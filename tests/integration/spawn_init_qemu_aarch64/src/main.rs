@@ -1,5 +1,5 @@
 //! `plans/PI.md` P6c-3 QEMU integration test: boot the aarch64 (Raspberry
-//! Pi 4) `rustos-kernel` pipeline on the `virt` board, spawn PID 1 (`init`)
+//! Pi 4) `tairix-kernel` pipeline on the `virt` board, spawn PID 1 (`init`)
 //! into EL0, and report success to QEMU once `init` traps back.
 //!
 //! ## What this test asserts
@@ -68,10 +68,10 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::boot as boot_aarch64;
+    use tairix_log::{Event, EventId, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -137,12 +137,12 @@ mod kernel {
     /// finisher parks the CPU, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_spawn_init_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_spawn_init_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt`
     /// blob's address is forwarded to the production boot pipeline with the
@@ -157,8 +157,8 @@ mod kernel {
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; this observer's PASS finisher fires
             // on it, so boot with the filter lowered.
-            rustos_log::Level::Debug,
-            &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
+            tairix_log::Level::Debug,
+            &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }
 }

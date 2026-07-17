@@ -15,7 +15,7 @@ basename — 从名字中去掉目录和后缀
 磁盘。给出 `suffix`（第二个操作数，或 `-s`）时，还会去掉结尾的 `suffix`，
 除非它就是剩下的整个名字。
 
-根永远不会被剥开：`basename /` 是 `/`，而 — RustOS 存储森林中的对应物 —
+根永远不会被剥开：`basename /` 是 `/`，而 — TAIRiX 存储森林中的对应物 —
 `basename Home:/` 是 `Home:/`。别名根（`Home:/`、`System:/`……）所扮演的
 角色与 POSIX 系统上的 `/` 完全相同。
 

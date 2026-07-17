@@ -1,7 +1,7 @@
 //! The outcomes of running a `cp` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a `cp` invocation did not complete.
 ///

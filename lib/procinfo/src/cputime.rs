@@ -5,8 +5,8 @@
 //! The paging is the generic [`walk_pages`](crate::list) used by the process
 //! and mount lists, so only the per-record decode lives here.
 
-use rustos_abi::sysinfo::{CpuTimeListRequest, CpuTimeRecord, SysinfoQueryId};
-use rustos_abi::Errno;
+use tairix_abi::sysinfo::{CpuTimeListRequest, CpuTimeRecord, SysinfoQueryId};
+use tairix_abi::Errno;
 
 use crate::list::{walk_pages, ListError};
 use crate::request::CallError;
@@ -71,10 +71,10 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::sysinfo::{
+    use tairix_abi::sysinfo::{
         CpuTimeListRequest, CpuTimeRecord, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory `sysinfod` stand-in answering CPU-time queries from a
     /// fixed record set, decoding the request exactly as the real service.

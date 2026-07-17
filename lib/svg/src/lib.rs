@@ -41,7 +41,7 @@
 //! let svg = br##"<svg viewBox="0 0 10 10">
 //!   <polygon points="0,0 10,0 10,10 0,10" fill="#3070f0"/>
 //! </svg>"##;
-//! let image = rustos_svg::decode(svg).expect("a square filled polygon");
+//! let image = tairix_svg::decode(svg).expect("a square filled polygon");
 //! assert_eq!(image.design(), 10);
 //! assert_eq!(image.layers().len(), 1);
 //! assert_eq!(image.layers()[0].fill.b, 0xf0);

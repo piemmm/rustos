@@ -2,7 +2,7 @@
 //!
 //! A logical record body under `/System/Logs` is attacker-influenced (a
 //! compromised journal, a tampered or torn file, a volume lifted from another
-//! machine), so [`rustos_log::decode_record`] must refuse malformed bytes
+//! machine), so [`tairix_log::decode_record`] must refuse malformed bytes
 //! cleanly and never panic. This harness drives it on both pseudo-random bytes
 //! and single-byte mutations of a genuine record (so the version, level,
 //! flags, string-length, origin, wall, and `data.*` paths are actually
@@ -11,13 +11,13 @@
 //! with the number of iterated fields.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
-use rustos_abi::{
+use tairix_abi::{
     CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, Time64, TrustDomain,
     WallClockReading, WallTimeState, ORIGIN_CONSOLE_NONE,
 };
-use rustos_log::{
+use tairix_log::{
     decode_record, CallerContent, DictionaryBuilder, DictionaryView, Level, LogRecord, Stream,
 };
 
@@ -87,16 +87,16 @@ fn exercise(bytes: &[u8]) {
 
 #[test]
 fn random_and_mutated_records_never_panic() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "random_and_mutated_records_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
     let mut base = [0u8; 512];
     let base_len = base_record(&mut base);
 
     let mut buf = [0u8; 512];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for i in 0..SMOKE_ITERATIONS {
             if i % 2 == 0 {
@@ -115,7 +115,7 @@ fn random_and_mutated_records_never_panic() {
                 exercise(&buf[..base_len]);
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

@@ -5,10 +5,10 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use rustos_abi::sysinfo::{MountAvailability, MOUNT_VOLUME_ID_LEN};
-use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{for_each_mount, Transport};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::sysinfo::{MountAvailability, MOUNT_VOLUME_ID_LEN};
+use tairix_help::{own_short_help, HelpSource};
+use tairix_procinfo::{for_each_mount, Transport};
 
 use crate::command::Command;
 use crate::error::UnmountError;
@@ -149,13 +149,13 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
-    use rustos_abi::sysinfo::{
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::sysinfo::{
         MountAvailability, MountListRequest, MountRecord, SysinfoRequestHeader,
     };
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
-    use rustos_procinfo::Transport;
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
+    use tairix_procinfo::Transport;
 
     /// An in-memory `sysinfod` stand-in answering mount-list queries from
     /// a fixture, decoding the request the same way the real service does.
@@ -451,7 +451,7 @@ mod tests {
         use std::fs;
 
         let help_root = alloc::format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        for locale in rustos_help::REQUIRED_LOCALES {
+        for locale in tairix_help::REQUIRED_LOCALES {
             let path = alloc::format!("{help_root}/{locale}/unmount.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             for switch in ["`-f, --force`", "`-?, --help`"] {

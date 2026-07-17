@@ -1,6 +1,6 @@
-# RustOS Security Tests
+# TAIRiX Security Tests
 
-This document is the adversarial-test charter for RustOS's memory subsystem
+This document is the adversarial-test charter for TAIRiX's memory subsystem
 and CPU privilege boundary. It records (a) the deliberate
 **memory-corruption / fault-injection** tests that exercise our *detectors*,
 and (b) the **memory and CPU/ring-boundary** adversarial tests modelled on
@@ -45,7 +45,7 @@ New work targets the CVE classes these do **not** yet hit.
 
 ### 1.3 Honest reach (§2.1, §2.6)
 
-RustOS today has **no SMEP/SMAP/`clac`/`stac`**; KPTI/IBPB are `Pending` and
+TAIRiX today has **no SMEP/SMAP/`clac`/`stac`**; KPTI/IBPB are `Pending` and
 tied to **Stage 6** (`sidechannel.rs` states this). A live ring-3 entry path
 *does* now exist — the Arch HAL `EnterUser` `iretq` primitive
 (`kernel/arch/x86_64/src/userentry.rs`), exercised end-to-end by
@@ -217,7 +217,7 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   space one page at a time, rejecting any page missing `USER` or the required
   read/write permission fail-closed (host-tested via `HostPageTable` /
   `SimPhysMap`). *Hardware fault fix-up landed:* the per-access byte move runs
-  inside each MMU port's exported fault window (`rustos_arch_api::uaccess` +
+  inside each MMU port's exported fault window (`tairix_arch_api::uaccess` +
   the per-port `uaccess` modules); a kernel-mode data fault whose saved PC
   lies in the window is redirected by the port's trap handler to the window's
   fix-up and surfaces as `UaccessError::Faulted` (collapsed onto the same

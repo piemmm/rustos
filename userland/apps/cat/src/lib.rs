@@ -1,4 +1,4 @@
-//! RustOS `cat` — concatenate files and standard input to the terminal
+//! TAIRiX `cat` — concatenate files and standard input to the terminal
 //! (Stage 6 `userland/apps/`).
 //!
 //! `cat` reads each of its sources in order and writes the bytes to the
@@ -18,7 +18,7 @@
 //! * [`FileSource`] — read a byte range of a named file.
 //! * [`Input`] — read the next bytes of standard input.
 //! * [`Output`] — write rendered bytes to the terminal.
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by the
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
 //!   short-help switches.
 //!
 //! The binary that ships as `cat` wires the real syscall-backed filesystem,
@@ -31,7 +31,7 @@
 //! # Fail closed
 //!
 //! An unknown option is a [`CatError::Usage`] that reads nothing; a source
-//! that cannot be read surfaces the underlying [`Errno`](rustos_abi::Errno)
+//! that cannot be read surfaces the underlying [`Errno`](tairix_abi::Errno)
 //! as [`CatError::Read`] and stops; a failed terminal write is
 //! [`CatError::Output`]. There is no partial-guess path and no panic.
 //!
@@ -45,7 +45,7 @@
 //! The bundle's `Help/` documents are **not** embedded in this crate: they
 //! are authored once in the bundle's on-disk `Help/` tree, planted onto
 //! `/System` by the image builder from that source (`tools/syshelp`), and read
-//! back at runtime through the injected [`rustos_help::HelpSource`] seam. Help
+//! back at runtime through the injected [`tairix_help::HelpSource`] seam. Help
 //! is never hardcoded into the program (`plans/APPS.md`).
 //!
 //! # Layering & safety

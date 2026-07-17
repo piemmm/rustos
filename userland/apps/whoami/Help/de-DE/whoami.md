@@ -11,7 +11,7 @@ whoami — den Kontonamen des aktuellen Benutzers ausgeben
 Gibt den Benutzernamen aus, der zur Identität dieses Prozesses gehört,
 gefolgt von einem Zeilenumbruch — und sonst nichts.
 
-RustOS hat kein `/etc/passwd`: Die Benutzerkennung stammt aus dem
+TAIRiX hat kein `/etc/passwd`: Die Benutzerkennung stammt aus dem
 Eintrag, den der Kernel über den aufrufenden Prozess führt, und der
 zugehörige Kontoname aus dem öffentlichen Kontoverzeichnis der
 Systeminformations-API. Enthält das Verzeichnis keinen Namen für die

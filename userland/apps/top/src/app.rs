@@ -18,13 +18,13 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use rustos_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
+use tairix_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
 // The figure → text conversions (`format_*`) are the shared full-screen
 // viewer formatters in `lib/procinfo`, so `top` and `sysmon` render the
 // same figures identically.
-use rustos_procinfo::{format_load, format_mib, state_char, Transport};
-pub(crate) use rustos_procinfo::{format_size, format_tenths, format_uptime};
-use rustos_vt::{Attributes, BasicColor, Color};
+use tairix_procinfo::{format_load, format_mib, state_char, Transport};
+pub(crate) use tairix_procinfo::{format_size, format_tenths, format_uptime};
+use tairix_vt::{Attributes, BasicColor, Color};
 
 use crate::error::TopError;
 use crate::model::{Action, CpuSplit, Model, Row, Summary};
@@ -228,7 +228,7 @@ fn title_line(model: &Model) -> String {
 /// counts both the running and runnable (waiting for a CPU) states, as GNU
 /// `top`'s `R` bucket does.
 fn tasks_line(model: &Model) -> String {
-    use rustos_abi::sysinfo::ProcessState;
+    use tairix_abi::sysinfo::ProcessState;
     let mut running = 0usize;
     let mut sleeping = 0usize;
     let mut stopped = 0usize;
@@ -254,7 +254,7 @@ fn tasks_line(model: &Model) -> String {
 /// The third summary line: the aggregate CPU busy/idle split over the last
 /// refresh interval, or its honest absence.
 ///
-/// RustOS accounts CPU time as busy (running tasks) and idle only — there
+/// TAIRiX accounts CPU time as busy (running tasks) and idle only — there
 /// is no user/system/nice/iowait split to report — so the line reads
 /// `%Cpu(s): 12.3 busy, 87.7 idle` where GNU `top` breaks the busy share
 /// down further. A deliberate, documented divergence: the figures shown
@@ -311,7 +311,7 @@ pub(crate) fn process_row(model: &Model, row: &Row) -> String {
         format_tenths(row.pct_cpu_tenths),
         format_tenths(row.wcpu_tenths),
         format_time_plus(record.cpu_time_ns),
-        rustos_procinfo::field_lossy(record.name_bytes()),
+        tairix_procinfo::field_lossy(record.name_bytes()),
     )
 }
 

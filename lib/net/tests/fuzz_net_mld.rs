@@ -13,8 +13,8 @@
 //! the same seeded stream until the budget elapses under
 //! `cargo xtask fuzz`.
 
-use rustos_net::mld::{self, MldQuery, RecordType};
-use rustos_net::Ipv6Addr;
+use tairix_net::mld::{self, MldQuery, RecordType};
+use tairix_net::Ipv6Addr;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -96,12 +96,12 @@ impl Lcg {
 
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut buf = [0u8; 64];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let size = ((rng.next_u64() & 0x7F) as usize) % (buf.len() + 1);
@@ -109,7 +109,7 @@ fn random_inputs_never_panic() {
             exercise_query_parse(&buf[..size]);
             exercise_report_write(&mut rng);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

@@ -2,11 +2,11 @@
 
 use std::time::{Duration, Instant};
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
-use rustos_abi::DriverError;
-use rustos_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
-use rustos_drv_fs_ext4::Ext4;
-use rustos_drv_fs_fat32::Fat32;
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
+use tairix_abi::DriverError;
+use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_drv_fs_ext4::Ext4;
+use tairix_drv_fs_fat32::Fat32;
 
 use crate::{exercise, random_exercise, RamBlock};
 
@@ -133,17 +133,17 @@ pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(),
 }
 
 /// Environment variable that pins the soak start seed for replay; unset
-/// draws a fresh seed each launch (`rustos_fuzzseed`).
-const FSSOAK_SEED_ENV: &str = "RUSTOS_FSSOAK_SEED";
+/// draws a fresh seed each launch (`tairix_fuzzseed`).
+const FSSOAK_SEED_ENV: &str = "TAIRIX_FSSOAK_SEED";
 
 /// Resolve and log this launch's *start* seed for `target`.
 ///
 /// Fresh from host entropy by default — so the run takes a different path on
 /// every launch (the issue's core requirement) — or pinned by
-/// `RUSTOS_FSSOAK_SEED` to replay a failure exactly. Logged at the start so a
+/// `TAIRIX_FSSOAK_SEED` to replay a failure exactly. Logged at the start so a
 /// fresh-seed failure is still reproducible.
 fn start_seed(target: &str) -> u64 {
-    let seed = rustos_fuzzseed::resolve_seed(FSSOAK_SEED_ENV);
+    let seed = tairix_fuzzseed::resolve_seed(FSSOAK_SEED_ENV);
     println!(
         "fssoak {target}: start seed {seed} ({seed:#018x}); \
          replay with {FSSOAK_SEED_ENV}={seed}"

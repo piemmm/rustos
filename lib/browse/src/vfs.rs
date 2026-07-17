@@ -4,7 +4,7 @@
 //! behind the [`Browser`](crate::Browser): it spells the browser's
 //! root-first components into one bounded, validated absolute path, hands
 //! that path to an injected *fetch* primitive (on a running system,
-//! `rustos_rt::read_dir_all` — the kernel-authorised `fs_open` +
+//! `tairix_rt::read_dir_all` — the kernel-authorised `fs_open` +
 //! `fs_readdir` transfer under the caller's own attested identity), and maps
 //! the returned packed `DirEntry` stream onto the browser's [`Entry`]
 //! vocabulary through the shared `lib/abi` stream walker.
@@ -21,8 +21,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::fs::{DirEntries, FileKind, FS_PATH_MAX};
-use rustos_abi::Errno;
+use tairix_abi::fs::{DirEntries, FileKind, FS_PATH_MAX};
+use tairix_abi::Errno;
 
 use crate::entry::{Entry, EntryKind};
 use crate::source::DirectorySource;

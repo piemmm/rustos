@@ -21,8 +21,8 @@
 //! `Scheduler::yield_current` + `KernelArch::monotonic_ns`; the
 //! virtio host wraps the kernel-binary's equivalent seam).
 
-use rustos_abi::IrqHandle;
-use rustos_kernel_sec::TaskId;
+use tairix_abi::IrqHandle;
+use tairix_kernel_sec::TaskId;
 
 use crate::table::{IrqTable, WaitStep};
 

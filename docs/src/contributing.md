@@ -44,7 +44,7 @@ usual cargo selectors (`--release`, `--doc`, `--target <triple>`,
 `-p <crate>`) to scope the clean, and reports how much space was freed.
 
 `cargo xtask prune` reclaims only the *superseded* build-script output
-that dominates that growth. The `rustos-kernel` build script compiles the
+that dominates that growth. The `tairix-kernel` build script compiles the
 embedded userland programs — each a roughly 1 GB `-Z build-std` tree —
 into an `OUT_DIR` cargo keys by build-script fingerprint, so every
 `build.rs` change strands the previous tree under
@@ -54,9 +54,9 @@ older siblings and their `.fingerprint` entries. Unlike `clean` it never
 touches the current build, so the next compile stays incremental — which
 is why it runs automatically before every `build` and `image`.
 
-[agents]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md
-[plan]: https://github.com/rustos-project/rustos/blob/main/PLAN.md
+[agents]: https://github.com/tairix-project/tairix/blob/main/AGENTS.md
+[plan]: https://github.com/tairix-project/tairix/blob/main/PLAN.md
 [modularity]: ./architecture/modularity.md
 [sc]: ./security/supply_chain.md
 [fz]: ./security/fuzzing.md
-[test]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md
+[test]: https://github.com/tairix-project/tairix/blob/main/AGENTS.md

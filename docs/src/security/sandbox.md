@@ -13,7 +13,7 @@ replacement) builds on this primitive and is staged in
 
 A spawn becomes a sandbox spawn by setting `SPAWN_FLAG_SANDBOX` in the
 `SpawnAttach` block's `flags` word (`lib/abi/src/process.rs`; C callers
-use `ROS_SPAWN_FLAG_SANDBOX`). The flag can only ever *narrow* the child,
+use `TAIRIX_SPAWN_FLAG_SANDBOX`). The flag can only ever *narrow* the child,
 so requesting it needs no capability.
 
 A sandbox block is canonical only when nothing ambient can flow into the
@@ -78,7 +78,7 @@ the parent's side.
 ## The user-space seam: `lib/sandbox`
 
 The kernel primitive makes a sandboxed process *exist*; `lib/sandbox`
-(`rustos-sandbox`) is the one user-space seam that makes it *usable*, so
+(`tairix-sandbox`) is the one user-space seam that makes it *usable*, so
 the containment discipline is written once and every program that
 sandboxes a parse imports it:
 
@@ -118,7 +118,7 @@ sandboxes a parse imports it:
   field fail-closed, because a worker that has parsed hostile bytes is
   itself treated as hostile.
 - **Help rendering** (`helpdoc`): a foreign bundle's help document is
-  parsed and rendered inside the worker (`rustos_help`'s `HelpDoc::parse`
+  parsed and rendered inside the worker (`tairix_help`'s `HelpDoc::parse`
   plus the short/full renderers), and the parent-side `render_help`
   client re-parses the returned bytes through the `lib/vt` streaming
   parser, admitting only the closed op set a help render can contain
@@ -127,7 +127,7 @@ sandboxes a parse imports it:
   produced, never bytes the worker chose. A document-parse error crosses
   the boundary typed (`HelpError`, code for code), so diagnostics lose
   nothing to the isolation. `man` is the consumer: it locates and reads
-  the document with its own file authority (`rustos_help::load_raw`),
+  the document with its own file authority (`tairix_help::load_raw`),
   re-spawns itself as the worker (`CAP_PROC_SPAWN` in its manifest), and
   withholds the page — never falling back to an in-process parse — when
   the renderer fails.

@@ -10,13 +10,13 @@
 //! binary exercises that wiring end to end on the `virt` board:
 //!
 //! 1. **Real context switch.** With interrupts still disabled, it seeds a
-//!    second `rustos_arch_riscv64::context::TaskCtx` over a private
+//!    second `tairix_arch_riscv64::context::TaskCtx` over a private
 //!    stack and `switch`es into it; the inbound task records that it ran
 //!    and `switch`es straight back, proving a bidirectional bare-metal
 //!    task switch round-trips.
 //! 2. **Live scheduler.** It builds a real
-//!    `rustos_kernel_sched_mlfq::Scheduler` over the arch port's
-//!    `rustos_arch_riscv64::RiscvArch`, publishes it, and installs the
+//!    `tairix_kernel_sched_mlfq::Scheduler` over the arch port's
+//!    `tairix_arch_riscv64::RiscvArch`, publishes it, and installs the
 //!    `preempt` timer callback **and** the IPI software-interrupt callback
 //!    so both drive `Scheduler::on_timer_tick`.
 //! 3. **Timer + IPI + dispatch.** It installs the trap vector, enables the
@@ -34,8 +34,8 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links the `rustos-arch-riscv64` port and the
-//! `rustos-kernel-sched-mlfq` policy directly and supplies its own
+//! It links the `tairix-arch-riscv64` port and the
+//! `tairix-kernel-sched-mlfq` policy directly and supplies its own
 //! `kernel_main`, so the wiring is
 //! exercised without the full `kernel_core::kernel_main` init pipeline
 //! (which halts after boot and keeps its scheduler private). The
@@ -59,16 +59,16 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use rustos_arch_api::{CpuId, SchedulerArch};
-    use rustos_arch_riscv64::context::TaskCtx;
-    use rustos_arch_riscv64::fdt::Fdt;
-    use rustos_arch_riscv64::{
+    use tairix_arch_api::{CpuId, SchedulerArch};
+    use tairix_arch_riscv64::context::TaskCtx;
+    use tairix_arch_riscv64::fdt::Fdt;
+    use tairix_arch_riscv64::{
         context, halt_current_hart, handle_panic_via_serial, preempt, qemu_exit, trap, RiscvArch,
         RiscvArchStorage, SERIAL_SINK,
     };
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
+    use tairix_log::{log, Event, EventId, Level};
 
     /// The single-hart slice runs logical CPU 0 on the boot hart.
     const BOOT_CPU: CpuId = 0;
@@ -191,7 +191,7 @@ mod kernel {
     /// The supervisor-timer scheduler-tick callback. Drives the live
     /// scheduler's per-CPU preemption counter through
     /// [`Scheduler::on_timer_tick`]. ISR-safe: `on_timer_tick` is wait-free
-    /// (one bounds check + one `fetch_add`). RustOS is tickless: the one-shot does not auto-reload, so the
+    /// (one bounds check + one `fetch_add`). TAIRiX is tickless: the one-shot does not auto-reload, so the
     /// callback re-arms the next one-shot itself (standing in for the
     /// scheduler's `set_preemption`) so the timer keeps driving the live
     /// scheduler while this hart idles in `wfi` below.
@@ -231,7 +231,7 @@ mod kernel {
     /// Forward to the shared riscv64 panic bridge (parks the hart; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_sched_drive_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_sched_drive_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -249,7 +249,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_riscv64_main`).
+    /// calls (via `tairix_arch_riscv64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         note(TEST_START, "riscv64 sched-drive test: starting");

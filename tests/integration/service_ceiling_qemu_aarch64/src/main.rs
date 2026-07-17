@@ -6,7 +6,7 @@
 //! embedded `virt` device tree, brings up the EL1 vectors + GICv2, and
 //! installs the **production** `KernelDispatchHook` through a
 //! `DispatchCallbackSlot` — with the real compiled system identity table
-//! (`rustos_kernel_core::system_identity_table`, the same table the boot
+//! (`tairix_kernel_core::system_identity_table`, the same table the boot
 //! `sec` phase installs) resolving spawn-as-user switches, the seeded
 //! hardware tree backing `hw_tree_read`, and a `ProgramRegistry` whose one
 //! `svc` row deliberately requests devmgr's ceiling **plus every sibling
@@ -42,7 +42,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-service-ceiling-qemu-aarch64: the `test-hooks` Cargo feature \
+    "tairix-test-service-ceiling-qemu-aarch64: the `test-hooks` Cargo feature \
      is a debug-only test affordance and must not be enabled in release \
      builds (fail closed, never ship a test hook)."
 );

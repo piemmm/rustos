@@ -1,4 +1,4 @@
-# `rustos-drv-network-virtio-net-driver`
+# `tairix-drv-network-virtio-net-driver`
 
 The user-space **virtio-net driver process** — the `Run` entry point of the
 signed `/System/Drivers/network/virtio_net/` bundle, autoloaded by `devmgr`
@@ -9,11 +9,11 @@ Stability tier: **experimental**.
 
 ## What it is
 
-RustOS runs its network drivers in user space (`AGENTS.md` §4,
+TAIRiX runs its network drivers in user space (`AGENTS.md` §4,
 microkernel-leaning). This process owns one virtio-net NIC — its MMIO register
 window, its DMA, and its interrupt line, all delivered as the capability
 grants its matched hardware-tree node requested — and serves the `netchan-v1`
-device-channel contract (`rustos_abi::driver::net_channel`) to the network
+device-channel contract (`tairix_abi::driver::net_channel`) to the network
 stack (`userland/net/netstack`).
 
 The two run in **separate address spaces** and never link each other: the

@@ -10,54 +10,54 @@
 //! IRQ table the production boot published, arm it through the
 //! boot-built PLIC controller, and park on a race-free `wfi`.
 
-use rustos_abi::{CapabilityId, IrqHandle};
-use rustos_arch_riscv64::plic::VolatilePlicMmio;
-use rustos_arch_riscv64::{qemu_exit, SERIAL_SINK};
-use rustos_caps::CapabilitySet;
-use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
-use rustos_drv_bus_virtio::MmioTransport;
-use rustos_fdt::Fdt;
-use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
-use rustos_kernel_mem::{
+use tairix_abi::{CapabilityId, IrqHandle};
+use tairix_arch_riscv64::plic::VolatilePlicMmio;
+use tairix_arch_riscv64::{qemu_exit, SERIAL_SINK};
+use tairix_caps::CapabilitySet;
+use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
+use tairix_drv_bus_virtio::MmioTransport;
+use tairix_fdt::Fdt;
+use tairix_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
+use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
 };
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_kernel_virtio::{
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_kernel_virtio::{
     provision_virtio_mmio, KernelMmioMapper, KernelVirtioFactory, KernelVirtioFactoryConfig,
     KernelVirtioHost,
 };
-use rustos_log::{Event, EventId, Level, Sink};
-use rustos_test_riscv64_boot::{
+use tairix_log::{Event, EventId, Level, Sink};
+use tairix_test_riscv64_boot::{
     plic_controller, published_dtb, published_irq_table, published_memory_map, PlicIrqController,
 };
-use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
+use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 /// Re-export so the verticals name the concrete transport for the shared
 /// device-tail turbofish under the same name as the PCI vertical.
-pub use rustos_drv_bus_virtio::MmioTransport as ScenarioTransport;
+pub use tairix_drv_bus_virtio::MmioTransport as ScenarioTransport;
 
 // Re-exports the `define_mmio_boot_harness!` macro expands against via
 // `$crate::...`. (`BOOT_COMPLETED_EVENT_ID` is re-exported at the crate
 // root through `pub use common::*`.)
 #[doc(hidden)]
-pub use rustos_arch_riscv64::handle_panic_via_serial;
+pub use tairix_arch_riscv64::handle_panic_via_serial;
 #[doc(hidden)]
-pub use rustos_arch_riscv64::{
+pub use tairix_arch_riscv64::{
     SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK,
 };
 #[doc(hidden)]
-pub use rustos_log::{
+pub use tairix_log::{
     Event as HarnessEvent, EventId as HarnessEventId, Level as HarnessLevel, Sink as HarnessSink,
 };
 #[doc(hidden)]
-pub use rustos_test_riscv64_boot::boot;
+pub use tairix_test_riscv64_boot::boot;
 
 use crate::common::{
     carve_dma_map, drive_driver_lifecycle, dtb_total_size, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
 };
 
-use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
@@ -419,7 +419,7 @@ macro_rules! define_mmio_boot_harness {
             $crate::handle_panic_via_serial(info)
         }
 
-        /// Boot entry point — the production `rustos-arch-riscv64` surface
+        /// Boot entry point — the production `tairix-arch-riscv64` surface
         /// with the audit observer sink in place.
         #[no_mangle]
         pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {

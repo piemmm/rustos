@@ -18,8 +18,8 @@
 //! firmware patches the real RAM ranges in at boot — so the memory walk
 //! is asserted for *shape* (`Some`), not for a size.
 
-use rustos_arch_aarch64::{console, uart_init, video};
-use rustos_fdt::Fdt;
+use tairix_arch_aarch64::{console, uart_init, video};
+use tairix_fdt::Fdt;
 
 #[test]
 fn real_pi4_dtb_discovery() {

@@ -1,6 +1,6 @@
-# rustos-sync
+# tairix-sync
 
-Shared `no_std` synchronisation primitives for RustOS: spin / MCS / RW
+Shared `no_std` synchronisation primitives for TAIRiX: spin / MCS / RW
 locks, `SeqLock`, epoch-based reclamation, and set-once `Once` / `OnceCell`.
 
 These primitives are foundational and free of any kernel dependency, so

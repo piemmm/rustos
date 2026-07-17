@@ -1,10 +1,10 @@
 //! wasm32 platform entropy source.
 //!
-//! Implements the Arch HAL [`PlatformEntropy`](rustos_arch_api::PlatformEntropy)
+//! Implements the Arch HAL [`PlatformEntropy`](tairix_arch_api::PlatformEntropy)
 //! surface for the wasm32 host environment. A browser/host sandbox *does*
 //! expose a CSPRNG (`crypto.getRandomValues`), but a freestanding
 //! `wasm32-unknown-unknown` module reaches it only through an imported host
-//! function, and that import is not yet bound in the RustOS wasm32 runtime.
+//! function, and that import is not yet bound in the TAIRiX wasm32 runtime.
 //! Until the import is wired, the port honestly declares the source
 //! `EntropySupport::Pending` and every draw fails closed with
 //! `EntropyError::Unavailable` rather than fabricating bytes.
@@ -14,13 +14,13 @@
 //! kernel CSPRNG reserve stays unseeded on wasm32, failing closed exactly as
 //! before any platform source is available.
 
-use rustos_arch_api::{EntropyProfile, EntropySupport, PlatformEntropy};
-use rustos_rng::{EntropyError, HardwareRng};
+use tairix_arch_api::{EntropyProfile, EntropySupport, PlatformEntropy};
+use tairix_rng::{EntropyError, HardwareRng};
 
 /// Tracking note for the `Pending` declaration: the host CSPRNG exists but
 /// the freestanding module's import is not yet bound.
 const PENDING_NOTE: &str = "the wasm32 host CSPRNG (`crypto.getRandomValues`) is reachable only \
-     through an imported host function, which the RustOS wasm32 runtime does \
+     through an imported host function, which the TAIRiX wasm32 runtime does \
      not yet bind — failing closed until that import is wired";
 
 /// wasm32 implementation of the Arch HAL platform-entropy surface.
@@ -64,7 +64,7 @@ impl PlatformEntropy for PlatformRng {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::entropy::conformance;
+    use tairix_arch_api::entropy::conformance;
 
     #[test]
     fn passes_entropy_conformance() {

@@ -1,21 +1,21 @@
 //! The `Run` entry-point binary of the `whoami` tool — the program a shell
 //! spawns to print the current user's account name.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
 //! preference from the inherited environment (plans/APPS.md §5), parses the
-//! arguments with the pure [`rustos_whoami`] grammar, and runs the resulting
+//! arguments with the pure [`tairix_whoami`] grammar, and runs the resulting
 //! command against the production seams: the caller's own kernel-attested
 //! identity (`self_origin` — ungated, a pure self-observer), `IpcTransport`
 //! (shared through `lib/procinfo`), which carries the framed `sysinfo-v1`
 //! account-directory request to `/System/Services/sysinfod.app/Run` over the
-//! well-known IPC call endpoint, the shared `rustos_help::BundleHelp`, which
+//! well-known IPC call endpoint, the shared `tairix_help::BundleHelp`, which
 //! reads the tool's own bundle's `Help/` tree for the short-help switches,
 //! and `RtOutput`, which writes the name to the inherited standard output
 //! (fd 1). The tool binds only to its inherited descriptors, never a console
@@ -35,11 +35,11 @@ mod program {
 
     use alloc::format;
 
-    use rustos_abi::Errno;
-    use rustos_help::BundleHelp;
-    use rustos_procinfo::{IpcTransport, RtOutput};
-    use rustos_rt::io::write_stderr_line;
-    use rustos_whoami::{parse, run, Identity, USAGE};
+    use tairix_abi::Errno;
+    use tairix_help::BundleHelp;
+    use tairix_procinfo::{IpcTransport, RtOutput};
+    use tairix_rt::io::write_stderr_line;
+    use tairix_whoami::{parse, run, Identity, USAGE};
 
     /// The production [`Identity`]: the caller's own kernel-attested origin
     /// record, read through the ungated `self_origin` syscall.
@@ -47,13 +47,13 @@ mod program {
 
     impl Identity for SelfOrigin {
         fn uid(&self) -> Result<u32, Errno> {
-            rustos_rt::self_origin()
+            tairix_rt::self_origin()
                 .map(|origin| origin.uid())
                 .map_err(Errno::from_syscall)
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when the name (or a requested short help) was
@@ -63,7 +63,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -75,7 +75,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(
@@ -94,13 +94,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

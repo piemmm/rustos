@@ -7,26 +7,26 @@
 //! (fail closed). Per the decode path is driven
 //! here against arbitrary text, with two invariants:
 //!
-//! * feeding any string to [`rustos_users::UsersDb::parse`] never panics
+//! * feeding any string to [`tairix_users::UsersDb::parse`] never panics
 //!   and never reads out of bounds — it returns a database or a
-//!   [`rustos_users::ParseError`];
+//!   [`tairix_users::ParseError`];
 //! * any database that parses re-serialises to text that parses back to an
 //!   equal database (the format has one meaning).
 //!
-//! RustOS pulls in no external fuzz runner: a
+//! TAIRiX pulls in no external fuzz runner: a
 //! per-run-seeded LCG mutates real databases built through the public
 //! constructors, splices hostile record lines under a valid header, and
 //! feeds pure noise. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 //!
 //! [`UsersDb::authenticate`] is deliberately *not* driven per iteration:
 //! its cost is the PBKDF2 work factor by design, and its input validation
 //! is the same parser surface exercised here.
 
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
-use rustos_users::{
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
+use tairix_users::{
     AccountState, Gid, Identity, StoredPassword, Uid, UserRecord, UsersDb, FORMAT_HEADER,
     MIN_ITERATIONS,
 };
@@ -40,7 +40,7 @@ const MAX_NOISE: usize = 2048;
 /// Bytes the noise generator draws from: the format's own alphabet, so the
 /// mutations reach past the first charset check instead of bouncing off it.
 const ALPHABET: &[u8] =
-    b"abcdefxyz0123456789:,$#/_-.* \nACTIVELOCKEDpbkdf2sha256rustos-users-v1nologin";
+    b"abcdefxyz0123456789:,$#/_-.* \nACTIVELOCKEDpbkdf2sha256tairix-users-v1nologin";
 
 /// Build the corpus of real, well-formed databases through the public
 /// constructors, so this harness encodes no second copy of the format.
@@ -124,14 +124,14 @@ fn exercise_never_panics(text: &str) {
 
 #[test]
 fn parsing_any_users_database_never_panics() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = templates();
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
-    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "parsing_any_users_database_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -185,7 +185,7 @@ fn parsing_any_users_database_never_panics() {
         exercise_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

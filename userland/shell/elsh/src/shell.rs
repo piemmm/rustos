@@ -90,7 +90,7 @@ impl<'a> Shell<'a> {
     /// Install the resource-limit seam the `ulimit` builtin drives.
     ///
     /// A shell built without one uses a fail-closed default, so `ulimit`
-    /// reports [`rustos_abi::Errno::NotImplemented`] rather than pretending a
+    /// reports [`tairix_abi::Errno::NotImplemented`] rather than pretending a
     /// get or set landed. This mirrors the `with_*`
     /// builder seams the kernel boot path uses.
     #[must_use]
@@ -102,7 +102,7 @@ impl<'a> Shell<'a> {
     /// Install the elevation seam the `elevate` builtin drives.
     ///
     /// A shell built without one uses a fail-closed default, so `elevate`
-    /// reports [`rustos_abi::Errno::NotImplemented`] rather than pretending
+    /// reports [`tairix_abi::Errno::NotImplemented`] rather than pretending
     /// a command ran. This mirrors [`Shell::with_limits`].
     #[must_use]
     pub fn with_elevator(mut self, elevator: &'a dyn Elevator) -> Self {
@@ -576,11 +576,11 @@ impl<'a> Shell<'a> {
 }
 
 /// Map a launch refusal onto its POSIX-style exit status and report text:
-/// [`rustos_abi::Errno::NotFound`] means the search exhausted every
+/// [`tairix_abi::Errno::NotFound`] means the search exhausted every
 /// candidate (`127`, "command not found"); any other refusal means the
 /// command resolved but cannot run (`126`, reported with the host's error).
-fn launch_failure(err: rustos_abi::Errno) -> (i32, String) {
-    if err == rustos_abi::Errno::NotFound {
+fn launch_failure(err: tairix_abi::Errno) -> (i32, String) {
+    if err == tairix_abi::Errno::NotFound {
         (NOT_FOUND_STATUS, String::from("command not found"))
     } else {
         (NOT_EXECUTABLE_STATUS, err.to_string())
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn non_executable_command_reports_and_sets_126() {
         let host = ScriptedHost::new();
-        host.fail_launch_with("secret-tool", rustos_abi::Errno::PermissionDenied);
+        host.fail_launch_with("secret-tool", tairix_abi::Errno::PermissionDenied);
         let console = RecordingConsole::new();
         let mut shell = Shell::new(&host, &console);
 

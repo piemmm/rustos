@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p rustos-kernel-mem --release
+//!     -p tairix-kernel-mem --release
 //! ```
 //!
 //! When the `loom` cfg is *not* set this file compiles to an empty test
@@ -20,7 +20,7 @@
 use loom::sync::Arc;
 use loom::thread;
 
-use rustos_kernel_mem::{
+use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
 

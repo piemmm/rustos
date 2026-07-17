@@ -23,11 +23,11 @@
 //! seed; the test is therefore deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
-use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 
 /// Deterministic signing seed so the trust anchor is stable across
 /// builds. Distinct from the other fixtures' seeds so the images cannot
@@ -42,7 +42,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x33; 32];
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let signing_key = SigningKey::from_bytes(&TEST_SEED);
@@ -54,7 +54,7 @@ fn main() {
     let caps: &[u16] = &[CapabilityId::DRV_LOAD.as_u16()];
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         kind: DriverKind::UserSpace,
         bind_key_count: 0,
         capability_count: u16::try_from(caps.len()).expect("caps fit in u16"),

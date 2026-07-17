@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-kernel-arch-boot-aarch64"
-description = "QEMU integration test (plans/PI.md P6c-2): boot the aarch64 rustos-kernel pipeline on the virt board to AuditEvent::BootCompleted and report PASS via ARM semihosting."
+name = "tairix-test-kernel-arch-boot-aarch64"
+description = "QEMU integration test (plans/PI.md P6c-2): boot the aarch64 tairix-kernel pipeline on the virt board to AuditEvent::BootCompleted and report PASS via ARM semihosting."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ workspace = true
 # `AuditEvent::BootCompleted` audit record" integration test — the
 # aarch64 analogue of `tests/integration/kernel_arch_boot` (x86_64) and
 # `tests/integration/kernel_arch_boot_riscv64`. It reuses the production
-# aarch64 boot pipeline through `rustos-kernel`'s library half
+# aarch64 boot pipeline through `tairix-kernel`'s library half
 # (`boot_aarch64::boot`, `plans/PI.md` P6c-2): it enables the stage-1
 # identity MMU + EL1 vectors, discovers the board from the embedded
 # `virt` device tree, hands the `BootMemoryMap` to
@@ -27,19 +27,19 @@ workspace = true
 # §5.4.5 — fail closed).
 
 [[bin]]
-name = "rustos-test-kernel-arch-boot-aarch64"
+name = "tairix-test-kernel-arch-boot-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-# The production aarch64 boot pipeline lives in `rustos-kernel`'s library
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The production aarch64 boot pipeline lives in `tairix-kernel`'s library
 # half; this vertical reuses it verbatim and only swaps the audit sink
 # (`AGENTS.md` §2.2 — no duplication).
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The boot heap the `kernel_core::kernel_main` allocations (the leaked
 # `KernelState`, the scheduler) draw from.
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

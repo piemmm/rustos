@@ -6,11 +6,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_abi::hwtree::{HwMatchKind, HwNode, HwResource, HwResourceKind};
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use rustos_devids::DevIds;
-use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{hwtree, Transport};
+use tairix_abi::hwtree::{HwMatchKind, HwNode, HwResource, HwResourceKind};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_devids::DevIds;
+use tairix_help::{own_short_help, HelpSource};
+use tairix_procinfo::{hwtree, Transport};
 
 use crate::command::{Command, NameMode, Options};
 use crate::error::LspciError;
@@ -343,10 +343,10 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwTreeHeader, HW_NODE_ROOT};
-    use rustos_abi::Errno;
-    use rustos_devids::{textdb, DbKind};
-    use rustos_help::SourceError;
+    use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwTreeHeader, HW_NODE_ROOT};
+    use tairix_abi::Errno;
+    use tairix_devids::{textdb, DbKind};
+    use tairix_help::SourceError;
 
     use super::*;
     use crate::command::parse;
@@ -636,7 +636,7 @@ C 02  Network controller
         use std::fs;
 
         let help_root = alloc::format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        for locale in rustos_help::REQUIRED_LOCALES {
+        for locale in tairix_help::REQUIRED_LOCALES {
             let path = alloc::format!("{help_root}/{locale}/lspci.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             for switch in [

@@ -2,7 +2,7 @@
 
 `AGENTS.md` §19.2 freezes four exploit-mitigation invariants on the
 `rxe` executable format. They are enforced *before* a single page of an
-image is mapped, by the `rustos_abi::rxe` module (the format owner) and
+image is mapped, by the `tairix_abi::rxe` module (the format owner) and
 the `kernel/mem` loader that consumes its output.
 
 ## The load image
@@ -55,7 +55,7 @@ therefore unrepresentable.
 
 The `kernel/mem` `map_flags_for` translation reinforces this: it never
 emits `MapFlags::WRITE | MapFlags::EXEC`, and the underlying Arch HAL
-page table (`rustos_arch_api::mmu::AddressSpace`) independently rejects
+page table (`tairix_arch_api::mmu::AddressSpace`) independently rejects
 that combination (`MapError::InvalidFlags`), so W^X holds twice over.
 
 ## PIE + KASLR
@@ -98,14 +98,14 @@ before it can drop to U-mode/EL0. It:
 1. maps every segment page (R/RX/RW + USER) **and** fills it with the
    segment's file content, zeroing the BSS tail past `file_size`;
 2. maps a zeroed user stack (U|R|W); and
-3. serialises the `rustos_abi::process` startup-vector block (the
+3. serialises the `tairix_abi::process` startup-vector block (the
    arguments, environment, and §19.2 stack-canary seed) and writes it
    into the new address space (U|R|W).
 
 It returns a `ProcessImage` — the relocated entry point, the initial
 user stack pointer, and the user address of the startup block — i.e. the
 register state the Arch HAL "enter user mode" primitive
-(`rustos_arch_api::EnterUser`, taking a `UserEntry`) consumes.
+(`tairix_arch_api::EnterUser`, taking a `UserEntry`) consumes.
 
 Content is written through the kernel's `PhysMap` directly to the
 freshly allocated frame, **not** through `copy_out`: a read-execute code
@@ -115,7 +115,7 @@ input is validated and the builder fails closed with a `SpawnError`
 (misaligned bases, a segment file range outside the image, an
 over-limit startup block) rather than panicking (`AGENTS.md` §2.9).
 
-The startup-vector block is produced by `rustos_abi::process::write_into`
+The startup-vector block is produced by `tairix_abi::process::write_into`
 (sized by `process::encoded_len`) — the production, allocation-free
 builder that `lib/abi` exposes for the kernel and that round-trips
 through the untrusted-input `ProcessStart::parse` crt0 uses.
@@ -128,7 +128,7 @@ the security policy).
 ## Entering user mode
 
 The Arch HAL "enter user mode" primitive that consumes the
-`ProcessImage` is a closed HAL slice (`rustos_arch_api::EnterUser` over
+`ProcessImage` is a closed HAL slice (`tairix_arch_api::EnterUser` over
 the architecture-neutral `UserEntry` register state, `AGENTS.md` §17.2).
 All three native ports implement it: riscv64 (the `sret` sequence),
 aarch64 (the EL0 `eret` sequence), and x86_64 (the `iretq`-to-ring-3
@@ -147,7 +147,7 @@ riscv64/aarch64 CC2 syscall round-trips already drive the HAL primitive,
 and the x86_64 `iretq` path lands with its own ring-3 exercise
 (`tests/integration/enter_user_qemu_x86_64`) that boots the production
 kernel, builds a ring-3 address space (a USER-accessible, executable,
-non-writable alias of the `ros_sys_cap_query` stub plus a USER read/write
+non-writable alias of the `tairix_sys_cap_query` stub plus a USER read/write
 stack — W^X), `iretq`s to ring 3 through `UserMode::new().enter_user(...)`,
 and asserts the stub's real `syscall` traps back into the kernel with the
 expected `(number, args)`.

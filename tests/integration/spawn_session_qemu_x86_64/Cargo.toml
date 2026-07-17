@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-spawn-session-qemu-x86-64"
-description = "plans/PI.md X3b + X4-follow-on QEMU integration test: boot the x86_64 rustos-kernel pipeline, spawn PID 1 init into ring 3, have init launch the embedded Shell session through the spawn syscall, and prove init runs the full wait->reap->relaunch supervision cycle under the live scheduler — the cross-port sibling of spawn-session-qemu-aarch64."
+name = "tairix-test-spawn-session-qemu-x86-64"
+description = "plans/PI.md X3b + X4-follow-on QEMU integration test: boot the x86_64 tairix-kernel pipeline, spawn PID 1 init into ring 3, have init launch the embedded Shell session through the spawn syscall, and prove init runs the full wait->reap->relaunch supervision cycle under the live scheduler — the cross-port sibling of spawn-session-qemu-aarch64."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 # This bin reuses the entire production x86_64 boot pipeline through
-# `rustos-kernel`'s library half (`kernel/rustos-kernel/src/lib.rs`),
+# `tairix-kernel`'s library half (`kernel/tairix-kernel/src/lib.rs`),
 # including the `with_init` PID 1 spawn seam, the runtime `with_spawn`
 # producer + embedded-program registry (`plans/PI.md` X3b), and the COM1
 # console backing, and only replaces the audit Sink: observing three
@@ -31,13 +31,13 @@ workspace = true
 # into a production image (`AGENTS.md` §5.4.5 — fail closed).
 
 [[bin]]
-name = "rustos-test-spawn-session-qemu-x86-64"
+name = "tairix-test-spawn-session-qemu-x86-64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

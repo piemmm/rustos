@@ -3,7 +3,7 @@
 The desktop is driven by pointer and keyboard input. A device's reports
 reach the user-space desktop as a stream of framed records over a
 capability-checked kernel input channel; the contracts of those records
-live in `lib/abi/src/input.rs` (`rustos_abi::input`).
+live in `lib/abi/src/input.rs` (`tairix_abi::input`).
 
 ## The record
 
@@ -88,17 +88,17 @@ the same `lib/input` `InputEvent` stream: `DeviceInputSource` reads
 channel. The window manager delivers a decoded key event to the
 focused window; the taskbar takes no keyboard input.
 
-[`PointerInput`]: ../../rustos_abi/input/enum.PointerInput.html
-[`KeyInput`]: ../../rustos_abi/input/enum.KeyInput.html
-[`KeyInput::WIRE_LEN`]: ../../rustos_abi/input/enum.KeyInput.html#associatedconstant.WIRE_LEN
-[`KeyInput::from_bytes`]: ../../rustos_abi/input/enum.KeyInput.html#method.from_bytes
-[`KeyValue`]: ../../rustos_abi/input/enum.KeyValue.html
-[`NamedKeyCode`]: ../../rustos_abi/input/enum.NamedKeyCode.html
-[`Modifiers`]: ../../rustos_abi/input/struct.Modifiers.html
-[`PointerInput::WIRE_LEN`]: ../../rustos_abi/input/enum.PointerInput.html#associatedconstant.WIRE_LEN
-[`PointerInput::from_bytes`]: ../../rustos_abi/input/enum.PointerInput.html#method.from_bytes
-[`PointerInput::from_device_event`]: ../../rustos_abi/input/enum.PointerInput.html#method.from_device_event
-[`PointerButtonCode`]: ../../rustos_abi/input/enum.PointerButtonCode.html
-[`Errno`]: ../../rustos_abi/error/enum.Errno.html
-[`driver::input::InputEvent`]: ../../rustos_abi/driver/input/struct.InputEvent.html
-[`Input`]: ../../rustos_abi/driver/input/trait.Input.html
+[`PointerInput`]: ../../tairix_abi/input/enum.PointerInput.html
+[`KeyInput`]: ../../tairix_abi/input/enum.KeyInput.html
+[`KeyInput::WIRE_LEN`]: ../../tairix_abi/input/enum.KeyInput.html#associatedconstant.WIRE_LEN
+[`KeyInput::from_bytes`]: ../../tairix_abi/input/enum.KeyInput.html#method.from_bytes
+[`KeyValue`]: ../../tairix_abi/input/enum.KeyValue.html
+[`NamedKeyCode`]: ../../tairix_abi/input/enum.NamedKeyCode.html
+[`Modifiers`]: ../../tairix_abi/input/struct.Modifiers.html
+[`PointerInput::WIRE_LEN`]: ../../tairix_abi/input/enum.PointerInput.html#associatedconstant.WIRE_LEN
+[`PointerInput::from_bytes`]: ../../tairix_abi/input/enum.PointerInput.html#method.from_bytes
+[`PointerInput::from_device_event`]: ../../tairix_abi/input/enum.PointerInput.html#method.from_device_event
+[`PointerButtonCode`]: ../../tairix_abi/input/enum.PointerButtonCode.html
+[`Errno`]: ../../tairix_abi/error/enum.Errno.html
+[`driver::input::InputEvent`]: ../../tairix_abi/driver/input/struct.InputEvent.html
+[`Input`]: ../../tairix_abi/driver/input/trait.Input.html

@@ -6,7 +6,7 @@
 //! mirroring the seam design of the other userland tools (`cat`'s and
 //! `head`'s `FileSource`/`Input`/`Output`).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// What a size probe of a named path learned, for the GNU output-width
 /// rule: regular files contribute their byte size to the column width,

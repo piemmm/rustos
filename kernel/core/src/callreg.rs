@@ -17,7 +17,7 @@
 //! mutable static the charter forbids): the kthread server and the
 //! syscall handler live in different crates and neither owns the other, so
 //! a global rendezvous keyed by the well-known
-//! [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`] avoids threading an
+//! [`tairix_abi::driver_store::DRIVER_STORE_ENDPOINT`] avoids threading an
 //! [`Arc`] through `KernelState`'s cross-crate wiring. Each endpoint is held behind an [`Arc`] so the server and every
 //! in-flight caller share one instance for its life.
 //!
@@ -29,18 +29,18 @@
 //! registry's register-denied event) so the kernel never silently
 //! re-points a live endpoint; [`lookup`] of an unbound id yields `None`,
 //! which the handler maps to [`Errno::NotFound`] and audits at that
-//! boundary (mirroring [`rustos_kernel_ipc::registry::PortRegistry`]).
+//! boundary (mirroring [`tairix_kernel_ipc::registry::PortRegistry`]).
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_kernel_ipc::audit::record;
-use rustos_kernel_ipc::{AuditEvent, CallEndpoint, EndpointId};
-use rustos_log::{Field, Sink};
-use rustos_sync::SpinLock;
-use rustos_util::fmt::format_hex_u64;
+use tairix_abi::Errno;
+use tairix_kernel_ipc::audit::record;
+use tairix_kernel_ipc::{AuditEvent, CallEndpoint, EndpointId};
+use tairix_log::{Field, Sink};
+use tairix_sync::SpinLock;
+use tairix_util::fmt::format_hex_u64;
 
 /// The global call-endpoint registry (set-up by the boot path's kthread
 /// server, read by the `ipc_call` syscall handler). Pure data behind a
@@ -72,7 +72,7 @@ pub fn register(endpoint: Arc<CallEndpoint>, audit: &dyn Sink) -> Result<(), Err
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "endpoint",
-            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
         record(audit, AuditEvent::CallEndpointRegisterDenied, &[id_field]);
         return Err(Errno::AlreadyExists);
@@ -134,8 +134,8 @@ pub trait EndpointVanishObserver: Sync {
 
 /// The set-once vanish observer, installed by the boot path. Fail-closed
 /// `None` before install: teardown simply has no listener.
-static VANISH_OBSERVER: rustos_sync::OnceCell<&'static dyn EndpointVanishObserver> =
-    rustos_sync::OnceCell::new();
+static VANISH_OBSERVER: tairix_sync::OnceCell<&'static dyn EndpointVanishObserver> =
+    tairix_sync::OnceCell::new();
 
 /// Install the endpoint-vanish observer. First-wins and idempotent, like
 /// the other late-installed boot seams.
@@ -150,7 +150,7 @@ pub fn install_vanish_observer(observer: &'static dyn EndpointVanishObserver) {
 /// callers are blocked in `ipc_call` awaiting its replies. Without this,
 /// those callers would park forever on a dead endpoint; destroying the
 /// endpoint flips every outstanding call to
-/// [`rustos_kernel_ipc::ReplyOutcome::Cancelled`] so the next poll abandons
+/// [`tairix_kernel_ipc::ReplyOutcome::Cancelled`] so the next poll abandons
 /// fail-closed. The observer is notified strictly **after**
 /// [`crate::waitq::call_wake`]: a caller parked mid-call on the dead
 /// endpoint may hold a lock the observer needs, and the wake is what lets
@@ -197,16 +197,16 @@ pub fn contains(id: EndpointId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_ipc::CallEndpointLimits;
-    use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-    use rustos_kernel_sec::identity::UserId;
-    use rustos_log::Sink;
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_ipc::CallEndpointLimits;
+    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::identity::UserId;
+    use tairix_log::Sink;
 
     /// A throwaway audit sink for endpoint construction in tests.
     struct NullSink;
     impl Sink for NullSink {
-        fn write_event(&self, _event: &rustos_log::Event<'_>) {}
+        fn write_event(&self, _event: &tairix_log::Event<'_>) {}
     }
 
     /// A recording sink capturing emitted event ids, for asserting the
@@ -216,14 +216,14 @@ mod tests {
     }
     impl RecordingSink {
         fn new() -> Self {
-            rustos_log::set_max_level(rustos_log::Level::Trace);
+            tairix_log::set_max_level(tairix_log::Level::Trace);
             Self {
                 ids: std::cell::RefCell::new(std::vec::Vec::new()),
             }
         }
     }
     impl Sink for RecordingSink {
-        fn write_event(&self, event: &rustos_log::Event<'_>) {
+        fn write_event(&self, event: &tairix_log::Event<'_>) {
             self.ids.borrow_mut().push(event.id.0);
         }
     }

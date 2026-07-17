@@ -37,7 +37,7 @@
 use core::ptr;
 use core::sync::atomic::{compiler_fence, Ordering};
 
-use rustos_fdt::Fdt;
+use tairix_fdt::Fdt;
 
 /// `FW_CFG_SIGNATURE` selector key; reading four bytes yields `QEMU`.
 pub const KEY_SIGNATURE: u16 = 0x0000;
@@ -305,7 +305,7 @@ fn find_selector(entries: &[u8], name: &str) -> Option<u16> {
     None
 }
 
-/// Scan-out width the RustOS boot path programs a QEMU `ramfb` boot
+/// Scan-out width the TAIRiX boot path programs a QEMU `ramfb` boot
 /// console with. `ramfb` exposes no display to probe (there is no
 /// EDID): the guest chooses the geometry and QEMU sizes its window to
 /// match. A classic 4:3 mode is large enough for a useful boot log
@@ -315,7 +315,7 @@ fn find_selector(entries: &[u8], name: &str) -> Option<u16> {
 /// pointer script) can never disagree about the surface.
 pub const RAMFB_CONSOLE_WIDTH_PX: u32 = 1024;
 
-/// Scan-out height of the RustOS `ramfb` boot console
+/// Scan-out height of the TAIRiX `ramfb` boot console
 /// (see [`RAMFB_CONSOLE_WIDTH_PX`]).
 pub const RAMFB_CONSOLE_HEIGHT_PX: u32 = 768;
 

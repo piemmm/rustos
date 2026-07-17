@@ -19,7 +19,7 @@
 //! [`Bus`], and the MMIO-map facility through [`MmioMapper`].
 //!
 //! This trait is part of the `abi-v1` surface. `abi-v1` is not yet
-//! frozen (RustOS has not shipped a release), so it may still be
+//! frozen (TAIRiX has not shipped a release), so it may still be
 //! extended in place; from the first release onward it freezes and new
 //! behaviour ships in `abi-v2`.
 

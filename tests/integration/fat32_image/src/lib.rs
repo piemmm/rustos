@@ -58,7 +58,7 @@ pub const PLANTED_FILE_CONTENT: &[u8] = b"Hello from a planted FAT32 image on vi
 pub const NEW_FILE_NAME: &[u8] = b"Written.txt";
 
 /// Contents the guest tail writes to [`NEW_FILE_NAME`] and reads back.
-pub const NEW_FILE_CONTENT: &[u8] = b"RustOS wrote this file to FAT32 over virtio-blk.\n";
+pub const NEW_FILE_CONTENT: &[u8] = b"TAIRiX wrote this file to FAT32 over virtio-blk.\n";
 
 /// Sectors per cluster (one — the simplest valid geometry).
 const SECTORS_PER_CLUSTER: u8 = 1;
@@ -198,10 +198,10 @@ pub fn build_image() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_abi::driver::block::{Block, BlockGeometry};
-    use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-    use rustos_abi::DriverError;
-    use rustos_drv_fs_fat32::Fat32;
+    use tairix_abi::driver::block::{Block, BlockGeometry};
+    use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+    use tairix_abi::DriverError;
+    use tairix_drv_fs_fat32::Fat32;
 
     /// In-memory [`Block`] device over the built image, used to drive
     /// the real FAT32 driver on the host exactly as the guest drives it

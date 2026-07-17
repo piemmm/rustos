@@ -8,7 +8,7 @@
 //! 2. Dump the canonical QEMU `virt` flattened device tree and embed it,
 //!    so the test discovers the GICv2 bases, the generic-timer rate, *and*
 //!    the PL031 RTC's GICv2 SPI line from the firmware tree
-//!    (`rustos_arch_aarch64::fdt::gic_device_intid`) rather than hard-coding
+//!    (`tairix_arch_aarch64::fdt::gic_device_intid`) rather than hard-coding
 //!    a board constant. QEMU's `-kernel <ELF>`
 //!    aarch64 path passes no DTB pointer (`x0 = 0`), so the board tree is
 //!    embedded at build time; the dump helper lives in the shared harness
@@ -30,7 +30,7 @@ use std::path::PathBuf;
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -49,7 +49,7 @@ fn main() {
 
         // One CPU: this is the single-core cooperative-scheduler slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
     } else {
         // Inert stub for host / other targets; the kernel body that uses

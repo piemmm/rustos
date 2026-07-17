@@ -9,7 +9,7 @@
 //! lay bundle *bytes* onto the volume but never drive `cargo`. This module
 //! is the orchestration half — it discovers every program crate's
 //! `AppInfo.toml` manifest source by walking the userland crate roots
-//! (`rustos_itest_harness::app_image::discover_app_manifests` — never a
+//! (`tairix_itest_harness::app_image::discover_app_manifests` — never a
 //! hand-maintained per-bundle list), compiles each crate's `Run` binary
 //! position-independent for the freestanding aarch64 target through the
 //! shared `pie_build` recipe, converts the linked PIE ELF to an `rxe`
@@ -17,7 +17,7 @@
 //! the kernel's compiled-in syscall CFI tag), and composes the bundle's
 //! Ed25519-signed wire `AppInfo` over the exact contents the volume ships
 //! — the `Run` rxe plus the bundle's discovered `Help/` documents
-//! (`rustos_syshelp`), so a tampered file or a swapped capability id fails
+//! (`tairix_syshelp`), so a tampered file or a swapped capability id fails
 //! the verifier closed.
 //!
 //! Bundles are signed with the dedicated system-app seed
@@ -28,14 +28,14 @@
 
 use std::sync::OnceLock;
 
-use rustos_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
-use rustos_itest_harness::app_image::{
+use tairix_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
+use tairix_itest_harness::app_image::{
     compose_signed_appinfo, discover_app_manifests, discover_crate_manifest, DiscoveredApp,
     APP_MANIFEST_SOURCE,
 };
-use rustos_itest_harness::elf2rxe::elf_to_rxe;
-use rustos_itest_harness::pie::PieArch;
-use rustos_itest_harness::USER_IMAGE_BIAS;
+use tairix_itest_harness::elf2rxe::elf_to_rxe;
+use tairix_itest_harness::pie::PieArch;
+use tairix_itest_harness::USER_IMAGE_BIAS;
 
 use super::image_drivers::build_support;
 use super::pie_build::cross_compile_pie_elf;
@@ -44,7 +44,7 @@ use crate::Context;
 /// One composed, signed application bundle ready to plant: the store it
 /// lives in, its bundle directory, and its two file payloads. The bundle's
 /// `Help/` documents are planted separately from their own discovered
-/// source (`rustos_syshelp`); the `AppInfo` content hash covers them.
+/// source (`tairix_syshelp`); the `AppInfo` content hash covers them.
 pub struct BuiltAppBundle {
     /// The `/System`-volume-relative store directory (`Apps` or `Services`).
     pub store_dir: &'static str,
@@ -212,7 +212,7 @@ fn build_bundle(
     let elf = cross_compile_pie_elf(ctx, arch, "image-apps", &app.package, &bin, &app.crate_dir)?;
     let run = elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_IMAGE_BIAS,
     )
     .map_err(|e| format!("image: convert {} ELF to rxe: {e}", app.package))?;
@@ -226,7 +226,7 @@ fn build_bundle(
     // planters plant, so image and signature cannot drift). Paths are
     // bundle-relative and byte-sorted, the order the canonical digest
     // framing requires.
-    let mut contents: Vec<(String, &[u8])> = rustos_syshelp::HELP_FILES
+    let mut contents: Vec<(String, &[u8])> = tairix_syshelp::HELP_FILES
         .iter()
         .filter(|doc| doc.bundle == bundle_dir)
         .map(|doc| {
@@ -235,7 +235,7 @@ fn build_bundle(
         })
         .collect();
     contents.extend(
-        rustos_syshelp::RESOURCE_FILES
+        tairix_syshelp::RESOURCE_FILES
             .iter()
             .filter(|res| res.bundle == bundle_dir)
             .map(|res| {
@@ -253,7 +253,7 @@ fn build_bundle(
     let composed = compose_signed_appinfo(
         &build_support::SYSTEM_APP_SIGNING_SEED,
         &app.manifest,
-        rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         &digests,
     )
     .map_err(|e| format!("image: compose {} AppInfo: {e}", app.package))?;
@@ -269,7 +269,7 @@ fn build_bundle(
 
 /// Fail-closed sanity check on a freshly composed `AppInfo` before it is
 /// planted (never ship a malformed store entry): it must re-decode through
-/// the same `rustos_abi` definition the bundle verifier uses, carry the
+/// the same `tairix_abi` definition the bundle verifier uses, carry the
 /// manifest magic, name the bundle it was composed for, and be signed. The
 /// signature *verifies* against the app trust anchor by construction (it is
 /// signed with the same seed the anchor derives from); the composer's own

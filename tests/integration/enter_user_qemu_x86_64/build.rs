@@ -1,12 +1,12 @@
 //! Build script: hand the kernel linker script to `rustc` *only* on
 //! the freestanding `x86_64-unknown-none` target. Mirrors
-//! `kernel/rustos-kernel/build.rs` and the sibling
+//! `kernel/tairix-kernel/build.rs` and the sibling
 //! `tests/integration/abi_sys_syscall_qemu/build.rs` exactly — all the
 //! freestanding x86_64 integration binaries share the same linker script
 //! (no duplication).
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
 
     let target = std::env::var("TARGET").unwrap_or_default();
     if target == "x86_64-unknown-none" {

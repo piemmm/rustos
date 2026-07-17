@@ -1,5 +1,5 @@
 //! Deterministic fuzz-style integration test for the journal persistence
-//! engine ([`rustos_log::Journal`]).
+//! engine ([`tairix_log::Journal`]).
 //!
 //! The journal turns an *untrusted* caller's admitted record into durable,
 //! hash-chained on-disk segments, rotating and sealing as it goes. Every input
@@ -12,17 +12,17 @@
 //! where required) and that a user origin never lands on a privileged stream.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rustos_abi::{
+use tairix_abi::{
     BootId, CapabilitySummary, Duration64, Origin, ProcId, Time64, TrustDomain, WallClockReading,
     WallTimeState, BOOT_ID_LEN, ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
 };
-use rustos_log::journal::{Journal, SegmentStore};
-use rustos_log::{
+use tairix_log::journal::{Journal, SegmentStore};
+use tairix_log::{
     machine_id_hash, verify_segment, BootRing, CallerContent, LogAttestationKey, Stream,
     STREAM_COUNT,
 };
@@ -96,7 +96,7 @@ const MESSAGES: [&str; 5] = [
     "the quick brown fox jumped over the lazy dog many many times over",
 ];
 
-fn one_round(rng: &mut rustos_fuzzseed::Lcg) {
+fn one_round(rng: &mut tairix_fuzzseed::Lcg) {
     let store = CaptureStore::default();
     let sink = store.segments.clone();
 
@@ -199,16 +199,16 @@ fn one_round(rng: &mut rustos_fuzzseed::Lcg) {
 
 #[test]
 fn journal_never_panics_and_persists_verifiable_segments() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "journal_never_panics_and_persists_verifiable_segments",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             one_round(&mut rng);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

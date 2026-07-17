@@ -1,7 +1,7 @@
 # POSIX conformance suite (`pjdfstest`-equivalent)
 
-The crate `rustos-test-posix-fs-suite`
-(`tests/integration/posix_fs_suite`) is RustOS's analogue of
+The crate `tairix-test-posix-fs-suite`
+(`tests/integration/posix_fs_suite`) is TAIRiX's analogue of
 [`pjdfstest`](https://github.com/pjd/pjdfstest): a body of black-box
 assertions about the return values and error codes of every filesystem
 operation the system exposes. It is the final `PLAN.md` Stage 5 test
@@ -10,7 +10,7 @@ deliverable.
 ## What it exercises
 
 The suite drives the **real** `arxfs` driver
-(`rustos_drv_fs_arxfs::ARXFS`) through the **real**
+(`tairix_drv_fs_arxfs::ARXFS`) through the **real**
 `kernel/core::fs::Vfs` policy layer — the identical code paths the
 kernel runs — and never re-implements any filesystem semantics
 (`AGENTS.md` §2.2). A `arxfs` volume is formatted in memory, mounted at

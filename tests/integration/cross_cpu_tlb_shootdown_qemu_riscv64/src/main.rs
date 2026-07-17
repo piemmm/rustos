@@ -3,7 +3,7 @@
 //!
 //! ## What this test asserts
 //!
-//! The `rustos_arch_api::CrossCpuTlbShootdown` HAL slice requires that a
+//! The `tairix_arch_api::CrossCpuTlbShootdown` HAL slice requires that a
 //! page-table edit on one CPU can be made visible on the others. riscv64
 //! has no broadcast `sfence.vma`, so `RiscvArch`'s implementation issues
 //! a local `sfence.vma` plus the SBI **RFENCE** `remote_sfence_vma`
@@ -30,7 +30,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-riscv64` port and supplies its own
+//! It links only the `tairix-arch-riscv64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
 //! never behind a Cargo feature on the arch crate (fail closed).
 
@@ -45,13 +45,13 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_arch_api::{CpuId, CrossCpuTlbShootdown};
-    use rustos_arch_riscv64::fdt::Fdt;
-    use rustos_arch_riscv64::{
+    use tairix_arch_api::{CpuId, CrossCpuTlbShootdown};
+    use tairix_arch_riscv64::fdt::Fdt;
+    use tairix_arch_riscv64::{
         halt_current_hart, handle_panic_via_serial, qemu_exit, sbi, smp, RiscvArch,
         RiscvArchStorage, SERIAL_SINK,
     };
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_log::{log, Event, EventId, Level};
 
     /// The two-hart `virt` board uses hart ids `0` and `1`; OpenSBI may
     /// boot on *either* one, so the boot hart is read at runtime and the
@@ -103,12 +103,12 @@ mod kernel {
     /// Forward to the shared riscv64 panic bridge (parks the hart; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_xtlb_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_xtlb_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_riscv64_main`).
+    /// calls (via `tairix_arch_riscv64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         log(

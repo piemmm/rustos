@@ -1,6 +1,6 @@
-# `rustos-curses`
+# `tairix-curses`
 
-The first-party curses / TUI screen-model library for RustOS's text stack, and
+The first-party curses / TUI screen-model library for TAIRiX's text stack, and
 the fourth stage (C4) of the `plans/CURSES.md` build plan. Applications draw
 into windows; this crate makes the terminal match, emitting the smallest
 escape-sequence set the terminal supports.
@@ -18,7 +18,7 @@ vocabulary, and terminal capabilities come from `lib/termcap`.
 - **Minimal-diff renderer** (`render`) — diffs the desired screen against the
   last-flushed screen and emits one cursor move per change-run, one SGR
   transition per attribute change, and one `Print` per glyph. Colour is degraded
-  by the terminal's `rustos_termcap::ColorDepth` (truecolour → 256 → 16 → mono),
+  by the terminal's `tairix_termcap::ColorDepth` (truecolour → 256 → 16 → mono),
   so a sequence the terminal could not honour is never emitted. A terminal
   without cursor addressing (`dumb`) takes a safe full-rewrite path.
 - **`ColorPairs`** — the curses colour-pair table (pair `0` is the reserved
@@ -41,7 +41,7 @@ vocabulary, and terminal capabilities come from `lib/termcap`.
   `ShellSource`, so the whole pipeline is host-testable without a kernel.
 - **`StreamTty`** (feature `program`, freestanding targets only) — the one
   production `Tty` over a program's inherited standard streams (fd 0/1)
-  through `rustos-rt`: blocking and timed reads park in the kernel, a closed
+  through `tairix-rt`: blocking and timed reads park in the kernel, a closed
   stream is a loud `CursesError::Io` (never a silent empty read a session
   could spin on), and an elapsed timed read is the caller's tick. Every
   full-screen tool's `Run` binary links this one definition instead of
@@ -49,7 +49,7 @@ vocabulary, and terminal capabilities come from `lib/termcap`.
 
 ## One vocabulary, fail closed
 
-Every byte emitted or parsed is a `rustos_vt::Op`. The crate is `no_std` +
+Every byte emitted or parsed is a `tairix_vt::Op`. The crate is `no_std` +
 `alloc` and is **part of the OS**: it is the curated `/System/Libraries/`
 Terminal/TUI shared-library class, so applications — OS-bundled and third-party
 alike — **dynamically link** it rather than compiling it in (`AGENTS.md`
@@ -60,8 +60,8 @@ colour is degraded (`AGENTS.md` §2.9). Nothing here writes to fd 3 (`stdinfo`,
 
 ## Layering
 
-`lib/curses` depends on `rustos-vt` and `rustos-termcap` (and, behind the
-`program` feature on freestanding targets, `rustos-rt` + `rustos-abi` for
+`lib/curses` depends on `tairix-vt` and `tairix-termcap` (and, behind the
+`program` feature on freestanding targets, `tairix-rt` + `tairix-abi` for
 `StreamTty`) — all `lib/*`, never `kernel/*`, `drivers/*`, or `userland/*`
 (`AGENTS.md` §17.4) — and is
 text-only infrastructure outside `userland/gui/*`, so a headless image links it

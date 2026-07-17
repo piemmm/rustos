@@ -13,7 +13,7 @@ use core::num::NonZeroU32;
 
 use alloc::string::String;
 
-use rustos_crypto::{pbkdf2_sha256, pbkdf2_sha256_verify, PasswordHash, PASSWORD_HASH_LEN};
+use tairix_crypto::{pbkdf2_sha256, pbkdf2_sha256_verify, PasswordHash, PASSWORD_HASH_LEN};
 
 use crate::ParseError;
 

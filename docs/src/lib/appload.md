@@ -1,6 +1,6 @@
-# `rustos-appload` — application-bundle load gate
+# `tairix-appload` — application-bundle load gate
 
-`lib/appload` (`rustos-appload`) is the one place a `<Name>.app/` bundle is
+`lib/appload` (`tairix-appload`) is the one place a `<Name>.app/` bundle is
 *judged* before it may be launched (`AGENTS.md` §16.4, §16.5). It is a shared
 `lib/*` crate so the same gate is used by both the kernel boot-floor spawn
 path and the user-space [application-manager service](../userland/appmgr.md),
@@ -33,7 +33,7 @@ exec time.
    **intersection** of that request with `user_grants`; ambient authority
    is forbidden (§4, §5.2), so the loader never widens a request.
 7. **Run image** — reads the `Run` binary and validates it through
-   `rustos_abi::rxe::LoadImage::parse` with the kernel's syscall hash as the
+   `tairix_abi::rxe::LoadImage::parse` with the kernel's syscall hash as the
    expected CFI tag, enforcing the §19.2 hardening invariants (PIE, W^X,
    CFI tag); a malformed image or CFI-tag mismatch is `AppError::RunImage`.
 
@@ -45,7 +45,7 @@ verified binary with that ceiling is the caller's job (the same load gate
 
 The kernel's spawn path retains the accepted `LoadedApp` for bundles on
 the immutable read-only system stores in the semantic launch cache
-(`rustos_kernel_core::launch_cache::LaunchCache`, `plans/SMARTRAM.md`
+(`tairix_kernel_core::launch_cache::LaunchCache`, `plans/SMARTRAM.md`
 SMART4): the gate runs once per boot per store bundle, and every later
 launch serves the cached result after re-authorising the caller's own
 read of the entry point — the cache stores no caller-dependent decision
@@ -85,7 +85,7 @@ reading the bundle off the store — the "getting it from disk" cost) and a
 signature / content-hash / run-image checking), so a slow first launch is
 diagnosable from the audit log.
 
-The crate is `no_std` (with `alloc`) and depends only on `rustos-abi`,
-`rustos-caps`, and `rustos-log` (§17.4); it has no `unsafe` and no
+The crate is `no_std` (with `alloc`) and depends only on `tairix-abi`,
+`tairix-caps`, and `tairix-log` (§17.4); it has no `unsafe` and no
 `unwrap`/`expect`/`panic!` in production paths. Stability tier:
 `experimental`.

@@ -1,7 +1,7 @@
 # riscv64
 
-RustOS targets `riscv64gc-unknown-none-elf` as a Tier-1 platform. The
-production `rustos-kernel` binary boots the QEMU `virt` / SiFive board
+TAIRiX targets `riscv64gc-unknown-none-elf` as a Tier-1 platform. The
+production `tairix-kernel` binary boots the QEMU `virt` / SiFive board
 to `AuditEvent::BootCompleted`; the host-side **QEMU runner** launches
 it (and the Stage 4.D virtio-MMIO integration tests that build on the
 same harness). This page documents both — the boot pipeline, the
@@ -10,21 +10,21 @@ on-board boot model, the result protocol, and the argv contract.
 ## Kernel boot pipeline
 
 Like x86_64, `kernel/arch/riscv64` is a pure Arch HAL implementation
-(`AGENTS.md` §17.2): it implements `rustos_arch_api::SchedulerArch`, the
+(`AGENTS.md` §17.2): it implements `tairix_arch_api::SchedulerArch`, the
 monotonic clock, the hart-park primitive, the PLIC register driver, and
 the S-mode trap glue, but it names no concrete kernel subsystem. The
 boot pipeline that *does* name `kernel/{core,mem,sec}` and
-`kernel/sched/api` lives in the production `rustos-kernel` crate
-(`rustos_kernel::boot_riscv64`), exactly as x86_64 / aarch64 keep their
+`kernel/sched/api` lives in the production `tairix-kernel` crate
+(`tairix_kernel::boot_riscv64`), exactly as x86_64 / aarch64 keep their
 boot pipeline and `BinArch` wrapper there. `kernel_main(hartid, dtb)` in
-the `rustos-kernel` binary forwards to it. It boots to
+the `tairix-kernel` binary forwards to it. It boots to
 `AuditEvent::BootCompleted` and is exercised by the
 `tests/integration/kernel_arch_boot_riscv64` QEMU test — the riscv64
 analogue of the x86_64 / aarch64 `kernel_arch_boot` bins. That test
-crate (`rustos-test-riscv64-boot`) is a thin test-side wrapper over the
+crate (`tairix-test-riscv64-boot`) is a thin test-side wrapper over the
 same pipeline: it publishes the firmware map + DTB for the device
 verticals (see *Boot-state publication*) and delegates to
-`rustos_kernel::boot_riscv64::boot`, so there is exactly one riscv64
+`tairix_kernel::boot_riscv64::boot`, so there is exactly one riscv64
 boot orchestration (`AGENTS.md` §2.2).
 
 Boot sequence:
@@ -33,7 +33,7 @@ Boot sequence:
    with paging off (`satp = 0`, bare addressing), `a0 = hartid`, and
    `a1 =` the flattened device tree pointer. The `_start` trampoline
    sets up the boot stack, zeroes `.bss`, and tail-calls
-   `rustos_arch_riscv64_main(hartid, dtb)`, which forwards to the
+   `tairix_arch_riscv64_main(hartid, dtb)`, which forwards to the
    binary-supplied `kernel_main`.
 2. **Device-tree parse (`fdt.rs`).** A minimal, bounds-checked FDT
    reader extracts the first `/memory` node's `reg` (base/size) and the
@@ -50,11 +50,11 @@ Boot sequence:
    (`riscv64::dispatch::production_dispatch`) is installed before any user
    thread can run. A pool that cannot satisfy the identity map fails
    closed (the boot parks rather than running `kernel_main` unpaged).
-4. **Boot pipeline (`rustos_kernel::boot_riscv64::boot`).** Builds a
+4. **Boot pipeline (`tairix_kernel::boot_riscv64::boot`).** Builds a
    `BootMemoryMap` reserving `[ram_base, __kernel_end)` (firmware +
    kernel image + boot heap) and marking `[__kernel_end, ram_end)`
    usable, constructs `RiscvArch` (`kernel_arch.rs`, the arch port's
-   `rustos_arch_api::SchedulerArch` impl whose monotonic clock reads the
+   `tairix_arch_api::SchedulerArch` impl whose monotonic clock reads the
    `time` CSR via `rdtime`) wrapped in the downstream `RiscvBinArch`
    `kernel_core::KernelArch` adapter (orphan rules), assembles a
    `kernel_core::BootInfo`, and hands it to `kernel_core::kernel_main`.
@@ -74,7 +74,7 @@ a 64 MiB `.heap` (NOLOAD) section the linker places *after*
 physical-memory map excludes it.
 
 > The 64 MiB kernel heap allocator itself lives in the shared
-> `lib/kalloc` crate (`rustos-kalloc`), registered as the test
+> `lib/kalloc` crate (`tairix-kalloc`), registered as the test
 > binary's `#[global_allocator]` — the same allocator the x86_64 boot
 > bins use, defined once (`AGENTS.md` §2.2, §6).
 
@@ -147,7 +147,7 @@ images use, §2.2). Proven end-to-end by
 `tests/integration/spawn_init_qemu_riscv64`: it boots the production
 pipeline with only the audit sink swapped and reports `SiFive` PASS once
 it observes `ProcessSpawned` (`EventId(4030)`, PID 1) → the
-`RustOS <version>: …` machine-summary banner (the version is stamped in at
+`TAIRiX <version>: …` machine-summary banner (the version is stamped in at
 compile time from the crate version; the memory/architecture/core figures
 come from the kernel-attested `boot_facts_get` answer) → `ProcessSpawned` (the session) →
 `SyscallInvoked` (`EventId(5000)`, `init`'s `spawn`) — proving PID 1
@@ -181,7 +181,7 @@ which `arm` the device source, install the trap dispatch, and call
   `IrqTable::fire` calls; it forwards to that inherent `mask`. See
   `docs/src/security/irq.md`.
 - **S-mode trap vector.** `trap::init_traps` installs
-  `rustos_riscv64_trap_vector` (`trap.s`) into `stvec` (direct mode),
+  `tairix_riscv64_trap_vector` (`trap.s`) into `stvec` (direct mode),
   zeroes `sscratch` (the S-mode invariant, below), and enables
   `sie.SEIE` + `sstatus.SIE`. The vector swaps to a kernel stack via
   `sscratch`, saves the caller-saved registers **plus** the return-state
@@ -398,7 +398,7 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   what an otherwise-fatal fault means. The slot is set-once and a second
   publish fails closed (`AGENTS.md` §2.1).
 - **Context switch (`context.rs` + `context.s`).** `TaskCtx { sp }` plus
-  `rustos_arch_riscv64_switch`, which saves `ra` + `s0`–`s11` + `a0`
+  `tairix_arch_riscv64_switch`, which saves `ra` + `s0`–`s11` + `a0`
   onto the outgoing kernel stack, swaps `sp` through `TaskCtx`, and
   restores symmetrically. `TaskCtx::prepare` seeds a first-run frame
   (`ra = entry`, `a0 = arg`); a `const _` assert pins the 112-byte frame
@@ -417,7 +417,7 @@ only the CSR/assembly operations to the freestanding riscv64 target.
 - **`ecall` syscall entry (`syscall_entry.rs`).** riscv64 has no
   dedicated syscall instruction pair; a U-mode `ecall` raises a
   synchronous exception the trap handler routes here. `pack_raw_args`
-  marshals `a0`–`a5` into the frozen `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
+  marshals `a0`–`a5` into the frozen `tairix_abi` `[u64; SYSCALL_MAX_ARGS]`
   layout (the same one x86_64 builds — `AGENTS.md` §2.2), `dispatch_ecall`
   forwards `(a7, &args)` to the set-once dispatch callback and writes the
   result into the frame's `a0`, and the handler advances the saved
@@ -455,7 +455,7 @@ CPU, 60 s budget).
 ## Cross-CPU TLB-shootdown HAL slice
 
 riscv64 implements the Arch HAL `CrossCpuTlbShootdown` slice
-(`rustos_arch_api::xtlb`, `plans/WIRING.md` Stage W13) on `RiscvArch`.
+(`tairix_arch_api::xtlb`, `plans/WIRING.md` Stage W13) on `RiscvArch`.
 There is no broadcast `sfence.vma`, so `shootdown_page` invalidates the
 calling hart locally — the shared `paging::invalidate_page_local`
 sequence the local `TlbShootdown::flush_page` also uses (`AGENTS.md`
@@ -476,7 +476,7 @@ under `cargo xtask test --qemu`.
 ## Secondary-CPU bring-up HAL slice
 
 riscv64 implements the Arch HAL `SecondaryBringup` slice
-(`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14) on `RiscvArch`.
+(`tairix_arch_api::smp`, `plans/WIRING.md` Stage W14) on `RiscvArch`.
 `start_secondary(cpu)` resolves the dense `CpuId` to its hart id through
 the handle's map (failing closed with `SmpError::InvalidCpu` for the boot
 hart or an unmapped id) and delegates to `kernel/arch/riscv64::smp::start_secondary`,
@@ -524,7 +524,7 @@ context with the Stage-3 Sv39 primitives:
 
 1. Identity-maps the low 4 GiB (kernel code/stack, trap vector, MMIO) as
    S-mode-only.
-2. Aliases the `ros_sys_cap_query` stub page at a high user VA with the
+2. Aliases the `tairix_sys_cap_query` stub page at a high user VA with the
    `U` bit set (`flags::USER | READ | EXEC`) and maps a small user stack
    (`USER | READ | WRITE`). The stub is a self-contained leaf, so a
    single-page code alias is sufficient; the identity pages carry no `U`
@@ -538,7 +538,7 @@ context with the Stage-3 Sv39 primitives:
 The stub's `ecall` raises an environment-call-from-U exception into the
 S-mode trap vector, which marshals `a7`/`a0`–`a5` and calls the
 callback; the callback asserts the dispatched `(number, args)` are
-exactly what `ros_sys_cap_query` should have placed in the registers
+exactly what `tairix_sys_cap_query` should have placed in the registers
 before writing the `SiFive` Test PASS finisher. Any mismatch (or the
 `ecall` resuming in U-mode at all) trips a distinct failure finisher
 (`AGENTS.md` §5.4.5). Enrolled in `tools/xtask/src/commands/qemu_tests.rs`
@@ -549,7 +549,7 @@ the host-only `cargo xtask ci` gate.
 
 `riscv64_boot::publish` exposes the boot-state a driver-bring-up
 observer needs as set-once slots, the riscv64 analogue of the
-`rustos-kernel` bin crate's `arch_wrapper` slots on x86_64. They are a
+`tairix-kernel` bin crate's `arch_wrapper` slots on x86_64. They are a
 test-only affordance, so they live in the test-side `riscv64_boot`
 wrapper crate (not in the production `boot_riscv64` pipeline, which
 never carries a test-observer side channel, and not in the HAL-only arch
@@ -596,8 +596,8 @@ The riscv64 bring-up (`imp_mmio`):
 1. Reads `published_dtb` / `published_memory_map` (see *Boot-state
    publication*) and carves a per-device DMA region from the top of RAM.
 2. Builds the `virt`-board virtio-MMIO bus via the public
-   `rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb` constructor (the MMIO
-   analogue of `rustos_pci::mechanism_one`; the concrete bus
+   `tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb` constructor (the MMIO
+   analogue of `tairix_pci::mechanism_one`; the concrete bus
    type stays crate-private behind `impl VirtioMmioBus`, §8) and
    provisions an `MmioTransport` through the `CAP_MMIO_MAP`-gated
    `KernelMmioMapper` (`kernel/virtio::provision_virtio_mmio`).
@@ -621,7 +621,7 @@ transport acknowledges the source as it drains the used ring), so a
 level-high virtio-mmio source deasserts before the waiter re-arms it —
 the park needs no dispatch-level ACK.
 
-The `kernel/virtio` (`rustos-kernel-virtio`) crate holds the
+The `kernel/virtio` (`tairix-kernel-virtio`) crate holds the
 architecture-neutral `KernelVirtioFactory` and the PCI/MMIO provisioning
 walks so both the x86_64 (PCI) and riscv64 (MMIO) verticals reuse the
 same code; it depends on no `kernel/arch/*` port (`AGENTS.md` §2.2, §6).
@@ -635,7 +635,7 @@ of the x86_64 PS/2 vertical. It reuses the exact `imp_mmio` bring-up
 above, then instead of a storage or network round-trip it loads the
 signed virtio-input `.rxe` and decodes a real injected key. The
 device-id (`18`, virtio-input) and the spawner registering the loaded image
-through `rustos_drv_input_virtio_input::register` are the only per-vertical
+through `tairix_drv_input_virtio_input::register` are the only per-vertical
 specifics; the `virtio_input_keypress` key-decode tail is the same shared
 `virtio_qemu_support` code the aarch64 vertical runs (`AGENTS.md` §2.2).
 
@@ -666,7 +666,7 @@ SiFive Test device, eight virtio-mmio transports, and a generic PCIe
 host bridge. Every virtio-mmio transport is forced to the modern
 (virtio 1.x, version 2) interface with `-global
 virtio-mmio.force-legacy=false` — QEMU defaults to the legacy (version 1)
-interface, but RustOS' `MmioTransport` only drives the modern layout. A
+interface, but TAIRiX' `MmioTransport` only drives the modern layout. A
 backing image attached with `Spec::with_virtio_blk`
 surfaces as a `virtio-blk-device` on one of the virtio-mmio transports —
 the riscv64 analogue of the x86_64 `virtio-blk-pci` function, driven by
@@ -730,8 +730,8 @@ interface creep).
 
 ## Manual debugging
 
-The `rustos-qemu-run` wrapper takes `--arch riscv64` (e.g. the input
-vertical reproduces with `rustos-qemu-run --arch riscv64
+The `tairix-qemu-run` wrapper takes `--arch riscv64` (e.g. the input
+vertical reproduces with `tairix-qemu-run --arch riscv64
 --virtio-keyboard "<marker>" a`); riscv64 runs also go through
 `Runner::run` or `cargo xtask test --qemu` (which builds and launches
 the enrolled riscv64 bins for `riscv64gc-unknown-none-elf`). A run can
@@ -740,7 +740,7 @@ also be reproduced by hand:
 ```text
 qemu-system-riscv64 -M virt -no-reboot -display none -serial stdio \
     -m 256M -smp 1 -bios default \
-    -kernel target/riscv64gc-unknown-none-elf/debug/rustos-test-kernel-arch-boot-riscv64
+    -kernel target/riscv64gc-unknown-none-elf/debug/tairix-test-kernel-arch-boot-riscv64
 ```
 
 A clean boot prints the phase timeline and `id=4004 kernel boot
@@ -753,7 +753,7 @@ The riscv64 port implements the Arch HAL `PlatformDiscovery` slice
 (`AGENTS.md` §17.2 / §18.2) in `kernel/arch/riscv64::platform`. The
 device-tree parser now lives once in the shared `lib/fdt` crate (§2.2);
 `kernel/arch/riscv64::fdt` re-exports it so the boot path and the QEMU
-integration tests keep naming `rustos_arch_riscv64::fdt::Fdt`.
+integration tests keep naming `tairix_arch_riscv64::fdt::Fdt`.
 `FdtDiscovery` normalises the two facts the reader extracts — the first
 `/memory` region and the `/cpus` `timebase-frequency` — into the single
 `lib/abi` hardware tree: a root node, a `Memory` node carrying the RAM
@@ -763,7 +763,7 @@ the port's `passes_arch_hal_conformance_suite`.
 
 The boot pipeline publishes that discovered tree to user space: after it
 extracts the timer rate, memory map, and CPU name, `try_boot` runs
-`FdtDiscovery` into the shared `rustos_kernel::boot_hwtree::CollectingHwNodeSink`
+`FdtDiscovery` into the shared `tairix_kernel::boot_hwtree::CollectingHwNodeSink`
 (the one growable collection sink the aarch64 boot path also uses, §2.2)
 and seeds the authoritative `HW_TREE` the `hw_tree_read` / `hw_tree_wait`
 syscalls read. This is **pure device-tree normalisation — no MMIO register
@@ -937,7 +937,7 @@ fault-form — a scheduled kthread overrunning its arena-backed stack — by
 wired the same way (G3b-2): `boot_riscv64::try_boot` carves a
 2 MiB-aligned guard arena out of the discovered memory map (§24.2 policy,
 bounded to the spawn seams' 4 GiB identity window), installs it into the
-shared `rustos-kernel` kthread-stack allocator, and audits the decision
+shared `tairix-kernel` kthread-stack allocator, and audits the decision
 (`EventId(4098)`); the `riscv64::init_spawn` / `riscv64::spawn_producer`
 seams then draw PID 1's and every spawned child's kernel stack from that
 arena and split+unmap each stack's guard page in the owning task's own
@@ -967,14 +967,14 @@ explicitly or never faults (timing out).
 *production* fault-form: an overrunning kthread takes a **synchronous
 store page fault while running** under the live scheduler, not the
 deferred next-reschedule poison-canary detection a heap-backed
-`rustos_kernel_core::BoxStack` falls back to.
+`tairix_kernel_core::BoxStack` falls back to.
 
 It builds an Sv39 `AddressSpace` identity-mapping the low 4 GiB,
 re-expresses a 2 MiB-aligned guard arena at 4 KiB granularity
 (`prepare_guard_arena`, G2), installs the S-mode trap vector + a `fault`
 handler, turns paging on, then `unmap`s + `flush_page`s one kthread
 stack's one-page guard through the Arch HAL — the production guard-page
-mechanism. It then builds the live `rustos-kernel-sched-eevdf`
+mechanism. It then builds the live `tairix-kernel-sched-eevdf`
 `Scheduler` over `RiscvArch` and admits a kthread on that arena-backed
 stack (laid out `[guard page | usable stack]`) via
 `kernel_core::spawn_kthread_with_stack` — the production runtime path,

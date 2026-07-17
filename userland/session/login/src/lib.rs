@@ -1,6 +1,6 @@
-//! RustOS text login (Stage 6).
+//! TAIRiX text login (Stage 6).
 //!
-//! `rustos-login` authenticates a user against `kernel/sec` and launches a
+//! `tairix-login` authenticates a user against `kernel/sec` and launches a
 //! session on their behalf. Which session runs is **system policy, never a
 //! per-login prompt**: the authenticated account's text shell by default,
 //! or the graphical desktop when the administrator configured
@@ -28,7 +28,7 @@
 //!
 //! Every security-relevant decision — a failed authentication, a lockout, a
 //! session start and end, a refused launch, a dead console — is audited
-//! through `lib/log` with a stable [`EventId`](rustos_log::EventId) in the
+//! through `lib/log` with a stable [`EventId`](tairix_log::EventId) in the
 //! reserved `10000..11000` range. The cause of an
 //! authentication failure is audited but **never** disclosed to the caller,
 //! so the prompt cannot be used to probe for valid usernames.
@@ -44,7 +44,7 @@
 //!
 //! # Module map
 //!
-//! * [`events`] — stable [`rustos_log::EventId`] constants (`10000` range).
+//! * [`events`] — stable [`tairix_log::EventId`] constants (`10000` range).
 //! * [`error`] — [`LoginError`], the fail-closed outcomes of [`Login::run`].
 //! * [`session`] — the identity types ([`Uid`], [`Gid`],
 //!   [`AuthenticatedUser`], [`SessionKind`]) and the [`LoginView`],
@@ -64,8 +64,8 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`); the only dependencies are the
-//! audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
-//! `rustos-users`, and `rustos-vt` (the shared terminal-control vocabulary the
+//! audited `lib/*` crates `tairix-abi`, `tairix-caps`, `tairix-log`,
+//! `tairix-users`, and `tairix-vt` (the shared terminal-control vocabulary the
 //! read line discipline keys off), so a userland service never links a kernel
 //! or driver crate.
 //! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.

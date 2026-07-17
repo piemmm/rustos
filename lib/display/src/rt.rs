@@ -1,4 +1,4 @@
-//! The production, `rustos-rt`-backed [`ShmMapper`] (feature `rt`).
+//! The production, `tairix-rt`-backed [`ShmMapper`] (feature `rt`).
 //!
 //! The one definition of "map a client's granted shared-memory region
 //! through the kernel's `shm_map`, sized from the kernel's own record of
@@ -8,11 +8,11 @@
 //! discipline cannot drift between the two.
 //!
 //! Feature-gated because the engine crate itself is I/O-free and
-//! forbid-unsafe: only a consumer that really runs on the RustOS
+//! forbid-unsafe: only a consumer that really runs on the TAIRiX
 //! runtime pulls in the syscall-backed mapping (and, with it, this
 //! module's single audited `unsafe` view of the kernel mapping).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::server::{FrameRegion, ShmMapper};
 
@@ -64,7 +64,7 @@ impl Drop for RtShmRegion {
         // Releasing the mapping drops this process's reference to the
         // region; the kernel resolves the mapping by its base and frees
         // the frames only at the last reference.
-        let _ = rustos_rt::shm_unmap(self.base, self.len);
+        let _ = tairix_rt::shm_unmap(self.base, self.len);
     }
 }
 
@@ -79,7 +79,7 @@ impl ShmMapper for RtShmMapper {
 
     fn map(&mut self, handle: u64, min_len: usize) -> Result<RtShmRegion, Errno> {
         let mut raw_len: u64 = 0;
-        let ret = rustos_rt::shm_map(handle, &mut raw_len);
+        let ret = tairix_rt::shm_map(handle, &mut raw_len);
         if ret < 0 {
             return Err(errno_from(ret));
         }
@@ -89,13 +89,13 @@ impl ShmMapper for RtShmMapper {
             // A region wider than the address width cannot be exposed
             // as a slice; release the mapping (the kernel resolves an
             // unmap by its base) and refuse rather than truncate.
-            let _ = rustos_rt::shm_unmap(base, 0);
+            let _ = tairix_rt::shm_unmap(base, 0);
             return Err(Errno::LengthOutOfRange);
         };
         let Ok(addr) = usize::try_from(base) else {
             // A base the address width cannot hold names no reachable
             // mapping; release it and refuse rather than truncate.
-            let _ = rustos_rt::shm_unmap(base, 0);
+            let _ = tairix_rt::shm_unmap(base, 0);
             return Err(Errno::LengthOutOfRange);
         };
         // Constructing the region first means every refusal below (and

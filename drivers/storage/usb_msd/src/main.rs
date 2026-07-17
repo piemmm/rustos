@@ -11,11 +11,11 @@
 //! binds the mass-storage interface node, reads the device's own
 //! configuration descriptor to learn its interface number, wire transport,
 //! and endpoints, brings each logical unit up over the shared SCSI command
-//! layer (`rustos_drv_storage_usb_msd::scsi`) on the transport the device
+//! layer (`tairix_drv_storage_usb_msd::scsi`) on the transport the device
 //! speaks — Bulk-Only (`bot`), Control/Bulk/Interrupt (`cbi`, USB floppy
 //! drives), or USB Attached SCSI (`uas`) — emits one **storage-class**
 //! hardware-tree node per ready LUN carrying a block-service call endpoint
-//! and a shared data window (`rustos_abi::blkio`), and serves those
+//! and a shared data window (`tairix_abi::blkio`), and serves those
 //! endpoints for the life of the device. It knows neither the controller
 //! type nor the bus.
 //!

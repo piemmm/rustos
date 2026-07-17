@@ -1,26 +1,26 @@
 //! Deterministic fuzz harness for the `lib/fsmeta` untrusted-input paths:
 //! the namespaced-key grammar parser and the attribute-set decoder.
 //!
-//! Attribute keys and encoded attribute sets arrive from outside RustOS's
+//! Attribute keys and encoded attribute sets arrive from outside TAIRiX's
 //! trust boundary — copied in from a foreign filesystem, an archive, or a raw
 //! block that may be corrupt or hostile. A malformed key, a truncated or
 //! over-count encoding, an out-of-bounds length field, a duplicate key, or an
 //! unknown flag bit must all be **rejected** fail-closed, never trusted and
 //! never a panic. The single invariant driven here:
 //!
-//! * feeding any byte image to [`rustos_fsmeta::AttrKey::parse`] and
-//!   [`rustos_fsmeta::AttrSet::decode`] never panics and never reads out of
+//! * feeding any byte image to [`tairix_fsmeta::AttrKey::parse`] and
+//!   [`tairix_fsmeta::AttrSet::decode`] never panics and never reads out of
 //!   bounds — each returns a validated value or a
-//!   [`rustos_fsmeta::MetadataError`]. Any value the decoder *accepts* must
+//!   [`tairix_fsmeta::MetadataError`]. Any value the decoder *accepts* must
 //!   re-encode and re-decode to the identical set (round-trip stability). The
 //!   run aborting *is* the failure.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG mutates a
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates a
 //! valid seed encoding and feeds pure noise. A plain `cargo test` runs the
 //! fixed smoke sweep; `cargo xtask fuzz` extends the loop to a wall-clock
 //! budget.
 
-use rustos_fsmeta::{AttrFlags, AttrKey, AttrSet};
+use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -58,12 +58,12 @@ fn exercise_decode(bytes: &[u8]) {
 
 #[test]
 fn parsing_any_metadata_never_panics() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let seed = seed_encoding();
 
-    let mut state: u64 = rustos_fuzzseed::start(
+    let mut state: u64 = tairix_fuzzseed::start(
         "parsing_any_metadata_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -101,7 +101,7 @@ fn parsing_any_metadata_never_panics() {
         let _ = AttrKey::parse(&key);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

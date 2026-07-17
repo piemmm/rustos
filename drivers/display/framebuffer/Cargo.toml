@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-display-framebuffer"
-description = "RustOS user-space framebuffer display-service process: resolves its granted linear scan-out surface (`sole_framebuffer`), hosts the `lib/display` server engine over the reserved DISPLAY_ENDPOINT, and blits lease-gated, zero-copy shared-memory frames to the surface (plans/DISPLAY.md D7b)."
+name = "tairix-drv-display-framebuffer"
+description = "TAIRiX user-space framebuffer display-service process: resolves its granted linear scan-out surface (`sole_framebuffer`), hosts the `lib/display` server engine over the reserved DISPLAY_ENDPOINT, and blits lease-gated, zero-copy shared-memory frames to the surface (plans/DISPLAY.md D7b)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,10 +14,10 @@ workspace = true
 # The crate is **only** a binary: the `Run` entry point of the framebuffer
 # display-service bundle, installed under `/System/Drivers/` and autoloaded
 # into user space by `devmgr` when a display node carrying a `Framebuffer`
-# resource is discovered. It links the userland runtime `rustos-rt` and
+# resource is discovered. It links the userland runtime `tairix-rt` and
 # depends only on `lib/*` crates so the workspace layering holds (no
 # `drivers/*`→`drivers/*` edge); the linear-surface engine it hosts is
-# `rustos_display::Framebuffer`, the one shared definition the framebuffer
+# `tairix_display::Framebuffer`, the one shared definition the framebuffer
 # QEMU verticals also drive. It is a freestanding pure-Rust program on the
 # native Tier-1 targets and an inert host stub elsewhere (`src/main.rs` /
 # `build.rs`), mirroring `drivers/input/virtio_kbd`.
@@ -28,26 +28,26 @@ workspace = true
 # `DisplayMode`, display_ipc protocol, `CapabilityId`, and the
 # `sole_framebuffer` grant resolver.
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The stable EventId vocabulary the lib target defines (FIRST_PRESENT) and
 # the freestanding binary emits its one-shot record through.
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 # Everything else the freestanding program links is pulled in only for the
 # bare-metal targets the binary is actually built for; on the host the binary
 # is an inert stub with no further dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over.
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The display-service protocol engine (`DisplayServer` + the `SeatCheck` /
 # `ShmMapper` seams) and the linear-surface `Framebuffer` engine — the one
 # definition of both, hosted here.
-rustos-display = { path = "../../../lib/display", version = "=0.0.0", features = ["rt"] }
+tairix-display = { path = "../../../lib/display", version = "=0.0.0", features = ["rt"] }
 # The user-space driver runtime: turns the kernel-issued device-resource
 # grants into the `MmioMapper` the surface bring-up consumes; every
 # capability and bound is re-checked kernel-side on the far side of the trap.
-rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, and the syscall wrappers (`call_create`, `call_recv`,
 # `call_reply`, `call_peer_seat`, `shm_map`, `waitset_*`).
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

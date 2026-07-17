@@ -23,13 +23,13 @@ use fixtures::{
     FailingSpawner, MemSource, NoDriverSpawner, RecordingSink, SingleSpawner,
 };
 
-use rustos_abi::{
+use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverKind, DriverManifest, HwMatchKey,
     ABI_VERSION_CURRENT,
 };
-use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
-use rustos_drvhost::{Host, HostConfig, HostError};
+use tairix_caps::CapabilitySet;
+use tairix_crypto::Ed25519PublicKey;
+use tairix_drvhost::{Host, HostConfig, HostError};
 
 const SYS_HASH: [u8; 32] = [0x11; 32];
 
@@ -452,7 +452,7 @@ fn source_read_failure_propagates() {
     let err = host
         .load("/d/missing", &full_caps())
         .expect_err("missing image surfaces");
-    assert_eq!(err, HostError::SourceFailed(rustos_abi::Errno::NotFound));
+    assert_eq!(err, HostError::SourceFailed(tairix_abi::Errno::NotFound));
 }
 
 #[test]
@@ -462,7 +462,7 @@ fn errno_mapping_exposed_publicly() {
     // public surface.
     assert_eq!(
         HostError::KernelKindForbidden.as_errno(),
-        rustos_abi::Errno::PermissionDenied
+        tairix_abi::Errno::PermissionDenied
     );
 }
 
@@ -472,7 +472,7 @@ fn drive(
     img: Vec<u8>,
     caller_caps: CapabilitySet,
     trusted: &[Ed25519PublicKey],
-) -> (Result<rustos_abi::DriverHandle, HostError>, Vec<u32>) {
+) -> (Result<tairix_abi::DriverHandle, HostError>, Vec<u32>) {
     let mut source = MemSource::new();
     source.images.insert("/d/img".into(), img);
     let spawner = SingleSpawner;
@@ -536,11 +536,11 @@ static NONE_FACTORY_SAW_VIRTIO: AtomicBool = AtomicBool::new(false);
 /// asserts that the host reports no virtio host and records the
 /// observation. Returns the canonical mock handle.
 fn register_expects_no_virtio(
-    host: &dyn rustos_abi::DriverHost,
-) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    host: &dyn tairix_abi::DriverHost,
+) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
     let seen = host.virtio_host().is_some();
     NONE_FACTORY_SAW_VIRTIO.store(seen, AtomicOrdering::SeqCst);
-    rustos_abi::DriverHandle::from_raw(0xD00D)
+    tairix_abi::DriverHandle::from_raw(0xD00D)
 }
 
 /// `register` fn used by `virtio_host_factory_some_yields_virtio_host`:
@@ -548,10 +548,10 @@ fn register_expects_no_virtio(
 /// exercises `alloc_dma_zeroed` to prove the wiring is real, and
 /// records the length on success.
 fn register_uses_virtio_host(
-    host: &dyn rustos_abi::DriverHost,
-) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    host: &dyn tairix_abi::DriverHost,
+) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
     let Some(vh) = host.virtio_host() else {
-        return Err(rustos_abi::DriverError::Unsupported);
+        return Err(tairix_abi::DriverError::Unsupported);
     };
     let slab = vh.alloc_dma_zeroed(64)?;
     VIRTIO_ALLOC_LEN.store(slab.len(), AtomicOrdering::SeqCst);
@@ -561,19 +561,19 @@ fn register_uses_virtio_host(
     // the free shim. Either way the host returns Ok with a fresh
     // handle (the host crate's freshly-minted one wins anyway).
     drop(slab);
-    rustos_abi::DriverHandle::from_raw(0xBEEF)
+    tairix_abi::DriverHandle::from_raw(0xBEEF)
 }
 
 /// Spawner that registers every manifest in-process through a
 /// caller-supplied entry. A bespoke type is necessary because the
 /// existing `SingleSpawner` hard-codes `mock_register`.
-struct PinnedSpawner(rustos_drvhost::DriverEntry);
-impl rustos_drvhost::DriverSpawner for PinnedSpawner {
+struct PinnedSpawner(tairix_drvhost::DriverEntry);
+impl tairix_drvhost::DriverSpawner for PinnedSpawner {
     fn spawn_and_register(
         &self,
-        ctx: &rustos_drvhost::SpawnContext<'_>,
-    ) -> Result<rustos_abi::DriverHandle, rustos_drvhost::SpawnRegisterError> {
-        (self.0)(ctx.host).map_err(rustos_drvhost::SpawnRegisterError::Register)
+        ctx: &tairix_drvhost::SpawnContext<'_>,
+    ) -> Result<tairix_abi::DriverHandle, tairix_drvhost::SpawnRegisterError> {
+        (self.0)(ctx.host).map_err(tairix_drvhost::SpawnRegisterError::Register)
     }
 }
 
@@ -581,12 +581,12 @@ impl rustos_drvhost::DriverSpawner for PinnedSpawner {
 /// `MockHost` (the production seam mints a `KernelVirtioHost`
 /// instead; see `kernel_host.rs`).
 struct MockVirtioFactory;
-impl rustos_virtio::VirtioHostFactory for MockVirtioFactory {
+impl tairix_virtio::VirtioHostFactory for MockVirtioFactory {
     fn mint<'r>(
         &'r self,
-        _granted: &dyn rustos_abi::CapabilityQuery,
-    ) -> Option<Box<dyn rustos_abi::driver::VirtioHost + 'r>> {
-        Some(Box::new(rustos_virtio::MockHost::new()))
+        _granted: &dyn tairix_abi::CapabilityQuery,
+    ) -> Option<Box<dyn tairix_abi::driver::VirtioHost + 'r>> {
+        Some(Box::new(tairix_virtio::MockHost::new()))
     }
 }
 
@@ -602,7 +602,7 @@ fn virtio_host_factory_default_none_yields_none() {
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
     let mut source = MemSource::new();
     source.images.insert("/d/probe".into(), img);
-    let spawner = PinnedSpawner(register_expects_no_virtio as rustos_drvhost::DriverEntry);
+    let spawner = PinnedSpawner(register_expects_no_virtio as tairix_drvhost::DriverEntry);
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
@@ -637,7 +637,7 @@ fn virtio_host_factory_some_yields_virtio_host() {
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
     let mut source = MemSource::new();
     source.images.insert("/d/virtio".into(), img);
-    let spawner = PinnedSpawner(register_uses_virtio_host as rustos_drvhost::DriverEntry);
+    let spawner = PinnedSpawner(register_uses_virtio_host as tairix_drvhost::DriverEntry);
     let sink = RecordingSink::new();
     let factory = MockVirtioFactory;
     let cfg = HostConfig {
@@ -682,44 +682,44 @@ static MMIO_OBSERVED_PHYS: AtomicU64 = AtomicU64::new(0);
 /// no backing memory has to be conjured in a unit test. The driver's
 /// `register()` asserts it both *saw* the mapper and *reached* it.
 struct MockMapper;
-impl rustos_abi::MmioMapper for MockMapper {
+impl tairix_abi::MmioMapper for MockMapper {
     fn map_window(
         &self,
         phys_base: u64,
         _len: usize,
-    ) -> Result<rustos_abi::RegisterWindow, rustos_abi::MmioMapError> {
+    ) -> Result<tairix_abi::RegisterWindow, tairix_abi::MmioMapError> {
         MMIO_OBSERVED_PHYS.store(phys_base, AtomicOrdering::SeqCst);
         // A unit test cannot mint a real `RegisterWindow` without
         // backing memory; the recognisable refusal proves the call
         // reached this mapper (the production `KernelMmioMapper`
         // returns a real window).
-        Err(rustos_abi::MmioMapError::InvalidRegion)
+        Err(tairix_abi::MmioMapError::InvalidRegion)
     }
 }
 
 /// `register` fn for `mmio_mapper_default_none_yields_none`: records
 /// whether the host reports a mapper.
 fn register_probes_mmio_mapper(
-    host: &dyn rustos_abi::DriverHost,
-) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    host: &dyn tairix_abi::DriverHost,
+) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
     NONE_MAPPER_SAW_MMIO.store(host.mmio_mapper().is_some(), AtomicOrdering::SeqCst);
-    rustos_abi::DriverHandle::from_raw(0xD0E5)
+    tairix_abi::DriverHandle::from_raw(0xD0E5)
 }
 
 /// `register` fn for `mmio_mapper_some_yields_mapper`: retrieves the
 /// mapper through the accessor and exercises `map_window` to prove the
 /// wiring is real.
 fn register_uses_mmio_mapper(
-    host: &dyn rustos_abi::DriverHost,
-) -> Result<rustos_abi::DriverHandle, rustos_abi::DriverError> {
+    host: &dyn tairix_abi::DriverHost,
+) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
     let Some(mapper) = host.mmio_mapper() else {
-        return Err(rustos_abi::DriverError::Unsupported);
+        return Err(tairix_abi::DriverError::Unsupported);
     };
     MMIO_SEEN.store(true, AtomicOrdering::SeqCst);
     // The sentinel refusal is expected; the latch above and the
     // observed `phys_base` are the proof of reach.
     let _ = mapper.map_window(0xFEBD_0000, 0x1000);
-    rustos_abi::DriverHandle::from_raw(0xF00D)
+    tairix_abi::DriverHandle::from_raw(0xF00D)
 }
 
 #[test]
@@ -732,7 +732,7 @@ fn mmio_mapper_default_none_yields_none() {
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
     let mut source = MemSource::new();
     source.images.insert("/d/nomap".into(), img);
-    let spawner = PinnedSpawner(register_probes_mmio_mapper as rustos_drvhost::DriverEntry);
+    let spawner = PinnedSpawner(register_probes_mmio_mapper as tairix_drvhost::DriverEntry);
     let sink = RecordingSink::new();
     let cfg = HostConfig {
         trusted_signers: &trusted,
@@ -767,7 +767,7 @@ fn mmio_mapper_some_yields_mapper() {
     let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
     let mut source = MemSource::new();
     source.images.insert("/d/map".into(), img);
-    let spawner = PinnedSpawner(register_uses_mmio_mapper as rustos_drvhost::DriverEntry);
+    let spawner = PinnedSpawner(register_uses_mmio_mapper as tairix_drvhost::DriverEntry);
     let sink = RecordingSink::new();
     let mapper = MockMapper;
     let cfg = HostConfig {

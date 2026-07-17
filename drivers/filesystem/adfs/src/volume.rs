@@ -7,8 +7,8 @@
 //! so any ADFS sector size works over any device block size without a
 //! special case.
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::Block;
+use tairix_abi::DriverError;
 
 /// Largest device logical-block size the driver stages through its
 /// on-stack scratch buffer. This is a validation bound on the untrusted

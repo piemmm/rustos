@@ -19,7 +19,7 @@ abschließendes `suffix` entfernt, sofern es nicht den ganzen
 verbleibenden Namen ausmacht.
 
 In eine Wurzel wird nie hineingeschnitten: `basename /` ist `/`, und —
-das Gegenstück im RustOS-Speicherwald — `basename Home:/` ist `Home:/`.
+das Gegenstück im TAIRiX-Speicherwald — `basename Home:/` ist `Home:/`.
 Eine Alias-Wurzel (`Home:/`, `System:/`, …) spielt genau die Rolle, die
 `/` auf POSIX-Systemen spielt.
 

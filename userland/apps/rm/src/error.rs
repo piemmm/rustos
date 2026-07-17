@@ -1,7 +1,7 @@
 //! The outcomes of running an `rm` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why an `rm` invocation did not complete.
 ///

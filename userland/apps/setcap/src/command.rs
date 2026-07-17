@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::CapabilityId;
+use tairix_abi::CapabilityId;
 
 use crate::error::SetcapError;
 
@@ -117,7 +117,7 @@ mod tests {
     use crate::error::SetcapError;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use rustos_abi::CapabilityId;
+    use tairix_abi::CapabilityId;
 
     fn set(recursive: bool, cap: Option<CapabilityId>, files: &[&str]) -> Command {
         Command::Set {

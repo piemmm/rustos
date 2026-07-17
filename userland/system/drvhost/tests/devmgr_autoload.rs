@@ -1,12 +1,12 @@
 //! End-to-end Stage 4.HW autoload test: the device manager's match walk
 //! drives this crate's load gate.
 //!
-//! `rustos-devmgr` owns matching *policy* and reaches the load
+//! `tairix-devmgr` owns matching *policy* and reaches the load
 //! *mechanism* only through its `DriverLoader` seam. This test
 //! closes the loop with the real pipeline: signed `.rxe` images carrying
-//! bind tables are decoded fail-closed by [`rustos_drvhost::ParsedImage`],
+//! bind tables are decoded fail-closed by [`tairix_drvhost::ParsedImage`],
 //! matched against a hardware tree, and the winners are loaded through a
-//! real [`rustos_drvhost::Host`] — signature verification, capability
+//! real [`tairix_drvhost::Host`] — signature verification, capability
 //! gate, spawner hand-off and all. Both subsystems' audit records
 //! (`7000`-range and `13000`-range) land on the same sink.
 
@@ -17,13 +17,13 @@ use fixtures::{
     SingleSpawner,
 };
 
-use rustos_abi::{
+use tairix_abi::{
     CapabilityId, DriverBindKey, DriverHandle, DriverKind, Errno, HwDeviceClass, HwMatchKey,
     HwNode, ABI_VERSION_CURRENT, DRIVER_MANIFEST_MAX_BIND_KEYS, HW_NODE_ROOT,
 };
-use rustos_caps::CapabilitySet;
-use rustos_devmgr::{DeviceManager, DriverCandidate, DriverLoader};
-use rustos_drvhost::{Host, HostConfig, ImageSource as _, ParsedImage};
+use tairix_caps::CapabilitySet;
+use tairix_devmgr::{DeviceManager, DriverCandidate, DriverLoader};
+use tairix_drvhost::{Host, HostConfig, ImageSource as _, ParsedImage};
 
 const SYS_HASH: [u8; 32] = [0x11; 32];
 
@@ -38,7 +38,7 @@ impl DriverLoader for HostLoader<'_, '_> {
     fn load(
         &mut self,
         path: &str,
-        _resources: &[rustos_abi::hwtree::HwResource],
+        _resources: &[tairix_abi::hwtree::HwResource],
         caller_caps: &CapabilitySet,
     ) -> Result<DriverHandle, Errno> {
         // This adapter exercises the *verification* gate with an
@@ -49,7 +49,7 @@ impl DriverLoader for HostLoader<'_, '_> {
         // loader that creates a fresh driver process). The argument is accepted to satisfy the seam.
         self.host
             .load(path, caller_caps)
-            .map_err(rustos_drvhost::HostError::as_errno)
+            .map_err(tairix_drvhost::HostError::as_errno)
     }
 }
 
@@ -80,7 +80,7 @@ fn decode_bind_table(source: &MemSource, path: &str) -> Vec<DriverBindKey> {
 fn autoload_matches_and_loads_through_the_real_gate() {
     // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
     // boot); lower the threshold so the test observes it.
-    rustos_log::set_max_level(rustos_log::Level::Trace);
+    tairix_log::set_max_level(tairix_log::Level::Trace);
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
 

@@ -2,15 +2,15 @@
 //! arxfs-over-virtio_blk-pci integration test.
 //!
 //! The device-agnostic bring-up *and* the arxfs round-trip tail both
-//! live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
+//! live in the shared `tairix-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the modern virtio-blk PCI device id, the spawner registering
 //! the loaded image through the virtio-blk `register`, and the boot harness.
 //! The device tail ([`arxfs_round_trip`]) mounts the arxfs volume the
 //! host harness planted on the backing disk and is the same code the
 //! riscv64 MMIO vertical would run.
 
-use rustos_drv_storage_virtio_blk::register as virtio_blk_register;
-use rustos_test_virtio_qemu_support::{
+use tairix_drv_storage_virtio_blk::register as virtio_blk_register;
+use tairix_test_virtio_qemu_support::{
     arxfs_round_trip, define_boot_harness, run_virtio_pci_scenario, FixedSpawner, ScenarioConfig,
     ScenarioTransport,
 };

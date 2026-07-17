@@ -9,7 +9,7 @@ sysinfo — interroger les informations système
 ## DESCRIPTION
 
 Émet une requête typée vers l'API d'information système et affiche la
-réponse. RustOS n'a ni `/proc` ni `/sys` : cette commande est le visage
+réponse. TAIRiX n'a ni `/proc` ni `/sys` : cette commande est le visage
 terminal de la même API versionnée et contrôlée par capacités que tout
 programme utilise, et aucun chemin ne contourne le contrôle de
 capacité.

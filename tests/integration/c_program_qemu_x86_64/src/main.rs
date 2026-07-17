@@ -6,13 +6,13 @@
 //! Unlike the riscv64/aarch64 C-program round-trips — which stand up a minimal
 //! self-contained test kernel — the x86_64 ring-3 transition needs the GDT
 //! ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, so
-//! this test boots the production `rustos-kernel` pipeline (exactly like the
-//! sibling `rustos-test-spawn-program-qemu-x86_64`). On
+//! this test boots the production `tairix-kernel` pipeline (exactly like the
+//! sibling `tairix-test-spawn-program-qemu-x86_64`). On
 //! `AuditEvent::BootCompleted` it enables `IA32_EFER.NXE`, builds a fresh
 //! address space (low 32 MiB identity + the higher-half kernel window),
 //! switches CR3, installs a dispatch callback, then calls the production
 //! capability-checked, audited spawn caller
-//! (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+//! (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
 //! materialise the program's ring-3 image — built from the `rxe` blob the build
 //! script produced, with W^X leaf permissions (code RX, data RW-NX, rodata
 //! R-NX) — and `iretq` into it. The C program checks a Time64 value across the
@@ -27,7 +27,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-c-program-qemu-x86_64: the `test-hooks` Cargo feature is a \
+    "tairix-test-c-program-qemu-x86_64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

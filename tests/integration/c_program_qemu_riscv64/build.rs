@@ -5,19 +5,19 @@
 //! the program here is written in **C** (`../cc5_program/csrc/main.c`). The
 //! kernel spawn path consumes an `rxe` load image, so this script:
 //!
-//! 1. builds the Rust startup/runtime shim (`rustos-test-cc5-program`) as a
+//! 1. builds the Rust startup/runtime shim (`tairix-test-cc5-program`) as a
 //!    position-independent `staticlib` for the freestanding riscv64 target —
-//!    this bundles crt0's `_start` and the `ros_sys_*` syscall stubs into one
+//!    this bundles crt0's `_start` and the `tairix_sys_*` syscall stubs into one
 //!    `.a` (the curated *System runtime / C ABI* class);
 //! 2. compiles `csrc/main.c` to a PIE object with the audited, version-pinned,
-//!    checksummed `clang` wrapper (`rustos_cc`) — RustOS stays
+//!    checksummed `clang` wrapper (`tairix_cc`) — TAIRiX stays
 //!    Rust-only; this only *hosts* a C program;
 //! 3. links the object + the shim archive into a PIE ELF with the audited
 //!    `ld.lld` wrapper, rooting crt0's `_start` via the shared CC3 link script;
 //! 4. converts the linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag so [`rustos_abi::rxe::LoadImage::parse`]
+//!    compiled-in syscall CFI tag so [`tairix_abi::rxe::LoadImage::parse`]
 //!    accepts it;
 //! 5. emits the bytes and `USER_BIAS` as Rust source the test `include!`s.
 //!
@@ -31,7 +31,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rustos_cc::{CTarget, CompileRequest, LinkRequest, Toolchain};
+use tairix_cc::{CTarget, CompileRequest, LinkRequest, Toolchain};
 
 /// Virtual base the program image is mapped at. Identical choice to the CC3
 /// round-trip: 64 GiB, far above the kernel's 4 GiB identity map, so the
@@ -42,7 +42,7 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -100,7 +100,7 @@ fn build_c_program(
     let toolchain =
         Toolchain::discover().unwrap_or_else(|e| panic!("C toolchain unavailable: {e}"));
     for line in toolchain.audit_lines() {
-        println!("cargo:warning=rustos-cc: {line}");
+        println!("cargo:warning=tairix-cc: {line}");
     }
 
     let object = PathBuf::from(out_dir).join("cc5_main.o");
@@ -125,15 +125,15 @@ fn build_c_program(
         .unwrap_or_else(|e| panic!("linking the CC5 C program failed: {e}"));
 
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {}: {e}", elf_path.display()));
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert the CC5 C program ELF into an rxe image")
 }
 
-/// Build the Rust crt0 + `ros_sys_*` runtime shim as a position-independent
+/// Build the Rust crt0 + `tairix_sys_*` runtime shim as a position-independent
 /// `staticlib` for the freestanding riscv64 target, returning its `.a` path.
 fn build_runtime_shim(manifest_dir: &str, out_dir: &str) -> PathBuf {
     let target_dir = format!("{out_dir}/cc5-shim-target");
@@ -157,7 +157,7 @@ fn build_runtime_shim(manifest_dir: &str, out_dir: &str) -> PathBuf {
             "build",
             "--release",
             "-p",
-            "rustos-test-cc5-program",
+            "tairix-test-cc5-program",
             "--target",
             RISCV64_TARGET,
             "-Z",
@@ -172,7 +172,7 @@ fn build_runtime_shim(manifest_dir: &str, out_dir: &str) -> PathBuf {
     assert!(status.success(), "building the CC5 runtime shim failed");
 
     PathBuf::from(format!(
-        "{target_dir}/{RISCV64_TARGET}/release/librustos_test_cc5_program.a"
+        "{target_dir}/{RISCV64_TARGET}/release/libtairix_test_cc5_program.a"
     ))
 }
 

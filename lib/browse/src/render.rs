@@ -16,10 +16,10 @@
 
 use alloc::string::String;
 
-use rustos_font::BitmapFont;
-use rustos_geometry::Rect;
-use rustos_raster::{Color, Surface};
-use rustos_theme::{Palette, Theme};
+use tairix_font::BitmapFont;
+use tairix_geometry::Rect;
+use tairix_raster::{Color, Surface};
+use tairix_theme::{Palette, Theme};
 
 use crate::browser::Browser;
 use crate::entry::Entry;

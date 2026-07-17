@@ -11,15 +11,15 @@
 //!    larger than the link MTU plus its header.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing
-//! from the same seeded stream until `RUSTOS_FUZZ_BUDGET_SECS` elapses
+//! from the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses
 //! under `cargo xtask fuzz`.
 
-use rustos_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
-use rustos_abi::time::Duration64;
-use rustos_net::eth::{EthernetFrame, ETHERNET_HEADER_LEN};
-use rustos_net::iface::MAX_IPV6_ADDRS;
-use rustos_net::stack::{Stack, StackConfig};
-use rustos_net::{IpAddr, Ipv4Addr};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
+use tairix_abi::time::Duration64;
+use tairix_net::eth::{EthernetFrame, ETHERNET_HEADER_LEN};
+use tairix_net::iface::MAX_IPV6_ADDRS;
+use tairix_net::stack::{Stack, StackConfig};
+use tairix_net::{IpAddr, Ipv4Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 5_000;
@@ -84,11 +84,11 @@ fn fresh_stack() -> Stack {
 
 #[test]
 fn random_frames_never_panic_and_state_stays_bounded() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "random_frames_never_panic_and_state_stays_bounded",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         let mut stack = fresh_stack();
         let mut buf = [0u8; 512];
@@ -133,7 +133,7 @@ fn random_frames_never_panic_and_state_stays_bounded() {
             assert!(stack.counters().rx_frames > 0);
             assert!(stack.iface().ipv6_addresses().len() <= MAX_IPV6_ADDRS);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

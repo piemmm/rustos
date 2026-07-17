@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_raster::{Color, Surface};
+use tairix_raster::{Color, Surface};
 
 /// One filled layer of an icon: a fill colour and a single polygon ring in
 /// design-grid coordinates.

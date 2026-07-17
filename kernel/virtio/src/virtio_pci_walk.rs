@@ -15,13 +15,13 @@
 //! . The capability check that authorises every
 //! window lives inside the mapper.
 
-use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::driver::virtio_pci::{
+use tairix_abi::driver::bus::BusDevice;
+use tairix_abi::driver::virtio_pci::{
     VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
 };
-use rustos_abi::{DriverError, MmioMapper};
-use rustos_virtio::{PciTransportWindows, VirtioError};
+use tairix_abi::{DriverError, MmioMapper};
+use tairix_virtio::{PciTransportWindows, VirtioError};
 
 /// Upper bound on the number of bus functions the walk will record
 /// while searching for the virtio device.
@@ -52,7 +52,7 @@ pub enum VirtioPciWalkError {
     Transport(VirtioError),
     /// Routing the device's MSI-X interrupt failed (propagated
     /// verbatim from
-    /// [`route_msix`](rustos_abi::driver::msix::MsixBus::route_msix);
+    /// [`route_msix`](tairix_abi::driver::msix::MsixBus::route_msix);
     /// e.g. the caller lacks `CAP_MMIO_MAP` or the function
     /// advertises no MSI-X capability).
     RouteMsix(DriverError),
@@ -64,7 +64,7 @@ pub enum VirtioPciWalkError {
 ///
 /// The boot wiring needs the `bdf` after the walk to route the
 /// device's MSI-X interrupt
-/// ([`route_msix`](rustos_abi::driver::msix::MsixBus::route_msix)),
+/// ([`route_msix`](tairix_abi::driver::msix::MsixBus::route_msix)),
 /// which is keyed by function — the walk already located it, so it is
 /// returned here rather than re-enumerated.
 #[derive(Debug)]
@@ -88,7 +88,7 @@ pub struct VirtioProvision<T> {
 ///
 /// The walk maps the windows but never names a concrete transport
 /// type: the caller passes `build` (in production
-/// `rustos_drv_bus_virtio::PciTransport::new`), so ring 0 depends only
+/// `tairix_drv_bus_virtio::PciTransport::new`), so ring 0 depends only
 /// on `lib/*` and never on a `drivers/bus/*` crate (`kernel/* → lib/*`, never a driver).
 ///
 /// # Errors
@@ -102,7 +102,7 @@ pub struct VirtioProvision<T> {
 /// # Capabilities
 ///
 /// The `mapper` enforces
-/// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) on
+/// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP) on
 /// every window; this walk holds no ambient authority of its own.
 pub fn provision_virtio_pci<T, B>(
     bus: &dyn VirtioPciBus,
@@ -134,7 +134,7 @@ fn map(
     bdf: u64,
     cfg_type: u8,
     mapper: &dyn MmioMapper,
-) -> Result<rustos_abi::RegisterWindow, VirtioPciWalkError> {
+) -> Result<tairix_abi::RegisterWindow, VirtioPciWalkError> {
     bus.map_virtio_window(bdf, cfg_type, mapper)
         .map_err(VirtioPciWalkError::MapWindow)
 }
@@ -166,8 +166,8 @@ fn find_virtio_function(bus: &dyn VirtioPciBus, device_id: u16) -> Result<u64, V
 mod tests {
     use super::*;
     use core::cell::RefCell;
-    use rustos_abi::driver::mmio::MmioMapError;
-    use rustos_abi::RegisterWindow;
+    use tairix_abi::driver::mmio::MmioMapError;
+    use tairix_abi::RegisterWindow;
 
     const VIRTIO_BLK_DEVICE_ID: u16 = 0x1042;
     const TARGET_BDF: u64 = 0x0000_0800;
@@ -235,7 +235,7 @@ mod tests {
         devices: alloc::vec::Vec<BusDevice>,
     }
 
-    impl rustos_abi::driver::bus::Bus for FakeBus {
+    impl tairix_abi::driver::bus::Bus for FakeBus {
         fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
             if out.len() < self.devices.len() {
                 return Err(DriverError::BufferTooSmall);

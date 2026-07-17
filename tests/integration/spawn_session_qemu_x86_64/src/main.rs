@@ -1,5 +1,5 @@
 //! `plans/PI.md` X3b + X4-follow-on QEMU integration test (x86_64 port): boot
-//! the production `rustos-kernel` pipeline, spawn PID 1 (`init`) into **ring
+//! the production `tairix-kernel` pipeline, spawn PID 1 (`init`) into **ring
 //! 3**, and prove `init` launches the embedded login session
 //! (`/System/Services/login.app/Run`, `plans/PI.md` P11) through the runtime `spawn`
 //! producer (a **hardware-isolated, concurrently-runnable** process under
@@ -10,7 +10,7 @@
 //!
 //! ## What this test asserts
 //!
-//! `rustos_kernel::boot` installs the x86_64 PID 1 spawn seam
+//! `tairix_kernel::boot` installs the x86_64 PID 1 spawn seam
 //! (`init_spawn_x86_64`, through `BootInfo::with_init`), the runtime
 //! `ProcessSpawn` producer + embedded-program registry
 //! (`spawn_producer_x86_64`, through `BootInfo::with_spawn`), and the COM1
@@ -96,12 +96,12 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use rustos_arch_x86_64::qemu_exit;
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_arch_x86_64::qemu_exit;
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     /// Static heap for the bump allocator (identical to the production bin's
     /// declaration; `#[global_allocator]` is per-binary).
@@ -162,17 +162,17 @@ mod kernel {
 
     static AUDIT_SINK: SpawnSessionExitSink = SpawnSessionExitSink;
 
-    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`. The bridge
+    /// Forward to the shared bridge in `tairix_kernel::x86_64::panic_ctx`. The bridge
     /// logs through `SERIAL_SINK`, not `AUDIT_SINK`, so a panic before PASS
     /// does not trip the QEMU-exit short-circuit — it halts, the run times
     /// out, and the harness reports `Outcome::Timeout` (fail-loud).
     #[panic_handler]
-    fn rustos_spawn_session_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_spawn_session_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
     /// The symbol the arch crate's boot trampoline calls. Forwards to
-    /// [`rustos_kernel::boot`] with the production COM1 log sink and the
+    /// [`tairix_kernel::boot`] with the production COM1 log sink and the
     /// audit-observer sink.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
@@ -183,7 +183,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Debug,
+            tairix_log::Level::Debug,
         )
     }
 }

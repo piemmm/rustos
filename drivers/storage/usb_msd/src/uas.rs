@@ -25,7 +25,7 @@
 //! as a failed exchange, and the staged remainder is recorded in
 //! `plans/DEVICES.md` §3.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::scsi::{CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
 

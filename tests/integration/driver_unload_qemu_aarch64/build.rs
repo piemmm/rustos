@@ -14,14 +14,14 @@
 //! 2. Compile the pure-Rust driver-stub fixture program
 //!    (`tests/integration/driver_register_program`) **position-independent**
 //!    for the freestanding aarch64 target (its own `program.ld` roots
-//!    `rustos-rt`'s `_start`), into a private target directory under
+//!    `tairix-rt`'s `_start`), into a private target directory under
 //!    `OUT_DIR`.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the production spawn producer maps every child image at and
 //!    stamping the kernel's compiled-in syscall CFI tag
-//!    (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -40,16 +40,16 @@ use std::process::Command;
 /// Virtual base the stub program image is mapped at: the production aarch64
 /// spawn producer's image bias (`spawn_with` passes it to
 /// `build_process_image`, so the `rxe`'s baked relocations must target the
-/// same value). It is the shared [`rustos_itest_harness::USER_IMAGE_BIAS`]
+/// same value). It is the shared [`tairix_itest_harness::USER_IMAGE_BIAS`]
 /// definition; the test kernel asserts it agrees with the
 /// producer's `SHELL_USER_BIAS` at runtime and fails closed on a mismatch.
-use rustos_itest_harness::USER_IMAGE_BIAS as USER_BIAS;
+use tairix_itest_harness::USER_IMAGE_BIAS as USER_BIAS;
 
 /// Rust target triple of the freestanding aarch64 build.
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -75,7 +75,7 @@ fn main() {
 
         // One CPU: this is the single-core driver-spawn handshake slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
         let rxe = build_and_convert_program(manifest_dir, &out_dir, &program_dir);
@@ -91,7 +91,7 @@ fn main() {
 }
 
 /// Deterministic Ed25519 seed the build signs the driver image with.
-const DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-driver-spawn-vertical/v1!";
+const DRIVER_SIGNING_SEED: [u8; 32] = *b"tairix-driver-spawn-vertical/v1!";
 
 /// Wrap `rxe` as the payload of a signed `DriverManifest` image the
 /// `SpawnDriverLoader` gate admits, and emit it plus the signer public key.
@@ -108,8 +108,8 @@ const DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-driver-spawn-vertical/v1!";
 /// gate (the bind-table decode path is covered by `drvhost`'s
 /// `devmgr_autoload` test).
 fn write_driver_image_fixture(path: &std::path::Path, rxe: &[u8]) {
-    use rustos_abi::{CapabilityId, DriverKind};
-    use rustos_itest_harness::driver_image::build_signed_driver_image;
+    use tairix_abi::{CapabilityId, DriverKind};
+    use tairix_itest_harness::driver_image::build_signed_driver_image;
 
     let (image, pubkey): (Vec<u8>, [u8; 32]) = if rxe.is_empty() {
         // Host / non-aarch64 build: inert stub (the kernel body is
@@ -127,7 +127,7 @@ fn write_driver_image_fixture(path: &std::path::Path, rxe: &[u8]) {
             DriverKind::UserSpace,
             &[CapabilityId::MEM_DMA, CapabilityId::IRQ_BIND],
             &[],
-            rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+            tairix_kernel_syscall::SYSCALL_TABLE_HASH,
             rxe,
         );
         (signed.image, signed.signer_pubkey)
@@ -174,11 +174,11 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
+    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
     // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
+    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
     // `#[global_allocator]` (its `mem_map`-backed heap), so the program names
     // `alloc`; omitting it would pull `alloc` from the prebuilt sysroot while
     // `core` is built fresh, a duplicate-lang-item link error.
@@ -200,7 +200,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-driver-register-program",
+            "tairix-test-driver-register-program",
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -216,12 +216,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     );
 
     let elf_path =
-        format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-test-driver-register-program");
+        format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-driver-register-program");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert the driver-register fixture program ELF into an rxe image")

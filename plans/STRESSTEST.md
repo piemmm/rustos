@@ -1,11 +1,11 @@
 # STRESSTEST.md — System stress testing and live kernel monitoring
 
 Status: ST1–ST5 done; ST6 planned
-Target: RustOS
+Target: TAIRiX
 Primary code areas: `lib/abi`, `kernel/mem`, `kernel/core`, `userland/system/sysinfod`, `lib/procinfo`, `userland/apps/`
 Secondary code areas: `lib/rt`, `lib/curses`, `userland/shell/sysinfo`, `kernel/sched`, `docs/src/`
 
-This is the staged build plan for RustOS's stress-testing and
+This is the staged build plan for TAIRiX's stress-testing and
 system-monitoring tier:
 
 - **`sysmon`** — a fullscreen curses monitor application that marks its own
@@ -87,7 +87,7 @@ Facts the stages below build on, so no stage re-derives them:
   (every port's user fault hook is terminal today) — the queries report
   whatever the tier really does, and the assertions that stress makes its
   counters *move* bind only once that prerequisite has landed.
-- **Signals exist; catching them does not.** `rustos_abi::Signal` is the
+- **Signals exist; catching them does not.** `tairix_abi::Signal` is the
   closed set `Continue`/`Terminate`/`Kill`/`Interrupt`/`Stop`
   (`plans/SPAWN.md` SP9, landed): the console line discipline delivers
   `^C`/`^Z` to the marked foreground child, `wait` reports stops, elsh has
@@ -116,7 +116,7 @@ Facts the stages below build on, so no stage re-derives them:
 
 ## 1. Goal
 
-Make RustOS's behaviour under load *observable* and *provokable* with
+Make TAIRiX's behaviour under load *observable* and *provokable* with
 first-party tools: an operator (or CI vertical) starts `stress` to drive
 the machine into any chosen combination of CPU, memory, disk, I/O, and
 cache pressure, watches the kernel respond in `sysmon` — pressure bands
@@ -336,7 +336,7 @@ is restored on exit).
 
 A system app-store command app (`userland/apps/stress`) following the
 established `stress`/`stress-ng` option surface (§16.7 familiarity —
-divergences only where RustOS genuinely differs, documented in `Help/`).
+divergences only where TAIRiX genuinely differs, documented in `Help/`).
 
 ### 7.1 Process model
 
@@ -495,7 +495,7 @@ implementation fixed):
   ungated — releasing one's own exemption grants nothing, the `mem_unmap`
   posture — but audited so the trail carries both pin edges) ship in the
   abi table with dispatcher-enforced gate/audit, `lib/rt` wrappers,
-  `ros_sys_*` stubs, and regenerated C headers. Both are idempotent:
+  `tairix_sys_*` stubs, and regenerated C headers. Both are idempotent:
   already in the requested state is success.
 - **Reconciliation — the pin state's home.** The plan said "process-scoped
   state in `kernel/mem`"; `kernel/mem` has no task vocabulary, so the mark
@@ -518,7 +518,7 @@ implementation fixed):
   intersects against it), so every task inherits it, `ulimit`/`rlimit_get`
   report it, and raising past it takes `CAP_RLIMIT_RAISE`. An unknown
   installed total keeps the compile-time floor. `CAP_MEM_PIN` joined the
-  administrative ceiling (`rustos_users::ADMINISTRATIVE_SET`), the intended
+  administrative ceiling (`tairix_users::ADMINISTRATIVE_SET`), the intended
   grant path for the ST4/ST5 tool manifests.
 - **Reconciliation — the aggregate's carrier.** `RamzipStats.reserved`
   became `pinned_bytes` (reserved-field evolution, wire length unchanged):
@@ -552,9 +552,9 @@ implementation fixed):
   with a closed op argument, `SignalIntakeOp` (`Enable` = 0, `Disable` =
   1, `Take` = 2), and the value-or-negative-errno `U64` return (`Take`
   yields the drained signal's wire discriminant). `lib/rt::signal_intake`
-  and the `ros_sys_signal_intake` stub follow; the C header additionally
-  gained `ROS_SIGNAL_INTAKE_OP_*` **and** the previously-unemitted
-  `ROS_WAITSET_OP_*` / `ROS_WAIT_SOURCE_*` vocabulary (a `waitset_ctl`
+  and the `tairix_sys_signal_intake` stub follow; the C header additionally
+  gained `TAIRIX_SIGNAL_INTAKE_OP_*` **and** the previously-unemitted
+  `TAIRIX_WAITSET_OP_*` / `TAIRIX_WAIT_SOURCE_*` vocabulary (a `waitset_ctl`
   caller had no symbolic constants — a pre-existing C-surface gap fixed
   in the same change).
 - The intake state is a per-task entry in `kernel/core::procsignal`
@@ -588,7 +588,7 @@ implementation fixed):
   owner's standing instruction) — parity with `signal` itself.
 - Docs: `docs/src/architecture/syscalls.md` (table row, waitset member,
   the `signal_intake` disposition-model section, handler-table row) —
-  RustOS deliberately ships no user-mode handler trampoline; observation
+  TAIRiX deliberately ships no user-mode handler trampoline; observation
   is event-shaped.
 - Tests per §10's signal-observation rows: procsignal host tests (intake
   lifecycle, disable-with-pending, escalation decline, opted-in
@@ -641,13 +641,13 @@ implementation fixed):
 - **Reconciliation — the shared hoists §2.2 forced.** sysmon is the
   second consumer of three things that previously lived inline, so each
   moved to its one home in the same change: the four kernel-statistics
-  fetches into `rustos_procinfo::kstats` (`memory_pressure`,
+  fetches into `tairix_procinfo::kstats` (`memory_pressure`,
   `ramzip_stats`, `for_each_reclaim_class`, `for_each_cpu_load`; the
   `info:`/`stats:` resolver retargeted onto them, its malformed-reply
   error now uniformly `Malformed`), the GNU `-d secs.tenths` grammar
-  into `rustos_curses::delay` (`top` delegates), and the viewer figure
+  into `tairix_curses::delay` (`top` delegates), and the viewer figure
   formatters (`format_tenths`/`format_size`/`format_mib`/
-  `format_uptime`/`format_load`) into `rustos_procinfo::human` (`top`
+  `format_uptime`/`format_load`) into `tairix_procinfo::human` (`top`
   imports them; only `TIME+` stays `top`-private).
 - Tests land per §10's sysmon rows: exhaustive host model tests (keys,
   panel cycling + scroll clamp, interval bounds, degradation states,
@@ -904,7 +904,7 @@ This work is complete only when all items are true:
 
 ```text
 You are implementing the next approved stage of `plans/STRESSTEST.md` for
-RustOS.
+TAIRiX.
 
 Before coding, read `AGENTS.md`, `PLAN.md`, `plans/STRESSTEST.md`,
 `plans/SWAPSWAPSWAP.md`, `plans/SMARTRAM.md`, `plans/SPAWN.md`,

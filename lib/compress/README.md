@@ -1,6 +1,6 @@
-# rustos-compress
+# tairix-compress
 
-The single shared **first-party compression codec** for RustOS (`AGENTS.md`
+The single shared **first-party compression codec** for TAIRiX (`AGENTS.md`
 §6, §16.4 — compression is a curated shared-library class). It implements a
 low-CPU, lossless LZ77 codec in the spirit of the zstd "fast" / LZ4 profiles
 (`docs/src/filesystem/arxfs-spec.md` §10 — *the v1 target is a low-CPU

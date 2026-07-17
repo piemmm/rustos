@@ -18,7 +18,7 @@
 //! The adapter is constructed per call with a `&mut dyn FilesystemRead`
 //! rather than stored in the [`Vfs`](super::Vfs): the VFS tree is
 //! `Clone + Eq`, and the live driver — mapped from the mount's
-//! [`DriverHandle`](rustos_abi::driver::DriverHandle) by the kernel host —
+//! [`DriverHandle`](tairix_abi::driver::DriverHandle) by the kernel host —
 //! is neither.
 
 use core::marker::PhantomData;
@@ -26,13 +26,13 @@ use core::marker::PhantomData;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo,
     NodeKind,
 };
-use rustos_abi::driver::DriverError;
-use rustos_abi::time::Time64;
-use rustos_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
+use tairix_abi::driver::DriverError;
+use tairix_abi::time::Time64;
+use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
 
 use super::path::MAX_COMPONENT_LEN;
 use super::perm::{Access, Credentials, Metadata};
@@ -245,7 +245,7 @@ impl<R: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized>
     ///
     /// The key is validated against the one shared `lib/fsmeta` grammar and
     /// its namespace's access class decides the gate: the ordinary
-    /// namespaces (`user`, the foreign presets, `rustos`) need read
+    /// namespaces (`user`, the foreign presets, `tairix`) need read
     /// permission on the node itself — the same [`Metadata::authorize`]
     /// decision every delegated read uses, `required_cap` included — while
     /// the privileged namespaces (`system`, `trusted`) are refused outright

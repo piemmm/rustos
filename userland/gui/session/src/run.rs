@@ -5,7 +5,7 @@
 //! session, and a shell user starts it on demand by typing `desktop`
 //! (`plans/DISPLAY.md` D7c, `plans/APPS.md`). The reserved `-h`/`-?`
 //! switches serve the command's own short help; the grammar is otherwise
-//! closed (see [`rustos_desktop_session::cli`]).
+//! closed (see [`tairix_desktop_session::cli`]).
 //!
 //! This is the client half of the zero-copy, lease-gated present path: the
 //! session acquires the boot seat's exclusive, revocable lease, brings the
@@ -18,11 +18,11 @@
 //! through the `DesktopShell`, and presents the composited damage by
 //! frame index — no frame bytes ever cross the IPC.
 //!
-//! It is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt`, never the C ABI (which exists solely for
-//! non-Rust programs). `rustos-rt` provides `_start`, the per-process stack
+//! It is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt`, never the C ABI (which exists solely for
+//! non-Rust programs). `tairix-rt` provides `_start`, the per-process stack
 //! canary, the panic handler, the allocator, and the syscall wrappers;
-//! `rustos_rt::entry!` names this program's `main`.
+//! `tairix_rt::entry!` names this program's `main`.
 //!
 //! `main` wires the real seams the shared engines drive:
 //!
@@ -68,29 +68,29 @@
 mod program {
     use alloc::collections::BTreeMap;
 
-    use rustos_abi::display_ipc::DISPLAY_ENDPOINT;
-    use rustos_abi::input::KeyInput;
-    use rustos_abi::seat::SEAT_PRIMARY;
-    use rustos_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
-    use rustos_abi::{
+    use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
+    use tairix_abi::input::KeyInput;
+    use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
+    use tairix_abi::{
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
         WaitStatus, ORIGIN_WIRE_LEN, WAIT_PID_ANY,
     };
-    use rustos_browse::{DirectorySource, VfsDirectorySource};
-    use rustos_caps::CapabilitySet;
-    use rustos_desktop_session::{
+    use tairix_browse::{DirectorySource, VfsDirectorySource};
+    use tairix_caps::CapabilitySet;
+    use tairix_desktop_session::{
         parse, CliError, Command, ConcludedPick, DesktopShell, DeviceInputSource,
         KeyboardInputSource, PickConclusion, SeatEventReader, SeatInputChannel, SessionPicker,
         SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER,
         FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, USAGE, VIEWER_LABEL,
         VIEWER_LAUNCHER, VIEWER_RUN_PATH,
     };
-    use rustos_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
-    use rustos_help::{own_short_help, BundleHelp};
-    use rustos_rt::io::{write_stderr_line, Stdout, Write};
-    use rustos_taskbar::{MenuAction, TaskbarConfig, TaskbarResponse};
-    use rustos_window::{CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX};
-    use rustos_wm::{Compositor, InputResponse, Rect};
+    use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
+    use tairix_help::{own_short_help, BundleHelp};
+    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_taskbar::{MenuAction, TaskbarConfig, TaskbarResponse};
+    use tairix_window::{CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX};
+    use tairix_wm::{Compositor, InputResponse, Rect};
 
     extern crate alloc;
 
@@ -175,9 +175,9 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
     /// alone is not a diagnosis) and hand back `code` for `main` to return.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = rustos_rt::stderr(b"desktop: ");
-        let _ = rustos_rt::stderr(reason.as_bytes());
-        let _ = rustos_rt::stderr(b"\n");
+        let _ = tairix_rt::stderr(b"desktop: ");
+        let _ = tairix_rt::stderr(reason.as_bytes());
+        let _ = tairix_rt::stderr(b"\n");
         code
     }
 
@@ -189,7 +189,7 @@ mod program {
 
     impl DisplayTransport for RtDisplayTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            rustos_rt::ipc_call(DISPLAY_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(DISPLAY_ENDPOINT, request, reply).map_err(errno_from)
         }
     }
 
@@ -200,7 +200,7 @@ mod program {
 
     impl SeatEventReader for PointerReader {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-            let ret = rustos_rt::pointer_read(SEAT_PRIMARY, buf);
+            let ret = tairix_rt::pointer_read(SEAT_PRIMARY, buf);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -217,7 +217,7 @@ mod program {
 
     impl SeatEventReader for KeyboardReader {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-            let ret = rustos_rt::keyboard_read(SEAT_PRIMARY, buf);
+            let ret = tairix_rt::keyboard_read(SEAT_PRIMARY, buf);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -265,7 +265,7 @@ mod program {
     impl CallerIdentity for RtWindowIdentity {
         fn caller(&mut self, ticket: u64) -> Result<ProcId, Errno> {
             let mut buf = [0u8; ORIGIN_WIRE_LEN];
-            let len = rustos_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
+            let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
                 .map_err(errno_from)?;
             let origin = Origin::from_bytes(&buf[..len])?;
             self.peers.insert(origin.pid(), origin.proc_id());
@@ -285,7 +285,7 @@ mod program {
             endpoint: u64,
             event: &[u8; WindowEvent::WIRE_LEN],
         ) -> Result<(), Errno> {
-            let ret = rustos_rt::ipc_send(endpoint, event);
+            let ret = tairix_rt::ipc_send(endpoint, event);
             if ret == 0 {
                 Ok(())
             } else {
@@ -352,11 +352,11 @@ mod program {
             return fail(EXIT_BAD_MODE, "queried mode is zero-sized");
         }
         let mut region_id: u64 = 0;
-        let base = rustos_rt::shm_create(total, &mut region_id);
+        let base = tairix_rt::shm_create(total, &mut region_id);
         if base < 0 {
             return fail(EXIT_NO_FRAMES, "shared frame region refused");
         }
-        let grant = rustos_rt::shm_grant(region_id, DISPLAY_ENDPOINT);
+        let grant = tairix_rt::shm_grant(region_id, DISPLAY_ENDPOINT);
         if grant < 1 {
             return fail(EXIT_NO_FRAMES, "frame region grant refused");
         }
@@ -436,7 +436,7 @@ mod program {
         // to its creator, so an unentitled sender only ever reaches typed
         // refusals.
         let empty = CapabilitySet::empty();
-        if rustos_rt::call_create(
+        if tairix_rt::call_create(
             WINDOW_ENDPOINT,
             &empty,
             &empty,
@@ -454,13 +454,13 @@ mod program {
         // its windows are torn down promptly). Every member is
         // owner-checked at add; the session never polls and never sleeps
         // through its own revocation.
-        let set = rustos_rt::waitset_create();
+        let set = tairix_rt::waitset_create();
         if set < 0 {
             return fail(EXIT_WAIT_FAILED, "wait-set refused");
         }
         #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
         let set = set as u64;
-        if rustos_rt::waitset_ctl(
+        if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::SeatInput,
@@ -470,7 +470,7 @@ mod program {
         {
             return fail(EXIT_WAIT_FAILED, "seat wait refused");
         }
-        if rustos_rt::waitset_ctl(
+        if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Endpoint,
@@ -480,11 +480,11 @@ mod program {
         {
             return fail(EXIT_WAIT_FAILED, "window endpoint wait refused");
         }
-        if rustos_rt::waitset_ctl(
+        if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Child,
-            rustos_abi::WAITSET_CHILD_ANY,
+            tairix_abi::WAITSET_CHILD_ANY,
             CHILD_TOKEN,
         ) != 0
         {
@@ -498,7 +498,7 @@ mod program {
         // into every create reply, so apps can authenticate the sender of
         // each later event; a session that cannot learn its own identity
         // must not serve windows apps cannot authenticate (fail closed).
-        let Ok(self_origin) = rustos_rt::self_origin() else {
+        let Ok(self_origin) = tairix_rt::self_origin() else {
             return fail(EXIT_NO_WINDOW_ENDPOINT, "session identity unavailable");
         };
         let mut server = WindowServer::new(RtShmMapper, self_origin.proc_id());
@@ -512,13 +512,13 @@ mod program {
         // authority; the app never lists anything itself.
         let mut picker = SessionPicker::new(|| {
             VfsDirectorySource::new(|path: &str| {
-                rustos_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
+                tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
             })
         });
 
         let mut token = 0u64;
         loop {
-            if rustos_rt::waitset_wait(set, u64::MAX, &mut token) != 0 {
+            if tairix_rt::waitset_wait(set, u64::MAX, &mut token) != 0 {
                 // A dead wait-set would degrade the loop into a busy poll;
                 // exit fail-loud instead and let the supervisor decide.
                 return fail(EXIT_WAIT_FAILED, "seat wait failed");
@@ -538,7 +538,7 @@ mod program {
                 // the wake and re-parks.
                 let mut request = [0u8; WINDOW_MAX_REQUEST];
                 let mut ticket = 0u64;
-                if let Ok(len) = rustos_rt::call_recv(WINDOW_ENDPOINT, &mut request, &mut ticket) {
+                if let Ok(len) = tairix_rt::call_recv(WINDOW_ENDPOINT, &mut request, &mut ticket) {
                     let mut reply = [0u8; WINDOW_REPLY_MAX];
                     let n = {
                         let mut bridge = ShellWindowHost {
@@ -555,7 +555,7 @@ mod program {
                             &mut reply,
                         )
                     };
-                    let _ = rustos_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
+                    let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
                 }
             } else if token == CHILD_TOKEN {
                 // Reap exited children and tear their windows down: the
@@ -568,7 +568,7 @@ mod program {
                     // Placeholder the kernel overwrites on a successful
                     // reap; the loop only needs the pid.
                     let mut status = WaitStatus::Exited(0);
-                    let pid = rustos_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::NONBLOCK);
+                    let pid = tairix_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::NONBLOCK);
                     if pid <= 0 {
                         break;
                     }
@@ -649,7 +649,7 @@ mod program {
     /// inside the shell.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn route_outcome<S: DirectorySource, F: FnMut() -> S>(
-        outcome: rustos_desktop_session::ShellOutcome,
+        outcome: tairix_desktop_session::ShellOutcome,
         key: Option<KeyInput>,
         focused: &mut Option<u64>,
         shell: &mut DesktopShell,
@@ -660,7 +660,7 @@ mod program {
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
     ) {
-        use rustos_desktop_session::{SessionEvent, ShellOutcome};
+        use tairix_desktop_session::{SessionEvent, ShellOutcome};
         match outcome {
             ShellOutcome::WindowManager(response) => match response {
                 InputResponse::Activated { window, local } => {
@@ -717,7 +717,7 @@ mod program {
                                 x,
                                 y,
                                 action: PointerAction::Pressed(
-                                    rustos_abi::input::PointerButtonCode::Primary,
+                                    tairix_abi::input::PointerButtonCode::Primary,
                                 ),
                             },
                         );
@@ -791,8 +791,8 @@ mod program {
                 // and ceiling; a refusal (missing bundle, stripped spawn
                 // capability) is reported and the desktop carries on — a
                 // denied optional action never ends the session.
-                if rustos_rt::spawn(FILES_RUN_PATH) < 0 {
-                    let _ = rustos_rt::stderr(b"desktop: files launch refused\n");
+                if tairix_rt::spawn(FILES_RUN_PATH) < 0 {
+                    let _ = tairix_rt::stderr(b"desktop: files launch refused\n");
                 }
             }
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
@@ -802,8 +802,8 @@ mod program {
                 // The terminal, exactly as the file browser above: spawned
                 // from the on-disk store bundle, refusal reported, desktop
                 // carries on.
-                if rustos_rt::spawn(TERMINAL_RUN_PATH) < 0 {
-                    let _ = rustos_rt::stderr(b"desktop: terminal launch refused\n");
+                if tairix_rt::spawn(TERMINAL_RUN_PATH) < 0 {
+                    let _ = tairix_rt::stderr(b"desktop: terminal launch refused\n");
                 }
             }
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
@@ -813,8 +813,8 @@ mod program {
                 // The file viewer, exactly as the apps above: spawned from
                 // the on-disk store bundle, refusal reported, desktop
                 // carries on.
-                if rustos_rt::spawn(VIEWER_RUN_PATH) < 0 {
-                    let _ = rustos_rt::stderr(b"desktop: viewer launch refused\n");
+                if tairix_rt::spawn(VIEWER_RUN_PATH) < 0 {
+                    let _ = tairix_rt::stderr(b"desktop: viewer launch refused\n");
                 }
             }
             _ => {}
@@ -844,7 +844,7 @@ mod program {
             PickConclusion::Chosen(path) => match delegate(&path, window_id, server, identity) {
                 Some(handle) => WindowEvent::FilePicked { window_id, handle },
                 None => {
-                    let _ = rustos_rt::stderr(b"desktop: picker delegation refused\n");
+                    let _ = tairix_rt::stderr(b"desktop: picker delegation refused\n");
                     WindowEvent::PickCancelled { window_id }
                 }
             },
@@ -865,10 +865,10 @@ mod program {
     ) -> Option<u64> {
         let owner = server.owner_of(window_id)?;
         let pid = identity.pid_of(owner)?;
-        let fd = rustos_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+        let fd = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
         let fd = u32::try_from(fd).ok()?;
-        let handle = rustos_rt::fd_grant(fd, pid);
-        let _ = rustos_rt::fs_close(fd);
+        let handle = tairix_rt::fd_grant(fd, pid);
+        let _ = tairix_rt::fs_close(fd);
         u64::try_from(handle).ok().filter(|&handle| handle != 0)
     }
 
@@ -908,7 +908,7 @@ mod program {
     /// bundle's documents) the usage banner stands in — the tool's own
     /// text, not fabricated help content — so `-h` never fails.
     fn short_help() -> i32 {
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let bytes = own_short_help(&BundleHelp::new("desktop"), locale, "desktop")
             .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
         match Stdout.write_all(&bytes) {
@@ -917,7 +917,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     ///
@@ -929,7 +929,7 @@ mod program {
         // The command surface first: a malformed (non-UTF-8) argument
         // vector is a usage error, reported rather than guessed at, and
         // the reserved short-help switches never touch the seat.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -945,23 +945,23 @@ mod program {
         // Acquire the boot seat's exclusive, revocable lease. The kernel
         // binds this task as the owner; a seat already held refuses with a
         // typed error rather than displacing its owner.
-        if rustos_rt::display_acquire(SEAT_PRIMARY) < 1 {
+        if tairix_rt::display_acquire(SEAT_PRIMARY) < 1 {
             return fail(EXIT_NO_SEAT, "seat acquire refused");
         }
         let code = session();
         // Owner-checked release on every exit path: a lease already lost
         // refuses (typed, ignored) — heal, never widen.
-        let _ = rustos_rt::display_release(SEAT_PRIMARY);
+        let _ = tairix_rt::display_release(SEAT_PRIMARY);
         code
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

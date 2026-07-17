@@ -11,12 +11,12 @@ pub const DEFAULT_DELAY_TENTHS: u32 = 30;
 
 /// The smallest accepted refresh delay, in tenths of a second.
 ///
-/// GNU `top` accepts a zero delay and spins as fast as it can; RustOS never
+/// GNU `top` accepts a zero delay and spins as fast as it can; TAIRiX never
 /// busy-loops, so a requested delay below one tenth of a second is clamped
 /// to it — a deliberate, documented divergence in the tool's Help. The
 /// grammar (and this clamp) is the shared full-screen-viewer delay grammar
 /// in `lib/curses`, so `top` and `sysmon` can never drift apart.
-pub use rustos_curses::MIN_DELAY_TENTHS;
+pub use tairix_curses::MIN_DELAY_TENTHS;
 
 /// One thing the `top` tool can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,7 +83,7 @@ pub fn parse(args: &[&str]) -> Result<Command, TopError> {
 
 /// Parse a `secs[.tenths…]` delay into whole tenths of a second through the
 /// shared full-screen-viewer grammar
-/// ([`rustos_curses::parse_delay_tenths`]), mapping its fail-closed `None`
+/// ([`tairix_curses::parse_delay_tenths`]), mapping its fail-closed `None`
 /// onto this tool's usage error.
 ///
 /// # Errors
@@ -91,7 +91,7 @@ pub fn parse(args: &[&str]) -> Result<Command, TopError> {
 /// [`TopError::Usage`] when the value is empty, carries a non-digit, has
 /// more than one decimal point, or overflows the tenths counter.
 fn parse_delay_tenths(value: &str) -> Result<u32, TopError> {
-    rustos_curses::parse_delay_tenths(value).ok_or(TopError::Usage)
+    tairix_curses::parse_delay_tenths(value).ok_or(TopError::Usage)
 }
 
 #[cfg(test)]
@@ -175,7 +175,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/top.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

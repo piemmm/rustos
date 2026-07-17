@@ -1,7 +1,7 @@
 //! Deterministic fuzz harness for the `lib/resref` parser (its untrusted
 //! resource-reference decoder).
 //!
-//! [`rustos_resref::parse`] turns a string supplied by a user, a script, or a
+//! [`tairix_resref::parse`] turns a string supplied by a user, a script, or a
 //! stored record — untrusted input — into a typed `ResourceRef`. The harness's
 //! invariants are:
 //!
@@ -11,13 +11,13 @@
 //!   equal value (the parser and its canonical spelling round-trip);
 //! * a parsed reference never exceeds the fixed security bounds.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG draws
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
 //! pseudo-random reference strings and mutates real templates. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged
-//! seed; `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the
+//! seed; `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the
 //! PRNG loop to a wall-clock budget.
 
-use rustos_resref::{
+use tairix_resref::{
     parse, MAX_FACET_LEN, MAX_GUARD_LEN, MAX_NAMESPACE_LEN, MAX_PARAMS, MAX_PARAM_KEY_LEN,
     MAX_PARAM_VALUE_LEN, MAX_SEGMENT_LEN, MAX_SELECTOR_SEGMENTS,
 };
@@ -102,13 +102,13 @@ fn exercise(input: &str) {
 
 #[test]
 fn parse_never_panics_and_round_trips_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh per
-    // run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh per
+    // run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "parse_never_panics_and_round_trips_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -157,7 +157,7 @@ fn parse_never_panics_and_round_trips_for_any_input() {
         exercise(&String::from_utf8_lossy(&noise));
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

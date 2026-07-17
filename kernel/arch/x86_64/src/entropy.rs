@@ -1,6 +1,6 @@
 //! x86_64 platform entropy source.
 //!
-//! Implements the Arch HAL [`PlatformEntropy`](rustos_arch_api::PlatformEntropy)
+//! Implements the Arch HAL [`PlatformEntropy`](tairix_arch_api::PlatformEntropy)
 //! surface for x86_64 over the on-die digital random-number generator: the
 //! `RDSEED` instruction (a true non-deterministic entropy source, the
 //! conditioner's seed input) is preferred, falling back to `RDRAND` (the
@@ -20,8 +20,8 @@
 //! `cfg`-gated out — the real instruction path is exercised by the QEMU
 //! verticals.
 
-use rustos_arch_api::{EntropyProfile, EntropySupport, PlatformEntropy};
-use rustos_rng::{EntropyError, HardwareRng};
+use tairix_arch_api::{EntropyProfile, EntropySupport, PlatformEntropy};
+use tairix_rng::{EntropyError, HardwareRng};
 
 /// x86_64 implementation of the Arch HAL platform-entropy surface.
 ///
@@ -185,7 +185,7 @@ fn fill_from_hardware(_out: &mut [u8]) -> Result<(), EntropyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::entropy::conformance;
+    use tairix_arch_api::entropy::conformance;
 
     #[test]
     fn passes_entropy_conformance() {

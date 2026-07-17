@@ -6,8 +6,8 @@
 //! produces a [`BarLayout`] on demand from the current state and answers
 //! pointer hits for input routing.
 
-use rustos_geometry::{Point, Scale};
-use rustos_theme::Theme;
+use tairix_geometry::{Point, Scale};
+use tairix_theme::Theme;
 
 use crate::clock::Clock;
 use crate::edge::Edge;
@@ -20,7 +20,7 @@ use crate::tasks::TaskList;
 ///
 /// The screen dimensions are *physical* pixels (the real framebuffer). The
 /// extents and `thickness` are *logical* pixels authored at the reference
-/// density (`rustos_geometry::REFERENCE_DPI`); the desktop's [`Scale`]
+/// density (`tairix_geometry::REFERENCE_DPI`); the desktop's [`Scale`]
 /// converts them to physical pixels at layout time, so the bar stays a
 /// comfortable physical size across panel densities.
 ///

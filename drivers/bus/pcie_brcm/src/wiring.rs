@@ -1,13 +1,13 @@
 //! Driver-host wiring: discovered BCM2711 PCIe controller → trained link.
 //!
 //! The aarch64 `FdtDiscovery` emits the `brcm,bcm2711-pcie` node into
-//! `rustos_abi::hwtree` as a `Bus` node whose controller/ECAM-access
+//! `tairix_abi::hwtree` as a `Bus` node whose controller/ECAM-access
 //! `reg` window and inbound-DMA aperture (`dma-ranges`) are
 //! device-tree-discovered, never compiled-in (
 //! `plans/PI.md` P10). A `devmgr`/host composition maps that window and
 //! calls [`open_discovered`] to reset the root complex and train its
 //! link; once it returns, the same register window is handed to
-//! `rustos_pci::mechanism_brcm` to enumerate the VL805 xHCI
+//! `tairix_pci::mechanism_brcm` to enumerate the VL805 xHCI
 //! controller behind the bridge.
 //!
 //! This is the only seam that maps memory: [`open_discovered`] checks
@@ -21,16 +21,16 @@
 //! root-port / link-up check; the live link training is the on-metal
 //! acceptance item.
 
-use rustos_abi::driver::mmio::MmioMapError;
-use rustos_abi::{
+use tairix_abi::driver::mmio::MmioMapError;
+use tairix_abi::{
     CapabilityId, DriverError, DriverHost, HwNode, HwResource, HwResourceKind, MmioMapper,
     MsiMessage, PciBus, RegisterWindow,
 };
-use rustos_pci::{
+use tairix_pci::{
     assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, mechanism_brcm,
     USB_CONTROLLER_CLASS,
 };
-use rustos_usb::XHCI_BAR_INDEX;
+use tairix_usb::XHCI_BAR_INDEX;
 
 use crate::{regs, BrcmPcieRc, Delay, PcieWindows};
 
@@ -104,7 +104,7 @@ pub fn pcie_bringup_from_node(node: &HwNode) -> Result<PcieBringup, BringupError
 /// [`HwNode`] itself — the kernel mints it one device-resource grant per
 /// resource the node requested and it learns them through the
 /// `resource_grants` syscall, exposed by its
-/// `rustos_drvrt::RtDriverHost::resources`. The node-taking form delegates
+/// `tairix_drvrt::RtDriverHost::resources`. The node-taking form delegates
 /// here, so the two callers parse the same three resources through one
 /// definition.
 ///
@@ -163,7 +163,7 @@ where
 /// compiled-in board constant — then maps the
 /// window and trains the link over it ([`open_discovered`]). On success
 /// the returned [`BrcmPcieRc`] owns the mapped window with the link up,
-/// ready for `rustos_pci::mechanism_brcm` to enumerate behind the
+/// ready for `tairix_pci::mechanism_brcm` to enumerate behind the
 /// bridge.
 ///
 /// # Errors
@@ -201,7 +201,7 @@ pub fn bring_up_from_node(
 /// On success the returned [`BrcmPcieRc`] owns the mapped window with the
 /// link up; the caller recovers the window with
 /// [`BrcmPcieRc::into_regs`] and builds the windowed configuration
-/// accessor (`rustos_pci::mechanism_brcm`) over it.
+/// accessor (`tairix_pci::mechanism_brcm`) over it.
 ///
 /// # Errors
 ///
@@ -247,7 +247,7 @@ pub fn open_discovered(
 /// manager then autoloads the next driver against. It talks to the kernel
 /// solely through the [`DriverHost`] contract; the
 /// concrete driver bin (`drivers/bus/pcie_brcm`) supplies an
-/// `rustos_drvrt::RtDriverHost` and an `rustos_rt::ClockDelay`.
+/// `tairix_drvrt::RtDriverHost` and an `tairix_rt::ClockDelay`.
 ///
 /// On success the returned [`HwNode`] is the node already published through
 /// [`DriverHost::emit_node`] — its kernel-assigned id/parent are still the

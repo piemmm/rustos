@@ -1,15 +1,15 @@
 # Building a curses TUI against `lib/curses`
 
-This page is a porting guide: how to write a RustOS terminal application on
+This page is a porting guide: how to write a TAIRiX terminal application on
 top of the OS curses library (`lib/curses`), using the `top` process viewer
 (`userland/apps/top`) as the worked example. It assumes the library reference
-in [`rustos-curses`](../lib/curses.md).
+in [`tairix-curses`](../lib/curses.md).
 
 ## The shape of a curses app
 
 A curses program never writes escape sequences by hand. It keeps an in-memory
 model, draws that model into one or more `Window`s, and asks a `Screen` to
-make the terminal match. RustOS splits a well-behaved TUI into three parts,
+make the terminal match. TAIRiX splits a well-behaved TUI into three parts,
 all of which `top` follows:
 
 1. **An I/O-free model.** All view state — what is selected, where the list is
@@ -39,8 +39,8 @@ Construct the driver with the terminal type the session advertises and the
 screen size:
 
 ```rust,ignore
-use rustos_curses::{InputMode, Screen, Size};
-use rustos_termcap::TermType;
+use tairix_curses::{InputMode, Screen, Size};
+use tairix_termcap::TermType;
 
 let mut screen = Screen::new(tty, TermType::Xterm256Color, Size::new(rows, cols));
 screen.set_cursor_visible(false);
@@ -51,7 +51,7 @@ screen.set_cursor_visible(false);
 Draw into a `Window`, then refresh:
 
 ```rust,ignore
-use rustos_curses::{Pos, Window};
+use tairix_curses::{Pos, Window};
 
 let mut win = Window::new(Pos::ORIGIN, screen.size());
 win.add_str("hello");
@@ -67,14 +67,14 @@ A few patterns `top` uses:
 
 - **Colour pairs.** `Screen::colored_attributes(fg, bg)` is the one-call form:
   it checks the terminal's colour depth, allocates (or reuses) the pair through
-  `Screen::alloc_pair`, and returns ready-to-apply `rustos_vt::Attributes` —
+  `Screen::alloc_pair`, and returns ready-to-apply `tairix_vt::Attributes` —
   or `None` on a terminal that cannot show either colour, so the caller falls
   back to a monochrome rendition instead of mis-colouring. Per-redraw requests
   never fill the table (an identical pair is reused). `top` asks for a
   white-on-blue header pair and falls back to reverse video on monochrome
   terminals; `edit` colours its menu bar and text area the same way — the
   renderer's colour downgrade does the rest.
-- **Wide text.** Measure with `rustos_curses::str_width` and clip with
+- **Wide text.** Measure with `tairix_curses::str_width` and clip with
   `truncate_to_width` so a double-width (CJK / fullwidth / emoji) glyph is
   never split across the right edge. `Window::add_char` stores a wide glyph as
   a lead cell plus a continuation cell automatically.

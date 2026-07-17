@@ -1,7 +1,7 @@
 # UNIVERSAL.md — Universal app distribution: multi-slice bundles + a Wasm app tier
 
 This is a staged plan for letting a vendor publish **one** artifact that runs
-on every RustOS architecture, instead of per-arch downloads. It is **binding
+on every TAIRiX architecture, instead of per-arch downloads. It is **binding
 under `AGENTS.md`**; read `AGENTS.md` and `PLAN.md` first, and `plans/APPS.md`
 for the application-bundle model this plan extends. Every rule in both applies
 here without exception. This plan exists because the charter requires a new
@@ -50,7 +50,7 @@ already in the tree, and this plan fixes the answers:
   the compiler out of roll-your-own (§2.12 does not extend to `rustc`/LLVM,
   §19.9). Source distribution makes the on-device TCB enormous, install times
   hostile, does nothing for closed-source vendors, and buys no security:
-  `unsafe` exists, and RustOS already refuses to trust language-level claims —
+  `unsafe` exists, and TAIRiX already refuses to trust language-level claims —
   third-party native code is hostile by assumption (§16.4, §19); the real
   boundary is hardware isolation + capabilities (§4, §5), not the compiler
   that produced the binary.
@@ -60,7 +60,7 @@ already in the tree, and this plan fixes the answers:
   Wasm slice adds a genuine *extra* in-process layer (validated control flow,
   bounded linear memory) on top of the same capability confinement — defence
   in depth, never a replacement for it.
-- **Evolve in place (§2.13).** RustOS is pre-release: `AppInfo` and the fixed
+- **Evolve in place (§2.13).** TAIRiX is pre-release: `AppInfo` and the fixed
   §16.5 bundle layout gain the architecture dimension by changing the single
   living definition and every consumer in the same change — no `v2` beside a
   `v1`, no compatibility shim.
@@ -131,7 +131,7 @@ scoping.
 
 ## 3. Explicitly out of scope (never build)
 
-- A bespoke RustOS bytecode or first-party VM/verifier.
+- A bespoke TAIRiX bytecode or first-party VM/verifier.
 - A multi-arch fat `rxe` *file* format (the bundle is the fat unit).
 - A runtime in-process JIT as the default execution mode for the Wasm tier.
 - An in-OS Rust compiler / source distribution as the app channel.

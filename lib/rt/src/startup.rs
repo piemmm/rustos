@@ -1,7 +1,7 @@
 //! Read access to the kernel-supplied startup vector (arguments).
 //!
 //! The kernel hands every spawned process a position-independent startup
-//! vector ([`rustos_abi::process::ProcessStart`]) carrying its arguments,
+//! vector ([`tairix_abi::process::ProcessStart`]) carrying its arguments,
 //! environment, and stack-protector canary. The runtime's `_start` driver
 //! validates the block once and publishes the parsed view here, before the
 //! program's `main` runs; these accessors are how a program reads the
@@ -20,7 +20,7 @@ use core::cell::UnsafeCell;
 
 use alloc::vec::Vec;
 
-use rustos_abi::process::ProcessStart;
+use tairix_abi::process::ProcessStart;
 
 /// Storage for the validated startup-vector view.
 ///
@@ -161,9 +161,9 @@ mod tests {
 
         let args: [&[u8]; 2] = [b"drvstub", b"42"];
         let envs: [&[u8]; 3] = [b"PATH=/Users/root/tools", b"LANG=fr-FR", b"noequals"];
-        let len = rustos_abi::process_start_encoded_len(&args, &envs).expect("sized");
+        let len = tairix_abi::process_start_encoded_len(&args, &envs).expect("sized");
         let buf: &'static mut [u8] = alloc_block(len);
-        rustos_abi::process_start_write_into(buf, &args, &envs, 7).expect("encoded");
+        tairix_abi::process_start_write_into(buf, &args, &envs, 7).expect("encoded");
         let view = ProcessStart::parse(buf).expect("valid block");
         install(view);
 

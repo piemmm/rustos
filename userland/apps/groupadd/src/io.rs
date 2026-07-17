@@ -7,7 +7,7 @@
 //! userland crates (`useradd`'s `UserDb`, `init`'s `Spawner`/`Reaper`,
 //! `login`'s `Authenticator`, `setcap`'s `FileSystem`).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// The fully-parsed group record handed to [`GroupDb::create`].
 ///

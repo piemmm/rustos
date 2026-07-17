@@ -1,14 +1,14 @@
 //! The output seam through which `lspci` touches the outside world.
 //!
 //! The hardware tree itself arrives through the shared
-//! [`Transport`](rustos_procinfo::Transport) seam (the `sysinfo-v1`
+//! [`Transport`](tairix_procinfo::Transport) seam (the `sysinfo-v1`
 //! `HARDWARE_TREE` query); only the output streams need a seam of their
 //! own. Keeping it behind an object-safe trait lets the listing logic in
 //! [`crate::client`] run against in-memory fixtures with no kernel,
 //! mirroring the seam discipline of the other userland tools (`df`'s
 //! `Output`, `ps`'s `Transport`).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Writes bytes to the tool's output streams.
 ///

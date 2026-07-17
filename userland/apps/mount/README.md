@@ -1,11 +1,11 @@
-# `rustos-mount` — list and attach filesystems
+# `tairix-mount` — list and attach filesystems
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `mount` both reports
 and changes the mount table, and the two halves take different paths.
 **Listing** the mounted filesystems is a read of live system state, so —
 like `ps` — it goes through the typed, versioned, capability-checked System
 Information API (`sysinfo-v1`) served by `/System/Services/sysinfod.app/Run`
-(`AGENTS.md` §16.6): RustOS has no `/proc` and no mount-table file, so
+(`AGENTS.md` §16.6): TAIRiX has no `/proc` and no mount-table file, so
 `mount` issues the ungated `MOUNT_LIST` query and has no privileged path
 that bypasses the capability check. **Attaching** a filesystem is
 privileged — it needs `CAP_FS_MOUNT` (`AGENTS.md` §5.2) — and the kernel,
@@ -13,8 +13,8 @@ not this tool, makes that decision (`AGENTS.md` §5.4).
 
 The crate is `no_std` (with `alloc`, used only by the test fixtures), has no
 `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md`
-§2.9). Its only dependencies are the audited `rustos-abi` crate and the
-shared `rustos-procinfo` client helpers, so it never links a kernel or
+§2.9). Its only dependencies are the audited `tairix-abi` crate and the
+shared `tairix-procinfo` client helpers, so it never links a kernel or
 driver crate (`AGENTS.md` §17.4).
 
 ## Usage
@@ -69,7 +69,7 @@ is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-mount` drives the parser and the engine against an
+`cargo test -p tairix-mount` drives the parser and the engine against an
 in-memory `sysinfod` fixture, a recording output, and an in-memory mounter:
 the command grammar, the mount-table listing and its query routing, the
 empty table, the service/output-failure paths, the attach request reaching

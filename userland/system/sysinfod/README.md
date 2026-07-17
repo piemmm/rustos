@@ -1,10 +1,10 @@
-# `rustos-sysinfod` — System Information service
+# `tairix-sysinfod` — System Information service
 
 Stage 6 deliverable (`AGENTS.md` §16.6). The user-space service that
-answers the `sysinfo-v1` API defined in `rustos_abi::sysinfo`. Installed
+answers the `sysinfo-v1` API defined in `tairix_abi::sysinfo`. Installed
 to `/System/Services/sysinfod.app/Run`.
 
-RustOS has **no `/proc` and no `/sys`**. Every piece of live system
+TAIRiX has **no `/proc` and no `/sys`**. Every piece of live system
 information those trees would have exposed is served here, through typed,
 versioned, capability-checked queries — never through a virtual
 filesystem (`AGENTS.md` §16.1). `sysinfod` is the only server of the API
@@ -83,14 +83,14 @@ Reserved `EventId` range `8000..9000`:
 
 ## Layering & safety
 
-`no_std`, depends only on `rustos-abi` and `rustos-log` (both `lib/*`),
+`no_std`, depends only on `tairix-abi` and `tairix-log` (both `lib/*`),
 so a userland service never links a kernel or driver crate (`AGENTS.md`
 §17.4). No `unsafe`, no `unwrap`/`expect`/`panic!` in production paths
 (`AGENTS.md` §2.9).
 
 ## Test surface
 
-`cargo test -p rustos-sysinfod` (12 unit tests):
+`cargo test -p tairix-sysinfod` (12 unit tests):
 
 - self-scoped list needs no capability and is not audited;
 - paging by `offset`/`limit`, and an empty page past the end;

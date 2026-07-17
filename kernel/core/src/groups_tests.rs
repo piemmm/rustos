@@ -6,11 +6,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
-use rustos_abi::{CapabilityId, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{GroupId, UserId};
-use rustos_users::{
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{GroupId, UserId};
+use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Uid, UserRecord, UsersDb,
     MIN_ITERATIONS,
 };
@@ -177,10 +177,10 @@ fn the_identity_table_merges_the_compiled_half_with_the_on_disk_records() {
     let system = table.user(UserId(0)).expect("system present");
     assert!(system.capability_grants.is_empty());
     let devmgr = table
-        .user(UserId(rustos_users::DEVMGR_UID.0))
+        .user(UserId(tairix_users::DEVMGR_UID.0))
         .expect("devmgr present");
     assert!(devmgr.capability_grants.contains(CapabilityId::DRV_LOAD));
-    assert_eq!(devmgr.primary_gid, GroupId(rustos_users::SERVICES_GID.0));
+    assert_eq!(devmgr.primary_gid, GroupId(tairix_users::SERVICES_GID.0));
     // The verifier emits exactly one IdentityTableLoaded record.
     assert_eq!(sink.snapshot().len(), 1);
 }
@@ -228,7 +228,7 @@ fn an_empty_database_pair_builds_exactly_the_compiled_identity() {
         assert_eq!(table.user_count(), 6);
         assert_eq!(table.group_count(), 2);
         assert!(table.user(UserId(0)).is_ok());
-        assert!(table.user(UserId(rustos_users::LOGIN_UID.0)).is_ok());
+        assert!(table.user(UserId(tairix_users::LOGIN_UID.0)).is_ok());
         assert!(table.user(UserId(1000)).is_err());
     }
 }
@@ -303,20 +303,20 @@ fn the_storage_group_is_accepted_only_under_its_pinned_pairing() {
     // registry legitimately carries…
     let sink = TestSink::new();
     let groups = GroupsDb::new(alloc::vec![GroupRecord::new(
-        rustos_users::STORAGE_GROUP,
-        rustos_users::STORAGE_GID
+        tairix_users::STORAGE_GROUP,
+        tairix_users::STORAGE_GID
     )
     .expect("valid")])
     .expect("ok");
     let users = UsersDb::new(Vec::new()).expect("empty users");
     let table = build_identity_table(&users, &groups, &sink).expect("storage pairing accepted");
-    assert!(table.group(GroupId(rustos_users::STORAGE_GID.0)).is_ok());
+    assert!(table.group(GroupId(tairix_users::STORAGE_GID.0)).is_ok());
 
     // …but neither half of the pairing may be repurposed: the name under
     // another gid, or the gid under another name, both reject.
     for (name, gid) in [
-        (rustos_users::STORAGE_GROUP, Gid(555)),
-        ("media", rustos_users::STORAGE_GID),
+        (tairix_users::STORAGE_GROUP, Gid(555)),
+        ("media", tairix_users::STORAGE_GID),
     ] {
         let groups =
             GroupsDb::new(alloc::vec![GroupRecord::new(name, gid).expect("valid")]).expect("ok");

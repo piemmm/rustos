@@ -4,7 +4,7 @@
 //! The consuming verticals (`tests/integration/stack_grow_qemu_aarch64` /
 //! `…_riscv64`; the x86_64 twin is staged, `plans/SPAWN.md` `SP11e`)
 //! register this one `rxe` under role-selecting
-//! argument vectors (`rustos_rt::arg(1)`) whose numeric parameters they
+//! argument vectors (`tairix_rt::arg(1)`) whose numeric parameters they
 //! derive from the one shared stack policy (`spawn_layout`), so no policy
 //! constant is ever duplicated into this program:
 //!
@@ -30,7 +30,7 @@
 //!   (exit 139). Surviving is a distinct non-zero exit.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland runtime
-//! `rustos-rt` (`_start`, stack canary, panic handler, syscall wrappers),
+//! `tairix-rt` (`_start`, stack canary, panic handler, syscall wrappers),
 //! never the C ABI. Built position-independent and converted to an `rxe`
 //! blob by the consuming test's build script. On the host it is an inert
 //! stub so `cargo build --workspace`, clippy, and fmt still cover the crate.
@@ -42,7 +42,7 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::{LimitKind, ResourceLimit};
+    use tairix_abi::{LimitKind, ResourceLimit};
 
     /// Page size shared by every Tier-1 MMU target this fixture runs on.
     const PAGE: u64 = 4096;
@@ -113,7 +113,7 @@ mod program {
     /// The `grow` role body: recurse past the committed top to at least
     /// `arg(2)` bytes of live stack and verify every frame survived.
     fn grow() -> i32 {
-        let Some(target) = rustos_rt::arg(2).and_then(parse_u64) else {
+        let Some(target) = tairix_rt::arg(2).and_then(parse_u64) else {
             return 20;
         };
         let frames = target / FRAME_BYTES as u64;
@@ -131,16 +131,16 @@ mod program {
     /// the bound must kill the task (exit 139); every return here is a
     /// distinct failure the parent will surface.
     fn limit() -> i32 {
-        let Some(limit) = rustos_rt::arg(2).and_then(parse_u64) else {
+        let Some(limit) = tairix_rt::arg(2).and_then(parse_u64) else {
             return 30;
         };
-        let Some(target) = rustos_rt::arg(3).and_then(parse_u64) else {
+        let Some(target) = tairix_rt::arg(3).and_then(parse_u64) else {
             return 31;
         };
         let Ok(bound) = ResourceLimit::new(limit, limit) else {
             return 32;
         };
-        if rustos_rt::rlimit_set(LimitKind::StackBytes, bound) != 0 {
+        if tairix_rt::rlimit_set(LimitKind::StackBytes, bound) != 0 {
             return 33;
         }
         // Deliberately past the bound: the kernel must refuse the growth
@@ -155,7 +155,7 @@ mod program {
     /// fault-kill the task (exit 139); every return here is a distinct
     /// failure the parent will surface.
     fn guard() -> i32 {
-        let Some(reserve) = rustos_rt::arg(2).and_then(parse_u64) else {
+        let Some(reserve) = tairix_rt::arg(2).and_then(parse_u64) else {
             return 40;
         };
         // The startup path (`_start` → the runtime driver → this frame)
@@ -181,14 +181,14 @@ mod program {
     /// with `expected`. Returns `0` on success or `fail_code` on any
     /// mismatch or syscall failure.
     fn run_child(path: &[u8], expected: i32, fail_code: i32) -> i32 {
-        let pid = rustos_rt::spawn(path);
+        let pid = tairix_rt::spawn(path);
         if pid <= 0 {
             return fail_code;
         }
         #[allow(clippy::cast_possible_truncation)]
         let pid = pid as i32;
         let mut code = 0i32;
-        if rustos_rt::wait_exit(pid, &mut code) < 0 {
+        if tairix_rt::wait_exit(pid, &mut code) < 0 {
             return fail_code + 1;
         }
         if code != expected {
@@ -219,7 +219,7 @@ mod program {
     /// pinned (`arg(1)`). An absent or unknown role is a wiring defect and a
     /// distinct failure code (fail closed, never a default role).
     fn main() -> i32 {
-        match rustos_rt::arg(1) {
+        match tairix_rt::arg(1) {
             Some(b"parent") => parent(),
             Some(b"grow") => grow(),
             Some(b"limit") => limit(),
@@ -228,13 +228,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the
 // crate building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

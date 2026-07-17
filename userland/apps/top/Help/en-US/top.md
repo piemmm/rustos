@@ -35,7 +35,7 @@ line needs `CAP_SYSINFO_KERNEL` — a caller without it sees the refusal
 spelled out and the session continues.
 
 The `%Cpu(s)` line shows the share of the last interval every CPU
-together spent busy (running tasks) and idle. RustOS accounts busy and
+together spent busy (running tasks) and idle. TAIRiX accounts busy and
 idle time only, so where GNU `top` breaks the busy share into
 user/system/nice/iowait figures this line deliberately shows the two
 real figures instead.
@@ -64,7 +64,7 @@ The rows are sorted by `%CPU`, biggest consumer first, and carry:
   in seconds with an optional fraction (only the first fractional
   digit, tenths, is kept): `top -d 1.5` refreshes every 1.5 seconds.
   Defaults to 3.0. GNU `top` accepts a zero delay and refreshes as fast
-  as it can; RustOS never busy-loops, so a zero is clamped to the 0.1 s
+  as it can; TAIRiX never busy-loops, so a zero is clamped to the 0.1 s
   minimum.
 - `-h, -?` — show this command's own short help and exit. Inside a
   running session the same keys toggle the key overlay instead.

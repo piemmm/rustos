@@ -168,7 +168,7 @@ pub struct DmaSlab {
 // because the compiler does not know whether the pointee permits
 // cross-thread access. We assert `Send` because (i) the pool's slot
 // bitmap guarantees only this slab observes its byte range; (ii) the
-// pool implementations in `rustos-kernel-mem` are themselves `Send`
+// pool implementations in `tairix-kernel-mem` are themselves `Send`
 // (their internal storage is behind a per-process address space);
 // and (iii) the in-process mock-host mint uses `Box::leak`, which
 // yields `'static` storage safe to send between test threads.

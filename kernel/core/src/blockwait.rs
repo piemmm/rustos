@@ -47,11 +47,11 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_abi::IrqHandle;
-use rustos_kernel_irq::{
+use tairix_abi::IrqHandle;
+use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
-use rustos_kernel_sec::TaskId;
+use tairix_kernel_sec::TaskId;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -75,7 +75,7 @@ pub type FallbackPark = fn(&IrqTable, IrqHandle);
 ///   that fails closed when the controller stays silent (no completion
 ///   *and* no error interrupt) past its budget.
 ///
-/// [`KernelVirtioHost::notify_wait`]: ../../rustos_kernel_virtio/struct.KernelVirtioHost.html#method.notify_wait
+/// [`KernelVirtioHost::notify_wait`]: ../../tairix_kernel_virtio/struct.KernelVirtioHost.html#method.notify_wait
 pub struct IrqParkWaiter {
     /// The published IRQ table the device's line is bound in.
     table: &'static IrqTable,
@@ -203,8 +203,8 @@ mod tests {
 
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    use rustos_kernel_irq::MaskError;
-    use rustos_sync::once::Once;
+    use tairix_kernel_irq::MaskError;
+    use tairix_sync::once::Once;
 
     use crate::waitq::{install_wait_arch, WaitQueueArch};
 
@@ -217,18 +217,18 @@ mod tests {
     }
 
     impl WaitQueueArch for TestArch {
-        fn unpark(&self, _id: rustos_kernel_sched_api::TaskId) {}
+        fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
         fn now_ns(&self) -> u64 {
             self.now.load(Ordering::SeqCst)
         }
         fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
-        fn current_cpu(&self) -> Option<rustos_kernel_sched_api::CpuId> {
+        fn current_cpu(&self) -> Option<tairix_kernel_sched_api::CpuId> {
             Some(0)
         }
         fn current_task(
             &self,
-            _cpu: rustos_kernel_sched_api::CpuId,
-        ) -> Option<rustos_kernel_sched_api::TaskId> {
+            _cpu: tairix_kernel_sched_api::CpuId,
+        ) -> Option<tairix_kernel_sched_api::TaskId> {
             Some(4242)
         }
     }

@@ -1,9 +1,9 @@
-# `rustos-ps` — list processes
+# `tairix-ps` — list processes
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `ps` lists running
 processes through the typed, versioned, capability-checked System
 Information API (`sysinfo-v1`) served by `/System/Services/sysinfod.app/Run`
-(`AGENTS.md` §16.6). RustOS has no `/proc` and no `/sys`: `ps` issues the
+(`AGENTS.md` §16.6). TAIRiX has no `/proc` and no `/sys`: `ps` issues the
 API's process-list queries and has no privileged path that bypasses the
 capability check. By default it lists the caller's own processes; `-e`/`-A`
 request every process system-wide, which the service gates on
@@ -11,8 +11,8 @@ request every process system-wide, which the service gates on
 
 The crate is `no_std` (with `alloc`, used only by the test fixtures), has no
 `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md`
-§2.9). Its only dependencies are the audited `rustos-abi` crate and the
-shared `rustos-procinfo` client helpers, so it never links a kernel or
+§2.9). Its only dependencies are the audited `tairix-abi` crate and the
+shared `tairix-procinfo` client helpers, so it never links a kernel or
 driver crate (`AGENTS.md` §17.4).
 
 ## Usage
@@ -53,8 +53,8 @@ is testable without a kernel.
 ## The `Run` binary
 
 The crate is both this request/render library and the `Run` entry-point
-binary (`rustos-ps-run`, `src/run.rs`) a shell spawns. Built for a Tier-1
-target it is a freestanding pure-Rust program: it links the `rustos-rt`
+binary (`tairix-ps-run`, `src/run.rs`) a shell spawns. Built for a Tier-1
+target it is a freestanding pure-Rust program: it links the `tairix-rt`
 runtime, collects its inherited arguments, parses them, and runs the command
 against the production seams shared through `lib/procinfo`
 (`IpcTransport` over the `sysinfo` IPC endpoint, `RtOutput` over fd 1). It is
@@ -71,7 +71,7 @@ or an undecodable reply is `PsError::Service`; a failed terminal write is
 
 ## Tests
 
-`cargo test -p rustos-ps` drives the parser and the engine against an
+`cargo test -p tairix-ps` drives the parser and the engine against an
 in-memory `sysinfod` fixture and a recording output: the command grammar
 (default self-listing, the `-e`/`-A`/`--all` selectors, `-h`/`--help`,
 unknown-option and positional-operand rejection), the self/global query

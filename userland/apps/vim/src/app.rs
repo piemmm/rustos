@@ -6,7 +6,7 @@
 //! inherited standard input — there is no polling loop; the editor only
 //! runs when a key arrives.
 
-use rustos_curses::{Pos, Screen, Tty, Window};
+use tairix_curses::{Pos, Screen, Tty, Window};
 
 use crate::command::Start;
 use crate::editor::Editor;

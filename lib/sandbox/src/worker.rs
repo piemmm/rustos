@@ -66,7 +66,7 @@ mod tests {
     use crate::proto::{recv_frame, send_frame, Channel, ProtoError, MAX_FRAME};
     use alloc::vec;
     use alloc::vec::Vec;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// A service that echoes each request back reversed.
     struct Reverser;

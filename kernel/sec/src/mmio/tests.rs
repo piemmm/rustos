@@ -12,9 +12,9 @@ use super::*;
 use crate::audit::RecordingSink;
 use crate::captable::{TaskCapabilities, TaskId};
 use crate::identity::UserId;
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{AddressSpace, HostPageTable, MmioError, PhysAddr, SimPhysMap, VirtAddr};
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::{AddressSpace, HostPageTable, MmioError, PhysAddr, SimPhysMap, VirtAddr};
 
 fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
     let mut s = CapabilitySet::empty();

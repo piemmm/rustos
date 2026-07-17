@@ -27,7 +27,7 @@
 //! adapter routes through it rather than re-deriving a pointer. A frame whose physical address is outside the
 //! direct map is returned to the allocator and the request fails closed, never synthesising a pointer of its own.
 
-use rustos_arch_api::frames::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
+use tairix_arch_api::frames::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
 
 use crate::frame::{Frame, FrameAllocator, PhysAddr, PAGE_SIZE};
 use crate::phys::PhysMap;
@@ -131,7 +131,7 @@ mod tests {
     use crate::frame::FrameCount;
     use crate::phys::SimPhysMap;
     use alloc::boxed::Box;
-    use rustos_arch_api::frames::conformance;
+    use tairix_arch_api::frames::conformance;
 
     /// Physical base of the simulated RAM window. Non-zero so a stray
     /// `phys == 0` would be caught as "outside the map".

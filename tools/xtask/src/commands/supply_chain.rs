@@ -427,7 +427,7 @@ pub fn render_policy(pins: &[SourcePin], advisories: &[AdvisoryEntry]) -> String
 }
 
 const POLICY_HEADER: &str = "\
-# RustOS supply-chain policy (AGENTS.md §19.3, PLAN.md §19 item 4).
+# TAIRiX supply-chain policy (AGENTS.md §19.3, PLAN.md §19 item 4).
 #
 # Verified by `cargo xtask supply-chain` (run as part of `cargo xtask ci`).
 #
@@ -588,7 +588,7 @@ reason = "fix queued in PR #42"
     #[test]
     fn check_source_pins_accepts_matching_set() {
         let locked = vec![
-            workspace_pkg("rustos-abi"),
+            workspace_pkg("tairix-abi"),
             registry_pkg("memchr", "2.7.4", "abc123"),
         ];
         let pins = vec![pin("memchr", "2.7.4", "abc123")];
@@ -742,7 +742,7 @@ reason = "fix queued in PR #42"
     fn write_pins_is_deterministic_and_idempotent() {
         let pins = pins_from_lock(&[
             registry_pkg("memchr", "2.7.4", "abc123"),
-            workspace_pkg("rustos-abi"),
+            workspace_pkg("tairix-abi"),
         ]);
         assert_eq!(pins, vec![pin("memchr", "2.7.4", "abc123")]);
         let first = render_policy(&pins, &[]);

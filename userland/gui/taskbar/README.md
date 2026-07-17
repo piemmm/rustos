@@ -1,6 +1,6 @@
-# rustos-taskbar
+# tairix-taskbar
 
-The RustOS traditional desktop **taskbar** (`AGENTS.md` §10, `PLAN.md`
+The TAIRiX traditional desktop **taskbar** (`AGENTS.md` §10, `PLAN.md`
 Stage 7): a GNOME/Windows-style bar pinned to a configured screen edge.
 
 This crate is the Stage 7 **layout, model, and rendering** increment. It
@@ -14,7 +14,7 @@ owns:
   fails closed inside the bar (`AGENTS.md` §2.9).
 - **Variable DPI** — the bar's extents, thickness, and corner radius are
   *logical* pixels (the screen dimensions are physical). `BarLayout::compute`
-  takes a `rustos-geometry` `Scale` and converts the logical lengths to
+  takes a `tairix-geometry` `Scale` and converts the logical lengths to
   physical pixels through the one shared `Scale::scale_length` (`AGENTS.md`
   §10, §2.2). The `Taskbar` stores **no** scale: the desktop density belongs
   to the output and is owned by the compositor, so `layout`, `hit_test`, and
@@ -25,7 +25,7 @@ owns:
   under it (start button, a task, a notification icon, or the clock) for
   input routing. A region slot that does not fit is `Rect::EMPTY` and is never
   hit.
-- **Input routing** — `TaskbarInput` consumes the shared `rustos-input`
+- **Input routing** — `TaskbarInput` consumes the shared `tairix-input`
   `InputEvent` stream (the same one the window manager routes) and turns a
   primary press into a `TaskbarResponse`: toggling the start menu, applying
   the task activate/minimise rule, or reporting a notification-icon or clock
@@ -58,19 +58,19 @@ owns:
   window manager's keyboard focus into the highlight (and restores the focused
   task), so a window the user clicks directly stays in step with the bar; an
   unknown id is rejected without disturbing the highlight (`AGENTS.md` §2.9).
-  The session glue (`rustos-desktop-session`'s `TaskBridge`) drives this from
+  The session glue (`tairix-desktop-session`'s `TaskBridge`) drives this from
   the window stack.
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21).
 - **Rendering** — `TaskbarRenderer::render` paints the bar into a
-  `rustos-raster` `Surface`: each region is filled with its theme colour role,
+  `tairix-raster` `Surface`: each region is filled with its theme colour role,
   then the notification-icon glyphs, clock label, and task titles are drawn on
-  top with the `rustos-font` built-in bitmap face, each in the foreground role
+  top with the `tairix-font` built-in bitmap face, each in the foreground role
   matching its background and truncated to fit its region. The surface is
   rectangular — the window manager rounds it (see below) — and the colour/blit
   algebra is reused from `lib/*`, never duplicated (`AGENTS.md` §2.2). The
-  renderer is stateful so it can hold a `rustos-raster` `RasterCache` of the
+  renderer is stateful so it can hold a `tairix-raster` `RasterCache` of the
   rasterised notification glyphs across frames: a glyph is converted once per
   tint and size and re-rendered only on a theme or scale change (the SVG-first
   rule, `AGENTS.md` §10), sharing the one cache the window manager uses for
@@ -78,7 +78,7 @@ owns:
   `render_menu` (a `&self` method, no cache — the popup is text only) paints
   the open start-menu popup the same way, returning `None` when closed.
 - **Notification icon set** — the renderer draws each notification glyph from
-  a `rustos-icon` `IconSet`: the built-in glyph set until `set_icons` installs
+  a `tairix-icon` `IconSet`: the built-in glyph set until `set_icons` installs
   one decoded from the on-disk `/System/Graphics` SVG assets
   (`IconSet::from_assets`). A loaded asset keeps its authored colours; a kind
   the assets omit keeps its tinted built-in glyph, so a corrupt asset set can
@@ -97,12 +97,12 @@ same one it uses for windows. There is no second implementation
 
 ## Dependencies and layering
 
-The crate depends only on `lib/*`: `rustos-geometry` (the shared `Point` /
-`Rect` vocabulary), `rustos-input` (the shared `PointerButton`/`InputEvent`
-vocabulary the window manager also routes), `rustos-raster` (the
+The crate depends only on `lib/*`: `tairix-geometry` (the shared `Point` /
+`Rect` vocabulary), `tairix-input` (the shared `PointerButton`/`InputEvent`
+vocabulary the window manager also routes), `tairix-raster` (the
 premultiplied-alpha `Color`/`Surface` the window manager also paints with),
-`rustos-font` (the shared text rasteriser, `AGENTS.md` §16.4), and
-`rustos-theme` (the single shared theme definition). It does **not** depend on
+`tairix-font` (the shared text rasteriser, `AGENTS.md` §16.4), and
+`tairix-theme` (the single shared theme definition). It does **not** depend on
 the window manager or any sibling userland crate, and nothing depends on it in
 turn (`AGENTS.md` §17.4, §17.3): the desktop is an optional, one-way-dependent
 frontend, so a headless image omits it cleanly.

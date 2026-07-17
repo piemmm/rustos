@@ -1,11 +1,11 @@
 //! Host-side link peer for the QEMU netstack verticals
 //! (`plans/NETWORK.md` N3c).
 //!
-//! The guest's `rustos-netstack` engine pumps a live virtio-net device
+//! The guest's `tairix-netstack` engine pumps a live virtio-net device
 //! whose QEMU `dgram` netdev forwards every guest frame as one raw
 //! Ethernet datagram to a unix socket the harness binds. This module is
 //! the other end of that wire: the *same* pure `lib/net` protocol
-//! engine, configured from the shared `rustos-test-netstack-wire`
+//! engine, configured from the shared `tairix-test-netstack-wire`
 //! topology, run on a plain host thread with real time.
 //!
 //! The peer drives the *inbound* half of the vertical's choreography:
@@ -26,12 +26,12 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rustos_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
-use rustos_abi::Duration64;
-use rustos_net::addr::{IpAddr, Ipv4Addr};
-use rustos_net::iface::eui64_interface_id;
-use rustos_net::stack::{Stack, StackConfig, StackEvent, StackOutput};
-use rustos_test_netstack_wire as wire;
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
+use tairix_abi::Duration64;
+use tairix_net::addr::{IpAddr, Ipv4Addr};
+use tairix_net::iface::eui64_interface_id;
+use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput};
+use tairix_test_netstack_wire as wire;
 
 /// Blocking-receive slice per loop pass; the wire is otherwise idle, so
 /// this also paces the peer's timer advancement.

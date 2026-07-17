@@ -1,4 +1,4 @@
-# `rustos-getcap` — report a file's capability gate
+# `tairix-getcap` — report a file's capability gate
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `getcap` reports
 the **optional capability requirement** an inode may carry: a capability
@@ -7,11 +7,11 @@ checks (`AGENTS.md` §5.3). For each file operand it prints one line —
 `path CAP_NAME` — when the file carries a gate, and prints nothing for a
 file that has none, so a clean tree is silent. With `-R` a directory
 operand is reported and then its contents recursively. It is the
-read-only companion of `rustos-setcap`.
+read-only companion of `tairix-setcap`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ## Usage
@@ -30,7 +30,7 @@ not an option.
 ## Capability names
 
 A gate renders by its canonical `CAP_*` name (e.g. `CAP_AUDIT_READ`),
-resolved through `rustos_abi::CapabilityId::name` — the single, frozen
+resolved through `tairix_abi::CapabilityId::name` — the single, frozen
 `abi-v1` source of truth shared with `setcap` (`AGENTS.md` §2.2, §5.2). A
 node that stored an in-range identifier the running ABI has not yet named
 renders as `CAP_<id>` rather than being silently dropped, so a gate is
@@ -68,7 +68,7 @@ operand, and there is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-getcap` drives the parser and the engine against an
+`cargo test -p tairix-getcap` drives the parser and the engine against an
 in-memory tree and a recording output: the command grammar, a gated file
 reported by name, an ungated file producing no output, an unnamed
 in-range gate rendered numerically, several files reporting only the

@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-mem-pin-migration-qemu-aarch64"
+name = "tairix-test-mem-pin-migration-qemu-aarch64"
 description = "Four-vCPU production-dispatch continuation vertical sharing the mem-pin chassis: repeated blocking IPC replies must resume the user task across CPU migration with integer, FP, stack, PC, and address-space state intact."
 version.workspace = true
 edition.workspace = true
@@ -17,27 +17,27 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-mem-pin-migration-qemu-aarch64"
+name = "tairix-test-mem-pin-migration-qemu-aarch64"
 path = "../mem_pin_qemu_aarch64/src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

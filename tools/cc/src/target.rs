@@ -101,7 +101,7 @@ pub struct LinkRequest<'a> {
 /// * `-fPIC` / position-independent: the image is loaded as a relocatable
 ///   `rxe` PIE.
 /// * `-ffreestanding` / `-nostdlib`: no host libc; the program reaches the
-///   kernel only through the `ros_sys_*` runtime.
+///   kernel only through the `tairix_sys_*` runtime.
 /// * `-fstack-protector-strong`: emit the stack canary; crt0 supplies
 ///   `__stack_chk_guard` / `__stack_chk_fail`.
 /// * `-Wall -Wextra -Werror`: senior-quality bar.

@@ -1,4 +1,4 @@
-# `rustos-drv-display-framebuffer` — framebuffer display service
+# `tairix-drv-display-framebuffer` — framebuffer display service
 
 The user-space framebuffer display-service process (`plans/DISPLAY.md`
 D7b). The crate is **only** a binary: the `Run` entry point of the
@@ -11,8 +11,8 @@ over the reserved `DISPLAY_ENDPOINT`; this process blits the presented
 frame to the scan-out surface.
 
 The crate contains **no device logic of its own**: the linear-surface
-blit engine is `rustos_display::Framebuffer` and the protocol engine is
-`rustos_display::DisplayServer` — both `lib/display`, the one shared
+blit engine is `tairix_display::Framebuffer` and the protocol engine is
+`tairix_display::DisplayServer` — both `lib/display`, the one shared
 definition the framebuffer QEMU verticals also drive. `main` only wires
 the real seams:
 

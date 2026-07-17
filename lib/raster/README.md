@@ -1,6 +1,6 @@
-# rustos-raster
+# tairix-raster
 
-The single shared **software rasterisation** primitives for the RustOS
+The single shared **software rasterisation** primitives for the TAIRiX
 desktop (`AGENTS.md` §6, §17.4 — `PLAN.md` Stage 7).
 
 Both the compositing window manager (`userland/gui/wm`) and the taskbar

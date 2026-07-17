@@ -1,6 +1,6 @@
 [package]
-name = "rustos-arch-wasm32"
-description = "RustOS architecture port: wasm32 (Arch HAL implementation + browser-sandbox cooperative scheduling / WASM-memory isolation primitives)."
+name = "tairix-arch-wasm32"
+description = "TAIRiX architecture port: wasm32 (Arch HAL implementation + browser-sandbox cooperative scheduling / WASM-memory isolation primitives)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # this crate is a pure Arch HAL implementation (`AGENTS.md` §17.2 /
 # §17.4): it names only the Arch HAL (`kernel/arch/api`) and `lib/*`,
 # never a concrete kernel subsystem. `WasmArch` implements
-# `rustos_arch_api::SchedulerArch`; the downstream boot consumer wraps it
+# `tairix_arch_api::SchedulerArch`; the downstream boot consumer wraps it
 # in a `kernel/core::KernelArch` type.
 #
 # Where a bare-metal port gates its CSR/assembly operations to
@@ -30,10 +30,10 @@ path = "src/lib.rs"
 # model, and the syscall-argument marshalling — builds on the host so
 # its unit tests run under `cargo test` (`AGENTS.md` §7).
 [dependencies]
-rustos-arch-api = { path = "../api", version = "=0.0.0" }
-rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
-# `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
+tairix-arch-api = { path = "../api", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # syscall entry path marshals user arguments into — the same `lib/*`
 # dependency the other arch ports take (`AGENTS.md` §17.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

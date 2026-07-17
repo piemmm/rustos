@@ -1,6 +1,6 @@
 //! Build script: enable the `freestanding` cfg when the crate is built for a
 //! bare-metal target (`target_os = "none"`), so the production client seams
-//! (`src/client.rs`) — which link the `rustos-rt` runtime pulled by the
+//! (`src/client.rs`) — which link the `tairix-rt` runtime pulled by the
 //! `program` feature — compile only there and are absent from host builds and
 //! the pure library.
 //!

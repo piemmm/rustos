@@ -19,9 +19,9 @@ use alloc::vec::Vec;
 use core::ptr::NonNull;
 
 use super::*;
-use rustos_abi::driver::block::Block;
-use rustos_abi::driver::DriverKind;
-use rustos_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
+use tairix_abi::driver::block::Block;
+use tairix_abi::driver::DriverKind;
+use tairix_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
 
 use command::BLOCK_SIZE;
 
@@ -1186,7 +1186,7 @@ fn open_discovered_without_mapper_is_unsupported() {
 
 #[test]
 fn bind_table_matches_the_bcm2711_emmc2_node() {
-    use rustos_abi::HwMatchKey;
+    use tairix_abi::HwMatchKey;
 
     // One entry at the declared exact-match priority, matching a
     // discovered node carrying the EMMC2 `compatible` string the

@@ -11,13 +11,13 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 extern crate alloc;
 use alloc::sync::Arc;
 
-use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
-use rustos_arch_x86_64::percpu;
-use rustos_arch_x86_64::{qemu_exit, serial, smp};
-use rustos_kernel_core::spawn_kthread;
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
+use tairix_arch_x86_64::percpu;
+use tairix_arch_x86_64::{qemu_exit, serial, smp};
+use tairix_kernel_core::spawn_kthread;
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 
-use rustos_arch_x86_64::context_hal::ContextSwitchHal;
+use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 
 /// The single-CPU slice runs logical CPU 0 on the boot processor.
 const BOOT_CPU: u32 = 0;
@@ -226,7 +226,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 // --- Panic handler ------------------------------------------------
 
 #[panic_handler]
-fn rustos_kthread_switch_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
+fn tairix_kthread_switch_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let _ = writeln!(com1, "[kthread_switch_qemu_x86_64] panic: {info}");
     qemu_exit::exit_failure();

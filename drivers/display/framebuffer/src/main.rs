@@ -12,14 +12,14 @@
 //! pixel format are read from the kernel-issued device-resource grants
 //! its matched node requested (`sole_framebuffer`), never a build-time
 //! constant, and the blit engine is the shared
-//! `rustos_display::Framebuffer` — the one definition the framebuffer
+//! `tairix_display::Framebuffer` — the one definition the framebuffer
 //! QEMU verticals also drive.
 //!
-//! It is a **pure-Rust** program: RustOS is Rust-only, so it links the
-//! Rust userland runtime `rustos-rt`, never the C ABI (which exists solely
-//! for non-Rust programs). `rustos-rt` provides `_start`, the per-process
+//! It is a **pure-Rust** program: TAIRiX is Rust-only, so it links the
+//! Rust userland runtime `tairix-rt`, never the C ABI (which exists solely
+//! for non-Rust programs). `tairix-rt` provides `_start`, the per-process
 //! stack canary, the panic handler, and the syscall wrappers;
-//! `rustos_rt::entry!` names this program's `main`.
+//! `tairix_rt::entry!` names this program's `main`.
 //!
 //! `main` wires the real seams the shared `DisplayServer` engine drives:
 //!
@@ -62,16 +62,16 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::display_ipc::{DISPLAY_ENDPOINT, DISPLAY_MAX_REQUEST};
-    use rustos_abi::driver::sole_framebuffer;
-    use rustos_abi::{CapabilityId, Errno, WaitSetOp, WaitSourceKind};
-    use rustos_caps::CapabilitySet;
-    use rustos_display::{
+    use tairix_abi::display_ipc::{DISPLAY_ENDPOINT, DISPLAY_MAX_REQUEST};
+    use tairix_abi::driver::sole_framebuffer;
+    use tairix_abi::{CapabilityId, Errno, WaitSetOp, WaitSourceKind};
+    use tairix_caps::CapabilitySet;
+    use tairix_display::{
         DisplayServer, Framebuffer, FramebufferConfig, RtShmMapper, SeatCheck, DISPLAY_REPLY_MAX,
     };
-    use rustos_drv_display_framebuffer::{FIRST_PRESENT, FIRST_PRESENT_MESSAGE};
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_rt::LogSink;
+    use tairix_drv_display_framebuffer::{FIRST_PRESENT, FIRST_PRESENT_MESSAGE};
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_rt::LogSink;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or
@@ -137,7 +137,7 @@ mod program {
 
     impl SeatCheck for RtSeatCheck {
         fn live_generation(&mut self, ticket: u64, seat_id: u64) -> Result<u64, Errno> {
-            let ret = rustos_rt::call_peer_seat(DISPLAY_ENDPOINT, ticket, seat_id);
+            let ret = tairix_rt::call_peer_seat(DISPLAY_ENDPOINT, ticket, seat_id);
             if ret >= 1 {
                 #[allow(clippy::cast_sign_loss)] // `ret >= 1` checked above.
                 Ok(ret as u64)
@@ -147,7 +147,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     ///
@@ -183,7 +183,7 @@ mod program {
         // gates every request — Query included — on the caller's live seat
         // lease, so an unentitled sender receives a typed refusal.
         let empty = CapabilitySet::empty();
-        let bound = rustos_rt::call_create(
+        let bound = tairix_rt::call_create(
             DISPLAY_ENDPOINT,
             &empty,
             &empty,
@@ -198,13 +198,13 @@ mod program {
         // Park on a wait-set between requests: endpoint readiness is a
         // non-consuming peek drained by `call_recv`, so the loop never
         // spins and an idle service holds the task off the run queue.
-        let wait_set = rustos_rt::waitset_create();
+        let wait_set = tairix_rt::waitset_create();
         if wait_set < 0 {
             return EXIT_WAIT_FAILED;
         }
         #[allow(clippy::cast_sign_loss)] // `wait_set >= 0` checked above; it is a kernel handle.
         let wait_set = wait_set as u64;
-        if rustos_rt::waitset_ctl(
+        if tairix_rt::waitset_ctl(
             wait_set,
             WaitSetOp::Add,
             WaitSourceKind::Endpoint,
@@ -226,7 +226,7 @@ mod program {
         // checked after the reply so the present hot path pays nothing.
         let mut first_present_logged = false;
         loop {
-            if rustos_rt::waitset_wait(wait_set, u64::MAX, &mut token) != 0 {
+            if tairix_rt::waitset_wait(wait_set, u64::MAX, &mut token) != 0 {
                 // A dead wait-set would degrade the loop into a busy poll;
                 // exit fail-loud instead and let the supervisor decide.
                 return EXIT_WAIT_FAILED;
@@ -238,20 +238,20 @@ mod program {
             // oversize request left queued) must not kill the server; drop
             // it and re-park.
             let Ok(len) =
-                rustos_rt::call_recv_nonblock(DISPLAY_ENDPOINT, &mut request, &mut ticket)
+                tairix_rt::call_recv_nonblock(DISPLAY_ENDPOINT, &mut request, &mut ticket)
             else {
                 continue;
             };
             // Every outcome — including a malformed request — is a
             // well-formed reply; the engine never leaves a caller parked.
             let n = server.serve(&mut surface, &mut seat, ticket, &request[..len], &mut reply);
-            let _ = rustos_rt::call_reply(DISPLAY_ENDPOINT, ticket, &reply[..n]);
+            let _ = tairix_rt::call_reply(DISPLAY_ENDPOINT, ticket, &reply[..n]);
             if !first_present_logged && server.has_presented() {
                 first_present_logged = true;
-                rustos_log::log(
+                tairix_log::log(
                     &LogSink,
-                    &rustos_log::Event {
-                        level: rustos_log::Level::Info,
+                    &tairix_log::Event {
+                        level: tairix_log::Level::Info,
                         id: FIRST_PRESENT,
                         message: FIRST_PRESENT_MESSAGE,
                         fields: &[],
@@ -261,13 +261,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

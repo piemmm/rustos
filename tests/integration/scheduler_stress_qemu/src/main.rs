@@ -4,11 +4,11 @@
 //!
 //! `PLAN.md`'s Stage 2 deliverable text mandates that the scheduler
 //! stress test exercise `≥ 4 emulated cores`. The host-side
-//! `rustos-test-scheduler-stress` crate satisfies the
+//! `tairix-test-scheduler-stress` crate satisfies the
 //! cross-crate contract by simulating four cores through `TestArch`;
 //! this binary executes the same kind of workload under QEMU on
 //! `-smp 4` with the actual x86_64 AP bring-up code from
-//! `rustos_arch_x86_64::smp` driving the three application processors.
+//! `tairix_arch_x86_64::smp` driving the three application processors.
 //!
 //! ## How it asserts it
 //!

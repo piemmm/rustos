@@ -1,4 +1,4 @@
-//! Stable [`rustos_log::EventId`] constants emitted by `sysinfod`.
+//! Stable [`tairix_log::EventId`] constants emitted by `sysinfod`.
 //!
 //! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. The System Information service occupies
@@ -6,7 +6,7 @@
 //! the numeric values must never be re-used or re-numbered — external
 //! audit-log consumers rely on them.
 
-use rustos_log::EventId;
+use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `sysinfod` event identifiers.
 ///
@@ -19,7 +19,7 @@ pub const SYSINFOD_RANGE_END: u32 = 9_000;
 /// An audited query was invoked under a granted capability set.
 ///
 /// Emitted for every invocation of a query whose
-/// [`SysinfoQuerySpec::audit`](rustos_abi::SysinfoQuerySpec) flag is set —
+/// [`SysinfoQuerySpec::audit`](tairix_abi::SysinfoQuerySpec) flag is set —
 /// the cross-principal, kernel, and hardware queries.
 /// Self-scoped observers are deliberately not recorded, to avoid drowning
 /// the audit log. Recorded at `Debug`: a monitor polling privileged

@@ -3,7 +3,7 @@
 //! the twin of the aarch64/riscv64 stack-grow verticals.
 //!
 //! On boot the test runs the shared production board bring-up
-//! (`rustos_kernel::x86_64::boot::bring_up_bsp`) — per-CPU tables, the
+//! (`tairix_kernel::x86_64::boot::bring_up_bsp`) — per-CPU tables, the
 //! dedicated `#PF` entry, NXE, LAPIC calibration, the ACPI walk, the
 //! **production** syscall-dispatch callback and user-fault resolver, the
 //! `syscall`/TSS entry, and the masked IO-APIC routing — then installs the
@@ -39,7 +39,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-stack-grow-qemu-x86_64: the `test-hooks` Cargo feature is a \
+    "tairix-test-stack-grow-qemu-x86_64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

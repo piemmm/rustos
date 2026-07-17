@@ -1,6 +1,6 @@
 # APPS — Application structure, command help, and command resolution
 
-This document is the normative specification for how a RustOS application is
+This document is the normative specification for how a TAIRiX application is
 **structured on disk**, how its **command-line help is authored and served**,
 and how the shell (`elsh`, `plans/SHELL.md`) **resolves a typed command name**
 to a runnable application. It extends — it does not replace — the fixed `.app`
@@ -62,7 +62,7 @@ help-lint`, the §8.1 gate wired into `cargo xtask ci`), and deliverable 8
 increments 1–4 — self-contained on-disk bundles: every discovered
 bundle's signed `AppInfo` + `Run` ships on disk beside its `Help/`, and
 on the aarch64 production boot the `spawn` syscall loads and verifies
-the on-disk store bundles through the shared `rustos_appload` gate (no
+the on-disk store bundles through the shared `tairix_appload` gate (no
 kernel-baked rxe rows remain there). Remaining: deliverable 7 (wider
 `stdinfo` adoption — `man`'s locale-fallback, `ls`'s hidden-entries
 omission, and the shared self-scope omission record `ps` and `sysinfo
@@ -137,7 +137,7 @@ when convenient), with one staged follow-up below.
   every other frame (image, user stack, startup block, anon heap) is zeroed
   through the physmap (zero-on-free, §4) and freed — and finally returns the
   page-table hierarchy post-order through the one shared
-  `rustos_arch_api::frames::reclaim_hierarchy` walk each port's
+  `tairix_arch_api::frames::reclaim_hierarchy` walk each port's
   `mmu::AddressSpace::reclaim_table_frames` override drives into the new
   `PageTableFrames::free_table` (allocator-backed `FrameTableSource`
   recycles; the boot pools retire without reuse). SMP safety is an
@@ -170,7 +170,7 @@ when convenient), with one staged follow-up below.
   `KernelMemoryStats.free_bytes` — read through sysinfod's
   `KERNEL_MEMORY_STATS` query under its manifest's `CAP_SYSINFO_KERNEL` —
   equals the baseline **exactly** (the host-tested
-  `rustos_test_memsoak::verdict`). On failure it prints `MEMSOAK FAIL
+  `tairix_test_memsoak::verdict`). On failure it prints `MEMSOAK FAIL
   baseline=… final=…` and parks forever, so the run times out fail-loud
   with the numbers in the transcript.
 
@@ -250,7 +250,7 @@ convenient), with one staged follow-up below.
 
 ## 1. Everything is a bundle — including single-binary utilities
 
-RustOS does **not** organise programs the Unix way: there is no `/usr/bin/<app>`
+TAIRiX does **not** organise programs the Unix way: there is no `/usr/bin/<app>`
 flat binary directory and no `man`-page directory in a separate tree
 (`AGENTS.md` §16.1 forbids the legacy top-level names). Every program the user
 can run — from a large graphical application down to a one-file utility like
@@ -274,7 +274,7 @@ The OS-provided command apps (`ls`, `cat`, `cp`, `mv`, `rm`, `ps`, `top`, …)
 MUST match **GNU coreutils** option names, argument grammar, and default
 output as closely as possible (`AGENTS.md` §16.7): a user or script that knows
 the GNU tool finds ours familiar, and any deviation carries the burden of
-proof. RustOS-native concepts diverge deliberately and only where they
+proof. TAIRiX-native concepts diverge deliberately and only where they
 genuinely differ — capabilities (§5.2) instead of `setuid`, the storage forest
 (§16.1) instead of Unix single-root paths, `Time64` (§21) timestamps, and the
 System Information API (§16.6) instead of a fabricated `/proc`. The `stdinfo`
@@ -342,7 +342,7 @@ Because `abi-v1` is not frozen (§9), the merge was a straightforward in-place
 evolution (§2.13), and it has landed: `BundleEntry::Help` replaced
 `Documentation` (`lib/abi/src/appinfo.rs`), `validate_bundle_layout` accepts
 exactly the new set, every caller and fixture was updated in the same change,
-and the generated C header carries `ROS_BUNDLE_ENTRY_HELP`.
+and the generated C header carries `TAIRIX_BUNDLE_ENTRY_HELP`.
 
 The permitted top-level entry names remain a closed, case-sensitive set
 validated by `validate_bundle_layout`: any entry outside the set still fails
@@ -477,7 +477,7 @@ document is rendered whole from a single file.
 
 ## 6. The help engine — `lib/help`
 
-There is exactly one help engine, the shared crate `lib/help` (`rustos-help`),
+There is exactly one help engine, the shared crate `lib/help` (`tairix-help`),
 so `man`, every command app's `-h`, and any graphical help viewer share one
 implementation (§2.2). Adding it updates `AGENTS.md` §3 and this plan (§6, §16.4
 list) per the `lib/*` rules (§6).
@@ -535,8 +535,8 @@ This is binding under `AGENTS.md` §16.5:
 
 ## 7. The `man` command
 
-`man` still exists, but it is RustOS'ised: it does **not** read the historical
-troff/roff man format (RustOS ships none), it renders the `Help/` Markdown.
+`man` still exists, but it is TAIRiX'ised: it does **not** read the historical
+troff/roff man format (TAIRiX ships none), it renders the `Help/` Markdown.
 
 - `man` is itself a command app, `man.app`, in the system app store (§8) — it
   is not a shell builtin (it needs no shell-process state, `plans/SHELL.md`).
@@ -546,8 +546,8 @@ troff/roff man format (RustOS ships none), it renders the `Help/` Markdown.
 - When the ordered store-then-`PATH` candidates find nothing for a bare word,
   `man` falls back to a **recursive bundle search** of the app stores: the
   machine-wide `/Apps`, then the user's own `<HOME>/Apps`
-  (`rustos_cmdres::search_roots` — the roots are spelled once, over
-  `rustos_abi::USER_APP_STORE`). The walk is breadth-first over sorted
+  (`tairix_cmdres::search_roots` — the roots are spelled once, over
+  `tairix_abi::USER_APP_STORE`). The walk is breadth-first over sorted
   listings, so the shallowest match wins deterministically; it never
   descends into another bundle's `.app` directory (a bundle is a sealed
   unit); a missing root or directory lists nothing while any other refusal
@@ -577,7 +577,7 @@ command word (after builtins, functions, and command aliases, per
    `PLAN.md` "Charter Amendments"), addressed by the `System:` path alias
    (`plans/DRIVES.md`). Its path and the bundle suffix are defined **once**
    in `lib/abi` (`SYSTEM_APP_STORE`, `BUNDLE_SUFFIX`), shared by the kernel's
-   program registry (`kernel/rustos-kernel/src/spawn_paths.rs`, drift-tested)
+   program registry (`kernel/tairix-kernel/src/spawn_paths.rs`, drift-tested)
    and the shell. The shell looks for `<word>.app` there and, if the manifest
    permits execution (§9.1), runs its `Run` binary through `appmgr`
    (signature + capability + interface-hash checks, §16.5).
@@ -595,7 +595,7 @@ command word (after builtins, functions, and command aliases, per
    (§1).
 
 The candidate *policy* is one pure, exhaustively-tested function,
-`rustos_cmdres::resolution_candidates` (`lib/cmdres`, the shared crate whose
+`tairix_cmdres::resolution_candidates` (`lib/cmdres`, the shared crate whose
 `bundle_candidates` view the `man` command's bundle lookup imports — one
 policy, two views, §2.2/§17.4):
 it computes only the ordered spelling list and grants nothing. The shell's
@@ -624,7 +624,7 @@ other refusal onto `126`). No "try everything until one runs" behaviour
   `en-US/` canonical document for every command it exposes, plus translations
   for the standing required locale set: `fr-FR`, `de-DE`, `es-ES`, `uk-UA`,
   `it-IT`, `pt-PT`, `cy-GB`, `zh-CN`, `ja-JP`, `ko-KR`, `ar-SA`, `he-IL`
-  (the one definition is `rustos_help::REQUIRED_LOCALES`; every consumer —
+  (the one definition is `tairix_help::REQUIRED_LOCALES`; every consumer —
   the lint and each app's own switch pins — imports it, never a private
   copy). The set gates *authoring* completeness only: runtime selection
   scans the bundle's `Help/` tree for whatever locales it actually ships
@@ -807,7 +807,7 @@ behind the floor work below).
   read-only mounts refused), rewriting only the driver security record's
   mode field. The bundle is store-only (console-write + `CAP_FS_ACCESS`),
   with the thirteen-locale `Help/` tree, `-h`/`-?` over `lib/help`, and
-  the `ros_sys_fs_set_mode` stub + `ROS_FS_MODE_MASK` in the regenerated C
+  the `tairix_sys_fs_set_mode` stub + `TAIRIX_FS_MODE_MASK` in the regenerated C
   header. `fstree`'s `a` mode editor is the second caller.
   **Remaining, blocked on kernel prerequisites:** `chown` needs the fs
   owner-set syscall, `getcap`/`setcap` need per-inode
@@ -828,24 +828,24 @@ behind the floor work below).
   argument of `-h`/`-?`/`--help` is honoured, the GNU position rule);
   the one documented divergence is that `false`'s served short help
   exits `0` per §4, where GNU `false --help` exits `1`. `basename` and
-  `dirname` are purely lexical, with one shared RustOS extension: a
+  `dirname` are purely lexical, with one shared TAIRiX extension: a
   `Name:/` alias root plays the role POSIX gives `/`, decided by the
-  path grammar's own exported rule (`rustos_path::alias_root_len`, the
+  path grammar's own exported rule (`tairix_path::alias_root_len`, the
   §2.2 one-definition seam added for exactly these lexical tools) —
   never a second path parser. Landing `mkdir`/`rmdir` evolved `abi-v1`
   in place (unfrozen, the `mv`/`CrossVolume` precedent): the dedicated
   `Errno::NotADirectory`/`Errno::NotEmpty` codes (`VfsError` now maps
   `AlreadyExists`/`NotADirectory`/`NotEmpty` precisely instead of
   collapsing them onto `OutOfRange`; C header regenerated with the new
-  errnos, `ROS_UNLINK_FLAG_DIRECTORY`, and the previously-unpublished
-  `ROS_OPEN_FLAG_*` bits) and a validated `UnlinkFlags` word on
+  errnos, `TAIRIX_UNLINK_FLAG_DIRECTORY`, and the previously-unpublished
+  `TAIRIX_OPEN_FLAG_*` bits) and a validated `UnlinkFlags` word on
   `fs_unlink` whose `DIRECTORY` bit is the atomic
   `rmdir(2)`/`unlinkat(AT_REMOVEDIR)` posture, decided by the
   filesystem under its own lock — `rmdir` (and `rm`'s own directory
   removals, migrated to the flag) carries no stat/remove race, and
   `--ignore-fail-on-non-empty` tolerates exactly `NotEmpty`. Both
   tools' `-p` walks share the one ancestor-spelling rule
-  (`rustos_path::Path::prefix`, the §2.2 seam added for exactly these
+  (`tairix_path::Path::prefix`, the §2.2 seam added for exactly these
   walks); `mkdir`'s GNU `-m` remains staged — its kernel prerequisite
   (`fs_set_mode`, Stage B `chmod`) now exists, and the flag lands with
   its own tests in its own change, never stubbed. `head`
@@ -862,14 +862,14 @@ behind the floor work below).
   minimum for non-regular inputs; unpadded single-input/single-count,
   files0, and total-only forms); `-m` decodes UTF-8 incrementally
   across chunks (an encoding-error byte is a byte, not a character)
-  and `-L` measures columns through the one `rustos_vt::char_width`
+  and `-L` measures columns through the one `tairix_vt::char_width`
   definition — never a second width table. `tee` implements
   `-a`/`--append`, `-p`, and `--output-error[=MODE]` (argmatch
   prefixes; the value only attached with `=`, a bare `--output-error`
   selecting `warn-nopipe`) with the GNU `tee.c` failure discipline (a
   failed output is diagnosed, dropped, and the run continues or stops
   per mode; reading stops when no output remains). Two documented
-  divergences: RustOS has no `SIGPIPE`, so the modes' "pipe" class maps
+  divergences: TAIRiX has no `SIGPIPE`, so the modes' "pipe" class maps
   to the standard-output copy (the one output that can be a pipe; the
   default mode's stdout failure stops the run fail-loud), and
   `-i`/`--ignore-interrupts` is staged behind per-process
@@ -894,18 +894,18 @@ behind the floor work below).
   with prior output kept; the per-conversion flag-validity table is
   probe-pinned against GNU coreutils). Landing it hoisted the two
   C-locale engines `seq` already carried into `lib/util` for the
-  second consumer: `rustos_util::cfloat` (the printf float renderer
+  second consumer: `tairix_util::cfloat` (the printf float renderer
   behind `seq -f` and `printf`'s float conversions) and
-  `rustos_util::cnum` (the `strtod` scanner, now with longest-prefix
+  `tairix_util::cnum` (the `strtod` scanner, now with longest-prefix
   `endptr` semantics — `seq` demands full consumption, `printf`
   diagnoses the remainder). Two documented divergences: the
   `f64`-not-`long double` computation (the `seq` precedent) and the
-  RustOS first-argument `-h`/`-?`/`--help` short-help convention
+  TAIRiX first-argument `-h`/`-?`/`--help` short-help convention
   (`printf -- -h…` spells such a format). `whoami` prints the name paired with
   the caller's uid: the uid comes from the kernel-attested origin
   record (the ungated `self_origin` syscall) and the name from the
   ungated `USER_DIRECTORY` sysinfod query over the shared
-  `rustos_procinfo` account-directory walk (the `top` USER-column
+  `tairix_procinfo` account-directory walk (the `top` USER-column
   helper, one definition); a uid with no directory entry is the GNU
   `cannot find name for user ID` diagnostic, and a failed walk is a
   service error, never misreported as a missing name. `du` walks its
@@ -914,7 +914,7 @@ behind the floor work below).
   (`--apparent-size`/`-b` for lengths) and implementing `-a`/`-s`/`-c`/
   `-d`/`-S`/`-0` plus the GNU unit options; the `-B` grammar, ceiling
   block scaling, and `human_ceiling` renderings live once in
-  `rustos_util::size` (a §2.2 `lib/util` promotion, shared with `df`).
+  `tairix_util::size` (a §2.2 `lib/util` promotion, shared with `df`).
   `df` renders the GNU table (auto-sized columns, `-a`/`-T`/`-t`/`-x`/
   `-i`/`-P`/`-l`/`--total`, operand→covering-mount by longest prefix)
   from the ungated `MOUNT_LIST` rows, which now carry each volume's
@@ -972,9 +972,9 @@ second escape table, colour list, or glyph set anywhere (§2.2).
   information MUST survive with every attribute stripped (a mono terminal,
   a colourblind reader, and a script see the same facts), so colour is never
   the *sole* carrier of a distinction.
-- **The standard RustOS colour scheme.** There is exactly **one** standard
+- **The standard TAIRiX colour scheme.** There is exactly **one** standard
   terminal colour scheme, defined once as data (a semantic-role palette,
-  proposed home `rustos_vt::scheme` beside the SGR vocabulary it maps onto;
+  proposed home `tairix_vt::scheme` beside the SGR vocabulary it maps onto;
   the implementing change confirms the home and updates the crate docs) and
   imported by every consumer — `lib/help`'s renders, `lib/curses` defaults,
   and each command app — never a per-tool colour list (§2.2). The scheme
@@ -1045,9 +1045,9 @@ both landed; `plans/SHELL.md` command execution):
    merge, so `Documentation` was renamed to `Help` in place (§2.13):
    enum/`ALL`/`as_str`, rustdoc, the `appinfo` and `appmgr` fixtures,
    `docs/src/abi/appinfo.md`, and the regenerated C header
-   (`ROS_BUNDLE_ENTRY_HELP`); the retired name now fails
+   (`TAIRIX_BUNDLE_ENTRY_HELP`); the retired name now fails
    `validate_bundle_layout` closed.
-2. **`lib/help` (`rustos-help`)** — **done.** The one help engine (§6):
+2. **`lib/help` (`tairix-help`)** — **done.** The one help engine (§6):
    validated `Locale`/`DocumentName` spellings, the injected `HelpSource`
    read seam, the §5 fallback chain (served locale reported for `stdinfo`),
    the bounded structured-Markdown parser (fixed §3 section model, typed
@@ -1061,12 +1061,12 @@ both landed; `plans/SHELL.md` command execution):
    harness registered in `cargo xtask fuzz` (§19.6), rustdoc,
    `lib/help/README.md`, `docs/src/lib/help.md`, and the §3 crate list are
    in place.
-3. **`man.app`** — **done.** The RustOS `man` command app (§7):
-   `userland/apps/man` resolves the word over `rustos_cmdres::
+3. **`man.app`** — **done.** The TAIRiX `man` command app (§7):
+   `userland/apps/man` resolves the word over `tairix_cmdres::
    bundle_candidates` (first existing bundle wins; `NotFound` moves on, any
    other refusal is final) and then, for a bare word no candidate matched,
    over the §7 bounded recursive search of `/Apps` and `<HOME>/Apps`
-   (`rustos_cmdres::search_roots`), loads and renders through `lib/help`,
+   (`tairix_cmdres::search_roots`), loads and renders through `lib/help`,
    reads `LANG`/`PATH`/`HOME` from the inherited environment, pages on a
    geometry-attested console (space/return/`q`, echo suppressed) and
    streams otherwise, and emits the §7 `stdinfo` `context` record
@@ -1083,7 +1083,7 @@ both landed; `plans/SHELL.md` command execution):
    (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app is registered
    as `/System/Apps/{cat,clear,elsh,ls,man,ps,reset,sysinfo,top,users}.app/Run`
    (`spawn_paths.rs`, drift-tested); the pure candidate policy
-   (`rustos_cmdres::resolution_candidates` in the shared `lib/cmdres`
+   (`tairix_cmdres::resolution_candidates` in the shared `lib/cmdres`
    crate, alias-aware `PATH` split, plus the `bundle_candidates` view for
    `man`'s bundle lookup) is unit-tested; the interpreter maps launch
    failures onto `127`/`126`; the shell passes the typed words and
@@ -1094,14 +1094,14 @@ both landed; `plans/SHELL.md` command execution):
    --bogus` argument end to end.
 5. **`cargo xtask help-lint`** — **done.** The §8.1 gate, wired into
    `cargo xtask ci` (and `ci-long`) among the cheap fail-fast checks. The
-   judgement is one definition, `rustos_help::lint_help_trees` (`lib/help`'s
+   judgement is one definition, `tairix_help::lint_help_trees` (`lib/help`'s
    host-only `lint` cargo feature; pure rows-in/violations-out, unit-tested
    per violation class), shared by the gate and the `tools/syshelp`
    aggregator tests (§2.2) so the two can never diverge. It checks, over the
-   build-discovered `rustos_syshelp::HELP_FILES` rows (the same data the
+   build-discovered `tairix_syshelp::HELP_FILES` rows (the same data the
    image planters plant): locale/document spellings and the `lib/help`
    structural bounds (§6), `en-US/` presence and completeness across the
-   standing `rustos_help::REQUIRED_LOCALES` set, no translation-only
+   standing `tairix_help::REQUIRED_LOCALES` set, no translation-only
    documents (§2.1), per-item backticked switch keys and cross-locale
    `OPTIONS` key equality against `en-US/` (§3.1 — the per-app unit tests
    keep pinning `en-US/` to each parser, which only the app crate knows),
@@ -1137,10 +1137,10 @@ both landed; `plans/SHELL.md` command execution):
    omission record (the `AGENTS.md` §20.1 canonical example), and the
    `proc.self_scope_only` omission record both `ps` and
    `sysinfo processes` emit on their default self-scoped listing (one
-   shared definition, `rustos_procinfo::emit_self_scope_omission`,
+   shared definition, `tairix_procinfo::emit_self_scope_omission`,
    parametrised only by each tool's widening spelling — `ps -e` /
    `sysinfo processes --all` — over the shared
-   `rustos_procinfo::Output::info` fd 3 seam, fail-closed on an argv
+   `tairix_procinfo::Output::info` fd 3 seam, fail-closed on an argv
    token that would break the record's JSON); advisory-only, never
    changing exit status. The remaining registered commands were surveyed
    and have nothing non-obvious to add today: `cat` and `users` omit
@@ -1164,7 +1164,7 @@ both landed; `plans/SHELL.md` command execution):
    `SYSTEM_APP_SIGNING_SEED`, the image/fixture planting of every signed
    bundle, the shared `lib/appload` verification engine (`appmgr`
    re-exports it), and the `spawn` syscall loading + verifying store
-   bundles from the mounted volume through `rustos_appload` — deriving the
+   bundles from the mounted volume through `tairix_appload` — deriving the
    child's capability request from the on-disk manifest, parking a
    boot-race spawn on the `AppStore` readiness latch, and dropping every
    embedded rxe row from the aarch64 production boot (the system

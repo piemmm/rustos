@@ -1,4 +1,4 @@
-//! Stable [`rustos_log::EventId`] constants emitted by `seatmgr`.
+//! Stable [`tairix_log::EventId`] constants emitted by `seatmgr`.
 //!
 //! Per `lib/log` convention every subsystem owns a 1 000-wide reserved
 //! range. The seat-manager service occupies `14_000..15_000` (adjacent to
@@ -6,7 +6,7 @@
 //! must never be re-used or re-numbered — external audit-log consumers rely
 //! on them.
 
-use rustos_log::EventId;
+use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `seatmgr` event identifiers.
 ///

@@ -39,7 +39,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-mem-pin-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-mem-pin-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds \
      (fail closed, never ship a test hook)."
 );

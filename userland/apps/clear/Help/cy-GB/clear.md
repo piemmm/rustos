@@ -15,13 +15,13 @@ terfynell na all glirio (mae `TERM` anhysbys yn dirywio i'r sylfaen
 «dumb») yn gwneud i'r gorchymyn fethu yn hytrach nag argraffu beitiau y
 byddai'r derfynell yn eu dangos fel sbwriel.
 
-Nid yw consolau RustOS yn cadw ôl-sgrolio, felly nid oes ôl-sgrolio i'w
+Nid yw consolau TAIRiX yn cadw ôl-sgrolio, felly nid oes ôl-sgrolio i'w
 glirio: derbynnir `-x` (opsiwn GNU sy'n cadw'r ôl-sgrolio) er
 cydnawsedd sgriptiau ac nid yw'n newid dim.
 
 ## OPTIONS
 
-- `-x` — fe'i derbynnir er cydnawsedd GNU; nid yw consol RustOS yn cadw
+- `-x` — fe'i derbynnir er cydnawsedd GNU; nid yw consol TAIRiX yn cadw
   ôl-sgrolio, felly mae'r allbwn yn union yr un fath hebddo a gydag ef.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun.
 

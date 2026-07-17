@@ -1,7 +1,7 @@
 //! Unit tests for the virtio-input keyboard console producer.
 
 use super::*;
-use rustos_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 
 /// Build one keyboard [`InputEvent`] for `keycode` with the given `value`
 /// (`1` = press, `0` = release, `2` = repeat).

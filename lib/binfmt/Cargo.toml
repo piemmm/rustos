@@ -1,6 +1,6 @@
 [package]
-name = "rustos-binfmt"
-description = "RustOS read-only executable-container decoder: typed, borrowed, fail-closed views of the rxe load image and signed-manifest summary (decoded through the lib/abi types, so the inspection view and the load path can never diverge), ELF64 (file header, program/section headers, section-name strings, symbol tables), and wasm module structure (section directory, type/function/code framing). no_std + alloc, forbids unsafe; it never executes, maps, or loads anything — every offset and count is bounds-checked against the input slice with fixed validation caps, and a malformed input is a typed error naming what failed."
+name = "tairix-binfmt"
+description = "TAIRiX read-only executable-container decoder: typed, borrowed, fail-closed views of the rxe load image and signed-manifest summary (decoded through the lib/abi types, so the inspection view and the load path can never diverge), ELF64 (file header, program/section headers, section-name strings, symbol tables), and wasm module structure (section directory, type/function/code framing). no_std + alloc, forbids unsafe; it never executes, maps, or loads anything — every offset and count is bounds-checked against the input slice with fixed validation caps, and a malformed input is a typed error naming what failed."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,11 +16,11 @@ workspace = true
 # (`LoadImage::parse_for_inspection`, `ManifestHeader::from_bytes`,
 # `decode_capability_ids`) so the inspection view and the kernel load path
 # share one definition and cannot drift.
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harnesses draw their inputs through the shared
 # seed/budget seam: one place picks the per-run seed, logs it at the start
 # of the test, and bounds the smoke/soak loop. Test scaffolding only; never
-# in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

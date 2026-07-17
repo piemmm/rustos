@@ -996,7 +996,7 @@ pub const WAIT_STATUS_KIND_STOPPED: u32 = 2;
 /// [`WAIT_STATUS_KIND_STOPPED`]; `0` and every other value are reserved so a
 /// zeroed or garbage record fails closed on decode) and `value` carries the
 /// exit code or the stopping [`Signal`]'s discriminant. `#[repr(C)]` with
-/// two fixed-width fields, so the C view (`ros_wait_status_t`) is the same
+/// two fixed-width fields, so the C view (`tairix_wait_status_t`) is the same
 /// bytes.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]

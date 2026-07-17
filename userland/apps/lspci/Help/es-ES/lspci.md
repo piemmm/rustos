@@ -26,7 +26,7 @@ validación, el listado degrada a identificadores numéricos con la
 razón en la salida de error estándar — el inventario en sí sigue
 listándose.
 
-RustOS no registra una dirección PCI `bus:device.function`: la
+TAIRiX no registra una dirección PCI `bus:device.function`: la
 dirección estable de una función es su identificador de nodo del árbol
 de hardware, mostrado como `#<node>`, y `-s` selecciona ese
 identificador (una divergencia deliberada y documentada respecto al

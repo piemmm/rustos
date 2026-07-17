@@ -6,7 +6,7 @@
 //! boot-info physical address. `entry.rs` validates the magic and
 //! records the protocol here, exactly once, before `kernel_main` runs.
 //!
-//! Consumers (the `rustos-kernel` boot pipeline and the SMP QEMU
+//! Consumers (the `tairix-kernel` boot pipeline and the SMP QEMU
 //! verticals) then obtain a [`BootData`] via [`BootData::load`] and read
 //! the memory map and RSDP through it without caring which loader
 //! booted the machine. This is the one place the two protocols are told

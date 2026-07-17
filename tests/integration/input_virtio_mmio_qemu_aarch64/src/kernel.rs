@@ -2,14 +2,14 @@
 //! integration test.
 //!
 //! The device-agnostic bring-up *and* the virtio-input key-decode tail
-//! both live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
+//! both live in the shared `tairix-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the bare virtio-input MMIO device id, the spawner registering
 //! the loaded image through the virtio-input `register`, and the boot
 //! harness. The device tail ([`virtio_input_keypress`]) is shared with
 //! any future PCI sibling.
 
-use rustos_drv_input_virtio_input::register as virtio_input_register;
-use rustos_test_virtio_qemu_support::{
+use tairix_drv_input_virtio_input::register as virtio_input_register;
+use tairix_test_virtio_qemu_support::{
     define_mmio_boot_harness_aarch64, run_virtio_mmio_scenario, virtio_input_keypress,
     FixedSpawner, ScenarioConfig, ScenarioTransport,
 };

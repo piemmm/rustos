@@ -1,6 +1,6 @@
-# rustos-input
+# tairix-input
 
-Shared input-event vocabulary for the RustOS desktop (`lib/input`,
+Shared input-event vocabulary for the TAIRiX desktop (`lib/input`,
 `AGENTS.md` §6 / §17.4 — `PLAN.md` Stage 7).
 
 This crate owns the device-level input types the desktop routes:
@@ -29,8 +29,8 @@ is depended on by the GUI crates, never the reverse — `Layer::Lib` in the
 
 Keyboard input is modelled alongside the pointer; this is the in-process
 routing vocabulary, while the bytes that cross the kernel boundary are
-`rustos_abi`'s `KeyInput` (the same producer/consumer split as `PointerButton`
-vs `rustos_abi`'s `PointerButtonCode`).
+`tairix_abi`'s `KeyInput` (the same producer/consumer split as `PointerButton`
+vs `tairix_abi`'s `PointerButtonCode`).
 
 ## Stability
 

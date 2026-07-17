@@ -5,7 +5,7 @@
 //! [`crate::smp`] (the parity reference, `plans/WIRING.md` Stage W6):
 //!
 //! * `install_current_cpu_index` publishes the firmware-validated dense
-//!   [`CpuId`](rustos_arch_api::CpuId) into the calling CPU's Arch HAL per-CPU word (`TPIDR_EL1`),
+//!   [`CpuId`](tairix_arch_api::CpuId) into the calling CPU's Arch HAL per-CPU word (`TPIDR_EL1`),
 //!   and `current_cpu_index` reads it. IRQ, timer, scheduler-current, and
 //!   continuation paths therefore index discovered-sized tables with dense
 //!   identity rather than assuming a sparse/clustered `MPIDR_EL1` affinity is
@@ -71,7 +71,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::{CpuId, PerCpu};
+use tairix_arch_api::{CpuId, PerCpu};
 
 use crate::percpu_hal::PerCpuStorage;
 
@@ -730,7 +730,7 @@ fn spintable_trampoline_addr() -> usize {
 /// closed).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]
-extern "C" fn rustos_arch_aarch64_secondary_main(cpu: CpuId) -> ! {
+extern "C" fn tairix_arch_aarch64_secondary_main(cpu: CpuId) -> ! {
     install_current_cpu_index(cpu);
     let raw = SECONDARY_ENTRY_FN.load(Ordering::Acquire);
     if raw != 0 {

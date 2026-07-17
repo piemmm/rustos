@@ -21,10 +21,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_caps::CapabilitySet;
+use tairix_abi::Errno;
+use tairix_caps::CapabilitySet;
 
-pub use rustos_users::{Gid, Uid};
+pub use tairix_users::{Gid, Uid};
 
 /// Maximum accepted input-line length, in bytes, for every prompt read —
 /// a validation bound on untrusted console input,
@@ -83,7 +83,7 @@ pub struct AuthenticatedUser {
 
 /// The default search path exported to a session: the OS command store
 /// first (`/System/Apps`, the system command apps), then installed
-/// applications (`/Apps`). RustOS has no `/usr/bin` (§16), so this is the
+/// applications (`/Apps`). TAIRiX has no `/usr/bin` (§16), so this is the
 /// analogue of a POSIX login's default `PATH`.
 pub const DEFAULT_PATH: &str = "/System/Apps:/Apps";
 
@@ -92,7 +92,7 @@ pub const DEFAULT_PATH: &str = "/System/Apps:/Apps";
 /// starts assuming that terminal type.
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
-/// The default `LANG` exported to a session: RustOS's default locale
+/// The default `LANG` exported to a session: TAIRiX's default locale
 /// (`en-US`), the mandatory canonical help locale (§16.5).
 pub const DEFAULT_LANG: &str = "en-US";
 
@@ -288,7 +288,7 @@ mod tests {
     };
     use alloc::string::ToString;
     use alloc::vec::Vec;
-    use rustos_caps::CapabilitySet;
+    use tairix_caps::CapabilitySet;
 
     #[test]
     fn id_newtypes_round_trip() {

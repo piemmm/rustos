@@ -8,8 +8,8 @@
 //!
 //! ```ignore
 //! #[panic_handler]
-//! fn rustos_panic(info: &core::panic::PanicInfo<'_>) -> ! {
-//!     rustos_kernel_core::handle_panic(info, &PANIC_CTX)
+//! fn tairix_panic(info: &core::panic::PanicInfo<'_>) -> ! {
+//!     tairix_kernel_core::handle_panic(info, &PANIC_CTX)
 //! }
 //! ```
 //!
@@ -35,7 +35,7 @@
 
 use core::panic::PanicInfo;
 
-use rustos_log::{log, Event, Field, Level, Sink};
+use tairix_log::{log, Event, Field, Level, Sink};
 
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
@@ -117,19 +117,19 @@ pub fn panic_dump<A: KernelArch>(
     let fields = [
         Field {
             key: "cpu",
-            value: rustos_log::FieldValue::Str(cpu_str),
+            value: tairix_log::FieldValue::Str(cpu_str),
         },
         Field {
             key: "file",
-            value: rustos_log::FieldValue::Str(file_str),
+            value: tairix_log::FieldValue::Str(file_str),
         },
         Field {
             key: "line",
-            value: rustos_log::FieldValue::Str(line_str),
+            value: tairix_log::FieldValue::Str(line_str),
         },
         Field {
             key: "column",
-            value: rustos_log::FieldValue::Str(col_str),
+            value: tairix_log::FieldValue::Str(col_str),
         },
     ];
 

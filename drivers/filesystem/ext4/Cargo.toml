@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-fs-ext4"
-description = "RustOS ext4 filesystem driver (read-only)."
+name = "tairix-drv-fs-ext4"
+description = "TAIRiX ext4 filesystem driver (read-only)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,10 +9,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared filesystem-signature definitions (the ext superblock magic),
 # so this driver and the volume manager's probe can never disagree.
-rustos-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
+tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
 
 [lints]
 workspace = true

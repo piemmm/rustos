@@ -2,8 +2,8 @@
 //!
 //! This module is the aarch64 analogue of `kernel/arch/{x86_64,riscv64}::paging`.
 //! It implements the Arch HAL page-table surface
-//! ([`rustos_arch_api::mmu::AddressSpace`] +
-//! [`rustos_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives: it
+//! ([`tairix_arch_api::mmu::AddressSpace`] +
+//! [`tairix_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives: it
 //! supplies the architectural mechanism the memory-isolation QEMU
 //! vertical needs — two stage-1 translation hierarchies that disagree
 //! about a single virtual address, so the MMU faults a process that
@@ -31,9 +31,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
-use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
-use rustos_arch_api::tlb::TlbShootdown;
+use tairix_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
+use tairix_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
+use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page).
 pub const PAGE_SIZE: usize = 4096;
@@ -922,7 +922,7 @@ pub struct AddressSpace {
     root_phys: u64,
     root: &'static mut [u64; ENTRIES_PER_TABLE],
     /// The frame source the page-table walk allocates intermediate
-    /// tables from, retained so the [`rustos_arch_api::mmu::AddressSpace`]
+    /// tables from, retained so the [`tairix_arch_api::mmu::AddressSpace`]
     /// HAL impl can install mappings without the caller re-supplying it.
     /// The static [`PageTablePool`] is the boot/bootstrap source; a real
     /// per-process space is built over the `kernel/mem` frame-allocator
@@ -1014,8 +1014,8 @@ impl AddressSpace {
     /// in this hierarchy.
     ///
     /// A read-only stage-1 walk used by the
-    /// [`rustos_arch_api::mmu::AddressSpace`] HAL impl to report
-    /// [`rustos_arch_api::mmu::MapError::AlreadyMapped`] rather than
+    /// [`tairix_arch_api::mmu::AddressSpace`] HAL impl to report
+    /// [`tairix_arch_api::mmu::MapError::AlreadyMapped`] rather than
     /// silently clobber an existing mapping. It dereferences present
     /// table descriptors through the identity map (phys == virt for every
     /// table the kernel owns), the same round-trip [`ensure_child`] uses.
@@ -1493,7 +1493,7 @@ pub unsafe fn adopt_boot_translation() -> bool {
     }
     // A secondary core's caches are in the architecturally-UNKNOWN
     // power-on state: it may hold stale lines (from firmware or a
-    // previous life) over the physical addresses RustOS now uses for the
+    // previous life) over the physical addresses TAIRiX now uses for the
     // boot page tables and this core's stack. Enabling the data cache
     // with those lines present lets them shadow DRAM, so the first
     // cacheable access after the MMU comes on — the table walk or a stack
@@ -1701,7 +1701,7 @@ impl TlbShootdown for AddressSpace {
 ///
 /// This is the single instruction sequence shared by both the *local*
 /// per-page flush ([`TlbShootdown::flush_page`]) and the *cross-CPU*
-/// shootdown ([`rustos_arch_api::CrossCpuTlbShootdown::shootdown_page`] on
+/// shootdown ([`tairix_arch_api::CrossCpuTlbShootdown::shootdown_page`] on
 /// [`crate::kernel_arch::Aarch64Arch`]): `tlbi vaae1is` is the
 /// inner-shareable *broadcast* variant, so the "local" and "cross-CPU"
 /// shootdowns are literally the same operation on aarch64 — there is one
@@ -1828,7 +1828,7 @@ fn active_root_phys() -> u64 {
 ///
 /// The MMU must already be enabled, and the L1 table at `root_phys` must
 /// map the currently-executing kernel `pc`, `sp`, and the MMIO the code
-/// touches identically to the outgoing root — every RustOS user space
+/// touches identically to the outgoing root — every TAIRiX user space
 /// identity-maps the low kernel window, so this holds for any task root,
 /// but a `root_phys` that does not faults the CPU on its next access.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]

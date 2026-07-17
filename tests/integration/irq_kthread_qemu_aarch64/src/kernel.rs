@@ -1,7 +1,7 @@
 //! The freestanding aarch64 test kernel: discover the PL031 RTC's GICv2
 //! SPI from the embedded `virt` device tree, then prove that SPI wakes an
 //! in-kernel service kthread parked on it through
-//! [`rustos_kernel_core::KthreadIrqWaiter`] under the live eevdf scheduler.
+//! [`tairix_kernel_core::KthreadIrqWaiter`] under the live eevdf scheduler.
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,26 +9,26 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use rustos_abi::IrqHandle;
-use rustos_arch_aarch64::context_hal::ContextSwitchHal;
-use rustos_arch_aarch64::fdt::gic_device_intid;
-use rustos_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
-use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
-use rustos_arch_aarch64::{
+use tairix_abi::IrqHandle;
+use tairix_arch_aarch64::context_hal::ContextSwitchHal;
+use tairix_arch_aarch64::fdt::gic_device_intid;
+use tairix_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
+use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
+use tairix_arch_aarch64::{
     exceptions, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
 };
-use rustos_fdt::Fdt;
-use rustos_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
-use rustos_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-use rustos_kernel_sec::TaskId;
-use rustos_log::{log, Event, EventId, Level};
+use tairix_fdt::Fdt;
+use tairix_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
+use tairix_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_sec::TaskId;
+use tairix_log::{log, Event, EventId, Level};
 
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
 /// The single-core slice runs logical CPU 0 on the boot core.
-const BOOT_CPU: rustos_arch_api::CpuId = 0;
+const BOOT_CPU: tairix_arch_api::CpuId = 0;
 
 /// Bump heap backing the leaked `IrqTable`, the scheduler, the arch
 /// handle, and the kthread's kernel stack. 2 MiB is generous headroom; it
@@ -46,8 +46,8 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: rustos_kalloc::FreeListAllocator = unsafe {
-    rustos_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
+static ALLOCATOR: tairix_kalloc::FreeListAllocator = unsafe {
+    tairix_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
 };
 
 // --- PL031 RTC (the `virt` board's GICv2 SPI device) --------------
@@ -116,7 +116,7 @@ const MAX_STEPS: u64 = 200_000_000;
 /// this bridge — the same shape as x86_64's `IoApicController` and the
 /// production `GicIrqController` — lives in the test crate (which may
 /// depend on both). `mask` delegates to the HAL
-/// [`rustos_arch_api::IrqController`] `mask` (which clears the distributor
+/// [`tairix_arch_api::IrqController`] `mask` (which clears the distributor
 /// enable bit and emits the `SeqCst` mask-before-wake fence).
 struct GicBridge {
     ctrl: GicController<VolatileGicMmio>,
@@ -131,7 +131,7 @@ static BRIDGE: GicBridge = GicBridge {
 
 impl IrqController for GicBridge {
     fn mask(&self, line: u32) -> Result<(), MaskError> {
-        rustos_arch_api::IrqController::mask(&self.ctrl, line).map_err(|_| MaskError::OutOfRange)
+        tairix_arch_api::IrqController::mask(&self.ctrl, line).map_err(|_| MaskError::OutOfRange)
     }
 }
 
@@ -222,7 +222,7 @@ extern "C" fn rtc_dispatch(intid: u32) {
 }
 
 /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-/// calls (via `rustos_arch_aarch64_main`).
+/// calls (via `tairix_arch_aarch64_main`).
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if TEST_DRIVEN

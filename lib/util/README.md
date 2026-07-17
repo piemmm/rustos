@@ -1,4 +1,4 @@
-# `rustos-util`
+# `tairix-util`
 
 Stability tier: **experimental**.
 

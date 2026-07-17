@@ -4,7 +4,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_help::{HelpSource, SourceError, MAX_DOC_LEN};
+use tairix_help::{HelpSource, SourceError, MAX_DOC_LEN};
 
 use crate::io::BundleStore;
 

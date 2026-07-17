@@ -1,22 +1,22 @@
-//! Inspection view of the RustOS `rxe` load image and signed manifest.
+//! Inspection view of the TAIRiX `rxe` load image and signed manifest.
 //!
 //! Both views decode *through* the `lib/abi` wire types — the load image
 //! via [`LoadImage::parse_for_inspection`] (every structural load-time
 //! invariant, with the CFI tag reported rather than compared, since an
 //! inspection tool has no kernel interface hash) and the manifest via
 //! [`ManifestHeader::from_bytes`] plus
-//! [`rustos_abi::decode_capability_ids`]. There is no second copy of
+//! [`tairix_abi::decode_capability_ids`]. There is no second copy of
 //! either wire format here, so the view a user reads and the image the
 //! kernel loads can never disagree.
 
 use alloc::vec::Vec;
 
-use rustos_abi::{
+use tairix_abi::{
     decode_capability_ids, CapabilityId, Errno, LoadHeader, LoadImage, ManifestHeader, Segment,
     LOAD_FLAG_PIE, MANIFEST_MAX_CAPABILITIES,
 };
 
-pub use rustos_abi::RxeError;
+pub use tairix_abi::RxeError;
 
 /// A decoded, structurally validated `rxe` load image plus its raw header.
 ///
@@ -134,7 +134,7 @@ impl ManifestSummary {
 mod tests {
     use super::{ManifestSummary, RxeError, RxeView};
     use alloc::vec::Vec;
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilityId, Errno, LoadHeader, ManifestHeader, NeededLibrary, Segment, LOAD_FLAG_PIE,
         LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
     };
@@ -147,20 +147,20 @@ mod tests {
             file_offset: 0,
             file_size: 64,
             mem_size: RXE_PAGE_SIZE,
-            permission: rustos_abi::RxePermission::ReadExecute,
+            permission: tairix_abi::RxePermission::ReadExecute,
         };
         let data = Segment {
             vaddr: RXE_PAGE_SIZE * 2,
             file_offset: 64,
             file_size: 32,
             mem_size: RXE_PAGE_SIZE,
-            permission: rustos_abi::RxePermission::ReadWrite,
+            permission: tairix_abi::RxePermission::ReadWrite,
         };
         let needed = NeededLibrary::from_reference("/System/Libraries/libexample.so")
             .expect("valid reference");
         let header = LoadHeader {
             magic: LOAD_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
             flags: LOAD_FLAG_PIE,
             segment_count: 2,
             needed_count: 1,
@@ -180,7 +180,7 @@ mod tests {
         let count = u16::try_from(ids.len()).expect("test counts fit");
         let header = ManifestHeader {
             magic: MANIFEST_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
             flags: 0,
             capability_count: count,
             reserved0: 0,

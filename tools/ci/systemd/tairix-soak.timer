@@ -1,0 +1,15 @@
+# systemd timer — fire tairix-soak.service nightly at 02:00 local time.
+#
+# The Linux counterpart of the launchd soak agent's StartCalendarInterval.
+# See tairix-soak.service for install instructions.
+
+[Unit]
+Description=Run the TAIRiX nightly soaks at 02:00
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+# Catch up a missed nightly after the host was asleep at 02:00.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

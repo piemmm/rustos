@@ -1,8 +1,8 @@
-//! RustOS compositing window manager (`userland/gui/wm`).
+//! TAIRiX compositing window manager (`userland/gui/wm`).
 //!
-//! This crate is the user-space compositor for the RustOS desktop. It composes per-window [`Surface`]s into a single
+//! This crate is the user-space compositor for the TAIRiX desktop. It composes per-window [`Surface`]s into a single
 //! scan-out frame and presents it through a capability-gated
-//! [`Display`](rustos_abi::driver::display::Display) driver; the kernel
+//! [`Display`](tairix_abi::driver::display::Display) driver; the kernel
 //! never composites (the desktop is an
 //! optional, one-way-dependent userland frontend).
 //!
@@ -27,11 +27,11 @@
 //!   under a primary press (*click-to-activate*), and drives
 //!   interactive window move-grabs.
 //! - **Pointer cursor overlay** ([`cursor`]): a scalable, colourful,
-//!   replaceable [`CursorImage`](rustos_cursor::CursorImage) from
+//!   replaceable [`CursorImage`](tairix_cursor::CursorImage) from
 //!   `lib/cursor`, composited as the top-most layer so its hotspot
 //!   tracks the pointer.
 //! - **Cursor selection** ([`select`]): the [`CursorController`]
-//!   chooses the [`CursorKind`](rustos_theme::CursorKind) from live
+//!   chooses the [`CursorKind`](tairix_theme::CursorKind) from live
 //!   interaction state (move-grab, the window under the pointer, the
 //!   desktop) and installs the matching artwork.
 //!
@@ -42,7 +42,7 @@
 //!
 //! [`Surface`]: surface::Surface
 //! [`Window`]: window::Window
-//! [`DisplayMode`]: rustos_abi::driver::display::DisplayMode
+//! [`DisplayMode`]: tairix_abi::driver::display::DisplayMode
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

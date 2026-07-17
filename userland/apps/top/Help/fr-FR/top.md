@@ -36,7 +36,7 @@ ligne mémoire exige `CAP_SYSINFO_KERNEL` — un appelant qui ne le détient
 pas voit le refus énoncé et la session continue.
 
 La ligne `%Cpu(s)` montre la part du dernier intervalle que l'ensemble
-des CPU a passée occupée (à exécuter des tâches) et inactive. RustOS ne
+des CPU a passée occupée (à exécuter des tâches) et inactive. TAIRiX ne
 comptabilise que les temps occupé et inactif : là où le `top` GNU
 décompose la part occupée en utilisateur/système/nice/iowait, cette
 ligne montre délibérément les deux chiffres réels.
@@ -68,7 +68,7 @@ portent :
   automatiques, en secondes avec une fraction facultative (seul le
   premier chiffre décimal, les dixièmes, est conservé) : `top -d 1.5`
   rafraîchit toutes les 1,5 secondes. Par défaut 3,0. Le `top` GNU
-  accepte un délai nul et rafraîchit aussi vite que possible ; RustOS
+  accepte un délai nul et rafraîchit aussi vite que possible ; TAIRiX
   ne boucle jamais à vide, donc un zéro est ramené au minimum de
   0,1 s.
 - `-h, -?` — afficher l'aide courte de cette commande et quitter. Dans

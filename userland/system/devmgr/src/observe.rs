@@ -11,7 +11,7 @@
 //! before use and a malformed snapshot is rejected whole, never partially
 //! interpreted.
 
-use rustos_abi::{Errno, HwNode, HwTreeHeader};
+use tairix_abi::{Errno, HwNode, HwTreeHeader};
 
 /// Decode the snapshot header and invoke `visit` once for each
 /// [`HwNode`] that follows, in wire order.
@@ -61,7 +61,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::*;
-    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
+    use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
 
     /// Encode `[HwTreeHeader][HwNode; n]` exactly as the kernel source does.
     fn encode(generation: u64, nodes: &[HwNode]) -> Vec<u8> {

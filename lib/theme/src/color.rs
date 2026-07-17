@@ -12,7 +12,7 @@
 /// Channels are **not** premultiplied; `a` is an independent opacity where
 /// `0` is fully transparent and `255` fully opaque. A consumer that needs
 /// to composite the colour converts it into the shared rasteriser's
-/// premultiplied pixel type (`From<Rgba> for rustos_raster::Color`).
+/// premultiplied pixel type (`From<Rgba> for tairix_raster::Color`).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Rgba {
     /// Red channel, `0..=255`.

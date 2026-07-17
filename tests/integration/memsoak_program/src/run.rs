@@ -2,11 +2,11 @@
 //! the program the aarch64 memory-stability QEMU vertical runs from the
 //! scripted root shell (`plans/APPS.md` "Immediate work" I2/I3).
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` soaks the kernel's per-cycle memory behaviour on the live system:
@@ -47,10 +47,10 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use rustos_abi::sysinfo::{KernelMemoryStats, SysinfoQueryId};
-    use rustos_procinfo::{call, for_each_process, IpcTransport, Transport};
-    use rustos_rt::io::{write_stderr_line, Stdout, Write};
-    use rustos_test_memsoak::{
+    use tairix_abi::sysinfo::{KernelMemoryStats, SysinfoQueryId};
+    use tairix_procinfo::{call, for_each_process, IpcTransport, Transport};
+    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_test_memsoak::{
         report_line, verdict, Verdict, CHILD_PATH, CYCLE_PARK_NANOS, MEASURED_CYCLES, WARMUP_CYCLES,
     };
 
@@ -72,7 +72,7 @@ mod program {
     /// not an error), then walk the self-scoped process list. Any step that
     /// refuses outright fails the cycle with its reason.
     fn cycle(transport: &dyn Transport) -> Result<(), &'static str> {
-        let pid = rustos_rt::spawn(CHILD_PATH);
+        let pid = tairix_rt::spawn(CHILD_PATH);
         if pid < 0 {
             return Err("memsoak: child spawn refused");
         }
@@ -80,7 +80,7 @@ mod program {
             return Err("memsoak: child PID out of range");
         };
         let mut status = 0i32;
-        if rustos_rt::wait_exit(pid, &mut status) < 0 {
+        if tairix_rt::wait_exit(pid, &mut status) < 0 {
             return Err("memsoak: child wait refused");
         }
         if status != 0 {
@@ -91,7 +91,7 @@ mod program {
         // error is absorbed; the park itself — arming the one-shot and
         // being woken by it — is the behaviour under test.
         let mut scratch = [0u8; 1];
-        let _ = rustos_rt::stdin_timeout(&mut scratch, CYCLE_PARK_NANOS);
+        let _ = tairix_rt::stdin_timeout(&mut scratch, CYCLE_PARK_NANOS);
         for_each_process(transport, false, |_| Ok(()))
             .map_err(|_| "memsoak: self process-list walk failed")?;
         Ok(())
@@ -106,13 +106,13 @@ mod program {
     /// remains, and exiting would still be wrong).
     fn fail(reason: &str) -> ! {
         write_stderr_line(reason);
-        let _ = rustos_rt::park_forever();
+        let _ = tairix_rt::park_forever();
         loop {
             core::hint::spin_loop();
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall. Returns `0` only for a proven-stable soak; every other
     /// outcome diverges into [`fail`].
@@ -151,13 +151,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

@@ -1,5 +1,5 @@
 //! `plans/PI.md` P11 Chunk B-2 INCREMENT (2) QEMU integration test: boot
-//! the production aarch64 `rustos-kernel` pipeline on the `virt` board with
+//! the production aarch64 `tairix-kernel` pipeline on the `virt` board with
 //! a planted whole-disk encrypted-root image, and prove the **in-kernel
 //! root-unlock kthread admission path** mounts the root so `root`/`root`
 //! authenticates.
@@ -17,7 +17,7 @@
 //! * `spawn_session_qemu_aarch64` boots the production pipeline with **no**
 //!   disk, so `unlock_service::spawn_if_present` is a no-op.
 //!
-//! This vertical attaches the shared `rustos_test_encrypted_root_image`
+//! This vertical attaches the shared `tairix_test_encrypted_root_image`
 //! whole-disk image as a virtio-blk-mmio device and boots
 //! `boot_aarch64::boot` verbatim. The production path then:
 //!
@@ -56,7 +56,7 @@
 //! shared fixture by `root_unlock_login` (which inspects the installed cell
 //! directly), and the per-console `login` authenticating end to end into a
 //! real shell session is proven by the session-ceiling vertical
-//! (`rustos-test-session-ceiling-qemu-aarch64`, `plans/CAPABILITY_USE.md`
+//! (`tairix-test-session-ceiling-qemu-aarch64`, `plans/CAPABILITY_USE.md`
 //! CU3). This vertical therefore keys on the install witness, not a
 //! `login` success.
 //!
@@ -88,11 +88,11 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_kernel::unlock_service::USERS_DB_INSTALLED_MESSAGE;
-    use rustos_log::{Event, Sink};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::boot as boot_aarch64;
+    use tairix_kernel::unlock_service::USERS_DB_INSTALLED_MESSAGE;
+    use tairix_log::{Event, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -142,12 +142,12 @@ mod kernel {
     /// finisher parks the CPU, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_root_unlock_admission_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_root_unlock_admission_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt`
     /// blob's address is forwarded to the production boot pipeline with the
@@ -159,8 +159,8 @@ mod kernel {
             dtb,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
-            &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
+            tairix_log::Level::Info,
+            &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }
 }

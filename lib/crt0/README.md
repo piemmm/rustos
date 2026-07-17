@@ -1,18 +1,18 @@
-# rustos-crt0
+# tairix-crt0
 
 The C-callable `abi-v1` program startup/teardown object (crt0). On each native
 Tier-1 target it provides the program's `_start` entry symbol: it sets up the C
 runtime environment (stack alignment per the platform C ABI; the `argc` /
 `argv` / `envp` a C `main` expects, marshalled from the kernel's
-position-independent startup-vector block, `rustos_abi::process`), installs the
+position-independent startup-vector block, `tairix_abi::process`), installs the
 per-process stack canary, calls the program's `main`, and routes its return
-value through the `exit` syscall (`rustos_abi_sys::sys_exit`, the `ros_sys_exit`
+value through the `exit` syscall (`tairix_abi_sys::sys_exit`, the `tairix_sys_exit`
 stub). A program **not** written in Rust links it as its startup object.
 
-Together with [`rustos-abi-sys`](../abi-sys) (the `ros_sys_<name>` syscall
+Together with [`tairix-abi-sys`](../abi-sys) (the `tairix_sys_<name>` syscall
 stubs) it forms the curated `/System/Libraries/` class *System runtime / C ABI*
 (`AGENTS.md` §16.4): the minimal libc-equivalent that lets a non-Rust program
-run on RustOS. It is dynamically linked like every curated library, so one
+run on TAIRiX. It is dynamically linked like every curated library, so one
 security update covers every consumer. The staged build plan is
 `plans/CCOMPAT.md` (stage CC3).
 
@@ -40,7 +40,7 @@ closed — crt0 terminates the program with a reserved non-zero exit code rather
 than indexing out of range or truncating the runtime (`AGENTS.md` §2.9). The
 `rxe` hardening invariants for the hosted image (PIE, `R`/`RX`/`RW`-only
 segments, the syscall-hash CFI tag, stack canaries; `AGENTS.md` §9/§19.2) are
-enforced at load time by `rustos_abi::rxe::LoadImage::parse` — a non-conforming
+enforced at load time by `tairix_abi::rxe::LoadImage::parse` — a non-conforming
 image is refused, not patched — and crt0 seeds the compiler's
 `__stack_chk_guard` from the per-process random canary the kernel placed in the
 startup vector.

@@ -13,12 +13,12 @@
 //! damage rectangle it just changed — never pixel bytes. The session
 //! reads the pixels through its own mapping of the granted region.
 
-use rustos_abi::driver::display::{DamageRect, DisplayMode};
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::window_ipc::{
+use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::window_ipc::{
     decode_create_reply, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
 };
-use rustos_abi::{Errno, ProcId};
+use tairix_abi::{Errno, ProcId};
 
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
@@ -155,8 +155,8 @@ impl<T: WindowTransport> WindowClient<T> {
     /// the caller does not own), a transport failure, or a corrupt status
     /// frame.
     ///
-    /// [`WindowEvent::FilePicked`]: rustos_abi::window_ipc::WindowEvent::FilePicked
-    /// [`WindowEvent::PickCancelled`]: rustos_abi::window_ipc::WindowEvent::PickCancelled
+    /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
+    /// [`WindowEvent::PickCancelled`]: tairix_abi::window_ipc::WindowEvent::PickCancelled
     pub fn pick_file(&mut self, window_id: u64) -> Result<(), Errno> {
         let request = WindowRequest::PickFile { window_id }.to_le_bytes();
         self.status_call(&request)

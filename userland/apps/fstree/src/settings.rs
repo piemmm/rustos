@@ -14,7 +14,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::fs::Fs;
 

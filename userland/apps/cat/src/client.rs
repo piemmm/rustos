@@ -4,8 +4,8 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_help::{own_short_help, HelpSource};
+use tairix_abi::Errno;
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Numbering, Render, Source};
 use crate::error::CatError;
@@ -224,8 +224,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     /// A Help tree with no documents at all: the short-help fallback path.
     struct NoHelp;
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn large_file_streams_in_chunks() {
         // Two-and-a-bit chunks exercise the multi-read streaming loop.
-        let pattern = b"rustos!";
+        let pattern = b"tairix!";
         let mut data = Vec::new();
         for i in 0..(super::READ_CHUNK * 2 + 7) {
             data.push(pattern[i % pattern.len()]);

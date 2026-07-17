@@ -7,7 +7,7 @@
 
 use core::fmt;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a browser navigation did not complete.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

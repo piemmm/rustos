@@ -20,7 +20,7 @@
 //! [`NULL_PROCESS_SPAWN`](crate::spawn::NULL_PROCESS_SPAWN) do for their
 //! syscalls.
 
-use rustos_abi::{Errno, MapFlags};
+use tairix_abi::{Errno, MapFlags};
 
 /// The kernel-side producer of anonymous user memory.
 ///

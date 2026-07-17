@@ -16,7 +16,7 @@
 //! recovers a halted endpoint per transfer) and fails the command rather
 //! than trusting the frame.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::scsi::{CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
 

@@ -7,15 +7,15 @@
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use rustos_arch_api::mmu::AddressSpace as _;
-use rustos_arch_api::tlb::TlbShootdown as _;
-use rustos_arch_x86_64::paging::{self, KERNEL_VMA_BASE, PAGE_SIZE};
-use rustos_arch_x86_64::{fault, qemu_exit};
-use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::{
+use tairix_arch_api::mmu::AddressSpace as _;
+use tairix_arch_api::tlb::TlbShootdown as _;
+use tairix_arch_x86_64::paging::{self, KERNEL_VMA_BASE, PAGE_SIZE};
+use tairix_arch_x86_64::{fault, qemu_exit};
+use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
-use rustos_log::{log, Event, EventId, Level, Sink};
+use tairix_log::{log, Event, EventId, Level, Sink};
 
 /// `EventId` emitted when every boot init phase completed.
 const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
@@ -90,7 +90,7 @@ fn note(level: Level, id: EventId, message: &'static str) {
     );
 }
 
-/// Forward to the shared bridge in `rustos_kernel`.
+/// Forward to the shared bridge in `tairix_kernel`.
 #[panic_handler]
 fn stack_guard_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
     handle_panic_via_kernel_core(info)
@@ -252,6 +252,6 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         multiboot_info,
         &SERIAL_SINK,
         &AUDIT_SINK,
-        rustos_log::Level::Info,
+        tairix_log::Level::Info,
     )
 }

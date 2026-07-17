@@ -1,9 +1,9 @@
 //! The `ulimit` builtin: report and impose the calling process's resource
 //! limits.
 //!
-//! RustOS sizes resource *capacities* from discovered hardware and grows
+//! TAIRiX sizes resource *capacities* from discovered hardware and grows
 //! them on demand; on top of those defaults a principal may impose a
-//! lower ceiling on itself and its children — the RustOS `ulimit`/`rlimit`
+//! lower ceiling on itself and its children — the TAIRiX `ulimit`/`rlimit`
 //! facility. This builtin is the command-line face of that facility,
 //! marshalling through the [`LimitStore`](crate::host::LimitStore) seam to
 //! the `rlimit_get` / `rlimit_set` syscalls.
@@ -29,13 +29,13 @@
 //!
 //! Lowering a bound is always permitted; *raising* a hard bound above the
 //! inherited ceiling is gated kernel-side on
-//! [`CapabilityId::RLIMIT_RAISE`](rustos_abi::CapabilityId::RLIMIT_RAISE) and surfaces here as an error the builtin reports — it is never
+//! [`CapabilityId::RLIMIT_RAISE`](tairix_abi::CapabilityId::RLIMIT_RAISE) and surfaces here as an error the builtin reports — it is never
 //! silently swallowed.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use rustos_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
+use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
 use crate::builtin::BuiltinContext;
 
@@ -287,7 +287,7 @@ fn parse_value(text: &str) -> Option<u64> {
 mod tests {
     use crate::test_support::Fixture as SharedFixture;
     use alloc::vec::Vec;
-    use rustos_abi::{Errno, LimitKind, ResourceLimit};
+    use tairix_abi::{Errno, LimitKind, ResourceLimit};
 
     /// The shared fixture with `ulimit`'s operand-only calling convention:
     /// `run` prepends the builtin name and unwraps the dispatch (the name is

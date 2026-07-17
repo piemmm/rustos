@@ -1,4 +1,4 @@
-//! `rustos-dma-barrier` — DMA memory-ordering barriers for user-space drivers.
+//! `tairix-dma-barrier` — DMA memory-ordering barriers for user-space drivers.
 //!
 //! A user-space driver shares a block of memory with a device that is a
 //! separate bus master (an xHCI controller, a virtio device, …). On a
@@ -14,7 +14,7 @@
 //!
 //! This crate is the single home of the architecture-specific barrier
 //! instruction, the user-space analogue of the syscall-trap
-//! carve-out in `rustos-abi-trap` and the assembly carve-out it belongs to:
+//! carve-out in `tairix-abi-trap` and the assembly carve-out it belongs to:
 //! the barrier is something the silicon strictly requires and that no
 //! target-neutral Rust can express to the right shareability domain. (Rust's
 //! own [`core::sync::atomic::fence`] lowers to an *inner*-shareable `dmb ish`

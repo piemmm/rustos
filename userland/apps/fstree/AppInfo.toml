@@ -11,7 +11,7 @@
 # re-spawns this same binary as the parser-sandbox decode worker
 # (docs/src/security/sandbox.md): the disassembly viewer's container and
 # instruction decoding runs there, never in this process.
-id = "os.rustos.fstree"
+id = "os.tairix.fstree"
 name = "fstree"
 version = "0.1.0"
 kind = "command"

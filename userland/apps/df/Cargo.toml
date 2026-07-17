@@ -1,6 +1,6 @@
 [package]
-name = "rustos-df"
-description = "RustOS `df` CLI: report filesystem space usage (`plans/APPS.md` §12.1 Stage C)."
+name = "tairix-df"
+description = "TAIRiX `df` CLI: report filesystem space usage (`plans/APPS.md` §12.1 Stage C)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,48 +11,48 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-du` and
-# `rustos-mount`. `cargo build -p rustos-df` builds the tool program with
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-du` and
+# `tairix-mount`. `cargo build -p tairix-df` builds the tool program with
 # it; host tooling builds only the pure *library*, so the host test build
 # never pulls the userland runtime's `_start` / `#[global_allocator]` /
 # panic handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-df` library (the pure parse + report
+# The package is both the `tairix-df` library (the pure parse + report
 # engine below) and the `Run` entry-point binary of the `df` tool. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets
 # and an inert host stub elsewhere (see `src/run.rs`).
 [[bin]]
-name = "rustos-df-run"
+name = "tairix-df-run"
 path = "src/run.rs"
 
 [dependencies]
 # The audited ABI vocabulary: `Errno`, the `MountRecord`/`VolumeStats`
 # rows, and the fd-3 advisory record.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-?`/`--help`
 # switches use (plans/APPS.md).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The shared System Information API client: the `MOUNT_LIST` paging walk
 # (`for_each_mount`) `mount` uses too — never a second query client.
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The one GNU size vocabulary: `--block-size` parsing and the
 # human-readable ceiling renderings, shared with `du`.
-rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, and the
 # standard-stream I/O). Pulled in only for the bare-metal targets the
 # program is actually built for; on the host it is not linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's
 # syscall-backed own-bundle `HelpSource` (`BundleHelp`) and the shared
 # production client seams in `lib/procinfo` (`IpcTransport`), enabled
 # through its `program` feature exactly as `ps` does.
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }

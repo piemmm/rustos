@@ -1,6 +1,6 @@
-//! RustOS shared filesystem path-spelling parser (`lib/path`).
+//! TAIRiX shared filesystem path-spelling parser (`lib/path`).
 //!
-//! RustOS storage is a *forest of named roots*, not one global Unix tree, so a
+//! TAIRiX storage is a *forest of named roots*, not one global Unix tree, so a
 //! path string names its root explicitly. Several components need to turn such
 //! a string into a structured, validated form — the shell first (`cd`, prompt
 //! display, word and tilde expansion, completion), and later the file browser
@@ -42,7 +42,7 @@
 //! A leading `Name:` (single colon) that is **not** followed by `/` is refused
 //! with [`PathError::NotAPath`]: that is either a resource reference
 //! (`namespace:selector`, owned by the separate resource-reference grammar) or
-//! an alias path missing its `/` (which RustOS deliberately does not treat as a
+//! an alias path missing its `/` (which TAIRiX deliberately does not treat as a
 //! relative path — there is no Windows-style `Drive:relative`). A caller that
 //! also handles resource references routes a `NotAPath` string to that resolver.
 //!
@@ -75,7 +75,7 @@
 //! # Example
 //!
 //! ```
-//! use rustos_path::{parse, Root};
+//! use tairix_path::{parse, Root};
 //!
 //! let p = parse("Home:/Documents/../Photos/2026").unwrap();
 //! assert_eq!(p.root(), &Root::Alias("Home".into()));
@@ -173,7 +173,7 @@ pub enum Root {
     Relative,
 }
 
-/// A parsed, normalised RustOS path: a [`Root`] plus its components.
+/// A parsed, normalised TAIRiX path: a [`Root`] plus its components.
 ///
 /// Components never contain `/`, are never empty, and — for a [`Root::View`],
 /// [`Root::Alias`], or [`Root::VolumeId`] — never contain a `.` or `..`
@@ -363,7 +363,7 @@ impl fmt::Display for PathError {
     }
 }
 
-/// Parse and normalise a RustOS path string into a typed [`Path`].
+/// Parse and normalise a TAIRiX path string into a typed [`Path`].
 ///
 /// See the crate documentation for the accepted spellings, the fixed security
 /// bounds, and the fail-closed rules. This is the only fallible step; the
@@ -653,12 +653,12 @@ mod tests {
 
     #[test]
     fn view_path() {
-        let p = parse("/System/Kernel/rustos.rxe").unwrap();
+        let p = parse("/System/Kernel/tairix.rxe").unwrap();
         assert_eq!(p.root(), &Root::View);
-        assert_eq!(components(&p), vec!["System", "Kernel", "rustos.rxe"]);
+        assert_eq!(components(&p), vec!["System", "Kernel", "tairix.rxe"]);
         assert!(p.is_absolute());
         assert_eq!(p.alias(), None);
-        assert_eq!(p.to_string(), "/System/Kernel/rustos.rxe");
+        assert_eq!(p.to_string(), "/System/Kernel/tairix.rxe");
     }
 
     #[test]

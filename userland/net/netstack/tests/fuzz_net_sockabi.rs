@@ -1,6 +1,6 @@
 //! Deterministic fuzz harness for the socket-service serve path
 //! (`plans/NETWORK.md` N4b): the decode + capability-check + dispatch
-//! pipeline of [`rustos_netstack::SocketService::serve`].
+//! pipeline of [`tairix_netstack::SocketService::serve`].
 //!
 //! Invariants, for any request bits a local caller crafts and any
 //! capability set it presents:
@@ -11,16 +11,16 @@
 //! 3. The socket table never exceeds its global bound.
 //!
 //! Runs a fixed smoke sweep under plain `cargo test`; keeps drawing from
-//! the same seeded stream until `RUSTOS_FUZZ_BUDGET_SECS` elapses under
+//! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
-use rustos_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
-use rustos_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
-use rustos_abi::{
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
+use tairix_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
+use tairix_abi::{
     CapabilityId, CapabilitySummary, Duration64, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
 };
-use rustos_log::{Event, Sink};
-use rustos_netstack::{Caller, Netstack, SocketService};
+use tairix_log::{Event, Sink};
+use tairix_netstack::{Caller, Netstack, SocketService};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -120,9 +120,9 @@ impl Lcg {
 
 #[test]
 fn serve_never_panics_and_gates_on_cap_net() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "serve_never_panics_and_gates_on_cap_net",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut svc = SocketService::new();
     let mut stack = routed_stack();
@@ -136,7 +136,7 @@ fn serve_never_panics_and_gates_on_cap_net() {
     };
     let mut request = [0u8; 256];
     let mut reply = [0u8; 64];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let now = Duration64::from_secs(2);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
@@ -167,9 +167,9 @@ fn serve_never_panics_and_gates_on_cap_net() {
                 assert_eq!(svc.len(), before, "no socket created without CAP_NET");
             }
             // The global bound is never exceeded.
-            assert!(svc.len() <= rustos_netstack::MAX_SOCKETS_TOTAL);
+            assert!(svc.len() <= tairix_netstack::MAX_SOCKETS_TOTAL);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

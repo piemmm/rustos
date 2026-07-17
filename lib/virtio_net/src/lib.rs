@@ -1,6 +1,6 @@
-//! RustOS arch-neutral virtio-net link-layer device logic.
+//! TAIRiX arch-neutral virtio-net link-layer device logic.
 //!
-//! Implements [`rustos_abi::driver::net::Net`] on top of the
+//! Implements [`tairix_abi::driver::net::Net`] on top of the
 //! cross-arch virtio transport from `lib/virtio`. As with
 //! `virtio_blk`, the device logic is bus-agnostic: the same source
 //! compiles against the PCI and MMIO transports
@@ -33,7 +33,7 @@
 //! [`VirtioNet`] is the device engine: a consumer brings it up with
 //! [`VirtioNet::open`] and drives frame I/O through the [`Net`] trait.
 //! The driver-host `register` shell that wraps it (and the load-time
-//! `CAP_DRV_LOAD` gate) lives in the `rustos-drv-network-virtio-net`
+//! `CAP_DRV_LOAD` gate) lives in the `tairix-drv-network-virtio-net`
 //! crate, which re-exports this type.
 //!
 //! # Capabilities
@@ -68,9 +68,9 @@
 //! # Zero-on-free
 //!
 //! [`Net::service`] honours a
-//! [`BufferClass::Sensitive`](rustos_abi::driver::BufferClass) ring
+//! [`BufferClass::Sensitive`](tairix_abi::driver::BufferClass) ring
 //! class by scrubbing the persistent staging through
-//! [`rustos_virtio::BounceBuffer::into_slab`] before the buffers are
+//! [`tairix_virtio::BounceBuffer::into_slab`] before the buffers are
 //! reused for the next packet; a harvested frame still awaiting a
 //! free RX slot is scrubbed after it is delivered, never before.
 
@@ -82,13 +82,13 @@ mod channel;
 pub use channel::NetChannelServer;
 
 use core::convert::TryFrom;
-use rustos_abi::driver::net::{
+use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,
 };
-use rustos_abi::driver::net_ring::{FrameRings, ServiceReport};
-use rustos_abi::DriverError;
-use rustos_abi::Errno;
-use rustos_virtio::{
+use tairix_abi::driver::net_ring::{FrameRings, ServiceReport};
+use tairix_abi::DriverError;
+use tairix_abi::Errno;
+use tairix_virtio::{
     BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
     VirtioHost,
 };
@@ -142,7 +142,7 @@ mod wire {
 /// a `VirtioHostFactory` (the seam defined in `lib/virtio`)
 /// and lives only for the duration of that load, so the driver borrows
 /// it for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads). This
-/// mirrors [`VirtioBlk`](../rustos_drv_storage_virtio_blk/struct.VirtioBlk.html).
+/// mirrors [`VirtioBlk`](../tairix_drv_storage_virtio_blk/struct.VirtioBlk.html).
 pub struct VirtioNet<'h, T: Transport> {
     transport: T,
     rx_queue: SplitQueue,

@@ -1,8 +1,8 @@
-//! Console-backed [`rustos_log::Sink`] for the freestanding aarch64 kernel.
+//! Console-backed [`tairix_log::Sink`] for the freestanding aarch64 kernel.
 //!
 //! Mirrors the riscv64 SBI-console sink (`kernel/arch/riscv64::serial`)
 //! and the x86_64 COM1 sink: one formatted line per event, in the one
-//! shared diagnostic format ([`rustos_log::write_diag_line`]) the
+//! shared diagnostic format ([`tairix_log::write_diag_line`]) the
 //! `kernel/core` audit consumers and the QEMU serial scraper expect —
 //!
 //! ```text
@@ -144,7 +144,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use rustos_log::{Event, Sink};
+use tairix_log::{Event, Sink};
 
 // The console MMIO seam is only reached by the freestanding transmit /
 // receive primitives below; the host build uses inert stubs, so importing
@@ -244,7 +244,7 @@ impl SerialRing {
 /// `lib/sync::SpinLock` is the workspace lock primitive, but `lib/sync`
 /// also carries the `epoch` reclamation module, which pulls in `alloc`
 /// (`Box`/`Vec`); Cargo feature-unifies a dependency across the whole
-/// target build, so *any* edge from this crate to `rustos-sync` would
+/// target build, so *any* edge from this crate to `tairix-sync` would
 /// force a global allocator onto this port's minimal, deliberately
 /// allocator-less QEMU test bins (they link only this crate). This tiny
 /// guard avoids that. It is the one place the serial ring needs mutual
@@ -628,14 +628,14 @@ impl core::fmt::Write for RingWriter<'_> {
 }
 
 /// Format one event into `w` in the shared diagnostic line shape
-/// ([`rustos_log::write_diag_line`]), stamped with the `CNTPCT_EL0`-derived
+/// ([`tairix_log::write_diag_line`]), stamped with the `CNTPCT_EL0`-derived
 /// uptime and a coloured level tag (both the serial capture and the
 /// framebuffer console render ANSI SGR).
 ///
 /// Called by the buffered UART path ([`RingWriter`]) and the direct
 /// fallback / video path ([`ConsoleWriter`]) so both emit the one format.
 fn write_formatted<W: core::fmt::Write>(w: &mut W, event: &Event<'_>) {
-    rustos_log::write_diag_line(w, Some(crate::kernel_arch::uptime_ms()), true, event);
+    tairix_log::write_diag_line(w, Some(crate::kernel_arch::uptime_ms()), true, event);
 }
 
 /// Read one byte from the currently-configured console UART **without

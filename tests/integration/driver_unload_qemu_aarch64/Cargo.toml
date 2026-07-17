@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-driver-unload-qemu-aarch64"
+name = "tairix-test-driver-unload-qemu-aarch64"
 description = "plans/USB.md U1 QEMU integration test: prove the kernel driver-unload mechanism on the aarch64 virt board. It autoloads the signed driver stub through the production devmgr-driven spawn path (exactly as driver-spawn-qemu-aarch64), then tears it back down through the production InitSpawnCtx::terminate_driver_process seam (the symmetric partner of spawn_driver_process the driver-store server drives for StoreRequest::Unload) and asserts the driver task was reaped (scheduler live-task count 1->0) and its capability record + address-space-registry entry reclaimed, and that a second unload of the now-gone handle fails closed with NotFound (idempotent). PASS once teardown reclaimed everything and the idempotent miss was observed (audit 13001 node-bound + 4033 driver-unloaded + 4302)."
 version.workspace = true
 edition.workspace = true
@@ -15,9 +15,9 @@ workspace = true
 # `-M virt` slice of the kernel-side production spawner (verified `.rxe`
 # payload from `/System/Drivers/` → `build_process_image` → spawn → reply
 # over `ipc_send`, with a budget-bounded cooperative wait host-side). The
-# fixture program (`rustos-test-driver-register-program`) is built
+# fixture program (`tairix-test-driver-register-program`) is built
 # position-independent by `build.rs` and converted to an `rxe` blob
-# (`rustos_itest_harness::elf2rxe`) carrying the kernel's compiled-in syscall
+# (`tairix_itest_harness::elf2rxe`) carrying the kernel's compiled-in syscall
 # CFI tag. On boot the test reads the GICv2 base + timer rate from the
 # embedded `virt` DTB, enables the identity MMU + EL1 vectors, builds a live
 # FrameAllocator, publishes the reply Port (send-gated on a driver-class
@@ -38,34 +38,34 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-driver-unload-qemu-aarch64"
+name = "tairix-test-driver-unload-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # The device manager (autoload policy) + the driver host (the signed load
 # gate) the `SpawnDriverLoader` bridges: this vertical proves the
 # `devmgr`-driven driver-spawn path end to end (`plans/PI.md` P10 5d-2-ii).
 # Linked with `default-features = false` so the device manager's `program`
-# feature (its `rustos-rt` userland runtime) never enters this kernel-harness
+# feature (its `tairix-rt` userland runtime) never enters this kernel-harness
 # image (`AGENTS.md` §17.4 / §1) — the same opt-out the kernel binary makes.
-rustos-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0", default-features = false }
-rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0", default-features = false }
+tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
 # The build script wraps the converted stub `rxe` as the payload of a signed
@@ -74,10 +74,10 @@ rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 # trusts. The signing + bundle assembly is the shared harness composer
 # (`driver_image`, `AGENTS.md` §2.2), so the manifest wire format is encoded
 # in exactly one place. Host-only build glue (`AGENTS.md` §12).
-rustos-itest-harness = { path = "../harness", version = "=0.0.0", features = [
+tairix-itest-harness = { path = "../harness", version = "=0.0.0", features = [
     "driver-image",
 ] }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 # The build script names the `CapabilityId` / `DriverKind` the signed manifest
 # requests from the one ABI definition (`AGENTS.md` §2.2).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

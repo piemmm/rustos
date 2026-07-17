@@ -4,7 +4,7 @@
 //!
 //! # Why this module contains assembly (justification)
 //!
-//! RustOS is Rust-only; assembly is permitted only where the architecture
+//! TAIRiX is Rust-only; assembly is permitted only where the architecture
 //! *strictly* requires it. A program's entry point is exactly such a case:
 //! when the kernel transfers control to `_start` there is no runtime yet —
 //! the stack-pointer alignment a `call` boundary demands, and reading the
@@ -14,10 +14,10 @@
 //! [`rust_rt_start`], which performs the rest in plain Rust.
 //!
 //! This is the Rust counterpart of `lib/crt0/src/start.rs`. Both reach the
-//! kernel through the one shared trap (`rustos-abi-trap`); crt0 marshals the
+//! kernel through the one shared trap (`tairix-abi-trap`); crt0 marshals the
 //! startup vector into a C `argc`/`argv`/`envp` and calls a C `main`, whereas
 //! this runtime calls the program's Rust `main` (named through
-//! [`crate::entry!`]). RustOS's own programs use this runtime; crt0 exists
+//! [`crate::entry!`]). TAIRiX's own programs use this runtime; crt0 exists
 //! only for non-Rust programs.
 //!
 //! Each `_start` is gated on a build-script-emitted `rt_native_<arch>` cfg
@@ -29,15 +29,15 @@
 //!
 //! The kernel transfers control to the program's `_start` with the C
 //! integer-argument-0 register holding the base address of the
-//! position-independent startup-vector block ([`rustos_abi::process`]) and a
+//! position-independent startup-vector block ([`tairix_abi::process`]) and a
 //! valid, writable stack (the register is `rdi` on x86_64, `x0` on aarch64,
 //! `a0` on riscv64 — the first integer argument on each platform's C ABI).
 
 use core::cell::UnsafeCell;
 use core::panic::PanicInfo;
 
-use rustos_abi::process::{ProcessStart, ProcessStartHeader};
-use rustos_abi::Errno;
+use tairix_abi::process::{ProcessStart, ProcessStartHeader};
+use tairix_abi::Errno;
 
 use crate::exit;
 
@@ -51,7 +51,7 @@ const EXIT_BAD_STARTUP: i32 = 70;
 // time. The runtime calls it once the startup vector is validated and routes
 // its return value through `exit`.
 extern "Rust" {
-    fn __rustos_rt_main() -> i32;
+    fn __tairix_rt_main() -> i32;
 }
 
 /// Storage for the program's stack-protector guard.
@@ -184,9 +184,9 @@ unsafe extern "C" fn rust_rt_start(block_ptr: *const u8) -> ! {
     // spawner chose for it (`crate::startup`).
     crate::startup::install(view);
 
-    // SAFETY: `__rustos_rt_main` is the program's entry point, exported with a
+    // SAFETY: `__tairix_rt_main` is the program's entry point, exported with a
     // matching Rust signature by `crate::entry!` and resolved at link time.
-    let code = unsafe { __rustos_rt_main() };
+    let code = unsafe { __tairix_rt_main() };
     exit(code)
 }
 

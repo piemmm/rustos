@@ -1,7 +1,7 @@
 //! The seams through which `df` touches the outside world.
 //!
 //! The mount table itself arrives through the shared
-//! [`Transport`](rustos_procinfo::Transport) seam (the `sysinfo-v1`
+//! [`Transport`](tairix_procinfo::Transport) seam (the `sysinfo-v1`
 //! `MOUNT_LIST` paging walk `mount` uses too); only the operand probe and
 //! the output streams need seams of their own. Keeping them behind
 //! object-safe traits lets the report logic in [`crate::client`] run
@@ -9,7 +9,7 @@
 //! discipline of the other userland tools (`ps`'s `Transport`, `du`'s
 //! `Walk`).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Verifies that a `file` operand names an existing filesystem node.
 ///

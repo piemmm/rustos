@@ -3,17 +3,17 @@
 //! long-running user-space service PID 1 `init` launches to observe the
 //! discovered hardware tree and react to it.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only,
-//! so it links the Rust userland runtime `rustos-rt` — never the C ABI,
-//! which exists solely for programs **not** written in Rust. `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, and the syscall wrappers
-//! (`hw_tree_read` / `hw_tree_wait`); `rustos_rt::entry!` names this
+//! This is a **pure-Rust** program: TAIRiX is Rust-only,
+//! so it links the Rust userland runtime `tairix-rt` — never the C ABI,
+//! which exists solely for programs **not** written in Rust. `tairix-rt` provides `_start`, the per-process stack canary, the panic handler, and the syscall wrappers
+//! (`hw_tree_read` / `hw_tree_wait`); `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! # What this service does (Design D D2b-2c)
 //!
 //! At startup it fetches the kernel-decoded driver **catalogue** over the
 //! capability-gated `ipc_call` endpoint the kernel store service serves
-//! (`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`): one entry per installed bundle, an opaque `bundle_id` plus the
+//! (`tairix_abi::driver_store::DRIVER_STORE_ENDPOINT`): one entry per installed bundle, an opaque `bundle_id` plus the
 //! bind table the kernel decoded from its signed manifest. The store is
 //! read-only and static for the life of the system, so the catalogue is
 //! fetched **once**; a fetch failure is fail-soft.
@@ -21,7 +21,7 @@
 //! It then reads the architecture-neutral hardware tree the kernel
 //! discovered at boot through the capability-gated `hw_tree_read` syscall
 //! (`CAP_SYSINFO_HW`), matches each node against
-//! the catalogue with the shared [`rustos_devmatch`] policy, and asks the kernel to load the matched bundle for each winning
+//! the catalogue with the shared [`tairix_devmatch`] policy, and asks the kernel to load the matched bundle for each winning
 //! node (`StoreRequest::Load`) — the kernel re-runs the signed gate and
 //! spawns the driver with only that node's grants. It then
 //! **blocks** in `hw_tree_wait` until the tree changes (a node seeded,
@@ -39,20 +39,20 @@
 
 // --- Pure-Rust program --------------------------------------------------
 // Compiled only for the freestanding service binary, which links the
-// optional `rustos-rt` runtime through the default `program` feature. The
+// optional `tairix-rt` runtime through the default `program` feature. The
 // kernel links this crate's *library* with `default-features = false`, so
-// it never builds this module (nor pulls in `rustos-rt`).
+// it never builds this module (nor pulls in `tairix-rt`).
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use rustos_abi::driver_store::DRIVER_STORE_ENDPOINT;
-    use rustos_abi::hwtree::HwDeviceClass;
-    use rustos_abi::net_ipc::{NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT};
-    use rustos_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
-    use rustos_abi::{Errno, HwNode, HwTreeHeader};
-    use rustos_devmgr::{events, DriverStoreCall, HwTreeService, NetstackBind};
-    use rustos_log::{log, Event, Field, Level};
-    use rustos_rt::LogSink;
-    use rustos_util::fmt::{format_hex_u64, format_usize};
+    use tairix_abi::driver_store::DRIVER_STORE_ENDPOINT;
+    use tairix_abi::hwtree::HwDeviceClass;
+    use tairix_abi::net_ipc::{NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT};
+    use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::{Errno, HwNode, HwTreeHeader};
+    use tairix_devmgr::{events, DriverStoreCall, HwTreeService, NetstackBind};
+    use tairix_log::{log, Event, Field, Level};
+    use tairix_rt::LogSink;
+    use tairix_util::fmt::{format_hex_u64, format_usize};
 
     /// Buffer the catalogue and each `Load` reply are received into, sized to
     /// the endpoint's `DRIVER_STORE_MAX_REPLY` so a full catalogue is never
@@ -92,16 +92,16 @@ mod program {
     }
 
     /// The production [`HwTreeService`] backing: the reactive observe loop
-    /// ([`rustos_devmgr::run`]) reads, waits, and reports through this seam,
+    /// ([`tairix_devmgr::run`]) reads, waits, and reports through this seam,
     /// which binds the `hw_tree_read` / `hw_tree_wait` `abi-v1` syscalls and
     /// emits each tree/node report through the kernel's diagnostic log via
     /// [`LogSink`] (the serial UART on a debug build) — never `stderr`. The loop's control flow is host-tested in
-    /// `rustos_devmgr::service`; this is the freestanding I/O it binds.
+    /// `tairix_devmgr::service`; this is the freestanding I/O it binds.
     struct RtTreeService;
 
     impl HwTreeService for RtTreeService {
         fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-            rustos_rt::hw_tree_read(buf).map_err(errno_from)
+            tairix_rt::hw_tree_read(buf).map_err(errno_from)
         }
 
         fn wait_for_change(&mut self, last_generation: u64) -> Result<(), Errno> {
@@ -109,7 +109,7 @@ mod program {
             // observed; `u64::MAX` is the effectively unbounded wait a
             // device manager holds for the life of the system. A negative
             // return is a `-errno` the loop fails closed on.
-            let waited = rustos_rt::hw_tree_wait(last_generation, u64::MAX);
+            let waited = tairix_rt::hw_tree_wait(last_generation, u64::MAX);
             if waited < 0 {
                 return Err(errno_from(waited));
             }
@@ -132,14 +132,14 @@ mod program {
                     fields: &[
                         Field {
                             key: "generation",
-                            value: rustos_log::FieldValue::Str(format_hex_u64(
+                            value: tairix_log::FieldValue::Str(format_hex_u64(
                                 header.generation(),
                                 &mut gen,
                             )),
                         },
                         Field {
                             key: "nodes",
-                            value: rustos_log::FieldValue::Str(format_usize(
+                            value: tairix_log::FieldValue::Str(format_usize(
                                 header.node_count() as usize,
                                 &mut count,
                             )),
@@ -169,22 +169,22 @@ mod program {
                     fields: &[
                         Field {
                             key: "id",
-                            value: rustos_log::FieldValue::Str(format_usize(
+                            value: tairix_log::FieldValue::Str(format_usize(
                                 node.id() as usize,
                                 &mut id,
                             )),
                         },
                         Field {
                             key: "parent",
-                            value: rustos_log::FieldValue::Str(parent_str),
+                            value: tairix_log::FieldValue::Str(parent_str),
                         },
                         Field {
                             key: "class",
-                            value: rustos_log::FieldValue::Str(class_name(node.class())),
+                            value: tairix_log::FieldValue::Str(class_name(node.class())),
                         },
                         Field {
                             key: "keys",
-                            value: rustos_log::FieldValue::Str(format_usize(
+                            value: tairix_log::FieldValue::Str(format_usize(
                                 node.match_keys().len(),
                                 &mut keys,
                             )),
@@ -198,7 +198,7 @@ mod program {
     /// The production [`DriverStoreCall`] backing: it binds the `ipc_call`
     /// `abi-v1` syscall to the read-only `/System` driver-store endpoint
     /// ([`DRIVER_STORE_ENDPOINT`]) the kernel store service serves. The protocol logic (request framing, reply
-    /// decoding) is host-tested in `rustos_devmgr::store`; this is the
+    /// decoding) is host-tested in `tairix_devmgr::store`; this is the
     /// freestanding I/O it binds. The kernel re-checks the
     /// caller's `CAP_DRV_LOAD` on every call; this client adds no authority.
     struct RtStoreCall;
@@ -207,7 +207,7 @@ mod program {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             // `ipc_call` returns the raw `-errno` on failure; recover the
             // typed `Errno` and surface it fail-closed.
-            rustos_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(errno_from)
         }
     }
 
@@ -217,7 +217,7 @@ mod program {
     /// [`NetstackRequest::BindDriver`]. The kernel gates the call on the
     /// device manager's `CAP_NET_ADMIN`; this client adds no authority, and
     /// the protocol logic (which channels to bind, once each, fail-soft on
-    /// refusal) is host-tested in `rustos_devmgr::netbind`.
+    /// refusal) is host-tested in `tairix_devmgr::netbind`.
     struct RtNetstackBind;
 
     impl NetstackBind for RtNetstackBind {
@@ -233,7 +233,7 @@ mod program {
             .to_le_bytes();
             let mut reply = [0u8; STATUS_REPLY_LEN];
             let len =
-                rustos_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
             decode_status_reply(&reply[..len])
         }
     }
@@ -247,13 +247,13 @@ mod program {
     fn main() -> i32 {
         // The catalogue/load reply buffer. The tree snapshot is read into a
         // separate, service-owned buffer that grows to fit the discovered
-        // tree (`rustos_devmgr::run`) — a real board's
+        // tree (`tairix_devmgr::run`) — a real board's
         // firmware tree dwarfs QEMU `virt`'s, so a fixed stack buffer here
         // would be a scaling cliff. The stack sizing
         // (`spawn_layout::USER_STACK_PAGES`, ~1.1 MiB) covers this 64 KiB
         // reply buffer comfortably.
         let mut reply_buf = [0u8; REPLY_BUF_LEN];
-        match rustos_devmgr::run(
+        match tairix_devmgr::run(
             &mut RtTreeService,
             &mut RtStoreCall,
             &mut RtNetstackBind,
@@ -277,7 +277,7 @@ mod program {
                         message: "hardware-tree seam failed; devmgr exiting for supervision",
                         fields: &[Field {
                             key: "errno",
-                            value: rustos_log::FieldValue::Str(format_usize(errno, &mut code)),
+                            value: tairix_log::FieldValue::Str(format_usize(errno, &mut code)),
                         }],
                     },
                 );
@@ -286,12 +286,12 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
-// Whenever the real freestanding `rustos-rt` `_start` path is not compiled
+// Whenever the real freestanding `tairix-rt` `_start` path is not compiled
 // — on the host (`cargo build --workspace`, clippy, fmt), or for a
 // `program`-less build of this crate — this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.

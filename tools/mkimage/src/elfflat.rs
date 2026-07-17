@@ -2,7 +2,7 @@
 //!
 //! The Pi firmware does not load ELF: it copies `kernel8.img` byte-for-byte
 //! to physical [`KERNEL_LOAD_ADDR`] and branches to its first byte. The
-//! converter therefore takes the freestanding `rustos-kernel` ELF (linked by
+//! converter therefore takes the freestanding `tairix-kernel` ELF (linked by
 //! `aarch64-rpi4.ld` at that address) and lays its `PT_LOAD` file bytes out
 //! at their physical offsets, zero-filling any inter-segment gap. Trailing
 //! `.bss` is *not* emitted — the boot stub clears it — so the image stays as

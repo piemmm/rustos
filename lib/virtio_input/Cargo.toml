@@ -1,6 +1,6 @@
 [package]
-name = "rustos-virtio-input"
-description = "RustOS arch-neutral, transport-agnostic virtio-input (keyboard / pointer) device logic over the bus-agnostic `lib/virtio` transport (§2.2, §6, §17.4 — plans/PI.md 5d-2-ii): the open/poll/decode engine both the kernel-side `-M virt` verticals and the user-space input-driver process compose, so neither a driver nor the harness re-implements it. no_std, fail-closed (§2.9)."
+name = "tairix-virtio-input"
+description = "TAIRiX arch-neutral, transport-agnostic virtio-input (keyboard / pointer) device logic over the bus-agnostic `lib/virtio` transport (§2.2, §6, §17.4 — plans/PI.md 5d-2-ii): the open/poll/decode engine both the kernel-side `-M virt` verticals and the user-space input-driver process compose, so neither a driver nor the harness re-implements it. no_std, fail-closed (§2.9)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,19 +12,19 @@ publish.workspace = true
 # The platform-neutral `Input`/`InputEvent` driver surface the device speaks
 # and the `BufferClass` / `DriverError` vocabulary it fails closed with — one
 # ABI definition (§2.2).
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol (the `Transport` trait,
 # `SplitQueue`, DMA slabs, `VirtioHost`) the device-class logic is written
 # against, so it consumes the protocol without naming a concrete bus driver
 # (`AGENTS.md` §17.4 — `lib/* → lib/*` only).
-rustos-virtio = { path = "../virtio", version = "=0.0.0" }
+tairix-virtio = { path = "../virtio", version = "=0.0.0" }
 # The decoded keyboard `Key` vocabulary the console producer resolves evdev
 # keycodes into (§17.4 — a `lib/*` crate).
-rustos-input = { path = "../input", version = "=0.0.0" }
+tairix-input = { path = "../input", version = "=0.0.0" }
 # The shared terminal key map that turns each resolved key press into the
 # `KeyInput` record a driver injects through `key_inject` — the one definition
 # of the `Key`→record map, shared with `lib/hid` (`AGENTS.md` §2.2).
-rustos-keymap = { path = "../keymap", version = "=0.0.0" }
+tairix-keymap = { path = "../keymap", version = "=0.0.0" }
 
 [lints]
 workspace = true

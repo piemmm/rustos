@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-encrypted-root-image"
+name = "tairix-test-encrypted-root-image"
 description = "Shared whole-disk encrypted-root image fixture for the plans/PI.md P11 Chunk B-2 root-mount->login QEMU vertical. Composes the same on-disk artefacts tools/mkimage writes a real installable disk from — an MBR table, a FAT32 boot partition carrying the plaintext root.unlock key-derivation descriptor, and a passphrase-derived encrypted ARXFS root carrying /System/Security/Users — through the real in-tree drivers, so the fixture and the booted system cannot drift (AGENTS.md §2.2). The host harness (xtask) plants build_image's bytes on the test's virtio-blk backing; the freestanding guest tail drives the production interactive unlock policy over that disk."
 version.workspace = true
 edition.workspace = true
@@ -23,17 +23,17 @@ path = "src/lib.rs"
 # fixture cannot drift from the system that mounts the disk (`AGENTS.md`
 # §2.2).
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 # The system app store's Help/ trees, discovered from the command-app
 # bundles' own on-disk `Help/` sources and embedded at build time
-# (`rustos_syshelp`), planted onto the fixture's read-only /System volume
+# (`tairix_syshelp`), planted onto the fixture's read-only /System volume
 # exactly as `tools/mkimage` plants it on a real image — so the session
 # vertical can type `man man` and `ls` against the same bytes a real image
 # ships, with no hand-maintained per-bundle list and no help hardcoded into
 # an app crate (AGENTS.md §2.2, §16.5). It is `no_std` (data only), so it
 # links into the freestanding guest tail unchanged.
-rustos-syshelp = { path = "../../../tools/syshelp", version = "=0.0.0" }
-rustos-partition = { path = "../../../lib/partition", version = "=0.0.0" }
-rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
+tairix-syshelp = { path = "../../../tools/syshelp", version = "=0.0.0" }
+tairix-partition = { path = "../../../lib/partition", version = "=0.0.0" }
+tairix-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }

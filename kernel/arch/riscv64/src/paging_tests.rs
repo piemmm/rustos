@@ -206,7 +206,7 @@ fn map_gigapage_rejects_misaligned_and_occupied() {
 
 #[test]
 fn passes_mmu_conformance() {
-    use rustos_arch_api::mmu;
+    use tairix_arch_api::mmu;
     let pool = fresh_pool();
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     // A VA in gigapage slot 100 — outside the single identity gigapage, so
@@ -244,7 +244,7 @@ fn leaf_pte(space: &AddressSpace, vaddr: u64) -> Option<(u64, usize)> {
 
 #[test]
 fn declares_block_split_supported_with_no_justification() {
-    use rustos_arch_api::mmu::BlockSplit;
+    use tairix_arch_api::mmu::BlockSplit;
     let space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
     // riscv64 now re-expresses coarse Sv39 leaves at 4 KiB granularity
     // (G1/G2), so it declares `Supported` (the sibling of aarch64).
@@ -284,7 +284,7 @@ fn split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping() {
 
 #[test]
 fn split_block_then_unmap_tears_down_exactly_one_page() {
-    use rustos_arch_api::mmu::{self, MapError};
+    use tairix_arch_api::mmu::{self, MapError};
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
     let va: u64 = (1u64 << 30) + 0x20_0000;
 
@@ -313,7 +313,7 @@ fn split_block_then_unmap_tears_down_exactly_one_page() {
 
 #[test]
 fn split_block_is_idempotent_and_fails_closed() {
-    use rustos_arch_api::mmu::MapError;
+    use tairix_arch_api::mmu::MapError;
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
     let va: u64 = (1u64 << 30) + 0x30_0000;
 
@@ -336,7 +336,7 @@ fn split_block_is_idempotent_and_fails_closed() {
 
 #[test]
 fn prepare_guard_arena_splits_every_covering_block_preserving_translation() {
-    use rustos_arch_api::mmu::{self};
+    use tairix_arch_api::mmu::{self};
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
 
     // An arena that straddles a 2 MiB boundary inside identity gigapage 1:
@@ -376,7 +376,7 @@ fn prepare_guard_arena_splits_every_covering_block_preserving_translation() {
 
 #[test]
 fn prepare_guard_arena_is_idempotent_and_fails_closed() {
-    use rustos_arch_api::mmu::MapError;
+    use tairix_arch_api::mmu::MapError;
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
     let base: u64 = (1u64 << 30) + 6 * BLOCK_2MIB;
 
@@ -413,7 +413,7 @@ fn prepare_guard_arena_is_idempotent_and_fails_closed() {
 
 #[test]
 fn hal_split_and_arena_forward_to_the_inherent_bodies() {
-    use rustos_arch_api::mmu;
+    use tairix_arch_api::mmu;
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
 
     // Driving `split_block` through the object-safe HAL trait must reach
@@ -451,7 +451,7 @@ fn hal_split_and_arena_forward_to_the_inherent_bodies() {
 
 #[test]
 fn passes_tlb_conformance() {
-    use rustos_arch_api::tlb;
+    use tairix_arch_api::tlb;
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
     // The host has no TLB, so `flush_page` is a vacuous no-op here; the
     // suite proves it is object-safe and panic-free for any address (the
@@ -464,7 +464,7 @@ fn passes_tlb_conformance() {
 
 #[test]
 fn passes_frames_conformance() {
-    use rustos_arch_api::frames::{self, PageTableFrames};
+    use tairix_arch_api::frames::{self, PageTableFrames};
     // The static pool is the boot/bootstrap `PageTableFrames` source; its
     // Sv39 `phys_of` is the identity map, so the suite runs on the host.
     // A fresh pool hands out `POOL_SIZE` frames before failing closed.
@@ -542,7 +542,7 @@ fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
 
     // SAFETY: the space is no hart's active translation (host test) and
     // no other reference into its tables is live.
-    unsafe { rustos_arch_api::mmu::AddressSpace::reclaim_table_frames(&mut space) };
+    unsafe { tairix_arch_api::mmu::AddressSpace::reclaim_table_frames(&mut space) };
 
     // Every drawn table frame came back exactly once, the root last, and
     // no leaf frame was ever freed.
@@ -561,7 +561,7 @@ fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
 
 #[test]
 fn map_page_translates_neutral_flags_and_walks() {
-    use rustos_arch_api::mmu::{self, PageFlags};
+    use tairix_arch_api::mmu::{self, PageFlags};
     let pool = fresh_pool();
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     let vaddr = (100u64 << 30) | (7u64 << 21) | (9u64 << 12);

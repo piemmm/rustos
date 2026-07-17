@@ -15,7 +15,7 @@ sobrescribe, salvo que `-a` añada al final. Un fichero que no puede
 abrirse o escribirse se notifica y la ejecución continúa con las
 salidas restantes, según el modo `--output-error` elegido.
 
-RustOS no tiene `SIGPIPE`: la desaparición de un consumidor se
+TAIRiX no tiene `SIGPIPE`: la desaparición de un consumidor se
 manifiesta como un error de escritura en la salida estándar — la única
 salida de esta orden que puede ser una tubería —, así que la «tubería»
 de los modos GNU significa aquí exactamente esa salida. Sin
@@ -24,7 +24,7 @@ equivalente de la herramienta GNU muriendo por `SIGPIPE`, con la razón
 indicada en el error estándar); con un modo `-nopipe` se tolera en
 silencio.
 
-GNU `tee -i` (ignorar interrupciones) no está disponible: RustOS no
+GNU `tee -i` (ignorar interrupciones) no está disponible: TAIRiX no
 tiene disposición de señales por proceso que configurar. El conmutador
 llegará con ese trabajo del núcleo en lugar de aceptarse e ignorarse.
 

@@ -1,6 +1,6 @@
 //! Time-Stamp Counter (TSC) suitability validation for x86_64.
 //!
-//! RustOS uses the x86_64 TSC (`RDTSC`) as its monotonic clock source on
+//! TAIRiX uses the x86_64 TSC (`RDTSC`) as its monotonic clock source on
 //! this architecture (`apic_timer`, `kernel_arch`). Treating the TSC as a
 //! *cross-CPU* monotonic time base is only sound on a part that provides
 //! an **Invariant TSC**: a counter that runs at a constant rate

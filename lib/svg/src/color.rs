@@ -7,7 +7,7 @@
 //! rejected so a malformed asset fails closed to its caller's fallback rather
 //! than guessing a colour.
 
-use rustos_raster::Color;
+use tairix_raster::Color;
 
 use crate::error::SvgError;
 

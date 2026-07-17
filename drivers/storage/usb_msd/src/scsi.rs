@@ -13,9 +13,9 @@
 //! `MODE SENSE(10)`, USB Mass Storage UFI 1.0). [`CommandSet`] carries that
 //! per-device spelling so the logic exists once.
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::{DriverError, Errno};
 
 /// One SCSI command execution seam: a wire transport (BOT, CBI, UAS) runs
 /// the command block, moves the data phase, and reports the device's honest
@@ -169,10 +169,10 @@ pub struct LunState {
 pub const MAX_LUNS: usize = 16;
 
 /// Most bytes one SCSI READ/WRITE issued by [`LunBlock`] covers: the
-/// block-service data window ([`rustos_abi::blkio::BLK_DATA_LEN`] — one
+/// block-service data window ([`tairix_abi::blkio::BLK_DATA_LEN`] — one
 /// definition), so a Block call of any size splits into bounded commands
 /// and per-device cost never scales with request length.
-pub const MSD_MAX_TRANSFER_LEN: usize = rustos_abi::blkio::BLK_DATA_LEN;
+pub const MSD_MAX_TRANSFER_LEN: usize = tairix_abi::blkio::BLK_DATA_LEN;
 
 /// One SCSI device: the command layer over a wire transport.
 pub struct ScsiDevice<T: ScsiTransport> {
@@ -574,7 +574,7 @@ fn driver_error(err: Errno) -> DriverError {
 }
 
 /// Commit-to-medium seam the block service drives for
-/// [`rustos_abi::blkio::BlkOp::Flush`]; the [`Block`] trait carries no
+/// [`tairix_abi::blkio::BlkOp::Flush`]; the [`Block`] trait carries no
 /// flush, so the per-LUN handle adds it explicitly.
 pub trait Flush {
     /// Commit every completed write to the medium.

@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ptr::NonNull;
 
-use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::{DriverError, MmioMapError, MmioMapper, MsiMessage, RegisterWindow};
+use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::{DriverError, MmioMapError, MmioMapper, MsiMessage, RegisterWindow};
 
 use crate::config::{
     BarKind, Capability, ConfigAddress, ConfigSpace, VIRTIO_CFG_COMMON, VIRTIO_CFG_DEVICE,
@@ -1207,9 +1207,9 @@ fn route_msi_rejects_a_64bit_address_on_a_32bit_capability() {
 /// lives in `kernel/arch/x86_64::pio`.
 #[test]
 fn mechanism_one_exposes_the_frozen_bus_seams() {
-    use rustos_abi::driver::msix::MsixBus;
-    use rustos_abi::driver::virtio_pci::VirtioPciBus;
-    use rustos_abi::PortIo;
+    use tairix_abi::driver::msix::MsixBus;
+    use tairix_abi::driver::virtio_pci::VirtioPciBus;
+    use tairix_abi::PortIo;
 
     /// Inert backend: the seam-coercion assertions never read or write
     /// a port, so the methods are never reached.
@@ -1381,8 +1381,8 @@ fn ecam_capability_walk_decodes_vl805_msix() {
 /// [`mechanism_one_exposes_the_frozen_bus_seams`].
 #[test]
 fn mechanism_ecam_exposes_the_frozen_bus_seams() {
-    use rustos_abi::driver::msix::MsixBus;
-    use rustos_abi::driver::virtio_pci::VirtioPciBus;
+    use tairix_abi::driver::msix::MsixBus;
+    use tairix_abi::driver::virtio_pci::VirtioPciBus;
 
     fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
 
@@ -1397,7 +1397,7 @@ fn mechanism_ecam_exposes_the_frozen_bus_seams() {
 /// through `&dyn PciBus` without naming the concrete `Pci` type.
 #[test]
 fn mechanism_ecam_exposes_the_pci_bus_seam() {
-    use rustos_abi::driver::pci::PciBus;
+    use tairix_abi::driver::pci::PciBus;
 
     fn assert_pci_bus(_: &dyn PciBus) {}
 
@@ -1412,7 +1412,7 @@ fn mechanism_ecam_exposes_the_pci_bus_seam() {
 /// `route_msix` performs).
 #[test]
 fn pci_bus_enable_bus_master_sets_command_bits() {
-    use rustos_abi::driver::pci::PciBus;
+    use tairix_abi::driver::pci::PciBus;
 
     let (backing, window) = vl805_ecam_region();
     let vl805 = ConfigAddress {
@@ -1447,7 +1447,7 @@ fn pci_bus_enable_bus_master_sets_command_bits() {
 /// the window).
 #[test]
 fn pci_bus_map_bar_window_maps_vl805_bar0() {
-    use rustos_abi::driver::pci::PciBus;
+    use tairix_abi::driver::pci::PciBus;
 
     let (_backing, window) = vl805_ecam_region();
     let vl805 = ConfigAddress {
@@ -1470,7 +1470,7 @@ fn pci_bus_map_bar_window_maps_vl805_bar0() {
 /// `map_bar_window` fails closed when the requested BAR slot is unused.
 #[test]
 fn pci_bus_map_bar_window_rejects_absent_bar() {
-    use rustos_abi::driver::pci::PciBus;
+    use tairix_abi::driver::pci::PciBus;
 
     let (_backing, window) = vl805_ecam_region();
     let vl805 = ConfigAddress {
@@ -1496,8 +1496,8 @@ fn pci_bus_map_bar_window_rejects_absent_bar() {
 /// (autoload is match *data*, not composition).
 #[test]
 fn describe_function_emits_the_vl805_child_node() {
-    use rustos_abi::driver::pci::PciBus;
-    use rustos_abi::{HwDeviceClass, HwMatchKey};
+    use tairix_abi::driver::pci::PciBus;
+    use tairix_abi::{HwDeviceClass, HwMatchKey};
 
     let (_backing, window) = vl805_ecam_region();
     let vl805 = ConfigAddress {
@@ -1531,7 +1531,7 @@ fn describe_function_emits_the_vl805_child_node() {
 /// function (the all-ones vendor sentinel), never fabricating a node.
 #[test]
 fn describe_function_rejects_an_absent_function() {
-    use rustos_abi::driver::pci::PciBus;
+    use tairix_abi::driver::pci::PciBus;
 
     let (_backing, window) = vl805_ecam_region();
     // 00:01.0 was never planted: it reads all-ones.

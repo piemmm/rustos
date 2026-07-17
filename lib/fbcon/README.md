@@ -1,13 +1,13 @@
-# `rustos-fbcon` — shared framebuffer text-console engine
+# `tairix-fbcon` — shared framebuffer text-console engine
 
 Stability tier: **experimental**.
 
-`rustos-fbcon` is the one architecture-neutral framebuffer text console in the
+`tairix-fbcon` is the one architecture-neutral framebuffer text console in the
 tree. It turns a byte stream into on-screen text by feeding it to the single
-shared `rustos_vt::Parser`, applying each parsed `rustos_vt::Op` to a retained
+shared `tairix_vt::Parser`, applying each parsed `tairix_vt::Op` to a retained
 cell grid, and repainting the dirtied cells once per write onto a borrowed
 32-bit scan-out surface (`&mut [u32]`), rendering glyphs with the shared
-`rustos_font` Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans Hebrew
+`tairix_font` Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans Hebrew
 coverage atlas (15×28 cells, 16-level anti-aliasing, all precomposed Hangul
 syllables, the merged family's wider Unicode repertoire with a U+FFFD fallback,
 and two-cell double-width glyphs).
@@ -27,7 +27,7 @@ program output uses `TextConsole::write_output_bytes`, which applies terminal
 ## Design
 
 - **Retained cell grid, one repaint per write.** The engine keeps the visible
-  screen as two borrowed `rustos_vt::Cell` grids (primary + alternate). Every
+  screen as two borrowed `tairix_vt::Cell` grids (primary + alternate). Every
   operation mutates only the active grid, and the cell rect a write dirtied is
   repainted from the grid **once** at the end of the write. Deferring the
   pixels to that single repaint bounds a write's render cost: a burst that
@@ -40,7 +40,7 @@ program output uses `TextConsole::write_output_bytes`, which applies terminal
 - **Allocator-free.** The engine is `no_std` and never allocates (the grids
   are borrowed `&mut [Cell]`), so a freestanding boot console with no global
   allocator links it directly. It
-  depends on `rustos_vt` and `rustos_font` with `default-features = false`.
+  depends on `tairix_vt` and `tairix_font` with `default-features = false`.
 - **Host-testable.** Every operation is pure CPU pixel arithmetic over a
   borrowed slice, so the whole engine is unit-tested on the host.
 - **Fail closed.** Firmware-supplied geometry is validated at construction

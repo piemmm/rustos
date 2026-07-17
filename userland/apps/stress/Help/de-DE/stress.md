@@ -12,7 +12,7 @@ Startet Arbeitsprozesse, die die Maschine absichtlich belasten, im
 Geist der etablierten Werkzeuge `stress`/`stress-ng`: CPU-Schleifen
 (`--cpu`), Speicher-Anfordern-und-Anfassen (`--vm`), Schreiben/Syncen
 kleiner Puffer (`--io`), große sequentielle Plattenschreiber (`--hdd`)
-und Cache-aufwirbelnde Wiederleser (`--cache`, eine RustOS-Ergänzung).
+und Cache-aufwirbelnde Wiederleser (`--cache`, eine TAIRiX-Ergänzung).
 Jeder Arbeiter ist ein eigener auslagerbarer Prozess; der steuernde
 Prozess heftet seinen eigenen Speicher an (`mem_pin`, erfordert
 `CAP_MEM_PIN`), damit er unter dem selbst erzeugten Druck reaktionsfähig
@@ -46,7 +46,7 @@ auf dem beratenden Standard-Informationsstrom (fd 3) ausgegeben.
 
 - `--cpu N`, `--io N`, `--vm N`, `--hdd N` — `N` Arbeiter der
   genannten Art starten, mit der Bedeutung von GNU `stress`.
-- `--cache N` — `N` Cache-Aufwirbler starten (nur RustOS: wiederholte
+- `--cache N` — `N` Cache-Aufwirbler starten (nur TAIRiX: wiederholte
   kalte Verzeichnisläufe und Wiederlesen bewegen die
   Rückforderungs-Register des Kernels).
 - `--all N` — `N` Arbeiter jeder Art.

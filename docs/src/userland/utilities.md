@@ -8,11 +8,11 @@ and is extended as the others (`mount`, …) arrive.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
-`rustos-sysinfo` is the single command-line tool that exposes the System
-Information API to the terminal (`AGENTS.md` §16.6). RustOS has no
+`tairix-sysinfo` is the single command-line tool that exposes the System
+Information API to the terminal (`AGENTS.md` §16.6). TAIRiX has no
 `/proc` and no `/sys`; every piece of live system information is served
 by `/System/Services/sysinfod.app/Run` over the typed, versioned, capability-
-checked `sysinfo-v1` wire surface defined in `rustos_abi::sysinfo` (see
+checked `sysinfo-v1` wire surface defined in `tairix_abi::sysinfo` (see
 [System Information API (`sysinfo-v1`)](../abi/sysinfo.md) and the
 [System Information service](./sysinfod.md)). `sysinfo` is a *client* of
 that API: it does **not** read a virtual filesystem, and there is no
@@ -20,8 +20,8 @@ privileged path that bypasses the capability check.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
-depends only on the audited `rustos-abi` crate and the shared
-`rustos-procinfo` client helpers, so it never links a kernel or driver
+depends only on the audited `tairix-abi` crate and the shared
+`tairix-procinfo` client helpers, so it never links a kernel or driver
 crate (`AGENTS.md` §17.4).
 
 ### Commands
@@ -110,7 +110,7 @@ limit. The paging loop lives in the client; the ABI carries only the
   partially-rendered guess.
 
 `sysinfo hardware` pages the tree in whole through the shared
-`rustos_procinfo::hwtree::fetch_tree` walk (the same fetch `lspci` and
+`tairix_procinfo::hwtree::fetch_tree` walk (the same fetch `lspci` and
 `lsusb` render from, `AGENTS.md` §2.2) and summarises it as a node
 count; the per-device inventory renderings are those tools' job.
 
@@ -127,7 +127,7 @@ exhaustive, or when the walk fails.
 
 ### Tests
 
-`cargo test -p rustos-sysinfo` drives the parser and the request/render
+`cargo test -p tairix-sysinfo` drives the parser and the request/render
 engine against an in-memory `sysinfod` stand-in and a recording output:
 the command grammar (every subcommand, alias, and the usage-error
 paths), every query's rendering, process-list paging across a page
@@ -138,12 +138,12 @@ fail-closed paths.
 
 ## `lspci` — list discovered PCI/PCIe devices (`userland/apps/lspci`)
 
-`rustos-lspci` is the `pciutils` `lspci` over what the RustOS model
+`tairix-lspci` is the `pciutils` `lspci` over what the TAIRiX model
 actually carries (`plans/DEVICES.md` DEVICE1 V2, `AGENTS.md` §16.7): one
 line per discovered PCI/PCIe function — its hardware-tree node id, class
 name, and vendor + device names. The inventory is the hardware tree read
 through the `CAP_SYSINFO_HW`-gated `sysinfo-v1` `HARDWARE_TREE` query
-(the shared paged `rustos_procinfo::hwtree::fetch_tree` walk — never a
+(the shared paged `tairix_procinfo::hwtree::fetch_tree` walk — never a
 `/proc` and never a kernel bypass), fail-closed whole `HwNode` records
 reassembled from a generation-checked snapshot; a refused
 query defeats the tool's purpose, so the reason lands on standard error
@@ -158,10 +158,10 @@ standard error. `-n`/`-nn` select the numeric modes, `-v` lists the
 node's declared resources (the capability-grant requests the tree
 records), `-t` renders the bus topology, and `-d
 [<vendor>]:[<device>]`/`-s <node>` filter. Documented divergences:
-RustOS records no `bus:device.function` triple (the address is the
+TAIRiX records no `bus:device.function` triple (the address is the
 stable node id, `#<node>`), no subsystem ids, and no `-k` until the
 system publishes driver-binding records. Manifest: `CAP_CONSOLE_WRITE` +
-`CAP_FS_ACCESS` + `CAP_SYSINFO_HW`. `cargo test -p rustos-lspci` drives
+`CAP_FS_ACCESS` + `CAP_SYSINFO_HW`. `cargo test -p tairix-lspci` drives
 the parser, the naming/fallback/filter/tree/verbose renders, the
 fail-closed reply and refusal paths, and the fd-3 record against a
 canned tree and a fixture database compiled through the real
@@ -169,7 +169,7 @@ canned tree and a fixture database compiled through the real
 
 ## `lsusb` — list discovered USB devices (`userland/apps/lsusb`)
 
-`rustos-lsusb` is the `usbutils` `lsusb` over what the RustOS model
+`tairix-lsusb` is the `usbutils` `lsusb` over what the TAIRiX model
 actually carries (`plans/DEVICES.md` DEVICE1 V3, `AGENTS.md` §16.7): one
 `Bus NNN Device NNN: ID vvvv:pppp <vendor> <product>` line per
 discovered physical USB device. The inventory records one node per
@@ -181,7 +181,7 @@ once, while two identical devices (distinct addresses) stay distinct,
 and a node whose emitter reported no address is never guessed into a
 group. It shares `lspci`'s whole posture: the same
 `CAP_SYSINFO_HW`-gated `HARDWARE_TREE` query, the same fail-closed paged
-fetch and stable bus order (the shared `rustos_procinfo::hwtree` walk
+fetch and stable bus order (the shared `tairix_procinfo::hwtree` walk
 both tools use, `AGENTS.md` §2.2), and
 names resolved through `lib/devids` from the vetted `usb.ids` table the
 bundle ships as `Resources/usb.ids.bin`. An identity the database lacks
@@ -193,12 +193,12 @@ class / subclass / protocol names from the `usb.ids` class tables (one
 triple per interface of the device), `-t` renders the bus → device →
 interface topology (the bus line names the controller by its
 `compatible` identity), and `-d [<vendor>]:[<product>]` /
-`-s [[<bus>]:][<devnum>]` filter. Documented divergence: RustOS has no
+`-s [[<bus>]:][<devnum>]` filter. Documented divergence: TAIRiX has no
 Linux bus/devnum registry, so the bus and device numbers are 1-based
 per-snapshot ordinals in stable bus order — small, dense, and stable
 for an unchanged topology, never kernel node ids. Manifest:
 `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_SYSINFO_HW`. `cargo test
--p rustos-lsusb` drives the parser (including the `usbutils` `-s`
+-p tairix-lsusb` drives the parser (including the `usbutils` `-s`
 grammar), the naming/bare-id/filter/tree/verbose renders, the
 fail-closed reply and refusal paths, and the fd-3 record against a
 canned tree and a fixture database compiled through the real
@@ -206,7 +206,7 @@ canned tree and a fixture database compiled through the real
 
 ## `ps` — list processes (`userland/apps/ps`)
 
-`rustos-ps` is the POSIX-named process lister. Like `sysinfo`, it is a
+`tairix-ps` is the POSIX-named process lister. Like `sysinfo`, it is a
 *client* of the System Information API (`AGENTS.md` §16.6): there is no
 `/proc`, so `ps` issues the `sysinfo-v1` process-list queries served by
 `/System/Services/sysinfod.app/Run` and has no privileged path that bypasses the
@@ -216,8 +216,8 @@ ungated `SELF_PROCESS_LIST`); `-e`/`-A`/`--all` request every process
 
 The crate is `no_std` (with `alloc`, used only by the test fixtures), has
 no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
-(`AGENTS.md` §2.9). It depends only on the audited `rustos-abi` crate and
-the shared `rustos-procinfo` client helpers, so it never links a kernel
+(`AGENTS.md` §2.9). It depends only on the audited `tairix-abi` crate and
+the shared `tairix-procinfo` client helpers, so it never links a kernel
 or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -288,7 +288,7 @@ output, ordering, or exit status — and nothing is emitted under
 
 ### Tests
 
-`cargo test -p rustos-ps` drives the parser and the request/render engine
+`cargo test -p tairix-ps` drives the parser and the request/render engine
 against an in-memory `sysinfod` stand-in and a recording output: the
 command grammar (default self-listing, the `-e`/`-A`/`--all` selectors,
 `-h`/`-?`/`--help`, unknown-option and positional-operand rejection), the
@@ -297,11 +297,11 @@ self-vs-global query routing, header + rows rendering, the empty listing,
 the denied-global capability mapping, the self-scope advisory record
 (present by default, absent under `--all`), and the header/row
 write-failure paths. The shared page walk and rendering carry their own
-unit tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
+unit tests in `lib/procinfo` (`cargo test -p tairix-procinfo`).
 
 ## `mount` — list and attach filesystems (`userland/apps/mount`)
 
-`rustos-mount` both reports and changes the mount table, and the two
+`tairix-mount` both reports and changes the mount table, and the two
 halves take deliberately different paths. **Listing** the mounted
 filesystems is a *read* of live system state, so — like `ps` — it goes
 through the System Information API (`AGENTS.md` §16.6): there is no
@@ -313,8 +313,8 @@ through the System Information API (`AGENTS.md` §16.6): there is no
 
 The crate is `no_std` (with `alloc`, used only by the test fixtures), has
 no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
-(`AGENTS.md` §2.9). It depends only on the audited `rustos-abi` crate and
-the shared `rustos-procinfo` client helpers, so it never links a kernel
+(`AGENTS.md` §2.9). It depends only on the audited `tairix-abi` crate and
+the shared `tairix-procinfo` client helpers, so it never links a kernel
 or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -379,7 +379,7 @@ the volume by probing; `mount` never guesses one (`AGENTS.md` §2.1).
 
 ### Tests
 
-`cargo test -p rustos-mount` drives the parser and the engine against an
+`cargo test -p tairix-mount` drives the parser and the engine against an
 in-memory `sysinfod` fixture, a recording output, and an in-memory
 mounter: the command grammar (list vs mount vs help, every option form,
 attached/space values, the read-only shorthand, `--`, and the
@@ -388,11 +388,11 @@ routing, the empty table, the service- and output-failure paths, the
 attach request reaching the mounter with the right fields, and the denied
 attach mapping to `MountError::Mount`. The shared page walk and the
 `source on target type fstype (options)` rendering carry their own unit
-tests in `lib/procinfo` (`cargo test -p rustos-procinfo`).
+tests in `lib/procinfo` (`cargo test -p tairix-procinfo`).
 
 ## `unmount` — detach a runtime-attached volume (`userland/apps/unmount`)
 
-`rustos-unmount` is `mount`'s counterpart (`plans/DEVICES.md` D4b):
+`tairix-unmount` is `mount`'s counterpart (`plans/DEVICES.md` D4b):
 `unmount NAME` takes the volume mounted under `NAME` out of service.
 `NAME` is the volume's catalog name (`usb1`) or its mount-point path
 (`/Storage/usb1`), resolved through the same ungated `sysinfo-v1`
@@ -449,7 +449,7 @@ an fd-3 `suggestion` record (`fs.volume_unavailable_force_required`,
   There is no panic (`AGENTS.md` §2.9).
 
 Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_FS_MOUNT`.
-`cargo test -p rustos-unmount` drives the parser, the resolver (catalog
+`cargo test -p tairix-unmount` drives the parser, the resolver (catalog
 name, mount-point path, unknown name, non-detachable mounts), the
 force flag reaching the kernel, the refusal paths with and without the
 fd-3 suggestion, the service-failure path, and the thirteen-locale
@@ -457,14 +457,14 @@ fd-3 suggestion, the service-failure path, and the thirteen-locale
 
 ## `df` — report filesystem space usage (`userland/apps/df`)
 
-`rustos-df` is the GNU coreutils `df` (`plans/APPS.md` §12.1 Stage C,
+`tairix-df` is the GNU coreutils `df` (`plans/APPS.md` §12.1 Stage C,
 `AGENTS.md` §16.7): one row per mounted filesystem — the volume's size,
 used and available space, use percentage, and mount point — or, with
 `file` operands, the filesystem containing each operand (chosen by the
 longest mount-point prefix, one row per filesystem). Like `mount`'s
 listing, the data is a read of live system state through the ungated
 `sysinfo-v1` `MOUNT_LIST` query (the shared
-`rustos_procinfo::for_each_mount` walk — never a second query client and
+`tairix_procinfo::for_each_mount` walk — never a second query client and
 never a `/proc`), whose rows carry each backing volume's `VolumeStats`
 as the mounted driver reports its own accounting. The default view hides
 capacity-less mounts (the in-RAM view bindings) and further mounts of an
@@ -473,23 +473,23 @@ already-listed volume, noting the hidden count on fd 3
 `-T`/`-t`/`-x` add and filter by filesystem type, `-i` reports inode
 counts (a dynamic-inode volume reports the honest zeros), `-P` selects
 the POSIX portable wording, `--total` appends a summed row, `-l` accepts
-the local-only filter (every RustOS mount is local), and
+the local-only filter (every TAIRiX mount is local), and
 `-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale through the shared
-`rustos_util::size` vocabulary `du` uses too (`AGENTS.md` §2.2). Columns
+`tairix_util::size` vocabulary `du` uses too (`AGENTS.md` §2.2). Columns
 are auto-sized; numbers right-align. A missing or relative operand is
 diagnosed on standard error and the report continues (exit `1`; mount
 points are absolute and the tool never guesses a resolution); filters
 that leave nothing report the GNU `no file systems processed` error.
 `--output` and `--sync`/`--no-sync` are not yet available (documented in
 the bundle's `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`,
-exactly as `ps`. `cargo test -p rustos-df` drives the parser, the
+exactly as `ps`. `cargo test -p tairix-df` drives the parser, the
 selection/filter/duplicate rules, every column format, the operand
 paths, the fd-3 record, and the failure paths against in-memory
 `sysinfod`/probe fixtures, plus the thirteen-locale `OPTIONS` pinning.
 
 ## `du` — estimate file space usage (`userland/apps/du`)
 
-`rustos-du` is the GNU coreutils `du` (`plans/APPS.md` §12.1 Stage C,
+`tairix-du` is the GNU coreutils `du` (`plans/APPS.md` §12.1 Stage C,
 `AGENTS.md` §16.7): it walks each path operand (default `.`) and
 reports, post-order, the storage each directory's tree occupies as
 `size<TAB>path` rows. The default measure is each node's **allocated**
@@ -500,7 +500,7 @@ file, `-s` reports only the operands, `-c` appends a grand total, `-d`
 bounds the reported depth (sums are unaffected), `-S` excludes
 subdirectories from a directory's own row, `-0` NUL-terminates rows, and
 `-k`/`-m`/`-h`/`--si`/`-B <size>` select the scale through the shared
-`rustos_util::size` vocabulary (`AGENTS.md` §2.2), later selections
+`tairix_util::size` vocabulary (`AGENTS.md` §2.2), later selections
 winning as in GNU. The walk is an explicit frame stack (a deep tree can
 never exhaust the call stack) over the kernel-authorised `fs_*`
 syscalls, and it is I/O-frugal by design: every `fs_readdir` entry
@@ -511,24 +511,24 @@ round-trips, each a fresh full path resolution on an uncached,
 authenticated volume; only operands are stat'ed individually. An
 unreachable operand is diagnosed on standard error and the walk
 continues (exit `1`), an unreadable directory contributing nothing
-rather than a guessed partial sum. RustOS has no hard links yet, so
+rather than a guessed partial sum. TAIRiX has no hard links yet, so
 nothing can be counted twice and the GNU link-deduplication switches do
 not exist; `-x` awaits device identity (documented in the bundle's
 `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test
--p rustos-du` drives the parser (clusters, values, conflicts), the
+-p tairix-du` drives the parser (clusters, values, conflicts), the
 post-order accumulation, every option's rendering, the diagnosed-path
 paths, and the thirteen-locale `OPTIONS` pinning against an in-memory
 tree fixture.
 
 ## `cat` — concatenate files to the terminal (`userland/apps/cat`)
 
-`rustos-cat` concatenates files and standard input (`AGENTS.md` §3; a
+`tairix-cat` concatenates files and standard input (`AGENTS.md` §3; a
 `plans/APPS.md` command app registered at `/System/Apps/cat.app/Run`, so
 the shell resolves the bare word `cat` to it). It reads each of its
 sources in order and writes the bytes to the terminal. A source is
 a path, standard input — the `-` operand, and the default when
 no operand is given — or a typed resource reference (`sys:random`).
-The reference support is not cat's own: `rustos_rt::File::open` — the
+The reference support is not cat's own: `tairix_rt::File::open` — the
 one open-by-name path every command app uses — applies the shared
 `lib/resref` spelling rule and routes a reference to the kernel's
 capability-checked `resource_open` resolver rather than the filesystem,
@@ -546,8 +546,8 @@ names, falling back to the usage banner when the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary and the shared
-`rustos-help` engine, so it never links a kernel or driver crate
+dependencies are the audited `tairix-abi` vocabulary and the shared
+`tairix-help` engine, so it never links a kernel or driver crate
 (`AGENTS.md` §17.4). Its manifest requests `CAP_CONSOLE_WRITE`,
 `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every path per-inode under the
@@ -592,7 +592,7 @@ reach the outside world are injected seams, the same discipline as
   advancing offset until a read returns zero (end-of-file).
 - `Input` — read the next bytes of standard input until end-of-input.
 - `Output` — write rendered bytes to the terminal.
-- `rustos_help::HelpSource` — the tool's own bundled `Help/` tree, read
+- `tairix_help::HelpSource` — the tool's own bundled `Help/` tree, read
   by the short-help switches; the documents are authored once on disk in
   the bundle, never embedded in the binary (`plans/APPS.md` §6.1).
 
@@ -626,7 +626,7 @@ leaving line feeds and tabs alone.
 
 ### Tests
 
-`cargo test -p rustos-cat` drives the parser and the streaming engine
+`cargo test -p tairix-cat` drives the parser and the streaming engine
 against an in-memory filesystem, a buffered standard input, and a
 recording output: the command grammar (every option, `-`/`--`, and the
 usage-error path, bundled short flags, and the `-b`-overrides-`-n`
@@ -678,7 +678,7 @@ included).
 
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
 
-`rustos-clear` writes the byte sequence that moves the cursor home and
+`tairix-clear` writes the byte sequence that moves the cursor home and
 erases the display — the ncurses `clear` model (a `plans/APPS.md`
 command app registered at `/System/Apps/clear.app/Run`, so the shell
 resolves the bare word `clear` to it). Which bytes are written is
@@ -688,7 +688,7 @@ capability database, and the sequence is encoded through the one shared
 unknown `TERM` degrades to the dumb baseline, which cannot clear, and
 the tool reports that on stderr (exit `1`) instead of printing escape
 garbage. `-x` (the GNU "do not clear the scrollback" switch) is accepted
-for script compatibility; a RustOS console keeps no scrollback, so the
+for script compatibility; a TAIRiX console keeps no scrollback, so the
 output is identical with and without it — the divergence is documented
 in the tool's `Help/` documents. `-h`/`-?` render the tool's own short
 help through the shared `lib/help` engine.
@@ -696,21 +696,21 @@ help through the shared `lib/help` engine.
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline.
-`cargo test -p rustos-clear` drives the parser (every switch and the
+`cargo test -p tairix-clear` drives the parser (every switch and the
 usage-error path), the per-terminal byte selection (xterm/VT100 clear,
 dumb refusal), and the locale switch-drift pin.
 
 ## `reset` — restore the terminal to a sane state (`userland/apps/reset`)
 
-`rustos-reset` undoes the state a crashed full-screen program can leave
+`tairix-reset` undoes the state a crashed full-screen program can leave
 behind (a `plans/APPS.md` command app registered at
 `/System/Apps/reset.app/Run`). It first restores the **cooked** input
-discipline through `stream_input_mode` (`rustos_rt::set_input_mode`) — a
+discipline through `stream_input_mode` (`tairix_rt::set_input_mode`) — a
 crashed viewer may have left the console raw, with neither echo nor
 indicator — then writes the restoration sequence for the `TERM`-named
 terminal: leave the alternate screen, show the cursor, reset the graphic
 rendition and the scroll region, and finally home + erase. Every
-operation is a `rustos_vt::Op` the terminal's `lib/termcap` profile
+operation is a `tairix_vt::Op` the terminal's `lib/termcap` profile
 accepts; an operation the terminal lacks is omitted, and the dumb
 baseline gets only the discipline restore. `-h`/`-?` render the tool's
 own short help through the shared `lib/help` engine.
@@ -719,13 +719,13 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its manifest requests
 `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ` (the discipline restore), and
 `CAP_FS_ACCESS` — within the session baseline. `cargo test -p
-rustos-reset` drives the parser, the per-terminal restoration sequences
+tairix-reset` drives the parser, the per-terminal restoration sequences
 (xterm full set, VT100 subset, dumb empty), and the locale switch-drift
 pin.
 
 ## `true` / `false` — do nothing, with a fixed status (`userland/apps/true`, `userland/apps/false`)
 
-`rustos-true` and `rustos-false` are the GNU coreutils status tools
+`tairix-true` and `tairix-false` are the GNU coreutils status tools
 (`plans/APPS.md` §12.1 Stage C store bundles): each ignores every
 argument and exits `0` (`true`) or `1` (`false`), giving scripts a
 command that always succeeds or always fails. Parsing is infallible —
@@ -738,13 +738,13 @@ short-help convention), where GNU `false --help` exits `1`.
 Both crates are `no_std` (no `alloc` in the library), have no `unsafe`,
 and no `unwrap`/`expect`/`panic!` in production paths. Each manifest
 requests `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) —
-within the session baseline. `cargo test -p rustos-true -p rustos-false`
+within the session baseline. `cargo test -p tairix-true -p tairix-false`
 drives the ignore-everything and first-argument-help rules and the
 locale switch-drift pins.
 
 ## `yes` — repeatedly output a line of text (`userland/apps/yes`)
 
-`rustos-yes` is the GNU coreutils repeater (a `plans/APPS.md` §12.1
+`tairix-yes` is the GNU coreutils repeater (a `plans/APPS.md` §12.1
 Stage C store bundle): it writes its operands joined by single spaces —
 or `y` when none are given — followed by a newline, until its output
 stops accepting bytes or the process is terminated. Option handling
@@ -757,14 +757,14 @@ backing blocks the write kernel-side — the tool never idle-spins.
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline.
-`cargo test -p rustos-yes` drives the parser (operand/option rules, the
+`cargo test -p tairix-yes` drives the parser (operand/option rules, the
 `--` spelling), the block builder (default line, whole-line packing, the
 over-long-line floor), the closed-pipe stop condition through an
 injected output, and the locale switch-drift pin.
 
 ## `seq` — print a sequence of numbers (`userland/apps/seq`)
 
-`rustos-seq` is the GNU coreutils sequence generator (a `plans/APPS.md`
+`tairix-seq` is the GNU coreutils sequence generator (a `plans/APPS.md`
 §12.1 Stage C store bundle): print the numbers from FIRST to LAST in
 steps of INCREMENT (both defaulting to 1), with the full GNU surface —
 `-f`/`--format` (a printf-style floating-point format with one `%`
@@ -782,14 +782,14 @@ negative number is an operand, and the operand count, format, and
 implements C-locale `%e`/`%f`/`%g`/`%a` semantics (flags `-+#0 '`,
 width, precision) so a format prints what C's `printf` prints for a
 `double`. One deliberate divergence, documented in the crate: GNU
-computes the floating-point path in `long double`, RustOS in `f64` —
+computes the floating-point path in `long double`, TAIRiX in `f64` —
 visibly, `%a` prints the C `double` spelling (`0x1.8p+0`) where glibc's
 `%La` normalisation spells the same value `0xcp-3`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
-the session baseline. `cargo test -p rustos-seq` drives the number scan
+the session baseline. `cargo test -p tairix-seq` drives the number scan
 (decimal/hex/inf spellings, the width/precision algebra, single-step
 rounding to the subnormal and overflow edges), the format validation and
 renderer against glibc-verified outputs, the parser (GNU scan rules and
@@ -799,7 +799,7 @@ rule), and the locale switch-drift pin.
 
 ## `printf` — format and print data (`userland/apps/printf`)
 
-`rustos-printf` is the GNU coreutils formatter (a `plans/APPS.md` §12.1
+`tairix-printf` is the GNU coreutils formatter (a `plans/APPS.md` §12.1
 Stage C store bundle): print ARGUMENTs under the control of FORMAT —
 literal text, backslash escapes (`\NNN`, `\xHH`, `\uHHHH`/`\UHHHHHHHH`,
 and `\c`, which ends all output), and `%` directives (`diouxX` integers,
@@ -807,7 +807,7 @@ and `\c`, which ends all output), and `%` directives (`diouxX` integers,
 `%q` shell quoting, `%%`) with the C flags (`-+ #0'`), width, and
 precision, both settable to `*`. The FORMAT is reused until every
 ARGUMENT is consumed. Argument conversion follows GNU exactly: base-0
-integers and `strtod` floats (through the shared `rustos_util::cnum`
+integers and `strtod` floats (through the shared `tairix_util::cnum`
 scanner), `'x` character constants, silent zero/empty for a missing or
 empty argument, and the GNU diagnostics ("expected a numeric value",
 "value not completely converted", "Numerical result out of range", the
@@ -816,7 +816,7 @@ invalid conversion specification — an unknown letter, or a
 flag/width/precision on a conversion that rejects it (`%b`/`%q` take
 none; the per-conversion validity table is probe-pinned against GNU) —
 and a malformed escape are fatal, with output already rendered kept, as
-GNU keeps it. Floats render through the shared `rustos_util::cfloat`
+GNU keeps it. Floats render through the shared `tairix_util::cfloat`
 engine; `%q` reproduces coreutils `quotearg`'s shell-escape style
 (probe-pinned: bare/safe words, `''`, `"it's"` double-quoting, `\'`
 splices, `$'\t\n'` control groups, octal-escaped non-ASCII bytes).
@@ -824,13 +824,13 @@ splices, `$'\t\n'` control groups, octal-escaped non-ASCII bytes).
 Two deliberate divergences, documented in the bundle's help: floats
 compute in `f64` rather than `long double` (the `seq` precedent — a
 value beyond double's range prints `inf`), and a *first* argument of
-`-h`/`-?`/`--help` serves the RustOS short-help convention where GNU
+`-h`/`-?`/`--help` serves the TAIRiX short-help convention where GNU
 would treat it as FORMAT (`printf -- -h...` spells such a format).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
-the session baseline. `cargo test -p rustos-printf` drives the argument
+the session baseline. `cargo test -p tairix-printf` drives the argument
 converter (base-0/char-constant/float readings, saturation, wrapping),
 the template engine (escapes, every conversion, the validity table, `\c`
 halting, `*` width/precision, flush-before-fatal), the `%q` quoter, the
@@ -839,7 +839,7 @@ switch-drift pin — all against observed GNU coreutils behaviour.
 
 ## `basename` / `dirname` — lexical name surgery (`userland/apps/basename`, `userland/apps/dirname`)
 
-`rustos-basename` and `rustos-dirname` are the POSIX name tools
+`tairix-basename` and `tairix-dirname` are the POSIX name tools
 (`plans/APPS.md` §12.1 Stage C store bundles): purely lexical string
 surgery — no operand path is resolved, normalised, or touched on disk.
 `basename` prints the final component of each spelling, optionally with
@@ -848,24 +848,24 @@ a trailing suffix removed, with the full GNU surface (`NAME [SUFFIX]`,
 bundles, permutation); `dirname` prints each spelling with its last
 component removed (`-z`/`--zero`, `NAME...`).
 
-One RustOS extension, shared by both: a `Name:/` alias root
+One TAIRiX extension, shared by both: a `Name:/` alias root
 (`plans/DRIVES.md`) plays the role POSIX gives `/` — it is never
 stripped into, so `dirname Home:/tools` is `Home:/` exactly as
 `dirname /tools` is `/`. Where the root prefix ends is decided by the
-path grammar's own exported rule (`rustos_path::alias_root_len`), so
+path grammar's own exported rule (`tairix_path::alias_root_len`), so
 neither tool carries a second path parser.
 
 Both crates are `no_std` (with `alloc`), have no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; each manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
-the session baseline. `cargo test -p rustos-basename -p rustos-dirname`
+the session baseline. `cargo test -p tairix-basename -p tairix-dirname`
 drives the parsers (operand forms, suffix spellings, bundles,
 permutation, refusals), the POSIX algorithms (root, slash-run, empty,
 suffix, and alias-root cases), and the locale switch-drift pins.
 
 ## `mkdir` / `rmdir` — make and remove directories (`userland/apps/mkdir`, `userland/apps/rmdir`)
 
-`rustos-mkdir` and `rustos-rmdir` are the GNU coreutils directory tools
+`tairix-mkdir` and `tairix-rmdir` are the GNU coreutils directory tools
 (`plans/APPS.md` §12.1 Stage C store bundles). `mkdir` creates each
 operand through `fs_mkdir` (`-p`/`--parents` creates missing ancestors
 and tolerates an operand that is already a directory; `-v`/`--verbose`
@@ -883,7 +883,7 @@ never asks to remove a bare root; `-v` reports the GNU-worded
 `rmdir: removing directory, 'dir'` attempt line.
 
 Both tools' `-p` walks spell each ancestor through the shared path
-grammar's own rule (`rustos_path::Path::prefix`), so alias-rooted
+grammar's own rule (`tairix_path::Path::prefix`), so alias-rooted
 operands (`Home:/tools/bin`) walk correctly and neither tool carries a
 second path parser; an operand the grammar cannot parse is handed to
 the kernel whole, which stays the one validator.
@@ -892,7 +892,7 @@ Both crates are `no_std` (with `alloc`), have no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; each manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operation per-inode.
-`cargo test -p rustos-mkdir -p rustos-rmdir` drives the parsers
+`cargo test -p tairix-mkdir -p tairix-rmdir` drives the parsers
 (switches, clusters, `--`, refusals), the engines over in-memory seams
 (ancestor walks, existing-directory tolerance, the tolerated non-empty
 refusal, first-failure-stops ordering, GNU `-v` wording), and the
@@ -900,7 +900,7 @@ locale switch-drift pins.
 
 ## `head` — output the first part of files (`userland/apps/head`)
 
-`rustos-head` is the GNU coreutils `head` (`plans/APPS.md` §12.1 Stage C
+`tairix-head` is the GNU coreutils `head` (`plans/APPS.md` §12.1 Stage C
 store bundle): the first 10 lines of each file operand (or standard
 input), or the amount `-n`/`--lines` and `-c`/`--bytes` select — a
 leading `-` on the count means "everything but the last COUNT", and a
@@ -925,7 +925,7 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; its manifest requests
 the console pair and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operand per-inode.
-`cargo test -p rustos-head` drives the parser (counts, suffixes, the
+`cargo test -p tairix-head` drives the parser (counts, suffixes, the
 obsolete form, clusters, `--`, refusals), the engine over in-memory
 seams (chunked streams, headers, both elide modes including a
 ring-vs-reference chunking matrix, per-file diagnostics), and the
@@ -933,12 +933,12 @@ locale switch-drift pins.
 
 ## `wc` — newline, word, and byte counts (`userland/apps/wc`)
 
-`rustos-wc` is the GNU coreutils `wc` (`plans/APPS.md` §12.1 Stage C
+`tairix-wc` is the GNU coreutils `wc` (`plans/APPS.md` §12.1 Stage C
 store bundle): the line/word/byte counts of each file operand (or
 standard input), with `-m`/`--chars` (decoded UTF-8 characters — an
 encoding-error byte counts as a byte, not a character) and
 `-L`/`--max-line-length` (display columns through the one OS-wide
-`rustos_vt::char_width` definition, tabs advancing to 8-column stops)
+`tairix_vt::char_width` definition, tabs advancing to 8-column stops)
 as the further selectors; counts always print in the fixed
 lines/words/chars/bytes/max-line order. `--total={auto,always,only,
 never}` (GNU `argmatch` prefix matching) controls the `total` row, and
@@ -962,7 +962,7 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; its manifest requests
 the console pair and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operand per-inode.
-`cargo test -p rustos-wc` drives the parser (selectors, `--total`
+`cargo test -p tairix-wc` drives the parser (selectors, `--total`
 argmatch, `--files0-from` conflicts), the counter (chunk-boundary
 invariance, encoding errors, tab stops, wide characters), the client
 (width rules, totals, files0 records, error rows), and the locale
@@ -970,7 +970,7 @@ switch-drift pins.
 
 ## `tee` — copy standard input to standard output and files (`userland/apps/tee`)
 
-`rustos-tee` is the GNU coreutils `tee` (`plans/APPS.md` §12.1 Stage C
+`tairix-tee` is the GNU coreutils `tee` (`plans/APPS.md` §12.1 Stage C
 store bundle): it copies standard input to standard output and to each
 file operand (created if absent; overwritten, or appended with
 `-a`/`--append`), streaming in constant memory — one 4 KiB chunk fanned
@@ -984,7 +984,7 @@ output is diagnosed, dropped, and the run continues (or stops, under an
 unopenable file is likewise diagnosed and — only under an `exit` mode —
 immediately fatal. A `-` operand names a file called `-`, as in GNU.
 
-Two documented divergences follow from RustOS having no `SIGPIPE` and
+Two documented divergences follow from TAIRiX having no `SIGPIPE` and
 no per-process signal disposition. The "pipe" class of the GNU modes
 maps to the standard-output copy — the one output of this tool that can
 be a pipe — where a consumer going away surfaces as a write error,
@@ -1000,7 +1000,7 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; its manifest requests
 the console pair and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operand per-inode.
-`cargo test -p rustos-tee` drives the parser (switches, bundles, the
+`cargo test -p tairix-tee` drives the parser (switches, bundles, the
 argmatch modes, `--`, refusals), the engine over in-memory seams
 (fan-out, chunking, append vs overwrite, every mode × failure verdict,
 the no-output early stop, read errors), and the locale switch-drift
@@ -1008,9 +1008,9 @@ pins.
 
 ## `whoami` — print the current user's account name (`userland/apps/whoami`)
 
-`rustos-whoami` is the GNU coreutils identity tool (a `plans/APPS.md`
+`tairix-whoami` is the GNU coreutils identity tool (a `plans/APPS.md`
 §12.1 Stage C store bundle): it prints the user name associated with
-the caller's identity, followed by a newline, and nothing else. RustOS
+the caller's identity, followed by a newline, and nothing else. TAIRiX
 has no `/etc/passwd`, so the uid comes from the caller's kernel-attested
 origin record (the ungated `self_origin` syscall — a pure self-observer)
 and the uid → name pairing from the ungated `USER_DIRECTORY` query
@@ -1027,7 +1027,7 @@ directory walk is a service error, never misreported as a missing name.
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
-the session baseline. `cargo test -p rustos-whoami` drives the parser
+the session baseline. `cargo test -p tairix-whoami` drives the parser
 (operand/option rules, getopt ordering, the `--` spelling), the lookup
 engine against an in-memory directory fixture (found name, missing
 name, failed walk, failed identity read, closed terminal), the
@@ -1035,7 +1035,7 @@ short-help fallback, and the locale switch-drift pin.
 
 ## `ls` — list directory contents (`userland/apps/ls`)
 
-`rustos-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`
+`tairix-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`
 command app registered at `/System/Apps/ls.app/Run`, so the shell
 resolves the bare word `ls` to it). It inspects each of its path
 operands in order: a non-directory operand is listed by name, and a
@@ -1058,8 +1058,8 @@ here).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary and the shared
-`rustos-help`/`rustos-vt` engines, so it never links a kernel or driver
+dependencies are the audited `tairix-abi` vocabulary and the shared
+`tairix-help`/`tairix-vt` engines, so it never links a kernel or driver
 crate (`AGENTS.md` §17.4). Its manifest requests `CAP_CONSOLE_WRITE`
 plus `CAP_FS_ACCESS` — within the session baseline — and the secured VFS
 still authorises every path per-inode under the caller's attested
@@ -1115,7 +1115,7 @@ outside world are injected seams, the same discipline as `cat`'s
   check is paid only when one of them asks for it.
 - `Output` — write the rendered listing to the terminal, and advisory
   records to the standard information stream (fd 3), best-effort.
-- `rustos_help::HelpSource` — the tool's own `Help/` tree, read by the
+- `tairix_help::HelpSource` — the tool's own `Help/` tree, read by the
   short-help switches.
 
 On a running system these are syscall-backed (`fs_open`/`fs_stat`/
@@ -1172,7 +1172,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-ls` drives the parser and the listing engine
+`cargo test -p tairix-ls` drives the parser and the listing engine
 against an in-memory tree, an in-memory help tree, and a recording
 output: the command grammar (every option, clustered short flags,
 `-`/`-?`/`--`, the `-h`-is-human-readable rule, the retired `--long`
@@ -1192,7 +1192,7 @@ and dead-console fail-closed paths. `ls`'s help is authored on disk in
 the bundle's own `Help/` tree and read at runtime through the injected
 seam — never embedded in the binary — and a crate test proves every
 locale's document records exactly the parser's switches; the
-`rustos-syshelp` discovery crate's tests prove every shipped locale
+`tairix-syshelp` discovery crate's tests prove every shipped locale
 parses under the engine's bounds and the required locale set is complete.
 The aarch64 session-ceiling QEMU vertical types
 `ls /System/Apps` in a real session and sees `man.app` in the listing —
@@ -1200,7 +1200,7 @@ a store read only the mounted read-only `/System` volume produces.
 
 ## `rm` — remove files and directories (`userland/apps/rm`)
 
-`rustos-rm` removes its operands in order (`AGENTS.md` §3). A
+`tairix-rm` removes its operands in order (`AGENTS.md` §3). A
 non-directory operand — a regular file, a symbolic link (removed, never
 followed), a device node — is unlinked. A directory operand is removed
 only with `-r`, which removes its contents depth-first and then the
@@ -1210,7 +1210,7 @@ the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -1287,7 +1287,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-rm` drives the parser and the removal engine
+`cargo test -p tairix-rm` drives the parser and the removal engine
 against an in-memory tree and a recording output: the command grammar
 (every option, clustered short flags, `-`/`--`, the no-operand and
 usage-error paths), a single file, several files in order, the
@@ -1300,7 +1300,7 @@ trailing-slash path join.
 
 ## `cp` — copy files and directories (`userland/apps/cp`)
 
-`rustos-cp` copies each of its source operands to a destination
+`tairix-cp` copies each of its source operands to a destination
 (`AGENTS.md` §3). With a single source and a destination that is not a
 directory, the source is copied to that exact path. When the destination
 is an existing directory — and always when there is more than one source
@@ -1310,7 +1310,7 @@ naming a directory without `-r` is an error. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -1400,7 +1400,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-cp` drives the parser and the copy engine against
+`cargo test -p tairix-cp` drives the parser and the copy engine against
 an in-memory tree and a recording output: the command grammar (every
 option, clustered short flags, `-`/`--`, the too-few-operands and
 unknown-option paths), a single file to a new path, a file copied across
@@ -1416,7 +1416,7 @@ trailing-slash base-name join.
 
 ## `mv` — move (rename) files and directories (`userland/apps/mv`)
 
-`rustos-mv` relocates each of its source operands to a destination
+`tairix-mv` relocates each of its source operands to a destination
 (`AGENTS.md` §3). With a single source and a destination that is not a
 directory, the source is moved to that exact path. When the destination
 is an existing directory — and always when there is more than one
@@ -1426,7 +1426,7 @@ operand. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -1512,7 +1512,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-mv` drives the parser and the move engine against
+`cargo test -p tairix-mv` drives the parser and the move engine against
 an in-memory tree and a recording output: the command grammar (every
 option, clustered short flags, `-`/`--`, the too-few-operands and
 unknown-option paths), a file renamed to a new path, a directory renamed,
@@ -1527,7 +1527,7 @@ paths, and the trailing-slash base-name join.
 
 ## `chmod` — change file mode bits (`userland/apps/chmod`)
 
-`rustos-chmod` applies a mode to each of its file operands (`AGENTS.md`
+`tairix-chmod` applies a mode to each of its file operands (`AGENTS.md`
 §3). The mode is either an absolute octal value (`644`, `0755`, …) that
 replaces the permission bits outright, or a comma-separated list of
 symbolic clauses (`[ugoa]*[-+=][rwxXst]*`, e.g. `g+w`, `o-rx`, `a=rx`,
@@ -1538,7 +1538,7 @@ permission model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependencies are the audited `rustos-abi` crate and the shared
+only dependencies are the audited `tairix-abi` crate and the shared
 `lib/help` engine, so it never links a kernel or driver crate
 (`AGENTS.md` §17.4). The `Run` binary (`src/run.rs`, the store bundle's
 entry point) wires the production seams: a resolve-only `fs_open` +
@@ -1582,7 +1582,7 @@ exit status still reflects the failure.
   `X` (execute only for a directory or a file that already carries an
   execute bit), `s` (setuid/setgid), and `t` (sticky). A clause may chain
   several operator sections that share its who (e.g. `u+x-w`). An omitted
-  who is treated as `a` (RustOS has no per-process umask seam to honour,
+  who is treated as `a` (TAIRiX has no per-process umask seam to honour,
   so the `a` interpretation is exact, not umask-masked).
 
 ### A mode-changing machine, not a data source
@@ -1621,7 +1621,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-chmod` drives the parser, the symbolic-mode
+`cargo test -p tairix-chmod` drives the parser, the symbolic-mode
 algebra, and the move engine against an in-memory tree and a recording
 output: the command grammar (octal and symbolic modes, the recursive
 flag, the `-r`-is-not-recursive and unknown-option refusals, `--`,
@@ -1636,7 +1636,7 @@ switches (the rendered own-document path and the usage-banner fallback).
 
 ## `chown` — change file owner and group (`userland/apps/chown`)
 
-`rustos-chown` applies an ownership change to each of its file operands
+`tairix-chown` applies an ownership change to each of its file operands
 (`AGENTS.md` §3). The owner operand is `OWNER`, `OWNER:GROUP`, or
 `:GROUP`, where `OWNER` and `GROUP` are **decimal** user/group ids:
 `OWNER` changes only the owning user, `:GROUP` only the owning group, and
@@ -1647,7 +1647,7 @@ model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -1681,7 +1681,7 @@ exit status still reflects the failure.
 - `OWNER:GROUP` — change both.
 - `:GROUP` — change only the owning group.
 
-A name (rather than a numeric id) is not accepted: RustOS has no
+A name (rather than a numeric id) is not accepted: TAIRiX has no
 name-to-id seam in this tool, so resolving names would be interface creep
 (`AGENTS.md` §2.4). An empty spec, a bare `:`, and a trailing-colon
 `OWNER:` (which on POSIX systems means "the user's login group", and has
@@ -1723,7 +1723,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-chown` drives the parser and the engine against an
+`cargo test -p tairix-chown` drives the parser and the engine against an
 in-memory tree and a recording output: the command grammar (every owner
 form, the recursive flag, the `-r`-is-not-recursive and unknown-option
 refusals, `--`, the too-few-operands and bad-owner paths), the owner-spec
@@ -1737,7 +1737,7 @@ fail-closed paths.
 
 ## `getcap` — report a file's capability gate (`userland/apps/getcap`)
 
-`rustos-getcap` reports the **optional capability requirement** an inode
+`tairix-getcap` reports the **optional capability requirement** an inode
 may carry: a capability the caller must hold to reach the node at all, on
 top of the mode/ACL checks (`AGENTS.md` §5.3). For each file operand it
 prints one line — `path CAP_NAME` — when the file carries a gate, and
@@ -1747,7 +1747,7 @@ It is the read-only companion of [`setcap`](#setcap--set-or-clear-a-files-capabi
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -1766,7 +1766,7 @@ not an option. `-h`/`--help` wins immediately.
 ### Capability names
 
 A gate renders by its canonical `CAP_*` name (e.g. `CAP_AUDIT_READ`),
-resolved through `rustos_abi::CapabilityId::name` — the single,
+resolved through `tairix_abi::CapabilityId::name` — the single,
 frozen `abi-v1` source of truth shared with `setcap` (`AGENTS.md` §2.2,
 §5.2). A node that stored an in-range identifier the running ABI has not
 yet named renders as `CAP_<id>` rather than being silently dropped, so a
@@ -1804,7 +1804,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-getcap` drives the parser and the engine against an
+`cargo test -p tairix-getcap` drives the parser and the engine against an
 in-memory tree and a recording output: the command grammar (the recursive
 flag, the `-r`-is-not-recursive and unknown-option refusals, `--`, and
 the no-operand path), a gated file reported by name, an ungated file
@@ -1816,7 +1816,7 @@ the directory before its contents, and the missing-operand / stat / query
 
 ## `setcap` — set or clear a file's capability gate (`userland/apps/setcap`)
 
-`rustos-setcap` changes the **optional capability requirement** of each
+`tairix-setcap` changes the **optional capability requirement** of each
 of its file operands (`AGENTS.md` §5.3). The capability operand is either
 a canonical `CAP_*` name (e.g. `CAP_AUDIT_READ`), which installs that gate,
 or the literal `-`, which clears the gate so the node has none. With `-R`
@@ -1832,7 +1832,7 @@ is not authorised to make (it surfaces as `SetcapError::Apply`).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
@@ -1854,7 +1854,7 @@ The capability spec is one of:
 
 - a canonical `CAP_*` name (`CAP_FS_MOUNT`, `CAP_AUDIT_READ`, …) — install
   that gate; the name is resolved through
-  `rustos_abi::CapabilityId::from_name`, the same frozen `abi-v1` table
+  `tairix_abi::CapabilityId::from_name`, the same frozen `abi-v1` table
   `getcap` renders with (`AGENTS.md` §2.2);
 - the literal `-` — clear the gate.
 
@@ -1895,7 +1895,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-setcap` drives the parser and the engine against an
+`cargo test -p tairix-setcap` drives the parser and the engine against an
 in-memory tree and a recording output: the command grammar (a named
 capability and the clearing `-`, the recursive flag, the
 `-r`-is-not-recursive and unknown-option refusals, `--`, the
@@ -1908,7 +1908,7 @@ the directory before its contents, and the missing-operand / stat / apply
 
 ## `useradd` — create a user account (`userland/apps/useradd`)
 
-`rustos-useradd` is a `plans/APPS.md` command app registered at
+`tairix-useradd` is a `plans/APPS.md` command app registered at
 `/System/Apps/useradd.app/Run`. It adds a single account to the user
 database that persists under `/System/Security/Users` (`AGENTS.md` §5.1,
 §16). It names the new account and its numeric identity — a login name,
@@ -1923,8 +1923,8 @@ unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary, the shared
-`rustos-help` engine, and the `rustos-users` account policy, so it never
+dependencies are the audited `tairix-abi` vocabulary, the shared
+`tairix-help` engine, and the `tairix-users` account policy, so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). Its manifest requests
 `CAP_CONSOLE_WRITE`, `CAP_USER_ADMIN`, and `CAP_FS_ACCESS`.
 
@@ -1949,7 +1949,7 @@ every later argument is an operand. `-h`/`-?`/`--help` wins immediately.
 ### The account grammar
 
 `UID`, `GID`, and the `-G` list entries are decimal ids. A group name
-(rather than a numeric id) is not accepted: RustOS has no name-to-id seam
+(rather than a numeric id) is not accepted: TAIRiX has no name-to-id seam
 in this tool, so resolving names would be interface creep (`AGENTS.md`
 §2.4). The login name must match `[a-z_][a-z0-9_-]*` within the length
 bound — the portable Unix shape, which admits no name that could be
@@ -1957,22 +1957,22 @@ confused for a numeric id or an option.
 
 `-g` is required rather than defaulted: there is no default-group policy
 to invent (`AGENTS.md` §2.1). A missing `-u` is allocated by the shared
-`rustos_users::next_id` policy (interactive-user range, `1000..`: one
+`tairix_users::next_id` policy (interactive-user range, `1000..`: one
 above the highest taken id in the band) and a
-missing `-d` is the shared `rustos_users::default_home` layout (the §16
+missing `-d` is the shared `tairix_users::default_home` layout (the §16
 `/Users/<name>` shape) — both applied by the production database client,
 never guessed in the parser.
 
 ### The created account has no usable password
 
 GNU `useradd` creates an account that cannot authenticate until an
-administrator sets a password. The RustOS database requires a well-formed
+administrator sets a password. The TAIRiX database requires a well-formed
 password record on creation, so the production client submits one derived
 from a throwaway 256-bit random secret it immediately discards: no
 password matches it, the honest equivalent of the `!` field. The
 administrator then sets a real password with the `users` tool's `passwd`
-command. The created account starts `rustos_users::DEFAULT_SHELL` and the
-`rustos_users::SESSION_BASELINE` capability ceiling.
+command. The created account starts `tairix_users::DEFAULT_SHELL` and the
+`tairix_users::SESSION_BASELINE` capability ceiling.
 
 ### An account-spec parser, not a policy point
 
@@ -1991,7 +1991,7 @@ are injected seams, mirroring `setcap`'s `FileSystem`, `login`'s
   `users_admin` client over its own injected `db::AdminChannel` (the
   syscall) and `db::Entropy` (the kernel CSPRNG through `sys:random`)
   seams, so the whole client policy is host-tested.
-- `rustos_help::HelpSource` — the tool's own bundled `Help/` tree, read
+- `tairix_help::HelpSource` — the tool's own bundled `Help/` tree, read
   by the short-help switches.
 - `Output` — write the short help to the terminal (`useradd` is silent
   on success).
@@ -2015,7 +2015,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-useradd` drives the parser, the engine, and the
+`cargo test -p tairix-useradd` drives the parser, the engine, and the
 production client against in-memory fixtures: the command grammar (the
 minimal name+group form, every option, long `--opt value`/`--opt=value`
 and attached short `-u0` spellings, `-h`/`-?`/`--help`, the missing-group,
@@ -2034,7 +2034,7 @@ switches (`plans/APPS.md` §3.1).
 
 ## `groupadd` — create a group (`userland/apps/groupadd`)
 
-`rustos-groupadd` is a `plans/APPS.md` command app registered at
+`tairix-groupadd` is a `plans/APPS.md` command app registered at
 `/System/Apps/groupadd.app/Run`. It adds a single group to the group
 database that persists under `/System/Security/Groups` (`AGENTS.md` §5.1,
 §16). It names the new group and an optional numeric id (auto-allocated
@@ -2049,8 +2049,8 @@ unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary, the shared
-`rustos-help` engine, and the `rustos-users` account policy, so it never
+dependencies are the audited `tairix-abi` vocabulary, the shared
+`tairix-help` engine, and the `tairix-users` account policy, so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). Its manifest requests
 `CAP_CONSOLE_WRITE`, `CAP_USER_ADMIN`, and `CAP_FS_ACCESS`.
 
@@ -2071,13 +2071,13 @@ wins immediately.
 ### The group grammar
 
 `GID` is a decimal id. A name (rather than a numeric id) is not accepted:
-RustOS has no name-to-id seam in this tool, so resolving names would be
+TAIRiX has no name-to-id seam in this tool, so resolving names would be
 interface creep (`AGENTS.md` §2.4). The group name must match
 `[a-z_][a-z0-9_-]*` within the length bound — the portable Unix shape,
 which admits no name that could be confused for a numeric id or an
 option.
 
-A missing `-g` is allocated by the shared `rustos_users::next_id` policy
+A missing `-g` is allocated by the shared `tairix_users::next_id` policy
 (interactive-user range, `1000..`: one above the highest taken id in the
 band) in the production database client, never guessed in the parser
 (`AGENTS.md` §2.1).
@@ -2098,7 +2098,7 @@ the outside world are injected seams, mirroring `useradd`'s `UserDb`,
   record. The production implementation, `db::GroupsAdminDb`, is the
   `users_admin` client over its injected `db::AdminChannel` transport,
   so the whole client policy is host-tested.
-- `rustos_help::HelpSource` — the tool's own bundled `Help/` tree, read
+- `tairix_help::HelpSource` — the tool's own bundled `Help/` tree, read
   by the short-help switches.
 - `Output` — write the short help to the terminal (`groupadd` is silent
   on success).
@@ -2122,7 +2122,7 @@ There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p rustos-groupadd` drives the parser, the engine, and the
+`cargo test -p tairix-groupadd` drives the parser, the engine, and the
 production client against in-memory fixtures: the command grammar (the
 bare-name and name+gid forms, long `--gid value`/`--gid=value` and
 attached short `-g0` spellings, `-h`/`-?`/`--help`, the
@@ -2139,7 +2139,7 @@ the parser's switches (`plans/APPS.md` §3.1).
 
 ## `users` — interactive account administration (`userland/shell/users`)
 
-`rustos-users-cli` (`/System/Apps/users.app/Run`) is the first holder of the
+`tairix-users-cli` (`/System/Apps/users.app/Run`) is the first holder of the
 `CAP_USER_ADMIN`-gated `users_admin` syscall
 (`plans/CAPABILITY_USE.md` CU4): an interactive session that lists,
 creates, modifies, locks/unlocks, and deletes accounts, edits their
@@ -2168,7 +2168,7 @@ administered from inside the session.
 
 ### Tests
 
-`cargo test -p rustos-users-cli` drives scripted sessions through the
+`cargo test -p tairix-users-cli` drives scripted sessions through the
 `ToolIo`/`AdminChannel`/`SaltSource` seams: the command grammar and its
 usage refusals, the exact typed requests submitted (decoded and asserted
 field by field), the password-record round trip and the
@@ -2177,8 +2177,8 @@ served listing, the listing renderers, and the terse errno reporting.
 
 ## `man` — show a command's help document (`userland/apps/man`)
 
-`rustos-man` (`/System/Apps/man.app/Run`) renders the help document a
-command's application bundle ships (`plans/APPS.md` §7). RustOS has no
+`tairix-man` (`/System/Apps/man.app/Run`) renders the help document a
+command's application bundle ships (`plans/APPS.md` §7). TAIRiX has no
 troff/roff man pages and no `/usr/share/man`: a bundle's single
 internationalised `Help/` tree is the one documentation source, and `man`
 is its terminal reader.
@@ -2196,14 +2196,14 @@ codes: `0` page shown, `1` command/document not found or delivery failed,
 
 ### One resolution, one engine
 
-`man <cmd>` walks `rustos_cmdres::bundle_candidates` — the same
+`man <cmd>` walks `tairix_cmdres::bundle_candidates` — the same
 store-then-`PATH` order the shell launches by — and stops at the first
 bundle directory that exists (`NotFound` moves on; any other refusal is
 final, mirroring the shell's launch rule), so the page shown always
 documents the program the shell would run for the same word. When no
 ordered candidate matches a bare word, `man` falls back to a **recursive
 bundle search** of the app stores — the machine-wide `/Apps`, then the
-user's own `<HOME>/Apps` (`rustos_cmdres::search_roots`) — walked
+user's own `<HOME>/Apps` (`tairix_cmdres::search_roots`) — walked
 breadth-first over sorted listings so the shallowest match wins
 deterministically. The walk never descends into another bundle's `.app`
 directory (a bundle is a sealed unit), is bounded in depth and by a
@@ -2248,7 +2248,7 @@ every `Help/` read per-inode under the caller's attested identity.
 
 ### Tests
 
-`cargo test -p rustos-man` drives the engine against in-memory
+`cargo test -p tairix-man` drives the engine against in-memory
 `BundleStore`/`Console` fixtures: the grammar and its refusals, the
 store-shadows-`PATH` order, the final-refusal rule, `.app`/explicit-path
 words, the recursive app-store search (nested finds, `/Apps`-before-home
@@ -2290,7 +2290,7 @@ the menu (`File`: `New`, `Open...`, `Save`, `Save As...`, `Exit`;
 `Search`: `Find...`, `Repeat Last Find`); `Esc` (or `F10`) closes it.
 An action that would discard unsaved changes asks first (`y` save /
 `n` discard / `c` or `Esc` cancel). The Alt chords arrive as the
-"meta sends escape" `ESC`-prefix form (`rustos_vt::Op::Meta`), decoded
+"meta sends escape" `ESC`-prefix form (`tairix_vt::Op::Meta`), decoded
 to `Event::Alt` by the shared `lib/curses` input decoder.
 
 ### Honest file handling
@@ -2309,13 +2309,13 @@ session never dies over a refused file.
 The `TextBuffer` (decode/edit primitives) and the `Model` (edit/menu/
 prompt/confirm state machine) are pure; file I/O goes through the `Fs`
 seam (in production the kernel-authorised `fs_*` syscalls via
-`rustos-rt`; in tests an in-memory map) and the display through the
+`tairix-rt`; in tests an in-memory map) and the display through the
 curses `Tty` seam. The blocking input read is parked by the kernel —
 never a poll loop.
 
 ### Tests
 
-`cargo test -p rustos-edit` drives the parser, the buffer's round-trip/
+`cargo test -p tairix-edit` drives the parser, the buffer's round-trip/
 refusal/editing behaviour, the full keystroke state machine (saving,
 save-as, confirm flows, open, wrap-around find, notices) against the
 in-memory filesystem, and the renderer against an in-memory tty,

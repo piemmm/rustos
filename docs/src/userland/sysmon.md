@@ -24,7 +24,7 @@ action still fails closed; only the session survives.
 
 Every figure travels through `sysinfo-v1` — there is no `/proc`. The
 four kernel-statistics fetches (`MEMORY_PRESSURE`, `RECLAIM_STATS`,
-`RAMZIP_STATS`, `CPU_LOAD`) are the shared `rustos_procinfo::kstats`
+`RAMZIP_STATS`, `CPU_LOAD`) are the shared `tairix_procinfo::kstats`
 walks — the same definitions the `info:`/`stats:` resolver uses, so the
 two consumers can never diverge. `KERNEL_MEMORY_STATS`, the ungated
 `UPTIME`/`LOAD_AVERAGE`/`CPU_TIME_STATS`, and the process lists round
@@ -68,7 +68,7 @@ binary that binds only its inherited fd 0/1 and the `sysinfod` IPC
 transport. Unit tests drive the model and renderer over in-memory
 `sysinfo` and tty channels (keys, panel cycling, interval bounds,
 refusal rendering, the refuse-everything survival case, the auto-refresh
-tick); the `rustos-test-sysmon-qemu-aarch64` vertical boots the
+tick); the `tairix-test-sysmon-qemu-aarch64` vertical boots the
 production aarch64 image, logs in, runs `sysmon` on the console,
 witnesses the pressure and reclaim figures on the transcript, quits
 with `q`, and gets the shell prompt back on an intact screen.

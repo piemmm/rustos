@@ -6,16 +6,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats,
     LoadAverage, MemoryPressureStats, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
     ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, Uptime,
     RECLAIM_CLASS_COUNT,
 };
-use rustos_abi::{Duration64, Errno, ProcId};
-use rustos_curses::{Event, Screen, Size, Tty};
-use rustos_procinfo::Transport;
-use rustos_termcap::TermType;
+use tairix_abi::{Duration64, Errno, ProcId};
+use tairix_curses::{Event, Screen, Size, Tty};
+use tairix_procinfo::Transport;
+use tairix_termcap::TermType;
 
 use crate::app::{detail_capacity, render, run};
 use crate::command::{parse, Command, DEFAULT_DELAY_TENTHS, MAX_DELAY_TENTHS, MIN_DELAY_TENTHS};
@@ -46,7 +46,7 @@ impl FakeService {
         Self {
             uptime_ns: RefCell::new(Some(1_000_000_000)),
             load: Some(LoadAverage {
-                load1: 1 << rustos_abi::sysinfo::LOAD_FIXED_SHIFT,
+                load1: 1 << tairix_abi::sysinfo::LOAD_FIXED_SHIFT,
                 ..LoadAverage::default()
             }),
             memory: Some(KernelMemoryStats {
@@ -241,12 +241,12 @@ impl FakeTty {
 }
 
 impl Tty for FakeTty {
-    fn write(&mut self, bytes: &[u8]) -> rustos_curses::Result<()> {
+    fn write(&mut self, bytes: &[u8]) -> tairix_curses::Result<()> {
         self.output.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn read(&mut self) -> rustos_curses::Result<Vec<u8>> {
+    fn read(&mut self) -> tairix_curses::Result<Vec<u8>> {
         Ok(self.chunks.pop().unwrap_or_default())
     }
 }
@@ -360,7 +360,7 @@ fn help_documents_the_parser_switches() {
     use std::fs;
 
     let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-    for locale in rustos_help::REQUIRED_LOCALES {
+    for locale in tairix_help::REQUIRED_LOCALES {
         let path = format!("{help_root}/{locale}/sysmon.md");
         let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         for switch in ["`-d, --delay <seconds>`", "`-h, -?`"] {

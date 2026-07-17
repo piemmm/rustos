@@ -5,7 +5,7 @@
 # standard output/error streams; CAP_FS_ACCESS is the tool's job —
 # statting and walking its path operands (and reading its own bundle's
 # Help/ documents) through the secured VFS. It reads no standard input.
-id = "os.rustos.du"
+id = "os.tairix.du"
 name = "du"
 version = "0.1.0"
 kind = "command"

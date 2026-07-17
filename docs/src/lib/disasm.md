@@ -1,6 +1,6 @@
-# `rustos-disasm` — instruction decoders
+# `tairix-disasm` — instruction decoders
 
-`rustos_disasm` (`lib/disasm`) is RustOS's one definition of how machine code
+`tairix_disasm` (`lib/disasm`) is TAIRiX's one definition of how machine code
 is rendered as text for the four Tier-1 ISAs. The file manager's disassembly
 viewer consumes it first (over `lib/binfmt`, which names and bounds the code
 regions); an `objdump`-class command app consumes the same crate the moment

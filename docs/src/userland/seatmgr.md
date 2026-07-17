@@ -1,6 +1,6 @@
 # Seat-manager service
 
-`rustos-seatmgr` is the user-space service that holds `CAP_SEAT_ADMIN` —
+`tairix-seatmgr` is the user-space service that holds `CAP_SEAT_ADMIN` —
 the seat-multiplexing authority (`plans/DISPLAY.md` D3): the
 `chvt`/`logind`-class power to switch which session is foreground across
 every seat and to forcibly revoke a wedged owner's lease. The installed
@@ -12,7 +12,7 @@ events — is documented in [Seat ownership](../desktop/seat.md).
 ## What the service does
 
 `seatmgr` binds the reserved `SEATMGR_ENDPOINT` rendezvous
-(`rustos_abi::seat`; binding a reserved id requires
+(`tairix_abi::seat`; binding a reserved id requires
 `CAP_IPC_BIND_PRIVILEGED`, so a squatter cannot intercept
 seat-administration traffic) and serves the fixed-width, versioned
 `SeatAdminRequest`:
@@ -27,7 +27,7 @@ refusal.
 
 ## The gate
 
-For each request the dispatcher (`rustos_seatmgr::serve`), in order and
+For each request the dispatcher (`tairix_seatmgr::serve`), in order and
 failing closed at the first problem:
 
 1. Decodes the request against `seatmgr-v1` (unknown magic, version,
@@ -49,9 +49,9 @@ exceed the kernel's own gate.
 
 ## Testing
 
-`cargo test -p rustos-seatmgr` drives `serve` against in-memory fixtures:
+`cargo test -p tairix-seatmgr` drives `serve` against in-memory fixtures:
 authorised switch/revoke forwarding and audit, unprivileged denial before
 any state is touched, kernel-refusal pass-through, malformed-request
 rejection, and the event-id range/uniqueness pins. The wire decoders are
 additionally hammered by the `lib/abi` fuzz harness
-(`cargo xtask fuzz`, target `rustos-abi/fuzz_decode`).
+(`cargo xtask fuzz`, target `tairix-abi/fuzz_decode`).

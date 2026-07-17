@@ -1,4 +1,4 @@
-//! QEMU runner for RustOS integration tests.
+//! QEMU runner for TAIRiX integration tests.
 //!
 //! This crate is the single, documented gateway between the host build and a
 //! QEMU process used to execute a kernel-mode integration test. It exists
@@ -890,15 +890,15 @@ impl Runner {
         .then(MonitorSocket::reserve);
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
-            let mut chardev = OsString::from("socket,id=rustos-mon,server=on,wait=off,path=");
+            let mut chardev = OsString::from("socket,id=tairix-mon,server=on,wait=off,path=");
             chardev.push(mon.path());
             cmd.arg(chardev);
             cmd.arg("-mon");
-            cmd.arg("chardev=rustos-mon,mode=readline");
+            cmd.arg("chardev=tairix-mon,mode=readline");
         }
 
-        if std::env::var_os("RUSTOS_QEMU_DEBUG").is_some() {
-            eprintln!("rustos-qemu: {cmd:?}");
+        if std::env::var_os("TAIRIX_QEMU_DEBUG").is_some() {
+            eprintln!("tairix-qemu: {cmd:?}");
         }
         // Serial input rides the `-serial stdio` console: pipe stdin only
         // when a vertical asked to type at the guest, otherwise keep it
@@ -943,8 +943,8 @@ impl Runner {
         for a in &spec.extra_args {
             cmd.arg(a);
         }
-        if std::env::var_os("RUSTOS_QEMU_DEBUG").is_some() {
-            eprintln!("rustos-qemu: {cmd:?}");
+        if std::env::var_os("TAIRIX_QEMU_DEBUG").is_some() {
+            eprintln!("tairix-qemu: {cmd:?}");
         }
         // The caller's terminal *is* the guest serial console: inherit
         // all three stdio streams and simply wait — in the foreground,
@@ -1138,7 +1138,7 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             if !serial.is_empty() && !serial.ends_with('\n') {
                 serial.push('\n');
             }
-            serial.push_str("rustos-qemu: ");
+            serial.push_str("tairix-qemu: ");
             serial.push_str(&reason);
             serial.push('\n');
             Outcome::Fail { status: -1, serial }
@@ -1283,7 +1283,7 @@ impl MonitorSocket {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("rustos-qemu-mon-{}-{}.sock", std::process::id(), n));
+            std::env::temp_dir().join(format!("tairix-qemu-mon-{}-{}.sock", std::process::id(), n));
         Self { path }
     }
 
@@ -1949,11 +1949,11 @@ mod tests {
     fn serial_script_waits_for_each_steps_declared_delay() {
         let start = Instant::now();
         let steps = [SerialInjection {
-            ready_marker: String::from("root@rustos ~% "),
+            ready_marker: String::from("root@tairix ~% "),
             delay_after_marker: Duration::from_secs(1),
             line: String::from("s"),
         }];
-        let captured = Mutex::new(String::from("root@rustos ~% "));
+        let captured = Mutex::new(String::from("root@tairix ~% "));
         let mut output = Some(Vec::new());
         let mut state = SerialScriptState::default();
 
@@ -2094,9 +2094,9 @@ mod tests {
         let second = Arc::new(AtomicBool::new(false));
         let markers = [
             (String::from("queue armed"), 1, Arc::clone(&first)),
-            (String::from("rustos$ "), 1, Arc::clone(&second)),
+            (String::from("tairix$ "), 1, Arc::clone(&second)),
         ];
-        let feed: &[u8] = b"boot ok\nqueue armed\nbanner\nrustos$ ";
+        let feed: &[u8] = b"boot ok\nqueue armed\nbanner\ntairix$ ";
         drain_stream(Some(feed), &captured, &markers).expect("drain markers");
         assert!(first.load(Ordering::Acquire));
         assert!(second.load(Ordering::Acquire));
@@ -2105,7 +2105,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_str(),
-            "boot ok\nqueue armed\nbanner\nrustos$ "
+            "boot ok\nqueue armed\nbanner\ntairix$ "
         );
     }
 
@@ -2340,7 +2340,7 @@ mod tests {
         // Plant a real (empty) kernel file so the failure is attributable
         // to the missing backing image, not to a missing kernel.
         let kernel =
-            std::env::temp_dir().join(format!("rustos-qemu-kernel-{}.elf", std::process::id()));
+            std::env::temp_dir().join(format!("tairix-qemu-kernel-{}.elf", std::process::id()));
         std::fs::write(&kernel, b"\x7fELF").expect("write placeholder kernel");
         let s = Spec {
             arch: Arch::X86_64,

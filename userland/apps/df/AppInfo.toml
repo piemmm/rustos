@@ -7,7 +7,7 @@
 # documents) through the secured VFS. The mount table itself comes from
 # the ungated sysinfo-v1 MOUNT_LIST query served by sysinfod; no
 # privileged capability is requested. It reads no standard input.
-id = "os.rustos.df"
+id = "os.tairix.df"
 name = "df"
 version = "0.1.0"
 kind = "command"

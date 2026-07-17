@@ -113,7 +113,7 @@ fn passes_arch_hal_conformance_suite() {
     let blob = crate::fdt::tests::virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
     let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");
     let discovery = crate::platform::FdtDiscovery::new(fdt);
-    rustos_arch_api::conformance::run_all(
+    tairix_arch_api::conformance::run_all(
         &arch,
         &crate::sidechannel::SideChannel::new(),
         &crate::memtag::MemoryTags::new(),
@@ -133,9 +133,9 @@ fn passes_arch_hal_conformance_suite() {
 fn passes_cross_cpu_tlb_shootdown_conformance() {
     static S: RiscvArchStorage<2> = RiscvArchStorage::new();
     let arch = RiscvArch::with_harts(&S, 0, 10_000_000, &[0, 1]);
-    rustos_arch_api::xtlb::conformance::run_all(&arch, 100u64 << 30);
+    tairix_arch_api::xtlb::conformance::run_all(&arch, 100u64 << 30);
     let erased: &dyn CrossCpuTlbShootdown = &arch;
-    rustos_arch_api::xtlb::conformance::run_all(erased, 100u64 << 30);
+    tairix_arch_api::xtlb::conformance::run_all(erased, 100u64 << 30);
 }
 
 /// / W14: the port passes the secondary-bring-up conformance
@@ -148,9 +148,9 @@ fn passes_cross_cpu_tlb_shootdown_conformance() {
 fn passes_secondary_bringup_conformance() {
     static S: RiscvArchStorage<2> = RiscvArchStorage::new();
     let arch = RiscvArch::with_harts(&S, 0, 10_000_000, &[0, 1]);
-    rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+    tairix_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
     let erased: &dyn SecondaryBringup = &arch;
-    rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+    tairix_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
 }
 
 /// The boot hart and any unmapped / out-of-range dense id are refused

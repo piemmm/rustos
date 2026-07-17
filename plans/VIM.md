@@ -1,7 +1,7 @@
 # VIM.md — the `vim` editor: shipped core and staged features
 
 Binding under `AGENTS.md`. This plan records what the `vim` command app
-(`userland/apps/vim`, `rustos-vim`) guarantees today and stages, feature
+(`userland/apps/vim`, `tairix-vim`) guarantees today and stages, feature
 by feature, everything the upstream vim package provides beyond that
 core, so later sessions can grow the editor toward a full implementation
 without re-deriving the gap analysis.
@@ -64,7 +64,7 @@ of upstream vim 9 with `nocompatible`.
 - **V1 — display parity.**
   - Line wrap (`'wrap'`, default on in vim) with `gj`/`gk` display
     motions; keep `'nowrap'` + side-scroll as the option.
-  - Double-width (CJK) cell arithmetic via `rustos_vt::char_width` in
+  - Double-width (CJK) cell arithmetic via `tairix_vt::char_width` in
     `render.rs` and the cursor-column math.
   - `'tabstop'`/`'shiftwidth'`/`'expandtab'` as settable options.
   - `'relativenumber'`; `'ruler'`; `'list'`.

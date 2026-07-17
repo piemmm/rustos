@@ -211,7 +211,7 @@ impl SyscallNumber {
     ///
     /// Arguments: `pid: i32` (the child to wait for, or [`WAIT_PID_ANY`] to
     /// wait for any of the caller's children), `status: *mut
-    /// ros_wait_status_t` (a non-null user pointer the kernel writes the
+    /// tairix_wait_status_t` (a non-null user pointer the kernel writes the
     /// typed [`crate::WaitStatusRecord`] into — an exited record carrying
     /// the reaped child's exit code, or, when requested with
     /// [`WaitFlags::STOPPED`], a stopped record carrying the stopping
@@ -240,7 +240,7 @@ impl SyscallNumber {
     /// Read the calling process's effective limit for one resource.
     ///
     /// Arguments: `kind: u32` (a [`crate::LimitKind`] discriminant) and
-    /// `out: *mut ros_resource_limit_t` (a non-null user pointer the kernel
+    /// `out: *mut tairix_resource_limit_t` (a non-null user pointer the kernel
     /// writes the encoded [`crate::ResourceLimit`] into). Returns an error
     /// code (`Ok(0)` on success). Observing one's *own* effective limit is
     /// the unprivileged baseline — it grants no authority and needs no
@@ -253,7 +253,7 @@ impl SyscallNumber {
     /// Set the calling process's limit for one resource.
     ///
     /// Arguments: `kind: u32` (a [`crate::LimitKind`] discriminant) and
-    /// `in: *const ros_resource_limit_t` (a non-null user pointer to the
+    /// `in: *const tairix_resource_limit_t` (a non-null user pointer to the
     /// encoded [`crate::ResourceLimit`] to install). Returns an error code
     /// (`Ok(0)` on success). A process may freely *lower* a bound, but
     /// *raising* a hard bound — or setting any bound above the inherited
@@ -1796,7 +1796,7 @@ impl SyscallNumber {
 ///
 /// The wire bound on the reference string the kernel copies in before it
 /// hands the bytes to the single shared reference parser (`lib/resref`),
-/// which enforces its own identical maximum (`rustos_resref::MAX_REF_LEN`) —
+/// which enforces its own identical maximum (`tairix_resref::MAX_REF_LEN`) —
 /// so a reference the ABI accepts always fits the parser's bound and the two
 /// cannot drift. A longer reference fails closed with
 /// [`Errno::LengthOutOfRange`] before any resolution work is done.

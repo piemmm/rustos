@@ -17,7 +17,7 @@ Nur ein **erstes** Argument `-h`, `-?` oder `--help` wird beachtet (die
 Position, in der GNU `false` `--help` beachtet); an jeder späteren
 Position werden diese Wörter wie alles andere ignoriert. Anders als GNU
 `false --help`, das trotzdem mit `1` endet, endet eine gelieferte
-Kurzhilfe hier mit `0` — die RustOS-Kurzhilfe-Konvention.
+Kurzhilfe hier mit `0` — die TAIRiX-Kurzhilfe-Konvention.
 
 ## OPTIONS
 

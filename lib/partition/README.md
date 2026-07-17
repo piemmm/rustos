@@ -1,13 +1,13 @@
-# rustos-partition
+# tairix-partition
 
 Shared, scheme-neutral partition-table model and a bounds-checked
 partition-window `Block` adapter — the one definition the image author
-(`tools/mkimage`) and the kernel boot reader (`kernel/rustos-kernel`)
+(`tools/mkimage`) and the kernel boot reader (`kernel/tairix-kernel`)
 share, so the bytes one writes are always the bytes the other reads back
 (`AGENTS.md` §2.2).
 
-A flashed RustOS disk is **not** one scheme on one board: a Raspberry Pi
-image is MBR, a UEFI x86_64 disk is GPT, and RustOS reads either on any
+A flashed TAIRiX disk is **not** one scheme on one board: a Raspberry Pi
+image is MBR, a UEFI x86_64 disk is GPT, and TAIRiX reads either on any
 architecture (`AGENTS.md` §17 — nothing here is board-specific). The
 parser detects the scheme on the device and dispatches; every scheme is
 validated fail-closed against an untrusted, possibly-hostile disk
@@ -45,4 +45,4 @@ on-disk magic (`AGENTS.md` §18.6). The parsers have a fuzz target
 ## Stability
 
 `experimental`. The on-disk MBR/GPT formats are external and fixed; the
-Rust API may still change while RustOS is pre-release.
+Rust API may still change while TAIRiX is pre-release.

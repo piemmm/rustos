@@ -16,9 +16,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::time::Time64;
-use rustos_abi::FileKind;
-use rustos_glob::Pattern;
+use tairix_abi::time::Time64;
+use tairix_abi::FileKind;
+use tairix_glob::Pattern;
 
 use crate::fs::Fs;
 use crate::model::join;

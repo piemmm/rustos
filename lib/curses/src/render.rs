@@ -1,11 +1,11 @@
 //! The minimal-diff renderer: a desired screen plus the last-flushed screen in,
 //! the smallest `lib/vt` operation sequence the terminal supports out.
 //!
-//! [`render`] walks the two [`Buffer`]s cell by cell and emits a [`rustos_vt::Op`]
+//! [`render`] walks the two [`Buffer`]s cell by cell and emits a [`tairix_vt::Op`]
 //! only where they differ — one cursor move per run of changes, one SGR
-//! transition per attribute change, and one [`rustos_vt::Op::Print`] per glyph.
+//! transition per attribute change, and one [`tairix_vt::Op::Print`] per glyph.
 //! Every colour is first passed through [`crate::color::downgrade`] for the
-//! terminal's [`ColorDepth`](rustos_termcap::ColorDepth), so a truecolour application drawn on a 16-colour
+//! terminal's [`ColorDepth`](tairix_termcap::ColorDepth), so a truecolour application drawn on a 16-colour
 //! `TERM` emits only colours that terminal renders (`plans/CURSES.md` §C4).
 //!
 //! A terminal that cannot address the cursor (the `dumb` fallback) takes a
@@ -14,13 +14,13 @@
 
 use alloc::vec::Vec;
 
-use rustos_termcap::Capabilities;
-use rustos_vt::{Attributes, Op, Sgr};
+use tairix_termcap::Capabilities;
+use tairix_vt::{Attributes, Op, Sgr};
 
 use crate::buffer::Buffer;
 use crate::color::downgrade;
 use crate::geom::Pos;
-use rustos_vt::{char_width, CONTINUATION};
+use tairix_vt::{char_width, CONTINUATION};
 
 /// The terminal cursor's desired end state after an update.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -35,7 +35,7 @@ pub struct CursorState {
 /// terminal with capabilities `caps`, leaving the cursor in `cursor`.
 ///
 /// The returned operations are intended to be encoded with
-/// [`rustos_vt::encode_all_into`] and written to the tty. When
+/// [`tairix_vt::encode_all_into`] and written to the tty. When
 /// `previous == desired` and the cursor is
 /// already placed, the result is empty — the renderer emits nothing when
 /// nothing changed.

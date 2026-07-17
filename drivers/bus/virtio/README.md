@@ -1,4 +1,4 @@
-# `rustos-drv-bus-virtio` — cross-arch virtio transport
+# `tairix-drv-bus-virtio` — cross-arch virtio transport
 
 Stage 4 deliverable: the shared **virtio 1.x split-virtqueue** plumbing
 that both `drivers/storage/virtio_blk` and `drivers/network/virtio_net`
@@ -62,7 +62,7 @@ remaining Stage 4.D work.
 
 ## Test surface
 
-`cargo test -p rustos-drv-bus-virtio` exercises 30 unit tests
+`cargo test -p tairix-drv-bus-virtio` exercises 30 unit tests
 covering:
 
 - Transport status progression (reset → ACK → DRIVER → FEATURES_OK

@@ -28,7 +28,7 @@
 //! falls back to `unknown.*`; the finer classes are added in place here when
 //! their producer exists, never invented ahead of an attestation source.
 
-use rustos_abi::{Errno, FieldName, Origin, TrustDomain, PROC_ID_HEX_LEN};
+use tairix_abi::{Errno, FieldName, Origin, TrustDomain, PROC_ID_HEX_LEN};
 
 use crate::record::SOURCE_NAME_MAX;
 use crate::stream::Stream;
@@ -245,7 +245,7 @@ pub fn resolve_stream(origin: &Origin, requested: Option<Stream>) -> StreamDecis
 mod tests {
     use super::{derive_source, reserved_source_prefix, resolve_stream, SourceName};
     use crate::stream::Stream;
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilitySummary, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
     };
 

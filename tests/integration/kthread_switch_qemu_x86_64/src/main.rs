@@ -17,14 +17,14 @@
 //! This binary exercises that on the multiboot-loaded kernel:
 //!
 //! 1. **Live scheduler over the production arch.** On the boot CPU it
-//!    builds a real `rustos_kernel_sched_eevdf::Scheduler` over the
-//!    production `rustos_arch_x86_64::kernel_arch::X86_64Arch` handle (read
+//!    builds a real `tairix_kernel_sched_eevdf::Scheduler` over the
+//!    production `tairix_arch_x86_64::kernel_arch::X86_64Arch` handle (read
 //!    from the boot LAPIC id), with no AP bring-up and no timer armed —
 //!    interrupts stay masked, so the cooperative `step` loop is the only
 //!    dispatch mechanism and the kthread context switches are the only
 //!    thing under test.
 //! 2. **Two kthreads.** It spawns two kthreads through
-//!    `rustos_kernel_core::spawn_kthread`. Each kthread body runs on its
+//!    `tairix_kernel_core::spawn_kthread`. Each kthread body runs on its
 //!    own kernel stack and calls `Yielder::yield_now` `PING_PONGS` times —
 //!    each yield is a real `ContextSwitch::switch` back to the dispatcher —
 //!    then returns (`Exit`).
@@ -40,8 +40,8 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links the `rustos-kernel-core` kthread runtime, the
-//! `rustos-arch-x86_64` port, and the default `rustos-kernel-sched-eevdf`
+//! It links the `tairix-kernel-core` kthread runtime, the
+//! `tairix-arch-x86_64` port, and the default `tairix-kernel-sched-eevdf`
 //! policy directly and supplies its own `kernel_main`, so the runtime is
 //! exercised without the full `kernel_core::kernel_main` init pipeline. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo

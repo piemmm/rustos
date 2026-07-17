@@ -1,6 +1,6 @@
-# rustos-seat
+# tairix-seat
 
-The arch-neutral **seat** model for RustOS (`lib/seat`, `plans/DISPLAY.md`
+The arch-neutral **seat** model for TAIRiX (`lib/seat`, `plans/DISPLAY.md`
 Stage D1).
 
 A seat is one physical display plus the keyboard and pointer attached to it.

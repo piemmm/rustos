@@ -1,7 +1,7 @@
 //! The outcomes of running a `du` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a `du` invocation did not complete.
 ///

@@ -1,4 +1,4 @@
-//! RustOS `rmdir` — remove empty directories (`plans/APPS.md` §12.1
+//! TAIRiX `rmdir` — remove empty directories (`plans/APPS.md` §12.1
 //! Stage C).
 //!
 //! `rmdir` removes each directory operand, in order. A removal succeeds
@@ -20,7 +20,7 @@
 //!
 //! * [`Filesystem`] — remove an (empty) directory.
 //! * [`Output`] — write `-v` reports to the terminal.
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by the
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
 //!   short-help switches.
 //!
 //! The binary that ships as `rmdir` wires the real syscall-backed
@@ -30,7 +30,7 @@
 //!
 //! The kernel stays the one path validator: an operand is handed to the
 //! removal seam as spelled, and only the `-p` ancestor walk parses it —
-//! through the one shared grammar (`rustos_path`, `Path::prefix`) — with an
+//! through the one shared grammar (`tairix_path`, `Path::prefix`) — with an
 //! unparseable operand removed whole so no second validator exists.
 //!
 //! # Fail closed
@@ -53,8 +53,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_abi::Errno;
-use rustos_help::{own_short_help, HelpSource};
+use tairix_abi::Errno;
+use tairix_help::{own_short_help, HelpSource};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `rmdir`'s own Help tree is unavailable.
@@ -261,7 +261,7 @@ fn short_help(
 /// (the GNU semantics: `rmdir -p a/b/c` removes `a/b/c`, `a/b`, `a`).
 ///
 /// The ancestor spellings come from the one shared path grammar
-/// (`rustos_path::Path::prefix`); an operand that grammar cannot parse is
+/// (`tairix_path::Path::prefix`); an operand that grammar cannot parse is
 /// removed whole, so the kernel stays the one validator.
 fn remove_chain(
     fs: &dyn Filesystem,
@@ -275,7 +275,7 @@ fn remove_chain(
     if !options.parents {
         return Ok(());
     }
-    let Ok(parsed) = rustos_path::parse(operand) else {
+    let Ok(parsed) = tairix_path::parse(operand) else {
         return Ok(());
     };
     let count = parsed.components().len();

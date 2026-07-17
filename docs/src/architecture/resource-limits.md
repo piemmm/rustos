@@ -1,10 +1,10 @@
 # Resource limits and scalability
 
-RustOS sizes resource *capacities* from the hardware it discovers at boot
+TAIRiX sizes resource *capacities* from the hardware it discovers at boot
 and grows them on demand; it never hard-wires a `const` ceiling that caps a
 large machine or wastes a small one (`AGENTS.md` §24). On top of those
 discovered, growable defaults a principal may *impose* a lower ceiling on
-itself or its children — the RustOS equivalent of POSIX `ulimit`/`rlimit`.
+itself or its children — the TAIRiX equivalent of POSIX `ulimit`/`rlimit`.
 
 This page describes the binding §24 contract and its staged build-out. The
 ABI surface (`LimitKind`, `ResourceLimit`, the `rlimit_get`/`rlimit_set`
@@ -71,9 +71,9 @@ inherited ceiling is refused with `PermissionDenied` unless the caller holds
 **`CAP_RLIMIT_RAISE`** (`AGENTS.md` §24.3). `rlimit_set` is audited (it
 changes enforced policy); `rlimit_get` is a pure observer and is not.
 
-The first-party Rust wrappers are `rustos_rt::rlimit_get` /
-`rustos_rt::rlimit_set`; non-Rust programs call `ros_sys_rlimit_get` /
-`ros_sys_rlimit_set` over the generated `rustos_rlimit.h` view.
+The first-party Rust wrappers are `tairix_rt::rlimit_get` /
+`tairix_rt::rlimit_set`; non-Rust programs call `tairix_sys_rlimit_get` /
+`tairix_sys_rlimit_set` over the generated `tairix_rlimit.h` view.
 
 ## Kernel enforcement
 
@@ -171,8 +171,8 @@ reported usage stays an honest zero (no live accounter yet).
 The `ulimit` builtin in the default shell (`userland/shell/elsh`) is the
 command-line face of the facility. It reads and imposes the calling
 process's own limits over the L1 ABI through an injected
-`rustos_elsh::LimitStore` seam — backed by `rustos_rt::rlimit_get` /
-`rustos_rt::rlimit_set` in the real `Run` binary, and by an in-memory double
+`tairix_elsh::LimitStore` seam — backed by `tairix_rt::rlimit_get` /
+`tairix_rt::rlimit_set` in the real `Run` binary, and by an in-memory double
 in tests, so the parsing and policy logic is exercised without a kernel (the
 same `ProcessHost`/`Console` seam pattern the rest of the shell uses). The
 shell holds no ambient authority of its own (`AGENTS.md` §4): every check
@@ -241,7 +241,7 @@ The kthread kernel-stack capacity is the first capacity converted off a
 hand-picked constant onto a §24.2 *policy* (a function of discovered
 hardware), under two knobs:
 
-- **Per-task kernel-stack size** (`rustos_kernel_core::KTHREAD_STACK_BYTES`)
+- **Per-task kernel-stack size** (`tairix_kernel_core::KTHREAD_STACK_BYTES`)
   is **release-tuned**, not a single worst-case constant (§24.2): a release
   image — the form that ships — reserves 32 KiB per kthread kernel stack,
   while an unoptimised debug build keeps the proven-ample 64 KiB its deeper
@@ -249,7 +249,7 @@ hardware), under two knobs:
   region lands on a clean boundary in either profile. Halving the release
   reservation doubles how many guarded stacks a given arena block holds — the
   server profile's win.
-- **Guard-arena size** (`rustos_kernel::mem_map::stack_arena_bytes`) is
+- **Guard-arena size** (`tairix_kernel::mem_map::stack_arena_bytes`) is
   **derived from the discovered RAM window**, not a fixed 2 MiB block (§24.1).
   The boot path reserves roughly 1/64 of discovered RAM for kthread kernel
   stacks, clamped to `[2 MiB, 64 MiB]` and rounded down to a whole 2 MiB
@@ -263,7 +263,7 @@ hardware), under two knobs:
 ## Growable *and* shrinkable kernel-stack arena
 
 The boot-carved guard arena above is the *first* block, not a ceiling. When it
-runs out of room for a whole guarded region, `rustos_kernel::stack_arena::
+runs out of room for a whole guarded region, `tairix_kernel::stack_arena::
 StackArena` **grows** by chaining a fresh, independently block-split 2 MiB
 block rather than failing over to the software-canary `BoxStack`; and when a
 chained block later goes idle it **shrinks** by returning that block to the
@@ -350,7 +350,7 @@ bookkeeping* below).
 
 ## Userland heap free-span table (grow-on-demand)
 
-The `rustos-rt` `mem_map`-backed heap (`lib/rt/src/heap.rs`) tracks freed
+The `tairix-rt` `mem_map`-backed heap (`lib/rt/src/heap.rs`) tracks freed
 regions as an address-sorted, coalesced list of free **spans**. The number of
 distinct spans is a *capacity*, not a fixed `const` ceiling (§24.1): the table
 lives in a growable `SpanStore`, and when a fragmenting workload fills it the
@@ -387,7 +387,7 @@ capacity itself becomes settable.
 
 The runtime `spawn` syscall's fan-out — how many distinct processes can be
 built — was a hard `const MAX_SPAWNS = 8` backing a fixed `[PageTablePool; 8]`
-`.bss` reserve in each production producer (`kernel/rustos-kernel/
+`.bss` reserve in each production producer (`kernel/tairix-kernel/
 src/spawn_producer.rs` and `…_x86_64.rs`): a §24.1 capacity ceiling that
 wasted RAM on a small machine and starved a large one. It is now a *capacity*
 that scales with discovered RAM and grows on demand. Each child's page-table
@@ -507,7 +507,7 @@ there is no `MAX_CPUS` ceiling in the handle. (The per-CPU
 `percpu`/`syscall_entry` arenas and the AP stack pool are *also* now
 caller-sized — see *Per-arch secondary-bring-up bound* below — so x86_64 no
 longer has a `MAX_CPUS` constant at all.) The production boot path supplies a
-`static X86_64ArchStorage<1>` (production `rustos-kernel` runs single-CPU) and
+`static X86_64ArchStorage<1>` (production `tairix-kernel` runs single-CPU) and
 every x86_64 QEMU vertical constructs through a right-sized `static`.
 
 ## Per-arch secondary-bring-up bound (discovered-count-sized)
@@ -545,7 +545,7 @@ is correctly a constant (§24.4). The two-core `ipi_smp_qemu_aarch64` and
 `SecondaryStackPool<2>`; the single-CPU `timer_preempt_qemu_aarch64` and
 `sched_drive_qemu_aarch64` verticals register a `PreemptStorage<1>`; all four
 still bring up and drive their cores on the `virt` board. Production
-`rustos-kernel` runs single-CPU and starts no secondaries, so it registers
+`tairix-kernel` runs single-CPU and starts no secondaries, so it registers
 neither.
 
 **riscv64 — done.** The fixed `.bss` pool (`smp.s` `.equ SECONDARY_MAX_HARTS`
@@ -591,7 +591,7 @@ first use, each failing closed (every index out of range → `CpuIndexOutOfRange
 
 (Unlike aarch64/riscv64, the x86_64 AP trampoline reads its stack top from the
 per-AP boot slot the BSP stamps, so the *Rust* `start_secondary` computes it —
-no assembly `.bss` reserve and no asm change.) Production `rustos-kernel` runs
+no assembly `.bss` reserve and no asm change.) Production `tairix-kernel` runs
 single-CPU: it registers `PerCpuStorage<1>` + `SyscallTlsStorage<1>` and no AP
 pool. The single-CPU x86_64 verticals register a `PerCpuStorage<1>` (when they
 drive `percpu::init` directly) and size their arch handle / TLS to one slot; the
@@ -651,7 +651,7 @@ host-provided.)
   set-once `register`. No per-arch secondary-bring-up bound remains.
 - **L4a — `ulimit` shell command (landed).** The `ulimit` builtin in the
   default shell over the L1 ABI, through the injected `LimitStore` seam
-  (`RtLimitStore` over `rustos_rt::rlimit_get`/`rlimit_set` in the `Run`
+  (`RtLimitStore` over `tairix_rt::rlimit_get`/`rlimit_set` in the `Run`
   binary). See *The `ulimit` shell command* above.
 - **L4b — `sysinfo` limits query (landed).** The
   `SysinfoQueryId::RESOURCE_LIMITS` System Information query (§16.6) returning

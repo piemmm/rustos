@@ -1,7 +1,7 @@
-//! RustOS virtio-net link-layer driver.
+//! TAIRiX virtio-net link-layer driver.
 //!
 //! The device engine itself — the bus-agnostic virtio-net bring-up and
-//! frame-ring [`Net`](rustos_abi::driver::net::Net) service — lives in
+//! frame-ring [`Net`](tairix_abi::driver::net::Net) service — lives in
 //! the `lib/virtio_net` crate and is re-exported here as [`VirtioNet`].
 //! It is hoisted into `lib/*` (rather than kept in this `drivers/*`
 //! crate) so a user-space driver *process* can link the engine directly:
@@ -14,7 +14,7 @@
 //! [`register`] is the only public *function* — the driver-host entry
 //! point. [`VirtioNet`] is re-exported so a host can instantiate the
 //! engine; the host never reaches the type beyond the
-//! [`Net`](rustos_abi::driver::net::Net) trait.
+//! [`Net`](tairix_abi::driver::net::Net) trait.
 //!
 //! # Capabilities
 //!
@@ -26,9 +26,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 
-pub use rustos_virtio_net::VirtioNet;
+pub use tairix_virtio_net::VirtioNet;
 
 /// The virtio device id of a network device (virtio 1.1 §5.1 — `virtio-net`
 /// is device type 1), re-exported from `lib/virtio_net` (its single
@@ -36,7 +36,7 @@ pub use rustos_virtio_net::VirtioNet;
 /// This driver's [`BIND_KEYS`] match key is built from it, so a discovered
 /// virtio node whose probed device id is 1 binds this driver and nothing
 /// else.
-pub use rustos_virtio_net::VIRTIO_NET_DEVICE_ID;
+pub use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_4554_0000_0001; // "VNET"
@@ -57,7 +57,7 @@ const BIND_PRIORITY: u16 = 10;
 /// from and the device manager (or the in-kernel bootstrap-floor catalogue)
 /// resolves a discovered node against. The match key carries no transport
 /// (PCI vs MMIO) detail: the same driver binds a virtio-net device however
-/// it is attached, because the bus-agnostic `rustos_virtio::Transport`
+/// it is attached, because the bus-agnostic `tairix_virtio::Transport`
 /// abstracts the transport.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
@@ -94,8 +94,8 @@ mod tests {
             fn has_capability(&self, cap: CapabilityId) -> bool {
                 cap == CapabilityId::DRV_LOAD && self.grant
             }
-            fn kind(&self) -> rustos_abi::driver::DriverKind {
-                rustos_abi::driver::DriverKind::UserSpace
+            fn kind(&self) -> tairix_abi::driver::DriverKind {
+                tairix_abi::driver::DriverKind::UserSpace
             }
         }
         assert_eq!(

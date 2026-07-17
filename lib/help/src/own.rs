@@ -14,7 +14,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_vt::encode_all_into;
+use tairix_vt::encode_all_into;
 
 use crate::locale::{load, DocumentName, HelpSource, Locale};
 use crate::render::render_short;
@@ -61,8 +61,8 @@ mod rt_source {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::{DirEntry, FileKind, FS_IO_MAX};
-    use rustos_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+    use tairix_abi::fs::{DirEntry, FileKind, FS_IO_MAX};
+    use tairix_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
 
     use crate::doc::MAX_DOC_LEN;
     use crate::locale::{HelpSource, SourceError};
@@ -104,7 +104,7 @@ mod rt_source {
 
         /// Read a directory's raw entry stream, growing the buffer up to
         /// the kernel's per-call cap.
-        fn read_dir_bytes(dir: &rustos_rt::Dir) -> Result<Vec<u8>, SourceError> {
+        fn read_dir_bytes(dir: &tairix_rt::Dir) -> Result<Vec<u8>, SourceError> {
             let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
             let used = loop {
                 match dir.read(&mut buf) {
@@ -127,7 +127,7 @@ mod rt_source {
             let path = self.help_root();
             // No tree, no locales: the engine reports "not found" and the
             // caller falls back to its usage banner.
-            let Ok(dir) = rustos_rt::open_dir(path.as_bytes()) else {
+            let Ok(dir) = tairix_rt::open_dir(path.as_bytes()) else {
                 return Ok(Vec::new());
             };
             let bytes = Self::read_dir_bytes(&dir)?;
@@ -151,7 +151,7 @@ mod rt_source {
 
         fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
             let path = format!("{}/{locale_dir}/{file_name}", self.help_root());
-            let file = match rustos_rt::open(path.as_bytes()) {
+            let file = match tairix_rt::open(path.as_bytes()) {
                 Ok(file) => file,
                 Err(ret) => {
                     return match Errno::from_syscall(ret) {

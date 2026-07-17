@@ -28,7 +28,7 @@
 //! return a typed [`SbiRet`], so the bring-up path observes failures
 //! (fail closed) instead of a blind legacy call.
 
-use rustos_arch_api::CpuId;
+use tairix_arch_api::CpuId;
 
 /// SBI legacy extension id for `set_timer`. Only the freestanding
 /// build issues the call, so the constant is gated with it.

@@ -11,15 +11,15 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver::net::{DeviceFacts, LinkState};
-use rustos_abi::driver::net_ring::FrameRings;
-use rustos_abi::net_ipc::{
+use tairix_abi::driver::net::{DeviceFacts, LinkState};
+use tairix_abi::driver::net_ring::FrameRings;
+use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetCountersReply, NetIfAddr, NetIfKind,
     NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
-use rustos_abi::{Duration64, Errno};
-use rustos_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use rustos_net::stack::{SendError, Stack, StackConfig, StackEvent};
+use tairix_abi::{Duration64, Errno};
+use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::stack::{SendError, Stack, StackConfig, StackEvent};
 
 use crate::channel::FrameService;
 
@@ -323,8 +323,8 @@ impl Netstack {
                 Ok(true) => batches.push((iface.name, iface.stack.advance(now).frames)),
                 // Already a member (a prior reference): no new report.
                 Ok(false) => {}
-                Err(rustos_net::stack::McastError::NotMulticast) => return Err(Errno::OutOfRange),
-                Err(rustos_net::stack::McastError::CapacityExhausted) => {
+                Err(tairix_net::stack::McastError::NotMulticast) => return Err(Errno::OutOfRange),
+                Err(tairix_net::stack::McastError::CapacityExhausted) => {
                     return Err(Errno::LimitExceeded)
                 }
             }
@@ -419,7 +419,7 @@ impl Netstack {
     /// are queued and flushed in the same pass).
     ///
     /// The pump is written once against the [`FrameService`] seam, so it
-    /// drives an in-process [`Net`](rustos_abi::driver::net::Net) device
+    /// drives an in-process [`Net`](tairix_abi::driver::net::Net) device
     /// ([`LocalFrameService`](crate::LocalFrameService)) and a cross-process
     /// driver ([`NetChannelClient`](crate::NetChannelClient)) identically:
     /// the service owns the frame region and each doorbell is either a direct

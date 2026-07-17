@@ -58,7 +58,7 @@ pub enum Command {
 /// A parsed owner operand: an optional new user id and an optional new group
 /// id.
 ///
-/// `chown` accepts three forms, all using **decimal** ids (RustOS has no
+/// `chown` accepts three forms, all using **decimal** ids (TAIRiX has no
 /// name-to-id seam in this tool, so a name would be interface creep):
 ///
 /// * `OWNER` — change the owning user, leave the group ([`uid`](Owner::uid)

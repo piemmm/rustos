@@ -212,7 +212,7 @@ pub fn parse_workspace_meta(cargo_toml: &str) -> Result<WorkspaceMeta, String> {
 /// returned by [`parse_cargo_lock`]), and no timestamp or random serial
 /// number is emitted. Every package becomes a `library` component carrying
 /// its purl, its registry checksum (as a `SHA-256` hash) when one exists,
-/// its distribution URL, and a `rustos:source-class` property marking it
+/// its distribution URL, and a `tairix:source-class` property marking it
 /// `workspace`, `registry`, `git`, or `other`.
 pub fn build_cyclonedx(packages: &[LockedPackage], meta: &WorkspaceMeta) -> String {
     let mut out = String::new();
@@ -223,16 +223,16 @@ pub fn build_cyclonedx(packages: &[LockedPackage], meta: &WorkspaceMeta) -> Stri
     out.push_str("  \"metadata\": {\n");
     out.push_str("    \"tools\": [\n");
     out.push_str("      {\n");
-    out.push_str("        \"vendor\": \"RustOS\",\n");
+    out.push_str("        \"vendor\": \"TAIRiX\",\n");
     out.push_str("        \"name\": \"cargo-xtask-sbom\",\n");
     write_field(&mut out, "        ", "version", &meta.version, true);
     out.push_str("      }\n");
     out.push_str("    ],\n");
     out.push_str("    \"component\": {\n");
     out.push_str("      \"type\": \"application\",\n");
-    let root_purl = format!("pkg:cargo/rustos@{}", meta.version);
+    let root_purl = format!("pkg:cargo/tairix@{}", meta.version);
     write_field(&mut out, "      ", "bom-ref", &root_purl, false);
-    write_field(&mut out, "      ", "name", "rustos", false);
+    write_field(&mut out, "      ", "name", "tairix", false);
     write_field(&mut out, "      ", "version", &meta.version, false);
     write_field(
         &mut out,
@@ -302,7 +302,7 @@ fn write_component(out: &mut String, pkg: &LockedPackage) {
 
     out.push_str("      \"properties\": [\n");
     out.push_str("        {\n");
-    write_field(out, "          ", "name", "rustos:source-class", false);
+    write_field(out, "          ", "name", "tairix:source-class", false);
     write_field(out, "          ", "value", pkg.source_class(), true);
     out.push_str("        }\n");
     out.push_str("      ]\n");
@@ -399,14 +399,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-abi"
+name = "tairix-abi"
 version = "0.0.0"
 
 [[package]]
-name = "rustos-xtask"
+name = "tairix-xtask"
 version = "0.0.0"
 dependencies = [
- "rustos-abi",
+ "tairix-abi",
 ]
 "#;
 
@@ -428,7 +428,7 @@ dependencies = [
         );
 
         let abi = &pkgs[1];
-        assert_eq!(abi.name, "rustos-abi");
+        assert_eq!(abi.name, "tairix-abi");
         assert_eq!(abi.source, None);
         assert_eq!(abi.checksum, None);
         assert_eq!(abi.source_class(), "workspace");
@@ -451,7 +451,7 @@ members = []
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
-repository = "https://github.com/rustos-project/rustos"
+repository = "https://github.com/tairix-project/tairix"
 
 [workspace.lints.rust]
 version = "ignored-outside-section"
@@ -460,7 +460,7 @@ version = "ignored-outside-section"
         assert_eq!(meta.version, "0.0.0");
         assert_eq!(
             meta.repository.as_deref(),
-            Some("https://github.com/rustos-project/rustos")
+            Some("https://github.com/tairix-project/tairix")
         );
     }
 
@@ -469,7 +469,7 @@ version = "ignored-outside-section"
         let pkgs = parse_cargo_lock(SAMPLE_LOCK).expect("parse");
         let meta = WorkspaceMeta {
             version: "0.0.0".to_string(),
-            repository: Some("https://github.com/rustos-project/rustos".to_string()),
+            repository: Some("https://github.com/tairix-project/tairix".to_string()),
         };
         let doc = build_cyclonedx(&pkgs, &meta);
 
@@ -481,10 +481,10 @@ version = "ignored-outside-section"
             "\"content\": \"ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301\""
         ));
         // Workspace crate: purl present, marked workspace.
-        assert!(doc.contains("\"purl\": \"pkg:cargo/rustos-abi@0.0.0\""));
+        assert!(doc.contains("\"purl\": \"pkg:cargo/tairix-abi@0.0.0\""));
         assert!(doc.contains("\"value\": \"workspace\""));
         // Root component identifies the workspace.
-        assert!(doc.contains("\"bom-ref\": \"pkg:cargo/rustos@0.0.0\""));
+        assert!(doc.contains("\"bom-ref\": \"pkg:cargo/tairix@0.0.0\""));
         // Every parsed package yields exactly one component bom-ref.
         let component_count = doc.matches("\"type\": \"library\"").count();
         assert_eq!(component_count, pkgs.len());
@@ -518,7 +518,7 @@ version = "ignored-outside-section"
         let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
         let pkgs = parse_cargo_lock(&lock).expect("parse real lock");
         assert!(
-            pkgs.iter().any(|p| p.name == "rustos-xtask"),
+            pkgs.iter().any(|p| p.name == "tairix-xtask"),
             "workspace crate must appear in the SBOM"
         );
         assert!(

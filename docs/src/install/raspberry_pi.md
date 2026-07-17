@@ -1,10 +1,10 @@
-# Installing RustOS on a Raspberry Pi 4
+# Installing TAIRiX on a Raspberry Pi 4
 
 `cargo xtask image --target aarch64-rpi` (equivalently `cargo xtask build
 --target aarch64-rpi`, with or without `--headless`) emits
-`images/rustos-aarch64-rpi-<profile>.img`, a flashable SD-card image for
+`images/tairix-aarch64-rpi-<profile>.img`, a flashable SD-card image for
 the Raspberry Pi 4 (BCM2711). The builder is `tools/mkimage`
-(`rustos-mkimage`): pure Rust, no `parted`/`mkfs` shell-outs (`AGENTS.md`
+(`tairix-mkimage`): pure Rust, no `parted`/`mkfs` shell-outs (`AGENTS.md`
 §12), with every partition laid down by the real in-tree filesystem
 drivers.
 
@@ -40,7 +40,7 @@ operator passphrase into the volume key. It is the analogue of a LUKS
 header and carries no secret. The passphrase is never stored on the
 image.
 
-`kernel8.img` is the freestanding aarch64 `rustos-kernel` ELF (release
+`kernel8.img` is the freestanding aarch64 `tairix-kernel` ELF (release
 profile, linked at `0x8_0000` by `aarch64-rpi4.ld`) flattened to the raw
 binary the GPU bootloader copies to memory — see the boot-protocol facts
 of record in [aarch64](../platform/aarch64.md). The generated
@@ -50,10 +50,10 @@ overlay itself is a pinned firmware input staged on the partition at
 `overlays/disable-bt.dtbo`), `init_uart_clock=48000000` (the PL011
 reference clock the kernel's baud divisors assume), and
 `init_uart_baud=115200`. The image builder imports
-`rustos_arch_aarch64::uart_init::CONSOLE_BAUD` when it writes that firmware
+`tairix_arch_aarch64::uart_init::CONSOLE_BAUD` when it writes that firmware
 setting, so both image profiles and the kernel share one line-rate
 definition. The kernel programs the serial console to that same 115200 8N1
-setting at boot (`rustos_arch_aarch64::uart_init`: GPIO 14/15 pin mux plus
+setting at boot (`tairix_arch_aarch64::uart_init`: GPIO 14/15 pin mux plus
 PL011 line registers; plus `armstub=armstub8.bin` only when that optional
 stub is staged). The serial log is **best-effort**: logging never blocks the
 kernel on the UART, so a burst that outruns the line drops log bytes rather
@@ -78,8 +78,8 @@ stops. Verified blobs are fetched once and reused across builds.
 
 For air-gapped or pre-staged builds, place the manifest's files in a
 directory yourself and pass `--firmware <dir>` or set
-`RUSTOS_PI_FIRMWARE=<dir>`; an operator-staged directory is only ever
-verified, never written. (The standalone `rustos-mkimage rpi` CLI always
+`TAIRIX_PI_FIRMWARE=<dir>`; an operator-staged directory is only ever
+verified, never written. (The standalone `tairix-mkimage rpi` CLI always
 takes `--firmware`: `tools/mkimage` itself performs no network I/O,
 `AGENTS.md` §12.)
 
@@ -100,8 +100,8 @@ blob from the pinned source, verifies the firmware against the
 manifest, and writes (for the default `debug` profile; pass
 `--profile installer` for the installer image):
 
-- `images/rustos-aarch64-rpi-debug.img` — the flashable image.
-- `images/rustos-aarch64-rpi-debug.rootkey` — the derived root volume key
+- `images/tairix-aarch64-rpi-debug.img` — the flashable image.
+- `images/tairix-aarch64-rpi-debug.rootkey` — the derived root volume key
   (64 hex digits, owner-readable only).
 
 ARXFS has no plaintext mode, so the root partition is always encrypted.
@@ -109,7 +109,7 @@ Its volume key is **derived from a passphrase** (`AGENTS.md` §11): the
 build provisions a per-volume `root.unlock` descriptor (random salt +
 PBKDF2 cost), runs the profile's passphrase through it to a 256-bit key,
 and provisions the root under that key. The passphrase is fixed by the
-profile (`rustos_mkimage::passphrase_for`):
+profile (`tairix_mkimage::passphrase_for`):
 
 - **`installer`** — a **blank** passphrase. The bootstrap tries the blank
   passphrase silently *first*, so the installer image unlocks with **no
@@ -139,7 +139,7 @@ Write the image to an SD card (replace `sdX` with the card device — this
 destroys its contents):
 
 ```sh
-sudo dd if=images/rustos-aarch64-rpi-debug.img of=/dev/sdX bs=4M conv=fsync
+sudo dd if=images/tairix-aarch64-rpi-debug.img of=/dev/sdX bs=4M conv=fsync
 ```
 
 Connect a 3.3 V serial adapter to the Pi's UART header (GPIO 14/15,

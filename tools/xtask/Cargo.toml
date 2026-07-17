@@ -1,6 +1,6 @@
 [package]
-name = "rustos-xtask"
-description = "Build orchestration for the RustOS workspace."
+name = "tairix-xtask"
+description = "Build orchestration for the TAIRiX workspace."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,66 +33,66 @@ path = "src/main.rs"
 # depend on both crates directly and run the comparison as ordinary
 # Rust: a future ABI change cannot pass `cargo build` without breaking
 # the cross-check.
-rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # `devids` imports, vets, and compiles the public PCI/USB ID databases
 # through the one grammar/vetting/codec definition in `lib/devids` (shared
 # with the runtime consumers, AGENTS.md §2.2), and drift-checks the
 # committed tables in `ci`.
-rustos-devids = { path = "../../lib/devids", version = "=0.0.0" }
+tairix-devids = { path = "../../lib/devids", version = "=0.0.0" }
 # `devids` stamps its import provenance with a UTC date through the one
 # civil-date calendar (`lib/fsmeta`), never a private copy.
-rustos-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
-rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+tairix-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # `test --qemu` cross-builds the CCOMPAT end-to-end C programs, whose build
-# scripts locate `clang`/`ld.lld` through the audited `rustos-cc` wrapper. xtask
+# scripts locate `clang`/`ld.lld` through the audited `tairix-cc` wrapper. xtask
 # resolves that toolchain *once* up front and exports its path so each build
 # script uses the authoritative override instead of re-running the full search
 # per crate/target (AGENTS.md §2.2 — the discovery logic lives only in
-# `rustos-cc`; xtask merely primes it). Host-only build glue (AGENTS.md §12).
-rustos-cc = { path = "../cc", version = "=0.0.0" }
+# `tairix-cc`; xtask merely primes it). Host-only build glue (AGENTS.md §12).
+tairix-cc = { path = "../cc", version = "=0.0.0" }
 # `help-lint` (plans/APPS.md §8.1) judges every discovered Help/ document
-# through the one shared lint in the help engine (`rustos_help::lint_help_trees`,
+# through the one shared lint in the help engine (`tairix_help::lint_help_trees`,
 # behind its host-only `lint` feature), so the gate and the `tools/syshelp`
 # aggregator tests can never diverge (AGENTS.md §2.2).
-rustos-help = { path = "../../lib/help", version = "=0.0.0", features = [
+tairix-help = { path = "../../lib/help", version = "=0.0.0", features = [
     "lint",
 ] }
 # The app-bundle composer (`image_apps`) signs each bundle's `AppInfo`
 # over the exact contents the volume ships; the bundle's `Help/` documents
 # come from the same build-discovered source the image planters plant
-# (`rustos_syshelp`), so the signed content hash and the planted tree
+# (`tairix_syshelp`), so the signed content hash and the planted tree
 # cannot drift.
-rustos-syshelp = { path = "../syshelp", version = "=0.0.0" }
+tairix-syshelp = { path = "../syshelp", version = "=0.0.0" }
 # `test --qemu` (Stage 2 deliverable) drives the bare-metal integration
 # tests through the audited `tools/qemu` runner. Sharing the runner
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
 # timeouts, no retries) in exactly one place — see AGENTS.md §2.2.
-rustos-qemu = { path = "../qemu", version = "=0.0.0" }
+tairix-qemu = { path = "../qemu", version = "=0.0.0" }
 # The interactive login negative fixture derives its over-limit username from
 # the account database format's own bound, so production validation and the
 # QEMU script cannot drift.
-rustos-users = { path = "../../lib/users", version = "=0.0.0" }
+tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 
 # The QEMU netstack verticals' host-side link peer: the same pure
 # `lib/net` protocol engine the guest's netstack drives, run by the
 # harness over the QEMU dgram netdev, configured from the shared
-# `rustos-test-netstack-wire` topology so the two ends cannot drift.
-rustos-net = { path = "../../lib/net", version = "=0.0.0" }
-rustos-test-netstack-wire = { path = "../../tests/integration/netstack_wire", version = "=0.0.0" }
+# `tairix-test-netstack-wire` topology so the two ends cannot drift.
+tairix-net = { path = "../../lib/net", version = "=0.0.0" }
+tairix-test-netstack-wire = { path = "../../tests/integration/netstack_wire", version = "=0.0.0" }
 # `test --qemu` plants the Stage 5 end-to-end FAT32 vertical's backing
-# image from the same `rustos-test-fat32-image` fixture the kernel-side
+# image from the same `tairix-test-fat32-image` fixture the kernel-side
 # tail reads, so the planted layout and the guest's expectations share
 # one source of truth (`AGENTS.md` §2.2).
-rustos-test-fat32-image = { path = "../../tests/integration/fat32_image", version = "=0.0.0" }
+tairix-test-fat32-image = { path = "../../tests/integration/fat32_image", version = "=0.0.0" }
 # `test --qemu` likewise plants the Stage 5 arxfs vertical's backing
-# image from the `rustos-test-arxfs-image` fixture, which the real
+# image from the `tairix-test-arxfs-image` fixture, which the real
 # arxfs driver itself authors (format + plant), so the planted layout
 # and the guest's expectations share one source of truth (`AGENTS.md`
 # §2.2).
-rustos-test-arxfs-image = { path = "../../tests/integration/arxfs_image", version = "=0.0.0" }
+tairix-test-arxfs-image = { path = "../../tests/integration/arxfs_image", version = "=0.0.0" }
 # `test --qemu` plants the `plans/PI.md` P11 Chunk B-2 root-mount->login
-# vertical's backing from the `rustos-test-encrypted-root-image` fixture —
+# vertical's backing from the `tairix-test-encrypted-root-image` fixture —
 # the whole-disk MBR + FAT-boot(`root.unlock`) + encrypted-ARXFS-root
 # image authored by the real in-tree drivers, the same bytes the
 # `root_mount` host tests split — so the planted layout and the guest's
@@ -105,24 +105,24 @@ rustos-test-arxfs-image = { path = "../../tests/integration/arxfs_image", versio
 # definition every image consumer shares, `AGENTS.md` §2.2) and planted through
 # this same encrypted-root fixture, so there is no separate fixed-arch fixture
 # crate baking them at build time.
-rustos-test-encrypted-root-image = { path = "../../tests/integration/encrypted_root_image", version = "=0.0.0" }
+tairix-test-encrypted-root-image = { path = "../../tests/integration/encrypted_root_image", version = "=0.0.0" }
 # The memory-stability vertical's fixture constants: the `MEMSOAK PASS`
 # marker its serial script waits for is pinned against the fixture's own
 # `PASS_MARKER` by a unit test, so the script and the program cannot drift.
 # `default-features = false`: the fixture's `program` feature (its `Run`
 # binary's userland runtime) is for its freestanding cross-compile only.
-rustos-test-memsoak = { path = "../../tests/integration/memsoak_program", version = "=0.0.0", default-features = false }
+tairix-test-memsoak = { path = "../../tests/integration/memsoak_program", version = "=0.0.0", default-features = false }
 # The fuzz/proptest orchestrators and the in-tree harnesses share one
 # per-run seed/budget vocabulary: the orchestrator picks and logs the
-# seed, the harness reads it. Both sides use `rustos-fuzzseed` so the
+# seed, the harness reads it. Both sides use `tairix-fuzzseed` so the
 # seed primitives and the env-var names live in exactly one place
 # (`AGENTS.md` §2.2).
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # `image` / `build --target aarch64-rpi` (Stage 8 / plans/PI.md P9) author
 # the flashable platform images through the `tools/mkimage` library, so the
 # image pipeline is ordinary Rust driven by the same xtask entry point as
 # every other build step (AGENTS.md §12).
-rustos-mkimage = { path = "../mkimage", version = "=0.0.0" }
+tairix-mkimage = { path = "../mkimage", version = "=0.0.0" }
 # `image` cross-compiles and signs the autoloaded `/System/Drivers/` bundles
 # the flashable Pi image ships (`plans/PI.md` P10 D4). The signed-bundle
 # composer and the ELF->rxe converter live in the shared harness — the single
@@ -133,40 +133,40 @@ rustos-mkimage = { path = "../mkimage", version = "=0.0.0" }
 # application-bundle composer + `AppInfo.toml` discovery the `image_apps`
 # pipeline composes the self-contained `/System/Apps` + `/System/Services`
 # bundles with (`plans/APPS.md` deliverable 8).
-rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
+tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
     "driver-image",
     "app-image",
 ] }
 # The autoloaded `/System/Drivers/` bundles' own canonical §18.3 bind tables,
 # copied verbatim into each signed bundle so the autoload match data never
 # drifts from the driver it binds (`AGENTS.md` §2.2 / §18.3): the mailbox
-# service driver (via `rustos-vcmailbox`), the BCM2711 PCIe root-complex bus
+# service driver (via `tairix-vcmailbox`), the BCM2711 PCIe root-complex bus
 # driver, the VL805 USB host bus driver, the xHCI host-controller driver, and
 # the USB boot-keyboard class driver — each `BIND_KEYS` lives in the driver
 # crate's own `lib` target (the device logic is co-located in the driver,
 # `AGENTS.md` §2.22). These are `drivers/*` crates; xtask is host build glue
 # (`Tooling`, outside the §17.4 product layering), so depending on them is
 # permitted.
-rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
-rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
-rustos-drv-bus-usb-vl805 = { path = "../../drivers/bus/usb/vl805", version = "=0.0.0" }
-rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
-rustos-drv-input-usb-kbd = { path = "../../drivers/input/usb_kbd", version = "=0.0.0" }
-rustos-drv-input-usb-mouse = { path = "../../drivers/input/usb_mouse", version = "=0.0.0" }
-rustos-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", version = "=0.0.0" }
+tairix-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
+tairix-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
+tairix-drv-bus-usb-vl805 = { path = "../../drivers/bus/usb/vl805", version = "=0.0.0" }
+tairix-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
+tairix-drv-input-usb-kbd = { path = "../../drivers/input/usb_kbd", version = "=0.0.0" }
+tairix-drv-input-usb-mouse = { path = "../../drivers/input/usb_mouse", version = "=0.0.0" }
+tairix-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", version = "=0.0.0" }
 # The virtio-net link-layer driver's canonical §18.3 bind table (and its
 # single-source virtio device id, used by the autoload-match tests): the
 # `image_drivers` pipeline signs `BIND_KEYS` into the bundle it cross-compiles
-# from the sibling driver-process crate (`rustos-drv-network-virtio-net-driver`),
+# from the sibling driver-process crate (`tairix-drv-network-virtio-net-driver`),
 # so the on-disk bundle and the driver never drift (`AGENTS.md` §2.2 / §18.3).
-rustos-drv-network-virtio-net = { path = "../../drivers/network/virtio_net", version = "=0.0.0" }
-rustos-drv-display-framebuffer = { path = "../../drivers/display/framebuffer", version = "=0.0.0" }
-rustos-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
-rustos-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "=0.0.0" }
+tairix-drv-network-virtio-net = { path = "../../drivers/network/virtio_net", version = "=0.0.0" }
+tairix-drv-display-framebuffer = { path = "../../drivers/display/framebuffer", version = "=0.0.0" }
+tairix-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
+tairix-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "=0.0.0" }
 # The shared desktop theme definition: the display vertical's screendump
 # assert compares the dumped scan-out against the theme's own desktop
 # colour, so the expected pixels have one definition (never a literal).
-rustos-theme = { path = "../../lib/theme", version = "=0.0.0" }
+tairix-theme = { path = "../../lib/theme", version = "=0.0.0" }
 # The desktop-session, taskbar, browser-engine, geometry, and fw_cfg crates:
 # the AW3 desktop vertical's pointer script reconstructs the production
 # shell's taskbar/start-menu layout (the same code the guest runs) to compute
@@ -174,23 +174,23 @@ rustos-theme = { path = "../../lib/theme", version = "=0.0.0" }
 # messages, and measures the browser window and ramfb surface against the one
 # shared definition of each — never a hand-copied literal (plans/APPWIN.md
 # AW3/AW5).
-rustos-desktop-session = { path = "../../userland/gui/session", version = "=0.0.0" }
-rustos-taskbar = { path = "../../userland/gui/taskbar", version = "=0.0.0" }
-rustos-browse = { path = "../../lib/browse", version = "=0.0.0" }
-rustos-terminal = { path = "../../userland/apps/terminal", version = "=0.0.0" }
-rustos-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
-rustos-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
+tairix-desktop-session = { path = "../../userland/gui/session", version = "=0.0.0" }
+tairix-taskbar = { path = "../../userland/gui/taskbar", version = "=0.0.0" }
+tairix-browse = { path = "../../lib/browse", version = "=0.0.0" }
+tairix-terminal = { path = "../../userland/apps/terminal", version = "=0.0.0" }
+tairix-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
+tairix-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
 # The autoload desktop vertical's shared interaction contract (delivery
 # counts), defined once in the test crate's lib target beside the guest
 # PASS gate that also consumes it.
-rustos-test-autoload-input-qemu-aarch64 = { path = "../../tests/integration/autoload_input_qemu_aarch64", version = "=0.0.0" }
+tairix-test-autoload-input-qemu-aarch64 = { path = "../../tests/integration/autoload_input_qemu_aarch64", version = "=0.0.0" }
 # The kernel/ipc audit vocabulary: the AW3 vertical's markers key on the
 # `MessageDelivered` / `CallReplied` records the kernel emits for the
 # window channel — the shared definitions, never literals.
-rustos-kernel-ipc = { path = "../../kernel/ipc", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../kernel/ipc", version = "=0.0.0" }
 # `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
 # the endpoint marker compares the exact on-wire spelling.
-rustos-util = { path = "../../lib/util", version = "=0.0.0" }
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The `image_drivers` autoload-decision tests drive the real production match
@@ -198,9 +198,9 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # manifest bind table and the shared devmatch policy resolves it against a
 # discovered node (`AGENTS.md` §2.2 / §18.3 / §18.6). The single-source
 # virtio-input device id keys the input node; the framebuffer compatible string
-# and the virtio-net device id come from `rustos-abi` / the network driver dep
+# and the virtio-net device id come from `tairix-abi` / the network driver dep
 # above.
-rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
-rustos-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
-rustos-log = { path = "../../lib/log", version = "=0.0.0" }
-rustos-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
+tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
+tairix-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
+tairix-log = { path = "../../lib/log", version = "=0.0.0" }
+tairix-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }

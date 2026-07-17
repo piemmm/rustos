@@ -12,7 +12,7 @@
 # the session baseline, armed only when the launching account's ceiling
 # carries them (an administrator) and refused with a stated reason for
 # everyone else while the ungated queries still work.
-id = "os.rustos.sysinfo"
+id = "os.tairix.sysinfo"
 name = "sysinfo"
 version = "0.1.0"
 kind = "command"

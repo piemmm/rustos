@@ -16,7 +16,7 @@ festgehalten sind. Jede Datei wird angelegt, falls sie fehlt, und
 verbleibenden Ausgaben fort — gemäß dem gewählten
 `--output-error`-Modus.
 
-RustOS kennt kein `SIGPIPE`: Ein verschwundener Abnehmer zeigt sich als
+TAIRiX kennt kein `SIGPIPE`: Ein verschwundener Abnehmer zeigt sich als
 Schreibfehler auf der Standardausgabe — der einzigen Ausgabe dieses
 Befehls, die eine Pipe sein kann —, das „Pipe" der GNU-Modi meint hier
 also genau diese Ausgabe. Ohne `--output-error` beendet eine
@@ -25,7 +25,7 @@ GNU-Werkzeug, das an `SIGPIPE` stirbt, mit dem Grund auf der
 Standardfehlerausgabe); mit einem `-nopipe`-Modus wird sie stillschweigend
 toleriert.
 
-GNU `tee -i` (Unterbrechungen ignorieren) ist nicht verfügbar: RustOS
+GNU `tee -i` (Unterbrechungen ignorieren) ist nicht verfügbar: TAIRiX
 hat keine prozessweite Signaldisposition, die sich setzen ließe. Der
 Schalter kommt mit dieser Kernel-Arbeit, statt angenommen und ignoriert
 zu werden.

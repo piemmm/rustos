@@ -1,7 +1,7 @@
 //! The input decoder: terminal bytes in, typed [`Event`]s out.
 //!
-//! [`Input`] wraps the one shared [`rustos_vt::Parser`] and
-//! maps the [`rustos_vt::Op`]s it produces to the [`Event`]s a curses
+//! [`Input`] wraps the one shared [`tairix_vt::Parser`] and
+//! maps the [`tairix_vt::Op`]s it produces to the [`Event`]s a curses
 //! application reads: printable characters, the arrow / function / editing
 //! keys, mouse reports, and bracketed-paste runs. There is no second
 //! escape-sequence table here — every sequence the decoder understands is one
@@ -14,7 +14,7 @@
 
 use alloc::string::String;
 
-use rustos_vt::{control, Key, MouseReport, Op, Parser};
+use tairix_vt::{control, Key, MouseReport, Op, Parser};
 
 /// A decoded input event.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,7 +22,7 @@ pub enum Event {
     /// A printable character was typed.
     Char(char),
     /// The Escape key: a bare `ESC` byte that ended a read with no sequence
-    /// following it (see [`rustos_vt::Parser::take_pending_escape`]).
+    /// following it (see [`tairix_vt::Parser::take_pending_escape`]).
     Esc,
     /// A control-chorded letter key (`Ctrl-A` … `Ctrl-Z`), carried as the
     /// lowercase letter. The controls that are keys in their own right —
@@ -31,7 +31,7 @@ pub enum Event {
     Ctrl(char),
     /// An Alt-chorded printable character (`Alt-F`, `Alt-é`, …), received as
     /// `ESC` followed by the character — the xterm "meta sends escape"
-    /// convention the RustOS keymap also writes ([`rustos_vt::Op::Meta`]).
+    /// convention the TAIRiX keymap also writes ([`tairix_vt::Op::Meta`]).
     Alt(char),
     /// The Enter / Return key (carriage return or line feed).
     Enter,
@@ -100,8 +100,8 @@ impl Input {
     /// paste rather than delivered individually.
     ///
     /// `DEL` (`0x7f`) is decoded as [`Event::Backspace`]: it is the byte
-    /// xterm-class terminals — and the RustOS keymap — send for the
-    /// Backspace key (the shared rub-out definition in `rustos_vt::control`).
+    /// xterm-class terminals — and the TAIRiX keymap — send for the
+    /// Backspace key (the shared rub-out definition in `tairix_vt::control`).
     /// The screen-op parser deliberately ignores `DEL` because it is a
     /// no-op on *output*; on the input side it is a keystroke. No escape
     /// sequence carries a `DEL` byte, so mapping it before the parser is

@@ -5,8 +5,8 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_help::{own_short_help, HelpSource};
+use tairix_abi::Errno;
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Count, HeaderMode, Job, Source};
 use crate::error::HeadError;
@@ -401,8 +401,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     use super::{run, TailRing, USAGE};
     use crate::command::{parse, Command};
@@ -715,7 +715,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/head.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

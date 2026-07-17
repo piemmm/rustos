@@ -18,7 +18,7 @@
 //! # Common ISR prologue
 //!
 //! The assembly half lives in `interrupts.s` and exports the symbol
-//! `rustos_arch_x86_64_isr_default`. Every IDT vector populated by
+//! `tairix_arch_x86_64_isr_default`. Every IDT vector populated by
 //! [`Idt::with_default_handler`] routes through this single thunk. On
 //! entry the prologue:
 //!
@@ -33,7 +33,7 @@
 //!   2. Pushes the full 15-GPR [`SavedRegs`] block in the layout the
 //!      `repr(C)` definition pins below.
 //!   3. Loads `rdi` with a pointer to the saved-regs block and calls
-//!      `rustos_arch_x86_64_default_interrupt`, which is `-> !` and
+//!      `tairix_arch_x86_64_default_interrupt`, which is `-> !` and
 //!      therefore must terminate the kernel through `qemu_exit` or the
 //!      equivalent platform-specific failure path.
 //!
@@ -544,7 +544,7 @@ macro_rules! define_isr {
 // --- Default ISR Rust callback -------------------------------------
 
 /// Rust callback invoked by the assembly thunk
-/// `rustos_arch_x86_64_isr_default` (`interrupts.s`) with a pointer to
+/// `tairix_arch_x86_64_isr_default` (`interrupts.s`) with a pointer to
 /// the saved-regs block. Treated by as a closed-fail:
 /// any unexpected interrupt halts the binary through the platform's
 /// QEMU-exit hook.
@@ -556,7 +556,7 @@ macro_rules! define_isr {
 /// QEMU integration test (`scheduler_stress_qemu`).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-extern "C" fn rustos_arch_x86_64_default_interrupt(_saved_regs: *mut SavedRegs) -> ! {
+extern "C" fn tairix_arch_x86_64_default_interrupt(_saved_regs: *mut SavedRegs) -> ! {
     crate::qemu_exit::exit_failure();
 }
 

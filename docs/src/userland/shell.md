@@ -1,6 +1,6 @@
 # elsh — the default shell (`userland/shell/elsh`)
 
-**elsh** ("Element Shell", crate `rustos-elsh`) is the default RustOS
+**elsh** ("Element Shell", crate `tairix-elsh`) is the default TAIRiX
 command interpreter: a POSIX-ish shell that
 reads a line of text and runs it. It lexes the line with full quoting and
 escaping, parses pipelines (`|`, `|&`, and the `!` status negation), the
@@ -11,9 +11,9 @@ background and stopped jobs.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependencies are the audited `lib/*` crates `rustos-abi` (the stable
-`Errno` carried back by the process-host seam), `rustos-resref` (the one
-resource-reference spelling parser), and `rustos-vt` (the shared read line
+only dependencies are the audited `lib/*` crates `tairix-abi` (the stable
+`Errno` carried back by the process-host seam), `tairix-resref` (the one
+resource-reference spelling parser), and `tairix-vt` (the shared read line
 discipline the REPL's line reader runs) — so a userland program never links
 a kernel or driver crate (`AGENTS.md` §17.4).
 
@@ -129,7 +129,7 @@ before its delimiter line), or an over-length here-document body runs
 
 ### Target: resource reference vs. filesystem path
 
-RustOS has no `/dev`, so the byte sinks and sources a redirection can name
+TAIRiX has no `/dev`, so the byte sinks and sources a redirection can name
 (`sys:null`, `sys:zero`, `sys:random`, …) are **resource references**, not
 device files. Each expanded `Open` target is classified into a `RedirTarget` —
 `Path` or `Resource` — through the single shared `lib/resref` parser, never a
@@ -157,7 +157,7 @@ to disk (`AGENTS.md` §5.4).
 Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
 rather than misbehaving): process substitution — the stream forms `<(…)` /
 `>(…)` await the launch plumbing, and the temporary-file form `=(…)` is
-permanently unsupported (RustOS has no scratch filesystem) — and the compound
+permanently unsupported (TAIRiX has no scratch filesystem) — and the compound
 commands `( list )` and `{ list; }`. Each is *recognised* and aborts the line
 with a parse error, so a parenthesised command can never be misread as a
 filename and `{`/`(` can never run as a program name. Classifying a
@@ -176,7 +176,7 @@ semantics above are exercised in full against the in-memory fixtures.
 The crate is both the interpreter library above and the `Run` entry-point
 binary of the `Shell` application bundle (`AGENTS.md` §16.5) — the program
 PID 1 [`init`](./init.md) launches as the user's session. The binary is a
-pure-Rust program (`AGENTS.md` §1): it links `rustos-rt` (`_start`, the stack
+pure-Rust program (`AGENTS.md` §1): it links `tairix-rt` (`_start`, the stack
 canary, the panic handler, the `mem_map`-backed global allocator, and the
 syscall wrappers), never the C ABI.
 
@@ -184,8 +184,8 @@ syscall wrappers), never the C ABI.
 over the program's **inherited standard streams** (`AGENTS.md` §20):
 
 - It reads command lines from **standard input** (fd 0) through
-  `rustos_rt::stdin`, reassembling lines across reads with the read line
-  discipline's shared **buffer** half (`rustos_vt::line::LineEditor`,
+  `tairix_rt::stdin`, reassembling lines across reads with the read line
+  discipline's shared **buffer** half (`tairix_vt::line::LineEditor`,
   the same editor login's prompt reads run and the kernel console echo
   mirrors): CR and LF both terminate a line (a serial terminal sends CR for
   the Return key, a pipe or script LF, and a CRLF pair counts once), and the
@@ -214,7 +214,7 @@ When the input backing accepts the **raw** read discipline
 (`stream_input_mode`), the REPL runs the interactive line editor
 (`src/editor.rs`) instead of the plain reader: the shell echoes and repaints
 the line itself through the shared `lib/vt` escape vocabulary, and decodes
-key bytes through the shared `rustos_curses::Input` decoder — never a
+key bytes through the shared `tairix_curses::Input` decoder — never a
 shell-private key table (`plans/SHELL.md` "Interactive terminal"). A backing
 that refuses raw mode (a pipe, a script) keeps the plain reader, so scripted
 execution is byte-identical with or without a terminal. Around every launched
@@ -238,11 +238,11 @@ the shell's own span-carrying lexer (`lexer::tokenize_with_spans`) and is
 read-only: it never runs a command, writes a file, or changes `$?`. A
 command-position word completes from the builtin table and the `.app`
 bundles of the shared command-search directories
-(`rustos_cmdres::command_search_dirs` — so exactly the names the shell would
+(`tairix_cmdres::command_search_dirs` — so exactly the names the shell would
 resolve are offered); argument words complete as filesystem paths through
 the injected `DirLister` (the shared `lib/complete` seam, kernel-authorised `fs_readdir`); a redirection
 target additionally offers the registered resource namespaces (`sys:` …) and
-their well-known selectors (`rustos_resref::KnownNamespace`) — the same
+their well-known selectors (`tairix_resref::KnownNamespace`) — the same
 registry the redirection classifier applies, cross-checked against the
 kernel resolver. A unique candidate inserts (directories stay open with `/`,
 finished words close with a space), several extend to their longest common
@@ -256,7 +256,7 @@ cmd` prefix overrides layered on top) as its environment, encoded into the
 `spawn` startup-strings block — strings are data, never authority, and the
 kernel re-validates the block fail-closed before building the child's own
 copy. Pipes and redirections run end to end (`plans/SPAWN.md` SP10): the
-pure `rustos_elsh::wireplan` planner lowers each pipeline into pre-opened
+pure `tairix_elsh::wireplan` planner lowers each pipeline into pre-opened
 targets (`fs_open` / `resource_open` / `pipe_create`), one fd 0–3 wire map
 per member, and the here-string / multios byte pumps; the host executes
 the plan over `spawn_attached` — all-or-nothing opens, kill-and-reap
@@ -336,7 +336,7 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
 ## Tests
 
-`cargo test -p rustos-elsh` drives the interpreter against in-memory
+`cargo test -p tairix-elsh` drives the interpreter against in-memory
 `Console`/`ProcessHost` fixtures, covering the lexer's quoting and escape
 rules, the parser's pipelines/redirections/connectors and its fail-closed
 grammar errors, `$`-expansion, here-document collection (quoted/unquoted

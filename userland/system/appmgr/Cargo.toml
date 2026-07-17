@@ -1,6 +1,6 @@
 [package]
-name = "rustos-appmgr"
-description = "RustOS application-manager service: loads and launches an installed `/Apps/<Name>.app/` bundle for a user through the shared `lib/appload` load gate (validates the fixed layout, verifies the signed `AppInfo` manifest and content hash, intersects capabilities with the user's grants, enforces the dynamic-loader shared-library policy) — Stage 6, `AGENTS.md` §16.4, §16.5, §17.4."
+name = "tairix-appmgr"
+description = "TAIRiX application-manager service: loads and launches an installed `/Apps/<Name>.app/` bundle for a user through the shared `lib/appload` load gate (validates the fixed layout, verifies the signed `AppInfo` manifest and content hash, intersects capabilities with the user's grants, enforces the dynamic-loader shared-library policy) — Stage 6, `AGENTS.md` §16.4, §16.5, §17.4."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,4 +16,4 @@ workspace = true
 # judged, used by both this service and the kernel boot-floor spawn path so
 # the security-relevant layout/signature/capability policy is never
 # re-implemented (§2.2, §17.4). `appmgr` is its user-space consumer.
-rustos-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }

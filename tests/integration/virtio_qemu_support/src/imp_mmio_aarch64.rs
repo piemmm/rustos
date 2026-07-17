@@ -23,45 +23,45 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use rustos_abi::{CapabilityId, IrqHandle};
-use rustos_arch_aarch64::gic::{
+use tairix_abi::{CapabilityId, IrqHandle};
+use tairix_arch_aarch64::gic::{
     self, GicController, Gicv2, VolatileGicMmio, MAX_INTID, MIN_SPI_INTID,
 };
-use rustos_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
-use rustos_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
-use rustos_caps::CapabilitySet;
-use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
-use rustos_drv_bus_virtio::MmioTransport;
-use rustos_fdt::Fdt;
-use rustos_kalloc::FreeListAllocator;
-use rustos_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError};
-use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-use rustos_kernel_mem::{
+use tairix_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
+use tairix_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
+use tairix_caps::CapabilitySet;
+use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
+use tairix_drv_bus_virtio::MmioTransport;
+use tairix_fdt::Fdt;
+use tairix_kalloc::FreeListAllocator;
+use tairix_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError};
+use tairix_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
+use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, PhysAddr,
     VirtAddr, PAGE_SIZE,
 };
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_kernel_virtio::{
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_kernel_virtio::{
     provision_virtio_mmio, KernelMmioMapper, KernelVirtioFactory, KernelVirtioFactoryConfig,
     KernelVirtioHost,
 };
-use rustos_log::{Event, EventId, Level, Sink};
-use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
+use tairix_log::{Event, EventId, Level, Sink};
+use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 use crate::common::{drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
 
 /// Re-export so the verticals name the concrete transport for the shared
 /// device-tail turbofish under the same name as the riscv64 / PCI
 /// verticals.
-pub use rustos_drv_bus_virtio::MmioTransport as ScenarioTransport;
+pub use tairix_drv_bus_virtio::MmioTransport as ScenarioTransport;
 
 // Re-exports the `define_mmio_boot_harness_aarch64!` macro expands
 // against via `$crate::...`.
 #[doc(hidden)]
-pub use rustos_arch_aarch64::handle_panic_via_serial;
+pub use tairix_arch_aarch64::handle_panic_via_serial;
 #[doc(hidden)]
-pub use rustos_arch_aarch64::{
+pub use tairix_arch_aarch64::{
     SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK,
 };
 
@@ -273,7 +273,7 @@ fn device_spi_number(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
 /// the charter forbids the architecture crate from depending on `kernel/irq`,
 /// so the bridge lives here (the test crate may depend on both), mirroring
 /// `tests/integration/irq_qemu_aarch64`. [`IrqController::mask`] delegates
-/// to the HAL [`rustos_arch_api::IrqController`] mask (which clears the
+/// to the HAL [`tairix_arch_api::IrqController`] mask (which clears the
 /// distributor enable bit and emits the `SeqCst` mask-before-wake fence);
 /// [`GicBridge::unmask`] re-enables the line for the next completion.
 struct GicBridge {
@@ -289,7 +289,7 @@ static BRIDGE: GicBridge = GicBridge {
 
 impl IrqController for GicBridge {
     fn mask(&self, line: u32) -> Result<(), MaskError> {
-        rustos_arch_api::IrqController::mask(&self.ctrl, line).map_err(|_| MaskError::OutOfRange)
+        tairix_arch_api::IrqController::mask(&self.ctrl, line).map_err(|_| MaskError::OutOfRange)
     }
 }
 
@@ -297,7 +297,7 @@ impl GicBridge {
     /// Re-enable `line` at the distributor (priority is left at the
     /// mid value the controller installs).
     fn unmask(&self, line: u32) {
-        let _ = rustos_arch_api::IrqController::unmask(&self.ctrl, line);
+        let _ = tairix_arch_api::IrqController::unmask(&self.ctrl, line);
     }
 }
 
@@ -560,7 +560,7 @@ pub fn harness_fail_reentry() -> ! {
 
 /// Generate the freestanding boot harness for an aarch64 virtio-MMIO QEMU
 /// test bin: the `#[panic_handler]` bridge and the `kernel_main(dtb)`
-/// entry point (the symbol `rustos_arch_aarch64_main` calls). It drives
+/// entry point (the symbol `tairix_arch_aarch64_main` calls). It drives
 /// `$scenario` exactly once.
 ///
 /// `$scenario` must be a `fn() -> !`. Invoke exactly once at the crate
@@ -583,7 +583,7 @@ macro_rules! define_mmio_boot_harness_aarch64 {
             $crate::handle_panic_via_serial(info)
         }
 
-        /// Boot entry point — the symbol `rustos_arch_aarch64_main` calls.
+        /// Boot entry point — the symbol `tairix_arch_aarch64_main` calls.
         #[no_mangle]
         pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             if SCENARIO_RAN.swap(true, ::core::sync::atomic::Ordering::SeqCst) {

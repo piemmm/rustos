@@ -9,20 +9,20 @@
 //! this crate on `lib/*` only, so the seam is how the gate is
 //! reached without a userland→userland production edge.
 //!
-//! Every outcome is audited through [`rustos_log`] with a stable
+//! Every outcome is audited through [`tairix_log`] with a stable
 //! [`crate::events`] identifier: a bound node, an unbound node (never
 //! an error), a refused unbroken tie, and a failed
 //! load are all visible to external audit consumers.
 
 use alloc::vec::Vec;
 
-use rustos_abi::hwtree::HwResource;
-use rustos_abi::{DriverHandle, Errno, HwNode};
-use rustos_caps::CapabilitySet;
-use rustos_log::{log as log_event, Event, EventId, Field, Level, Sink};
-use rustos_util::fmt::{format_hex_u64, format_i32};
+use tairix_abi::hwtree::HwResource;
+use tairix_abi::{DriverHandle, Errno, HwNode};
+use tairix_caps::CapabilitySet;
+use tairix_log::{log as log_event, Event, EventId, Field, Level, Sink};
+use tairix_util::fmt::{format_hex_u64, format_i32};
 
-use rustos_devmatch::{resolve, DriverCandidate, MatchResolution};
+use tairix_devmatch::{resolve, DriverCandidate, MatchResolution};
 
 use crate::events;
 
@@ -143,7 +143,7 @@ impl<'m> DeviceManager<'m> {
                         node.id(),
                         &[Field {
                             key: "priority",
-                            value: rustos_log::FieldValue::Str(priority_str),
+                            value: tairix_log::FieldValue::Str(priority_str),
                         }],
                     );
                     report.ties_rejected += 1;
@@ -165,11 +165,11 @@ impl<'m> DeviceManager<'m> {
                                 &[
                                     Field {
                                         key: "path",
-                                        value: rustos_log::FieldValue::Str(path),
+                                        value: tairix_log::FieldValue::Str(path),
                                     },
                                     Field {
                                         key: "errno",
-                                        value: rustos_log::FieldValue::Str(errno_str),
+                                        value: tairix_log::FieldValue::Str(errno_str),
                                     },
                                 ],
                             );
@@ -186,11 +186,11 @@ impl<'m> DeviceManager<'m> {
                         &[
                             Field {
                                 key: "path",
-                                value: rustos_log::FieldValue::Str(path),
+                                value: tairix_log::FieldValue::Str(path),
                             },
                             Field {
                                 key: "handle",
-                                value: rustos_log::FieldValue::Str(handle_str),
+                                value: tairix_log::FieldValue::Str(handle_str),
                             },
                         ],
                     );
@@ -211,7 +211,7 @@ impl<'m> DeviceManager<'m> {
         // two event-specific fields. Sized for the largest emitter.
         let mut fields = [Field {
             key: "node",
-            value: rustos_log::FieldValue::Str(node_str),
+            value: tairix_log::FieldValue::Str(node_str),
         }; 3];
         let mut len = 1;
         for field in extra {
@@ -246,7 +246,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::{CapabilityId, DriverBindKey, HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
+    use tairix_abi::{CapabilityId, DriverBindKey, HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
 
     struct MockLoader {
         /// `Err` paths are refused with the given errno; everything
@@ -374,7 +374,7 @@ mod tests {
     fn winner_is_loaded_and_bound_and_unmatched_node_stays_unbound() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
         // boot); lower the threshold so the test observes it.
-        rustos_log::set_max_level(rustos_log::Level::Trace);
+        tairix_log::set_max_level(tairix_log::Level::Trace);
         let emmc = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
         let candidates = [DriverCandidate {
             path: "/System/Drivers/emmc2",

@@ -17,7 +17,7 @@
 //! frame blocks) with an [`AddressSpace<P>`] (for the per-process
 //! virtual-address window). The capability check itself lives in
 //! `kernel/sec::dma`, since `kernel/mem` deliberately depends on
-//! neither `rustos-abi` nor `rustos-caps` (see `kernel/mem/Cargo.toml`).
+//! neither `tairix-abi` nor `tairix-caps` (see `kernel/mem/Cargo.toml`).
 //!
 //! # Returned shape
 //!
@@ -240,7 +240,7 @@ pub struct DmaWindowMap {
 ///
 /// One pool is intended to live per process that holds
 /// `CapabilityId::MEM_DMA`; the capability check itself lives in
-/// `kernel/sec::dma` so this crate stays free of the `rustos-abi`
+/// `kernel/sec::dma` so this crate stays free of the `tairix-abi`
 /// dependency. The guarded carve mechanism lives in [`DmaWindowMap`]
 /// (shared with the `dma_alloc` syscall facility); this
 /// type is the thin owning adapter over a space it owns outright.
@@ -256,7 +256,7 @@ pub struct DmaPool<'a, P: PageTable> {
     /// Borrowed frame allocator used to back the data slots.
     ///
     /// `FrameAllocator` is internally synchronised via a
-    /// [`rustos_sync::SpinLock`], so multiple pools may share
+    /// [`tairix_sync::SpinLock`], so multiple pools may share
     /// one. The borrow is explicit (not `'static`) so the host-side
     /// tests do not need to leak their allocators and a future
     /// per-process kernel layout can carve the global allocator into

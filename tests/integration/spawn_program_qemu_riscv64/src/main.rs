@@ -5,7 +5,7 @@
 //! On boot the test builds an Sv39 address space that identity-maps the kernel
 //! and MMIO, activates it, installs the trap vector and a dispatch callback,
 //! then calls the production capability-checked, audited spawn caller
-//! (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+//! (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
 //! materialise the program's U-mode image — built from the `rxe` blob the
 //! build script produced — and `sret` into it. The program parses `argv[1]`
 //! and returns it; crt0 routes the return through the `exit` syscall, whose
@@ -19,7 +19,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-spawn-program-qemu-riscv64: the `test-hooks` Cargo feature is a \
+    "tairix-test-spawn-program-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

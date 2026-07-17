@@ -1,6 +1,6 @@
 [package]
-name = "rustos-help"
-description = "RustOS shared command-help engine (plans/APPS.md): the one implementation that locates a bundle's internationalised Help/ tree through an injected, capability-scoped read seam, applies the deterministic locale fallback chain (exact tag -> same language -> default en-US), parses one structured-Markdown help document into the fixed section model under hard fail-closed security bounds, and renders both the short `-h`/`-?` view and the full `man` page as `lib/vt` operations — so `man`, every command's short help, and any graphical viewer share one engine (AGENTS.md §2.2). no_std + alloc, forbids unsafe, never panics (§2.9)."
+name = "tairix-help"
+description = "TAIRiX shared command-help engine (plans/APPS.md): the one implementation that locates a bundle's internationalised Help/ tree through an injected, capability-scoped read seam, applies the deterministic locale fallback chain (exact tag -> same language -> default en-US), parses one structured-Markdown help document into the fixed section model under hard fail-closed security bounds, and renders both the short `-h`/`-?` view and the full `man` page as `lib/vt` operations — so `man`, every command's short help, and any graphical viewer share one engine (AGENTS.md §2.2). no_std + alloc, forbids unsafe, never panics (§2.9)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,36 +11,36 @@ publish.workspace = true
 [features]
 # The production own-bundle `HelpSource` (`BundleHelp`): reads the running
 # command app's own `/System/Apps/<word>.app/Help/` tree through the
-# `rustos-rt` file wrappers, so every `Run` binary shares one syscall-backed
+# `tairix-rt` file wrappers, so every `Run` binary shares one syscall-backed
 # source instead of each carrying a private copy (the charter forbids that
 # duplication). Enabled only by a freestanding `Run` binary's target-gated
 # dependency; the engine itself stays seam-injected and performs no ambient
 # I/O.
-rt = ["dep:rustos-abi", "dep:rustos-rt"]
+rt = ["dep:tairix-abi", "dep:tairix-rt"]
 
 # The one help-tree lint (plans/APPS.md §8.1): completeness, required-locale
 # coverage, cross-locale OPTIONS switch-key drift, structural bounds, and the
 # content-policy screen over a set of discovered Help/ trees. Enabled only by
 # host-side consumers (`cargo xtask help-lint`, the `tools/syshelp` aggregator
-# tests); never linked into a RustOS program.
+# tests); never linked into a TAIRiX program.
 lint = []
 
 [dependencies]
-rustos-vt = { path = "../vt", version = "=0.0.0" }
-rustos-curses = { path = "../curses", version = "=0.0.0" }
+tairix-vt = { path = "../vt", version = "=0.0.0" }
+tairix-curses = { path = "../curses", version = "=0.0.0" }
 
 # For the `rt` feature's `BundleHelp` only: the system-app-store/bundle
-# spellings and the `Errno`/`DirEntry` vocabulary (`rustos-abi`), and the
-# kernel-authorised `fs_*` file wrappers (`rustos-rt`).
-rustos-abi = { path = "../abi", version = "=0.0.0", optional = true }
-rustos-rt = { path = "../rt", version = "=0.0.0", optional = true }
+# spellings and the `Errno`/`DirEntry` vocabulary (`tairix-abi`), and the
+# kernel-authorised `fs_*` file wrappers (`tairix-rt`).
+tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget
-# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# §2.2). Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

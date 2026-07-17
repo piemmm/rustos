@@ -21,7 +21,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR set by cargo");
@@ -37,7 +37,7 @@ fn main() {
         println!("cargo:rustc-link-arg=-T{linker_script}");
         // Four CPUs exercise every GICv2 target-list bit the Tier-1
         // Raspberry Pi 4 topology needs (boot core + three secondaries).
-        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 4)
+        tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir, 4)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.
         Vec::new()

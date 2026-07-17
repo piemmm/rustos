@@ -1,4 +1,4 @@
-//! RustOS application-bundle load gate (`rustos-appload`).
+//! TAIRiX application-bundle load gate (`tairix-appload`).
 //!
 //! An installed application — and every OS-provided command app and service
 //! (a service is an app) — is a `<Name>.app/` bundle with a fixed top-level
@@ -8,10 +8,10 @@
 //! responsibilities:
 //!
 //! 1. **Layout** — the bundle's top-level entries must be exactly drawn from
-//!    the fixed [`rustos_abi::BundleEntry`] set, with the mandatory `AppInfo`
+//!    the fixed [`tairix_abi::BundleEntry`] set, with the mandatory `AppInfo`
 //!    and `Run` present. Any other entry is a packaging defect and the whole
 //!    bundle is refused.
-//! 2. **Authenticity** — the signed [`rustos_abi::AppInfoHeader`] manifest is
+//! 2. **Authenticity** — the signed [`tairix_abi::AppInfoHeader`] manifest is
 //!    decoded, its target ABI version and syscall-table hash are matched
 //!    against the kernel's, its Ed25519 signature is verified, and the
 //!    content hash it carries is checked against the bundle's actual
@@ -21,7 +21,7 @@
 //!    forbidden, so the loader never widens a request.
 //!
 //! It additionally validates the entry-point `Run` binary through
-//! [`rustos_abi::LoadImage::parse`] (enforcing the PIE / W^X / CFI-tag
+//! [`tairix_abi::LoadImage::parse`] (enforcing the PIE / W^X / CFI-tag
 //! invariants on a C binary identically to a Rust one) and resolves every
 //! shared library that binary declares it needs under the dynamic-loader
 //! policy ([`AppLoader::resolve_library`]): a reference resolves only against
@@ -46,7 +46,7 @@
 //! # Layering
 //!
 //! This is a `lib/*` crate (`no_std`, with `alloc`) depending only on the
-//! audited `lib/*` crates `rustos-abi`, `rustos-caps`, and `rustos-log`, so
+//! audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`, so
 //! it links no kernel or driver crate and both the kernel boot-floor spawn
 //! path and the user-space application-manager service (`userland/system/
 //! appmgr`) can share this one gate rather than each re-implementing it.

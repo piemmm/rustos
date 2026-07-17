@@ -1,8 +1,8 @@
 //! The `seq` format grammar behind `-f` and the default formats.
 //!
-//! GNU `seq` hands its format to C `printf(3)`; RustOS is Rust-only, so
+//! GNU `seq` hands its format to C `printf(3)`; TAIRiX is Rust-only, so
 //! the rendering itself is the one shared C-locale engine
-//! (`rustos_util::cfloat`, also consumed by `printf`). This module owns
+//! (`tairix_util::cfloat`, also consumed by `printf`). This module owns
 //! only what is `seq`'s: the validation of the one directive `seq`
 //! permits — flags `-+#0 '`, optional width and precision, and a
 //! conversion in `efgaEFGA` — exactly as GNU `long_double_format`
@@ -12,7 +12,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_util::cfloat::{FloatConversion, FloatDirective};
+use tairix_util::cfloat::{FloatConversion, FloatDirective};
 
 use crate::error::SeqError;
 

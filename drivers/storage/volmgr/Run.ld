@@ -2,7 +2,7 @@
  * (`drivers/storage/volmgr/src/main.rs`).
  *
  * The volume-manager policy driver is a position-independent **pure-Rust** program
- * whose entry point is the `rustos-rt` runtime's `_start`. It links no
+ * whose entry point is the `tairix-rt` runtime's `_start`. It links no
  * architecture crate, so nothing in the default object graph references
  * `_start`; this script makes `_start` the entry GC root and lays the loadable
  * sections out at a fixed, non-zero base so the consuming spawn path maps the

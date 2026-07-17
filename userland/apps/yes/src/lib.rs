@@ -1,4 +1,4 @@
-//! RustOS `yes` — repeatedly output a line of text (`plans/APPS.md` §12.1
+//! TAIRiX `yes` — repeatedly output a line of text (`plans/APPS.md` §12.1
 //! Stage C).
 //!
 //! The GNU coreutils `yes`: it writes its operands, joined by single
@@ -287,7 +287,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/yes.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

@@ -92,8 +92,8 @@ pub struct Crate {
 ///
 /// Empty: every grandfathered edge has been burned down. The final
 /// entries were the x86_64 production binary's bring-up edges
-/// (`rustos-kernel → {rustos-kernel-core, rustos-arch-x86_64,
-/// rustos-drvhost, rustos-drv-bus-virtio}`). That binary is the
+/// (`tairix-kernel → {tairix-kernel-core, tairix-arch-x86_64,
+/// tairix-drvhost, tairix-drv-bus-virtio}`). That binary is the
 /// image-assembly seam, not a kernel subsystem, so it is now classified
 /// as [`Layer::Tooling`] (see [`classify`]) — the x86_64 analogue of the
 /// downstream `tests/integration/riscv64_boot` consumer — rather than
@@ -106,7 +106,7 @@ pub fn classify(rel_dir: &str) -> Layer {
         Layer::Lib
     } else if rel_dir == "kernel/core" {
         Layer::KernelCore
-    } else if rel_dir == "kernel/rustos-kernel" {
+    } else if rel_dir == "kernel/tairix-kernel" {
         // The final-image production binary is the x86_64 image-assembly
         // seam, not a kernel subsystem. It is the one place that wires the
         // arch port, `kernel/core`, the driver host, and the boot-time bus
@@ -487,14 +487,14 @@ mod tests {
         let crates = build_graph(&root).expect("graph");
         let drvhost = crates
             .iter()
-            .find(|c| c.name == "rustos-drvhost")
+            .find(|c| c.name == "tairix-drvhost")
             .expect("drvhost present");
         assert!(
-            !drvhost.deps.iter().any(|d| d == "rustos-drv-bus-virtio"),
+            !drvhost.deps.iter().any(|d| d == "tairix-drv-bus-virtio"),
             "drvhost gained a production dependency on the virtio bus crate"
         );
         assert!(
-            !is_grandfathered("rustos-drvhost", "rustos-drv-bus-virtio"),
+            !is_grandfathered("tairix-drvhost", "tairix-drv-bus-virtio"),
             "stale grandfather entry must stay removed"
         );
     }
@@ -511,18 +511,18 @@ mod tests {
         let crates = build_graph(&root).expect("graph");
         let kernel_virtio = crates
             .iter()
-            .find(|c| c.name == "rustos-kernel-virtio")
+            .find(|c| c.name == "tairix-kernel-virtio")
             .expect("kernel-virtio present");
         assert!(
-            !kernel_virtio.deps.iter().any(|d| d == "rustos-drvhost"),
+            !kernel_virtio.deps.iter().any(|d| d == "tairix-drvhost"),
             "kernel/virtio regained a dependency on userland/drvhost"
         );
         assert!(
-            !is_grandfathered("rustos-kernel-virtio", "rustos-drvhost"),
+            !is_grandfathered("tairix-kernel-virtio", "tairix-drvhost"),
             "stale grandfather entry for kernel/virtio -> drvhost must stay removed"
         );
         assert!(
-            kernel_virtio.deps.iter().any(|d| d == "rustos-virtio"),
+            kernel_virtio.deps.iter().any(|d| d == "tairix-virtio"),
             "kernel/virtio must consume the VirtioHostFactory seam from lib/virtio"
         );
     }
@@ -541,21 +541,21 @@ mod tests {
         let crates = build_graph(&root).expect("graph");
         let kernel_virtio = crates
             .iter()
-            .find(|c| c.name == "rustos-kernel-virtio")
+            .find(|c| c.name == "tairix-kernel-virtio")
             .expect("kernel-virtio present");
         assert!(
             !kernel_virtio
                 .deps
                 .iter()
-                .any(|d| d == "rustos-drv-bus-virtio"),
+                .any(|d| d == "tairix-drv-bus-virtio"),
             "kernel/virtio regained a dependency on the virtio bus driver"
         );
         assert!(
-            !is_grandfathered("rustos-kernel-virtio", "rustos-drv-bus-virtio"),
+            !is_grandfathered("tairix-kernel-virtio", "tairix-drv-bus-virtio"),
             "stale grandfather entry for kernel/virtio -> drv-bus-virtio must stay removed"
         );
         assert!(
-            kernel_virtio.deps.iter().any(|d| d == "rustos-virtio"),
+            kernel_virtio.deps.iter().any(|d| d == "tairix-virtio"),
             "kernel/virtio must build its transports from the lib/virtio seam"
         );
     }
@@ -569,33 +569,33 @@ mod tests {
         // its PLIC moved into the downstream boot consumer
         // (`tests/integration/riscv64_boot`), so the arch crate names only
         // `kernel/arch/api` + `lib/*`. None of the former
-        // `rustos-arch-riscv64 -> kernel/{core,mem,sec,irq,sched-api}`
+        // `tairix-arch-riscv64 -> kernel/{core,mem,sec,irq,sched-api}`
         // edges may return or be re-grandfathered.
         let root = workspace_root();
         let crates = build_graph(&root).expect("graph");
         let riscv = crates
             .iter()
-            .find(|c| c.name == "rustos-arch-riscv64")
+            .find(|c| c.name == "tairix-arch-riscv64")
             .expect("riscv64 port present");
         for kernel_crate in [
-            "rustos-kernel-core",
-            "rustos-kernel-mem",
-            "rustos-kernel-sec",
-            "rustos-kernel-irq",
-            "rustos-kernel-sched-api",
+            "tairix-kernel-core",
+            "tairix-kernel-mem",
+            "tairix-kernel-sec",
+            "tairix-kernel-irq",
+            "tairix-kernel-sched-api",
         ] {
             assert!(
                 !riscv.deps.iter().any(|d| d == kernel_crate),
                 "riscv64 arch port regained a dependency on {kernel_crate}"
             );
             assert!(
-                !is_grandfathered("rustos-arch-riscv64", kernel_crate),
+                !is_grandfathered("tairix-arch-riscv64", kernel_crate),
                 "stale grandfather entry for the riscv64 port must stay removed"
             );
         }
         assert!(
-            riscv.deps.iter().any(|d| d == "rustos-arch-api"),
-            "riscv64 arch port must implement the Arch HAL (rustos-arch-api)"
+            riscv.deps.iter().any(|d| d == "tairix-arch-api"),
+            "riscv64 arch port must implement the Arch HAL (tairix-arch-api)"
         );
     }
 
@@ -619,45 +619,45 @@ mod tests {
                 .clone()
         };
 
-        let bus = dep_of("rustos-drv-bus-virtio");
+        let bus = dep_of("tairix-drv-bus-virtio");
         for kernel_crate in [
-            "rustos-kernel-mem",
-            "rustos-kernel-sec",
-            "rustos-kernel-irq",
+            "tairix-kernel-mem",
+            "tairix-kernel-sec",
+            "tairix-kernel-irq",
         ] {
             assert!(
                 !bus.iter().any(|d| d == kernel_crate),
                 "virtio bus driver regained a kernel dependency on {kernel_crate}"
             );
             assert!(
-                !is_grandfathered("rustos-drv-bus-virtio", kernel_crate),
+                !is_grandfathered("tairix-drv-bus-virtio", kernel_crate),
                 "stale grandfather entry for the virtio bus driver must stay removed"
             );
         }
         assert!(
-            bus.iter().any(|d| d == "rustos-virtio"),
+            bus.iter().any(|d| d == "tairix-virtio"),
             "virtio bus driver must consume the protocol from lib/virtio"
         );
 
         for (driver, expected_lib) in [
-            ("rustos-drv-storage-virtio-blk", "rustos-virtio"),
+            ("tairix-drv-storage-virtio-blk", "tairix-virtio"),
             // The virtio-net driver shell consumes the bus-agnostic device
             // engine from `lib/virtio_net` (hoisted there so a user-space
             // driver process could link it, §17.4); the engine in turn
             // consumes the protocol from `lib/virtio`.
-            ("rustos-drv-network-virtio-net", "rustos-virtio-net"),
+            ("tairix-drv-network-virtio-net", "tairix-virtio-net"),
             // The user-space virtio-input keyboard driver `rxe` builds its
             // bus-agnostic MMIO transport from `lib/virtio`, never the bus
             // driver crate (the `lib/usb` precedent).
-            ("rustos-drv-input-virtio-kbd", "rustos-virtio"),
+            ("tairix-drv-input-virtio-kbd", "tairix-virtio"),
         ] {
             let deps = dep_of(driver);
             assert!(
-                !deps.iter().any(|d| d == "rustos-drv-bus-virtio"),
+                !deps.iter().any(|d| d == "tairix-drv-bus-virtio"),
                 "{driver} regained a direct dependency on the virtio bus driver"
             );
             assert!(
-                !is_grandfathered(driver, "rustos-drv-bus-virtio"),
+                !is_grandfathered(driver, "tairix-drv-bus-virtio"),
                 "stale grandfather entry for {driver} must stay removed"
             );
             assert!(
@@ -668,38 +668,38 @@ mod tests {
     }
 
     #[test]
-    fn rustos_kernel_binary_is_tooling_integration_point() {
+    fn tairix_kernel_binary_is_tooling_integration_point() {
         // burn-down regression: the x86_64 production binary
-        // `rustos-kernel` is the image-assembly seam, not a kernel
+        // `tairix-kernel` is the image-assembly seam, not a kernel
         // subsystem. It is classified as `Tooling` (outside the product
         // layering) so it may wire the arch port, `kernel/core`, the
         // driver host, and the boot-time bus driver into a bootable image
         // — the x86_64 analogue of `tests/integration/riscv64_boot`. None
         // of those bring-up edges may be re-grandfathered, and the
         // grandfather list as a whole stays empty.
-        assert_eq!(classify("kernel/rustos-kernel"), Layer::Tooling);
+        assert_eq!(classify("kernel/tairix-kernel"), Layer::Tooling);
         let root = workspace_root();
         let crates = build_graph(&root).expect("graph");
         let bin = crates
             .iter()
-            .find(|c| c.name == "rustos-kernel")
+            .find(|c| c.name == "tairix-kernel")
             .expect("production kernel binary present");
         assert_eq!(bin.layer, Layer::Tooling);
-        for dep in ["rustos-kernel-core", "rustos-arch-x86_64"] {
+        for dep in ["tairix-kernel-core", "tairix-arch-x86_64"] {
             assert!(
                 bin.deps.iter().any(|d| d == dep),
                 "production binary should integrate {dep}"
             );
         }
         for to in [
-            "rustos-kernel-core",
-            "rustos-arch-x86_64",
-            "rustos-drvhost",
-            "rustos-drv-bus-virtio",
+            "tairix-kernel-core",
+            "tairix-arch-x86_64",
+            "tairix-drvhost",
+            "tairix-drv-bus-virtio",
         ] {
             assert!(
-                !is_grandfathered("rustos-kernel", to),
-                "stale grandfather entry for rustos-kernel -> {to} must stay removed"
+                !is_grandfathered("tairix-kernel", to),
+                "stale grandfather entry for tairix-kernel -> {to} must stay removed"
             );
         }
         assert!(
@@ -714,12 +714,12 @@ mod tests {
         let crates = build_graph(&root).expect("graph");
         let core = crates
             .iter()
-            .find(|c| c.name == "rustos-kernel-core")
+            .find(|c| c.name == "tairix-kernel-core")
             .expect("core present");
         assert_eq!(core.layer, Layer::KernelCore);
-        assert!(core.deps.iter().any(|d| d == "rustos-kernel-mem"));
+        assert!(core.deps.iter().any(|d| d == "tairix-kernel-mem"));
         // dev-dependency self-reference must not appear as an edge.
-        assert!(!core.deps.iter().any(|d| d == "rustos-kernel-core"));
+        assert!(!core.deps.iter().any(|d| d == "tairix-kernel-core"));
     }
 
     #[test]
@@ -767,13 +767,13 @@ mod tests {
     fn synthetic_gui_dependency_is_flagged() {
         let crates = vec![
             Crate {
-                name: "rustos-init".into(),
+                name: "tairix-init".into(),
                 rel_dir: "userland/system/init".into(),
                 layer: Layer::Userland,
-                deps: vec!["rustos-wm".into()],
+                deps: vec!["tairix-wm".into()],
             },
             Crate {
-                name: "rustos-wm".into(),
+                name: "tairix-wm".into(),
                 rel_dir: "userland/gui/wm".into(),
                 layer: Layer::UserGui,
                 deps: vec![],
@@ -790,13 +790,13 @@ mod tests {
     fn synthetic_concrete_scheduler_naming_is_flagged() {
         let crates = vec![
             Crate {
-                name: "rustos-kernel-mem".into(),
+                name: "tairix-kernel-mem".into(),
                 rel_dir: "kernel/mem".into(),
                 layer: Layer::KernelSubsystem,
-                deps: vec!["rustos-kernel-eevdf".into()],
+                deps: vec!["tairix-kernel-eevdf".into()],
             },
             Crate {
-                name: "rustos-kernel-eevdf".into(),
+                name: "tairix-kernel-eevdf".into(),
                 rel_dir: "kernel/sched/eevdf".into(),
                 layer: Layer::SchedImpl,
                 deps: vec![],

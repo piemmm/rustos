@@ -7,7 +7,7 @@ use crate::packed::PackedQueue;
 use crate::queue::{ChainSegment, SplitQueue};
 use crate::transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};
 use alloc::boxed::Box;
-use rustos_abi::driver::BufferClass;
+use tairix_abi::driver::BufferClass;
 
 /// Build a `'static` reference to a freshly-leaked `MockHost` —
 /// the unit tests hand this to `SplitQueue::new`.

@@ -1,4 +1,4 @@
-//! RustOS USB mass-storage **class driver** — shared library.
+//! TAIRiX USB mass-storage **class driver** — shared library.
 //!
 //! This crate is a `lib` (the loadable-module identity — the [`BIND_KEYS`]
 //! bind table `devmgr` matches a discovered mass-storage interface node
@@ -31,7 +31,7 @@ pub mod serve;
 mod testutil;
 pub mod uas;
 
-use rustos_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{DriverBindKey, HwMatchKey};
 
 /// SCSI-transparent Bulk-Only Transport (class `0x08`, sub-class `0x06`,
 /// protocol `0x50`) — the ubiquitous USB disk/stick.

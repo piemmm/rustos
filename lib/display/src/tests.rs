@@ -10,10 +10,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rustos_abi::display_ipc::{DisplayRequest, DISPLAY_MAX_FRAMES};
-use rustos_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_MAX_FRAMES};
+use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::{DriverError, Errno};
 
 use crate::client::{DisplayClient, DisplayTransport, RemoteDisplay};
 use crate::driver_error_from_errno;
@@ -237,14 +237,14 @@ fn full() -> DamageRect {
 fn query_returns_the_mode_to_the_live_owner_only() {
     let mut rig = Rig::new(2, 1);
     let reply = rig.serve(&DisplayRequest::Query { seat_id: SEAT });
-    assert_eq!(rustos_abi::display_ipc::decode_mode_reply(&reply), Ok(MODE));
+    assert_eq!(tairix_abi::display_ipc::decode_mode_reply(&reply), Ok(MODE));
     assert_eq!(rig.seat.asked, vec![(TICKET, SEAT)]);
 
     // A non-owner learns nothing — not even the mode.
     rig.seat = MockSeat::refusing(Errno::SeatNotOwner);
     let reply = rig.serve(&DisplayRequest::Query { seat_id: SEAT });
     assert_eq!(
-        rustos_abi::display_ipc::decode_mode_reply(&reply),
+        tairix_abi::display_ipc::decode_mode_reply(&reply),
         Err(Errno::SeatNotOwner)
     );
 }

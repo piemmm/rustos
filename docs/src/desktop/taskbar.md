@@ -1,6 +1,6 @@
 # Traditional desktop taskbar
 
-The taskbar (`userland/gui/taskbar`, crate `rustos-taskbar`) is the
+The taskbar (`userland/gui/taskbar`, crate `tairix-taskbar`) is the
 GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
 `PLAN.md` Stage 7). This page describes the **layout, model, and rendering**:
 the geometry of every region, pointer hit-testing for input routing, the
@@ -15,12 +15,12 @@ later increments.
 ## Where it sits
 
 As a `userland/gui/*` crate the taskbar depends only on `lib/*`: the shared
-[`rustos-geometry`](../lib/overview.md) coordinate types, the shared
-`rustos-raster` rasteriser (the premultiplied-alpha `Color`/`Surface` the
-window manager also paints with), the shared `rustos-font` text rasteriser
+[`tairix-geometry`](../lib/overview.md) coordinate types, the shared
+`tairix-raster` rasteriser (the premultiplied-alpha `Color`/`Surface` the
+window manager also paints with), the shared `tairix-font` text rasteriser
 (the built-in bitmap face and glyph blitter, `AGENTS.md` §16.4), the shared
-`rustos-input` pointer-event vocabulary (the same `PointerButton`/`InputEvent`
-the window manager routes), and the shared [`rustos-theme`](theming.md)
+`tairix-input` pointer-event vocabulary (the same `PointerButton`/`InputEvent`
+the window manager routes), and the shared [`tairix-theme`](theming.md)
 definition. It never depends on the window manager or on any sibling userland
 crate, and nothing depends on it in turn (`AGENTS.md` §17.4, §17.3) — the
 desktop is an optional, one-way-dependent frontend, so a headless image simply
@@ -66,7 +66,7 @@ There is no second rounded-corner implementation (`AGENTS.md` §2.2).
 
 ## Rendering
 
-`TaskbarRenderer::render` paints the taskbar into a `rustos-raster` `Surface`
+`TaskbarRenderer::render` paints the taskbar into a `tairix-raster` `Surface`
 sized to the bar, filling each region with a colour role from the active
 theme's `Palette`:
 
@@ -79,7 +79,7 @@ theme's `Palette`:
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour.
 
-On top of those fills, the renderer draws **text** with the shared `rustos-font`
+On top of those fills, the renderer draws **text** with the shared `tairix-font`
 `BitmapFont` (the built-in Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
 Hebrew family): the clock label is centred in the clock region, and each task
 slot shows its window title aligned to the leading edge. Each label takes the
@@ -89,13 +89,13 @@ foreground over a minimised slot, and `on_surface` otherwise (and for the clock
 over the raised bar) — so text stays legible after a theme switch. A label is
 truncated to the characters that fit its region, so text never spills into a
 neighbouring slot (`AGENTS.md` §2.9), and glyphs are composited through
-`rustos-raster`'s one premultiplied-alpha `over` path — no blitter or colour
+`tairix-raster`'s one premultiplied-alpha `over` path — no blitter or colour
 algebra is duplicated here (`AGENTS.md` §2.2).
 
 The surface is rectangular: the taskbar paints no corners. The window manager
 presents it and applies `BarLayout::corner_radius` through its single
 anti-aliased rounded-corner path, exactly as it rounds windows (`AGENTS.md`
-§2.2). The colour algebra is not duplicated here either — `rustos-raster`
+§2.2). The colour algebra is not duplicated here either — `tairix-raster`
 owns the one premultiplied-alpha implementation and the
 `From<Rgba> for Color` edge. Region rectangles are screen-space; each is
 translated into the bar's local surface space, the translation saturates, and
@@ -105,7 +105,7 @@ palette.
 
 `TaskbarRenderer` is a small stateful object — the region fills, clock, and
 task titles are cheap to repaint every frame, but the vector notification
-glyphs are not, so it holds a `rustos-raster` `RasterCache` of rasterised
+glyphs are not, so it holds a `tairix-raster` `RasterCache` of rasterised
 glyphs across frames. The renderer is the right home for that state: the
 `Taskbar` model stays pure data. `render_menu` needs no cache (the popup draws
 only text), so it stays a `&self` method.
@@ -114,11 +114,11 @@ only text), so it stays a `&self` method.
 
 The notification area holds an ordered list of status icons, each with a
 stable `IconId` and a theme **asset id**. When the bar renders, every
-notification slot resolves its asset id to a `rustos-icon` `IconKind`
+notification slot resolves its asset id to a `tairix-icon` `IconKind`
 (`IconKind::for_asset`, falling back to a generic glyph for an unknown id,
 `AGENTS.md` §2.9), builds the matching scalable `VectorIcon` in the **muted**
 foreground colour, rasterises it to the slot size at the active scale, and
-composites it onto the bar through `rustos-raster`'s `Surface::blit`. The
+composites it onto the bar through `tairix-raster`'s `Surface::blit`. The
 glyph is artwork, not a flood fill, so the raised bar background shows through
 around it. The icons rasterise through the *same* supersampled polygon path
 (`Surface::fill_polygon`) the cursors use — there is no second scan converter
@@ -161,7 +161,7 @@ manager / `appmgr`) resolves it to an application bundle and launches it
 same way — next free id, app-supplied label — so it too left the interface
 unchanged (`AGENTS.md` §2.4). The taskbar owns no theme registry: activating
 the entry reports `MenuAction::ToggleAppearance` and the session glue calls
-`rustos_theme::ThemeRegistry::toggle_appearance` and re-applies the new theme
+`tairix_theme::ThemeRegistry::toggle_appearance` and re-applies the new theme
 to the window manager, taskbar, and apps (`AGENTS.md` §10).
 
 ### Popup geometry and rendering
@@ -180,7 +180,7 @@ pathological screen or scale fails closed (`AGENTS.md` §2.9).
 
 Like the bar, the popup is a *rectangular* surface the window manager places
 and rounds: `TaskbarRenderer::render_menu` paints a raised-surface panel with each entry's
-label drawn on top through the same `rustos-font` / `rustos-raster` path the
+label drawn on top through the same `tairix-font` / `tairix-raster` path the
 bar uses (no second blitter or rounded-corner path, `AGENTS.md` §2.2), and
 returns `None` when the menu is closed. `Taskbar::menu_layout` computes the
 geometry from the current state.
@@ -202,7 +202,7 @@ ids, so a clash signals a bug rather than a benign retry.
 ## Input routing
 
 `TaskbarInput` is the taskbar's input router, the counterpart of the window
-manager's `InputRouter`. It consumes the **same** shared `rustos-input`
+manager's `InputRouter`. It consumes the **same** shared `tairix-input`
 `InputEvent` stream the compositor routes (`AGENTS.md` §17.4, §2.2), tracking
 the pointer position from motion events and acting only on a primary-button
 press. A press is hit-tested against the current `BarLayout` and dispatched to
@@ -236,7 +236,7 @@ with `Taskbar::apply_theme`; the rest of its state is untouched, so a runtime
 dark/light switch needs no model relayout (`AGENTS.md` §10). The region
 **colours** and the text **foreground** roles are wired through the same theme
 by `TaskbarRenderer::render` (see *Rendering*). The text is drawn with the built-in
-`rustos-font` face today; selecting a face from the theme's `FontSpec` roles
+`tairix-font` face today; selecting a face from the theme's `FontSpec` roles
 joins this once installed font faces exist. The user *triggers* a runtime
 dark/light switch through the start menu's appearance-toggle entry (see *Start
 menu*): the taskbar reports the request and the session glue performs the

@@ -6,13 +6,13 @@
 //! username and uid uniqueness, and fails closed on the first defect — a
 //! database the parser cannot fully understand yields **no** [`UsersDb`].
 //!
-//! # Format (`rustos-users-v1`)
+//! # Format (`tairix-users-v1`)
 //!
 //! Line one is exactly [`FORMAT_HEADER`]. Every other line is blank, a `#`
 //! comment, or one [`UserRecord`] line:
 //!
 //! ```text
-//! rustos-users-v1
+//! tairix-users-v1
 //! # username:uid:gid:supplementary:display name:home:shell:caps:state:password
 //! root:1000:1000::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$…$…
 //! devmgr:10:101::Device Manager:none:none:CAP_DRV_LOAD:nologin:*
@@ -29,14 +29,14 @@ use core::num::NonZeroU32;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_crypto::{pbkdf2_sha256_verify, PASSWORD_HASH_LEN};
+use tairix_crypto::{pbkdf2_sha256_verify, PASSWORD_HASH_LEN};
 
 use crate::password::{DEFAULT_ITERATIONS, MAX_PASSWORD_LEN, SALT_LEN};
 use crate::record::{AccountState, Uid, UserRecord};
 use crate::{AuthError, ParseError};
 
 /// The exact first line of every `users-v1` database.
-pub const FORMAT_HEADER: &str = "rustos-users-v1";
+pub const FORMAT_HEADER: &str = "tairix-users-v1";
 
 /// Largest database file, in bytes, the parser will consider (
 /// validation bound — a defence, not a capacity).
@@ -206,8 +206,8 @@ mod tests {
 
     use alloc::string::String;
     use alloc::vec::Vec;
-    use rustos_abi::CapabilityId;
-    use rustos_caps::CapabilitySet;
+    use tairix_abi::CapabilityId;
+    use tairix_caps::CapabilitySet;
 
     fn record(username: &str, uid: u32, state: AccountState, password: &[u8]) -> UserRecord {
         let mut capabilities = CapabilitySet::empty();
@@ -263,7 +263,7 @@ mod tests {
     fn serialise_parse_round_trips() {
         let original = db();
         let text = original.serialise();
-        assert!(text.starts_with("rustos-users-v1\n"));
+        assert!(text.starts_with("tairix-users-v1\n"));
         assert_eq!(UsersDb::parse(&text), Ok(original));
     }
 
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn missing_or_wrong_header_is_rejected() {
         assert_eq!(UsersDb::parse(""), Err(ParseError::Header));
-        assert_eq!(UsersDb::parse("rustos-users-v2\n"), Err(ParseError::Header));
+        assert_eq!(UsersDb::parse("tairix-users-v2\n"), Err(ParseError::Header));
         let body = record("ada", 1000, AccountState::Active, b"x").encode_line();
         assert_eq!(UsersDb::parse(&body), Err(ParseError::Header));
     }

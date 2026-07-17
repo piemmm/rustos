@@ -27,7 +27,7 @@ Un percorso illeggibile viene segnalato sull'errore standard e
 l'attraversamento continua con il resto; una directory illeggibile
 non contribuisce nulla anziché una somma parziale indovinata.
 
-RustOS non ha ancora collegamenti fisici, quindi nessuna voce può
+TAIRiX non ha ancora collegamenti fisici, quindi nessuna voce può
 essere contata due volte e le opzioni GNU di deduplicazione dei
 collegamenti non esistono; `-x` (un solo filesystem) non è ancora
 disponibile; le variabili d'ambiente della famiglia `DU_BLOCK_SIZE`

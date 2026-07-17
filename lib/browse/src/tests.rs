@@ -9,10 +9,10 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_geometry::Rect;
-use rustos_raster::Color;
-use rustos_theme::Theme;
+use tairix_abi::Errno;
+use tairix_geometry::Rect;
+use tairix_raster::Color;
+use tairix_theme::Theme;
 
 use crate::browser::Browser;
 use crate::entry::Entry;
@@ -237,7 +237,7 @@ fn render_highlights_the_selected_entry_with_the_accent() {
     // selected "Users", filled with the accent. Each row is the shared
     // font's glyph height plus the renderer's padding, so the selected fill
     // starts two rows down.
-    let row_height = rustos_font::BitmapFont::inconsolata().glyph_height() + 4;
+    let row_height = tairix_font::BitmapFont::inconsolata().glyph_height() + 4;
     let selected_y = row_height * 2 + 1;
     assert_eq!(surface.get(199, selected_y), Some(accent));
 }
@@ -260,8 +260,8 @@ fn render_into_a_tiny_viewport_does_not_panic() {
 // exact bytes a kernel `fs_readdir` transfer produces — so the spelling,
 // decode, and refusal branches are all host-proven.
 
-use rustos_abi::fs::{DirEntry, FileKind, FS_PATH_MAX};
-use rustos_abi::time::Time64;
+use tairix_abi::fs::{DirEntry, FileKind, FS_PATH_MAX};
+use tairix_abi::time::Time64;
 
 use crate::vfs::{absolute_path, entries_from_dir_stream, VfsDirectorySource};
 

@@ -18,7 +18,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::Signal;
+use tairix_abi::Signal;
 
 use crate::worker::{WorkerKind, REFUSED_EXIT};
 

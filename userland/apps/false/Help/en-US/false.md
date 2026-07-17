@@ -15,7 +15,7 @@ a deliberate failure.
 Only a **first** argument of `-h`, `-?`, or `--help` is honoured (the
 position GNU `false` honours `--help` in); in any later position those
 tokens are ignored like everything else. Unlike GNU `false --help`,
-which still exits `1`, a served short help exits `0` here — the RustOS
+which still exits `1`, a served short help exits `0` here — the TAIRiX
 short-help convention.
 
 ## OPTIONS

@@ -8,7 +8,7 @@
 //! dispatcher, and the `userland/net` parser harnesses in the `cargo xtask
 //! fuzz` target set.
 //!
-//! RustOS does not pull in an external fuzz runner: a
+//! TAIRiX does not pull in an external fuzz runner: a
 //! deterministic, per-run-seeded PRNG drives random `(sender capabilities,
 //! payload)` pairs against a port and asserts the invariants the dispatch
 //! path must uphold no matter what a caller crafts:
@@ -30,19 +30,19 @@
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed. When
-//! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
+//! `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing from the *same continuing* PRNG stream until the budget elapses
 //! — the "run each harness for its wall-clock budget" contract — while the logged
 //! seed keeps any crash reproducible.
 
 use std::collections::VecDeque;
 
-use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use rustos_abi::{CapabilityId, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_ipc::{EndpointId, Port};
-use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
-use rustos_log::{set_max_level, Event, Level, Sink};
+use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
+use tairix_abi::{CapabilityId, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_ipc::{EndpointId, Port};
+use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_log::{set_max_level, Event, Level, Sink};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -137,15 +137,15 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
         usize::try_from(u64::from(MAX_PAYLOAD).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN)))
             .expect("the port's payload bound fits usize on every supported target");
 
-    let mut rng = Rng::new(rustos_fuzzseed::start(
+    let mut rng = Rng::new(tairix_fuzzseed::start(
         "fuzz_send_is_fail_closed_and_recv_is_faithful",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut accepted = 0u64;
     let mut denied_caps = 0u64;
     let mut denied_size = 0u64;
     let mut denied_full = 0u64;
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for iter in 0..SMOKE_ITERATIONS {
             // Draw a random sender capability set from the universe.
@@ -218,7 +218,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
                 }
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }
@@ -238,9 +238,9 @@ fn fuzz_closed_port_fails_closed_for_any_sender() {
     let port = authorised_port(&sink);
     port.destroy(&sink);
 
-    let mut rng = Rng::new(rustos_fuzzseed::start(
+    let mut rng = Rng::new(tairix_fuzzseed::start(
         "fuzz_closed_port_fails_closed_for_any_sender",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     for _ in 0..10_000 {
         // Even a sender holding every capability cannot send to a closed

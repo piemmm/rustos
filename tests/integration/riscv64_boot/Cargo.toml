@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-riscv64-boot"
-description = "Test-side boot wrapper for the riscv64 QEMU verticals: it re-exports the production riscv64 boot pipeline (rustos_kernel::riscv64::boot — RiscvBinArch, BootError, try_boot) and adds the set-once device-bring-up observers (memory map + DTB) and the IrqController bridge over the arch port's PLIC register driver. The single riscv64 boot orchestration lives in rustos-kernel (AGENTS.md §2.2); this crate only publishes for the virtio/framebuffer observers and delegates. Tooling: it relaxes the §17.4 layering, keeping those edges out of the arch port (§17.2)."
+name = "tairix-test-riscv64-boot"
+description = "Test-side boot wrapper for the riscv64 QEMU verticals: it re-exports the production riscv64 boot pipeline (tairix_kernel::riscv64::boot — RiscvBinArch, BootError, try_boot) and adds the set-once device-bring-up observers (memory map + DTB) and the IrqController bridge over the arch port's PLIC register driver. The single riscv64 boot orchestration lives in tairix-kernel (AGENTS.md §2.2); this crate only publishes for the virtio/framebuffer observers and delegates. Tooling: it relaxes the §17.4 layering, keeping those edges out of the arch port (§17.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ workspace = true
 path = "src/lib.rs"
 
 # Freestanding (`virt`-board) only: the boot wrapper delegates to the
-# production riscv64 boot pipeline in `rustos-kernel` (so there is one
+# production riscv64 boot pipeline in `tairix-kernel` (so there is one
 # riscv64 boot orchestration, `AGENTS.md` §2.2) and publishes the
 # firmware map + DTB for the device-bring-up observers. Gated to the
 # bare-metal target because `boot_riscv64` links the arch port's
@@ -23,12 +23,12 @@ path = "src/lib.rs"
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 # The single riscv64 boot pipeline (`boot_riscv64`) this crate re-exports
 # and delegates to.
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # `publish` clones + serves the firmware `BootMemoryMap` through a
 # set-once slot for the device-bring-up observers.
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

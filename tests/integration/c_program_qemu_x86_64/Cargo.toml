@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-c-program-qemu-x86_64"
-description = "CCOMPAT stage CC5 QEMU integration test: build a real C program (tests/integration/cc5_program/csrc/main.c) with the audited clang/ld.lld wrapper (tools/cc), link it against the Rust crt0 + ros_sys_* runtime staticlib into a PIE image, convert it to an rxe blob, spawn it into ring 3 on x86_64 with rustos_kernel_core::spawn_and_enter, and assert the program's abi-v1 checks + syscall round-trips pass (exit code 99). Proves the generated C header, the syscall stub runtime, and crt0 agree with the Rust side end to end."
+name = "tairix-test-c-program-qemu-x86_64"
+description = "CCOMPAT stage CC5 QEMU integration test: build a real C program (tests/integration/cc5_program/csrc/main.c) with the audited clang/ld.lld wrapper (tools/cc), link it against the Rust crt0 + tairix_sys_* runtime staticlib into a PIE image, convert it to an rxe blob, spawn it into ring 3 on x86_64 with tairix_kernel_core::spawn_and_enter, and assert the program's abi-v1 checks + syscall round-trips pass (exit code 99). Proves the generated C header, the syscall stub runtime, and crt0 agree with the Rust side end to end."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,17 +14,17 @@ workspace = true
 # This bin is the `plans/CCOMPAT.md` stage CC5 x86_64 round-trip: the ring-3
 # analogue of the riscv64/aarch64 verticals. A genuinely C-compiled program,
 # linked against the curated System runtime / C ABI class (crt0 + the
-# `ros_sys_*` stubs) via the `rustos-test-cc5-program` staticlib shim, runs end
-# to end. The build script compiles `csrc/main.c` with the audited `rustos-cc`
+# `tairix_sys_*` stubs) via the `tairix-test-cc5-program` staticlib shim, runs end
+# to end. The build script compiles `csrc/main.c` with the audited `tairix-cc`
 # wrapper (version-pinned + checksummed clang/ld.lld), links a PIE image, and
 # converts it to an `rxe` blob carrying the kernel's compiled-in syscall CFI
 # tag. Because the x86_64 ring-3 transition needs the GDT user selectors, the
 # TSS, and `syscall`/`IA32_LSTAR` entry installed, the test boots the production
-# `rustos-kernel` pipeline and, on `AuditEvent::BootCompleted`, enables
+# `tairix-kernel` pipeline and, on `AuditEvent::BootCompleted`, enables
 # `IA32_EFER.NXE`, builds a fresh address space (low 32 MiB identity +
 # higher-half kernel window), switches CR3, installs a dispatch callback that
 # services the program's `cap_query` / `clock_get` round-trips, then calls the
-# production capability-checked, audited `rustos_kernel_core::spawn_and_enter`
+# production capability-checked, audited `tairix_kernel_core::spawn_and_enter`
 # to materialise the ring-3 image and `iretq` into it. The program's `exit`
 # syscall traps back; the callback asserts the exit code is 99 (every abi-v1
 # check + round-trip passed) before `qemu_exit::exit_success`.
@@ -37,20 +37,20 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-c-program-qemu-x86_64"
+name = "tairix-test-c-program-qemu-x86_64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-cc = { path = "../../../tools/cc", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-cc = { path = "../../../tools/cc", version = "=0.0.0" }

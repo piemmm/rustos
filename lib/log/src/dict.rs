@@ -48,7 +48,7 @@
 //! [`MAX_ENTRIES`] or a [`FORM_REF`] to an undefined handle is rejected, never
 //! guessed at.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::cursor::{put_bytes, put_u16, put_u8, read_u16, read_u8, take};
 
@@ -317,7 +317,7 @@ mod tests {
         DictionaryBuilder, DictionaryView, FORM_DEF, FORM_PLAIN, FORM_REF, MAX_DICT_STRING,
         MAX_ENTRIES,
     };
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     // A wide bound so the codec, not the field limit, drives every test.
     const MAX: usize = 256;

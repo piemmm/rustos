@@ -1,6 +1,6 @@
-//! RustOS shared System Information API client helpers (Stage 6).
+//! TAIRiX shared System Information API client helpers (Stage 6).
 //!
-//! RustOS has no `/proc` and no `/sys`: every piece of live system
+//! TAIRiX has no `/proc` and no `/sys`: every piece of live system
 //! information is read through the typed, versioned, capability-checked
 //! `sysinfo-v1` API served by `/System/Services/sysinfod.app/Run`. Several terminal tools speak that API — the umbrella `sysinfo`
 //! command, the POSIX-named `ps`, and the `mount` listing — and they share
@@ -19,9 +19,9 @@
 //!   what lets the consuming tools run against in-memory fixtures with no
 //!   kernel, mirroring the seam design of the other userland crates.
 //! * [`encode_request`], which frames a
-//!   [`SysinfoQueryId`](rustos_abi::sysinfo::SysinfoQueryId) and its typed
+//!   [`SysinfoQueryId`](tairix_abi::sysinfo::SysinfoQueryId) and its typed
 //!   payload into the `sysinfo-v1`
-//!   [`SysinfoRequestHeader`](rustos_abi::sysinfo::SysinfoRequestHeader)
+//!   [`SysinfoRequestHeader`](tairix_abi::sysinfo::SysinfoRequestHeader)
 //!   envelope, and [`call`], which issues a request and maps a capability
 //!   denial onto the distinguished [`CallError::PermissionDenied`].
 //! * [`for_each_process`], the paged process-list walk, plus
@@ -35,8 +35,8 @@
 //! * [`walk_pages`](list) and the shared [`ListError`], the generic paging
 //!   loop both walks are built on.
 //! * [`resolve()`], the userspace `info:`/`stats:` resource-reference resolver:
-//!   it maps a parsed [`ResourceRef`](rustos_resref::ResourceRef) onto a
-//!   [`SysinfoQueryId`](rustos_abi::sysinfo::SysinfoQueryId), issues it over
+//!   it maps a parsed [`ResourceRef`](tairix_resref::ResourceRef) onto a
+//!   [`SysinfoQueryId`](tairix_abi::sysinfo::SysinfoQueryId), issues it over
 //!   the same [`Transport`], and returns the structured [`ResourceResponse`]
 //!   (`plans/ALIAS.md` §14) — the one place `info:`/`stats:` are resolved, so
 //!   the shell never invents a second resolver or bypasses the System
@@ -79,7 +79,7 @@ extern crate alloc;
 
 // The production client seams (`IpcTransport`, `RtOutput`) that back the
 // `sysinfo`/`ps`/`top` `Run` binaries. Compiled only for a freestanding
-// program that opts into the `program` feature (which pulls `rustos-rt`); the
+// program that opts into the `program` feature (which pulls `tairix-rt`); the
 // pure library and host builds never link the runtime.
 #[cfg(all(freestanding, feature = "program"))]
 pub mod client;

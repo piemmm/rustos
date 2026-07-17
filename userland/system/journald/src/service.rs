@@ -3,10 +3,10 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::log_ingress::LogIngressRequest;
-use rustos_abi::time::{Duration64, WallClockReading};
-use rustos_abi::{Errno, FieldName, FieldValue, Origin};
-use rustos_log::{CallerContent, Journal, JournalError, Level, SegmentStore, Stream};
+use tairix_abi::log_ingress::LogIngressRequest;
+use tairix_abi::time::{Duration64, WallClockReading};
+use tairix_abi::{Errno, FieldName, FieldValue, Origin};
+use tairix_log::{CallerContent, Journal, JournalError, Level, SegmentStore, Stream};
 
 /// The journal's own ingest lane: a fixed CPU identity and the monotonically
 /// increasing per-CPU record sequence used to detect ingestion gaps.
@@ -207,12 +207,12 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::log_ingress::{encode_request, LogIngressFields};
-    use rustos_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
-    use rustos_abi::{
+    use tairix_abi::log_ingress::{encode_request, LogIngressFields};
+    use tairix_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
+    use tairix_abi::{
         CapabilitySummary, Errno, FieldValue, Origin, ProcId, TrustDomain, BOOT_ID_LEN, PROC_ID_LEN,
     };
-    use rustos_log::{
+    use tairix_log::{
         decode_record, machine_id_hash, DictionaryView, Journal, LogAttestationKey, SegmentReader,
         SegmentStore, Stream, STREAM_COUNT,
     };
@@ -247,7 +247,7 @@ mod tests {
             42,
             ProcId::from_raw([0x5A; PROC_ID_LEN]),
             CapabilitySummary::EMPTY,
-            rustos_abi::ORIGIN_CONSOLE_NONE,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
         )
     }
 
@@ -259,7 +259,7 @@ mod tests {
             1,
             ProcId::KERNEL,
             CapabilitySummary::EMPTY,
-            rustos_abi::ORIGIN_CONSOLE_NONE,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
         )
     }
 
@@ -291,7 +291,7 @@ mod tests {
         let mut journal = Journal::new(
             store,
             machine_id_hash(&MID),
-            rustos_abi::BootId::from_raw([0x5A; BOOT_ID_LEN]),
+            tairix_abi::BootId::from_raw([0x5A; BOOT_ID_LEN]),
             seal,
             journal_origin(),
             bufs,
@@ -318,7 +318,7 @@ mod tests {
     }
 
     fn request(fields: &LogIngressFields<'_>, data: &[(&str, FieldValue<'_>)]) -> Vec<u8> {
-        let mut buf = alloc::vec![0u8; rustos_abi::LOG_INGRESS_MAX_REQUEST];
+        let mut buf = alloc::vec![0u8; tairix_abi::LOG_INGRESS_MAX_REQUEST];
         let n = encode_request(&mut buf, fields, data).expect("encode request");
         buf.truncate(n);
         buf
@@ -370,7 +370,7 @@ mod tests {
         let mut saw_runtime = false;
         let mut saw_security = false;
         for seg in &segments {
-            let s = rustos_log::verify_segment(seg, Some(&key)).expect("verify");
+            let s = tairix_log::verify_segment(seg, Some(&key)).expect("verify");
             match s.header.stream {
                 Stream::Runtime => {
                     saw_runtime = true;
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn a_runtime_flood_is_rate_limited_and_a_loss_record_is_authored() {
-        use rustos_log::{Journal, RateLimit, RateLimiter};
+        use tairix_log::{Journal, RateLimit, RateLimiter};
         let scratch = &mut [0u8; 1024];
         let store = CaptureStore::new();
         let sink = store.segments.clone();
@@ -451,7 +451,7 @@ mod tests {
         let mut journal = Journal::new(
             store,
             machine_id_hash(&MID),
-            rustos_abi::BootId::from_raw([0x5A; BOOT_ID_LEN]),
+            tairix_abi::BootId::from_raw([0x5A; BOOT_ID_LEN]),
             None,
             journal_origin(),
             bufs,
@@ -506,7 +506,7 @@ mod tests {
         let mut runtime = 0u64;
         let mut loss = 0u64;
         for seg in segments.iter() {
-            let s = rustos_log::verify_segment(seg, None).expect("verify");
+            let s = tairix_log::verify_segment(seg, None).expect("verify");
             match s.header.stream {
                 Stream::Runtime => runtime += s.record_count,
                 Stream::Journal => {

@@ -1,4 +1,4 @@
-//! RustOS EEVDF scheduler policy.
+//! TAIRiX EEVDF scheduler policy.
 //!
 //! This `kernel/sched/eevdf` crate is one concrete implementation of the
 //! [`SchedulerPolicy`] contract defined in `kernel/sched/api`. It is a sibling of the `kernel/sched/mlfq` policy
@@ -56,14 +56,14 @@ mod scheduler;
 mod task;
 
 // Re-export the contract vocabulary so call sites
-// (`rustos_kernel_sched_eevdf::{Scheduler, Priority, …}`) resolve to the
+// (`tairix_kernel_sched_eevdf::{Scheduler, Priority, …}`) resolve to the
 // single canonical definitions in `kernel/sched/api` (no duplication).
-pub use rustos_kernel_sched_api::{
+pub use tairix_kernel_sched_api::{
     CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
     SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
 };
 
 #[cfg(any(test, feature = "test-arch"))]
-pub use rustos_kernel_sched_api::TestArch;
+pub use tairix_kernel_sched_api::TestArch;
 
 pub use scheduler::Scheduler;

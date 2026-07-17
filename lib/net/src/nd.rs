@@ -18,8 +18,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver::net::MacAddress;
-use rustos_abi::time::Duration64;
+use tairix_abi::driver::net::MacAddress;
+use tairix_abi::time::Duration64;
 
 use crate::addr::{IpAddr, Ipv6Addr};
 use crate::neigh::NeighborTable;
@@ -325,7 +325,7 @@ impl NdMessage {
     /// This host emits what a host emits: Router Solicitations,
     /// Neighbour Solicitations, and Neighbour Advertisements. Router
     /// Advertisements and Redirects are router output; writing one
-    /// returns `None` (RustOS is a host, not a router — see
+    /// returns `None` (TAIRiX is a host, not a router — see
     /// `plans/NETWORK.md` §9).
     #[must_use]
     pub fn write_body(&self, out: &mut [u8]) -> Option<usize> {

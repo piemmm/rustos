@@ -10,7 +10,7 @@
 //! cfg-check` stays clean.
 //!
 //! The consuming vertical (`spawn_session_qemu_riscv64`) sets
-//! `RUSTOS_SPAWN_ROLE` and `RUSTOS_SPAWN_YIELDS` when it compiles this program
+//! `TAIRIX_SPAWN_ROLE` and `TAIRIX_SPAWN_YIELDS` when it compiles this program
 //! (once per role), so a changed role or yield count must force a recompile;
 //! declare those dependencies here.
 
@@ -20,7 +20,7 @@ fn main() {
     if target_os == "none" {
         println!("cargo:rustc-cfg=freestanding");
     }
-    println!("cargo:rerun-if-env-changed=RUSTOS_SPAWN_ROLE");
-    println!("cargo:rerun-if-env-changed=RUSTOS_SPAWN_YIELDS");
+    println!("cargo:rerun-if-env-changed=TAIRIX_SPAWN_ROLE");
+    println!("cargo:rerun-if-env-changed=TAIRIX_SPAWN_YIELDS");
     println!("cargo:rerun-if-changed=build.rs");
 }

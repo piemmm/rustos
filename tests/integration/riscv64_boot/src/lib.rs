@@ -1,11 +1,11 @@
 //! Downstream boot consumer for the riscv64 Arch HAL port.
 //!
 //! The arch port (`kernel/arch/riscv64`) is a pure Arch HAL
-//! implementation: it implements `rustos_arch_api::SchedulerArch`, the
+//! implementation: it implements `tairix_arch_api::SchedulerArch`, the
 //! monotonic clock, the hart-park primitive, and the PLIC register
 //! driver, but it names no concrete kernel subsystem. The riscv64 boot pipeline that *does* name
 //! `kernel/{core,mem,sec}` and `kernel/sched/api` lives in the
-//! production `rustos-kernel` crate (`rustos_kernel::riscv64::boot`),
+//! production `tairix-kernel` crate (`tairix_kernel::riscv64::boot`),
 //! mirroring how x86_64 / aarch64 keep their `BinArch` wrapper and
 //! `BootInfo` assembly there. This crate is the test-side wrapper that
 //! consumes that one pipeline: it re-exports the
@@ -20,11 +20,11 @@
 //! | Module    | Role                                                                 |
 //! | --------- | -------------------------------------------------------------------- |
 //! | `publish` | Set-once firmware-map / DTB observers for the device verticals (freestanding). |
-//! | `boot`    | Thin wrapper: publish, then delegate to `rustos_kernel::riscv64::boot` (freestanding). |
+//! | `boot`    | Thin wrapper: publish, then delegate to `tairix_kernel::riscv64::boot` (freestanding). |
 //!
 //! The `kernel/irq` `IrqController` bridge over the arch port's PLIC register
 //! driver (`PlicIrqController`) is the production
-//! `rustos_kernel::riscv64_plic_irq` definition, re-exported here for the
+//! `tairix_kernel::riscv64_plic_irq` definition, re-exported here for the
 //! freestanding `virt`-board verticals (one definition, no duplication); its
 //! mask-before-wake / re-arm regression test lives with it and runs under
 //! `cargo test` on the CI host. `boot` / `publish` are gated to the
@@ -51,11 +51,11 @@ pub use boot::{boot, try_boot, BootError, RiscvBinArch};
 pub use publish::{published_dtb, published_memory_map};
 
 // The single `PlicIrqController` definition lives in the production kernel
-// (`rustos_kernel::riscv64_plic_irq`); re-export it so the `virt`-board
+// (`tairix_kernel::riscv64_plic_irq`); re-export it so the `virt`-board
 // virtio-MMIO verticals name it under the same path they always have. Only
 // the freestanding target links the kernel, so the re-export is gated to it.
 #[cfg(freestanding)]
-pub use rustos_kernel::riscv64_plic_irq::PlicIrqController;
+pub use tairix_kernel::riscv64_plic_irq::PlicIrqController;
 
 // The production boot pipeline installs the S-mode PLIC dispatch and
 // publishes the kernel IRQ table + controller in its `Irq` phase. A
@@ -64,4 +64,4 @@ pub use rustos_kernel::riscv64_plic_irq::PlicIrqController;
 // `set_trap_dispatch` is set-once per boot), so re-export the accessors it
 // binds its device source through.
 #[cfg(freestanding)]
-pub use rustos_kernel::riscv64::irq::{plic_controller, published_irq_table};
+pub use tairix_kernel::riscv64::irq::{plic_controller, published_irq_table};

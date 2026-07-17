@@ -1,6 +1,6 @@
 //! The boot-time system-configuration store engine.
 //!
-//! RustOS keeps its administrator-settable boot-time configuration in one
+//! TAIRiX keeps its administrator-settable boot-time configuration in one
 //! text document on the encrypted root volume,
 //! [`CONFIG_PATH`](`/System/Settings/Configuration/system.conf`). This crate
 //! is the **single definition** of that document: the line grammar, the
@@ -267,7 +267,7 @@ impl SystemConfig {
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::from(
-            "# RustOS boot-time system configuration.\n\
+            "# TAIRiX boot-time system configuration.\n\
              # Managed by the `configure` command; parsed after the root\n\
              # filesystem is unlocked. One `key value` setting per line.\n",
         );

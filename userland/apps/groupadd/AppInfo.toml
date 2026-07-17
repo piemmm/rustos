@@ -8,7 +8,7 @@
 # account and is inert for everyone else; `CAP_FS_ACCESS` covers the
 # short-help read of the bundle's own Help/ tree. No console-read: the
 # tool never prompts.
-id = "os.rustos.groupadd"
+id = "os.tairix.groupadd"
 name = "groupadd"
 version = "0.1.0"
 kind = "command"

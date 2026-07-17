@@ -1,6 +1,6 @@
 [package]
-name = "rustos-arch-riscv64"
-description = "RustOS architecture port: riscv64 (Arch HAL implementation + virt-board external-IRQ / boot primitives)."
+name = "tairix-arch-riscv64"
+description = "TAIRiX architecture port: riscv64 (Arch HAL implementation + virt-board external-IRQ / boot primitives)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,7 +25,7 @@ test-harness = []
 # Like `kernel/arch/x86_64`, this crate is a pure Arch HAL
 # implementation (`AGENTS.md` §17.2 / §17.4): it names only the Arch
 # HAL (`kernel/arch/api`) and `lib/*`, never a concrete kernel
-# subsystem. `RiscvArch` implements `rustos_arch_api::SchedulerArch`;
+# subsystem. `RiscvArch` implements `tairix_arch_api::SchedulerArch`;
 # the `kernel/core::KernelArch` wrapper, the `BootInfo` assembly, the
 # set-once boot-state slots, and the `IrqController` bridge over
 # `plic::PlicController` all live in the downstream boot consumer
@@ -37,19 +37,19 @@ test-harness = []
 # parser, the `RiscvArch` struct, and the PLIC register driver build on
 # the host so their unit tests run under `cargo test`.
 [dependencies]
-rustos-arch-api = { path = "../api", version = "=0.0.0" }
-rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
-# `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
+tairix-arch-api = { path = "../api", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # ecall entry path marshals user arguments into — the same dependency
 # `kernel/arch/x86_64` takes for its `syscall`/`sysret` stub. It is a
 # `lib/*` crate, so this edge is permitted by `AGENTS.md` §17.4.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The flattened-device-tree parser is architecture-neutral and shared
 # (`AGENTS.md` §2.2); this port builds its `platform` discovery on it.
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [dev-dependencies]
 # Enable the shared DTB builder for this port's `fdt`/`platform` host
 # tests (off in production builds — `[dev-dependencies]` only).
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }

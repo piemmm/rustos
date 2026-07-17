@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-syscall-dispatch-qemu"
+name = "tairix-test-syscall-dispatch-qemu"
 description = "Stage 2.7 follow-up (f6) QEMU integration test: drive Dispatcher::dispatch with (cap_query, CAP_TIME_SET) and (exit, 0) and observe the resulting SyscallInvoked audit record before flipping qemu_exit::exit_success."
 version.workspace = true
 edition.workspace = true
@@ -15,8 +15,8 @@ workspace = true
 # PLAN.md ("Stage 2.7 follow-up — Production syscall wiring"). It runs
 # only on the freestanding `x86_64-unknown-none` target under QEMU.
 #
-# The test reuses the production `rustos-kernel` boot pipeline (via
-# `rustos-kernel`'s library half — see `kernel/rustos-kernel/src/lib.rs`)
+# The test reuses the production `tairix-kernel` boot pipeline (via
+# `tairix-kernel`'s library half — see `kernel/tairix-kernel/src/lib.rs`)
 # and replaces the audit sink with one that, on observing
 # `AuditEvent::BootCompleted`, synthesises a Scheduler/CapTable/
 # KernelSyscallHandlers/Dispatcher quartet locally on the stack and
@@ -39,36 +39,36 @@ workspace = true
 # The `test-hooks` feature is on by default for this crate. Release
 # builds that enable it are rejected by the `compile_error!` guard in
 # `src/main.rs` and by `cargo deny check`'s `[[bans.features]]` rule
-# on the production `rustos-kernel` crate, which is forbidden from
+# on the production `tairix-kernel` crate, which is forbidden from
 # ever growing a `test-hooks` feature (AGENTS.md §1 — no hacks;
 # §5.4.5 — fail closed; §15 — test affordances stay in test crates).
 [features]
 default = ["test-hooks"]
 # `test-hooks` gates the synthesised-quartet entry point. The feature
 # exists so that a future consumer can disable it (e.g. when running
-# `cargo build --no-default-features -p rustos-test-syscall-dispatch-qemu`
+# `cargo build --no-default-features -p tairix-test-syscall-dispatch-qemu`
 # for a layout sanity check) without removing the crate from the
 # workspace. The `compile_error!` guard in `src/main.rs` rejects the
 # feature in release-mode builds.
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-syscall-dispatch-qemu"
+name = "tairix-test-syscall-dispatch-qemu"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

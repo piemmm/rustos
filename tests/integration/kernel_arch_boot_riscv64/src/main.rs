@@ -11,7 +11,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It re-uses the entire `rustos-arch-riscv64` boot pipeline
+//! It re-uses the entire `tairix-arch-riscv64` boot pipeline
 //! (`boot`); only the audit Sink is replaced. Splitting the
 //! audit-observer behaviour into a separate bin (instead of a Cargo
 //! feature on the arch crate) prevents feature unification from
@@ -29,10 +29,10 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_log::{Event, EventId, Sink};
-    use rustos_test_riscv64_boot::boot;
+    use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_log::{Event, EventId, Sink};
+    use tairix_test_riscv64_boot::boot;
 
     /// Static boot heap.
     ///
@@ -80,12 +80,12 @@ mod kernel {
     /// harness reports `Outcome::Timeout` — the documented fail-loud
     /// behaviour.
     #[panic_handler]
-    fn rustos_kernel_arch_boot_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_kernel_arch_boot_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s`
-    /// trampoline calls (via `rustos_arch_riscv64_main`). Forwards the
+    /// trampoline calls (via `tairix_arch_riscv64_main`). Forwards the
     /// SBI hand-off values to the production boot pipeline with the
     /// audit-observer sink in place.
     #[no_mangle]
@@ -95,7 +95,7 @@ mod kernel {
             dtb,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }

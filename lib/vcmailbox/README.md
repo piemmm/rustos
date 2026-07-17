@@ -1,4 +1,4 @@
-# rustos-vcmailbox
+# tairix-vcmailbox
 
 The single **BCM2711 `VideoCore` firmware mailbox property-channel client**
 (`AGENTS.md` §2.2 — `plans/PI.md` P7/P7b).

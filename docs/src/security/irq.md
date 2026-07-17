@@ -136,7 +136,7 @@ follow-up session's kernel-side test plan exercises it directly.
 ## Kernel-side implementation (Stage 4.D Item 2-tail)
 
 The kernel-side substrate that backs the contract above lives in
-the `kernel/irq` crate (`rustos-kernel-irq`). The crate is `no_std`,
+the `kernel/irq` crate (`tairix-kernel-irq`). The crate is `no_std`,
 holds no global mutable state, and exposes one type, `IrqTable`,
 together with an `IrqController` seam the architecture port
 implements:
@@ -205,7 +205,7 @@ implements:
 ### Wait semantics
 
 The polling loop on top of `IrqTable::try_wait_step` lives in one
-place — `rustos_kernel_irq::block_until_ready` — so every in-kernel
+place — `tairix_kernel_irq::block_until_ready` — so every in-kernel
 waiter drives the same implementation rather than re-deriving it
 (`AGENTS.md` §2.2 — no duplication). The loop computes the deadline
 once (`start + saturating(timeout)`, so `u64::MAX` does not wrap to a
@@ -226,7 +226,7 @@ scheduler or architecture dependency:
 Three implementations exist:
 
 * **`irq_wait` syscall handler** (`kernel/core::syscalls`): registers
-  the caller on `rustos_kernel_core::IRQ_WAITQ` *before* the first
+  the caller on `tairix_kernel_core::IRQ_WAITQ` *before* the first
   poll, then **parks** off the run queue (`SyscallIrqWaiter` calls
   `reschedule_current(Park)` — `AGENTS.md` §2.1, no busy yield). The
   device-IRQ dispatch path's `irq_wake` (after `IrqTable::fire`) and the
@@ -291,16 +291,16 @@ phase:
 
 | Architecture | Production controller                                                                                  | Status today |
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
-| `x86_64`     | `kernel/rustos-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
-| `aarch64`    | `kernel/rustos-kernel::aarch64::gic_irq::GicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/aarch64::gic::GicController`, whose HAL `mask` clears the distributor `ICENABLER` enable bit + SeqCst-fences; the EL1 IRQ vector (`kernel/arch/aarch64::exceptions`) acknowledges via `IAR`, forwards a non-timer INTID to the set-once `set_device_irq_dispatch` hook, and bridges to `IrqTable::fire`. | **Wired into the boot path and QEMU-validated** (P11 Chunk B-2 INCREMENT (1)). `Aarch64BinArch::irq_routing` returns the GICv2-backed routing and `install_irq_dispatch` publishes the `IrqTable` into the EL1 vector seam, so the kernel/core `irq` phase builds the table against the real controller. Device SPIs are discovered from the device tree (`kernel/arch/aarch64::fdt::gic_device_intid` decodes a node's `interrupts` triple → INTID, no board constant) and a parked **kthread** is woken through `KthreadIrqWaiter`; proven end-to-end by `tests/integration/irq_kthread_qemu_aarch64` (RTC SPI → parked kthread → `WaitOutcome::Ready` + post-fire masked bit) alongside the delivery-path vertical `tests/integration/irq_qemu_aarch64`. The boot path does not yet *bind/route* a device SPI — that arrives with INCREMENT (2)'s root-unlock kthread; the arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
+| `x86_64`     | `kernel/tairix-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
+| `aarch64`    | `kernel/tairix-kernel::aarch64::gic_irq::GicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/aarch64::gic::GicController`, whose HAL `mask` clears the distributor `ICENABLER` enable bit + SeqCst-fences; the EL1 IRQ vector (`kernel/arch/aarch64::exceptions`) acknowledges via `IAR`, forwards a non-timer INTID to the set-once `set_device_irq_dispatch` hook, and bridges to `IrqTable::fire`. | **Wired into the boot path and QEMU-validated** (P11 Chunk B-2 INCREMENT (1)). `Aarch64BinArch::irq_routing` returns the GICv2-backed routing and `install_irq_dispatch` publishes the `IrqTable` into the EL1 vector seam, so the kernel/core `irq` phase builds the table against the real controller. Device SPIs are discovered from the device tree (`kernel/arch/aarch64::fdt::gic_device_intid` decodes a node's `interrupts` triple → INTID, no board constant) and a parked **kthread** is woken through `KthreadIrqWaiter`; proven end-to-end by `tests/integration/irq_kthread_qemu_aarch64` (RTC SPI → parked kthread → `WaitOutcome::Ready` + post-fire masked bit) alongside the delivery-path vertical `tests/integration/irq_qemu_aarch64`. The boot path does not yet *bind/route* a device SPI — that arrives with INCREMENT (2)'s root-unlock kthread; the arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `riscv64`    | `tests/integration/riscv64_boot::PlicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/riscv64::plic::PlicController`, whose inherent `mask` writes the source's PLIC priority register to zero; S-mode trap vector (`kernel/arch/riscv64::trap`) claims/completes via the PLIC and bridges to `IrqTable::fire`. | **Implemented and host-tested**, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The PLIC register driver, the `scause` decode, the one-shot dispatch slot, and the `PlicIrqController` bridge (incl. mask-before-wake through `IrqTable`) are unit-tested; the boot pipeline does not call `trap::init_traps` until the virtio-mmio verticals wire it. The arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
 
 There are two `IrqController` traits and they are deliberately
 distinct. The one in this section is the **consumer-side**
-`rustos_kernel_irq::IrqController` (just `mask`) that `IrqTable::fire`
+`tairix_kernel_irq::IrqController` (just `mask`) that `IrqTable::fire`
 calls during a wake. Separately, the §17.2 Arch HAL
-(`rustos_arch_api`, `plans/WIRING.md` Stage W3) defines an
+(`tairix_arch_api`, `plans/WIRING.md` Stage W3) defines an
 architecture-facing `IrqController` (`mask` + `unmask`, fail-closed with
 `IrqControlError::OutOfRange`) and an `InterruptEntry` (the `claim` →
 `complete` prologue/epilogue) so the architecture-neutral kernel can name
@@ -336,9 +336,9 @@ The x86_64 trap path threads an external IRQ end-to-end through:
    addresses are published as a `.rodata` `.quad` table and
    exposed through `kernel/arch/x86_64::irq::external_isr_addr`.
 2. **Shared trampoline.** Each per-vector stub pushes the vector
-   immediate and jumps to `rustos_arch_x86_64_external_irq_common`,
+   immediate and jumps to `tairix_arch_x86_64_external_irq_common`,
    which saves the 15 GPRs into a `SavedRegs` block and calls
-   `rustos_arch_x86_64_external_irq_dispatch(*mut SavedRegs, u64)`.
+   `tairix_arch_x86_64_external_irq_dispatch(*mut SavedRegs, u64)`.
 3. **Rust dispatcher.** Reads the installed `ExternalIrqDispatchFn`
    from a set-once `AtomicUsize` and writes the LAPIC EOI register
    before returning. The asm trampoline pops GPRs, drops the
@@ -364,7 +364,7 @@ The x86_64 trap path threads an external IRQ end-to-end through:
    guaranteeing every CPU that observes `ready = true` also
    observes the masked redirection entry. The host test
    `ioapic_controller_mask_before_wake_ordering` in
-   `kernel/rustos-kernel::ioapic_controller` drives this exact
+   `kernel/tairix-kernel::ioapic_controller` drives this exact
    path against a `RecordingMmio` mock and asserts the mask write
    completes before `IrqTable::fire` returns `Marked`.
 
@@ -382,19 +382,19 @@ impls so non-x86_64 ports inherit the conservative
 `tests/integration/irq_qemu_x86_64` is the end-to-end regression
 bound for the x86_64 trap path. The crate is a freestanding
 `x86_64-unknown-none` kernel binary that reuses
-`rustos_kernel::boot` verbatim and installs a custom audit Sink.
+`tairix_kernel::boot` verbatim and installs a custom audit Sink.
 On observing `AuditEvent::BootCompleted` the sink:
 
 1. Reads the published `IrqTable` through
-   `rustos_kernel::arch_wrapper::published_irq_table` and the
+   `tairix_kernel::arch_wrapper::published_irq_table` and the
    typed `IoApicController<VolatileIoApicMmio>` through
-   `rustos_kernel::ioapic_controller::published_typed`. Both
+   `tairix_kernel::ioapic_controller::published_typed`. Both
    accessors expose state already published into set-once slots
    during boot; they perform no new writes (`AGENTS.md` §2.1).
 2. Resolves the IDT vector assigned to GSI 2 (legacy ISA IRQ 0
    under QEMU's PIIX/Q35 `InterruptSourceOverride { source: 0,
    gsi: 2 }` mapping) via
-   `rustos_arch_x86_64::irq::global_routing().vector_for_gsi(2)`.
+   `tairix_arch_x86_64::irq::global_routing().vector_for_gsi(2)`.
 3. Binds GSI 2 in the `IrqTable` against the synthesised
    `TaskId(0)`, masks the legacy 8259 PIC, unmasks the line via
    `IoApicController::unmask`, and arms PIT channel 0 in mode 0
@@ -453,7 +453,7 @@ so the virtio-mmio verticals are the first consumer.
    drives `IrqTable::fire` with the bridge and asserts the priority-zero
    write is the last register write before `fire` returns `Marked`.
 3. **S-mode trap vector.** `kernel/arch/riscv64::trap` publishes
-   `rustos_riscv64_trap_vector` (`trap.s`) and installs it into
+   `tairix_riscv64_trap_vector` (`trap.s`) and installs it into
    `stvec` (direct mode) via `init_traps`, which also sets
    `sie.SEIE` and `sstatus.SIE`. The vector saves the interrupted
    context's caller-saved registers, calls the Rust handler, restores,
@@ -562,12 +562,12 @@ alongside the other freestanding integration crates.
   (mint / out-of-range / duplicate / forgery / timeout / pre-fired
   ready) plus an `exit_releases_every_irq_binding_owned_by_task`
   test that asserts the `exit` ↔ `release_for` ordering.
-* `kernel/rustos-kernel::ioapic_controller` adds host tests for
+* `kernel/tairix-kernel::ioapic_controller` adds host tests for
   `program_pin`, `mask`, `unmask`, `read_pin_low`, multi-IO-APIC
   routing, the mask-before-wake ordering against a
   `RecordingMmio` mock, and out-of-range / unprogrammed-pin
   fail-closed paths.
-* `kernel/rustos-kernel::arch_wrapper` adds host tests pinning
+* `kernel/tairix-kernel::arch_wrapper` adds host tests pinning
   the set-once semantics of the `published_irq_controller` slot
   and the "still-None until installed" invariant of the
   `published_irq_table` slot.

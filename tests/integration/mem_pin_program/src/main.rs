@@ -3,7 +3,7 @@
 //!
 //! The consuming vertical (`tests/integration/mem_pin_qemu_aarch64`)
 //! registers this one `rxe` under role-selecting argument vectors
-//! (`rustos_rt::arg(1)`) whose numeric parameters it derives from the one
+//! (`tairix_rt::arg(1)`) whose numeric parameters it derives from the one
 //! shared stack policy (`spawn_layout`), so no policy constant is ever
 //! duplicated into this program:
 //!
@@ -30,7 +30,7 @@
 //!   return.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland runtime
-//! `rustos-rt` (`_start`, stack canary, panic handler, syscall wrappers),
+//! `tairix-rt` (`_start`, stack canary, panic handler, syscall wrappers),
 //! never the C ABI. Built position-independent and converted to an `rxe`
 //! blob by the consuming test's build script. On the host it is an inert
 //! stub so `cargo build --workspace`, clippy, and fmt still cover the crate.
@@ -44,7 +44,7 @@
 mod program {
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    use rustos_abi::{Errno, LimitKind, MapFlags, ResourceLimit};
+    use tairix_abi::{Errno, LimitKind, MapFlags, ResourceLimit};
 
     /// Private endpoint installed only by the consuming migration chassis.
     const MIGRATION_ENDPOINT: u64 = 0x4d49_4752_4154_4501;
@@ -78,10 +78,10 @@ mod program {
     /// by the dispatcher gate, while the ungated unpin still answers
     /// success (it only narrows the caller's own state).
     fn deny() -> i32 {
-        if rustos_rt::mem_pin() != neg(Errno::PermissionDenied) {
+        if tairix_rt::mem_pin() != neg(Errno::PermissionDenied) {
             return 20;
         }
-        if rustos_rt::mem_unpin() != 0 {
+        if tairix_rt::mem_unpin() != 0 {
             return 21;
         }
         0
@@ -90,44 +90,44 @@ mod program {
     /// The `pin` role body: the full bound/pin/map/unpin dance under a
     /// self-lowered `pinned-memory-bytes` budget.
     fn pin() -> i32 {
-        let Some(bound) = rustos_rt::arg(2).and_then(parse_u64) else {
+        let Some(bound) = tairix_rt::arg(2).and_then(parse_u64) else {
             return 30;
         };
-        let Some(within) = rustos_rt::arg(3).and_then(parse_u64) else {
+        let Some(within) = tairix_rt::arg(3).and_then(parse_u64) else {
             return 31;
         };
-        let Some(over) = rustos_rt::arg(4).and_then(parse_u64) else {
+        let Some(over) = tairix_rt::arg(4).and_then(parse_u64) else {
             return 32;
         };
         let Ok(limit) = ResourceLimit::new(bound, bound) else {
             return 33;
         };
         // Lowering one's own bound needs no capability.
-        if rustos_rt::rlimit_set(LimitKind::PinnedMemoryBytes, limit) != 0 {
+        if tairix_rt::rlimit_set(LimitKind::PinnedMemoryBytes, limit) != 0 {
             return 34;
         }
-        if rustos_rt::mem_pin() != 0 {
+        if tairix_rt::mem_pin() != 0 {
             return 35;
         }
         // Already pinned is success: the caller is in the requested state.
-        if rustos_rt::mem_pin() != 0 {
+        if tairix_rt::mem_pin() != 0 {
             return 36;
         }
         // Past the budget: refused closed by the bound, before the
         // producer is reached.
-        if rustos_rt::mem_map(over as usize, MapFlags::empty(), 0) != neg(Errno::OutOfRange) {
+        if tairix_rt::mem_map(over as usize, MapFlags::empty(), 0) != neg(Errno::OutOfRange) {
             return 37;
         }
         // Inside the budget: a genuine mapping.
-        if rustos_rt::mem_map(within as usize, MapFlags::empty(), 0) < 0 {
+        if tairix_rt::mem_map(within as usize, MapFlags::empty(), 0) < 0 {
             return 38;
         }
-        if rustos_rt::mem_unpin() != 0 {
+        if tairix_rt::mem_unpin() != 0 {
             return 39;
         }
         // Unpinned, the same request must now reach the producer and
         // succeed — the bound binds exactly while pinned.
-        if rustos_rt::mem_map(over as usize, MapFlags::empty(), 0) < 0 {
+        if tairix_rt::mem_map(over as usize, MapFlags::empty(), 0) < 0 {
             return 40;
         }
         0
@@ -137,10 +137,10 @@ mod program {
     /// starts unpinned (the mark is never inherited), so a map past the
     /// parent's pinned budget must succeed.
     fn child() -> i32 {
-        let Some(over) = rustos_rt::arg(2).and_then(parse_u64) else {
+        let Some(over) = tairix_rt::arg(2).and_then(parse_u64) else {
             return 50;
         };
-        if rustos_rt::mem_map(over as usize, MapFlags::empty(), 0) < 0 {
+        if tairix_rt::mem_map(over as usize, MapFlags::empty(), 0) < 0 {
             return 51;
         }
         0
@@ -154,7 +154,7 @@ mod program {
         }
         let request = round.to_le_bytes();
         let mut reply = [0u8; 8];
-        let Ok(len) = rustos_rt::ipc_call(MIGRATION_ENDPOINT, &request, &mut reply) else {
+        let Ok(len) = tairix_rt::ipc_call(MIGRATION_ENDPOINT, &request, &mut reply) else {
             return 62;
         };
         if len != reply.len() || reply != request {
@@ -251,14 +251,14 @@ mod program {
     /// exited with `0`. Returns `0` on success or `fail_code` (+1/+2) on a
     /// spawn, wait, or exit-code failure.
     fn run_child(path: &[u8], fail_code: i32) -> i32 {
-        let pid = rustos_rt::spawn(path);
+        let pid = tairix_rt::spawn(path);
         if pid <= 0 {
             return fail_code;
         }
         #[allow(clippy::cast_possible_truncation)]
         let pid = pid as i32;
         let mut code = 0i32;
-        if rustos_rt::wait_exit(pid, &mut code) < 0 {
+        if tairix_rt::wait_exit(pid, &mut code) < 0 {
             return fail_code + 1;
         }
         if code != 0 {
@@ -270,7 +270,7 @@ mod program {
     /// The `parent` role body: drive `deny` and `pin`, then pin itself
     /// under a lowered bound and prove a spawned child starts unpinned.
     fn parent() -> i32 {
-        let Some(bound) = rustos_rt::arg(2).and_then(parse_u64) else {
+        let Some(bound) = tairix_rt::arg(2).and_then(parse_u64) else {
             return 6;
         };
         let failed = run_child(b"/bin/mp-deny", 10);
@@ -289,17 +289,17 @@ mod program {
         let Ok(limit) = ResourceLimit::new(bound, bound) else {
             return 7;
         };
-        if rustos_rt::rlimit_set(LimitKind::PinnedMemoryBytes, limit) != 0 {
+        if tairix_rt::rlimit_set(LimitKind::PinnedMemoryBytes, limit) != 0 {
             return 8;
         }
-        if rustos_rt::mem_pin() != 0 {
+        if tairix_rt::mem_pin() != 0 {
             return 9;
         }
         let failed = run_child(b"/bin/mp-child", 16);
         if failed != 0 {
             return failed;
         }
-        if rustos_rt::mem_unpin() != 0 {
+        if tairix_rt::mem_unpin() != 0 {
             return 19;
         }
         0
@@ -309,7 +309,7 @@ mod program {
     /// pinned (`arg(1)`). An absent or unknown role is a wiring defect and a
     /// distinct failure code (fail closed, never a default role).
     fn main() -> i32 {
-        match rustos_rt::arg(1) {
+        match tairix_rt::arg(1) {
             Some(b"parent") => parent(),
             Some(b"deny") => deny(),
             Some(b"pin") => pin(),
@@ -319,13 +319,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the
 // crate building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

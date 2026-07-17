@@ -1,8 +1,8 @@
-# `rustos-keymap`
+# `tairix-keymap`
 
-The shared **terminal key map** for RustOS console-input producers
+The shared **terminal key map** for TAIRiX console-input producers
 (`plans/PI.md` P11). A directly attached keyboard driver decodes its device's
-scancodes into the `rustos_input::Key` vocabulary, then has to turn each key
+scancodes into the `tairix_input::Key` vocabulary, then has to turn each key
 press into the byte sequence a terminal sends down its input stream — a
 printable character as itself, `Ctrl-C` as the `0x03` control code, the up
 arrow as `ESC [ A`. That translation is identical for every keyboard
@@ -37,8 +37,8 @@ Stability tier: **experimental**.
 ## One escape vocabulary
 
 The named-key escape sequences are **not** redefined here: the `SS3` / `CSI …
-~` forms come from `rustos_vt::key` and the control bytes from
-`rustos_vt::control`, the one canonical ANSI / VT / xterm definition
+~` forms come from `tairix_vt::key` and the control bytes from
+`tairix_vt::control`, the one canonical ANSI / VT / xterm definition
 (`AGENTS.md` §2.2). Only those `const` tables are touched, so the crate is
 allocation-free.
 
@@ -53,8 +53,8 @@ parser of untrusted bytes.
 
 ## Layering and testing
 
-`lib/keymap` depends on `lib/*` only (`rustos_input` for the key vocabulary,
-`rustos_vt` for the escape tables) — never on `kernel/*`, `drivers/*`, or
+`lib/keymap` depends on `lib/*` only (`tairix_input` for the key vocabulary,
+`tairix_vt` for the escape tables) — never on `kernel/*`, `drivers/*`, or
 `userland/*` (`AGENTS.md` §17.4) — and is text-mode infrastructure outside
 `userland/gui/*`, so a headless image links it freely (§17.3). Its consumer is
 the keyboard drivers' console-input producer (`lib/hid`'s

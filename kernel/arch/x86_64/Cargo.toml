@@ -1,6 +1,6 @@
 [package]
-name = "rustos-arch-x86_64"
-description = "RustOS architecture port: x86_64 (Stage 3a — partial, scoped to Stage-2 QEMU integration tests)."
+name = "tairix-arch-x86_64"
+description = "TAIRiX architecture port: x86_64 (Stage 3a — partial, scoped to Stage-2 QEMU integration tests)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,11 +16,11 @@ path = "src/lib.rs"
 
 # Production dependencies.
 #
-# - `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant
+# - `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant
 #   consumed by `syscall_entry.rs`. Re-declaring it locally would
 #   violate AGENTS.md §2.2 (no duplication) and §9 (one ABI source of
 #   truth).
-# - `rustos-arch-api` is the Arch HAL (`AGENTS.md` §17.2). It provides
+# - `tairix-arch-api` is the Arch HAL (`AGENTS.md` §17.2). It provides
 #   the `SchedulerArch` / `CpuId` trait surface that `kernel_arch.rs`
 #   implements for [`X86_64Arch`]. §17.4 lets an architecture port
 #   name `kernel/arch/api` and `lib/*` only; naming the HAL here —
@@ -31,12 +31,12 @@ path = "src/lib.rs"
 #
 # The `kernel/core::KernelArch` super-trait (`SchedulerArch + halt()`)
 # is **not** implemented inside the arch crate — pulling
-# `rustos-kernel-core` would transitively drag in `kernel/mem`,
+# `tairix-kernel-core` would transitively drag in `kernel/mem`,
 # `kernel/sec`, `kernel/ipc`, all of which use `extern crate alloc`
 # and would force the existing freestanding test bins to ship a
 # `#[global_allocator]` they do not currently need. Instead, the arch
 # crate exports a free `halt() -> !` function on this side of the
-# boundary and the downstream `rustos-kernel` bin crate brings the
+# boundary and the downstream `tairix-kernel` bin crate brings the
 # allocator, implements `KernelArch` for `X86_64Arch`, and wires both
 # halves together. AGENTS.md §3 / §6 / §17.4 — drivers, kernel/mem,
 # kernel/sec, kernel/ipc remain forbidden as arch-crate deps.
@@ -44,9 +44,9 @@ path = "src/lib.rs"
 # `sched-arch` opts the crate into compiling the `kernel_arch` module
 # (the [`X86_64Arch`] `SchedulerArch` impl) and the other scheduler-,
 # side-channel-, timer-, per-CPU-, platform-, and user-entry HAL impls.
-# The Arch HAL `rustos-arch-api` itself is **not** optional: the
+# The Arch HAL `tairix-arch-api` itself is **not** optional: the
 # always-compiled `paging` module implements the §17.2 MMU/page-table
-# HAL slice ([`rustos_arch_api::mmu::AddressSpace`]) and so every build
+# HAL slice ([`tairix_arch_api::mmu::AddressSpace`]) and so every build
 # of this crate names the HAL. The crate is `no_std` and
 # dependency-free, so the dep pulls no `#[global_allocator]` burden
 # (`AGENTS.md` §17.4); `sched-arch` therefore only gates which HAL
@@ -55,13 +55,13 @@ default = []
 sched-arch = []
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../api", version = "=0.0.0" }
-rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../api", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical
-# `rustos_kernel_mem::RegionKind` and refuse to compile if the two
+# `tairix_kernel_mem::RegionKind` and refuse to compile if the two
 # enums ever drift (AGENTS.md §2.2 — no duplication).
 #
 # The crate self-references with `sched-arch` so `cargo test` always
@@ -69,8 +69,8 @@ rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # `test-arch` self-link convention used by `kernel/sched` and
 # `kernel/core`.
 [dev-dependencies]
-rustos-kernel-mem = { path = "../../mem", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = ".", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel-mem = { path = "../../mem", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = ".", version = "=0.0.0", features = ["sched-arch"] }
 
 # This crate is the **partial** Stage 3a baseline. It exists so the two
 # Stage-2 deliverable integration tests in `tests/integration/*` have an

@@ -8,7 +8,7 @@
 # its file operands (and reading its own bundle's Help/ documents)
 # through the secured VFS, which still authorises every path per-inode
 # under the caller's attested identity.
-id = "os.rustos.vim"
+id = "os.tairix.vim"
 name = "vim"
 version = "0.1.0"
 kind = "command"

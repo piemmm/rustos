@@ -32,16 +32,16 @@
 //! [`DesktopSession`]: crate::DesktopSession
 //! [`SessionInputRouter`]: crate::SessionInputRouter
 //! [`TaskbarPresenter`]: crate::TaskbarPresenter
-//! [`TaskbarRenderer`]: rustos_taskbar::TaskbarRenderer
+//! [`TaskbarRenderer`]: tairix_taskbar::TaskbarRenderer
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_cursor::{CursorRegistry, CursorSetId, CursorTheme};
-use rustos_icon::IconSet;
-use rustos_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
-use rustos_wm::{
+use tairix_abi::Errno;
+use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
+use tairix_icon::IconSet;
+use tairix_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
+use tairix_wm::{
     Color, Compositor, CursorController, InputEvent, InputResponse, Point, Scale, Surface, WindowId,
 };
 
@@ -174,7 +174,7 @@ impl DesktopShell {
     ///
     /// Runs the window manager's cursor-shape policy against the current
     /// interaction state (the plain arrow over the desktop background, a
-    /// window's own [`cursor_hint`](rustos_wm::Window::cursor_hint) under the
+    /// window's own [`cursor_hint`](tairix_wm::Window::cursor_hint) under the
     /// pointer, the move cursor during an interactive grab), re-rasterising at
     /// the output density only when the chosen shape, the active cursor set,
     /// or the [`scale`](Compositor::scale) actually changed, and repositions

@@ -20,7 +20,7 @@
 
 use alloc::collections::BTreeSet;
 
-use rustos_sync::SpinLock;
+use tairix_sync::SpinLock;
 
 use crate::TaskId;
 

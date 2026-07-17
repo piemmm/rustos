@@ -1,9 +1,9 @@
-//! RustOS kernel memory subsystem (Stage 2.2 of `PLAN.md`).
+//! TAIRiX kernel memory subsystem (Stage 2.2 of `PLAN.md`).
 //!
 //! This crate is **architecture-neutral**. Anything that touches a real
 //! page table, a TLB, or a CPU control register lives in `kernel/arch/*`
 //! and is plugged in through the Arch HAL page-table surface
-//! (`rustos_arch_api::mmu::AddressSpace` + `rustos_arch_api::tlb::TlbShootdown`),
+//! (`tairix_arch_api::mmu::AddressSpace` + `tairix_arch_api::tlb::TlbShootdown`),
 //! re-exported here behind the [`PageTable`] bound alias.
 //!
 //! The four public layers, top to bottom:

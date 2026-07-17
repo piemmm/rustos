@@ -17,19 +17,19 @@
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a
 //! fresh, logged seed so the suite stays fast. When `cargo xtask fuzz
-//! --soak` exports `RUSTOS_FUZZ_BUDGET_SECS`, the PRNG-driven harness
+//! --soak` exports `TAIRIX_FUZZ_BUDGET_SECS`, the PRNG-driven harness
 //! keeps drawing fresh inputs from the *same continuing* stream until
 //! the deadline elapses. The seed is logged at the start, so a
-//! fresh-seed crash stays reproducible via `RUSTOS_FUZZ_SEED`. The
+//! fresh-seed crash stays reproducible via `TAIRIX_FUZZ_SEED`. The
 //! structured bit-flip harness is an exhaustive boundary sweep, not a
 //! random one, so it runs once regardless of the budget.
 
-use rustos_abi::driver::net::MacAddress;
-use rustos_net::arp::{self, ArpPacket};
-use rustos_net::eth::{self, EthernetFrame};
-use rustos_net::icmp::{IcmpContext, IcmpEcho};
-use rustos_net::ipv4::{self, Ipv4Header};
-use rustos_net::Ipv4Addr;
+use tairix_abi::driver::net::MacAddress;
+use tairix_net::arp::{self, ArpPacket};
+use tairix_net::eth::{self, EthernetFrame};
+use tairix_net::icmp::{IcmpContext, IcmpEcho};
+use tairix_net::ipv4::{self, Ipv4Header};
+use tairix_net::Ipv4Addr;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -138,19 +138,19 @@ impl Lcg {
 
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut buf = [0u8; 256];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

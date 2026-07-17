@@ -1,5 +1,5 @@
 //! [`WasmArch`] — the wasm32 implementation of the Arch HAL
-//! ([`rustos_arch_api::SchedulerArch`]).
+//! ([`tairix_arch_api::SchedulerArch`]).
 //!
 //! Like the bare-metal ports, the wasm32 port is a pure Arch HAL
 //! implementation: it implements [`SchedulerArch`]
@@ -39,7 +39,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup, SmpError};
+use tairix_arch_api::{CpuId, SchedulerArch, SecondaryBringup, SmpError};
 
 /// Upper bound on the *worker-index value* the host may be asked to
 /// spawn as a secondary logical CPU ([`crate::smp::start_worker`]).
@@ -254,7 +254,7 @@ impl SecondaryBringup for WasmArch {
         };
         // A secondary is a fresh Web Worker instantiating this same
         // module; there is no settable entry pointer to install (the
-        // worker enters through the fixed `rustos_arch_wasm32_main`
+        // worker enters through the fixed `tairix_arch_wasm32_main`
         // export), so wasm32 never reports `NotReady`.
         match crate::smp::start_worker(worker) {
             Ok(()) => Ok(()),

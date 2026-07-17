@@ -8,7 +8,7 @@
 //! The kernel's validated user-copy path (`kernel/mem::uaccess`) proves
 //! every page before it moves a byte, so a mid-copy hardware fault means
 //! that proof was violated underneath it. The per-port fault window
-//! (`rustos_arch_riscv64::uaccess`) is the backstop that turns such a
+//! (`tairix_arch_riscv64::uaccess`) is the backstop that turns such a
 //! fault into an error return; this vertical proves the whole mechanism
 //! live on the `virt` board: real S-mode page fault → trap vector →
 //! saved-`sepc` rewrite → fix-up return.
@@ -21,7 +21,7 @@
 //! 2. `trap::install_trap_vector` (run before activation) points `stvec`
 //!    at the S-mode vector **and arms the Arch HAL guarded-copy slot** —
 //!    the one chokepoint pairing the recovery with the vector.
-//! 3. The shared `rustos_arch_api::uaccess::conformance` checks pass:
+//! 3. The shared `tairix_arch_api::uaccess::conformance` checks pass:
 //!    an intact copy moves its bytes exactly; a copy reading the
 //!    unmapped page returns the fault error; a copy writing it returns
 //!    the fault error — each taking a *real* hardware page fault whose
@@ -31,7 +31,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-riscv64` port and supplies its own
+//! It links only the `tairix-arch-riscv64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
 //! never behind a Cargo feature on the arch crate (fail closed).
 
@@ -43,11 +43,11 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_api::mmu::AddressSpace as _;
-    use rustos_arch_api::uaccess::conformance::{self, Verdict};
-    use rustos_arch_riscv64::paging::{AddressSpace, PageTablePool};
-    use rustos_arch_riscv64::{fault, handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
-    use rustos_log::{log, Event, EventId, Field, Level};
+    use tairix_arch_api::mmu::AddressSpace as _;
+    use tairix_arch_api::uaccess::conformance::{self, Verdict};
+    use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool};
+    use tairix_arch_riscv64::{fault, handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
+    use tairix_log::{log, Event, EventId, Field, Level};
 
     /// Gigapages of identity map the space installs: `[0, 4 GiB)` covers
     /// the `virt` board's low MMIO and the 2 GiB RAM base at `0x8000_0000`
@@ -102,7 +102,7 @@ mod kernel {
     /// Forward to the shared riscv64 panic bridge (parks the hart; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_uaccess_fault_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_uaccess_fault_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -116,7 +116,7 @@ mod kernel {
                 message: "riscv64 uaccess-fault test: failed",
                 fields: &[Field {
                     key: "stage",
-                    value: rustos_log::FieldValue::Str(what),
+                    value: tairix_log::FieldValue::Str(what),
                 }],
             },
         );
@@ -124,7 +124,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_riscv64_main`).
+    /// calls (via `tairix_arch_riscv64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
         note(

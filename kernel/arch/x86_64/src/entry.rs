@@ -1,4 +1,4 @@
-//! `extern "C" fn rustos_arch_x86_64_main` — the Rust side of the boot
+//! `extern "C" fn tairix_arch_x86_64_main` — the Rust side of the boot
 //! trampoline.
 //!
 //! The 32-bit assembly in `boot.s` finishes by `call`ing this symbol with
@@ -57,7 +57,7 @@ extern "C" {
 /// invariants in `boot.s` are upheld. Calling from anywhere else is a
 /// kernel bug.
 #[no_mangle]
-pub extern "C" fn rustos_arch_x86_64_main(magic: u64, boot_info: u64) -> ! {
+pub extern "C" fn tairix_arch_x86_64_main(magic: u64, boot_info: u64) -> ! {
     // The magic arrives in `%rdi` zero-extended from the 32-bit value
     // the entry stub placed in `%edi`. Only the low 32 bits carry the
     // magic; the truncation is the documented 32-bit entry ABI of both

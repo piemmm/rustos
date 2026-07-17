@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-bus-pcie-brcm"
-description = "RustOS autoloaded user-space BCM2711 (Raspberry Pi 4) PCIe root-complex bus driver: binds the discovered brcm,bcm2711-pcie node, trains the link, enumerates the VL805 USB host controller behind the bridge, assigns/enables its register BAR, and publishes it into the live hardware tree as a bindable xHCI node (AGENTS.md §4 / §18; plans/PI.md P10 D5b.2b)."
+name = "tairix-drv-bus-pcie-brcm"
+description = "TAIRiX autoloaded user-space BCM2711 (Raspberry Pi 4) PCIe root-complex bus driver: binds the discovered brcm,bcm2711-pcie node, trains the link, enumerates the VL805 USB host controller behind the bridge, assigns/enables its register BAR, and publishes it into the live hardware tree as a bindable xHCI node (AGENTS.md §4 / §18; plans/PI.md P10 D5b.2b)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +21,7 @@ workspace = true
 # The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
 # `/System/Drivers/` and autoloaded into user space by `devmgr` when the
 # `brcm,bcm2711-pcie` node is discovered (`AGENTS.md` §18). It links the
-# userland runtime `rustos-rt`, so those bin-only deps are pulled in **only**
+# userland runtime `tairix-rt`, so those bin-only deps are pulled in **only**
 # for the bare-metal targets the binary is built for; on the host the binary is
 # an inert stub and only the `lib` target (and its host tests) compiles
 # (`AGENTS.md` §2.2).
@@ -33,28 +33,28 @@ workspace = true
 # seams the bring-up runs over, the `HwNode` / `HwResource` / `HwMatchKey`
 # vocabulary the controller node is published with, and the `CapabilityId` /
 # `DriverError` types it fails closed with — one ABI definition (§2.2).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The PCI/PCIe configuration-access mechanism + shared bus-driver locate/BAR
 # primitives (`mechanism_brcm`, `find_function_by_class`, `assign_and_map_bar`,
 # `bus_to_cpu_phys`, `USB_CONTROLLER_CLASS`) the `emit_vl805_node` composition
 # drives once the link trains. `lib/* → lib/*`, no cycle.
-rustos-pci = { path = "../../../lib/pci", version = "=0.0.0" }
+tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
 # The xHCI-protocol facts the published node's grants are sized by:
 # `XHCI_BAR_INDEX` (the controller's register BAR), one definition shared
 # with the xHCI driver (`AGENTS.md` §2.2).
-rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
+tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the device logic is pulled
 # in only for the bare-metal targets the binary is actually built for; on the
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over (§5.2).
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` (`mmio_map` / `resource_grants` / `hw_emit_node` over
 # the syscall surface, §5.4).
-rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
 # canary §19.2, the panic handler, the syscall wrappers, the `ClockDelay`, and
 # `yield_now`.
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

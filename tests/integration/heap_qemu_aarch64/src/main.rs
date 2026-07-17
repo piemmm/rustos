@@ -1,4 +1,4 @@
-//! PI P6e-3b prerequisite QEMU integration test: prove the `rustos-rt`
+//! PI P6e-3b prerequisite QEMU integration test: prove the `tairix-rt`
 //! `mem_map`-backed global allocator works end to end in an EL0 process on the
 //! aarch64 `virt` board (`plans/PI.md`).
 //!
@@ -7,9 +7,9 @@
 //! and installs a syscall-dispatch callback and a fault handler. It builds one
 //! hardware-isolated EL0 address space — its own stage-1 page-table hierarchy —
 //! from the `rxe` fixture program through the production capability-checked,
-//! audited `rustos_kernel_core::spawn_image` caller, **retains it live**, and
-//! installs a `rustos_kernel_core::MemMap` producer backed by
-//! `rustos_kernel_mem::map_anonymous` / `unmap_anonymous` over that space and
+//! audited `tairix_kernel_core::spawn_image` caller, **retains it live**, and
+//! installs a `tairix_kernel_core::MemMap` producer backed by
+//! `tairix_kernel_mem::map_anonymous` / `unmap_anonymous` over that space and
 //! its frame pool. It admits the program as a resumable user kthread
 //! (`spawn_user_kthread`, `plans/SPAWN.md` SP2) and drains the cooperative
 //! `step` loop; the dispatch callback routes the program's allocator-issued
@@ -27,7 +27,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-heap-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-heap-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

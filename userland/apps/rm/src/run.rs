@@ -1,11 +1,11 @@
 //! The `Run` entry-point binary of the `rm` tool — the program a shell
 //! spawns to remove files and directories.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
@@ -16,7 +16,7 @@
 //! per-inode and mount check stays kernel-side), `RtPrompt`, which asks the
 //! `-i`/`-I` confirmations on standard error and reads the reply from
 //! standard input (consent only on a leading `y`/`Y`; an unreadable reply is
-//! never consent), the shared `rustos_help::BundleHelp`, which reads the
+//! never consent), the shared `tairix_help::BundleHelp`, which reads the
 //! tool's own bundle's `Help/` tree for the short-help switches, and
 //! `RtOutput`, which writes `-v` reports to the inherited standard output.
 //! The tool binds only to its inherited descriptors, never a console device,
@@ -39,12 +39,12 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX};
-    use rustos_abi::Errno;
-    use rustos_help::BundleHelp;
-    use rustos_rm::{parse, run, Entry, EntryKind, Output, Prompt, Removal, USAGE};
-    use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-    use rustos_rt::File;
+    use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX};
+    use tairix_abi::Errno;
+    use tairix_help::BundleHelp;
+    use tairix_rm::{parse, run, Entry, EntryKind, Output, Prompt, Removal, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::File;
 
     /// Initial byte size of the directory-listing buffer: one page covers a
     /// typical directory; `BufferTooSmall` grows it (below).
@@ -62,7 +62,7 @@ mod program {
     /// Read every entry of the directory at `path` into one snapshot, the
     /// same grow-on-`BufferTooSmall` read `ls` uses.
     fn read_entries(path: &str) -> Result<Vec<Entry>, Errno> {
-        let dir = rustos_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
+        let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
         let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
         let used = loop {
             match dir.read(&mut buf) {
@@ -163,7 +163,7 @@ mod program {
         }
 
         fn remove_file(&self, path: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_unlink(path.as_bytes(), rustos_abi::UnlinkFlags::empty());
+            let ret = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -178,7 +178,7 @@ mod program {
             // a file between this tool's listing and the removal fails
             // closed instead of unlinking the file. A non-empty directory
             // fails closed with the kernel's own errno.
-            let ret = rustos_rt::fs_unlink(path.as_bytes(), rustos_abi::UnlinkFlags::DIRECTORY);
+            let ret = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::DIRECTORY);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -202,7 +202,7 @@ mod program {
             let mut first: Option<u8> = None;
             let mut buf = [0u8; REPLY_MAX];
             loop {
-                let n = rustos_rt::stdin(&mut buf);
+                let n = tairix_rt::stdin(&mut buf);
                 if n == 0 {
                     // End of input (or an unreadable stream): no consent was
                     // given, so the answer is a decline — never an assumed yes.
@@ -238,7 +238,7 @@ mod program {
         let _ = Stderr.write_all(USAGE.as_bytes());
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a filesystem, prompt, or output
@@ -247,7 +247,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             report_usage();
             return 2;
         };
@@ -258,7 +258,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(
@@ -277,13 +277,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

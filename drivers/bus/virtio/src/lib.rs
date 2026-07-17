@@ -1,24 +1,24 @@
-//! RustOS concrete virtio PCI transport + register-window backends.
+//! TAIRiX concrete virtio PCI transport + register-window backends.
 //!
 //! This crate provides the **architecture-specific bus bindings** for
 //! the bus-agnostic virtio split-virtqueue protocol that lives in
-//! [`rustos_virtio`] (`lib/virtio`): the PCI ([`PciTransport`])
-//! implementation of the [`rustos_virtio::Transport`] trait, plus the
+//! [`tairix_virtio`] (`lib/virtio`): the PCI ([`PciTransport`])
+//! implementation of the [`tairix_virtio::Transport`] trait, plus the
 //! [`PciBackend`] / [`MmioBackend`] register-window adapters.
 //!
 //! The concrete **MMIO** transport ([`MmioTransport`]) does *not* live
-//! here: it depends only on the bounds-checked [`rustos_abi`] register
-//! window and the protocol types, so it lives in [`rustos_virtio`] where
+//! here: it depends only on the bounds-checked [`tairix_abi`] register
+//! window and the protocol types, so it lives in [`tairix_virtio`] where
 //! both this crate's kernel-side consumers and an arch-neutral
 //! user-space virtio driver process can construct it without a
 //! `drivers/* → drivers/*` edge (the
 //! `lib/usb` ↔ `drivers/bus/usb` precedent). It is re-exported below so
-//! existing `rustos_drv_bus_virtio::MmioTransport` import sites keep
+//! existing `tairix_drv_bus_virtio::MmioTransport` import sites keep
 //! resolving.
 //!
 //! The queue management, owned DMA-slab abstraction, and the
 //! in-process [`MockHost`] / [`MockTransport`] doubles do **not** live
-//! here — they live in [`rustos_virtio`] so that the device-class
+//! here — they live in [`tairix_virtio`] so that the device-class
 //! drivers (`drivers/storage/virtio_blk`, `drivers/network/virtio_net`)
 //! consume them through `lib/*` rather than depending on this bus
 //! driver crate, which the charter forbids (`drivers/* → lib/*`
@@ -37,7 +37,7 @@
 //! # Safety
 //!
 //! The MMIO and PCI backends reach device registers exclusively through
-//! the bounds-checked accessors on [`rustos_abi::RegisterWindow`], the
+//! the bounds-checked accessors on [`tairix_abi::RegisterWindow`], the
 //! capability-checked window the kernel's MMIO-map facility mints for
 //! the bus driver. The backends themselves perform no raw pointer
 //! arithmetic and export no `unsafe` across this crate's public
@@ -57,17 +57,17 @@ pub use backend::{MmioBackend, PciBackend};
 pub use transport_pci::PciTransport;
 
 // The bus-agnostic protocol now lives in `lib/virtio`. Re-export it so
-// existing `rustos_drv_bus_virtio::{...}` import sites in the kernel-side
+// existing `tairix_drv_bus_virtio::{...}` import sites in the kernel-side
 // consumers keep resolving without each one having to also name the
-// `rustos-virtio` crate directly (one canonical
+// `tairix-virtio` crate directly (one canonical
 // definition, re-exported, never duplicated).
-pub use rustos_virtio::{
+pub use tairix_virtio::{
     BounceBuffer, ChainSegment, ChainView, Direction, DmaSlab, MmioTransport, MockHost,
     MockTransport, PciTransportWindows, PoolId, SlabFreeFn, SplitQueue, Status, Transport,
     UsedToken, VirtioError, VirtioHost,
 };
 
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///

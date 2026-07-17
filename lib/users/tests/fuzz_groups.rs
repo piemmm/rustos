@@ -7,9 +7,9 @@
 //! closed). The decode path is driven here against arbitrary text, with two
 //! invariants:
 //!
-//! * feeding any string to [`rustos_users::GroupsDb::parse`] never panics
+//! * feeding any string to [`tairix_users::GroupsDb::parse`] never panics
 //!   and never reads out of bounds — it returns a database or a
-//!   [`rustos_users::ParseError`];
+//!   [`tairix_users::ParseError`];
 //! * any database that parses re-serialises to text that parses back to an
 //!   equal database (the format has one meaning).
 //!
@@ -18,9 +18,9 @@
 //! constructors, splices hostile record lines under a valid header, and
 //! feeds pure noise. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
-use rustos_users::{Gid, GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER};
+use tairix_users::{Gid, GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -30,7 +30,7 @@ const MAX_NOISE: usize = 2048;
 
 /// Bytes the noise generator draws from: the format's own alphabet, so the
 /// mutations reach past the first charset check instead of bouncing off it.
-const ALPHABET: &[u8] = b"abcdefxyz0123456789:,#/_-. \nrustos-groups-v1";
+const ALPHABET: &[u8] = b"abcdefxyz0123456789:,#/_-. \ntairix-groups-v1";
 
 /// Build the corpus of real, well-formed databases through the public
 /// constructors, so this harness encodes no second copy of the format.
@@ -76,14 +76,14 @@ fn exercise_never_panics(text: &str) {
 
 #[test]
 fn parsing_any_group_database_never_panics() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = templates();
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
-    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "parsing_any_group_database_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -137,7 +137,7 @@ fn parsing_any_group_database_never_panics() {
         exercise_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

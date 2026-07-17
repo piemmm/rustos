@@ -1,4 +1,4 @@
-# `rustos-terminal` — terminal emulator
+# `tairix-terminal` — terminal emulator
 
 Stage 7 deliverable (`AGENTS.md` §10, `PLAN.md` Stage 7). The default
 graphical terminal: it hosts the system shell and shows its output on a
@@ -100,7 +100,7 @@ kernel (`AGENTS.md` §7).
 ## The `Run` bundle
 
 `src/run.rs` is the `terminal.app` bundle's entry point: it creates the two
-pipes, spawns the user's default shell (`rustos_users::policy::DEFAULT_SHELL`)
+pipes, spawns the user's default shell (`tairix_users::policy::DEFAULT_SHELL`)
 with `TERM` exported, creates and grants the zero-copy window frame region,
 and **parks** on one wait-set with three members — its window-event mailbox
 (`WaitSourceKind::Port`), the shell-output pipe's read end
@@ -114,14 +114,14 @@ refusal exits fail-loud with a reserved code and its reason on `stderr`.
 
 ## Layering & safety
 
-`no_std` (with `alloc`); depends only on `rustos-abi` and the shared `lib/*`
+`no_std` (with `alloc`); depends only on `tairix-abi` and the shared `lib/*`
 desktop libraries, so this app never links a kernel, driver, or window-manager
 crate (`AGENTS.md` §17.4). No `unsafe`, no `unwrap`/`expect`/`panic!` in
 production paths (`AGENTS.md` §2.9).
 
 ## Test surface
 
-`cargo test -p rustos-terminal` (42 unit tests): grid sizing fail-closed;
+`cargo test -p tairix-terminal` (42 unit tests): grid sizing fail-closed;
 text fill + cursor advance; right-edge wrap; last-row scroll on CRLF and
 line-feed-only down-move; carriage-return overwrite; backspace; tab stops;
 CSI cursor positioning (1-based and home default), relative moves defaulting

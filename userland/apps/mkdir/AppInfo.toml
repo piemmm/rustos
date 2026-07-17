@@ -6,7 +6,7 @@
 # CAP_FS_ACCESS covers the `fs_mkdir` creations and the short-help read of
 # the bundle's own Help/ documents through the secured VFS. The tool never
 # prompts, so it requests no CAP_CONSOLE_READ.
-id = "os.rustos.mkdir"
+id = "os.tairix.mkdir"
 name = "mkdir"
 version = "0.1.0"
 kind = "command"

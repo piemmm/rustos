@@ -1,4 +1,4 @@
-# `rustos-useradd` — create a user account
+# `tairix-useradd` — create a user account
 
 A `plans/APPS.md` command app registered at `/System/Apps/useradd.app/Run`
 so the shell resolves the bare word `useradd` to it. `useradd` adds a
@@ -16,8 +16,8 @@ falling back to the usage banner when the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary, the shared
-`rustos-help` engine, and the `rustos-users` account policy, so it never
+dependencies are the audited `tairix-abi` vocabulary, the shared
+`tairix-help` engine, and the `tairix-users` account policy, so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). Its manifest
 (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE`, `CAP_USER_ADMIN`, and
 `CAP_FS_ACCESS` — the administrative gate sits above the session
@@ -43,7 +43,7 @@ the following argument (`-u 0`, `--uid 0`). `--` ends option parsing:
 every later argument is an operand.
 
 The bundle's thirteen-locale `Help/` tree (the canonical `en-US` plus the
-`rustos_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
+`tairix_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
 authored on disk in this crate and
 planted at `/System/Apps/useradd.app/Help/` by the image builder from
 that source (`tools/syshelp`) — never embedded in the binary
@@ -52,7 +52,7 @@ that source (`tools/syshelp`) — never embedded in the binary
 ## The account grammar
 
 `UID`, `GID`, and the `-G` list entries are decimal ids. A name (rather
-than a numeric id) is not accepted for a group: RustOS has no name-to-id
+than a numeric id) is not accepted for a group: TAIRiX has no name-to-id
 seam in this tool, so resolving names would be interface creep
 (`AGENTS.md` §2.4). The login name must match `[a-z_][a-z0-9_-]*` and fit
 within the length bound — the portable Unix shape, which admits no name
@@ -64,7 +64,7 @@ to invent (`AGENTS.md` §2.1).
 ## The created account has no usable password
 
 GNU `useradd` creates an account that cannot authenticate until an
-administrator sets a password. The RustOS database requires a well-formed
+administrator sets a password. The TAIRiX database requires a well-formed
 password record on creation, so the production client submits one derived
 from a throwaway 256-bit random secret it immediately discards: no
 password matches it, the honest equivalent of the `!` field. The
@@ -81,12 +81,12 @@ the new record. The production `UserDb` is `db::UsersAdminDb`, the
 syscall; `db::Entropy` — the kernel CSPRNG through `sys:random`), so the
 whole client policy is host-tested against an in-memory endpoint:
 
-- an omitted uid is allocated by the shared `rustos_users::next_id`
+- an omitted uid is allocated by the shared `tairix_users::next_id`
   policy (interactive-user range, `1000..`: one above the highest taken
   id in the band, fail closed on band exhaustion);
-- an omitted home is the shared `rustos_users::default_home` layout
-  (`/Users/NAME`), the shell is `rustos_users::DEFAULT_SHELL`, and the
-  created ceiling is `rustos_users::SESSION_BASELINE` — an administrator
+- an omitted home is the shared `tairix_users::default_home` layout
+  (`/Users/NAME`), the shell is `tairix_users::DEFAULT_SHELL`, and the
+  created ceiling is `tairix_users::SESSION_BASELINE` — an administrator
   widens it afterwards with the `users` tool's `grant`, bounded by their
   own effective set (the kernel enforces never-widen);
 - the database — not this tool — is the policy point: it enforces
@@ -109,7 +109,7 @@ failure, `2` on a usage error.
 
 ## Tests
 
-`cargo test -p rustos-useradd` drives the parser, the engine, and the
+`cargo test -p tairix-useradd` drives the parser, the engine, and the
 production client against in-memory fixtures: the command grammar (the
 minimal name+group form, every option, long `--opt value`/`--opt=value`
 and attached short `-u0` spellings, `-h`/`-?`/`--help`, the

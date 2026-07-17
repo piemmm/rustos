@@ -1,9 +1,9 @@
 //! Deterministic fuzz harness for the `lib/devids` vetting parser and table
 //! decoder — the two untrusted-input surfaces of the ID-database pipeline.
 //!
-//! [`rustos_devids::textdb::parse`] judges a raw upstream download (untrusted
+//! [`tairix_devids::textdb::parse`] judges a raw upstream download (untrusted
 //! bytes whose strings end up on users' terminals);
-//! [`rustos_devids::DevIds::parse`] decodes a compiled table that is still
+//! [`tairix_devids::DevIds::parse`] decodes a compiled table that is still
 //! treated as data. The harness's invariants:
 //!
 //! * parsing any byte string never panics — it returns a `ParsedDb` or a
@@ -13,13 +13,13 @@
 //! * decoding any byte string — noise or a bit-flipped valid table — never
 //!   panics, and an accepted table serves lookups without panicking.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG mutates
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates
 //! real snapshot templates, splices structured hostile lines, and draws pure
 //! noise. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from
 //! a fresh, logged seed; `cargo xtask fuzz` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
-use rustos_devids::{textdb, DbKind, DevIds};
+use tairix_devids::{textdb, DbKind, DevIds};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -104,13 +104,13 @@ fn exercise_lookups(ids: &DevIds<'_>) {
 
 #[test]
 fn parse_encode_decode_never_panic_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh per
-    // run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh per
+    // run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "parse_encode_decode_never_panic_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -168,7 +168,7 @@ fn parse_encode_decode_never_panic_for_any_input() {
         }
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

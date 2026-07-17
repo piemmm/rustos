@@ -1,12 +1,12 @@
 //! Structured response records for the `info:` and `stats:` resource
 //! namespaces (`plans/ALIAS.md` §14).
 //!
-//! RustOS has no `/proc` and no `/sys`: the `info:` (mostly stable facts) and
+//! TAIRiX has no `/proc` and no `/sys`: the `info:` (mostly stable facts) and
 //! `stats:` (time-dependent measurements) resource namespaces are served by
 //! the System Information API, never by a virtual file or by text scraping.
 //! [`resolve`](crate::resolve::resolve) maps a parsed
-//! [`ResourceRef`](rustos_resref::ResourceRef) onto a
-//! [`SysinfoQueryId`](rustos_abi::sysinfo::SysinfoQueryId), issues it through
+//! [`ResourceRef`](tairix_resref::ResourceRef) onto a
+//! [`SysinfoQueryId`](tairix_abi::sysinfo::SysinfoQueryId), issues it through
 //! the [`Transport`](crate::transport::Transport) seam, and returns one of the
 //! typed records defined here — never free-form text.
 //!
@@ -25,8 +25,8 @@
 
 use alloc::string::{String, ToString};
 
-use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::{CapabilityId, Errno};
+use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::{CapabilityId, Errno};
 
 /// Envelope version for the `info:`/`stats:` response records in this build.
 pub const RESINFO_VERSION_V1: u16 = 1;
@@ -126,7 +126,7 @@ pub enum ResetBehavior {
 }
 
 /// Render a resource-limit soft/hard bound for display, spelling
-/// [`RLIMIT_INFINITY`](rustos_abi::RLIMIT_INFINITY) as `unlimited` and any
+/// [`RLIMIT_INFINITY`](tairix_abi::RLIMIT_INFINITY) as `unlimited` and any
 /// finite bound as its decimal value.
 ///
 /// The one definition of that convention, shared by the `sysinfo` CLI's
@@ -134,7 +134,7 @@ pub enum ResetBehavior {
 /// an unlimited bound differently.
 #[must_use]
 pub fn render_limit_bound(value: u64) -> String {
-    if value == rustos_abi::RLIMIT_INFINITY {
+    if value == tairix_abi::RLIMIT_INFINITY {
         String::from("unlimited")
     } else {
         value.to_string()
@@ -313,13 +313,13 @@ mod tests {
         ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN, MAX_METRIC_NAME_LEN,
         MAX_QUERY_LEN, RESINFO_VERSION_CURRENT,
     };
-    use rustos_abi::time::Time64;
-    use rustos_abi::{CapabilityId, Errno};
+    use tairix_abi::time::Time64;
+    use tairix_abi::{CapabilityId, Errno};
 
     #[test]
     fn info_value_holds_text_and_kind() {
-        let v = InfoValue::new_str(Sensitivity::Public, "rustos").expect("value");
-        assert_eq!(v.value(), "rustos");
+        let v = InfoValue::new_str(Sensitivity::Public, "tairix").expect("value");
+        assert_eq!(v.value(), "tairix");
         assert_eq!(v.kind, ValueKind::Str);
         assert_eq!(v.sensitivity, Sensitivity::Public);
     }

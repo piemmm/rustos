@@ -14,7 +14,7 @@ and the converting tool own interpretation.
 
 ## Namespaces
 
-`user`, `rustos`, and the foreign namespaces (`acorn`, `amiga`, `atari`, `mac`)
+`user`, `tairix`, and the foreign namespaces (`acorn`, `amiga`, `atari`, `mac`)
 are ordinary file metadata (file read/write permission). `system` and `trusted`
 are privileged (a VFS capability gate). See arxfs-spec §21.1.
 
@@ -59,12 +59,12 @@ attributes distinct from a generic FAT mapping so intent is not lost.
 | `mac.finderflags` | 16-bit Finder flags, big-endian. |
 | `mac.resourcefork` | the resource fork, stored as a *named stream* (arxfs-spec §21.2), not an inline attribute value. |
 
-## RustOS native
+## TAIRiX native
 
 | key | value encoding |
 |---|---|
-| `rustos.origin` | provenance: source filesystem family + volume id, set on import so a later export knows where the metadata came from. |
-| `rustos.mime` | optional MIME type hint (advisory; never a security decision). |
+| `tairix.origin` | provenance: source filesystem family + volume id, set on import so a later export knows where the metadata came from. |
+| `tairix.mime` | optional MIME type hint (advisory; never a security decision). |
 
 ## Status
 

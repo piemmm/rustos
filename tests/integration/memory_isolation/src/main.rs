@@ -12,7 +12,7 @@
 //!
 //! ## How it asserts it
 //!
-//! Two distinct `AddressSpace`s are constructed (`rustos_arch_x86_64`'s
+//! Two distinct `AddressSpace`s are constructed (`tairix_arch_x86_64`'s
 //! Stage-3a-partial paging primitives — see that crate's docs):
 //!
 //! * **Victim** — identity-maps the first 32 MiB *and* adds a 4 KiB
@@ -49,9 +49,9 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(itest_x86_64)]
-use rustos_arch_api::mmu::{AddressSpace as _, PageFlags};
+use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
 #[cfg(itest_x86_64)]
-use rustos_arch_x86_64::{idt, paging, qemu_exit, serial};
+use tairix_arch_x86_64::{idt, paging, qemu_exit, serial};
 
 /// Virtual address only the *victim* address space maps. Chosen well
 /// outside the 32 MiB identity-mapped boot region so any access from
@@ -89,7 +89,7 @@ static ATTACKER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SECRET_PHYS: AtomicU64 = AtomicU64::new(0);
 
 /// Entry point for the freestanding kernel. Called by
-/// `rustos_arch_x86_64`'s boot trampoline after the multiboot magic
+/// `tairix_arch_x86_64`'s boot trampoline after the multiboot magic
 /// has been validated.
 #[no_mangle]
 #[cfg(itest_x86_64)]
@@ -124,7 +124,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         qemu_exit::exit_failure();
     };
     // Install the secret mapping through the Arch HAL MMU surface
-    // (`rustos_arch_api::mmu::AddressSpace::map_page`), the path the
+    // (`tairix_arch_api::mmu::AddressSpace::map_page`), the path the
     // architecture-neutral kernel uses, rather than the port's inherent
     // `map_4k` (`plans/WIRING.md` W5b).
     if victim

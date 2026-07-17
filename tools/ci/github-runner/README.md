@@ -1,7 +1,7 @@
 # `tools/ci/github-runner` — self-hosted GitHub Actions runner (Linux)
 
 This directory documents standing up a **self-hosted GitHub Actions runner on
-Linux** for RustOS. It is the GitHub-native counterpart of the
+Linux** for TAIRiX. It is the GitHub-native counterpart of the
 cron/systemd/launchd builders in the parent `tools/ci/` directory: same
 `cargo xtask` pipeline, just triggered by GitHub instead of a local timer.
 
@@ -35,14 +35,14 @@ the workflows are locked down so only the owner can ever reach the runner:
   runs only on `schedule` (always the base repo's default branch, never a fork)
   and `workflow_dispatch`.
 - **Owner-only execution.** Every job is gated with
-  `if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'`. A
+  `if: github.repository == 'piemmm/tairix' && github.actor == 'piemmm'`. A
   fork (a different `github.repository`) and any other actor — including a
   collaborator's manual dispatch — are refused before checkout, so no untrusted
   code is fetched or run.
 - **Least-privilege token.** Both workflows set `permissions: contents: read`;
   no job can write to the repo, releases, packages, or other GitHub state.
 
-If you fork this repository under a different owner, update the `piemmm/rustos`
+If you fork this repository under a different owner, update the `piemmm/tairix`
 / `piemmm` guards in `.github/workflows/*.yml` to your own owner and account
 before registering a runner — otherwise the jobs will (correctly) refuse to run.
 
@@ -61,8 +61,8 @@ host — one without the `soak` label for `ci`, one with it for `soak`:
 
 | Runner instance | Labels | Picks up |
 |-----------------|--------|----------|
-| `<host>-rustos-ci`   | `self-hosted,linux`      | `ci.yml` (and, when idle, could also serve a `soak` job — but `soak` requires the `soak` label, so it never lands here). |
-| `<host>-rustos-soak` | `self-hosted,linux,soak` | `soak.yml` only — `soak`'s `runs-on` requires the `soak` label, so the long block never occupies the `ci` runner. |
+| `<host>-tairix-ci`   | `self-hosted,linux`      | `ci.yml` (and, when idle, could also serve a `soak` job — but `soak` requires the `soak` label, so it never lands here). |
+| `<host>-tairix-soak` | `self-hosted,linux,soak` | `soak.yml` only — `soak`'s `runs-on` requires the `soak` label, so the long block never occupies the `ci` runner. |
 
 Because `soak`'s `runs-on` demands the `soak` label, soak jobs only ever land
 on the `soak` instance; the `ci` instance stays free for per-push gates. The
@@ -81,7 +81,7 @@ soaks, just register the `soak`-labelled instance there.
   (`${CARGO_HOME:-~/.cargo}/bin`; see the toolchain note in the parent
   `tools/ci/README.md`).
 - Outbound HTTPS to GitHub (to pull jobs). Per AGENTS.md §19.3 this governs the
-  build host, not RustOS itself; keep `Cargo.lock` committed so source-hash
+  build host, not TAIRiX itself; keep `Cargo.lock` committed so source-hash
   pinning stays meaningful.
 
 ## Register the runner
@@ -102,9 +102,9 @@ tar xzf actions-runner.tar.gz
 
 # Register against the repository with the short-lived token from that page.
 ./config.sh \
-  --url https://github.com/<owner>/rustos \
+  --url https://github.com/<owner>/tairix \
   --token <registration-token> \
-  --name "$(hostname)-rustos-soak" \
+  --name "$(hostname)-tairix-soak" \
   --labels self-hosted,linux,soak \
   --unattended --replace
 ```
@@ -117,9 +117,9 @@ in its own directory **without** the `soak` label:
 mkdir -p ~/actions-runner-ci && cd ~/actions-runner-ci
 # Download + extract the runner the same way (exact URL from the runners page).
 ./config.sh \
-  --url https://github.com/<owner>/rustos \
+  --url https://github.com/<owner>/tairix \
   --token <registration-token> \
-  --name "$(hostname)-rustos-ci" \
+  --name "$(hostname)-tairix-ci" \
   --labels self-hosted,linux \
   --unattended --replace
 ```

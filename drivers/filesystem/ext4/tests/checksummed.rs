@@ -19,10 +19,10 @@
 // the width-narrowing casts are exact for these fixtures.
 #![allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use rustos_abi::DriverError;
-use rustos_drv_fs_ext4::Ext4;
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::DriverError;
+use tairix_drv_fs_ext4::Ext4;
 
 const META_CSUM: &[u8] = include_bytes!("fixtures/metadata_csum.img");
 const GDT_CSUM: &[u8] = include_bytes!("fixtures/gdt_csum.img");

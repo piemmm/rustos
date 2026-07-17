@@ -13,7 +13,7 @@ ysbryd yr offer sefydledig `stress`/`stress-ng`: dolenni CPU
 (`--cpu`), gweithwyr cof dyrannu-a-chyffwrdd (`--vm`),
 ysgrifennu/cysoni byfferau bach (`--io`), ysgrifenwyr disg dilyniannol
 mawr (`--hdd`) ac ail-ddarllenwyr sy'n corddi'r storfeydd (`--cache`,
-ychwanegiad RustOS). Mae pob gweithiwr yn broses gyfnewidiadwy ei hun;
+ychwanegiad TAIRiX). Mae pob gweithiwr yn broses gyfnewidiadwy ei hun;
 mae'r broses reoli yn pinio ei chof ei hun (`mem_pin`, angen
 `CAP_MEM_PIN`) er mwyn aros yn ymatebol o dan y pwysau y mae hi ei hun
 yn ei greu, ac yn arsylwi `Ctrl-C`/`Terminate`, fel bod pob diwedd i'r
@@ -46,7 +46,7 @@ gwybodaeth safonol gynghorol (fd 3).
 
 - `--cpu N`, `--io N`, `--vm N`, `--hdd N` — lansio `N` gweithiwr o'r
   math a enwyd, gydag ystyr GNU `stress`.
-- `--cache N` — lansio `N` corddwr storfa (RustOS yn unig: mae
+- `--cache N` — lansio `N` corddwr storfa (TAIRiX yn unig: mae
   teithiau oer ailadroddus drwy gyfeiriaduron ac ail-ddarlleniadau yn
   symud cofrestrau storfeydd adferadwy'r cnewyllyn).
 - `--all N` — `N` gweithiwr o bob math.

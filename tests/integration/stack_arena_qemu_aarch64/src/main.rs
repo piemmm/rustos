@@ -7,7 +7,7 @@
 //! ## Why this exists
 //!
 //! G1 proved the page-table block-split primitive
-//! (`rustos_arch_aarch64::paging::AddressSpace::split_block`) on a
+//! (`tairix_arch_aarch64::paging::AddressSpace::split_block`) on a
 //! single page. G2 is the boot-map step that gives kthread kernel stacks a
 //! dedicated arena, re-expressed at 4 KiB granularity up-front, so the
 //! eventual guard-page unmap (stage G3) never has to break-before-make the
@@ -43,7 +43,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port and supplies its own
+//! It links only the `tairix-arch-aarch64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
 //! never behind a Cargo feature on the arch crate (fail closed).
 
@@ -57,11 +57,11 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_aarch64::paging::{AddressSpace, PageTablePool, BLOCK_2MIB, PAGE_SIZE};
-    use rustos_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-    use rustos_arch_api::mmu::AddressSpace as _;
-    use rustos_arch_api::tlb::TlbShootdown as _;
-    use rustos_log::{log, Event, EventId, Field, Level};
+    use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool, BLOCK_2MIB, PAGE_SIZE};
+    use tairix_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_arch_api::mmu::AddressSpace as _;
+    use tairix_arch_api::tlb::TlbShootdown as _;
+    use tairix_log::{log, Event, EventId, Field, Level};
 
     /// Number of GiB the space identity-maps (device MMIO + RAM). The
     /// kernel image, stack, and `ARENA` all live in the Normal RAM
@@ -131,12 +131,12 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_stack_arena_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_stack_arena_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         log(
@@ -226,7 +226,7 @@ mod kernel {
                 message: "aarch64 stack-arena test: read the unmapped guard page (no fault)",
                 fields: &[Field {
                     key: "observed",
-                    value: rustos_log::FieldValue::Str(if observed == SENTINEL {
+                    value: tairix_log::FieldValue::Str(if observed == SENTINEL {
                         "sentinel"
                     } else {
                         "other"
@@ -268,7 +268,7 @@ mod kernel {
                 message: "aarch64 stack-arena test: setup failed",
                 fields: &[Field {
                     key: "stage",
-                    value: rustos_log::FieldValue::Str(what),
+                    value: tairix_log::FieldValue::Str(what),
                 }],
             },
         );

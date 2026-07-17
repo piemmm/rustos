@@ -4,9 +4,9 @@
 //! board — the EL1/SPI analogue of `tests/integration/irq_qemu_x86_64`.
 //!
 //! On boot the test installs the EL1 vectors, brings up the GICv2, builds
-//! a kernel-neutral `rustos_kernel_irq::IrqTable`, binds the PL031 RTC's
+//! a kernel-neutral `tairix_kernel_irq::IrqTable`, binds the PL031 RTC's
 //! GICv2 SPI line (INTID 34), installs a set-once device-IRQ dispatcher
-//! (`rustos_arch_aarch64::exceptions::set_device_irq_dispatch`) that
+//! (`tairix_arch_aarch64::exceptions::set_device_irq_dispatch`) that
 //! forwards the line to `IrqTable::fire` over a `GicController` bridge,
 //! routes that SPI to CPU 0 (`gic::route_spi` → `GICD_ITARGETSR`), arms
 //! the RTC match interrupt, and unmasks IRQs. When the RTC fires, the GIC
@@ -24,7 +24,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-irq-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-irq-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

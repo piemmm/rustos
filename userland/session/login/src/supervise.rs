@@ -19,7 +19,7 @@
 //!    would fight over the one keyboard. So while the unlock is still
 //!    running, `users_db_read` reports [`DbLoad::Pending`] (the kernel's
 //!    `Errno::WouldBlock`); `login` then **waits** ([`supervise`] calls the
-//!    injected `wait`, e.g. `rustos_rt::users_db_wait`, which parks the task
+//!    injected `wait`, e.g. `tairix_rt::users_db_wait`, which parks the task
 //!    off the run queue until the unlock resolves) and does not prompt,
 //!    leaving the console to the unlock until it resolves.
 //! 2. **Stale "no database".** A `login` that read the database **once** at
@@ -35,7 +35,7 @@
 use crate::auth::{DenyAll, UsersAuthenticator};
 use crate::session::Authenticator;
 
-use rustos_users::UsersDb;
+use tairix_users::UsersDb;
 
 /// The state of the user database as seen by a single `load_db` call.
 ///
@@ -62,7 +62,7 @@ pub enum DbLoad {
 /// the `/System/Security/Users` database ([`DbLoad`]). `wait` is called
 /// when the database is [`DbLoad::Pending`] (the encrypted root is still
 /// being unlocked); it should **block** until the database becomes
-/// available (e.g. `rustos_rt::users_db_wait`, which parks the task off the
+/// available (e.g. `tairix_rt::users_db_wait`, which parks the task off the
 /// run queue rather than busy-yielding) so the in-kernel
 /// unlock kthread runs — `login` neither prompts nor reads the console
 /// while pending, so it cannot steal the passphrase bytes.
@@ -111,8 +111,8 @@ mod tests {
 
     use alloc::vec;
     use core::cell::{Cell, RefCell};
-    use rustos_caps::CapabilitySet;
-    use rustos_users::{AccountState, Gid, Identity, Uid, UserRecord, UsersDb, MIN_ITERATIONS};
+    use tairix_caps::CapabilitySet;
+    use tairix_users::{AccountState, Gid, Identity, Uid, UserRecord, UsersDb, MIN_ITERATIONS};
 
     /// A one-record database whose `root`/`root` account authenticates — the
     /// debug-image seed shape (`tools/mkimage`).

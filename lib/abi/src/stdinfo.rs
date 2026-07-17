@@ -1,6 +1,6 @@
 //! Standard Information Stream (`stdinfo`, file descriptor 3) ABI.
 //!
-//! RustOS reserves file descriptor [`STDINFO_FD`] as `stdinfo`: an optional,
+//! TAIRiX reserves file descriptor [`STDINFO_FD`] as `stdinfo`: an optional,
 //! structured advisory stream for concise human context and AI/tool metadata
 //! about a command's `stdout`. It is **never** primary data (that is
 //! `stdout`), **never** errors or diagnostics (that is `stderr`), and

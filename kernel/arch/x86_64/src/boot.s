@@ -48,18 +48,18 @@
 //     reachable, and likewise that any ACPI table OVMF/GRUB placed in
 //     high memory below 4 GiB is reachable. Going beyond 4 GiB is not
 //     needed for the Stage-2 QEMU tests (the runner allocates 256 MiB of
-//     guest RAM and no MMIO RustOS uses today sits above 4 GiB).
+//     guest RAM and no MMIO TAIRiX uses today sits above 4 GiB).
 //  5. The long-mode GDT below has a single 64-bit code segment at
 //     selector 0x08 with L=1 (long mode) and a 64-bit data segment at
 //     selector 0x10. Both are flat (base 0, limit ignored in 64-bit).
 //  6. On entry to `long_mode_start` interrupts are disabled (CLI is the
 //     bootloader default) and the IDTR is invalid; the Rust side must
 //     install an IDT before enabling interrupts (`AGENTS.md` §10).
-//  7. `rustos_arch_x86_64_main` receives the boot magic (multiboot2 or
+//  7. `tairix_arch_x86_64_main` receives the boot magic (multiboot2 or
 //     PVH) in `%rdi` and the boot-info pointer in `%rsi` (System V
 //     AMD64 ABI). The Rust prologue re-validates the magic before
 //     touching the info blob (validate every input).
-//  8. If `rustos_arch_x86_64_main` ever returns we halt the CPU with
+//  8. If `tairix_arch_x86_64_main` ever returns we halt the CPU with
 //     interrupts masked. The Rust contract (`-> !`) makes this branch
 //     unreachable; the `hlt`/`jmp` loop is the belt-and-braces fallback
 //     `AGENTS.md` §2.9 requires.
@@ -97,7 +97,7 @@ multiboot_header_end:
 // name "Xen", descriptor = the 32-bit physical entry point. QEMU's
 // `-kernel` ELF loader finds this note in the PT_NOTE segment and enters
 // `pvh_start` in 32-bit protected mode with %ebx = &hvm_start_info.
-.section .note.rustos_pvh, "a", @note
+.section .note.tairix_pvh, "a", @note
 .align 4
     .long 4                                         // namesz ("Xen\0")
     .long 4                                         // descsz
@@ -253,9 +253,9 @@ long_mode_start:
 higher_half_entry:
     // rdi/rsi still hold the multiboot magic / info pointer (untouched by
     // the absolute jump above).
-    call rustos_arch_x86_64_main
+    call tairix_arch_x86_64_main
 
-    // `rustos_arch_x86_64_main` is `-> !`; reaching here is a kernel bug.
+    // `tairix_arch_x86_64_main` is `-> !`; reaching here is a kernel bug.
     cli
 .Lhang:
     hlt
@@ -294,7 +294,7 @@ boot_pds:
 // `open` (which stages whole blocks through on-stack scratch buffers)
 // onto this stack, so 16 KiB was marginal; 64 KiB gives ample headroom
 // and keeps an overflow from silently corrupting the adjacent
-// `boot_pds` page tables. `KERNEL_STACK_BYTES` in `rustos-kernel`
+// `boot_pds` page tables. `KERNEL_STACK_BYTES` in `tairix-kernel`
 // tracks this value (its static assert pins the lower bound).
 .align 16
 boot_stack_bottom:

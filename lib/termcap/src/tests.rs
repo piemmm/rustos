@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_vt::{encode_into, Color, Op, Parser};
+use tairix_vt::{encode_into, Color, Op, Parser};
 
 /// Encode one operation into a fresh `Vec` over the sink API.
 fn encode(op: &Op) -> Vec<u8> {
@@ -47,7 +47,7 @@ fn xterm_16color_caps() {
     assert_eq!(caps.color, ColorDepth::Ansi16);
     assert!(caps
         .color
-        .supports(Color::Basic(rustos_vt::BasicColor::BrightCyan)));
+        .supports(Color::Basic(tairix_vt::BasicColor::BrightCyan)));
     assert!(!caps.color.supports(Color::Indexed(200)));
 }
 
@@ -156,7 +156,7 @@ fn color_depth_supports_each_model_at_the_right_depth() {
     ] {
         assert!(depth.supports(Color::Default));
         assert_eq!(
-            depth.supports(Color::Basic(rustos_vt::BasicColor::Red)),
+            depth.supports(Color::Basic(tairix_vt::BasicColor::Red)),
             !matches!(depth, ColorDepth::None)
         );
         assert_eq!(

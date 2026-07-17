@@ -9,9 +9,9 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::driver::filesystem::MountFlags;
-use rustos_abi::sysinfo::{MountAvailability, MountListRequest, MountRecord, SysinfoQueryId};
-use rustos_abi::Errno;
+use tairix_abi::driver::filesystem::MountFlags;
+use tairix_abi::sysinfo::{MountAvailability, MountListRequest, MountRecord, SysinfoQueryId};
+use tairix_abi::Errno;
 
 use crate::list::{field_lossy, walk_pages, ListError};
 use crate::request::CallError;
@@ -126,11 +126,11 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
-    use rustos_abi::sysinfo::{
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::sysinfo::{
         MountAvailability, MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory `sysinfod` stand-in answering mount-list queries from a
     /// fixed record set, decoding the request exactly as the real service.

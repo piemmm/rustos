@@ -1,4 +1,4 @@
-# RustOS formatting policy.
+# TAIRiX formatting policy.
 #
 # Keep this file small. Anything not specified follows rustfmt defaults so the
 # code matches what a contributor's editor produces without surprises.

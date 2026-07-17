@@ -18,13 +18,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::display::{
+use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
 };
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
-use rustos_cursor::CursorImage;
-use rustos_theme::CursorKind;
+use tairix_cursor::CursorImage;
+use tairix_theme::CursorKind;
 
 use crate::color::{Color, Pixel};
 use crate::corner::Corners;

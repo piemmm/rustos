@@ -1,6 +1,6 @@
-# rustos-users
+# tairix-users
 
-The RustOS **user-account database**: the versioned text format persisted at
+The TAIRiX **user-account database**: the versioned text format persisted at
 `/System/Security/Users` (`AGENTS.md` §5.1, §16.2), the account identity
 types (`Uid`, `Gid`, `UserRecord`), and password verification.
 
@@ -42,7 +42,7 @@ depends on nothing else.
 
 ## Stability tier
 
-`experimental` — the format version line (`rustos-users-v1`) carries the
+`experimental` — the format version line (`tairix-users-v1`) carries the
 version; until the first release the record shape evolves in place
 (`AGENTS.md` §2.13). The crate is `no_std` + `alloc`. No `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths: parsing and authentication

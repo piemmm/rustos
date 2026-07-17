@@ -1,5 +1,5 @@
 //! riscv64 implementation of the Arch HAL "enter user mode" surface
-//! ([`rustos_arch_api::EnterUser`]).
+//! ([`tairix_arch_api::EnterUser`]).
 //!
 //! Dropping a freshly built process image into U-mode is the `sret`
 //! sequence: clear `sstatus.SPP` (so `sret` targets U-mode) and
@@ -23,7 +23,7 @@
 //! Leaving `SIE` clear keeps the *kernel* non-preemptible: a tick taken while in S-mode never fires the preempt point
 //! (`crate::trap` gates it on the saved `SPP`).
 
-use rustos_arch_api::{EnterUser, UserEntry};
+use tairix_arch_api::{EnterUser, UserEntry};
 
 /// riscv64 implementation of the Arch HAL "enter user mode" surface.
 ///

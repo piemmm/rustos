@@ -338,7 +338,7 @@ pub trait Block {
 /// borrowed device.
 ///
 /// This lets a caller layer a transient adapter (e.g. a
-/// `rustos_partition::PartitionBlock` window) over a *borrowed* device,
+/// `tairix_partition::PartitionBlock` window) over a *borrowed* device,
 /// use it, drop it, then reuse the underlying device — without giving up
 /// ownership. The boot path relies on it to open the FAT boot partition
 /// and the encrypted root partition of one disk in sequence (one disk,

@@ -1,7 +1,7 @@
 //! Deterministic hardware-node ↔ driver bind-table match resolution.
 //!
 //! Matching is pure data comparison: a hardware-tree node carries the
-//! match keys its discoverer emitted ([`rustos_abi::HwNode::match_keys`]),
+//! match keys its discoverer emitted ([`tairix_abi::HwNode::match_keys`]),
 //! a driver candidate carries the bind table its signed manifest declared,
 //! and a bind-table entry matches a node when its [`HwMatchKey`] matches one
 //! of the node's keys ([`HwMatchKey::matches`] — exact for
@@ -19,7 +19,7 @@
 //! * the user-space device manager (`userland/system/devmgr`), the
 //!   autoload owner; and
 //! * the kernel's interim in-kernel driver-candidate catalogue
-//!   (`kernel/rustos-kernel`), which brings the Pi 4 USB chain up by the
+//!   (`kernel/tairix-kernel`), which brings the Pi 4 USB chain up by the
 //!   same data-driven match until the user-space driver-host-over-IPC path
 //!   lands (PLAN Stage 4.HW item 5).
 //!
@@ -30,13 +30,13 @@
 //! # Stability
 //!
 //! Tier: `experimental` (). The wire formats compared
-//! (hardware-tree match keys, bind-table entries) are owned by `rustos-abi`.
+//! (hardware-tree match keys, bind-table entries) are owned by `tairix-abi`.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{DriverBindKey, HwMatchKey};
 
 /// One autoload candidate: a driver image's logical path plus the bind
 /// table decoded — fail-closed — from its signed manifest.

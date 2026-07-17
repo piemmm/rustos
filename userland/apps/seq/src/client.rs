@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_help::{own_short_help, HelpSource};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Job};
 use crate::error::SeqError;
@@ -340,7 +340,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_help::{HelpSource, SourceError};
 
     use super::{run, Output, USAGE};
     use crate::command::parse;
@@ -547,7 +547,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/seq.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

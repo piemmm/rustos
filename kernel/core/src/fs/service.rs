@@ -2,14 +2,14 @@
 //! route through (`PREREQUISITES.md` P-A).
 //!
 //! The mounted volume's filesystem driver is owned for the life of the
-//! system by the single disk-owning kthread (`rustos-kernel`'s driver-store
+//! system by the single disk-owning kthread (`tairix-kernel`'s driver-store
 //! service); the block device cannot be shared and an operation may park on
 //! the device completion IRQ. The `fs_*` syscall handlers therefore do not
 //! borrow the filesystem directly — they call this [`FilesystemService`],
 //! whose production implementation routes each request to that disk-owning
 //! service. The handler supplies the caller's **kernel-attested** identity
 //! (the owning uid and effective capability set, taken from the task's
-//! [`rustos_kernel_sec::TaskCapabilities`], never anything the caller
+//! [`tairix_kernel_sec::TaskCapabilities`], never anything the caller
 //! supplied); the service resolves the caller's groups from the system
 //! identity table and authorises every operation through the secured VFS, so
 //! every per-inode owner/mode/ACL/capability and mount-flag check stays
@@ -23,9 +23,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::sysinfo::MountRecord;
-use rustos_abi::time::Time64;
-use rustos_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
+use tairix_abi::sysinfo::MountRecord;
+use tairix_abi::time::Time64;
+use tairix_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
 
 /// One directory entry as [`FilesystemService::readdir`] reports it: the
 /// child's kind, its apparent and allocated sizes, and its name.

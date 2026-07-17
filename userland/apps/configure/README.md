@@ -1,6 +1,6 @@
 # configure
 
-The RustOS boot-time configuration command (the `sysctl`-shaped settings
+The TAIRiX boot-time configuration command (the `sysctl`-shaped settings
 tool): list, show, and set the settings of the system-configuration store
 at `/System/Settings/Configuration/system.conf`.
 

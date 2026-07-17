@@ -13,10 +13,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::sysinfo::{KernelMemoryStats, LoadAverage, ProcessRecord, SysinfoQueryId, Uptime};
-use rustos_abi::ProcId;
-use rustos_curses::Event;
-use rustos_procinfo::{call, for_each_cpu_time, for_each_process, CallError, Transport};
+use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, ProcessRecord, SysinfoQueryId, Uptime};
+use tairix_abi::ProcId;
+use tairix_curses::Event;
+use tairix_procinfo::{call, for_each_cpu_time, for_each_process, CallError, Transport};
 
 use crate::error::TopError;
 

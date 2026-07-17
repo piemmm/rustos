@@ -1,4 +1,4 @@
-# CAPABILITY_USE.md — The capability lifecycle: how a user actually uses RustOS
+# CAPABILITY_USE.md — The capability lifecycle: how a user actually uses TAIRiX
 
 This is the binding specification and staged build plan for how kernel
 capabilities are **granted, delegated, exercised, and revoked** across a real
@@ -30,13 +30,13 @@ useless: every `ls`, `cd`, file open, and program launch fails with
    `CAP_PROC_SPAWN` — so the spawned shell could not touch the filesystem
    or launch anything. The shell now requests its own exercised set,
    `SHELL_MANIFEST`: the console pair plus `CAP_FS_ACCESS` and
-   `CAP_PROC_SPAWN` (`kernel/rustos-kernel/src/program_manifests.rs`,
+   `CAP_PROC_SPAWN` (`kernel/tairix-kernel/src/program_manifests.rs`,
    CU2; decoupled from the baseline when CU6 widened the ceiling with
    the graphical-session class the shell never exercises).
 3. *(fixed — CU3)* The debug root account's seeded grant (`tools/mkimage`)
    omitted `CAP_FS_ACCESS`, so even with the intersection wired the shell
    was still denied the filesystem. The seeded grant is now the shared
-   administrator ceiling (`rustos_users::administrator_ceiling`, CU3).
+   administrator ceiling (`tairix_users::administrator_ceiling`, CU3).
 
 This plan defines the lifecycle properly, then fixes the defect through it —
 never by widening a check or special-casing `uid 0` (`AGENTS.md` §2.17,
@@ -50,7 +50,7 @@ never by widening a check or special-casing `uid 0` (`AGENTS.md` §2.17,
 
 ## 1. The model (normative recap)
 
-RustOS authority is layered. Nothing here is new; this section fixes the
+TAIRiX authority is layered. Nothing here is new; this section fixes the
 vocabulary the rest of the plan uses.
 
 1. **Identity** — every process runs as a kernel-attested
@@ -99,7 +99,7 @@ The life of a capability, from disk to exercise to revocation:
    authored by the image builder (debug), the installer (first user), or a
    `CAP_USER_ADMIN` holder (user management, CU4). A *system/service*
    account's ceiling is compiled into the kernel with its record
-   (`rustos_users::system_accounts`, `plans/USERS.md`) — OS policy,
+   (`tairix_users::system_accounts`, `plans/USERS.md`) — OS policy,
    tamper-proof as the kernel text, never volume data. The *system*
    principal (PID 1 `init`) has no account ceiling; its manifest is its
    ceiling (§4.1).
@@ -172,7 +172,7 @@ The life of a capability, from disk to exercise to revocation:
   fixed.
 - The audited, pinned per-program manifests — the shell's own exercised
   set (`SHELL_MANIFEST`), sized per §4.5, among them
-  (`kernel/rustos-kernel/src/program_manifests.rs`, CU2) — B2 is fixed.
+  (`kernel/tairix-kernel/src/program_manifests.rs`, CU2) — B2 is fixed.
 - The §4.2/§4.3 sets defined once in `lib/users` (`grants`:
   `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, `administrator_ceiling()`)
   and seeded as the debug root grant (`tools/mkimage`'s profile-keyed
@@ -250,7 +250,7 @@ service-class (`CAP_SPAWN_AS_USER`, `CAP_USERS_READ`,
 part of an *interactive* account ceiling: they belong to the specific system
 program whose manifest requests them — and, through that service's own
 no-login account (`plans/USERS.md`), to its dedicated per-service ceiling
-(`rustos_users::{DEVMGR_CEILING, SYSINFOD_CEILING, SEATMGR_CEILING,
+(`tairix_users::{DEVMGR_CEILING, SYSINFOD_CEILING, SEATMGR_CEILING,
 LOGIN_CEILING, NETSTACK_CEILING}`), which holds exactly that one service's needs so the
 ceiling∩manifest intersection does real work. An administrator administers
 the system; they do not impersonate its services.
@@ -404,7 +404,7 @@ authorises it; anything not listed is denied.
 **Status: done.**
 
 - Every embedded program's manifest-requested capability list is defined
-  once in `kernel/rustos-kernel/src/program_manifests.rs` (pure data, host-
+  once in `kernel/tairix-kernel/src/program_manifests.rs` (pure data, host-
   testable) and consumed by the `SPAWN_PROGRAMS` rows and `init_caps` in
   `spawn_layout.rs`. The shell's manifest is `SESSION_BASELINE`
   (`CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, `CAP_CONSOLE_READ`,
@@ -443,7 +443,7 @@ authorises it; anything not listed is denied.
 - `tools/mkimage`'s profile-keyed `users_db` seeds the debug root grant
   as `administrator_ceiling()`; its unit test pins the seeded record to
   the exact set. The shared users-root QEMU fixture
-  (`rustos_test_arxfs_image`) plants the same ceiling and the account's
+  (`tairix_test_arxfs_image`) plants the same ceiling and the account's
   `/Users/root` home directory, so the fixture cannot drift from the
   debug profile.
 - End-to-end QEMU acceptance vertical
@@ -476,8 +476,8 @@ exist from CU3).
   No raw-text edit path exists: password records never leave the kernel
   (`CAP_USERS_READ` stays login's alone), the list responses are
   secret-free, and a new password crosses only as a client-built salted
-  PBKDF2 record. Wrappers: `rustos_rt::users_admin`,
-  `ros_sys_users_admin`; the decoder is in the shared `lib/abi` fuzz sweep.
+  PBKDF2 record. Wrappers: `tairix_rt::users_admin`,
+  `tairix_sys_users_admin`; the decoder is in the shared `lib/abi` fuzz sweep.
 - **The engine** (`kernel/core/src/useradmin.rs`, `UserAdminEngine` behind
   the `UsersAdmin` seam and the set-once `LateUsersAdmin` cell) applies one
   operation at a time, whole-or-nothing: never-widen (an added grant must be
@@ -495,7 +495,7 @@ exist from CU3).
   identity row (and any running session) is unaffected.
   `UsersDbSource::text` now serves an owned zero-on-drop snapshot.
 - **Persistence** is the `UserAdminBacking` seam: production is
-  `RootAdminBacking` (`kernel/rustos-kernel/src/user_admin_backing.rs`)
+  `RootAdminBacking` (`kernel/tairix-kernel/src/user_admin_backing.rs`)
   over a dedicated read-write `ARXFS` window the unlock's
   `WritableRootSink::publish` opens (the `/System` VFS mount shadows
   `/System/Security`, so the engine writes through a direct window exactly
@@ -548,7 +548,7 @@ exist from CU3).
   1, second concurrent post fails closed) and stays concurrent across
   consoles. A login without a bindable rendezvous degrades to broker-less
   sessions and audits `ELEVATE_UNAVAILABLE`.
-- Reserved-rendezvous hardening: `rustos_abi::ipc::is_reserved_endpoint`
+- Reserved-rendezvous hardening: `tairix_abi::ipc::is_reserved_endpoint`
   is the one definition of the reserved well-known call-endpoint ids
   (driver store, log ingress, mailbox, sysinfo, the elevate range), and
   `CallEndpoint::create` refuses to bind any of them without
@@ -618,7 +618,7 @@ there).**
   capability, no ceiling change, no runtime raise, and `sysinfod` keeps
   gating on the caller's kernel-attested *effective* set.
 - Manifests audited against every gated code path
-  (`kernel/rustos-kernel/src/program_manifests.rs` and each tool's
+  (`kernel/tairix-kernel/src/program_manifests.rs` and each tool's
   `AppInfo.toml`, kept in lockstep by the drift pin): `top` +=
   `CAP_SYSINFO_GLOBAL` (the `a` system-wide toggle) + `CAP_SYSINFO_KERNEL`
   (the memory summary line); `ps` += `CAP_SYSINFO_GLOBAL` (`-e`/`-A`);

@@ -1,9 +1,9 @@
 # Desktop icons
 
-RustOS status and notification icons are **vectorised, scalable, and
+TAIRiX status and notification icons are **vectorised, scalable, and
 themeable** — scalable vector artwork rather than fixed-resolution bitmaps
 (`AGENTS.md` §6 / §10, `PLAN.md` Stage 7). They live in the shared `lib/icon`
-crate (`rustos-icon`) so the taskbar draws them without the taskbar and the
+crate (`tairix-icon`) so the taskbar draws them without the taskbar and the
 window manager depending on one another (`AGENTS.md` §17.4). The crate is
 `no_std`, `#![forbid(unsafe_code)]`, and owns no scan converter or colour
 arithmetic of its own — exactly like `lib/cursor`.
@@ -45,7 +45,7 @@ On-disk icon sets follow the desktop's **SVG-first** asset rule (`AGENTS.md`
 §10), the same as cursors: a set under `/System/Graphics` is authored as SVG
 and decoded — through the curated §16.4 image-decoding library (`lib/svg`) in
 a §19.5 parser sandbox — into the in-memory `VectorIcon` form shown here.
-`rustos_icon::decode_svg(bytes)` (built on `rustos_svg::decode` and
+`tairix_icon::decode_svg(bytes)` (built on `tairix_svg::decode` and
 `VectorIcon::from_svg`) performs that conversion; a malformed or out-of-subset
 asset fails closed, so the caller substitutes a `builtin_icon` glyph rather
 than crashing (`AGENTS.md` §2.9). See [SVG asset decoding](./svg-assets.md).

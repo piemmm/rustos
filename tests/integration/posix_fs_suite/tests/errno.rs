@@ -6,7 +6,7 @@
 //! remain many-to-one (documented on `VfsError::to_errno`). This suite
 //! pins the contract so a future change cannot silently alter it.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn vfs_error_maps_to_the_documented_stable_errno() {

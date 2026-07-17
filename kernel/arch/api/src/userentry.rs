@@ -16,7 +16,7 @@
 //!   image is entered with: the entry-point virtual address, the initial
 //!   user stack pointer, and the value of the first-argument register
 //!   (the kernel hands a freshly spawned process the address of its
-//!   `rustos_abi::process` startup-vector block there). This mirrors the
+//!   `tairix_abi::process` startup-vector block there). This mirrors the
 //!   `ProcessImage` the kernel-side image builder
 //!   (`kernel/mem/src/spawn.rs`) produces.
 //! * [`EnterUser`] — the per-port handle the kernel reaches through. Its
@@ -49,7 +49,7 @@
 ///   exclusive top of the mapped user stack).
 /// * [`Self::arg0`] — the value placed in the first-argument register
 ///   (`a0` on riscv64, `x0` on aarch64, `rdi` on x86_64). The kernel
-///   passes the user address of the `rustos_abi::process` startup-vector
+///   passes the user address of the `tairix_abi::process` startup-vector
 ///   block here so the program's startup object can find its arguments.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct UserEntry {

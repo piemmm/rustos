@@ -14,7 +14,7 @@
 //! colours, so [`IconSet::icon`] tints only the built-in fallback, never an
 //! authored asset.
 
-use rustos_raster::Color;
+use tairix_raster::Color;
 
 use crate::glyph::{builtin_icon, IconKind};
 use crate::vector::VectorIcon;

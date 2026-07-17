@@ -7,7 +7,7 @@
 //! in time that depends only on the *lengths* of the inputs (which are public)
 //! and never on their contents.
 //!
-//! This is the one sanctioned home for secret comparison in RustOS: callers
+//! This is the one sanctioned home for secret comparison in TAIRiX: callers
 //! must never reintroduce `==`, `Ord`, or a short-circuiting loop over secret
 //! material.
 

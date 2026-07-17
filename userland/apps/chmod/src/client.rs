@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_help::{own_short_help, HelpSource};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Mode, Options, Verbosity};
 use crate::error::ChmodError;
@@ -51,7 +51,7 @@ const OWN_WORD: &str = "chmod";
 /// # Errors
 ///
 /// * [`ChmodError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](rustos_abi::Errno).
+///   underlying [`Errno`](tairix_abi::Errno).
 /// * [`ChmodError::Apply`] — applying the new mode failed.
 /// * [`ChmodError::Read`] — a directory's entries could not be read during a
 ///   recursive descent.
@@ -215,8 +215,8 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     /// A Help tree with no documents at all: the short-help fallback path.
     struct NoHelp;

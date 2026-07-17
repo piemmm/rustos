@@ -15,14 +15,14 @@
 //!   screen and the last-flushed *physical* screen and, on [`Screen::doupdate`],
 //!   runs the [minimal-diff renderer](mod@crate::render) to emit the smallest `lib/vt`
 //!   sequence the terminal supports — degrading colour by the terminal's
-//!   [`rustos_termcap::ColorDepth`] (truecolour → 256 → 16 → mono).
+//!   [`tairix_termcap::ColorDepth`] (truecolour → 256 → 16 → mono).
 //! * [`Input`] decodes the terminal's bytes (through `lib/vt`'s one parser) into
 //!   typed [`Event`]s: characters, the arrow / function / editing keys, mouse
 //!   reports, and bracketed-paste runs.
 //!
 //! # One vocabulary, fail closed
 //!
-//! Every byte this crate emits or parses is a [`rustos_vt::Op`] — there is no
+//! Every byte this crate emits or parses is a [`tairix_vt::Op`] — there is no
 //! second escape-sequence table here. It is `no_std` +
 //! `alloc` and is part of the OS — the curated `/System/Libraries/`
 //! Terminal/TUI class that applications dynamically link —
@@ -32,8 +32,8 @@
 //! colour the terminal cannot show is degraded, never emitted raw. Nothing here writes to fd 3 (`stdinfo`).
 //!
 //! ```
-//! use rustos_curses::{render, Buffer, CursorState, Pos, Size, Window};
-//! use rustos_termcap::TermType;
+//! use tairix_curses::{render, Buffer, CursorState, Pos, Size, Window};
+//! use tairix_termcap::TermType;
 //!
 //! // Draw "hi" into a one-row window.
 //! let mut win = Window::new(Pos::ORIGIN, Size::new(1, 5));
@@ -79,8 +79,8 @@ pub use error::{CursesError, Result};
 pub use geom::{Pos, Size};
 pub use input::{Event, Input};
 pub use render::{render, CursorState};
-pub use rustos_vt::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 pub use screen::{InputMode, Screen, Tty, DEFAULT_COLOR_PAIR};
 #[cfg(all(freestanding, feature = "program"))]
 pub use stream::StreamTty;
+pub use tairix_vt::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};
 pub use window::{BorderChars, Window};

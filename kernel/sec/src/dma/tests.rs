@@ -12,9 +12,9 @@ use super::*;
 use crate::audit::RecordingSink;
 use crate::captable::{TaskCapabilities, TaskId};
 use crate::identity::UserId;
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::{
     bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
     AddressSpace, DmaPool, FrameAllocator, HostPageTable, PhysAddr, SimPhysMap, VirtAddr,
     PAGE_SIZE,
@@ -131,7 +131,7 @@ fn alloc_oversized_request_maps_to_length_out_of_range() {
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
     // Exceed MAX_ORDER ⇒ DmaError::SizeUnsupported.
-    let too_big = (1usize << (rustos_kernel_mem::MAX_ORDER + 1)) * PAGE_SIZE;
+    let too_big = (1usize << (tairix_kernel_mem::MAX_ORDER + 1)) * PAGE_SIZE;
     let err = alloc_dma(&mut pool, &caller, too_big, &sink).unwrap_err();
     assert_eq!(err.as_errno(), Errno::LengthOutOfRange);
 }
@@ -191,7 +191,7 @@ fn as_errno_maps_every_pool_error_into_abi_v1() {
         Errno::LengthOutOfRange
     );
     assert_eq!(
-        DmaGateError::Pool(DmaError::Alloc(rustos_kernel_mem::AllocError::OutOfMemory)).as_errno(),
+        DmaGateError::Pool(DmaError::Alloc(tairix_kernel_mem::AllocError::OutOfMemory)).as_errno(),
         Errno::LengthOutOfRange
     );
     assert_eq!(

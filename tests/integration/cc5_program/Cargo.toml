@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-cc5-program"
-description = "CCOMPAT stage CC5 fixture: the Rust startup/runtime shim for the end-to-end C program. Built as a `staticlib` that re-exports the curated System runtime / C ABI class — crt0's `_start` and the `ros_sys_*` syscall stubs — so a clang-compiled C object (csrc/main.c) links against the real abi-v1 runtime exactly as a non-Rust app would. Built PIE for a native Tier-1 target and converted to an `rxe` blob by the consuming QEMU test."
+name = "tairix-test-cc5-program"
+description = "CCOMPAT stage CC5 fixture: the Rust startup/runtime shim for the end-to-end C program. Built as a `staticlib` that re-exports the curated System runtime / C ABI class — crt0's `_start` and the `tairix_sys_*` syscall stubs — so a clang-compiled C object (csrc/main.c) links against the real abi-v1 runtime exactly as a non-Rust app would. Built PIE for a native Tier-1 target and converted to an `rxe` blob by the consuming QEMU test."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,15 +13,15 @@ workspace = true
 
 [lib]
 # A static archive so a clang-compiled C object can link the Rust crt0 +
-# `ros_sys_*` runtime into a single PIE image (`plans/CCOMPAT.md` CC5).
-name = "rustos_test_cc5_program"
+# `tairix_sys_*` runtime into a single PIE image (`plans/CCOMPAT.md` CC5).
+name = "tairix_test_cc5_program"
 path = "src/lib.rs"
 crate-type = ["staticlib"]
 
 # The shim re-exports the curated System runtime / C ABI class (crt0 + the
-# `ros_sys_*` syscall stubs) exactly as a non-Rust program links it, and only
+# `tairix_sys_*` syscall stubs) exactly as a non-Rust program links it, and only
 # on the three native Tier-1 targets (`target_os = "none"`). On the host it is
 # an inert empty archive so `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-crt0 = { path = "../../../lib/crt0", version = "=0.0.0" }
-rustos-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }
+tairix-crt0 = { path = "../../../lib/crt0", version = "=0.0.0" }
+tairix-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }

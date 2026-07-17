@@ -10,8 +10,8 @@
 //!    delegation invariant ("a delegated set is always a subset of the
 //!    parent set") cannot be bypassed by mistake.
 
-use rustos_abi::{CapabilityId, Errno};
-use rustos_collections::BitSet256;
+use tairix_abi::{CapabilityId, Errno};
+use tairix_collections::BitSet256;
 
 /// Set of capabilities held by a principal (task, manifest, or token).
 ///
@@ -185,10 +185,10 @@ impl IntoIterator for &CapabilitySet {
 }
 
 /// Expose a [`CapabilitySet`] to ABI-level host seams that gate on a
-/// granted capability through `&dyn rustos_abi::CapabilityQuery` without
+/// granted capability through `&dyn tairix_abi::CapabilityQuery` without
 /// naming this crate (the `lib/abi -> lib/caps`
 /// reverse edge is forbidden).
-impl rustos_abi::CapabilityQuery for CapabilitySet {
+impl tairix_abi::CapabilityQuery for CapabilitySet {
     fn holds(&self, cap: CapabilityId) -> bool {
         self.contains(cap)
     }
@@ -197,7 +197,7 @@ impl rustos_abi::CapabilityQuery for CapabilitySet {
 /// Ascending iterator over the capabilities of a [`CapabilitySet`].
 #[derive(Clone, Debug)]
 pub struct CapabilitySetIter {
-    inner: rustos_collections::BitSet256Iter,
+    inner: tairix_collections::BitSet256Iter,
 }
 
 impl Iterator for CapabilitySetIter {
@@ -221,7 +221,7 @@ impl core::iter::FusedIterator for CapabilitySetIter {}
 #[cfg(test)]
 mod tests {
     use super::CapabilitySet;
-    use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
+    use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
 
     #[test]
     fn capability_query_matches_contains() {

@@ -5,7 +5,7 @@ use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::bot::{MsdTransport, CSW_LEN};
 

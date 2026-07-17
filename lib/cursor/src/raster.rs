@@ -10,8 +10,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_geometry::Point;
-use rustos_raster::Surface;
+use tairix_geometry::Point;
+use tairix_raster::Surface;
 
 use crate::vector::VectorCursor;
 

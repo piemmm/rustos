@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 use super::*;
 use crate::gpt::{self, ENTRY_LEN, TYPE_GUID_ARXFS_ROOT, TYPE_GUID_EFI_SYSTEM};
 use crate::mbr::{self, MbrError, MBR_SECTOR_LEN};
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::DriverError;
 
 /// An in-memory [`Block`] device over a byte vector, for building and
 /// parsing disk images in tests.

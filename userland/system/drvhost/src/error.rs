@@ -2,7 +2,7 @@
 //!
 //! Every load / unload / reload outcome maps to exactly one variant of
 //! [`HostError`]; the variants are deliberately disjoint from the kernel
-//! [`rustos_abi::Errno`] so that a mis-routed value cannot be confused
+//! [`tairix_abi::Errno`] so that a mis-routed value cannot be confused
 //! between layers (fail closed, never silently widen).
 //!
 //! The set is `#[non_exhaustive]` so new failure modes can be added
@@ -10,13 +10,13 @@
 
 use core::fmt;
 
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::{DriverError, Errno};
 
 /// One failure outcome from a [`crate::Host`] operation.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum HostError {
-    /// The supplied image bytes are shorter than a [`rustos_abi::DriverManifest`].
+    /// The supplied image bytes are shorter than a [`tairix_abi::DriverManifest`].
     ImageTruncated,
     /// The manifest decoded cleanly but with content the ABI rejects
     /// (bad magic, unsupported `abi_version`, out-of-range field, …).
@@ -32,7 +32,7 @@ pub enum HostError {
     /// Ed25519 verification of the manifest signature failed.
     SignatureInvalid,
     /// A capability identifier inside the manifest body is outside the
-    /// ABI's identifier space ([`rustos_abi::CAPABILITY_ID_MAX`]).
+    /// ABI's identifier space ([`tairix_abi::CAPABILITY_ID_MAX`]).
     CapabilityOutOfRange,
     /// A bind-table entry inside the manifest body failed to decode
     /// (non-zero reserved field, unknown match-key kind, or an
@@ -43,16 +43,16 @@ pub enum HostError {
     /// hold. Surfaces the subset-only delegation rule.
     CapabilityEscalation,
     /// The driver declared `kind = InKernel` but the caller does not
-    /// hold [`rustos_abi::CapabilityId::DRV_KERNEL`].
+    /// hold [`tairix_abi::CapabilityId::DRV_KERNEL`].
     KernelKindForbidden,
-    /// The caller does not hold [`rustos_abi::CapabilityId::DRV_LOAD`].
+    /// The caller does not hold [`tairix_abi::CapabilityId::DRV_LOAD`].
     LoadCapabilityMissing,
     /// The configured [`crate::DriverSpawner`] has no driver program for
     /// the verified image.
     UnknownDriver,
     /// The driver's `register` entry point itself rejected the host.
     DriverRegisterFailed(DriverError),
-    /// A [`rustos_abi::DriverHandle`] was supplied to `unload` / `reload`
+    /// A [`tairix_abi::DriverHandle`] was supplied to `unload` / `reload`
     /// that the host has no record of.
     HandleNotFound,
     /// An [`crate::ImageSource`] read failed; the inner [`Errno`] is the

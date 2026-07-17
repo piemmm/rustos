@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{fence, AtomicU64, Ordering};
 
-use rustos_rng::{FastRng, RandU64};
-use rustos_sync::{RwLock, SpinLock};
+use tairix_rng::{FastRng, RandU64};
+use tairix_sync::{RwLock, SpinLock};
 
 use crate::runqueue::{vslice, Entry, RunQueue};
 use crate::task::{TaskBody, TaskInner};

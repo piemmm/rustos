@@ -16,17 +16,17 @@
 //!
 //! The signed-bundle composer and the ELF->rxe converter are the shared
 //! definitions the kernel `build.rs` and the autoload fixtures also use
-//! (`rustos_itest_harness`), so the wire layout is never
+//! (`tairix_itest_harness`), so the wire layout is never
 //! re-rolled here. This is host-only build glue; the
 //! production image stays Rust-only.
 
 use std::sync::OnceLock;
 
-use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
-use rustos_itest_harness::driver_image::build_signed_driver_image;
-use rustos_itest_harness::elf2rxe::elf_to_rxe;
-use rustos_itest_harness::pie::PieArch;
-use rustos_itest_harness::USER_IMAGE_BIAS;
+use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
+use tairix_itest_harness::driver_image::build_signed_driver_image;
+use tairix_itest_harness::elf2rxe::elf_to_rxe;
+use tairix_itest_harness::pie::PieArch;
+use tairix_itest_harness::USER_IMAGE_BIAS;
 
 use super::image_apps::AppStoreFile;
 use super::pie_build::cross_compile_pie_elf;
@@ -40,12 +40,12 @@ use crate::Context;
 /// which this module does not use.
 //
 // `broken_intra_doc_links` is allowed because this is a foreign shared source
-// file authored to live in the `rustos-kernel` crate (the single source of the
+// file authored to live in the `tairix-kernel` crate (the single source of the
 // seed); its own `//!`/item doc links resolve in that crate,
 // not when it is re-included here as a submodule. Suppressing the check is
 // scoped to this included file and silences none of this module's own docs.
 #[allow(dead_code, rustdoc::broken_intra_doc_links)]
-#[path = "../../../../kernel/rustos-kernel/src/build_support.rs"]
+#[path = "../../../../kernel/tairix-kernel/src/build_support.rs"]
 pub(crate) mod build_support;
 
 /// Store path of the `VideoCore` mailbox service-driver bundle, **relative to
@@ -118,23 +118,23 @@ fn build_bundle(
     arch: PieArch,
     package: &str,
     caps: &[CapabilityId],
-    bind_keys: &[rustos_abi::DriverBindKey],
+    bind_keys: &[tairix_abi::DriverBindKey],
 ) -> Result<Vec<u8>, String> {
     // Map the package name to its source directory under `drivers/`. Only
     // the crates installed into the image are listed; an unknown package is
     // a programming error in the image pipeline, never a runtime input.
     let rel_dir = match package {
-        "rustos-drv-bus-mailbox-vcmailbox" => "drivers/bus/mailbox/vcmailbox",
-        "rustos-drv-bus-pcie-brcm" => "drivers/bus/pcie_brcm",
-        "rustos-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
-        "rustos-drv-bus-usb" => "drivers/bus/usb/xhci",
-        "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
-        "rustos-drv-input-usb-mouse" => "drivers/input/usb_mouse",
-        "rustos-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
-        "rustos-drv-network-virtio-net-driver" => "drivers/network/virtio_net_driver",
-        "rustos-drv-display-framebuffer" => "drivers/display/framebuffer",
-        "rustos-drv-storage-usb-msd" => "drivers/storage/usb_msd",
-        "rustos-drv-storage-volmgr" => "drivers/storage/volmgr",
+        "tairix-drv-bus-mailbox-vcmailbox" => "drivers/bus/mailbox/vcmailbox",
+        "tairix-drv-bus-pcie-brcm" => "drivers/bus/pcie_brcm",
+        "tairix-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
+        "tairix-drv-bus-usb" => "drivers/bus/usb/xhci",
+        "tairix-drv-input-usb-kbd" => "drivers/input/usb_kbd",
+        "tairix-drv-input-usb-mouse" => "drivers/input/usb_mouse",
+        "tairix-drv-input-virtio-kbd" => "drivers/input/virtio_kbd",
+        "tairix-drv-network-virtio-net-driver" => "drivers/network/virtio_net_driver",
+        "tairix-drv-display-framebuffer" => "drivers/display/framebuffer",
+        "tairix-drv-storage-usb-msd" => "drivers/storage/usb_msd",
+        "tairix-drv-storage-volmgr" => "drivers/storage/volmgr",
         other => return Err(format!("image: no source dir mapped for driver {other}")),
     };
     // A driver crate's `Run` binary shares the package name.
@@ -142,7 +142,7 @@ fn build_bundle(
     let elf = cross_compile_pie_elf(ctx, arch, "image-drivers", package, package, &crate_dir)?;
     let rxe = elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_IMAGE_BIAS,
     )
     .map_err(|e| format!("image: convert {package} driver ELF to rxe: {e}"))?;
@@ -152,7 +152,7 @@ fn build_bundle(
         DriverKind::UserSpace,
         caps,
         bind_keys,
-        rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         &rxe,
     );
     verify_signed_bundle(&signed.image)?;
@@ -178,13 +178,13 @@ pub fn build_vcmailbox_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-bus-mailbox-vcmailbox",
+        "tairix-drv-bus-mailbox-vcmailbox",
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
             CapabilityId::IPC_BIND_PRIVILEGED,
         ],
-        rustos_vcmailbox::BIND_KEYS,
+        tairix_vcmailbox::BIND_KEYS,
     )
 }
 
@@ -196,7 +196,7 @@ pub fn build_vcmailbox_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
 /// (`CAP_IRQ_BIND`, which the `msi_alloc` trap is gated on), and publishes the
 /// enumerated USB host function into the live hardware tree (`CAP_HW_EMIT`) —
 /// and nothing more (no ambient authority). Carries
-/// `rustos_drv_bus_pcie_brcm::BIND_KEYS`, so it autoloads against the
+/// `tairix_drv_bus_pcie_brcm::BIND_KEYS`, so it autoloads against the
 /// discovered `brcm,bcm2711-pcie` node.
 ///
 /// # Errors
@@ -206,13 +206,13 @@ pub fn build_pcie_brcm_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-bus-pcie-brcm",
+        "tairix-drv-bus-pcie-brcm",
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::IRQ_BIND,
             CapabilityId::HW_EMIT,
         ],
-        rustos_drv_bus_pcie_brcm::BIND_KEYS,
+        tairix_drv_bus_pcie_brcm::BIND_KEYS,
     )
 }
 
@@ -223,7 +223,7 @@ pub fn build_pcie_brcm_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
 /// forwarding the BAR + DMA grants it received (`CAP_HW_EMIT`) — and nothing
 /// more. It holds neither `CAP_MMIO_MAP` nor `CAP_MEM_DMA`: it forwards the
 /// grants without mapping them (least privilege). Carries
-/// `rustos_drv_bus_usb_vl805::BIND_KEYS`, so it autoloads against the VL805
+/// `tairix_drv_bus_usb_vl805::BIND_KEYS`, so it autoloads against the VL805
 /// PCI node the PCIe driver emitted.
 ///
 /// # Errors
@@ -233,9 +233,9 @@ pub fn build_vl805_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Strin
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-bus-usb-vl805",
+        "tairix-drv-bus-usb-vl805",
         &[CapabilityId::MAILBOX, CapabilityId::HW_EMIT],
-        rustos_drv_bus_usb_vl805::BIND_KEYS,
+        tairix_drv_bus_usb_vl805::BIND_KEYS,
     )
 }
 
@@ -247,7 +247,7 @@ pub fn build_vl805_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Strin
 /// restricted-sender URB transport endpoint (`CAP_IPC_BIND_PRIVILEGED`),
 /// publishes the per-interface node (`CAP_HW_EMIT`), and emits a one-shot
 /// bring-up diagnostic (`CAP_LOG_EMIT`) — and nothing more. Carries
-/// `rustos_drv_bus_usb::BIND_KEYS`, so it autoloads against the `usb,xhci`
+/// `tairix_drv_bus_usb::BIND_KEYS`, so it autoloads against the `usb,xhci`
 /// node the VL805 driver emitted.
 ///
 /// # Errors
@@ -257,7 +257,7 @@ pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-bus-usb",
+        "tairix-drv-bus-usb",
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
@@ -267,7 +267,7 @@ pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String
             CapabilityId::HW_EMIT,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_drv_bus_usb::BIND_KEYS,
+        tairix_drv_bus_usb::BIND_KEYS,
     )
 }
 
@@ -278,7 +278,7 @@ pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String
 /// host-controller driver forwarded (`CAP_SHM`), submits URBs on its one
 /// interface's transport endpoint (`CAP_IPC_ENDPOINT`), and emits a one-shot
 /// beacon (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO, DMA, or
-/// IRQ authority. Carries `rustos_drv_input_usb_kbd::BIND_KEYS`, so it
+/// IRQ authority. Carries `tairix_drv_input_usb_kbd::BIND_KEYS`, so it
 /// autoloads against the HID boot-keyboard interface node the HCD emitted.
 ///
 /// # Errors
@@ -288,14 +288,14 @@ pub fn build_usb_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-input-usb-kbd",
+        "tairix-drv-input-usb-kbd",
         &[
             CapabilityId::INPUT_INJECT,
             CapabilityId::SHM,
             CapabilityId::IPC_ENDPOINT,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_drv_input_usb_kbd::BIND_KEYS,
+        tairix_drv_input_usb_kbd::BIND_KEYS,
     )
 }
 
@@ -306,7 +306,7 @@ pub fn build_usb_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
 /// buffer its host-controller driver forwarded (`CAP_SHM`), submits URBs on
 /// its one interface's transport endpoint (`CAP_IPC_ENDPOINT`), and emits a
 /// one-shot beacon (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO,
-/// DMA, or IRQ authority. Carries `rustos_drv_input_usb_mouse::BIND_KEYS`, so
+/// DMA, or IRQ authority. Carries `tairix_drv_input_usb_mouse::BIND_KEYS`, so
 /// it autoloads against the HID boot-mouse interface node the HCD emitted.
 ///
 /// # Errors
@@ -316,14 +316,14 @@ pub fn build_usb_mouse_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-input-usb-mouse",
+        "tairix-drv-input-usb-mouse",
         &[
             CapabilityId::INPUT_INJECT,
             CapabilityId::SHM,
             CapabilityId::IPC_ENDPOINT,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_drv_input_usb_mouse::BIND_KEYS,
+        tairix_drv_input_usb_mouse::BIND_KEYS,
     )
 }
 
@@ -336,7 +336,7 @@ pub fn build_usb_mouse_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, S
 /// serves (`CAP_IPC_BIND_PRIVILEGED`), publishes/retracts the per-LUN
 /// storage nodes (`CAP_HW_EMIT`), and emits diagnostics (`CAP_LOG_EMIT`) —
 /// and nothing more. It holds **no** MMIO, DMA, or IRQ authority. Carries
-/// `rustos_drv_storage_usb_msd::BIND_KEYS`, so it autoloads against the
+/// `tairix_drv_storage_usb_msd::BIND_KEYS`, so it autoloads against the
 /// mass-storage interface node the HCD emitted (`plans/DEVICES.md` D2).
 ///
 /// # Errors
@@ -346,7 +346,7 @@ pub fn build_usb_msd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-storage-usb-msd",
+        "tairix-drv-storage-usb-msd",
         &[
             CapabilityId::SHM,
             CapabilityId::IPC_ENDPOINT,
@@ -354,7 +354,7 @@ pub fn build_usb_msd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
             CapabilityId::HW_EMIT,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_drv_storage_usb_msd::BIND_KEYS,
+        tairix_drv_storage_usb_msd::BIND_KEYS,
     )
 }
 
@@ -366,7 +366,7 @@ pub fn build_usb_msd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Str
 /// kernel attach of each recognised volume (`CAP_FS_MOUNT`), and emits
 /// diagnostics (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO,
 /// DMA, IRQ, or node-emission authority. Carries
-/// `rustos_drv_storage_volmgr::BIND_KEYS`, so it autoloads against the
+/// `tairix_drv_storage_volmgr::BIND_KEYS`, so it autoloads against the
 /// per-LUN block-service storage node the mass-storage class driver
 /// emitted (`plans/DEVICES.md` D3c).
 ///
@@ -377,14 +377,14 @@ pub fn build_volmgr_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Stri
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-storage-volmgr",
+        "tairix-drv-storage-volmgr",
         &[
             CapabilityId::SHM,
             CapabilityId::IPC_ENDPOINT,
             CapabilityId::FS_MOUNT,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_drv_storage_volmgr::BIND_KEYS,
+        tairix_drv_storage_volmgr::BIND_KEYS,
     )
 }
 
@@ -395,7 +395,7 @@ pub fn build_volmgr_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Stri
 /// (`CAP_MEM_DMA`), parks on the device's interrupt line (`CAP_IRQ_BIND`),
 /// and injects decoded key edges into the kernel input-focus arbiter
 /// (`CAP_INPUT_INJECT`) — and nothing more. Carries
-/// `rustos_drv_input_virtio_input::BIND_KEYS`, so it autoloads against a
+/// `tairix_drv_input_virtio_input::BIND_KEYS`, so it autoloads against a
 /// discovered virtio-input node (and stays unbound on the Pi, whose tree
 /// carries none — §18.4).
 ///
@@ -406,14 +406,14 @@ pub fn build_virtio_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-input-virtio-kbd",
+        "tairix-drv-input-virtio-kbd",
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
             CapabilityId::IRQ_BIND,
             CapabilityId::INPUT_INJECT,
         ],
-        rustos_drv_input_virtio_input::BIND_KEYS,
+        tairix_drv_input_virtio_input::BIND_KEYS,
     )
 }
 
@@ -428,7 +428,7 @@ pub fn build_virtio_kbd_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
 /// record (`CAP_LOG_EMIT`) — and nothing more. Every present is gated
 /// kernel-side on the caller's live seat lease (`call_peer_seat`, no
 /// capability — the authority is serving the in-flight call). Carries
-/// `rustos_drv_display_framebuffer::BIND_KEYS`, so it autoloads against
+/// `tairix_drv_display_framebuffer::BIND_KEYS`, so it autoloads against
 /// the boot display node the kernel publishes for its platform-programmed
 /// scan-out surface (and stays unbound on a headless boot, §18.4).
 ///
@@ -439,14 +439,14 @@ pub fn build_framebuffer_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>,
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-display-framebuffer",
+        "tairix-drv-display-framebuffer",
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::SHM,
             CapabilityId::IPC_BIND_PRIVILEGED,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_drv_display_framebuffer::BIND_KEYS,
+        tairix_drv_display_framebuffer::BIND_KEYS,
     )
 }
 
@@ -459,7 +459,7 @@ pub fn build_framebuffer_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>,
 /// binds the reserved device-channel endpoint (`CAP_IPC_ENDPOINT`,
 /// `CAP_IPC_BIND_PRIVILEGED`), publishes its `netchan` node (`CAP_HW_EMIT`),
 /// and emits its readiness beacon (`CAP_LOG_EMIT`) — and nothing more.
-/// Carries `rustos_drv_network_virtio_net::BIND_KEYS`, so it autoloads
+/// Carries `tairix_drv_network_virtio_net::BIND_KEYS`, so it autoloads
 /// against a discovered virtio-net node (and stays unbound on a machine
 /// whose tree carries none — §18.4).
 ///
@@ -470,7 +470,7 @@ pub fn build_virtio_net_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
     build_bundle(
         ctx,
         arch,
-        "rustos-drv-network-virtio-net-driver",
+        "tairix-drv-network-virtio-net-driver",
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
@@ -481,7 +481,7 @@ pub fn build_virtio_net_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, 
             CapabilityId::HW_EMIT,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_drv_network_virtio_net::BIND_KEYS,
+        tairix_drv_network_virtio_net::BIND_KEYS,
     )
 }
 
@@ -533,7 +533,7 @@ fn store_file(path: &[&[u8]], bytes: Vec<u8>) -> AppStoreFile {
 /// Fail-closed sanity check on a freshly composed bundle before it is planted
 /// into the image (never ship a malformed store entry).
 ///
-/// It re-decodes the bundle through the same `rustos_abi` definition the
+/// It re-decodes the bundle through the same `tairix_abi` definition the
 /// kernel's store scan and load gate use, asserting it is a well-formed,
 /// signed `kind = UserSpace` manifest carrying a non-empty payload — so a
 /// broken cross-compile/sign step fails the image build loudly instead of
@@ -576,13 +576,13 @@ mod tests {
     //! program image, so a real payload adds nothing to what is exercised.
     use super::*;
 
-    use rustos_abi::{DriverBindKey, Errno, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
-    use rustos_devmatch::{resolve, MatchResolution};
-    use rustos_drv_network_virtio_net::VIRTIO_NET_DEVICE_ID;
-    use rustos_drvhost::store::scan_store;
-    use rustos_drvhost::{DriverStore, ImageSource, Sink};
-    use rustos_log::Event;
-    use rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID;
+    use tairix_abi::{DriverBindKey, Errno, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
+    use tairix_devmatch::{resolve, MatchResolution};
+    use tairix_drv_network_virtio_net::VIRTIO_NET_DEVICE_ID;
+    use tairix_drvhost::store::scan_store;
+    use tairix_drvhost::{DriverStore, ImageSource, Sink};
+    use tairix_log::Event;
+    use tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 
     /// An arbitrary non-empty program image: the store scan and the match
     /// policy never look at the payload, only the signed manifest and bind
@@ -609,7 +609,7 @@ mod tests {
             DriverKind::UserSpace,
             &[],
             bind_keys,
-            rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+            tairix_kernel_syscall::SYSCALL_TABLE_HASH,
             STUB_PAYLOAD,
         )
         .image
@@ -628,15 +628,15 @@ mod tests {
             Self {
                 kbd: (
                     path_str(VIRTIO_KBD_STORE_PATH),
-                    sign(rustos_drv_input_virtio_input::BIND_KEYS),
+                    sign(tairix_drv_input_virtio_input::BIND_KEYS),
                 ),
                 framebuffer: (
                     path_str(FRAMEBUFFER_STORE_PATH),
-                    sign(rustos_drv_display_framebuffer::BIND_KEYS),
+                    sign(tairix_drv_display_framebuffer::BIND_KEYS),
                 ),
                 network: (
                     path_str(VIRTIO_NET_STORE_PATH),
-                    sign(rustos_drv_network_virtio_net::BIND_KEYS),
+                    sign(tairix_drv_network_virtio_net::BIND_KEYS),
                 ),
             }
         }
@@ -679,9 +679,9 @@ mod tests {
     #[test]
     fn each_autoload_bundle_is_a_signed_userspace_driver_manifest() {
         for bundle in [
-            sign(rustos_drv_input_virtio_input::BIND_KEYS),
-            sign(rustos_drv_display_framebuffer::BIND_KEYS),
-            sign(rustos_drv_network_virtio_net::BIND_KEYS),
+            sign(tairix_drv_input_virtio_input::BIND_KEYS),
+            sign(tairix_drv_display_framebuffer::BIND_KEYS),
+            sign(tairix_drv_network_virtio_net::BIND_KEYS),
         ] {
             // The same fail-closed structural check the image build applies
             // to every planted bundle accepts each one.

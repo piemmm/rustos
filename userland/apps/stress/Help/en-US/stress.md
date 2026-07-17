@@ -12,7 +12,7 @@ Dispatches worker processes that load the machine deliberately, in the
 spirit of the established `stress`/`stress-ng` tools: CPU spinners
 (`--cpu`), memory allocate-and-touch workers (`--vm`), small-buffer
 write/sync workers (`--io`), large sequential disk writers (`--hdd`),
-and cache-churning re-readers (`--cache`, a RustOS addition). Each
+and cache-churning re-readers (`--cache`, a TAIRiX addition). Each
 worker is its own swappable process; the controlling process pins its
 own memory (`mem_pin`, requiring `CAP_MEM_PIN`) so it stays responsive
 under the very pressure it creates, and observes `Ctrl-C`/`Terminate`
@@ -43,7 +43,7 @@ standard-information stream (fd 3).
 
 - `--cpu N`, `--io N`, `--vm N`, `--hdd N` — dispatch `N` workers of
   the named kind, with the GNU `stress` meaning.
-- `--cache N` — dispatch `N` cache-churn workers (RustOS-only:
+- `--cache N` — dispatch `N` cache-churn workers (TAIRiX-only:
   repeated cold directory walks and re-reads move the kernel's
   reclaimable-cache ledgers).
 - `--all N` — `N` workers of every kind.

@@ -1,10 +1,10 @@
 //! Stable audit-log event IDs and the writer used by `kernel/ipc`.
 //!
 //! Every security-relevant decision taken by this crate emits exactly
-//! one structured record through [`rustos_log`]. The numeric
+//! one structured record through [`tairix_log`]. The numeric
 //! identifiers are part of the audit contract with external log
 //! consumers and may not be re-used or re-numbered.
-//! They live in the `kernel/ipc` range reserved by [`rustos_log::EventId`]
+//! They live in the `kernel/ipc` range reserved by [`tairix_log::EventId`]
 //! conventions: `3_000..4_000`. (`kernel/sec` owns `1_000..2_000`;
 //! `kernel/mem` owns `2_000..3_000`.)
 //!
@@ -50,11 +50,11 @@
 //! this file and appending a row to the table in
 //! `docs/src/architecture/ipc.md`.
 
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 /// Audit log event identifiers used by `kernel/ipc`.
 ///
-/// The associated numeric values are part of the ABI between RustOS
+/// The associated numeric values are part of the ABI between TAIRiX
 /// and external log consumers and may not be re-used or re-numbered.
 /// See the module-level table for the meaning of each ID.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -266,7 +266,7 @@ impl AuditEvent {
 
 /// Emit `event` to `sink` with the supplied structured fields.
 ///
-/// Returns whatever [`rustos_log::log`] returns: `true` if the event
+/// Returns whatever [`tairix_log::log`] returns: `true` if the event
 /// passed the global level filter, `false` if it was dropped. Callers
 /// ignore the return value because the audit trail's
 /// configuration — not the call site — decides whether the record
@@ -299,8 +299,8 @@ pub(crate) mod test_support {
 
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use rustos_log::{set_max_level, Event, Level, Sink};
     use std::cell::RefCell;
+    use tairix_log::{set_max_level, Event, Level, Sink};
 
     /// Single-threaded recording sink used by `kernel/ipc` tests.
     pub(crate) struct RecordingSink {
@@ -342,7 +342,7 @@ pub(crate) use test_support::RecordingSink;
 #[cfg(test)]
 mod tests {
     use super::{record, AuditEvent, RecordingSink};
-    use rustos_log::{EventId, Field};
+    use tairix_log::{EventId, Field};
 
     #[test]
     fn ids_are_frozen() {
@@ -440,7 +440,7 @@ mod tests {
         let sink = RecordingSink::new();
         let fields = [Field {
             key: "port",
-            value: rustos_log::FieldValue::Str("1"),
+            value: tairix_log::FieldValue::Str("1"),
         }];
         record(&sink, AuditEvent::MessageDelivered, &fields);
         assert_eq!(sink.len(), 1);
@@ -454,7 +454,7 @@ mod tests {
         // busy IPC path from flooding the log; the records remain available
         // when the level is lowered for forensics. Their denials stay at
         // `Error` (covered by `refused_events_log_at_error_level`).
-        use rustos_log::Level;
+        use tairix_log::Level;
         assert_eq!(AuditEvent::CallPosted.level(), Level::Debug);
         assert_eq!(AuditEvent::CallReplied.level(), Level::Debug);
         assert!(AuditEvent::CallPosted.level() < Level::Info);
@@ -483,7 +483,7 @@ mod tests {
             AuditEvent::CallReplyDenied,
             AuditEvent::CallEndpointRegisterDenied,
         ] {
-            assert_eq!(ev.level(), rustos_log::Level::Error);
+            assert_eq!(ev.level(), tairix_log::Level::Error);
         }
     }
 }

@@ -7,7 +7,7 @@
 //! glyphs, an SVG icon carries its own per-layer colours, so it is not tinted
 //! by the caller.
 
-use rustos_svg::{SvgError, SvgImage};
+use tairix_svg::{SvgError, SvgImage};
 
 use crate::vector::{IconLayer, VectorIcon};
 
@@ -34,7 +34,7 @@ impl VectorIcon {
 /// compositor.
 ///
 /// # Errors
-/// Propagates the [`SvgError`] from [`rustos_svg::decode`].
+/// Propagates the [`SvgError`] from [`tairix_svg::decode`].
 pub fn decode(bytes: &[u8]) -> Result<VectorIcon, SvgError> {
-    Ok(VectorIcon::from_svg(&rustos_svg::decode(bytes)?))
+    Ok(VectorIcon::from_svg(&tairix_svg::decode(bytes)?))
 }

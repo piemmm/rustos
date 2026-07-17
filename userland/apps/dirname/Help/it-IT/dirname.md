@@ -15,7 +15,7 @@ viene risolto né toccato su disco. Una scrittura senza barre rimaste ha
 come genitore `.`; un genitore che si svuota è la radice.
 
 Una radice non viene mai intaccata: `dirname /tools` è `/`, e —
-l'equivalente nella foresta di archiviazione RustOS —
+l'equivalente nella foresta di archiviazione TAIRiX —
 `dirname Home:/tools` è `Home:/`. Una radice di alias (`Home:/`,
 `System:/`, …) svolge esattamente il ruolo che `/` svolge sui sistemi
 POSIX.

@@ -14,7 +14,7 @@
 //      stub pushed before the GPR saves (it sits at `[rsp + 15*8]`).
 //   4. Aligns the stack to %rsp ≡ 8 (mod 16) per SysV AMD64 §3.2.2
 //      and calls the Rust dispatcher
-//      `rustos_arch_x86_64_external_irq_dispatch(SavedRegs*, u64)`.
+//      `tairix_arch_x86_64_external_irq_dispatch(SavedRegs*, u64)`.
 //   5. Pops the GPRs in reverse order, drops the vector qword, and
 //      `iretq`s.
 //
@@ -25,12 +25,12 @@
 //      offset and the per-vector immediate fits in a sign-extended
 //      i32 (every value is ≤ 0xFE).
 //   2. The stub addresses are published through the
-//      `rustos_arch_x86_64_external_irq_table` data array (one
+//      `tairix_arch_x86_64_external_irq_table` data array (one
 //      `.quad` per vector, indexed by `vector - EXTERNAL_VECTOR_FIRST`).
 //      Rust references it via `extern "C"` so the IDT installer in
-//      `kernel/rustos-kernel::boot` can take the address of each stub
+//      `kernel/tairix-kernel::boot` can take the address of each stub
 //      without having to know its name.
-//   3. The shared trampoline is `rustos_arch_x86_64_external_irq_common`
+//   3. The shared trampoline is `tairix_arch_x86_64_external_irq_common`
 //      and is the single chokepoint AGENTS.md §2.2 (no duplication)
 //      requires for code that would otherwise be duplicated across
 //      207 ISRs.
@@ -59,10 +59,10 @@
 // at the saved-regs block. After the call, the trampoline pops the
 // 15 GPRs and drops the vector qword (`add rsp, 8`) before `iretq`.
 
-.global rustos_arch_x86_64_external_irq_common
-.type   rustos_arch_x86_64_external_irq_common, @function
+.global tairix_arch_x86_64_external_irq_common
+.type   tairix_arch_x86_64_external_irq_common, @function
 
-rustos_arch_x86_64_external_irq_common:
+tairix_arch_x86_64_external_irq_common:
     pushq   %rax
     pushq   %rcx
     pushq   %rdx
@@ -90,7 +90,7 @@ rustos_arch_x86_64_external_irq_common:
     // SysV AMD64 wants %rsp ≡ 8 (mod 16) at the `call` instruction,
     // so subtract 8.
     subq    $8, %rsp
-    call    rustos_arch_x86_64_external_irq_dispatch
+    call    tairix_arch_x86_64_external_irq_dispatch
     addq    $8, %rsp
 
     popq    %r15
@@ -113,7 +113,7 @@ rustos_arch_x86_64_external_irq_common:
     addq    $8, %rsp
     iretq
 
-.size rustos_arch_x86_64_external_irq_common, . - rustos_arch_x86_64_external_irq_common
+.size tairix_arch_x86_64_external_irq_common, . - tairix_arch_x86_64_external_irq_common
 
 // --- Per-vector stubs ---------------------------------------------
 //
@@ -128,21 +128,21 @@ rustos_arch_x86_64_external_irq_common:
 // bytes; values 0x80..=0xFE use `push imm32` and are five bytes.
 // The size difference is irrelevant because Rust never assumes a
 // fixed stride — the per-vector addresses are published through the
-// `rustos_arch_x86_64_external_irq_table` data array below.
+// `tairix_arch_x86_64_external_irq_table` data array below.
 
 .altmacro
 
 .macro external_irq_stub vec
-    .global rustos_arch_x86_64_external_irq_\vec
-    .type   rustos_arch_x86_64_external_irq_\vec, @function
-rustos_arch_x86_64_external_irq_\vec:
+    .global tairix_arch_x86_64_external_irq_\vec
+    .type   tairix_arch_x86_64_external_irq_\vec, @function
+tairix_arch_x86_64_external_irq_\vec:
     pushq   $\vec
-    jmp     rustos_arch_x86_64_external_irq_common
-    .size rustos_arch_x86_64_external_irq_\vec, . - rustos_arch_x86_64_external_irq_\vec
+    jmp     tairix_arch_x86_64_external_irq_common
+    .size tairix_arch_x86_64_external_irq_\vec, . - tairix_arch_x86_64_external_irq_\vec
 .endm
 
 .macro external_irq_table_entry vec
-    .quad rustos_arch_x86_64_external_irq_\vec
+    .quad tairix_arch_x86_64_external_irq_\vec
 .endm
 
 .set    vec_no, 0x30
@@ -167,14 +167,14 @@ rustos_arch_x86_64_external_irq_\vec:
 // macro body, which is the form `.altmacro` is documented to handle.
 
 .section .rodata
-.global rustos_arch_x86_64_external_irq_table
-.type   rustos_arch_x86_64_external_irq_table, @object
+.global tairix_arch_x86_64_external_irq_table
+.type   tairix_arch_x86_64_external_irq_table, @object
 
-rustos_arch_x86_64_external_irq_table:
+tairix_arch_x86_64_external_irq_table:
 .set    vec_no, 0x30
 .rept   (0xFF - 0x30)
     external_irq_table_entry %vec_no
     .set vec_no, vec_no + 1
 .endr
 
-.size rustos_arch_x86_64_external_irq_table, . - rustos_arch_x86_64_external_irq_table
+.size tairix_arch_x86_64_external_irq_table, . - tairix_arch_x86_64_external_irq_table

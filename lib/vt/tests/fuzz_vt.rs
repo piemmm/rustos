@@ -1,23 +1,23 @@
 //! Deterministic fuzz harness for the `lib/vt` streaming parser
 //! (the terminal's untrusted-input decoder).
 //!
-//! [`rustos_vt::Parser`] consumes bytes a terminal did not produce: local shell
+//! [`tairix_vt::Parser`] consumes bytes a terminal did not produce: local shell
 //! output and, in the remote stages of `plans/CURSES.md`, a foreign host's
 //! output. Per that decode path is driven by a fuzz harness whose single
 //! invariant is:
 //!
 //! * feeding any byte stream never panics and never reads out of bounds — the
-//!   parser either emits well-formed [`rustos_vt::Op`] events or silently drops
+//!   parser either emits well-formed [`tairix_vt::Op`] events or silently drops
 //!   the bytes it cannot interpret (fail closed).
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG
 //! draws pseudo-random byte strings, mutates real escape-sequence templates, and
 //! splices structured-but-hostile sequences together. A plain `cargo test` runs
 //! the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
 //! fuzz --soak` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
-use rustos_vt::{Op, Parser};
+use tairix_vt::{Op, Parser};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -62,13 +62,13 @@ fn feed_never_panics(bytes: &[u8]) {
 
 #[test]
 fn feed_never_panics_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
-    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "feed_never_panics_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -109,7 +109,7 @@ fn feed_never_panics_for_any_input() {
         feed_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

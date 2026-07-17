@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_help::{own_short_help, HelpSource};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::MvError;
@@ -64,7 +64,7 @@ const OWN_WORD: &str = "mv";
 ///   destination (or at any destination under `-T`), or a `-t` operand
 ///   that is not an existing directory.
 /// * [`MvError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](rustos_abi::Errno).
+///   underlying [`Errno`](tairix_abi::Errno).
 /// * [`MvError::Rename`] — a rename failed for a non-boundary reason.
 /// * [`MvError::Read`] / [`MvError::Create`] / [`MvError::Write`] — a
 ///   cross-device copy failed.
@@ -121,7 +121,7 @@ fn move_all(
         TargetMode::Directory => match stat(dest, fs)? {
             Some(EntryKind::Directory) => true,
             Some(EntryKind::File) => return Err(MvError::Usage),
-            None => return Err(MvError::Stat(rustos_abi::Errno::NotFound)),
+            None => return Err(MvError::Stat(tairix_abi::Errno::NotFound)),
         },
         // `-T`: the destination is a normal file for exactly one source.
         TargetMode::NoDirectory => {
@@ -251,7 +251,7 @@ fn copy_file(source: &str, target: &str, fs: &dyn FileSystem) -> Result<(), MvEr
         // A seam reporting more than the buffer holds would index out of
         // bounds; refuse it rather than trust the count.
         if read > buf.len() {
-            return Err(MvError::Read(rustos_abi::Errno::LengthOutOfRange));
+            return Err(MvError::Read(tairix_abi::Errno::LengthOutOfRange));
         }
         fs.write(target, offset, &buf[..read])
             .map_err(MvError::Write)?;
@@ -291,7 +291,7 @@ fn read_children(path: &str, fs: &dyn FileSystem) -> Result<Vec<Entry>, MvError>
 fn stat(path: &str, fs: &dyn FileSystem) -> Result<Option<EntryKind>, MvError> {
     match fs.kind(path) {
         Ok(kind) => Ok(Some(kind)),
-        Err(rustos_abi::Errno::NotFound) => Ok(None),
+        Err(tairix_abi::Errno::NotFound) => Ok(None),
         Err(errno) => Err(MvError::Stat(errno)),
     }
 }

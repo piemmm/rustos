@@ -1,4 +1,4 @@
-# `rustos-log`
+# `tairix-log`
 
 Structured, level-filtered, allocation-free logging.
 
@@ -49,7 +49,7 @@ append-only security log under `/System/Logs` (`AGENTS.md` §19.4). See
   is caught as `HashMismatch`, since it is bound into each entry's hash.
 
 The module is payload-format agnostic: the persisted-log writer reduces
-each serialized record to a `rustos-crypto` SHA-256 digest, so this
+each serialized record to a `tairix-crypto` SHA-256 digest, so this
 crate pulls in no payload codec and stays allocation-free.
 
 ## Streams and on-disk segments
@@ -133,11 +133,11 @@ chain and segment hash.
 The records of one segment are encoded through one builder, and decoded through
 one view, in append order. The advancing byte cursors that `record` and `dict`
 share live once in an internal `cursor` module (one definition), distinct from
-`rustos_abi`'s offset-indexed `le` helpers for fixed-`WIRE_LEN` structs.
+`tairix_abi`'s offset-indexed `le` helpers for fixed-`WIRE_LEN` structs.
 
 The body reuses the shared building blocks — `FieldValue`/`FieldName`,
 `Origin`, `WallClockReading`, `Stream`, `Level`, and the shared named-field
-codec (`rustos_abi::encode_named_field` / `decode_named_field`) that the
+codec (`tairix_abi::encode_named_field` / `decode_named_field`) that the
 `log_emit` diagnostic record also builds on — so there is one field-encoding
 definition, not two. Origin fields the kernel cannot yet attest are absent by
 construction rather than guessed.
@@ -418,17 +418,17 @@ editing a rendered report never changes the log. Like `render_line` they are
   text can contribute none — it is escaped). All three are asserted by the
   `fuzz_report` harness, which never panics on any decoded or hostile record.
 
-## Journal ingress ABI and service (`rustos_abi::log_ingress`, `journald`)
+## Journal ingress ABI and service (`tairix_abi::log_ingress`, `journald`)
 
 An ordinary process never appends to a segment: it frames a request and posts
-it to the journal service. The wire contract is `rustos_abi::log_ingress`
+it to the journal service. The wire contract is `tairix_abi::log_ingress`
 (`no_std`, allocation-free, fail-closed), a sibling of the `sysinfo` and
 driver-store endpoint ABIs rather than part of the C-callable surface:
 
 * `LOG_INGRESS_ENDPOINT` — the well-known synchronous call endpoint the journal
   service binds (unrestricted-sender: any process may write, since authority is
   the attested origin, not the transport; the id is a reserved rendezvous —
-  `rustos_abi::ipc::is_reserved_endpoint` — so binding it requires
+  `tairix_abi::ipc::is_reserved_endpoint` — so binding it requires
   `CAP_IPC_BIND_PRIVILEGED` and a squatter can never capture log traffic).
 * `LogIngressRequest` — a caller's message plus its *advisory* level and stream
   discriminants, an optional trusted-emitter subsystem label, its
@@ -442,7 +442,7 @@ driver-store endpoint ABIs rather than part of the C-callable surface:
 * `encode_reply` / `decode_reply` — a status-word reply: accepted, or the
   `Errno` the journal refused it with.
 
-The `rustos-journald` crate (`userland/system/journald`) is the
+The `tairix-journald` crate (`userland/system/journald`) is the
 architecture-neutral dispatch core over this ABI. `serve` decodes and fully
 validates a request, resolves the advisory stream/level against the closed
 vocabularies (fail-closed on an unknown discriminant), rate-limits the record
@@ -459,9 +459,9 @@ aggregation remain staged follow-ons (`plans/SYSLOG.md` §8.1/§10/§11/§15).
 
 ## Typed-field value model (`field`)
 
-The typed field-value model is defined in `rustos-abi` (`rustos_abi::field`,
-its ABI-schema home) and re-exported as `rustos_log::field` so both the
-`log_emit` record (`rustos_abi::log`) and the RustOS system log
+The typed field-value model is defined in `tairix-abi` (`tairix_abi::field`,
+its ABI-schema home) and re-exported as `tairix_log::field` so both the
+`log_emit` record (`tairix_abi::log`) and the TAIRiX system log
 (`plans/SYSLOG.md`) schema share **one** definition — there is no second
 string-only field encoding. It defines the closed set of value types a field
 may hold and how a single value is named, validated, and encoded; it does
@@ -480,7 +480,7 @@ journal service's job.
   (only the public numeric id — never a raw token), and a same-type bounded
   `FieldList` of scalars. Records are flat: nested maps and nested lists are
   forbidden so search, indexing, and rendering stay cheap. The scalar ABI types
-  (`Time64`, `Duration64`, `Errno`, `CapabilityId`) are reused from `rustos-abi`
+  (`Time64`, `Duration64`, `Errno`, `CapabilityId`) are reused from `tairix-abi`
   so a logged value and its ABI form cannot drift apart.
 * `FieldValue::encode` / `FieldValue::decode` — a compact little-endian codec
   for a single value (a tag byte plus payload). Decoding borrows variable-length

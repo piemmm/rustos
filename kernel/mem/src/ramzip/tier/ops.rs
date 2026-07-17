@@ -537,7 +537,7 @@ impl Ramzip {
     /// field. Returns `false` if no entry exists or the offset is out
     /// of range.
     pub fn tamper_entry(&mut self, space_id: u64, page: Page, offset: usize) -> bool {
-        use rustos_crypto::aead::{AEAD_NONCE_LEN, AEAD_TAG_LEN};
+        use tairix_crypto::aead::{AEAD_NONCE_LEN, AEAD_TAG_LEN};
         let Some(entry) = self.entries.get_mut(&(space_id, page.number())) else {
             return false;
         };

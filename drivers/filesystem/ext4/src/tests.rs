@@ -20,8 +20,8 @@ extern crate alloc;
 use super::*;
 use alloc::vec;
 use alloc::vec::Vec;
-use rustos_abi::driver::block::BlockGeometry;
-use rustos_abi::DriverKind;
+use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::DriverKind;
 
 const FS_BLOCK: usize = 1024;
 const FS_BLOCK_COUNT: usize = 40;
@@ -1429,7 +1429,7 @@ fn format_produces_a_mountable_empty_volume() {
 
 #[test]
 fn format_create_write_read_roundtrips_across_a_remount() {
-    let body = b"a fresh ext4 volume, formatted in RustOS\n";
+    let body = b"a fresh ext4 volume, formatted in TAIRiX\n";
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     fs.create(root, b"hello.txt", NodeKind::RegularFile)
@@ -1767,7 +1767,7 @@ fn inode_time_extra_extends_the_epoch_past_2038() {
     // Without epoch bits the extra field still carries the nanoseconds.
     assert_eq!(
         crate::decode_inode_time(10, Some(500 << 2)),
-        Time64::new(10, 500).map_err(|_| rustos_abi::DriverError::DeviceFault)
+        Time64::new(10, 500).map_err(|_| tairix_abi::DriverError::DeviceFault)
     );
 }
 
@@ -1777,6 +1777,6 @@ fn inode_time_corrupt_nanoseconds_fail_closed() {
     // it is corruption and is refused, never clamped.
     assert_eq!(
         crate::decode_inode_time(0, Some(1_000_000_000 << 2)),
-        Err(rustos_abi::DriverError::DeviceFault)
+        Err(tairix_abi::DriverError::DeviceFault)
     );
 }

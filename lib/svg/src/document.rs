@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_raster::Color;
+use tairix_raster::Color;
 
 use crate::color::parse_fill;
 use crate::error::SvgError;

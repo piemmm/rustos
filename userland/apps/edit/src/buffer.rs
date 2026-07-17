@@ -23,7 +23,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_vt::char_width;
+use tairix_vt::char_width;
 
 /// The largest file the editor loads, a fail-closed validation bound on
 /// untrusted input (the whole buffer lives in memory, line by line): 16 MiB

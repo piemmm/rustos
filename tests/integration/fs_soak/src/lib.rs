@@ -14,7 +14,7 @@
 //! asserts the OS reports the extremes cleanly.
 //!
 //! The exerciser drives a small LCG from a per-launch start seed (fresh from
-//! host entropy by default, or pinned by `RUSTOS_FSSOAK_SEED`). The start seed
+//! host entropy by default, or pinned by `TAIRIX_FSSOAK_SEED`). The start seed
 //! is logged at the start of each run, so every launch exercises different
 //! content yet any failure reproduces from its logged seed.
 //!

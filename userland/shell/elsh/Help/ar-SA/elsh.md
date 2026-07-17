@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — صدفة أوامر RustOS
+elsh — صدفة أوامر TAIRiX
 
 ## SYNOPSIS
 

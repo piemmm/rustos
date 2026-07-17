@@ -16,7 +16,7 @@
 //! window manager registers and activates it through the existing
 //! [`CursorRegistry`](crate::CursorRegistry) with no compositor change.
 
-use rustos_theme::CursorKind;
+use tairix_theme::CursorKind;
 
 use crate::theme::CursorTheme;
 use crate::vector::VectorCursor;

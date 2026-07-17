@@ -1,10 +1,10 @@
 // x86_64 common ISR prologue (Stage 3a (c2)).
 //
-// rustos_arch_x86_64_isr_default:
+// tairix_arch_x86_64_isr_default:
 //     The single fail-closed thunk every default IDT slot points at.
 //     The prologue saves the 15 architectural general-purpose registers
 //     in the order pinned by `SavedRegs` (see `interrupts.rs`) and calls
-//     into `rustos_arch_x86_64_default_interrupt(&mut SavedRegs)`. That
+//     into `tairix_arch_x86_64_default_interrupt(&mut SavedRegs)`. That
 //     Rust callee is `-> !`; reaching the `iretq` below is a kernel
 //     bug. Belt-and-braces per AGENTS.md §2.9.
 //
@@ -30,10 +30,10 @@
 //      handler that *does* return without touching the prologue.
 
 .section .text
-.global rustos_arch_x86_64_isr_default
-.type   rustos_arch_x86_64_isr_default, @function
+.global tairix_arch_x86_64_isr_default
+.type   tairix_arch_x86_64_isr_default, @function
 
-rustos_arch_x86_64_isr_default:
+tairix_arch_x86_64_isr_default:
     // Prologue: push GPRs in the order pinned by SavedRegs.
     // r15 ends up at the *lowest* address (offset 0 of SavedRegs);
     // rax ends up at the *highest* (offset 14*8) — see SavedRegs
@@ -68,7 +68,7 @@ rustos_arch_x86_64_isr_default:
     // callee with a 16-aligned stack. Subtract 8 to satisfy that.
     subq    $8, %rsp
 
-    call    rustos_arch_x86_64_default_interrupt
+    call    tairix_arch_x86_64_default_interrupt
 
     // The callee is `-> !`. Reaching here is a kernel bug; AGENTS.md
     // §2.9 belt-and-braces.
@@ -92,4 +92,4 @@ rustos_arch_x86_64_isr_default:
     popq    %rax
     iretq
 
-.size rustos_arch_x86_64_isr_default, . - rustos_arch_x86_64_isr_default
+.size tairix_arch_x86_64_isr_default, . - tairix_arch_x86_64_isr_default

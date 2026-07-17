@@ -1,6 +1,6 @@
 # Variable DPI and UI scale
 
-RustOS treats display density as a first-class, **settable** desktop property
+TAIRiX treats display density as a first-class, **settable** desktop property
 (`AGENTS.md` §10). The same image must be comfortable on a low-DPI monitor and
 on a high-DPI panel, and the user is free to pick the density that suits them.
 The mechanism is one shared scale factor, `Scale`, in `lib/geometry`.
@@ -9,7 +9,7 @@ The mechanism is one shared scale factor, `Scale`, in `lib/geometry`.
 
 Every desktop length — theme corner radii and border thicknesses, font sizes,
 taskbar extents, window chrome — is authored in *logical* pixels at a fixed
-reference density, `rustos_geometry::REFERENCE_DPI` (96 DPI). A logical pixel
+reference density, `tairix_geometry::REFERENCE_DPI` (96 DPI). A logical pixel
 is one physical pixel only at that density. On a denser panel a logical pixel
 maps to several physical pixels, so the UI keeps its physical size instead of
 shrinking.
@@ -93,14 +93,14 @@ changes. So a DPI switch is `Compositor::set_scale` followed by one `refresh`.
 
 ## Tests
 
-`cargo test -p rustos-geometry` covers `Scale`: the 1:1 identity, logical→
+`cargo test -p tairix-geometry` covers `Scale`: the 1:1 identity, logical→
 physical scaling at several percentages, saturation rather than wrapping, the
 fail-closed out-of-range rejection, and the DPI round-trip through the
-reference density. `cargo test -p rustos-taskbar` covers the threading: 200%
+reference density. `cargo test -p tairix-taskbar` covers the threading: 200%
 doubling every extent and the corner radius, `Scale::ONE` reproducing the
 unscaled layout exactly, and supplying a higher scale relaying the bar at the
-new density. `cargo test -p rustos-wm` covers the compositor owning the output
+new density. `cargo test -p tairix-wm` covers the compositor owning the output
 scale (settable, idempotent, marking the screen dirty, and `window_scale` per
 window) and the cursor controller re-rendering on a scale change. `cargo test
--p rustos-desktop-session` covers `DesktopShell::set_scale` driving the
+-p tairix-desktop-session` covers `DesktopShell::set_scale` driving the
 compositor and re-laying the bar transparently.

@@ -2,11 +2,11 @@
 //! spawns to watch the kernel's memory and load live through the System
 //! Information API (`plans/STRESSTEST.md` ST4).
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the
-//! Rust userland runtime `rustos-rt` — never the C ABI, which exists solely
-//! for programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the
+//! Rust userland runtime `tairix-rt` — never the C ABI, which exists solely
+//! for programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector (the reserved `-h`/`-?`
@@ -19,8 +19,8 @@
 //! launching intersection, or the pinned-memory limit — is an answer, not a
 //! failure: the stated reason rides the title line and the session runs
 //! unpinned. It then sizes the screen, puts the terminal into raw
-//! (no-echo) input, and runs the [`rustos_sysmon`] monitor loop against two
-//! seams: the shared `rustos_curses::StreamTty` over the inherited fd 0/1,
+//! (no-echo) input, and runs the [`tairix_sysmon`] monitor loop against two
+//! seams: the shared `tairix_curses::StreamTty` over the inherited fd 0/1,
 //! and `IpcTransport` (shared through `lib/procinfo`), which carries the
 //! framed `sysinfo-v1` requests to `/System/Services/sysinfod.app/Run`. The
 //! tool binds only to its inherited descriptors, never a console device,
@@ -49,13 +49,13 @@
 mod program {
     extern crate alloc;
 
-    use rustos_abi::{Errno, InputMode, STDOUT};
-    use rustos_curses::{Screen, Size, StreamTty};
-    use rustos_help::{own_short_help, BundleHelp};
-    use rustos_procinfo::IpcTransport;
-    use rustos_rt::io::{write_stderr_line, Stdout, Write};
-    use rustos_sysmon::{parse, run, Command, Model, PinState, USAGE};
-    use rustos_termcap::from_term;
+    use tairix_abi::{Errno, InputMode, STDOUT};
+    use tairix_curses::{Screen, Size, StreamTty};
+    use tairix_help::{own_short_help, BundleHelp};
+    use tairix_procinfo::IpcTransport;
+    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_sysmon::{parse, run, Command, Model, PinState, USAGE};
+    use tairix_termcap::from_term;
 
     /// The conventional fallback terminal grid — 80 columns by 24 rows —
     /// applied when the kernel cannot attest the console's size (a serial
@@ -69,7 +69,7 @@ mod program {
     /// documents) the usage banner stands in — the tool's own text, not
     /// fabricated help content — so `-h` never fails.
     fn short_help() -> i32 {
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let bytes = own_short_help(&BundleHelp::new("sysmon"), locale, "sysmon")
             .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
         match Stdout.write_all(&bytes) {
@@ -84,7 +84,7 @@ mod program {
     /// reported, never fatal, and the *action* still fails closed on the
     /// kernel side — only the session survives.
     fn pin_self() -> PinState {
-        let ret = rustos_rt::mem_pin();
+        let ret = tairix_rt::mem_pin();
         if ret == 0 {
             return PinState::Pinned;
         }
@@ -99,7 +99,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     ///
@@ -109,7 +109,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error,
         // reported rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -129,7 +129,7 @@ mod program {
         // Size the screen from the console the kernel gave us, falling
         // back to the conventional 80×24 when the kernel cannot attest the
         // size.
-        let size = match rustos_rt::terminal_size(STDOUT) {
+        let size = match tairix_rt::terminal_size(STDOUT) {
             Ok(grid) => Size::new(grid.rows(), grid.cols()),
             Err(_) => Size::new(FALLBACK_ROWS, FALLBACK_COLS),
         };
@@ -139,15 +139,15 @@ mod program {
         // over the display it paints. Restored to the cooked default on
         // exit so the next program on this console sees normal interactive
         // echo again.
-        let _ = rustos_rt::set_input_mode(InputMode::Raw);
+        let _ = tairix_rt::set_input_mode(InputMode::Raw);
 
         // The terminal's capabilities come from the inherited `TERM`
         // (fail-closed: unknown or absent degrades to the dumb baseline
         // inside `from_term`), never a hard-coded terminal model — the
         // session exports the profile its console actually implements.
-        let term = rustos_rt::env_var(b"TERM")
+        let term = tairix_rt::env_var(b"TERM")
             .and_then(|raw| core::str::from_utf8(raw).ok())
-            .map_or(rustos_termcap::TermType::Dumb, from_term);
+            .map_or(tairix_termcap::TermType::Dumb, from_term);
         let mut screen = Screen::new(StreamTty, term, size);
         // Take over the display for the session: the alternate screen
         // where the terminal has one (restoring the covered content on
@@ -160,7 +160,7 @@ mod program {
         let result = run(&mut model, &transport, &mut screen);
         let left = screen.leave_full_screen();
 
-        let _ = rustos_rt::set_input_mode(InputMode::Cooked);
+        let _ = tairix_rt::set_input_mode(InputMode::Cooked);
 
         // A session that ends for any reason other than the user quitting
         // states that reason on stderr — after the terminal is restored, so
@@ -178,13 +178,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

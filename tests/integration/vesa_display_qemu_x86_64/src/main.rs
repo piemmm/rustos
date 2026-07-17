@@ -7,7 +7,7 @@
 //! (`src/kernel/ioport.rs`). It then publishes a bootloader-captured VBE
 //! `ModeInfoBlock` describing that surface as the boot hand-off — the
 //! shape a real VBE BIOS mode query (`0x4F01`) would have produced — and
-//! loads the signed vesa display `.rxe` through `rustos_drvhost::Host`,
+//! loads the signed vesa display `.rxe` through `tairix_drvhost::Host`,
 //! driving it through `load -> use -> unload -> reload`: "use" maps the
 //! surface through the capability-gated `KernelMmioMapper` and `present`s
 //! a frame, which a second independently-mapped window reads back to

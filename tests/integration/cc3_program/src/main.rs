@@ -3,18 +3,18 @@
 //!
 //! The kernel-side test (`tests/integration/spawn_program_qemu_*`) builds this
 //! program into a fresh user address space with
-//! `rustos_kernel_mem::build_process_image` — passing an argument vector
+//! `tairix_kernel_mem::build_process_image` — passing an argument vector
 //! `["prog", "<N>"]` — and drops into user mode through the Arch HAL
-//! `rustos_arch_api::EnterUser` primitive. Control arrives at crt0's `_start`
-//! (`rustos_crt0`), which marshals the kernel's startup vector into C
+//! `tairix_arch_api::EnterUser` primitive. Control arrives at crt0's `_start`
+//! (`tairix_crt0`), which marshals the kernel's startup vector into C
 //! `argc`/`argv`/`envp`, installs the stack canary, and calls the [`main`]
 //! below. `main` parses `argv[1]` as a decimal integer and returns it; crt0
 //! routes that return value through the `exit` syscall
-//! (`rustos_abi_sys::sys_exit`). The test asserts the kernel-observed `exit`
+//! (`tairix_abi_sys::sys_exit`). The test asserts the kernel-observed `exit`
 //! code equals `N`, proving argv marshalling and program teardown across the
 //! whole curated *System runtime / C ABI* class.
 //!
-//! The program links **only** `rustos-crt0` and `rustos-abi-sys` — never an
+//! The program links **only** `tairix-crt0` and `tairix-abi-sys` — never an
 //! architecture crate — so its `_start` is crt0's program entry trampoline,
 //! not a kernel boot vector (the two would collide). It is built position-
 //! independent and converted to an `rxe` blob by the consuming test's build
@@ -30,7 +30,7 @@ mod program {
     use core::ffi::{c_char, c_int};
     use core::panic::PanicInfo;
 
-    // The program's entry point is crt0's `_start` (`rustos_crt0`), but the
+    // The program's entry point is crt0's `_start` (`tairix_crt0`), but the
     // program never names the crate in a Rust path — crt0 only provides the
     // startup trampoline that *calls into* this program, not the other way
     // round. rustc links a dependency's rlib only when the crate is
@@ -41,7 +41,7 @@ mod program {
     // solely for its link-time side effect, so the rust-2018 "unused extern
     // crate" idiom lint does not apply.
     #[allow(unused_extern_crates)]
-    extern crate rustos_crt0;
+    extern crate tairix_crt0;
 
     /// Exit code returned when the program is spawned without the single
     /// decimal argument it expects (`argc < 2`). A reserved, fail-closed
@@ -124,7 +124,7 @@ mod program {
     /// panic-free; this exists only to satisfy the `no_std` contract.
     #[panic_handler]
     fn panic(_info: &PanicInfo<'_>) -> ! {
-        rustos_abi_sys::sys_exit(EXIT_BAD_ARG)
+        tairix_abi_sys::sys_exit(EXIT_BAD_ARG)
     }
 }
 

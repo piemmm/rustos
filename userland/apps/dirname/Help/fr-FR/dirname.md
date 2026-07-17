@@ -15,7 +15,7 @@ n'est résolu ni touché sur le disque. Un chemin sans barre restante a
 pour parent `.` ; un parent qui se vide est la racine.
 
 Une racine n'est jamais entamée : `dirname /tools` donne `/`, et —
-l'équivalent dans la forêt de stockage RustOS — `dirname Home:/tools`
+l'équivalent dans la forêt de stockage TAIRiX — `dirname Home:/tools`
 donne `Home:/`. Une racine d'alias (`Home:/`, `System:/`, …) joue
 exactement le rôle que `/` joue sur les systèmes POSIX.
 

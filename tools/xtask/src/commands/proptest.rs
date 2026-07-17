@@ -10,7 +10,7 @@
 //!
 //! Each [`Model`] names an existing `cargo test` integration harness
 //! (`tests/proptest_model.rs`). The orchestrator exports
-//! `RUSTOS_PROPTEST_BUDGET_SECS`, which the harness reads to keep running
+//! `TAIRIX_PROPTEST_BUDGET_SECS`, which the harness reads to keep running
 //! batches from its proptest RNG until the budget elapses (a plain `cargo
 //! test` leaves the variable unset and runs the fast fixed-case sweep
 //! instead). It also exports a per-model RNG seed (`commands::seed`): by
@@ -48,25 +48,25 @@ pub struct Model {
 pub const MODELS: &[Model] = &[
     Model {
         name: "caps",
-        package: "rustos-caps",
+        package: "tairix-caps",
         test: "proptest_model",
         description: "lib/caps CapabilitySet + signed-token verification",
     },
     Model {
         name: "sec",
-        package: "rustos-kernel-sec",
+        package: "tairix-kernel-sec",
         test: "proptest_model",
         description: "kernel/sec CapTable + TaskCapabilities derive/delegate/revoke",
     },
     Model {
         name: "ipc",
-        package: "rustos-kernel-ipc",
+        package: "tairix-kernel-ipc",
         test: "proptest_model",
         description: "kernel/ipc capability-checked port dispatch",
     },
     Model {
         name: "syscall",
-        package: "rustos-kernel-syscall",
+        package: "tairix-kernel-syscall",
         test: "proptest_model",
         description: "kernel/syscall dispatch capability gate",
     },
@@ -286,7 +286,7 @@ pub(crate) fn job_for(
     // its single smoke iteration.
     if let Some(budget) = budget {
         cmd.env(
-            rustos_fuzzseed::PROPTEST_BUDGET_ENV,
+            tairix_fuzzseed::PROPTEST_BUDGET_ENV,
             budget.as_secs().to_string(),
         );
     }
@@ -351,7 +351,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "sec"])).expect("target parses");
         let chosen = selected(&opts).expect("known model");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-kernel-sec");
+        assert_eq!(chosen[0].package, "tairix-kernel-sec");
     }
 
     #[test]

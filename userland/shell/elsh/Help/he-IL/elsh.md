@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — מעטפת הפקודות של RustOS
+elsh — מעטפת הפקודות של TAIRiX
 
 ## SYNOPSIS
 

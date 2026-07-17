@@ -2,17 +2,17 @@
 //! users-database integration test.
 //!
 //! The device-agnostic bring-up *and* the users-database device tail
-//! both live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
+//! both live in the shared `tairix-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the bare virtio-blk MMIO device id, the spawner registering
 //! the loaded image through the virtio-blk `register`, and the boot
 //! harness. The device tail ([`users_db_load`]) mounts the planted
 //! users-root arxfs volume and drives
-//! `rustos_kernel_core::load_users_db` — the boot-time root-volume read
+//! `tairix_kernel_core::load_users_db` — the boot-time root-volume read
 //! path for `/System/Security/Users` — then proves the parsed database
 //! authenticates the planted account.
 
-use rustos_drv_storage_virtio_blk::register as virtio_blk_register;
-use rustos_test_virtio_qemu_support::{
+use tairix_drv_storage_virtio_blk::register as virtio_blk_register;
+use tairix_test_virtio_qemu_support::{
     define_mmio_boot_harness_aarch64, run_virtio_mmio_scenario, users_db_load, FixedSpawner,
     ScenarioConfig, ScenarioTransport,
 };

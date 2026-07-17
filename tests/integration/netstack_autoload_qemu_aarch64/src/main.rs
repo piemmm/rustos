@@ -1,5 +1,5 @@
 //! `plans/NETWORK.md` N4e-β QEMU integration test: boot the production
-//! aarch64 `rustos-kernel` pipeline on the `virt` board against the shared
+//! aarch64 `tairix-kernel` pipeline on the `virt` board against the shared
 //! whole-disk autoload-root image — whose read-only `/System` volume now
 //! carries the **kernel-signed virtio-net driver bundle** in its `Drivers/`
 //! store alongside the input and display bundles — with a `virtio-net-device`
@@ -9,7 +9,7 @@
 //!
 //! ## What this vertical asserts — and how it differs from its siblings
 //!
-//! * `netstack_mmio_aarch64` proves the pure `rustos-netstack` engine pumps a
+//! * `netstack_mmio_aarch64` proves the pure `tairix-netstack` engine pumps a
 //!   live virtio-net device — but in a *single* process, over the in-kernel
 //!   `register` scaffold (`plans/NETWORK.md` N3c). This vertical is the
 //!   two-process production-boot replacement (N4e-β): the driver runs in its
@@ -76,10 +76,10 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_log::{Event, Sink};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::boot as boot_aarch64;
+    use tairix_log::{Event, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -133,11 +133,11 @@ mod kernel {
             // Replay through the serial sink so the QEMU transcript records the
             // full boot + autoload + bind + echo timeline for a failing run.
             SerialSink::new().write_event(event);
-            if event.id.0 == rustos_devmgr::events::NETSTACK_BOUND.0 {
+            if event.id.0 == tairix_devmgr::events::NETSTACK_BOUND.0 {
                 self.netstack_bound.store(true, Ordering::Release);
-            } else if event.id.0 == rustos_netstack::events::DRIVER_BOUND.0 {
+            } else if event.id.0 == tairix_netstack::events::DRIVER_BOUND.0 {
                 self.driver_bound.store(true, Ordering::Release);
-            } else if event.id.0 == rustos_netstack::events::INBOUND_ECHO_SERVED.0 {
+            } else if event.id.0 == tairix_netstack::events::INBOUND_ECHO_SERVED.0 {
                 self.echo_served.store(true, Ordering::Release);
             } else {
                 return;
@@ -157,12 +157,12 @@ mod kernel {
     /// finisher parks the CPU, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_netstack_autoload_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_netstack_autoload_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
     /// address is forwarded to the production boot pipeline. The witness
@@ -180,8 +180,8 @@ mod kernel {
             dtb,
             &WITNESS_SINK,
             &SERIAL_SINK,
-            rustos_log::Level::Info,
-            &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
+            tairix_log::Level::Info,
+            &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }
 }

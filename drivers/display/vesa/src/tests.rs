@@ -12,8 +12,8 @@ use core::ptr::NonNull;
 
 use super::*;
 use core::cell::Cell;
-use rustos_abi::driver::DriverKind;
-use rustos_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
+use tairix_abi::driver::DriverKind;
+use tairix_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
 
 /// Build a well-formed VBE `ModeInfoBlock` describing a 32-bpp
 /// direct-colour linear-framebuffer mode with the `Bgra8888` layout

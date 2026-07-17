@@ -57,7 +57,7 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
             Ok(password) => ctx.elevator.elevate(username, password, program),
             // Refuse malformed input locally without ever sending it — the
             // same errno the wire decoder gives a bad encoding.
-            Err(_) => Err(rustos_abi::Errno::LengthOutOfRange),
+            Err(_) => Err(tairix_abi::Errno::LengthOutOfRange),
         },
         Err(err) => Err(err),
     };
@@ -79,7 +79,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory [`Elevator`]: scripted secret input, recorded calls,
     /// scripted outcome.

@@ -9,13 +9,13 @@
 //! 4. The reassembler's budgets hold after every push.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing
-//! from the same seeded stream until `RUSTOS_FUZZ_BUDGET_SECS` elapses
+//! from the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses
 //! under `cargo xtask fuzz`.
 
-use rustos_abi::time::Duration64;
-use rustos_net::frag::{FragKey, PushOutcome, Reassembler, ReassemblyConfig};
-use rustos_net::ipv4::{self, Ipv4Header};
-use rustos_net::{IpAddr, Ipv4Addr};
+use tairix_abi::time::Duration64;
+use tairix_net::frag::{FragKey, PushOutcome, Reassembler, ReassemblyConfig};
+use tairix_net::ipv4::{self, Ipv4Header};
+use tairix_net::{IpAddr, Ipv4Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -76,7 +76,7 @@ fn exercise_reassembler(rng: &mut Lcg, reassembler: &mut Reassembler, config: &R
     let data = vec![0xA5u8; len];
     let now = Duration64::from_secs(i64::try_from(rng.next_u64() & 0x3FF).expect("bounded"));
     match reassembler.push(key, offset, more, &data, now) {
-        PushOutcome::Complete(payload) => assert!(payload.len() <= rustos_net::frag::MAX_DATAGRAM),
+        PushOutcome::Complete(payload) => assert!(payload.len() <= tairix_net::frag::MAX_DATAGRAM),
         PushOutcome::Pending | PushOutcome::Rejected(_) => {}
     }
     assert!(reassembler.buffered_bytes() <= config.global_budget);
@@ -118,9 +118,9 @@ impl Lcg {
 
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let config = ReassemblyConfig {
         per_source_budget: 64 * 1024,
@@ -130,7 +130,7 @@ fn random_inputs_never_panic() {
     };
     let mut reassembler = Reassembler::new(config);
     let mut buf = [0u8; 128];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
@@ -139,7 +139,7 @@ fn random_inputs_never_panic() {
             exercise_fragment(&mut rng);
             exercise_reassembler(&mut rng, &mut reassembler, &config);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

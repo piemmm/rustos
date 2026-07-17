@@ -14,7 +14,7 @@
 # to a stated placeholder/refusal for everyone else. The USER column's
 # uid -> name map comes from the ungated, secret-free user-directory
 # sysinfo query, so no further capability is requested for it.
-id = "os.rustos.top"
+id = "os.tairix.top"
 name = "top"
 version = "0.1.0"
 kind = "command"

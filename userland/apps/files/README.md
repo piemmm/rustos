@@ -1,4 +1,4 @@
-# `rustos-files` — filesystem browser
+# `tairix-files` — filesystem browser
 
 Stage 7 deliverable (`AGENTS.md` §10, `PLAN.md` Stage 7,
 `plans/APPWIN.md` AW3). The default graphical file manager: the `Run`
@@ -14,7 +14,7 @@ shared, host-tested crates the binary composes over the live syscalls:
 - the directory-browser **engine** — the transactional navigation model
   (`Browser`), the themed listing renderer (`render`), the validated
   path spelling, and the `VfsDirectorySource` composition — is the
-  shared `lib/browse` crate (`rustos-browse`), the same engine the
+  shared `lib/browse` crate (`tairix-browse`), the same engine the
   desktop session's trusted file picker drives (`plans/APPWIN.md` AW5),
   so the file manager and the picker can never diverge;
 - the window channel's client half (`WindowClient` / `WindowEvents`) is
@@ -44,5 +44,5 @@ frame region). See `AppInfo.toml`.
 ## Test surface
 
 The engine's behaviour is exhaustively host-tested in `lib/browse`
-(`cargo test -p rustos-browse`); this package carries only the inert
+(`cargo test -p tairix-browse`); this package carries only the inert
 host stub the workspace tooling compiles.

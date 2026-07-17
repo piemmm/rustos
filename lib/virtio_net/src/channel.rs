@@ -4,7 +4,7 @@
 //! [`NetChannelServer`] is the pure, host-testable engine the user-space
 //! virtio-net driver *process* drives: the process owns the device
 //! (MMIO/DMA/IRQ) and the call endpoint, and hands each decoded
-//! [`NetChannelRequest`](rustos_abi::driver::net_channel::NetChannelRequest)
+//! [`NetChannelRequest`](tairix_abi::driver::net_channel::NetChannelRequest)
 //! to this server, which turns it into the right
 //! device action and the matching reply. The I/O — receiving the request,
 //! mapping the granted frame region, sending the reply and the
@@ -15,16 +15,16 @@
 //! # State machine
 //!
 //! A freshly-constructed server is **detached**: it answers
-//! [`NetChannelRequest::Facts`](rustos_abi::driver::net_channel::NetChannelRequest::Facts)
+//! [`NetChannelRequest::Facts`](tairix_abi::driver::net_channel::NetChannelRequest::Facts)
 //! (so the stack can size the ring geometry) and refuses
-//! [`NetChannelRequest::Service`](rustos_abi::driver::net_channel::NetChannelRequest::Service)
+//! [`NetChannelRequest::Service`](tairix_abi::driver::net_channel::NetChannelRequest::Service)
 //! with [`Errno::NotConnected`].
-//! [`NetChannelRequest::Attach`](rustos_abi::driver::net_channel::NetChannelRequest::Attach)
+//! [`NetChannelRequest::Attach`](tairix_abi::driver::net_channel::NetChannelRequest::Attach)
 //! validates the offered geometry against the
 //! device and moves the server to **attached**; from there
 //! [`NetChannelServer::service_reply`] binds a [`FrameRings`] view over the
 //! caller-mapped region and drives one [`Net::service`] doorbell.
-//! [`NetChannelRequest::Detach`](rustos_abi::driver::net_channel::NetChannelRequest::Detach)
+//! [`NetChannelRequest::Detach`](tairix_abi::driver::net_channel::NetChannelRequest::Detach)
 //! returns the server to detached.
 //!
 //! # Fail closed
@@ -35,15 +35,15 @@
 //! typed [`Errno`] carried in the reply's status word — never a panic, never
 //! a partially-applied action.
 
-use rustos_abi::driver::net::{Net, ETHERNET_HEADER_LEN};
-use rustos_abi::driver::net_channel::{
+use tairix_abi::driver::net::{Net, ETHERNET_HEADER_LEN};
+use tairix_abi::driver::net_channel::{
     encode_facts_reply, encode_service_reply, AttachParams, NET_CHANNEL_FACTS_REPLY_LEN,
     NET_CHANNEL_SERVICE_REPLY_LEN,
 };
-use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use rustos_abi::Errno;
+use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::Errno;
 
 /// The state a channel carries once the stack has attached its frame region.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -117,18 +117,18 @@ impl<N: Net> NetChannelServer<N> {
         self.attached.as_ref().map(|a| a.geometry)
     }
 
-    /// Answer [`NetChannelRequest::Facts`](rustos_abi::driver::net_channel::NetChannelRequest::Facts):
+    /// Answer [`NetChannelRequest::Facts`](tairix_abi::driver::net_channel::NetChannelRequest::Facts):
     /// the device's validated facts, or a `-errno` status on a device fault.
     #[must_use]
     pub fn facts_reply(&self) -> [u8; NET_CHANNEL_FACTS_REPLY_LEN] {
         encode_facts_reply(
             self.net
                 .device_facts()
-                .map_err(rustos_abi::DriverError::as_errno),
+                .map_err(tairix_abi::DriverError::as_errno),
         )
     }
 
-    /// Answer [`NetChannelRequest::Attach`](rustos_abi::driver::net_channel::NetChannelRequest::Attach):
+    /// Answer [`NetChannelRequest::Attach`](tairix_abi::driver::net_channel::NetChannelRequest::Attach):
     /// validate the offered geometry against the device and, on success,
     /// move to attached. Returns the status frame; on refusal the server is
     /// left unchanged (fail closed — a rejected attach never half-binds).
@@ -147,7 +147,7 @@ impl<N: Net> NetChannelServer<N> {
         let facts = self
             .net
             .device_facts()
-            .map_err(rustos_abi::DriverError::as_errno)?;
+            .map_err(tairix_abi::DriverError::as_errno)?;
         let required = facts.mtu.saturating_add(ETHERNET_HEADER_LEN);
         if params.geometry.slot_capacity() < required {
             return Err(Errno::OutOfRange);
@@ -160,13 +160,13 @@ impl<N: Net> NetChannelServer<N> {
         Ok(())
     }
 
-    /// Answer [`NetChannelRequest::Service`](rustos_abi::driver::net_channel::NetChannelRequest::Service):
+    /// Answer [`NetChannelRequest::Service`](tairix_abi::driver::net_channel::NetChannelRequest::Service):
     /// bind the frame rings over the caller-mapped `region` and drive one
     /// [`Net::service`] doorbell, reporting what moved.
     ///
     /// `region` is the driver's own mapping of the shared frame region (the
     /// process binary `shm_map`ped the grant the stack forwarded in
-    /// [`Attach`](rustos_abi::driver::net_channel::NetChannelRequest::Attach)).
+    /// [`Attach`](tairix_abi::driver::net_channel::NetChannelRequest::Attach)).
     /// A service before attach fails closed with [`Errno::NotConnected`]; a
     /// region whose length does not match the agreed geometry, or a device
     /// fault, is the typed error carried in the reply.
@@ -180,10 +180,10 @@ impl<N: Net> NetChannelServer<N> {
         let mut rings = FrameRings::bind(region, attached.geometry, attached.class)?;
         self.net
             .service(&mut rings)
-            .map_err(rustos_abi::DriverError::as_errno)
+            .map_err(tairix_abi::DriverError::as_errno)
     }
 
-    /// Answer [`NetChannelRequest::Detach`](rustos_abi::driver::net_channel::NetChannelRequest::Detach):
+    /// Answer [`NetChannelRequest::Detach`](tairix_abi::driver::net_channel::NetChannelRequest::Detach):
     /// forget the attach state. The process binary unmaps the region and
     /// forgets the notify port; the device itself stays live for a later
     /// re-attach.

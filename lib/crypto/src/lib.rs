@@ -1,4 +1,4 @@
-//! Audited cryptographic primitives for RustOS.
+//! Audited cryptographic primitives for TAIRiX.
 //!
 //! This crate exists for one purpose: to keep cryptography out of the rest
 //! of the codebase. Per no hand-rolled primitives are allowed;

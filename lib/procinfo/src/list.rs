@@ -8,13 +8,13 @@
 //! record, and stop on a short page. It lives here once rather than being
 //! copied per query.
 //!
-//! [`WIRE_LEN`]: rustos_abi::sysinfo::ProcessRecord::WIRE_LEN
+//! [`WIRE_LEN`]: tairix_abi::sysinfo::ProcessRecord::WIRE_LEN
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::sysinfo::SysinfoQueryId;
-use rustos_abi::Errno;
+use tairix_abi::sysinfo::SysinfoQueryId;
+use tairix_abi::Errno;
 
 use crate::request::{call, CallError};
 use crate::transport::Transport;

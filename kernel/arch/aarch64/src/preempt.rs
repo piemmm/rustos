@@ -6,7 +6,7 @@
 //! [`TIMER_PPI`]:
 //!
 //! * The set-once callback ([`set_timer_callback`]) the IRQ path forwards
-//!   each tick to, with the CPU's `rustos_arch_api::CpuId`.
+//!   each tick to, with the CPU's `tairix_arch_api::CpuId`.
 //! * `init_local_preempt`, which records the tick interval and the CPU's
 //!   `CpuId`, enables the timer PPI at the GIC, programs the first
 //!   countdown into `CNTP_TVAL_EL0`, and enables the timer
@@ -30,7 +30,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::CpuId;
+use tairix_arch_api::CpuId;
 
 /// GIC INTID of the EL1 physical-timer private-peripheral interrupt
 /// (ARM Generic Timer: the non-secure EL1 physical timer raises PPI 30).
@@ -439,7 +439,7 @@ pub fn recorded_deadlines(cpu: CpuId) -> (Option<u64>, Option<u64>) {
 /// only for a real pending event).
 ///
 /// The combining math is the shared, host-tested
-/// [`rustos_arch_api::wakeup`] helper; only the `CNTPCT_EL0` read and the
+/// [`tairix_arch_api::wakeup`] helper; only the `CNTPCT_EL0` read and the
 /// `arm_oneshot` / `disarm` programming are aarch64-specific. Off the
 /// freestanding target there is no generic timer, so the arming is inert
 /// (the deadline bookkeeping above still runs for host tests).
@@ -449,7 +449,7 @@ fn reprogram(cpu: CpuId) {
     };
     let quantum = slot_deadline(quantum_slot(idx).load(Ordering::Relaxed));
     let wakeup = slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed));
-    let target = rustos_arch_api::wakeup::earliest(quantum, wakeup);
+    let target = tairix_arch_api::wakeup::earliest(quantum, wakeup);
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
         match target {
@@ -611,7 +611,7 @@ pub fn disarm() {
 ///
 /// Records the CPU and the per-quantum `interval_ticks` (the value the
 /// scheduler's one-shot is later armed to) and enables the timer PPI at
-/// the GIC, but **leaves the timer disarmed**: RustOS is tickless, so the
+/// the GIC, but **leaves the timer disarmed**: TAIRiX is tickless, so the
 /// timer is armed only when the scheduler has a task to bound, via
 /// [`arm_oneshot`] from [`crate::kernel_arch::Aarch64Arch`]'s
 /// `set_preemption` (`NO_HZ`). It does **not** unmask
@@ -655,7 +655,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 /// Handle a generic-timer interrupt: clear the timer condition and
 /// dispatch the (observation-only) scheduler-tick callback.
 ///
-/// RustOS is tickless: the timer was armed **one-shot**
+/// TAIRiX is tickless: the timer was armed **one-shot**
 /// by the scheduler, so this handler does **not** re-arm it — the next
 /// fire happens only when the scheduler arms another quantum via
 /// [`arm_oneshot`]. It disarms (clearing the now-asserted timer condition
@@ -693,7 +693,7 @@ pub(crate) fn on_timer_interrupt(cpu: CpuId) {
         // `init_local_preempt`, so the low 32 bits are the whole value.
         #[allow(clippy::cast_possible_truncation)]
         let recorded_cpu = recorded as u32;
-        use rustos_arch_api::Timer;
+        use tairix_arch_api::Timer;
         crate::timer_hal::TimerHal::new().dispatch_tick(recorded_cpu);
     }
 }
@@ -877,7 +877,7 @@ mod tests {
         assert_eq!(recorded_deadlines(1), (Some(5_000), Some(3_000)));
         // The combiner would arm the earlier of the two (the wakeup here).
         assert_eq!(
-            rustos_arch_api::wakeup::earliest(Some(5_000), Some(3_000)),
+            tairix_arch_api::wakeup::earliest(Some(5_000), Some(3_000)),
             Some(3_000)
         );
         record_quantum_deadline(1, None);

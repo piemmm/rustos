@@ -6,7 +6,7 @@
 //! mirroring the seam design of the other userland tools (`head`'s
 //! `FileSource`/`Input`/`Output`, `cp`'s `FileSystem`).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Reads the next bytes of standard input.
 ///

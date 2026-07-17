@@ -15,7 +15,7 @@ accodi. Un file che non può essere aperto o scritto viene segnalato e
 l'esecuzione continua con le uscite rimanenti, secondo la modalità
 `--output-error` scelta.
 
-RustOS non ha `SIGPIPE`: la scomparsa di un consumatore si manifesta
+TAIRiX non ha `SIGPIPE`: la scomparsa di un consumatore si manifesta
 come un errore di scrittura sullo standard output — l'unica uscita di
 questo comando che può essere una pipe — quindi la «pipe» delle
 modalità GNU qui indica esattamente quell'uscita. Senza
@@ -24,7 +24,7 @@ modalità GNU qui indica esattamente quell'uscita. Senza
 indicata sullo standard error); con una modalità `-nopipe` viene
 tollerato in silenzio.
 
-GNU `tee -i` (ignorare le interruzioni) non è disponibile: RustOS non
+GNU `tee -i` (ignorare le interruzioni) non è disponibile: TAIRiX non
 ha una disposizione dei segnali per processo da impostare.
 L'interruttore arriverà con quel lavoro nel kernel invece di essere
 accettato e ignorato.

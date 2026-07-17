@@ -7,7 +7,7 @@
 # CAP_IPC_BIND_PRIVILEGED for the reserved well-known seat-admin endpoint,
 # and CAP_LOG_EMIT for its audit records. No console pair: it writes no
 # standard stream.
-id = "os.rustos.seatmgr"
+id = "os.tairix.seatmgr"
 name = "seatmgr"
 version = "0.1.0"
 kind = "service"

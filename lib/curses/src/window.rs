@@ -14,12 +14,12 @@
 //!
 //! [screen driver]: crate::Screen
 
-use rustos_vt::{Attributes, Cell, Color};
+use tairix_vt::{Attributes, Cell, Color};
 
 use crate::buffer::Buffer;
 use crate::error::{CursesError, Result};
 use crate::geom::{Pos, Size};
-use rustos_vt::{char_width, CONTINUATION};
+use tairix_vt::{char_width, CONTINUATION};
 
 /// The Unicode box-drawing glyphs a default [`Window::draw_box`] uses.
 ///

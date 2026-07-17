@@ -1,4 +1,4 @@
-# `rustos-login` — RustOS text login
+# `tairix-login` — TAIRiX text login
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/session/`, §10). It
 authenticates a user against `kernel/sec` and launches a session on their
@@ -13,8 +13,8 @@ binary lives at `/System/Services/login.app/Run`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
-depends only on the audited `lib/*` crates `rustos-abi`, `rustos-caps`,
-and `rustos-log`, so it never links a kernel or driver crate
+depends only on the audited `lib/*` crates `tairix-abi`, `tairix-caps`,
+and `tairix-log`, so it never links a kernel or driver crate
 (`AGENTS.md` §17.4).
 
 ## A policy machine, not a credential store
@@ -78,7 +78,7 @@ Login owns the reserved `EventId` range `10000..11000` (`AGENTS.md` §2.5,
 
 ## Tests
 
-`cargo test -p rustos-login` drives the state machine against in-memory
+`cargo test -p tairix-login` drives the state machine against in-memory
 `Prompt`/`Authenticator`/`SessionLauncher` fixtures and a recording log
 sink, covering a successful text login, the configured graphical default
 starting the desktop (and degrading to text when no graphical session is

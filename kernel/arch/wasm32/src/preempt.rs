@@ -3,7 +3,7 @@
 //! The wasm32 analogue of the bare-metal ports' timer-interrupt
 //! preemption. A WebAssembly module cannot be pre-empted by a hardware
 //! timer — it runs to completion on the host's single JavaScript turn —
-//! so RustOS yields *cooperatively*: the host schedules a
+//! so TAIRiX yields *cooperatively*: the host schedules a
 //! `requestAnimationFrame` callback that re-enters [`on_animation_frame`],
 //! which drives one scheduler tick and asks the host for the next frame.
 //! This module owns that surface:
@@ -46,7 +46,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::{CpuId, Timer};
+use tairix_arch_api::{CpuId, Timer};
 
 /// `u64` sentinel meaning "no `CpuId` recorded for this context yet".
 const NO_CPU: u64 = u32::MAX as u64;

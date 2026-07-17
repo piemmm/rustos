@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — RustOS 的命令 shell
+elsh — TAIRiX 的命令 shell
 
 ## SYNOPSIS
 

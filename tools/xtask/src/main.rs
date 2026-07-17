@@ -1,7 +1,7 @@
-//! Build orchestration for the RustOS workspace.
+//! Build orchestration for the TAIRiX workspace.
 //!
 //! `cargo xtask <command>` is the only sanctioned way to build, test, lint,
-//! document, and audit RustOS. Driving every check through one entry point
+//! document, and audit TAIRiX. Driving every check through one entry point
 //! keeps local developer flows and CI identical: when CI is green, a
 //! contributor running the same command locally on a clean clone gets the
 //! same result.
@@ -17,7 +17,7 @@
 //!   selectors are forwarded (`--release`, `--doc`, `--target <triple>`,
 //!   `-p <crate>`) and the reclaimed size is reported
 //! - `prune`        — reclaim only the *superseded* build-script output the
-//!   `rustos-kernel` build script orphans: it compiles the embedded userland
+//!   `tairix-kernel` build script orphans: it compiles the embedded userland
 //!   programs (each a ~1 GB `-Z build-std` tree) into an `OUT_DIR` cargo keys
 //!   by build-script fingerprint, so every `build.rs` change strands the
 //!   previous tree forever. Keeps the newest `build/<pkg>-<hash>` per package
@@ -292,10 +292,10 @@ mod tests {
     #[test]
     fn target_dir_honours_absolute_override() {
         let root = Path::new("/ws");
-        let abs = OsString::from("/var/lib/actions-runner/rustos-cache/target");
+        let abs = OsString::from("/var/lib/actions-runner/tairix-cache/target");
         assert_eq!(
             resolve_target_dir(root, Some(abs)),
-            Path::new("/var/lib/actions-runner/rustos-cache/target")
+            Path::new("/var/lib/actions-runner/tairix-cache/target")
         );
     }
 

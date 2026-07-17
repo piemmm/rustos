@@ -1,7 +1,7 @@
 //! Signed driver-store scan — turn the installed `/System/Drivers/`
 //! bundles into `devmgr` autoload candidates.
 //!
-//! RustOS does not ship a compiled-in list of *which* drivers exist: the discovered driver set is found at runtime by
+//! TAIRiX does not ship a compiled-in list of *which* drivers exist: the discovered driver set is found at runtime by
 //! scanning the installed signed bundles under `/System/Drivers/` and
 //! reading each bundle's manifest bind table. This module is that scan,
 //! sitting beside the load gate that already owns image parsing
@@ -24,7 +24,7 @@
 //! A bundle that fails any step is **skipped and logged**, never fatal:
 //! one malformed bundle cannot block the rest of the boot. The successful bundles become owned
 //! [`ScannedDriver`] records whose borrowed [`DriverCandidate`] view feeds
-//! `rustos_devmgr`'s `DeviceManager::autoload`.
+//! `tairix_devmgr`'s `DeviceManager::autoload`.
 //!
 //! The scan is a **match** step only. Building a candidate from a bundle's
 //! bind table is *necessary but never sufficient* to run it: the bundle's
@@ -36,7 +36,7 @@
 //!
 //! # Layering
 //!
-//! The scan produces canonical [`rustos_devmatch::DriverCandidate`] values
+//! The scan produces canonical [`tairix_devmatch::DriverCandidate`] values
 //! directly (the single definition both the kernel floor catalogue and the
 //! user-space `devmgr` consume), so the bin-crate boot
 //! wiring — the one layer that may name both `drvhost` and `devmgr` — hands the candidates straight to
@@ -45,9 +45,9 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::{DriverBindKey, HwMatchKey, DRIVER_MANIFEST_MAX_BIND_KEYS};
-use rustos_devmatch::DriverCandidate;
-use rustos_log::{log as log_event, Event, Field, Level, Sink};
+use tairix_abi::{DriverBindKey, HwMatchKey, DRIVER_MANIFEST_MAX_BIND_KEYS};
+use tairix_devmatch::DriverCandidate;
+use tairix_log::{log as log_event, Event, Field, Level, Sink};
 
 use crate::events;
 use crate::host::HandleBuf;
@@ -135,7 +135,7 @@ impl DriverStore {
     }
 
     /// The accepted bundles as borrowed [`DriverCandidate`] values for
-    /// [`rustos_devmatch::resolve`] / `DeviceManager::autoload`.
+    /// [`tairix_devmatch::resolve`] / `DeviceManager::autoload`.
     #[must_use]
     pub fn candidates(&self) -> Vec<DriverCandidate<'_>> {
         self.drivers.iter().map(ScannedDriver::candidate).collect()
@@ -223,11 +223,11 @@ fn audit_candidate(sink: &dyn Sink, path: &str, bind_key_count: usize) {
     let fields = [
         Field {
             key: "path",
-            value: rustos_log::FieldValue::Str(path),
+            value: tairix_log::FieldValue::Str(path),
         },
         Field {
             key: "bind_keys",
-            value: rustos_log::FieldValue::Str(count_str),
+            value: tairix_log::FieldValue::Str(count_str),
         },
     ];
     log_event(
@@ -245,11 +245,11 @@ fn audit_skip(sink: &dyn Sink, path: &str, reason: &str) {
     let fields = [
         Field {
             key: "path",
-            value: rustos_log::FieldValue::Str(path),
+            value: tairix_log::FieldValue::Str(path),
         },
         Field {
             key: "reason",
-            value: rustos_log::FieldValue::Str(reason),
+            value: tairix_log::FieldValue::Str(reason),
         },
     ];
     log_event(
@@ -268,7 +268,7 @@ mod tests {
     use super::*;
     use alloc::collections::BTreeMap;
     use core::cell::RefCell;
-    use rustos_abi::{DriverError, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
+    use tairix_abi::{DriverError, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 
     /// In-memory [`ImageSource`] keyed by logical path.
     struct MemStore(BTreeMap<String, Vec<u8>>);
@@ -284,13 +284,13 @@ mod tests {
     }
 
     impl ImageSource for MemStore {
-        fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), rustos_abi::Errno> {
+        fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), tairix_abi::Errno> {
             match self.0.get(path) {
                 Some(bytes) => {
                     buf.extend_from_slice(bytes);
                     Ok(())
                 }
-                None => Err(rustos_abi::Errno::NotFound),
+                None => Err(tairix_abi::Errno::NotFound),
             }
         }
     }
@@ -352,7 +352,7 @@ mod tests {
     fn build_image(caps: &[u16], bind_keys: &[DriverBindKey], payload: &[u8]) -> Vec<u8> {
         let m = DriverManifest {
             magic: DRIVER_MANIFEST_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
             kind: DriverKind::UserSpace,
             bind_key_count: u8::try_from(bind_keys.len()).expect("test bind keys fit u8"),
             capability_count: u16::try_from(caps.len()).expect("test caps fit u16"),
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn skip_reason_classifies_each_scan_error() {
         assert_eq!(
-            skip_reason(HostError::SourceFailed(rustos_abi::Errno::NotFound)),
+            skip_reason(HostError::SourceFailed(tairix_abi::Errno::NotFound)),
             "source read"
         );
         assert_eq!(skip_reason(HostError::ImageTruncated), "image truncated");
@@ -549,8 +549,8 @@ mod tests {
         let candidates = store.candidates();
         let vl805 = [HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330)];
         assert_eq!(
-            rustos_devmatch::resolve(&vl805, &candidates),
-            rustos_devmatch::MatchResolution::Winner {
+            tairix_devmatch::resolve(&vl805, &candidates),
+            tairix_devmatch::MatchResolution::Winner {
                 candidate: 0,
                 priority: 5,
             }

@@ -1,6 +1,6 @@
 //! Key derivation.
 //!
-//! RustOS derives subkeys with HMAC-SHA256 used as a pseudo-random function,
+//! TAIRiX derives subkeys with HMAC-SHA256 used as a pseudo-random function,
 //! the single-block case of HKDF-Expand (RFC 5869): a 256-bit secret keys the
 //! MAC and a caller-chosen, domain-separating `context` string is the message.
 //! The 256-bit output is itself a 256-bit key, so no expansion past one block
@@ -12,11 +12,11 @@
 //! metadata-authentication, filename, and content keys, each under a distinct
 //! `context`, so a derived key never collides with another use of the master.
 //!
-//! For **password** material RustOS uses PBKDF2-HMAC-SHA256 (RFC 8018 §5.2):
+//! For **password** material TAIRiX uses PBKDF2-HMAC-SHA256 (RFC 8018 §5.2):
 //! a deliberately slow, salted derivation that makes offline guessing of a
 //! stolen `/System/Security/Users` record expensive ([`pbkdf2_sha256`]). It
 //! is a standard *construction* over the same audited HMAC primitive — the
-//! same shape as `rustos-rng`'s HMAC-DRBG — never a hand-rolled primitive. Verification goes through [`crate::ct_eq`]
+//! same shape as `tairix-rng`'s HMAC-DRBG — never a hand-rolled primitive. Verification goes through [`crate::ct_eq`]
 //! ([`pbkdf2_sha256_verify`]) so a stored hash comparison cannot leak through
 //! timing.
 

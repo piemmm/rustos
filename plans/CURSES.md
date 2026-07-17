@@ -1,6 +1,6 @@
 # CURSES.md — First-party terminal vocabulary, termcap database, and curses library
 
-This is a staged build plan for RustOS's text-mode / TUI stack. It is
+This is a staged build plan for TAIRiX's text-mode / TUI stack. It is
 **binding under `AGENTS.md`**; read `AGENTS.md` and `PLAN.md` first. Every
 rule in both applies here without exception. This plan exists because the
 charter requires a `lib/*` crate proposal to be written and approved in a
@@ -10,7 +10,7 @@ plan file *before* any API is invented (`AGENTS.md` §6, §15.2).
 
 - **We adopt the ANSI / xterm escape vocabulary as canonical.** It is what
   every real terminal, terminal multiplexer, and remote Linux host already
-  speaks, so RustOS speaks it too — emitter (curses) and consumer (our
+  speaks, so TAIRiX speaks it too — emitter (curses) and consumer (our
   emulator) share *one* definition (`AGENTS.md` §2.2). Our terminal emulator
   is upgraded to a full xterm-class consumer as part of this work; the
   current subset parser in `userland/apps/terminal` is replaced by the shared

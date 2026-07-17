@@ -1,4 +1,4 @@
-//! RustOS arch-neutral seat model (`lib/seat`, `plans/DISPLAY.md` D1).
+//! TAIRiX arch-neutral seat model (`lib/seat`, `plans/DISPLAY.md` D1).
 //!
 //! A **seat** is one physical display plus the keyboard and pointer attached
 //! to it. This crate owns the pure, host-testable state machine behind seat

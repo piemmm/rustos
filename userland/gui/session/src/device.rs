@@ -28,11 +28,11 @@
 //! [`pump`](crate::DesktopShell::pump) stops without misinterpreting the bytes.
 //!
 //! [`InputSource`]: crate::InputSource
-//! [`InputEvent`]: rustos_wm::InputEvent
+//! [`InputEvent`]: tairix_wm::InputEvent
 
-use rustos_abi::input::{PointerButtonCode, PointerInput};
-use rustos_abi::Errno;
-use rustos_wm::{InputEvent, Point, PointerButton, Rect};
+use tairix_abi::input::{PointerButtonCode, PointerInput};
+use tairix_abi::Errno;
+use tairix_wm::{InputEvent, Point, PointerButton, Rect};
 
 use crate::shell::InputSource;
 
@@ -176,9 +176,9 @@ mod tests {
     use super::{DeviceInputSource, PointerInputChannel};
     use crate::InputSource;
     use alloc::collections::VecDeque;
-    use rustos_abi::input::{PointerButtonCode, PointerInput};
-    use rustos_abi::Errno;
-    use rustos_wm::{InputEvent, Point, PointerButton, Rect};
+    use tairix_abi::input::{PointerButtonCode, PointerInput};
+    use tairix_abi::Errno;
+    use tairix_wm::{InputEvent, Point, PointerButton, Rect};
 
     /// The screen the tests resolve motion against: 640×480 at the origin,
     /// so the pointer starts at its centre (320, 240).

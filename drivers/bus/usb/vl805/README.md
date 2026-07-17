@@ -1,4 +1,4 @@
-# `rustos-drv-bus-usb-vl805`
+# `tairix-drv-bus-usb-vl805`
 
 Autoloaded **user-space** Raspberry Pi 4 (BCM2711) **VL805** USB bus driver.
 
@@ -47,7 +47,7 @@ This crate has two targets:
   device logic — the VL805 firmware-reload policy (`reload_firmware`,
   `probe_firmware_revision`), the §18.3 `BIND_KEYS` match table (exact PCI
   `1106:3483`), and the `wiring` (`build_xhci_node` publishes the controller
-  as an `rustos_usb::XHCI_COMPATIBLE` node forwarding the BAR + DMA grants;
+  as an `tairix_usb::XHCI_COMPATIBLE` node forwarding the BAR + DMA grants;
   `reload_firmware_and_publish` is the reload-then-publish composition); and
 * the **`Run` binary** (`src/main.rs`), the freestanding pure-Rust program
   that builds the rt-backed host and drives that logic.
@@ -61,7 +61,7 @@ none. Its only consumer is this crate's own `Run` binary, so there is no
 second crate to keep in sync (`AGENTS.md` §2.22 / §2.2 / §2.14).
 
 A **pure-Rust** program (`AGENTS.md` §1): the binary links the userland
-runtime `rustos-rt` (never the C ABI, §16.4) and depends only on `lib/*`
+runtime `tairix-rt` (never the C ABI, §16.4) and depends only on `lib/*`
 crates, so the §17.4 layering holds (no `drivers/*`→`drivers/*` edge). It
 names no board address and maps nothing, so it stays platform-neutral
 (`coherency = None`, §2.20). On the host the binary is an inert stub and only

@@ -28,15 +28,15 @@
 //! caller falls back to the block's redundant copy
 //! ([`crate::ARXFS::read_meta`]).
 
-use rustos_abi::DriverError;
-use rustos_crypto::{ct_eq, hmac_sha256, MacKey, MacTag, MAC_TAG_LEN};
+use tairix_abi::DriverError;
+use tairix_crypto::{ct_eq, hmac_sha256, MacKey, MacTag, MAC_TAG_LEN};
 
 /// Magic in a metadata block header's first eight bytes: `"ARXFSB\3"`. The
 /// trailing byte tracks the on-disk block layout; it advanced to `3` when the
 /// fast physical checksum became the keyed authenticator (Stage 3). The one
 /// definition lives in `lib/fsprobe`, which the volume manager's signature
 /// probe shares, so the probe and this driver can never disagree.
-pub use rustos_fsprobe::ARXFS_HEADER_MAGIC as HEADER_MAGIC;
+pub use tairix_fsprobe::ARXFS_HEADER_MAGIC as HEADER_MAGIC;
 
 /// On-disk format version understood by this build. A volume written by a
 /// different version is refused rather than misread. Version 2 widened the
@@ -80,7 +80,7 @@ pub enum BlockType {
     /// the scrub-progress record it is reached from the transaction root and
     /// is never required for ordinary crash recovery.
     HealthBaseline = 6,
-    /// An inode's extended-attribute set: the encoded `rustos_fsmeta`
+    /// An inode's extended-attribute set: the encoded `tairix_fsmeta`
     /// attribute store, reached from the owning inode. Its payload is
     /// encrypted at rest under the metadata (filename) key exactly like a
     /// directory block's entry names, so no plaintext attribute key or value

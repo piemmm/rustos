@@ -1,7 +1,7 @@
 //! `readdir`/`stat` conformance: directory listing, `ENOTDIR` on listing
 //! a file, and the size/kind a `stat` reports.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn readdir_lists_created_children() {

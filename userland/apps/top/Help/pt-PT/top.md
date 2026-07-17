@@ -37,7 +37,7 @@ minutos; o censo de tarefas por estado; a repartição de utilização
 sessão continua.
 
 A linha `%Cpu(s)` mostra a fração do último intervalo que todos os CPU
-juntos passaram ocupados (a correr tarefas) e inativos. O RustOS
+juntos passaram ocupados (a correr tarefas) e inativos. O TAIRiX
 contabiliza apenas tempo ocupado e inativo, pelo que onde o `top` GNU
 divide a fração ocupada em user/system/nice/iowait, esta linha mostra
 deliberadamente os dois números reais.
@@ -68,7 +68,7 @@ carregam:
   em segundos com fração opcional (só o primeiro dígito fracionário,
   décimos, é conservado): `top -d 1.5` atualiza a cada 1,5 segundos. A
   omissão é 3,0. O `top` GNU aceita um atraso zero e atualiza o mais
-  depressa que consegue; o RustOS nunca faz espera ativa, pelo que um
+  depressa que consegue; o TAIRiX nunca faz espera ativa, pelo que um
   zero é fixado ao mínimo de 0,1 s.
 - `-h, -?` — mostrar a ajuda curta deste próprio comando e sair. Dentro
   de uma sessão as mesmas teclas alternam a sobreposição de teclas.

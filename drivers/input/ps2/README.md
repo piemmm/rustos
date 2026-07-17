@@ -1,6 +1,6 @@
-# `rustos-drv-input-ps2` — i8042 PS/2 keyboard driver
+# `tairix-drv-input-ps2` — i8042 PS/2 keyboard driver
 
-Stage 4 deliverable. Implements `rustos_abi::driver::input::Input` for a
+Stage 4 deliverable. Implements `tairix_abi::driver::input::Input` for a
 keyboard attached to the Intel 8042 keyboard controller — the legacy
 "PS/2" controller every x86 PC and QEMU's default `q35`/`i440fx`
 machines expose. The driver polls the controller and decodes a
@@ -53,7 +53,7 @@ issues no controller commands, unload has no hardware state to quiesce.
 
 ## Test surface
 
-`cargo test -p rustos-drv-input-ps2` exercises, against an in-process
+`cargo test -p tairix-drv-input-ps2` exercises, against an in-process
 mock `PortIo8` controller:
 
 - `register` capability gate.
@@ -70,11 +70,11 @@ mock `PortIo8` controller:
 12/12 host-side tests pass.
 
 The QEMU integration vertical `tests/integration/ps2_input_qemu_x86_64`
-(`rustos-test-ps2-qemu-x86-64`, enrolled in `cargo xtask test --qemu`)
+(`tairix-test-ps2-qemu-x86-64`, enrolled in `cargo xtask test --qemu`)
 boots the production kernel, loads this driver's signed `.rxe` through
-`rustos_drvhost::Host`, and drives it through load → use → unload →
+`tairix_drvhost::Host`, and drives it through load → use → unload →
 reload. The boot hand-off it needed is the x86_64 8-bit port seam
-`rustos_arch_x86_64::pio::X86PortIo8` (the byte-wide sibling of the PCI
+`tairix_arch_x86_64::pio::X86PortIo8` (the byte-wide sibling of the PCI
 bus driver's `X86PortIo`). "Use" is made deterministic without a
 physical keypress by the i8042 `0xD2` ("write keyboard output buffer")
 command: the test injects a scancode into the controller's output

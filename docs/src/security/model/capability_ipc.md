@@ -6,7 +6,7 @@ machine-checked specifications in addition to unit and property tests. The
 IPC state machine [that] is kept in sync with the code", checked by `cargo
 xtask ci` on every PR that touches the modelled subsystems.
 
-RustOS supplies the *equivalent*: an in-tree, exhaustive **explicit-state
+TAIRiX supplies the *equivalent*: an in-tree, exhaustive **explicit-state
 model checker**. The charter forbids leaning on external code where a clean
 first-party implementation is feasible (§2.12), and §19.6 already set the
 "equivalent in-tree harness" precedent over an external runner; TLA+'s TLC

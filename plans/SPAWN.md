@@ -48,7 +48,7 @@ header (`cargo xtask c-header --write`), which the drift guard enforces.
 
 3. **The primitive already exists; it is not wired in.** The §17.2
    Arch-HAL **context-switch** slice
-   (`rustos_arch_api::context::{ContextSwitch, TaskContext, TaskEntry,
+   (`tairix_arch_api::context::{ContextSwitch, TaskContext, TaskEntry,
    PrepareError}`) is implemented and conformance-tested on every
    bare-metal port (`kernel/arch/*/src/context_hal.rs`,
    `plans/WIRING.md` W5a/W7). `ContextSwitch::prepare` seeds a never-run
@@ -223,7 +223,7 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   `dispatch_step`'s switch-back still fails the task closed **silently**
   (no log — the dispatcher has no sink seam); the termination must reach
   the system log per the fail-loud rule once a logging seam exists there.
-- `rustos-kernel::dispatch_core::dispatch_via_slot`: the `Reschedule` arm
+- `tairix-kernel::dispatch_core::dispatch_via_slot`: the `Reschedule` arm
   (suspend via `reschedule_current`, then encode the result on resume).
 - **Tests:** `kernel/core` host tests (publish→suspend records the
   `task→dispatch` switch + action; no-handle and out-of-range fail closed;
@@ -270,10 +270,10 @@ vertical (mirrors `kthread_switch_qemu_aarch64` + the `spawn_program` EL0
 recipe) proves two EL0 user tasks timeshare one CPU under the live
 scheduler on the `virt` board:
 
-- A new pure-Rust EL0 fixture program `rustos-test-el0-yielder`
-  (`tests/integration/el0_yielder_program`) links `rustos-rt` (§1) and
-  yields `RUSTOS_EL0_YIELDS` times then exits 0. The new
-  `rustos_rt::yield_now()` wrapper (over the existing `abi-v1` `yield`
+- A new pure-Rust EL0 fixture program `tairix-test-el0-yielder`
+  (`tests/integration/el0_yielder_program`) links `tairix-rt` (§1) and
+  yields `TAIRIX_EL0_YIELDS` times then exits 0. The new
+  `tairix_rt::yield_now()` wrapper (over the existing `abi-v1` `yield`
   syscall) is its cooperative reschedule point; the vertical's `build.rs`
   owns the yield count, injecting it into the program build *and* emitting
   the matching `YIELDS_PER_TASK` constant the kernel asserts against, so the
@@ -319,10 +319,10 @@ landed first; the real device/producer wired in a following increment).
   on `CapabilityId::PROC_SPAWN` (id 17), `audit: true`. Args: program-path
   user pointer + length; returns the new PID (`U64`) or a stable `Errno`.
   Frozen-number + frozen-capability tests added.
-- `lib/abi-sys`: the `ros_sys_spawn` C stub (`#[export_name]`, panic-free,
+- `lib/abi-sys`: the `tairix_sys_spawn` C stub (`#[export_name]`, panic-free,
   `AGENTS.md` §9) + the drift-registry row + a marshalling test. C header
-  regenerated (`cargo xtask c-header --write` → `ROS_SYS_SPAWN 12u`,
-  `uint64_t ros_sys_spawn(void*, uintptr_t)`); `abi-check` + `c-header`
+  regenerated (`cargo xtask c-header --write` → `TAIRIX_SYS_SPAWN 12u`,
+  `uint64_t tairix_sys_spawn(void*, uintptr_t)`); `abi-check` + `c-header`
   drift guards green. `SYSCALL_TABLE_HASH` recomputed (`791b08…`).
 - `kernel/syscall`: `SyscallHandlers::spawn` trait method + the
   `SyscallNumber::SPAWN` dispatch arm + `MockHandlers::spawn` + the
@@ -356,7 +356,7 @@ landed first; the real device/producer wired in a following increment).
 #### SP3b — aarch64 `ProcessSpawn` producer + registry + `-M virt` vertical `[x]`
 
 **Landed.** The real aarch64 `ProcessSpawn` producer lives in the kernel
-binary (`kernel/rustos-kernel/src/spawn_producer.rs`, sibling of
+binary (`kernel/tairix-kernel/src/spawn_producer.rs`, sibling of
 `init_spawn`): it draws the child's stage-1 page tables from the kernel's
 live `FrameAllocator` through a boot-cached `kernel/mem` `FrameTableSource`
 (the §24.1 allocator-backed source — no fixed `MAX_SPAWNS` reserve, so the
@@ -376,13 +376,13 @@ definition every port installs, §2.2); `kernel_core` threads
 `&state.frame_allocator` through `BootInfo::with_spawn` → `run_phases` →
 `KernelDispatchHook::new` → `with_frames`/`with_spawn`. The kernel `build.rs`
 was generalised to build **both** `init` and the `Shell` session program
-through one `elf2rxe` helper (§2.2; RustOS stays Rust-only, §1), embedding
+through one `elf2rxe` helper (§2.2; TAIRiX stays Rust-only, §1), embedding
 `SHELL_RXE` registered under `/System/Apps/elsh.app/Run`. `AdmitError`,
 build, and parse failures map onto stable `Errno`s (`NoSpace` /
 `AlreadyExists` / `PermissionDenied` / `BadMagic`); page-table and image
 frames are handed out monotonically (not reclaimed this stage), so a failed
 spawn leaks nothing user-visible (§2.9).
-- `-M virt` vertical landed: `rustos-test-spawn-session-qemu-aarch64` boots
+- `-M virt` vertical landed: `tairix-test-spawn-session-qemu-aarch64` boots
   the production pipeline, PID 1 `init` spawns `/System/Apps/elsh.app/Run` through
   the `spawn` syscall, both run (proving SP2 timesharing), the session writes
   a gated banner + `exit`s, and `init` observes the returned PID. PASS keys
@@ -397,7 +397,7 @@ follow. **SP3a + SP3b are landed.**
 
 **Landed alongside SP3b.** `init`'s startup config (`session
 /System/Apps/elsh.app/Run`, already parsed, `plans/PI.md` P6b) is now launched
-through the SP3 `spawn` syscall (`rustos_rt::spawn`) as a separate, isolated
+through the SP3 `spawn` syscall (`tairix_rt::spawn`) as a separate, isolated
 process; `init` keeps running when a spawn is refused — the refusal is
 reported on `stderr` (`Sessions::report_launch_failure`) and that entry's
 slot abandoned while the remaining entries boot on (§2.24) — rather than
@@ -406,7 +406,7 @@ being replaced. `init`'s effective set gained
 `{CAP_CONSOLE_WRITE, CAP_CONSOLE_READ}` (no ambient authority, §4). The
 minimal `session` program is a banner+exit `Run` stub in the `Shell`
 bundle; growing it into a real shell REPL (wiring
-in the `rustos-elsh` interpreter library) is `plans/PI.md` P6e. Per the
+in the `tairix-elsh` interpreter library) is `plans/PI.md` P6e. Per the
 binding §20 stream model, the REPL does its text I/O over its **inherited
 standard streams (fd 0/1/2/3 — `stdin`/`stdout`/`stderr`/`stdinfo`)**, never
 the kernel-discovered console (`console_*` is only the bootstrap stream
@@ -451,7 +451,7 @@ a modern anonymous-memory **map/unmap** pair.
 **Binding decisions (settle the open ones in the SP5-0 design note,
 §15.2 — do not invent the capability/ABI before then):**
 
-1. **Clean-slate shape, no legacy single break (§2.13).** RustOS has no
+1. **Clean-slate shape, no legacy single break (§2.13).** TAIRiX has no
    installed base, so SP5 adds an `mmap`-style *anonymous region* map +
    unmap, **not** a `brk`/`sbrk` single-heap-break model. The libc/heap
    allocator a program links (`lib/rt`, future) layers its `malloc` over
@@ -511,7 +511,7 @@ landing):**
   (Numbers are **14/15**, not the 13/14 sketched below: `STREAM_READ` took
   13. `MapFlags` carries a `FIXED` bit; `addr_hint` is advisory unless
   `FIXED`. `Errno::OutOfMemory` = **20** was appended.)
-  `lib/abi-sys`: the `ros_sys_mem_map` / `ros_sys_mem_unmap` C stubs
+  `lib/abi-sys`: the `tairix_sys_mem_map` / `tairix_sys_mem_unmap` C stubs
   (`#[export_name]`, panic-free) + drift-registry rows + marshalling tests;
   regenerate the C header (`cargo xtask c-header --write`) and recompute
   `SYSCALL_TABLE_HASH`; `abi-check` + `c-header` drift guards green.
@@ -550,7 +550,7 @@ landing):**
   `unmap_anonymous` over its frame pool + `DirectPhysMap`, admits the
   program as a resumable user kthread, and routes the program's `mem_map` /
   `mem_unmap` `svc`s through the producer. The pure-Rust EL0 fixture
-  (`tests/integration/mem_map_program`, linking the new `rustos_rt::mem_map`
+  (`tests/integration/mem_map_program`, linking the new `tairix_rt::mem_map`
   / `mem_unmap` wrappers) `mem_map`s a region (FIXED), writes and reads back
   a pattern, `mem_unmap`s it, then touches the released range; the fault
   handler reports the use-after-unmap data abort as PASS (id 4282), and a
@@ -569,7 +569,7 @@ landing):**
   pure-Rust `mem_map_program` fixture and SP5b-1 producer (its own
   `AnonProducer` over an x86_64 four-level space), but — needing the GDT
   ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry — boots the
-  production `rustos-kernel` pipeline (like `spawn_program_qemu_x86_64`), then
+  production `tairix-kernel` pipeline (like `spawn_program_qemu_x86_64`), then
   `iretq`s into the program through `EnterUser::enter_user`; its `fault`
   observer reports the use-after-unmap `#PF` as PASS on the QEMU boot
   (ids 4274–4277, verified green on this host). Reaching it required closing a
@@ -579,7 +579,7 @@ landing):**
   `swapgs`), leaving `TSS.RSP0 = 0`, so a user fault's frame-push faulted and
   escalated to `#DF` (the trap was *undeliverable*, a security gap, §2.9/§2.17).
   Boot now installs the dedicated, error-code-aware `#PF` entry
-  (`rustos_arch_x86_64::fault`, the x86_64 analogue of the riscv64/aarch64
+  (`tairix_arch_x86_64::fault`, the x86_64 analogue of the riscv64/aarch64
   `fault` hooks) **and** programs `TSS.RSP0` (`percpu::install_tss_rsp0`, reusing
   the one shared stack-pivot validator `validate_kernel_rsp0`, §2.2) to the
   same already-mapped per-CPU kernel stack the syscall path uses, bringing
@@ -592,7 +592,7 @@ landing):**
   mutate its own space through the `live_producers` per-CPU slot (the shared
   MMIO/ANON/DMA window offsets live once in `spawn_layout`, §2.2; the stack
   and startup-block placement is *derived per spawn* from the image's mapped
-  top with guard gaps — `rustos_kernel_mem::derive_user_layout` bound by
+  top with guard gaps — `tairix_kernel_mem::derive_user_layout` bound by
   `spawn_layout::user_layout`, one definition for every port — so an image
   of any size below the device window spawns, never capped by a fixed
   offset). wasm32's linear-memory model is an honest n/a (declared).
@@ -628,7 +628,7 @@ landing).
 
 1. **`waitpid`-style, not a global reaper (§2.13).** `wait(pid: i32,
    status: *mut i32) -> i64`: `pid` selects a specific child or
-   `rustos_abi::WAIT_PID_ANY` (`-1`) for any child; on success the kernel writes
+   `tairix_abi::WAIT_PID_ANY` (`-1`) for any child; on success the kernel writes
    the child's exit code to `status` and returns the reaped child's PID
    (`< 0` is `-errno`, the standard signed-result convention).
 2. **Own children only (§4 / §16.6).** A process may only reap children it
@@ -649,7 +649,7 @@ landing).
 - **SP6a — abi-v1 surface + fail-closed seam (host-proven) `[x]`.**
   `lib/abi`: `SyscallNumber::WAIT` (**16**) + `WAIT_PID_ANY` const + the
   `SyscallSpec` row (`wait(I32 pid, UserPtr status) -> U64`, **unprivileged,
-  audited**) + frozen-number test. `lib/abi-sys`: the `ros_sys_wait` C stub
+  audited**) + frozen-number test. `lib/abi-sys`: the `tairix_sys_wait` C stub
   (`#[export_name]`, panic-free) + drift-registry row + marshalling tests;
   regenerate the C header (`cargo xtask c-header --write`); `SYSCALL_TABLE_HASH`
   re-derives from `ENCODED_TABLE`; `abi-check` + `c-header` guards green.
@@ -699,7 +699,7 @@ complete:** SP6a landed the abi surface + fail-closed seam; SP6b landed the
 scheduler-side blocking producer + the `-M virt` vertical.
 
 **Non-blocking poll (`WaitFlags::NONBLOCK`).** `wait` carries a third
-`flags: u32` argument (a `rustos_abi::WaitFlags` set; the ABI is unfrozen so
+`flags: u32` argument (a `tairix_abi::WaitFlags` set; the ABI is unfrozen so
 the row was extended in place, no `v2`). With `NONBLOCK` set the call polls:
 it reaps an already-exited child, or returns `Errno::WouldBlock` for a
 still-running child **without parking** — the reap the shell's job control
@@ -708,8 +708,8 @@ blocking. The producer serves it through the same single `ProcessTable::reap`
 primitive the blocking loop uses (`ProcessWait::poll`), so the two can never
 diverge; `WouldBlock` is the `abi-v1` "nothing yet, retry" signal the
 dispatcher records below the error level, so a polling loop never floods the
-audit log. First-party wrapper `rustos_rt::try_wait`; C stub `ros_sys_wait`
-(header macro `ROS_WAIT_FLAG_NONBLOCK`). Host-proven end to end (producer
+audit log. First-party wrapper `tairix_rt::try_wait`; C stub `tairix_sys_wait`
+(header macro `TAIRIX_WAIT_FLAG_NONBLOCK`). Host-proven end to end (producer
 poll ready/would-block/not-found; handler nonblock-poll + would-block; abi-sys
 + rt marshalling); the blocking-reap `-M virt` vertical already proves the
 shared `reap` primitive on hardware.
@@ -734,7 +734,7 @@ with no live enforcement point). No cross-process or process-group signalling
 exists yet: that is a later stage with its own capability when a holder and
 an enforcement point exist together.
 
-**Signal set (closed, `rustos_abi::Signal`).** The minimal set job control
+**Signal set (closed, `tairix_abi::Signal`).** The minimal set job control
 needs, mirroring the shell's own `job::Signal` vocabulary: `Continue`
 (resume a stopped child, discriminant 1), `Terminate` (ask a child to end,
 2), `Kill` (force a child to end, 3). Discriminant 0 is reserved and never
@@ -749,7 +749,7 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   Errno`, **unprivileged, audited** — signalling a process is a
   security-relevant lifecycle decision, and own-children-only grants no
   authority over another principal) + frozen-number test. `lib/abi-sys`: the
-  `ros_sys_signal` C stub (`#[export_name]`, panic-free) + drift-registry row
+  `tairix_sys_signal` C stub (`#[export_name]`, panic-free) + drift-registry row
   + marshalling tests; regenerate the C header
   (`cargo xtask c-header --write`); `abi-check` + `c-header` guards green.
   `lib/rt`: the `signal(pid, Signal) -> i64` wrapper + marshalling tests.
@@ -761,8 +761,8 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   `NULL_PROCESS_SIGNAL` → `NotImplemented`, mirroring `NULL_PROCESS_WAIT`),
   the `signal` handler (forward → return `Ok(0)`), and a `with_process_signal`
   builder, so the kernel binary needs no change yet. The shell's
-  `RtProcessHost::signal` is wired to the real `rustos_rt::signal` wrapper
-  (mapping `job::Signal` → `rustos_abi::Signal`), replacing its explicit
+  `RtProcessHost::signal` is wired to the real `tairix_rt::signal` wrapper
+  (mapping `job::Signal` → `tairix_abi::Signal`), replacing its explicit
   `NotImplemented` stub with the genuine syscall path (fail-closed until the
   producer lands). Host-tested (null seam fail-closed; handler forwards;
   dispatch decodes/validates; marshalling).
@@ -819,7 +819,7 @@ argv-taking command app):
 
 - **ABI.** `spawn` is a 6-argument syscall: `(path, path_len, console,
   target_uid, strings, strings_len)`. `strings` (0 = absent) names an
-  encoded `rustos_abi::process` `PSV1` startup-vector block — the **same**
+  encoded `tairix_abi::process` `PSV1` startup-vector block — the **same**
   format the kernel writes into a child's image, so there is exactly one
   strings encoding and one fuzz-covered decoder, no second codec. The
   kernel bounds `strings_len` against `PROCESS_START_MAX_TOTAL_LEN`
@@ -839,9 +839,9 @@ argv-taking command app):
   delegator was deleted; the handler resolves the effective strings and
   calls `spawn_with` directly); all three arch producers thread `env` into
   the shared `kernel/mem` startup-vector build. Userland:
-  `rustos_rt::spawn_with(path, console, uid, args, env)` encodes the block
-  via the shared `process_start_*` helpers, `rustos_rt::{env, env_count,
-  env_var}` read the child-side environment, `ros_sys_spawn` carries the
+  `tairix_rt::spawn_with(path, console, uid, args, env)` encodes the block
+  via the shared `process_start_*` helpers, `tairix_rt::{env, env_count,
+  env_var}` read the child-side environment, `tairix_sys_spawn` carries the
   two new C-ABI parameters, and elsh's `RtProcessHost` passes the
   command's words plus exported env (with `NAME=v cmd` prefix overrides);
   pipes/redirections still fail closed pending descriptor plumbing.
@@ -861,7 +861,7 @@ foreground child, `^C` must interrupt and `^Z` must stop that child — the
 kernel console line discipline delivers the signal; the shell only marks and
 clears the foreground job. Binding design decisions:
 
-- **Signal set.** The closed `rustos_abi::Signal` gains `Interrupt` (4, the
+- **Signal set.** The closed `tairix_abi::Signal` gains `Interrupt` (4, the
   `^C` interrupt request; default disposition terminates) and `Stop` (5, the
   `^Z` stop; parks the child, never terminates it). `Signal::
   termination_status` follows the POSIX-familiar `128 + <signal a script
@@ -873,10 +873,10 @@ clears the foreground job. Binding design decisions:
   `WUNTRACED` analogue): with it set, `wait` also reports a child freshly
   stopped by `Signal::Stop` — without reaping it. A stop is reported once
   (edge-triggered, re-armed by `Continue`). The `status` out-pointer now
-  names a typed two-field record, `rustos_abi::WaitStatusRecord`
+  names a typed two-field record, `tairix_abi::WaitStatusRecord`
   (`#[repr(C)]`: `kind: u32` — 1 exited, 2 stopped, 0 reserved — plus
   `value: i32` — the exit code, or the stopping signal's discriminant),
-  decoded fail-closed into `rustos_abi::WaitStatus::{Exited(i32),
+  decoded fail-closed into `tairix_abi::WaitStatus::{Exited(i32),
   Stopped(Signal)}`; no POSIX bit-packing. Every caller updates in place.
 - **Kernel bookkeeping.** `ProcessTable`'s `ChildEntry` gains
   `stop_pending: Option<Signal>`; `KernelProcessWait` gains
@@ -993,10 +993,10 @@ connects `cmd | cmd`. Binding design decisions:
 - **The spawn attach block.** `spawn` keeps its six registers but slots 2/3
   become `attach`/`attach_len` (in-place `abi-v1` evolution; the old
   `console` and `target_uid` registers move *into* the block): a
-  fixed-length `rustos_abi::SpawnAttach` block carrying `target_uid`
+  fixed-length `tairix_abi::SpawnAttach` block carrying `target_uid`
   (`SPAWN_UID_INHERIT` sentinel), the console selector (`CONSOLE_INHERIT`
   or an installed index — the base table exactly as before), and four typed
-  per-fd wires (`rustos_abi::FdWire`): `Inherit` (the base table's own
+  per-fd wires (`tairix_abi::FdWire`): `Inherit` (the base table's own
   slot), `InheritSlot(n)` (the base table's slot *n* — how `2>&1` onto an
   inherited console is spelled), `Closed`, and `Handle(fd)` (a descriptor
   of the **parent's own** open table: a file, resource, or pipe end).
@@ -1057,9 +1057,9 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
   caller without one fails closed `NotFound`) + `SPAWN_ATTACH_LEN`, the
   `SPAWN` row's slots 2/3 → `attach`/`attach_len`, and the
   `stream_read`/`stream_write` rows' dispatcher gate dropped (checked
-  in-handler for console backings). `lib/abi-sys`: `ros_sys_spawn` carries
+  in-handler for console backings). `lib/abi-sys`: `tairix_sys_spawn` carries
   `(path, path_len, attach, attach_len, strings, strings_len)`,
-  `ros_sys_pipe_create` added; C header regenerated, drift guards green.
+  `tairix_sys_pipe_create` added; C header regenerated, drift guards green.
   `kernel/syscall`: `SyscallHandlers::spawn` re-shaped, `pipe_create`
   added, dispatch arms + decode tests. `kernel/core`: the `pipe` module
   (ring + Drop-counted ends + `PIPE_WAITQ`/`pipe_wake` + park-loop
@@ -1079,7 +1079,7 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
   handler decode paths.
 - **SP10b — elsh `RtProcessHost` wiring + `-M virt` pipeline vertical `[x]`.**
   **Landed.** The lowering is a pure, host-tested planner,
-  `rustos_elsh::wireplan`: `lower` turns a `LaunchSpec` into a `WirePlan`
+  `tairix_elsh::wireplan`: `lower` turns a `LaunchSpec` into a `WirePlan`
   — the ordered `PlannedOpen` list (path/resource opens with
   `OpenMode`-derived flags, pipe pairs), one fd 0–3 `PlannedWire` map per
   member (pipeline joints wired fd 1 → next fd 0; redirections applied in
@@ -1184,7 +1184,7 @@ enforced nowhere yet). Session-to-session working notes:
 **Staging (one fully-gated increment per landing):**
 
 - **SP11a — layout mechanism (host-proven) `[x]`.** **Landed.**
-  `rustos_kernel_mem::derive_user_layout` takes the
+  `tairix_kernel_mem::derive_user_layout` takes the
   `(stack_reserve_pages, stack_commit_pages)` pair and `UserLayout` carries
   `stack_reserve_base` beside the committed `stack_base`; fail-closed on a
   zero commit, a commit exceeding the reserve, the ceiling, and overflow
@@ -1226,13 +1226,13 @@ enforced nowhere yet). Session-to-session working notes:
   `OpenStreams` / `Processes`.
 - **SP11c — policy flip + `-M virt` verticals `[x]`.** **Landed.**
   `USER_STACK_RESERVE_PAGES` is 2048 pages (8 MiB), derived from the one
-  default stack policy value — `rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES`
+  default stack policy value — `tairix_kernel_core::DEFAULT_STACK_LIMIT_BYTES`
   (`kernel/core/src/rlimit.rs`), which `LimitSet::DEFAULT` carries as the
   `StackBytes` bound (soft and hard: the span is the structural bound, so
   a wider grant is meaningless without `CAP_RLIMIT_RAISE` *and* a wider
   span) — so the settable default and the structural span share one
   definition. `USER_STACK_COMMIT_PAGES` is 32 (128 KiB): ample for
-  `rustos-rt` startup (the 1 MiB "scratch carve" is the C-compat `crt0`'s,
+  `tairix-rt` startup (the 1 MiB "scratch carve" is the C-compat `crt0`'s,
   reached only under the production growth path, and the c-program
   verticals map their own bespoke fully-eager stacks). QEMU verticals
   landed on aarch64 + riscv64: `tests/integration/stack_grow_program`

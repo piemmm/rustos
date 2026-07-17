@@ -1,7 +1,7 @@
 //! riscv64 Platform-Level Interrupt Controller (PLIC) register driver.
 //!
 //! Stage 4.D Item 4 (riscv64 external-IRQ controller). On the QEMU
-//! `virt` board — and on every SiFive-derived platform RustOS targets
+//! `virt` board — and on every SiFive-derived platform TAIRiX targets
 //! — external interrupts from `virtio-mmio` transports (and any other
 //! wired peripheral) are routed through a single PLIC. The PLIC is the
 //! riscv64 analogue of the x86_64 IO-APIC: it owns per-source priority,
@@ -349,7 +349,7 @@ impl<M: PlicMmio> PlicController<M> {
     }
 }
 
-impl<M: PlicMmio + Send + Sync> rustos_arch_api::IrqController for PlicController<M> {
+impl<M: PlicMmio + Send + Sync> tairix_arch_api::IrqController for PlicController<M> {
     /// Mask `line` (a PLIC source) by dropping its priority to zero,
     /// forwarding to the inherent [`PlicController::mask`].
     ///
@@ -358,20 +358,20 @@ impl<M: PlicMmio + Send + Sync> rustos_arch_api::IrqController for PlicControlle
     /// through the trait lets the architecture-neutral kernel name one
     /// controller surface across every port without
     /// the arch port acquiring a `kernel/irq` dependency.
-    fn mask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+    fn mask(&self, line: u32) -> Result<(), tairix_arch_api::IrqControlError> {
         PlicController::mask(self, line)
-            .map_err(|PlicError::SourceOutOfRange| rustos_arch_api::IrqControlError::OutOfRange)
+            .map_err(|PlicError::SourceOutOfRange| tairix_arch_api::IrqControlError::OutOfRange)
     }
 
     /// Unmask `line` by restoring its delivering priority, forwarding to
     /// the inherent [`PlicController::unmask`].
-    fn unmask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+    fn unmask(&self, line: u32) -> Result<(), tairix_arch_api::IrqControlError> {
         PlicController::unmask(self, line)
-            .map_err(|PlicError::SourceOutOfRange| rustos_arch_api::IrqControlError::OutOfRange)
+            .map_err(|PlicError::SourceOutOfRange| tairix_arch_api::IrqControlError::OutOfRange)
     }
 }
 
-impl<M: PlicMmio + Send + Sync> rustos_arch_api::InterruptEntry for PlicController<M> {
+impl<M: PlicMmio + Send + Sync> tairix_arch_api::InterruptEntry for PlicController<M> {
     /// Claim the highest-priority pending source for this context.
     ///
     /// The PLIC reports source `0` ("no interrupt pending") when nothing

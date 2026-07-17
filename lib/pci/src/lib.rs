@@ -1,8 +1,8 @@
-//! RustOS PCI/PCIe configuration-access mechanism library.
+//! TAIRiX PCI/PCIe configuration-access mechanism library.
 //!
 //! A `no_std` `lib/*` crate: it implements the
 //! `abi-v1` PCI/PCIe bus and transport seams
-//! ([`rustos_abi::driver::bus::Bus`], [`VirtioPciBus`], [`MsixBus`],
+//! ([`tairix_abi::driver::bus::Bus`], [`VirtioPciBus`], [`MsixBus`],
 //! [`PciBus`]) over three configuration-access mechanisms, and exposes them
 //! through the [`mechanism_one`] / [`mechanism_ecam`] / [`mechanism_brcm`]
 //! constructors. The concrete `Pci<C>` type stays crate-private — every
@@ -25,14 +25,14 @@
 //! index/data window pair). MSI / MSI-X capabilities are *discovered* and
 //! routed through [`MsixBus::route_msix`]; the BAR walker maps a BAR only
 //! through the supplied [`MmioMapper`], which enforces
-//! [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) kernel-side
+//! [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP) kernel-side
 //! (no ambient authority).
 //!
 //! # Safety
 //!
 //! This crate contains no `unsafe`: the `in`/`out` instructions that reach
 //! I/O ports `0xCF8`/`0xCFC` live in the architecture port behind the
-//! [`rustos_abi::PortIo`] seam, driven only through
+//! [`tairix_abi::PortIo`] seam, driven only through
 //! `mech_one::PortIoConfigSpace`, which the unit tests exercise against a
 //! recording mock.
 
@@ -40,11 +40,11 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::driver::msix::MsixBus;
-use rustos_abi::driver::pci::PciBus;
-use rustos_abi::driver::virtio_pci::VirtioPciBus;
-use rustos_abi::{DriverError, HwNode, MmioMapper, MsiMessage, PortIo, RegisterWindow};
+use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::driver::msix::MsixBus;
+use tairix_abi::driver::pci::PciBus;
+use tairix_abi::driver::virtio_pci::VirtioPciBus;
+use tairix_abi::{DriverError, HwNode, MmioMapper, MsiMessage, PortIo, RegisterWindow};
 
 pub(crate) mod config;
 pub(crate) mod enumerate;
@@ -71,7 +71,7 @@ pub use locate::{
 /// at I/O port `0xCF8` selects a `(bus, device, function, register)`
 /// tuple and the data word at `0xCFC` reads/writes the corresponding
 /// configuration dword. The `pio` backend issues the port accesses
-/// (the x86_64 architecture port supplies [`rustos_abi::PortIo`]).
+/// (the x86_64 architecture port supplies [`tairix_abi::PortIo`]).
 ///
 /// The returned value is the bus the ring-0 boot pipeline drives
 /// through the three frozen `abi-v1` seams — [`Bus`] (enumeration),
@@ -112,7 +112,7 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 ///
 /// `window` is the kernel-mapped [`RegisterWindow`] over the host
 /// bridge's configuration region, obtained from the MMIO-map facility
-/// after a [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+/// after a [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
 /// check. Its base
 /// is the physical base of `(bus 0, device 0, function 0, register 0)`
 /// and its length bounds the buses the enumeration can reach: an
@@ -149,7 +149,7 @@ pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + P
 /// controller's register block — the very window the BCM2711 PCIe
 /// host-bridge bring-up driver (`drivers/bus/pcie_brcm`) trained the
 /// link through — obtained from the MMIO-map facility after a
-/// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) check. The link must be
+/// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP) check. The link must be
 /// up before any downstream configuration access, or the controller
 /// raises a CPU abort; the bring-up driver guarantees this before
 /// handing the window here.

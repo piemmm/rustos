@@ -1,6 +1,6 @@
-# rustos-log
+# tairix-log
 
-Structured, level-filtered logging plus the RustOS system-log (SYSLOG) data
+Structured, level-filtered logging plus the TAIRiX system-log (SYSLOG) data
 model (`lib/log`, `plans/SYSLOG.md`). `no_std`, allocation-free on the hot
 path, and payload-format agnostic so the same code runs in the kernel, a
 freestanding driver, and a WebAssembly userland binary.
@@ -102,7 +102,7 @@ neither re-implements the record format.
 Both the userland journal service and in-kernel early-boot logging need one
 identical record format, integrity chain, and authority model; keeping them
 here is the single definition both reach without duplication (§2.2), while the
-crate depends only on `rustos-abi` and `rustos-crypto` (the lowest layers).
+crate depends only on `tairix-abi` and `tairix-crypto` (the lowest layers).
 
 ## Design
 
@@ -111,11 +111,11 @@ crate depends only on `rustos-abi` and `rustos-crypto` (the lowest layers).
   values (e.g. `SourceName`) are fixed-capacity inline buffers.
 - Fail-closed everywhere: every length, discriminant, UTF-8 constraint, and
   authority decision rejects or downgrades rather than guessing.
-- The field-value model is re-exported from `rustos_abi::field`, its ABI-schema
+- The field-value model is re-exported from `tairix_abi::field`, its ABI-schema
   home; there is one definition.
 - The advancing, bounds-checked byte cursors that `record` and `dict` share
   live once in the internal `cursor` module (one definition), distinct from
-  `rustos_abi`'s offset-indexed `le` helpers for fixed-`WIRE_LEN` structs.
+  `tairix_abi`'s offset-indexed `le` helpers for fixed-`WIRE_LEN` structs.
 
 ## Stability
 

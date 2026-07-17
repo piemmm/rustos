@@ -1,9 +1,9 @@
 //! aarch64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
-//! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
+//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice by
 //! normalising the flattened device tree the firmware hands the kernel
-//! into [`rustos_abi::hwtree`] nodes — **generically**. The walk emits a
+//! into [`tairix_abi::hwtree`] nodes — **generically**. The walk emits a
 //! node for every device the tree describes, with no per-device list to
 //! grow (`PLAN.md` Stage 4.HW):
 //!
@@ -39,13 +39,13 @@ use crate::fdt::{
     bus_level, dma_ranges_aperture, outbound_mmio_window, reg_entry_count, scan_translated,
     translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH,
 };
-use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
-use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
-use rustos_fdt::{name_stem, read_cells, Node};
+use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
+use tairix_fdt::{name_stem, read_cells, Node};
 // The single source of the mailbox `compatible` match identity lives in the
 // device's own client crate (`lib/vcmailbox`) so the discovery key here and
 // the `vcmailbox` service driver's `BIND_KEYS` can never diverge.
-use rustos_vcmailbox::MAILBOX_COMPATIBLE;
+use tairix_vcmailbox::MAILBOX_COMPATIBLE;
 
 /// Exclusive upper bound of the 30-bit `VideoCore` SDRAM aperture: the
 /// highest ARM-physical address (plus one) the BCM2711 firmware can DMA
@@ -72,7 +72,7 @@ const MAILBOX_DMA_BUFFER_LEN: u64 = 4096;
 ///
 /// Public because it is the **discovery-contract identity** of the bridge
 /// node: the in-kernel driver-candidate catalogue
-/// (`kernel/rustos-kernel::driver_catalog`, PLAN Stage 4.HW item 5)
+/// (`kernel/tairix-kernel::driver_catalog`, PLAN Stage 4.HW item 5)
 /// reconstructs the discovered node's `compatible` match key from this same
 /// constant — the string the device tree advertised and [`pcie_bringup`]
 /// verified — so the USB bring-up is gated by a match against the discovered
@@ -412,10 +412,10 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
 mod tests {
     use super::{pcie_bringup, FdtDiscovery};
     use crate::fdt::Fdt;
-    use rustos_abi::{HwDeviceClass, HwNode, HwResourceKind};
-    use rustos_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
-    use rustos_fdt::fixture::{arm_with_cpus, raspi_like_arm, virt_like_arm, DtbBuilder};
     use std::vec::Vec;
+    use tairix_abi::{HwDeviceClass, HwNode, HwResourceKind};
+    use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
+    use tairix_fdt::fixture::{arm_with_cpus, raspi_like_arm, virt_like_arm, DtbBuilder};
 
     #[test]
     fn passes_platform_discovery_conformance() {
@@ -735,7 +735,7 @@ mod tests {
             .expect("outbound window request");
         assert_eq!(
             win.required_capability(),
-            Ok(rustos_abi::CapabilityId::MMIO_MAP)
+            Ok(tairix_abi::CapabilityId::MMIO_MAP)
         );
     }
 
@@ -785,7 +785,7 @@ mod tests {
             .expect("aperture request");
         assert_eq!(
             dma.required_capability(),
-            Ok(rustos_abi::CapabilityId::MEM_DMA)
+            Ok(tairix_abi::CapabilityId::MEM_DMA)
         );
     }
 
@@ -860,7 +860,7 @@ mod tests {
         let keys: Vec<&[u8]> = sdhci
             .match_keys()
             .iter()
-            .map(rustos_abi::HwMatchKey::compatible_bytes)
+            .map(tairix_abi::HwMatchKey::compatible_bytes)
             .collect();
         assert_eq!(
             keys,

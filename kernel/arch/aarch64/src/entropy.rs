@@ -1,6 +1,6 @@
 //! aarch64 platform entropy source.
 //!
-//! Implements the Arch HAL [`PlatformEntropy`](rustos_arch_api::PlatformEntropy)
+//! Implements the Arch HAL [`PlatformEntropy`](tairix_arch_api::PlatformEntropy)
 //! surface for aarch64 over the ARMv8.5 `FEAT_RNG` random-number system
 //! register `RNDR` (the reseeded DRBG output of an on-die entropy source).
 //! `FEAT_RNG` is detected at runtime from `ID_AA64ISAR0_EL1.RNDR` before the
@@ -18,8 +18,8 @@
 //! the real path is exercised by the QEMU verticals on a CPU model with
 //! `FEAT_RNG`.
 
-use rustos_arch_api::{EntropyProfile, EntropySupport, PlatformEntropy};
-use rustos_rng::{EntropyError, HardwareRng};
+use tairix_arch_api::{EntropyProfile, EntropySupport, PlatformEntropy};
+use tairix_rng::{EntropyError, HardwareRng};
 
 /// aarch64 implementation of the Arch HAL platform-entropy surface.
 ///
@@ -152,7 +152,7 @@ fn fill_from_hardware(_out: &mut [u8]) -> Result<(), EntropyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::entropy::conformance;
+    use tairix_arch_api::entropy::conformance;
 
     #[test]
     fn passes_entropy_conformance() {

@@ -6,7 +6,7 @@
 //! `/cpus/cpu@*` node names its core through its `compatible` property
 //! (Devicetree Specification; the RISC-V cpus binding), e.g.
 //! `sifive,u74-mc` on a SiFive part — read by the boot path through
-//! [`rustos_fdt::Fdt::boot_cpu_compatible`] and mapped here.
+//! [`tairix_fdt::Fdt::boot_cpu_compatible`] and mapped here.
 //!
 //! The mapper is pure and host-testable. A compatible outside the table —
 //! including the bare `riscv` QEMU's `virt` board advertises, which names

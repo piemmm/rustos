@@ -24,7 +24,7 @@ sydd wedi'i gynnwys ar goll neu'n methu'r dilysu, mae'r rhestr yn
 dirywio i ddynodwyr rhifol gyda'r rheswm ar y gwall safonol — rhestrir
 y rhestr ei hun o hyd.
 
-Nid yw RustOS yn cofnodi cyfeiriad PCI `bus:device.function`: cyfeiriad
+Nid yw TAIRiX yn cofnodi cyfeiriad PCI `bus:device.function`: cyfeiriad
 sefydlog swyddogaeth yw dynodwr ei nod yn y goeden galedwedd, a
 ddangosir fel `#<node>`, ac mae `-s` yn dewis y dynodwr hwnnw
 (gwyriad bwriadol, wedi'i ddogfennu, oddi wrth `lspci` Linux). Nid

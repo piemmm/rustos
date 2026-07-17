@@ -12,13 +12,13 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
-use rustos_abi::sysinfo::{
+use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
+use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord,
     ProcessRecord, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
     SystemIdentity, Uptime, UserDirectoryRecord,
 };
-use rustos_abi::{CapabilityQuery, Errno, LimitKind, Origin};
+use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
 /// The authenticated principal on whose behalf a request is served.
 ///
@@ -79,7 +79,7 @@ pub enum ProcessScope {
 
 /// Read-only access to the live system state exposed by the `sysinfo` API.
 ///
-/// Every method is fallible and returns a [`rustos_abi::Errno`]; a source
+/// Every method is fallible and returns a [`tairix_abi::Errno`]; a source
 /// must never panic. Methods that answer a query whose
 /// response is a sequence — the process and mount lists — return an owned
 /// `Vec` and leave paging to the dispatcher, so the bounds logic lives in

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-fs-adfs"
-description = "RustOS Acorn ADFS filesystem driver (read/write, all FileCore formats)."
+name = "tairix-drv-fs-adfs"
+description = "TAIRiX Acorn ADFS filesystem driver (read/write, all FileCore formats)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,11 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 
 [dev-dependencies]
-rustos-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 [lints]
 workspace = true

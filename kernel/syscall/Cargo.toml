@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kernel-syscall"
-description = "RustOS kernel syscall dispatch: the generated abi-v1 table and its enforcement layer."
+name = "tairix-kernel-syscall"
+description = "TAIRiX kernel syscall dispatch: the generated abi-v1 table and its enforcement layer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,20 +17,20 @@ workspace = true
 # only names the ABI/capability/security/log/crypto libraries directly.
 # Concrete dispatch into kernel/ipc, kernel/sched, and so on lives in
 # `kernel/core` where the wiring is owned (`AGENTS.md` §2.3, no bloat).
-rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
-rustos-log = { path = "../../lib/log", version = "=0.0.0" }
-rustos-util = { path = "../../lib/util", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+tairix-log = { path = "../../lib/log", version = "=0.0.0" }
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 
 [build-dependencies]
 # `build.rs` derives `SYSCALL_TABLE_HASH` from the single source of truth
-# (`rustos_abi::ENCODED_TABLE`) at build time rather than committing a
+# (`tairix_abi::ENCODED_TABLE`) at build time rather than committing a
 # hand-maintained literal (`AGENTS.md` §9, §2.2). Same path crates the
 # library half links, so the host-computed digest matches the linked one.
-rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 
 [dev-dependencies]
 # The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
@@ -38,8 +38,8 @@ rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # already-audited version the other kernel crates use; dev-only.
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
 # The §19.7 model drives its programs through the shared seed/budget runner
-# (`rustos_fuzzseed::prop::drive`), so the seed selection, start-of-test
+# (`tairix_fuzzseed::prop::drive`), so the seed selection, start-of-test
 # seed log, and smoke/soak loop live in one place (`AGENTS.md` §2.2). Test
-# scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
+# scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
 

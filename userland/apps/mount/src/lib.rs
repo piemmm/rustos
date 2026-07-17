@@ -1,11 +1,11 @@
-//! RustOS `mount` — list mounted filesystems and attach new ones (Stage 6 `userland/apps/`).
+//! TAIRiX `mount` — list mounted filesystems and attach new ones (Stage 6 `userland/apps/`).
 //!
 //! With no operands `mount` lists the current mount table; with a
 //! `SOURCE TARGET` pair it attaches a filesystem. The two halves use
 //! different paths, both kernel-plumbing-free behind injected seams:
 //!
 //! * **Listing** is a *read* of live system state, so — like `ps` — it goes
-//!   through the System Information API: RustOS has no
+//!   through the System Information API: TAIRiX has no
 //!   `/proc` and no mount-table file. `mount` issues the typed, versioned
 //!   `sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod.app/Run`
 //!   and renders one `source on target type fstype (options)` line per
@@ -21,7 +21,7 @@
 //! A command-line parser and presenter, not a policy point. The operations
 //! that touch the outside world are the injected seams:
 //!
-//! * [`Transport`](rustos_procinfo::Transport) / [`Output`](rustos_procinfo::Output)
+//! * [`Transport`](tairix_procinfo::Transport) / [`Output`](tairix_procinfo::Output)
 //!   — issue the `MOUNT_LIST` query and write each rendered line (shared
 //!   with the other `sysinfo` clients).
 //! * [`Mounter`] — perform the privileged attach.
@@ -36,7 +36,7 @@
 //! An unknown option, a missing option value, or a number of operands other
 //! than zero or two is a [`MountError::Usage`]; an unknown `-o`/`-t` value is
 //! a [`MountError::BadOption`]. A listing transport failure surfaces the
-//! underlying [`Errno`](rustos_abi::Errno) as [`MountError::Service`], a
+//! underlying [`Errno`](tairix_abi::Errno) as [`MountError::Service`], a
 //! refused or failed attach as [`MountError::Mount`], and a terminal write
 //! failure as [`MountError::Output`]. There is no panic.
 //!

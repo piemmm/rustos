@@ -1,6 +1,6 @@
-//! RustOS `man` — render a command's bundled help (plans/APPS.md §7).
+//! TAIRiX `man` — render a command's bundled help (plans/APPS.md §7).
 //!
-//! RustOS ships no troff/roff man pages and no `/usr/share/man` tree: every
+//! TAIRiX ships no troff/roff man pages and no `/usr/share/man` tree: every
 //! program is an application bundle whose single internationalised `Help/`
 //! tree holds one structured-Markdown document per command or topic. `man
 //! <cmd>` resolves `<cmd>` through the **same** store-then-`PATH` policy the
@@ -13,12 +13,12 @@
 //! A thin front end over `lib/cmdres`, `lib/help`, and `lib/sandbox`. For
 //! one parsed [`Command`] it resolves the owning bundle, locates and reads
 //! the document down the deterministic locale-fallback chain
-//! (`rustos_help::load_raw`), emits a `stdinfo` advisory when the served
+//! (`tairix_help::load_raw`), emits a `stdinfo` advisory when the served
 //! locale is not the requested one, and writes the rendered page — a
 //! screenful at a time on an interactive terminal — to standard output.
 //! The document itself is **never parsed in this process**: it is foreign
 //! bundle content, so its parse and render run in a minimum-capability
-//! parser-sandbox worker (`rustos_sandbox::helpdoc`) and only the
+//! parser-sandbox worker (`tairix_sandbox::helpdoc`) and only the
 //! whitelist-validated render comes back — a crashed or hostile worker
 //! costs the page, never the tool. The [`BundleStore`] and [`Console`]
 //! seams keep every effect injectable and the sandbox runs over an

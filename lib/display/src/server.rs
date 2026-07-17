@@ -27,10 +27,10 @@
 //!   the damage rectangle must lie inside the mode; each failure is a
 //!   typed refusal, never a clamp.
 
-use rustos_abi::display_ipc::{encode_mode_reply, DisplayRequest, DISPLAY_MODE_REPLY_LEN};
-use rustos_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
-use rustos_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use rustos_abi::Errno;
+use tairix_abi::display_ipc::{encode_mode_reply, DisplayRequest, DISPLAY_MODE_REPLY_LEN};
+use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
+use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::Errno;
 
 /// Upper bound, in bytes, of any reply [`DisplayServer::serve`] writes:
 /// the mode reply is the longest frame, and the status frame always fits
@@ -164,7 +164,7 @@ impl<M: ShmMapper> DisplayServer<M> {
             DisplayRequest::Query { .. } => {
                 let result = display
                     .mode_info()
-                    .map_err(rustos_abi::DriverError::as_errno);
+                    .map_err(tairix_abi::DriverError::as_errno);
                 mode(reply, result)
             }
             DisplayRequest::Configure {
@@ -236,7 +236,7 @@ impl<M: ShmMapper> DisplayServer<M> {
     ) -> Result<(), Errno> {
         let mode = display
             .mode_info()
-            .map_err(rustos_abi::DriverError::as_errno)?;
+            .map_err(tairix_abi::DriverError::as_errno)?;
         // The frames must be bit-compatible with the scan-out surface:
         // an exact-mode match, so a present is a bounded copy with no
         // conversion on the hot path.
@@ -291,7 +291,7 @@ impl<M: ShmMapper> DisplayServer<M> {
         }
         damage
             .validate_in(&configured.mode)
-            .map_err(rustos_abi::DriverError::as_errno)?;
+            .map_err(tairix_abi::DriverError::as_errno)?;
         let offset = configured.frame_len * frame_index as usize;
         let bytes = configured.region.bytes();
         let frame = bytes
@@ -302,7 +302,7 @@ impl<M: ShmMapper> DisplayServer<M> {
         } else {
             display.present_region(frame, damage)
         };
-        let result = result.map_err(rustos_abi::DriverError::as_errno);
+        let result = result.map_err(tairix_abi::DriverError::as_errno);
         if result.is_ok() {
             self.presented = true;
         }

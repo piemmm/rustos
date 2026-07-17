@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::MountFlags;
+use tairix_abi::driver::filesystem::MountFlags;
 
 use crate::error::MountError;
 
@@ -169,7 +169,7 @@ fn value<'a>(
 
 /// Parse a comma-separated `-o` option list into the [`MountFlags`] it sets.
 ///
-/// Accepts the policy names RustOS recognises: `ro`/`rw` (read-only vs the
+/// Accepts the policy names TAIRiX recognises: `ro`/`rw` (read-only vs the
 /// read-write default) and the `nosuid`/`nodev`/`noexec` restrictions. `rw` clears nothing on its own — it is the default —
 /// but is accepted so a user can write it explicitly.
 ///
@@ -201,7 +201,7 @@ mod tests {
     use super::{parse, Command, MountRequest};
     use crate::error::MountError;
     use alloc::string::String;
-    use rustos_abi::driver::filesystem::MountFlags;
+    use tairix_abi::driver::filesystem::MountFlags;
 
     fn mount(source: &str, target: &str, fstype: Option<&str>, flags: MountFlags) -> Command {
         Command::Mount(MountRequest {

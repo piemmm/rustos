@@ -8,7 +8,7 @@
 //! `cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`).
 
 use alloc::string::String;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// What kind of object a path or directory entry is, as far as `cp` cares.
 ///

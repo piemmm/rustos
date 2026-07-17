@@ -5,11 +5,11 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::VolumeStats;
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{for_each_mount, Transport};
-use rustos_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
+use tairix_abi::driver::filesystem::VolumeStats;
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_help::{own_short_help, HelpSource};
+use tairix_procinfo::{for_each_mount, Transport};
+use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
 
 use crate::command::{Command, Options};
 use crate::error::DfError;
@@ -499,13 +499,13 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
-    use rustos_abi::sysinfo::{
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::sysinfo::{
         MountAvailability, MountListRequest, MountRecord, SysinfoRequestHeader,
     };
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
-    use rustos_procinfo::Transport;
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
+    use tairix_procinfo::Transport;
 
     /// An in-memory `sysinfod` stand-in answering mount-list queries from
     /// a fixture, decoding the request the same way the real service does.
@@ -878,7 +878,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/df.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

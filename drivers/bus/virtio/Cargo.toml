@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-bus-virtio"
-description = "RustOS cross-arch virtio transport (PCI + MMIO, split virtqueues)."
+name = "tairix-drv-bus-virtio"
+description = "TAIRiX cross-arch virtio transport (PCI + MMIO, split virtqueues)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The bus-agnostic split-virtqueue protocol (Transport trait, SplitQueue,
 # DMA slabs, MockHost) lives in `lib/virtio` so that the device-class
 # drivers can consume it without depending on this bus driver crate
 # (`AGENTS.md` §17.4 — `drivers/* → lib/*` only). This crate provides the
 # concrete PCI / MMIO `Transport` implementations on top of it.
-rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 
 [lints]
 workspace = true

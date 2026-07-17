@@ -1,6 +1,6 @@
 # riscv64 context-switch primitive.
 #
-# extern "C" fn rustos_arch_riscv64_switch(prev: *mut TaskCtx,
+# extern "C" fn tairix_arch_riscv64_switch(prev: *mut TaskCtx,
 #                                           next: *mut TaskCtx);
 #
 # Calling convention: RISC-V integer ABI. a0 = prev, a1 = next.
@@ -27,10 +27,10 @@
 
 .section .text
 .balign 4
-.global rustos_arch_riscv64_switch
-.type   rustos_arch_riscv64_switch, @function
+.global tairix_arch_riscv64_switch
+.type   tairix_arch_riscv64_switch, @function
 
-rustos_arch_riscv64_switch:
+tairix_arch_riscv64_switch:
     # --- Suspend half ---
     # Reserve a 112-byte frame and save ra, s0..s11, a0 in ascending
     # address order so the resume half restores them by the same offsets.
@@ -82,4 +82,4 @@ rustos_arch_riscv64_switch:
     # address after the inbound task's suspend-time call site.
     ret
 
-.size rustos_arch_riscv64_switch, . - rustos_arch_riscv64_switch
+.size tairix_arch_riscv64_switch, . - tairix_arch_riscv64_switch

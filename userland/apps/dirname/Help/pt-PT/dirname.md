@@ -15,7 +15,7 @@ nem tocado no disco. Uma grafia sem barra restante tem `.` como pai; um
 pai que fica vazio é a raiz.
 
 Uma raiz nunca é desfeita: `dirname /tools` é `/`, e — o equivalente na
-floresta de armazenamento do RustOS — `dirname Home:/tools` é `Home:/`.
+floresta de armazenamento do TAIRiX — `dirname Home:/tools` é `Home:/`.
 Uma raiz de alias (`Home:/`, `System:/`, …) desempenha exatamente o
 papel que `/` desempenha nos sistemas POSIX.
 

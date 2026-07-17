@@ -1,4 +1,4 @@
-//! RustOS synchronisation primitives.
+//! TAIRiX synchronisation primitives.
 //!
 //! This `lib/` crate ships the foundational synchronisation primitives
 //! consumed across the workspace. They carry no kernel dependency, so

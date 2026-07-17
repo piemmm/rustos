@@ -2,14 +2,14 @@
 //! virtio-blk-mmio integration test.
 //!
 //! The device-agnostic bring-up *and* the virtio-blk round-trip tail both
-//! live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
+//! live in the shared `tairix-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the bare virtio-blk MMIO device id, the spawner registering the
 //! loaded image through the virtio-blk `register`, and the boot harness. The
 //! device tail ([`virtio_blk_round_trip`]) is the same code the x86_64
 //! PCI vertical runs.
 
-use rustos_drv_storage_virtio_blk::register as virtio_blk_register;
-use rustos_test_virtio_qemu_support::{
+use tairix_drv_storage_virtio_blk::register as virtio_blk_register;
+use tairix_test_virtio_qemu_support::{
     define_mmio_boot_harness, run_virtio_mmio_scenario, virtio_blk_round_trip, FixedSpawner,
     ScenarioConfig, ScenarioTransport,
 };

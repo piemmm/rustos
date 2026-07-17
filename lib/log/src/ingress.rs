@@ -33,7 +33,7 @@
 //! is `no_std` and allocation-free: the [`Admission`] holds the derived
 //! [`SourceName`] inline, so ingress runs with no allocator.
 
-use rustos_abi::{FieldName, FieldValue, Origin, WallClockReading};
+use tairix_abi::{FieldName, FieldValue, Origin, WallClockReading};
 
 use crate::authority::{derive_source, reserved_source_prefix, resolve_stream, SourceName};
 use crate::record::{CallerContent, LogRecord};
@@ -276,7 +276,7 @@ mod tests {
     use crate::record::{decode as decode_record, CallerContent};
     use crate::stream::Stream;
     use crate::{DictionaryBuilder, DictionaryView, Level};
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilitySummary, Origin, ProcId, Time64, TrustDomain, WallClockReading, WallTimeState,
         ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
     };

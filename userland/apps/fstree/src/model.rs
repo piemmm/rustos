@@ -6,7 +6,7 @@
 //! performs I/O itself. A directory is read only when it is first shown or
 //! expanded — never a whole-volume scan, so browsing costs the working set
 //! and a 100 TB volume costs no more than the directories actually opened.
-//! A refused listing surfaces its [`Errno`](rustos_abi::Errno) on the
+//! A refused listing surfaces its [`Errno`](tairix_abi::Errno) on the
 //! message line and leaves
 //! the previous state (cursor, listing, expansion) untouched — fail closed,
 //! never a crash, never a fabricated entry.
@@ -15,8 +15,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::FileKind;
-use rustos_glob::Pattern;
+use tairix_abi::FileKind;
+use tairix_glob::Pattern;
 
 use crate::fs::{Fs, FsEntry, VolumeInfo, VolumeSpace};
 use crate::ops::FileOp;
@@ -399,7 +399,7 @@ pub struct AttrsView {
     /// Cursor index into [`AttrsView::entries`].
     pub cursor: usize,
     /// Whether the mounted format stores no attributes at all
-    /// ([`rustos_abi::Errno::NotSupported`]) — stated honestly in place
+    /// ([`tairix_abi::Errno::NotSupported`]) — stated honestly in place
     /// of an empty list, with the editing keys inert.
     pub unsupported: bool,
 }
@@ -510,14 +510,14 @@ impl Model {
     ///
     /// # Errors
     ///
-    /// The [`rustos_abi::Errno`] of the initial root listing: a session
+    /// The [`tairix_abi::Errno`] of the initial root listing: a session
     /// that cannot list its starting directory fails loudly at startup
     /// rather than presenting an empty view.
     pub fn new(
         fs: &mut dyn Fs,
         root_path: &str,
         help_text: String,
-    ) -> Result<Self, rustos_abi::Errno> {
+    ) -> Result<Self, tairix_abi::Errno> {
         let mut model = Self {
             root: DirNode {
                 name: String::from(root_path),
@@ -633,7 +633,7 @@ impl Model {
     }
 
     /// Surface `errno` on the message line, spelling out the operation.
-    pub fn report(&mut self, what: &str, errno: rustos_abi::Errno) {
+    pub fn report(&mut self, what: &str, errno: tairix_abi::Errno) {
         self.message = Some(format!("{what}: {errno:?}"));
     }
 }

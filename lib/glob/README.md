@@ -1,8 +1,8 @@
-# rustos-glob
+# tairix-glob
 
-Shared filename-glob matcher for RustOS (`lib/glob`).
+Shared filename-glob matcher for TAIRiX (`lib/glob`).
 
-Several RustOS components need to match a name against a shell-style wildcard
+Several TAIRiX components need to match a name against a shell-style wildcard
 pattern — the shell's filename generation and interactive completion first, and
 later the file browser, `find`-class tooling, and any other wildcard resolver.
 That matching is identical wherever it happens, so it lives here once and every

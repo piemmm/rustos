@@ -1,6 +1,6 @@
 //! The fail-closed error type for bundle loading.
 
-use rustos_abi::{BundleLayoutError, Errno, LibraryError, RxeError};
+use tairix_abi::{BundleLayoutError, Errno, LibraryError, RxeError};
 
 /// Why a bundle could not be loaded, or a library reference resolved.
 ///

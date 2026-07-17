@@ -4,7 +4,7 @@ WM/desktop graphical assets are **SVG-first** (`AGENTS.md` §10): every cursor,
 icon, notification glyph, and piece of window-chrome artwork is authored once
 as SVG so a single source stays crisp at any DPI / UI scale. The decoder that
 turns those assets into the desktop's fast-draw vector form lives in the
-shared `lib/svg` crate (`rustos-svg`), one of the curated §16.4
+shared `lib/svg` crate (`tairix-svg`), one of the curated §16.4
 image-decoding shared libraries. Like the rest of the desktop's parsers it is
 a **first-party** implementation, not an external dependency (`AGENTS.md`
 §2.12).
@@ -23,7 +23,7 @@ and that form is cached and re-rendered only on a scale or theme change:
                                               lib/raster Surface  ──blit──▶  compositor
 ```
 
-`rustos_svg::decode(bytes)` returns an `SvgImage`: a square design grid
+`tairix_svg::decode(bytes)` returns an `SvgImage`: a square design grid
 (`design()`), an ordered stack of filled polygon layers (`layers()`, bottom
 layer first — each an `SvgLayer { fill, polygon }`), and an optional pointer
 hotspot (`hotspot()`). That is exactly the shape `lib/cursor`'s `VectorCursor`
@@ -31,7 +31,7 @@ and `lib/icon`'s `VectorIcon` already hold, so the conversion is a direct
 field map and the asset still rasterises through `lib/raster`'s single
 supersampled polygon path — there is no second rasterisation path (`AGENTS.md`
 §2.2). The cursor and icon libraries expose the wrappers
-`rustos_cursor::decode_svg` and `rustos_icon::decode_svg`.
+`tairix_cursor::decode_svg` and `tairix_icon::decode_svg`.
 
 ## Loading a whole asset set
 

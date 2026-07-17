@@ -6,7 +6,7 @@
 //! in-memory images. The order is fixed and documented:
 //!
 //! 1. **Whole-device filesystem first.** A supported signature at LBA 0
-//!    (`rustos_fsprobe::probe`) means an unpartitioned "superfloppy"
+//!    (`tairix_fsprobe::probe`) means an unpartitioned "superfloppy"
 //!    volume: the device is planned whole and the partition parse is
 //!    skipped (a real partition table's LBA 0 never carries a valid
 //!    filesystem head, and parsing a boot sector's code bytes as an MBR
@@ -24,11 +24,11 @@
 //! ([`crate::name::candidate`]); the plan itself is one deterministic
 //! pass.
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::volume::VolumeFsType;
-use rustos_abi::DriverError;
-use rustos_fsprobe::{probe, ProbedVolume, PROBE_HEAD_LEN};
-use rustos_partition::{parse_partition_table, Partition, PartitionError};
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::volume::VolumeFsType;
+use tairix_abi::DriverError;
+use tairix_fsprobe::{probe, ProbedVolume, PROBE_HEAD_LEN};
+use tairix_partition::{parse_partition_table, Partition, PartitionError};
 
 use crate::name::{fallback_name, sanitise_label, VolumeName};
 
@@ -186,7 +186,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use rustos_partition::{mbr, PartitionType};
+    use tairix_partition::{mbr, PartitionType};
 
     use super::*;
 
@@ -249,7 +249,7 @@ mod tests {
         sb[0..4].copy_from_slice(&8192u32.to_le_bytes());
         sb[4..8].copy_from_slice(&32768u32.to_le_bytes());
         sb[0x18..0x1C].copy_from_slice(&2u32.to_le_bytes());
-        sb[0x38..0x3A].copy_from_slice(&rustos_fsprobe::EXT4_SUPERBLOCK_MAGIC.to_le_bytes());
+        sb[0x38..0x3A].copy_from_slice(&tairix_fsprobe::EXT4_SUPERBLOCK_MAGIC.to_le_bytes());
         sb[0x68..0x78].copy_from_slice(&uuid);
         sb[0x78..0x78 + label.len()].copy_from_slice(label);
     }

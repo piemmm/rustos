@@ -1,6 +1,6 @@
-# rustos-fsmeta
+# tairix-fsmeta
 
-The one definition of RustOS's extended-file-metadata model: the namespaced
+The one definition of TAIRiX's extended-file-metadata model: the namespaced
 attribute-key grammar, the bounded per-inode attribute store with its
 self-identifying on-disk encoding, and the closed foreign-metadata preset
 registry. ARXFS, the foreign-filesystem drivers, and the copy/move/archive
@@ -10,7 +10,7 @@ another and no conversion logic is duplicated (`AGENTS.md` §2.2).
 ## What it provides
 
 - **`key`** — the closed, curated `Namespace` set (`user`, `acorn`, `amiga`,
-  `atari`, `mac`, `rustos`, `system`, `trusted`), each with a fixed
+  `atari`, `mac`, `tairix`, `system`, `trusted`), each with a fixed
   `NamespaceAccess` class, and `AttrKey::parse`, a fail-closed validator for a
   key's bytes (UTF-8, no `/` or NUL, `namespace.rest` split, `KEY_MAX` bound).
 - **`attr`** — `AttrEntry` / `AttrFlags` / `AttrSet`: an ordered set of unique

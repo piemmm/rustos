@@ -23,7 +23,7 @@ on the standard information stream (fd 3). If the bundled table is
 missing or fails validation, the listing degrades to numeric ids with
 the reason on standard error — the inventory itself is still listed.
 
-RustOS records no PCI `bus:device.function` address: a function's
+TAIRiX records no PCI `bus:device.function` address: a function's
 stable address is its hardware-tree node id, shown as `#<node>`, and
 `-s` selects that node id (a deliberate, documented divergence from
 Linux's `lspci`). The `-k` kernel-driver view is not offered yet: the

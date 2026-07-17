@@ -58,7 +58,7 @@ processi mostra qui solo il censimento e i maggiori consumatori per
   automatici, in secondi con frazione facoltativa (si conserva solo la
   prima cifra decimale, i decimi): `sysmon -d 1.5` aggiorna ogni 1,5
   secondi. Predefinito 3,0. GNU `top` accetta un intervallo zero e
-  aggiorna il più in fretta possibile; RustOS non gira mai a vuoto,
+  aggiorna il più in fretta possibile; TAIRiX non gira mai a vuoto,
   quindi lo zero viene alzato al minimo di 0,1 s.
 - `-h, -?` — mostrare la guida breve di questo comando e uscire.
   Dentro una sessione in corso, gli stessi tasti attivano invece il

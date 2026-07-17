@@ -1,4 +1,4 @@
-//! RustOS `edit` — a full-screen curses text editor (plans/APPS.md).
+//! TAIRiX `edit` — a full-screen curses text editor (plans/APPS.md).
 //!
 //! `edit` is a small, honest text editor in the spirit of the `QuickBasic` /
 //! MS-DOS editor: a menu bar (`File`, `Search`) across the top, the text
@@ -57,4 +57,4 @@ pub use buffer::{DecodeError, LoadNotices, TextBuffer, MAX_FILE_BYTES, TAB_STOP}
 pub use command::{parse, Command, USAGE};
 pub use error::EditError;
 pub use model::{Action, Fs, Mode, Model, Pending, PromptIntent, MENUS};
-pub use rustos_curses::{Screen, Tty};
+pub use tairix_curses::{Screen, Tty};

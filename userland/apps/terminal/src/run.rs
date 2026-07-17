@@ -5,10 +5,10 @@
 //! # What the program wires (and what stays in the libraries)
 //!
 //! Everything with behaviour worth testing lives in host-tested crates —
-//! the screen model and its `lib/vt`-consuming parser (`rustos_terminal`),
-//! the themed cell renderer (`rustos_terminal::render`), the spawned
-//! shell's pipe wiring (`rustos_terminal::spawned`), and the window
-//! channel's client half (`rustos_window`). This binary only composes
+//! the screen model and its `lib/vt`-consuming parser (`tairix_terminal`),
+//! the themed cell renderer (`tairix_terminal::render`), the spawned
+//! shell's pipe wiring (`tairix_terminal::spawned`), and the window
+//! channel's client half (`tairix_window`). This binary only composes
 //! them over the live syscalls:
 //!
 //! * Two kernel pipes to a shell child spawned under this app's own
@@ -46,19 +46,19 @@
 mod program {
     extern crate alloc;
 
-    use rustos_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use rustos_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
-    use rustos_abi::{
+    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
     };
-    use rustos_keymap::{encode_key_input, MAX_KEY_BYTES};
-    use rustos_terminal::render::render;
-    use rustos_terminal::{
+    use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
+    use tairix_terminal::render::render;
+    use tairix_terminal::{
         shell_wires, PipeShellSource, ShellSource, Terminal, COLS, ROWS, TERM, WIN_HEIGHT,
         WIN_WIDTH,
     };
-    use rustos_users::DEFAULT_SHELL;
-    use rustos_window::{event_endpoint_for, WindowClient, WindowTransport};
+    use tairix_users::DEFAULT_SHELL;
+    use tairix_window::{event_endpoint_for, WindowClient, WindowTransport};
 
     /// Exit code when the shell could not be hosted (a pipe or the spawn
     /// itself was refused). A reserved, fail-closed value: the terminal
@@ -115,9 +115,9 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = rustos_rt::stderr(b"terminal: ");
-        let _ = rustos_rt::stderr(reason.as_bytes());
-        let _ = rustos_rt::stderr(b"\n");
+        let _ = tairix_rt::stderr(b"terminal: ");
+        let _ = tairix_rt::stderr(reason.as_bytes());
+        let _ = tairix_rt::stderr(b"\n");
         code
     }
 
@@ -129,7 +129,7 @@ mod program {
 
     impl WindowTransport for RtWindowTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            rustos_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
         }
     }
 
@@ -141,7 +141,7 @@ mod program {
     /// copy is small.
     fn present_frame<S, T>(
         terminal: &Terminal<S>,
-        theme: &rustos_theme::Theme,
+        theme: &tairix_theme::Theme,
         client: &mut WindowClient<T>,
         window: u64,
         frame: &mut [u8],
@@ -151,7 +151,7 @@ mod program {
         S: ShellSource,
         T: WindowTransport,
     {
-        let viewport = rustos_geometry::Rect::new(0, 0, mode.width_px, mode.height_px);
+        let viewport = tairix_geometry::Rect::new(0, 0, mode.width_px, mode.height_px);
         let surface = render(terminal, theme, viewport).ok_or(Errno::LengthOutOfRange)?;
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
@@ -164,22 +164,22 @@ mod program {
         client.present(window, 0, DamageRect::full(mode))
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would obscure the teardown ordering.
     fn main() -> i32 {
         // --- The hosted shell: two pipes, then the spawn wiring the
         // child's standard streams onto their child-side ends.
-        let Ok((shell_out_read, shell_out_write)) = rustos_rt::pipe_create() else {
+        let Ok((shell_out_read, shell_out_write)) = tairix_rt::pipe_create() else {
             return fail(EXIT_NO_SHELL, "shell output pipe refused");
         };
-        let Ok((shell_in_read, shell_in_write)) = rustos_rt::pipe_create() else {
+        let Ok((shell_in_read, shell_in_write)) = tairix_rt::pipe_create() else {
             return fail(EXIT_NO_SHELL, "shell input pipe refused");
         };
         let attach = shell_wires(shell_in_read, shell_out_write);
         let term_env = alloc::format!("TERM={TERM}");
-        let shell_pid = rustos_rt::spawn_attached(
+        let shell_pid = tairix_rt::spawn_attached(
             DEFAULT_SHELL.as_bytes(),
             &attach,
             &[b"elsh"],
@@ -192,13 +192,13 @@ mod program {
         // spawn cloned them into the shell, and keeping them here would
         // mask the shell's exit (this process's own write end would keep
         // the output pipe's end-of-stream from ever arriving).
-        let _ = rustos_rt::fs_close(shell_in_read);
-        let _ = rustos_rt::fs_close(shell_out_write);
+        let _ = tairix_rt::fs_close(shell_in_read);
+        let _ = tairix_rt::fs_close(shell_out_write);
 
         // --- The screen model over the live pipe primitives.
         let source = PipeShellSource::new(
-            |buf: &mut [u8]| rustos_rt::fs_read(shell_out_read, 0, buf).map_err(errno_from),
-            |bytes: &[u8]| rustos_rt::fs_write(shell_in_write, 0, bytes).map_err(errno_from),
+            |buf: &mut [u8]| tairix_rt::fs_read(shell_out_read, 0, buf).map_err(errno_from),
+            |bytes: &[u8]| tairix_rt::fs_write(shell_in_write, 0, bytes).map_err(errno_from),
         );
         let Some(mut terminal) = Terminal::new(COLS, ROWS, source) else {
             return fail(EXIT_NO_SHELL, "screen grid refused");
@@ -215,11 +215,11 @@ mod program {
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
         let mut region_id: u64 = 0;
-        let base = rustos_rt::shm_create(total, &mut region_id);
+        let base = tairix_rt::shm_create(total, &mut region_id);
         if base < 0 {
             return fail(EXIT_NO_FRAMES, "shared frame region refused");
         }
-        let grant = rustos_rt::shm_grant(region_id, WINDOW_ENDPOINT);
+        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
         if grant < 1 {
             return fail(EXIT_NO_FRAMES, "frame region grant refused");
         }
@@ -243,16 +243,16 @@ mod program {
         // `event_endpoint_for` naming rule: this task's never-reused
         // kernel id under a fixed tag) and never reserved; the bind is
         // refused otherwise.
-        let Ok(origin) = rustos_rt::self_origin() else {
+        let Ok(origin) = tairix_rt::self_origin() else {
             return fail(EXIT_NO_EVENTS, "own identity unavailable");
         };
         let event_endpoint = event_endpoint_for(origin.pid());
-        if rustos_abi::ipc::is_reserved_endpoint(event_endpoint)
-            || rustos_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
+        if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
+            || tairix_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
         {
             return fail(EXIT_NO_EVENTS, "event mailbox bind refused");
         }
-        let set = rustos_rt::waitset_create();
+        let set = tairix_rt::waitset_create();
         if set < 0 {
             return fail(EXIT_NO_EVENTS, "wait-set refused");
         }
@@ -275,7 +275,7 @@ mod program {
             ),
         ];
         for (kind, id, token) in members {
-            if rustos_rt::waitset_ctl(set, WaitSetOp::Add, kind, id, token) != 0 {
+            if tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, id, token) != 0 {
                 return fail(EXIT_NO_EVENTS, "wait-set member refused");
             }
         }
@@ -288,7 +288,7 @@ mod program {
         else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
-        let themes = rustos_theme::ThemeRegistry::with_builtins();
+        let themes = tairix_theme::ThemeRegistry::with_builtins();
         let theme = themes.active();
         if present_frame(&terminal, theme, &mut client, window, frames, &mode).is_err() {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
@@ -301,7 +301,7 @@ mod program {
         // re-reports on the next wait.
         loop {
             let mut token = 0u64;
-            if rustos_rt::waitset_wait(set, u64::MAX, &mut token) != 0 {
+            if tairix_rt::waitset_wait(set, u64::MAX, &mut token) != 0 {
                 return fail(EXIT_CHANNEL_LOST, "wait-set lost");
             }
             match token {
@@ -343,7 +343,7 @@ mod program {
                     // readiness was a peek), drain and paint whatever
                     // output it left in the pipe, then end cleanly.
                     let mut status = WaitStatus::Exited(0);
-                    let _ = rustos_rt::try_wait(
+                    let _ = tairix_rt::try_wait(
                         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                         // The kernel-minted PID round-trips through the i32 wait ABI.
                         {
@@ -391,7 +391,7 @@ mod program {
         loop {
             let mut frame = [0u8; WindowEvent::WIRE_LEN];
             let mut sender = [0u8; ORIGIN_WIRE_LEN];
-            match rustos_rt::ipc_recv(endpoint, &mut frame, &mut sender) {
+            match tairix_rt::ipc_recv(endpoint, &mut frame, &mut sender) {
                 Ok(len) => {
                     if len != WindowEvent::WIRE_LEN {
                         continue;
@@ -438,13 +438,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

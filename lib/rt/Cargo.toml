@@ -1,6 +1,6 @@
 [package]
-name = "rustos-rt"
-description = "The pure-Rust userland runtime: the _start entry trampoline, idiomatic abi-v1 syscall wrappers, the entry! macro, and the panic handler that a first-party RustOS program written in Rust links. The Rust counterpart of the C-only crt0 + abi-sys (which exist solely for non-Rust third-party programs)."
+name = "tairix-rt"
+description = "The pure-Rust userland runtime: the _start entry trampoline, idiomatic abi-v1 syscall wrappers, the entry! macro, and the panic handler that a first-party TAIRiX program written in Rust links. The Rust counterpart of the C-only crt0 + abi-sys (which exist solely for non-Rust third-party programs)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,39 +14,39 @@ workspace = true
 [dependencies]
 # The startup-vector wire format the kernel hands `_start`, and the `abi-v1`
 # syscall numbers the wrappers marshal.
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 # The `CapabilitySet` wire image (`to_le_bytes`/`WIRE_LEN`) the `call_create`
 # server-side wrapper marshals to the kernel — the one capability-set type the
 # workspace shares (`AGENTS.md` §2.2).
-rustos-caps = { path = "../caps", version = "=0.0.0" }
+tairix-caps = { path = "../caps", version = "=0.0.0" }
 
 # The single per-architecture syscall trap (`AGENTS.md` §2.2): the wrappers
 # marshal into register form and hand off to the shared `raw_syscall`, so the
 # trap assembly is not duplicated here.
-rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 
 # The one shared spelling rule that decides whether a name a program opens
 # is a filesystem path or a resource reference (`sys:random`), so
 # `File::open` routes it to the right kernel resolver and every program —
 # not each tool privately — supports resource references (`AGENTS.md` §2.2).
-rustos-resref = { path = "../resref", version = "=0.0.0" }
+tairix-resref = { path = "../resref", version = "=0.0.0" }
 
 # The `SpinLock` that guards the `mem_map`-backed global allocator's shared
 # free-span state (`src/heap.rs`). First-party (`AGENTS.md` §2.12); the one
 # deduplicated lock the workspace shares (`AGENTS.md` §2.2, §6).
-rustos-sync = { path = "../sync", version = "=0.0.0" }
+tairix-sync = { path = "../sync", version = "=0.0.0" }
 
 # The structured `Event`/`Sink`/`Level` logging vocabulary the `LogSink`
-# implements: a first-party program builds `rustos_log::Event`s and the
+# implements: a first-party program builds `tairix_log::Event`s and the
 # `LogSink` marshals each through the `log_emit` syscall to the kernel's
 # diagnostic sink, so a service's diagnostics reach the same log the kernel's
 # do (the serial UART on a debug build) instead of fd 2 (`AGENTS.md` §19.4 /
 # §20). The one logging vocabulary the workspace shares (`AGENTS.md` §2.2).
-rustos-log = { path = "../log", version = "=0.0.0" }
+tairix-log = { path = "../log", version = "=0.0.0" }
 
 # The host trap seam used to assert the wrappers' marshalling without a kernel
 # (`AGENTS.md` §7). Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.
 [dev-dependencies]
-rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }

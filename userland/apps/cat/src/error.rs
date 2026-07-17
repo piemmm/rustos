@@ -1,7 +1,7 @@
 //! The outcomes of running a `cat` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a `cat` invocation did not complete.
 ///

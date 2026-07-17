@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rustos_itest_harness::pie::PieArch;
+use tairix_itest_harness::pie::PieArch;
 
 use crate::Context;
 
@@ -420,7 +420,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 /// The `userland/gui/*` crates excluded from the headless image.
-const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-taskbar"];
+const GUI_CRATES: &[&str] = &["tairix-wm", "tairix-taskbar"];
 
 /// Default wall-clock budget for `cargo xtask test --soak`: 24 h.
 ///
@@ -966,7 +966,7 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // therefore need QEMU for every Tier-1 target, documented under
     // `docs/src/platform/x86_64.md`. The closing image gate additionally
     // needs the pinned Pi firmware blobs: an operator-staged directory
-    // (`--firmware`/`$RUSTOS_PI_FIRMWARE`) or `curl` to populate the
+    // (`--firmware`/`$TAIRIX_PI_FIRMWARE`) or `curl` to populate the
     // checksummed cache (`docs/src/install/raspberry_pi.md`).
     // `fmt --check` is the very first, cheapest gate and streams `cargo fmt`
     // output live, so it stays a sequential fail-fast step rather than joining
@@ -1173,7 +1173,7 @@ fn run_image_gate(ctx: &Context) -> Result<(), String> {
 /// the debug optimisation level the main test phase uses.
 fn run_crypto_constant_time(ctx: &Context) -> Result<(), String> {
     let mut cmd = ctx.cargo();
-    cmd.args(["test", "--release", "--locked", "-p", "rustos-crypto"]);
+    cmd.args(["test", "--release", "--locked", "-p", "tairix-crypto"]);
     ctx.run("crypto-constant-time (release)", cmd)
 }
 
@@ -1192,32 +1192,32 @@ fn run_deny(ctx: &Context) -> Result<(), String> {
 /// directory, the hands-free alternative to `--firmware` (air-gapped and
 /// pre-staged builds). When neither is set, `image` fetches the pinned
 /// blobs itself.
-const PI_FIRMWARE_ENV: &str = "RUSTOS_PI_FIRMWARE";
+const PI_FIRMWARE_ENV: &str = "TAIRIX_PI_FIRMWARE";
 
 /// Parsed `image` arguments. The flags mirror `tools/mkimage`'s CLI so the
 /// two entry points stay interchangeable.
 struct ImageArgs {
     /// Operator-staged firmware directory (`--firmware` /
-    /// `$RUSTOS_PI_FIRMWARE`); `None` means fetch into the build cache.
+    /// `$TAIRIX_PI_FIRMWARE`); `None` means fetch into the build cache.
     firmware_dir: Option<PathBuf>,
-    profile: rustos_mkimage::ImageProfile,
+    profile: tairix_mkimage::ImageProfile,
     out: Option<PathBuf>,
 }
 
 /// Parse `image` arguments: `--target <name>` (required; only
 /// `aarch64-rpi` exists today), `--firmware <dir>` (or
-/// `$RUSTOS_PI_FIRMWARE`; optional — missing blobs are fetched from the
+/// `$TAIRIX_PI_FIRMWARE`; optional — missing blobs are fetched from the
 /// manifest's pinned source otherwise), `--profile debug|installer`
 /// (default `debug` — the development image seeds the test `root` account;
 /// the installer image seeds none), `--out <path>`, and `--headless`. The
 /// root volume key is derived from the profile's passphrase
-/// (`rustos_mkimage::passphrase_for` — `root` for the
+/// (`tairix_mkimage::passphrase_for` — `root` for the
 /// debug image, blank for the installer); there is no operator-supplied
 /// key.
 fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
     let mut target: Option<String> = None;
     let mut firmware_dir: Option<PathBuf> = None;
-    let mut profile: Option<rustos_mkimage::ImageProfile> = None;
+    let mut profile: Option<tairix_mkimage::ImageProfile> = None;
     let mut out: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -1242,7 +1242,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
                     .next()
                     .and_then(|v| v.to_str())
                     .ok_or("image: --profile requires a value")?;
-                profile = Some(rustos_mkimage::ImageProfile::from_label(name).ok_or_else(
+                profile = Some(tairix_mkimage::ImageProfile::from_label(name).ok_or_else(
                     || format!("image: unknown profile {name:?}; expected `debug` or `installer`"),
                 )?);
             }
@@ -1270,7 +1270,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
         firmware_dir.or_else(|| std::env::var_os(PI_FIRMWARE_ENV).map(PathBuf::from));
     Ok(ImageArgs {
         firmware_dir,
-        profile: profile.unwrap_or(rustos_mkimage::ImageProfile::Debug),
+        profile: profile.unwrap_or(tairix_mkimage::ImageProfile::Debug),
         out,
     })
 }
@@ -1284,7 +1284,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
 /// stops reporting it. A blob that still mismatches after its fetch is
 /// deleted and the build fails closed.
 fn fetch_missing_firmware(
-    manifest: &rustos_mkimage::firmware::FirmwareManifest,
+    manifest: &tairix_mkimage::firmware::FirmwareManifest,
     cache: &Path,
 ) -> Result<(), String> {
     let missing = manifest.missing_in(cache);
@@ -1357,11 +1357,11 @@ fn fetch_missing_firmware(
 ///   (optimised, `debug_assertions` off), so its log stream renders on the
 ///   user-facing screen.
 fn kernel_build_profile(
-    profile: rustos_mkimage::ImageProfile,
+    profile: tairix_mkimage::ImageProfile,
 ) -> (&'static [&'static str], &'static str) {
     match profile {
-        rustos_mkimage::ImageProfile::Debug => (&[], "debug"),
-        rustos_mkimage::ImageProfile::Installer => (&["--release"], "release"),
+        tairix_mkimage::ImageProfile::Debug => (&[], "debug"),
+        tairix_mkimage::ImageProfile::Installer => (&["--release"], "release"),
     }
 }
 
@@ -1459,7 +1459,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     let mut cmd = ctx.cargo();
     cmd.arg("build").arg("--locked");
     cmd.args(build_profile_args);
-    cmd.args(["-p", "rustos-kernel", "--target", "aarch64-unknown-none"]);
+    cmd.args(["-p", "tairix-kernel", "--target", "aarch64-unknown-none"]);
     ctx.run(
         &format!("image: kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
         cmd,
@@ -1475,7 +1475,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
         .join("firmware.lock");
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("image: cannot read {}: {e}", manifest_path.display()))?;
-    let manifest = rustos_mkimage::firmware::FirmwareManifest::parse(&manifest_text)
+    let manifest = tairix_mkimage::firmware::FirmwareManifest::parse(&manifest_text)
         .map_err(|e| format!("image: {e}"))?;
     let firmware_dir = if let Some(dir) = firmware_dir {
         dir
@@ -1492,7 +1492,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
         .target_dir()
         .join("aarch64-unknown-none")
         .join(kernel_profile_dir)
-        .join("rustos-kernel");
+        .join("tairix-kernel");
     let kernel_elf = std::fs::read(&kernel_path).map_err(|e| {
         format!(
             "image: cannot read kernel ELF {}: {e}",
@@ -1516,10 +1516,10 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     let apps = image_apps::app_store_files(ctx, PieArch::Aarch64)?;
 
     let built = image_apps::with_plant_refs(apps, |app_files| {
-        rustos_mkimage::build_rpi_image(
+        tairix_mkimage::build_rpi_image(
             &kernel_elf,
             &firmware,
-            &mut rustos_mkimage::HostEntropy,
+            &mut tairix_mkimage::HostEntropy,
             profile,
             &drivers,
             app_files,
@@ -1532,7 +1532,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     let out = out.unwrap_or_else(|| {
         ctx.workspace_root
             .join("images")
-            .join(format!("rustos-aarch64-rpi-{}.img", profile.label()))
+            .join(format!("tairix-aarch64-rpi-{}.img", profile.label()))
     });
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)
@@ -1541,7 +1541,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     std::fs::write(&out, &built.image)
         .map_err(|e| format!("image: cannot write {}: {e}", out.display()))?;
     let key_out = out.with_extension("rootkey");
-    std::fs::write(&key_out, rustos_mkimage::volume_key_to_hex(&built.root_key))
+    std::fs::write(&key_out, tairix_mkimage::volume_key_to_hex(&built.root_key))
         .map_err(|e| format!("image: cannot write {}: {e}", key_out.display()))?;
     #[cfg(unix)]
     {
@@ -1594,13 +1594,13 @@ fn parse_run_args(args: &[OsString]) -> Result<(u32, Vec<OsString>), String> {
 /// The Pi-linked kernel inside the platform image loads at `0x8_0000`,
 /// which is not RAM on the `virt` board, and QEMU's ELF `-kernel` path
 /// passes no DTB — so `run` builds the same production crate against
-/// the `virt` linker script (`RUSTOS_KERNEL_BOARD=virt`, its own target
+/// the `virt` linker script (`TAIRIX_KERNEL_BOARD=virt`, its own target
 /// directory so the Pi build stays cached) and boots the arm64
 /// `Image`-wrapped flat form, which QEMU loads at the `virt` link
 /// address with the generated device tree in `x0`.
 fn build_virt_run_kernel(
     ctx: &Context,
-    profile: rustos_mkimage::ImageProfile,
+    profile: tairix_mkimage::ImageProfile,
 ) -> Result<PathBuf, String> {
     let (build_profile_args, kernel_profile_dir) = kernel_build_profile(profile);
     let target_dir = ctx.target_dir().join("virt-kernel");
@@ -1609,13 +1609,13 @@ fn build_virt_run_kernel(
     cmd.args(build_profile_args);
     cmd.args([
         "-p",
-        "rustos-kernel",
+        "tairix-kernel",
         "--target",
         "aarch64-unknown-none",
         "--target-dir",
     ]);
     cmd.arg(&target_dir);
-    cmd.env("RUSTOS_KERNEL_BOARD", "virt");
+    cmd.env("TAIRIX_KERNEL_BOARD", "virt");
     ctx.run(
         &format!("run: virt kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
         cmd,
@@ -1623,7 +1623,7 @@ fn build_virt_run_kernel(
     let elf_path = target_dir
         .join("aarch64-unknown-none")
         .join(kernel_profile_dir)
-        .join("rustos-kernel");
+        .join("tairix-kernel");
     let elf = std::fs::read(&elf_path).map_err(|e| {
         format!(
             "run: cannot read virt kernel ELF {}: {e}",
@@ -1631,8 +1631,8 @@ fn build_virt_run_kernel(
         )
     })?;
     let boot_image =
-        rustos_mkimage::elfflat::build_virt_boot_image(&elf).map_err(|e| format!("run: {e}"))?;
-    let out = target_dir.join(format!("rustos-kernel-virt-{}.img", profile.label()));
+        tairix_mkimage::elfflat::build_virt_boot_image(&elf).map_err(|e| format!("run: {e}"))?;
+    let out = target_dir.join(format!("tairix-kernel-virt-{}.img", profile.label()));
     std::fs::write(&out, &boot_image)
         .map_err(|e| format!("run: cannot write {}: {e}", out.display()))?;
     Ok(out)
@@ -1659,14 +1659,14 @@ fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let profile = parsed.profile;
     let disk_image = build_platform_image(ctx, parsed)?;
     let virt_kernel = build_virt_run_kernel(ctx, profile)?;
-    let spec = rustos_qemu::Spec::for_aarch64_kernel(&virt_kernel)
+    let spec = tairix_qemu::Spec::for_aarch64_kernel(&virt_kernel)
         .with_cpus(cpus)
         .with_virtio_blk(&disk_image)
         .with_ramfb()
         .windowed_interactive();
     let passphrase_hint = match profile {
-        rustos_mkimage::ImageProfile::Debug => "`root`",
-        rustos_mkimage::ImageProfile::Installer => "empty — press Enter",
+        tairix_mkimage::ImageProfile::Debug => "`root`",
+        tairix_mkimage::ImageProfile::Installer => "empty — press Enter",
     };
     eprintln!(
         "xtask: [run] booting {} ({}) on qemu-system-aarch64 -M virt; this \
@@ -1675,7 +1675,7 @@ fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         profile.label(),
         passphrase_hint,
     );
-    let status = rustos_qemu::Runner::run_interactive(&spec).map_err(|e| format!("run: {e}"))?;
+    let status = tairix_qemu::Runner::run_interactive(&spec).map_err(|e| format!("run: {e}"))?;
     if status != 0 {
         return Err(format!("run: QEMU exited with status {status}"));
     }
@@ -1823,7 +1823,7 @@ mod tests {
     #[test]
     fn dir_size_sums_regular_files_and_tolerates_missing() {
         let root = std::env::temp_dir().join(format!(
-            "rustos-xtask-clean-{}-{}",
+            "tairix-xtask-clean-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1850,7 +1850,7 @@ mod tests {
     /// debug log never reached the UART.
     #[test]
     fn kernel_build_profile_matches_image_profile() {
-        let (debug_args, debug_dir) = kernel_build_profile(rustos_mkimage::ImageProfile::Debug);
+        let (debug_args, debug_dir) = kernel_build_profile(tairix_mkimage::ImageProfile::Debug);
         assert!(
             debug_args.is_empty(),
             "the debug image must build the kernel in Cargo's dev profile (no --release)"
@@ -1858,7 +1858,7 @@ mod tests {
         assert_eq!(debug_dir, "debug");
 
         let (installer_args, installer_dir) =
-            kernel_build_profile(rustos_mkimage::ImageProfile::Installer);
+            kernel_build_profile(tairix_mkimage::ImageProfile::Installer);
         assert_eq!(
             installer_args,
             &["--release"],

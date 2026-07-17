@@ -1,4 +1,4 @@
-# `rustos-users-cli` — interactive account administration
+# `tairix-users-cli` — interactive account administration
 
 The `users` tool (`/System/Apps/users.app/Run`) is the first holder of the
 `CAP_USER_ADMIN`-gated `users_admin` syscall
@@ -25,7 +25,7 @@ help / exit
 ```
 
 A created account starts from the shared session baseline
-(`rustos_users::SESSION_BASELINE`) with `/Users/<name>` as its home
+(`tairix_users::SESSION_BASELINE`) with `/Users/<name>` as its home
 (provisioned kernel-side, owned by the new account) and the default
 shell; `grant` widens it afterwards.
 
@@ -54,7 +54,7 @@ shell; `grant` widens it afterwards.
 binary binding the seams to the inherited standard streams, the
 `users_admin` wrapper, and `sys:random`.
 
-`cargo test -p rustos-users-cli` drives the command grammar, the exact
+`cargo test -p tairix-users-cli` drives the command grammar, the exact
 typed requests submitted (decoded and asserted field by field), the
 password-record round trip, the grant merge/removal flow, the response
 rendering, and the fail-closed usage/refusal paths.

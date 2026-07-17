@@ -1,6 +1,6 @@
 //! The cryptographically secure RNG ([`CsRng`]).
 //!
-//! [`CsRng`] is the generator the rest of RustOS reaches for whenever the
+//! [`CsRng`] is the generator the rest of TAIRiX reaches for whenever the
 //! randomness must be unpredictable: `ARXFS` volume and per-record keys, the
 //! encrypted-swap key, nonces, the KASLR/ASLR seed,
 //! capability-token material. It pairs an [`HmacDrbg`] with an

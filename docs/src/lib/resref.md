@@ -1,7 +1,7 @@
-# `rustos-resref` — resource-reference parser
+# `tairix-resref` — resource-reference parser
 
-`rustos_resref` (`lib/resref`) is RustOS's one definition of how a *resource
-reference* string is lexed and validated into a structured value. RustOS has no
+`tairix_resref` (`lib/resref`) is TAIRiX's one definition of how a *resource
+reference* string is lexed and validated into a structured value. TAIRiX has no
 `/dev`, `/proc`, or `/sys`; non-filesystem resources — the random source, a
 disk, a serial port, a live metric — are named by typed references such as
 `sys:random`, `disk:backup@7K2M`, or `stats:net/wan/rx.pps?window=1s`. Turning

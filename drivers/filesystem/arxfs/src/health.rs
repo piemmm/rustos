@@ -38,9 +38,9 @@
 //! [`DeviceHealth::Unavailable`]; the health subsystem stays enabled and
 //! classifies from the filesystem-observed counters alone.
 
-use rustos_abi::driver::block::{Block, DeviceHealth, HealthSnapshot};
-use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
-use rustos_log::{log, Event, EventId, Level, Sink};
+use tairix_abi::driver::block::{Block, DeviceHealth, HealthSnapshot};
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
+use tairix_log::{log, Event, EventId, Level, Sink};
 
 use crate::header::{BlockType, HEADER_LEN};
 use crate::scrub::{ScrubBudget, ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};

@@ -1,11 +1,11 @@
 //! The `Run` entry-point binary of the `lsusb` tool — the program a shell
 //! spawns to list the discovered USB devices.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
@@ -15,8 +15,8 @@
 //! syscalls (a missing or corrupt table degrades the listing to bare ids
 //! with the reason on standard error — never a withheld inventory, never a
 //! fabricated name), and runs the parsed command against the production
-//! seams: the shared `rustos_procinfo::IpcTransport` for the `sysinfo-v1`
-//! `HARDWARE_TREE` query, the shared `rustos_help::BundleHelp` for the
+//! seams: the shared `tairix_procinfo::IpcTransport` for the `sysinfo-v1`
+//! `HARDWARE_TREE` query, the shared `tairix_help::BundleHelp` for the
 //! short-help switches, and `RtOutput`/`RtErrors`, which write the listing
 //! to the inherited standard output (with the naming advisory on fd 3,
 //! best-effort) and the diagnostics to standard error. The tool binds only
@@ -38,14 +38,14 @@ mod program {
     use alloc::format;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::OpenFlags;
-    use rustos_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
-    use rustos_devids::{DbKind, DevIds, MAX_SOURCE_BYTES};
-    use rustos_help::BundleHelp;
-    use rustos_lsusb::{parse, run, Output, USAGE};
-    use rustos_procinfo::IpcTransport;
-    use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
-    use rustos_rt::File;
+    use tairix_abi::fs::OpenFlags;
+    use tairix_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+    use tairix_devids::{DbKind, DevIds, MAX_SOURCE_BYTES};
+    use tairix_help::BundleHelp;
+    use tairix_lsusb::{parse, run, Output, USAGE};
+    use tairix_procinfo::IpcTransport;
+    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_rt::File;
 
     /// The command word this bundle is named by.
     const OWN_WORD: &str = "lsusb";
@@ -107,7 +107,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` when the query or output failed
@@ -117,7 +117,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -129,7 +129,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         // The bundle's own lookup table. A load or validation failure is a
         // lost naming aid, not a lost inventory: the reason goes to standard
         // error and the listing renders bare ids.
@@ -170,13 +170,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

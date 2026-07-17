@@ -8,7 +8,7 @@
 //! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
 //! cfg-check` stays clean.
 //!
-//! The consuming vertical (`preempt_el0_qemu_aarch64`) sets `RUSTOS_EL0_SPINS`
+//! The consuming vertical (`preempt_el0_qemu_aarch64`) sets `TAIRIX_EL0_SPINS`
 //! when it compiles this program, so a changed spin count must force a
 //! recompile; declare that dependency here.
 
@@ -18,6 +18,6 @@ fn main() {
     if target_os == "none" {
         println!("cargo:rustc-cfg=freestanding");
     }
-    println!("cargo:rerun-if-env-changed=RUSTOS_EL0_SPINS");
+    println!("cargo:rerun-if-env-changed=TAIRIX_EL0_SPINS");
     println!("cargo:rerun-if-changed=build.rs");
 }

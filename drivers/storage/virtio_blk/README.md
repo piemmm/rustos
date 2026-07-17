@@ -1,6 +1,6 @@
-# `rustos-drv-storage-virtio-blk` — virtio-blk block driver
+# `tairix-drv-storage-virtio-blk` — virtio-blk block driver
 
-Stage 4 deliverable. Implements `rustos_abi::driver::block::Block` on
+Stage 4 deliverable. Implements `tairix_abi::driver::block::Block` on
 top of the cross-arch virtio transport in `drivers/bus/virtio`. The
 driver is **bus-agnostic**: the same source compiles against the PCI
 backend (x86_64) and the MMIO backend (aarch64, riscv64).
@@ -72,7 +72,7 @@ zeroed; that scrubbing remains the caller's responsibility.
 
 ## Test surface
 
-`cargo test -p rustos-drv-storage-virtio-blk` exercises:
+`cargo test -p tairix-drv-storage-virtio-blk` exercises:
 
 - `open` reads geometry from the device-configuration window.
 - Read / write / write-then-read round-trips against a sector-array

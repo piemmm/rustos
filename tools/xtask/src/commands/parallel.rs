@@ -8,7 +8,7 @@
 //! * the fuzz and proptest orchestrators, each a registry of
 //!   wall-clock-budgeted `cargo test` harnesses ([`Work::Command`]);
 //! * the QEMU integration matrix ([`Work::Closure`]), which plants per-test
-//!   backing images and drives [`rustos_qemu::Runner::run`] in-process.
+//!   backing images and drives [`tairix_qemu::Runner::run`] in-process.
 //!
 //! # Weighted admission
 //!
@@ -23,7 +23,7 @@
 //! vCPU threads require simultaneous progress. That is what makes guest
 //! scheduling safe under TCG: a guest is not starved of host CPU, so its
 //! wall-clock deadline
-//! ([`rustos_qemu::Runner::run`]) stays as reachable as it is for a solo run,
+//! ([`tairix_qemu::Runner::run`]) stays as reachable as it is for a solo run,
 //! and the no-flaky-tests / no-retry rules hold. (A single job heavier than
 //! the whole budget — a guest with more vCPUs than the host has cores — still
 //! runs, alone, when nothing else is in flight, rather than deadlocking.)

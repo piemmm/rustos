@@ -20,12 +20,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
-use rustos_procinfo::{
+use tairix_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
+use tairix_procinfo::{
     field_lossy, format_load, format_mib, format_size, format_tenths, format_uptime, state_char,
     Transport,
 };
-use rustos_vt::{Attributes, BasicColor, Color};
+use tairix_vt::{Attributes, BasicColor, Color};
 
 use crate::error::SysmonError;
 use crate::model::{Action, Focus, Gauge, Model, PinState, Snapshot};
@@ -109,7 +109,7 @@ pub(crate) fn memory_line(snapshot: &Snapshot) -> String {
 
 /// One-character band glyphs for the history strip, indexed by band depth
 /// (normal, mild, moderate, severe, critical).
-const BAND_GLYPHS: [char; rustos_abi::sysinfo::PRESSURE_BAND_COUNT] = ['.', '-', '=', '#', '!'];
+const BAND_GLYPHS: [char; tairix_abi::sysinfo::PRESSURE_BAND_COUNT] = ['.', '-', '=', '#', '!'];
 
 /// The pressure line: the current band name, a five-step depth gauge, the
 /// reserve floor, and the entry counters — or the stated reason.
@@ -122,12 +122,12 @@ pub(crate) fn pressure_line(snapshot: &Snapshot) -> String {
         };
     };
     let band = usize::from(pressure.band);
-    let name = rustos_abi::sysinfo::PRESSURE_BAND_NAMES
+    let name = tairix_abi::sysinfo::PRESSURE_BAND_NAMES
         .get(band)
         .copied()
         .unwrap_or("?");
     let mut gauge = String::new();
-    for depth in 0..rustos_abi::sysinfo::PRESSURE_BAND_COUNT {
+    for depth in 0..tairix_abi::sysinfo::PRESSURE_BAND_COUNT {
         gauge.push(if depth <= band { '#' } else { '-' });
     }
     let entries: u64 = pressure.band_entries.iter().sum();
@@ -189,7 +189,7 @@ pub(crate) fn cpu_line(model: &Model) -> String {
 /// The task-census line, GNU-style, with the recorded scope: the
 /// system-wide census, or the caller's own with the refusal stated.
 pub(crate) fn tasks_line(snapshot: &Snapshot) -> String {
-    use rustos_abi::sysinfo::ProcessState;
+    use tairix_abi::sysinfo::ProcessState;
     let mut running = 0usize;
     let mut sleeping = 0usize;
     let mut stopped = 0usize;
@@ -247,7 +247,7 @@ fn reclaim_lines(snapshot: &Snapshot) -> Vec<String> {
         "class", "payload", "meta", "entries", "shrinks", "refused", "fails"
     ));
     for record in records {
-        let name = rustos_abi::sysinfo::RECLAIM_CLASS_NAMES
+        let name = tairix_abi::sysinfo::RECLAIM_CLASS_NAMES
             .get(usize::from(record.class))
             .copied()
             .unwrap_or("?");
@@ -546,7 +546,7 @@ fn drive<T: Transport, Y: Tty>(
     loop {
         // Re-arm the input wait from the model each pass, so the `+`/`-`
         // keys take effect on the very next wait.
-        screen.set_input_mode(rustos_curses::InputMode::Timeout(
+        screen.set_input_mode(tairix_curses::InputMode::Timeout(
             core::time::Duration::from_millis(u64::from(model.delay_tenths()) * 100),
         ));
         render(model, screen)?;

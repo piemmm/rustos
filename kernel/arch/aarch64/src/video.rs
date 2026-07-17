@@ -5,9 +5,9 @@
 //! last resort). On the Raspberry Pi the display pipeline is owned by
 //! the `VideoCore` firmware, so this module asks it for a scan-out
 //! surface over the shared mailbox property-channel client
-//! (`rustos_vcmailbox`) and renders the kernel log into that surface
+//! (`tairix_vcmailbox`) and renders the kernel log into that surface
 //! with the shared, architecture-neutral framebuffer text-console engine
-//! (`rustos_fbcon` — one terminal definition across every arch port).
+//! (`tairix_fbcon` — one terminal definition across every arch port).
 //!
 //! Bring-up runs **before the MMU is enabled** (`configure_from_fdt`
 //! is an early-returning, `ranges`-aware walk like the console/GIC
@@ -21,7 +21,7 @@
 //! On QEMU's `virt` board there is no firmware mailbox; when the tree
 //! instead carries a `qemu,fw-cfg-mmio` node **and** QEMU was started
 //! with `-device ramfb`, the console programs the `ramfb` scan-out
-//! (over the shared `rustos_fwcfg` client) to a statically-reserved
+//! (over the shared `tairix_fwcfg` client) to a statically-reserved
 //! guest-RAM surface and renders into that — the same renderer, glyph
 //! atlas, and publication discipline as the mailbox path, only the
 //! surface source differs.
@@ -34,14 +34,14 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_abi::driver::display::DisplayFormat;
+use tairix_abi::driver::display::DisplayFormat;
 /// The framebuffer console's character cell, re-exported so the boot caller
 /// can size and blank the grid buffers it leaks into [`attach_console`]
-/// without naming `rustos_fbcon` directly.
-pub use rustos_fbcon::Cell;
-use rustos_fbcon::Geometry;
-use rustos_fdt::Fdt;
-use rustos_vcmailbox::{
+/// without naming `tairix_fbcon` directly.
+pub use tairix_fbcon::Cell;
+use tairix_fbcon::Geometry;
+use tairix_fdt::Fdt;
+use tairix_vcmailbox::{
     discover_framebuffer, query_display_size, FramebufferRequest, MailboxTransport,
 };
 
@@ -82,17 +82,17 @@ pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
 //
 // The shared framebuffer text-console engine — the glyph atlas, palette,
 // scrolling, and the `Geometry` / `TextConsole` / `DirtyBand` types — lives in
-// `rustos_fbcon` so every arch port renders through one definition. This module
+// `tairix_fbcon` so every arch port renders through one definition. This module
 // keeps only the board-specific surface discovery below and threads its
 // firmware-confirmed extents into `Geometry::for_display`.
 
 /// Fixed scan-out width of the QEMU `virt` ramfb boot console — the
-/// shared `rustos_fwcfg` console geometry, so the port programming the
+/// shared `tairix_fwcfg` console geometry, so the port programming the
 /// device and every other consumer read one definition.
-pub const RAMFB_WIDTH_PX: u32 = rustos_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+pub const RAMFB_WIDTH_PX: u32 = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
 
 /// Fixed scan-out height of the QEMU `virt` ramfb boot console.
-pub const RAMFB_HEIGHT_PX: u32 = rustos_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+pub const RAMFB_HEIGHT_PX: u32 = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
 
 /// Text geometry of the fixed-size ramfb surface.
 ///
@@ -200,7 +200,7 @@ pub use metal::{
 
 /// Host stand-in for the freestanding writer: rendering needs the
 /// firmware surface, so on the host this is inert (the renderer itself
-/// is host-tested directly through [`rustos_fbcon::TextConsole`]).
+/// is host-tested directly through [`tairix_fbcon::TextConsole`]).
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn write_bytes(_bytes: &[u8]) {}
 
@@ -213,7 +213,7 @@ pub fn write_output_bytes(_bytes: &[u8]) {}
 /// on the host, so no video console is active and the grid is unknown.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 #[must_use]
-pub fn text_grid() -> Option<rustos_abi::TerminalSize> {
+pub fn text_grid() -> Option<tairix_abi::TerminalSize> {
     None
 }
 
@@ -229,8 +229,8 @@ pub fn text_cell_count() -> Option<usize> {
 /// the host, so attaching the cell grids is inert.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn attach_console(
-    _main: &'static mut [rustos_fbcon::Cell],
-    _alt: &'static mut [rustos_fbcon::Cell],
+    _main: &'static mut [tairix_fbcon::Cell],
+    _alt: &'static mut [tairix_fbcon::Cell],
 ) {
 }
 
@@ -245,11 +245,11 @@ mod metal {
     use core::ptr::NonNull;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use rustos_abi::RegisterWindow;
-    use rustos_fbcon::{Cell, TextConsole};
-    use rustos_fdt::Fdt;
-    use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
-    use rustos_vcmailbox::{
+    use tairix_abi::RegisterWindow;
+    use tairix_fbcon::{Cell, TextConsole};
+    use tairix_fdt::Fdt;
+    use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+    use tairix_vcmailbox::{
         arm_physical_to_bus, MmioMailbox, DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET,
         MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
     };
@@ -264,7 +264,7 @@ mod metal {
     /// from an interrupt handler on the holding CPU cannot deadlock.
     ///
     /// A minimal DAIF-masking spinlock private to this module —
-    /// deliberately not `rustos_sync::IrqSafeSpinLock`, a documented
+    /// deliberately not `tairix_sync::IrqSafeSpinLock`, a documented
     /// carve-out: the minimal aarch64 QEMU test binaries link no
     /// global allocator, and cargo feature unification across the
     /// single `--target aarch64-unknown-none` build of the test matrix
@@ -669,7 +669,7 @@ mod metal {
     /// caller reports no size and the client applies its fallback. A grid so
     /// large a dimension overflows the `u16` wire field also yields [`None`]
     /// (fail closed) rather than a truncated size.
-    pub fn text_grid() -> Option<rustos_abi::TerminalSize> {
+    pub fn text_grid() -> Option<tairix_abi::TerminalSize> {
         if !super::is_active() {
             return None;
         }
@@ -681,7 +681,7 @@ mod metal {
         let state = (unsafe { (*VIDEO.0.get()).as_ref() })?;
         let rows = u16::try_from(state.geometry.rows()).ok()?;
         let cols = u16::try_from(state.geometry.columns()).ok()?;
-        rustos_abi::TerminalSize::new(rows, cols).ok()
+        tairix_abi::TerminalSize::new(rows, cols).ok()
     }
 
     /// Clean `[start, start + len)` from the data cache to the point of
@@ -721,9 +721,9 @@ mod metal {
 
 #[cfg(test)]
 mod tests {
-    use rustos_fdt::fixture::raspi_like_arm;
-    use rustos_fdt::Fdt;
-    use rustos_vcmailbox::mock::MockFirmware;
+    use tairix_fdt::fixture::raspi_like_arm;
+    use tairix_fdt::Fdt;
+    use tairix_vcmailbox::mock::MockFirmware;
 
     use super::*;
 
@@ -746,7 +746,7 @@ mod tests {
         // A virt-like tree (no `brcm,bcm2835-mbox` node) yields no
         // mailbox, so the video console stays unconfigured and the UART
         // keeps the console.
-        let mut builder = rustos_fdt::fixture::DtbBuilder::new();
+        let mut builder = tairix_fdt::fixture::DtbBuilder::new();
         builder.begin_node("");
         builder.begin_node("pl011@9000000");
         builder.prop_str("compatible", "arm,pl011");

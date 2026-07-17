@@ -12,7 +12,7 @@
 //! * **Provenance is preserved, never obeyed.** Each view separates the
 //!   *system-attested* facts the kernel/journal vouch for (stream, sequence,
 //!   CPU, monotonic and wall time, effective level, system-derived source, and
-//!   the attested [`Origin`](rustos_abi::Origin)) from the *caller-supplied*
+//!   the attested [`Origin`](tairix_abi::Origin)) from the *caller-supplied*
 //!   content (message,
 //!   caller level, component, tag, event id, the stream/source the caller
 //!   *requested*, and the `data.*` fields). A caller that requested a
@@ -30,7 +30,7 @@
 
 use core::fmt::{self, Write};
 
-use rustos_abi::{
+use tairix_abi::{
     BootId, Duration64, FieldValue, TrustDomain, WallTimeState, BOOT_ID_HEX_LEN, PROC_ID_HEX_LEN,
 };
 
@@ -161,7 +161,7 @@ fn json_time<W: Write + ?Sized>(out: &mut W, secs: i64, nanos: u32) -> fmt::Resu
 /// The object has three provenance groups: the top-level system-attested
 /// fields, a `"caller"` object holding the caller's own content, and a
 /// `"data"` object of the typed `data.*` fields. `data.*` keys obey the
-/// [`FieldName`](rustos_abi::FieldName) grammar (lowercase, no control
+/// [`FieldName`](tairix_abi::FieldName) grammar (lowercase, no control
 /// characters), so they are
 /// written directly; every caller string value is JSON-escaped.
 ///
@@ -378,7 +378,7 @@ mod tests {
 
     use alloc::string::String;
 
-    use rustos_abi::{
+    use tairix_abi::{
         BootId, CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, Time64,
         TrustDomain, WallClockReading, WallTimeState, BOOT_ID_LEN, ORIGIN_CONSOLE_NONE,
     };

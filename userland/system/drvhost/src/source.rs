@@ -12,7 +12,7 @@
 //! same image without re-deriving its location.
 
 use alloc::vec::Vec;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Source of `.rxe` image bytes consumed by [`crate::Host::load`] and
 /// [`crate::Host::reload`].

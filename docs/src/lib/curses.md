@@ -1,6 +1,6 @@
-# `rustos-curses`
+# `tairix-curses`
 
-The first-party curses / TUI screen-model library for RustOS's text stack,
+The first-party curses / TUI screen-model library for TAIRiX's text stack,
 built over stages C4–C5 of the `plans/CURSES.md` build plan. A curses application
 does not write escape sequences by hand — it draws into windows, and the
 library makes the terminal match by emitting the smallest sequence set the
@@ -18,7 +18,7 @@ added the first in-tree consumer (`userland/apps/top`).
 ## The model
 
 - **`Window`** is the application's drawing surface — a cell `Buffer` with a
-  cursor and the current `rustos_vt::Attributes`. It offers `add_str` /
+  cursor and the current `tairix_vt::Attributes`. It offers `add_str` /
   `move_add_str`, `draw_box` / `draw_border`, horizontal and vertical lines, a
   scrolling region (the `scrollok` behaviour), `set_colors`, and `resize`. A
   pad is simply a window larger than the screen, shown through a viewport with
@@ -50,7 +50,7 @@ added the first in-tree consumer (`userland/apps/top`).
   means exactly one thing: the channel has closed.
 - **`StreamTty`** (feature `program`, freestanding targets only) is the one
   production `Tty` over a program's inherited standard streams (fd 0/1)
-  through `rustos-rt`. Blocking and timed reads park the task in the kernel; a
+  through `tairix-rt`. Blocking and timed reads park the task in the kernel; a
   closed stream surfaces as a loud `CursesError::Io` rather than a silent
   empty read a session could spin on, and an elapsed timed read is the
   caller's tick, kept distinct from failure. Every full-screen tool's `Run`
@@ -68,11 +68,11 @@ added the first in-tree consumer (`userland/apps/top`).
 ## Minimal-diff rendering and colour downgrade
 
 `render` walks the desired and last-flushed screens cell by cell and emits a
-`rustos_vt::Op` only where they differ: one `CursorPosition` per run of
+`tairix_vt::Op` only where they differ: one `CursorPosition` per run of
 changes, one SGR transition per attribute change, and one `Print` per glyph.
 
 Every colour first passes through `downgrade` for the terminal's
-`rustos_termcap::ColorDepth`, so a truecolour application drawn on a 16-colour
+`tairix_termcap::ColorDepth`, so a truecolour application drawn on a 16-colour
 `TERM` emits only colours that terminal renders — truecolour degrades to the
 256-colour palette, then to the 16 ANSI colours, then to monochrome, by
 capability. A terminal that cannot address the cursor (the `dumb` baseline)
@@ -94,7 +94,7 @@ instead of mis-colouring. `top` and `edit` colour through it.
 
 ## One vocabulary, fail closed
 
-Every byte this crate emits or parses is a `rustos_vt::Op`. It is `no_std` +
+Every byte this crate emits or parses is a `tairix_vt::Op`. It is `no_std` +
 `alloc` and is **part of the OS**: the curated `/System/Libraries/`
 Terminal/TUI shared-library class, so applications — OS-bundled and third-party
 alike — **dynamically link** it rather than compiling it in (`AGENTS.md`
@@ -110,15 +110,15 @@ The full-screen viewers (`top`, `sysmon`) all accept GNU `top`'s
 parameterises the `Screen` input timeout, so the grammar lives here once
 (`delay::parse_delay_tenths`): seconds with an optional fraction of which
 only the first digit (tenths) is kept, failing closed on anything else,
-with a parsed zero clamped up to `MIN_DELAY_TENTHS` — RustOS never
+with a parsed zero clamped up to `MIN_DELAY_TENTHS` — TAIRiX never
 busy-loops, a deliberate divergence each tool's Help documents. Each tool
 keeps its own usage banner and error enum and maps the parser's `None`
 onto its usage error.
 
 ## Layering and testing
 
-`lib/curses` depends on `rustos-vt` and `rustos-termcap` (and, behind the
-`program` feature on freestanding targets, `rustos-rt` + `rustos-abi` for
+`lib/curses` depends on `tairix-vt` and `tairix-termcap` (and, behind the
+`program` feature on freestanding targets, `tairix-rt` + `tairix-abi` for
 `StreamTty`) — all `lib/*`, never `kernel/*`, `drivers/*`, or `userland/*`
 (`AGENTS.md` §17.4) — and is
 text-only infrastructure outside `userland/gui/*`, so a headless image links it

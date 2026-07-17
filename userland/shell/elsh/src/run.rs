@@ -2,13 +2,13 @@
 //! session through the `spawn` syscall (`plans/SPAWN.md` `SP3b`,
 //! `plans/PI.md` P6e).
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so
-//! it links the Rust userland runtime `rustos-rt` — never the C ABI, which
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so
+//! it links the Rust userland runtime `tairix-rt` — never the C ABI, which
 //! exists solely for programs **not** written in Rust.
-//! `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, the `mem_map`-backed global allocator, and the
-//! syscall wrappers; `rustos_rt::entry!` names this program's `main`.
+//! `tairix-rt` provides `_start`, the per-process stack canary, the panic handler, the `mem_map`-backed global allocator, and the
+//! syscall wrappers; `tairix_rt::entry!` names this program's `main`.
 //!
-//! `main` runs the [`rustos_elsh`] interpreter as a read-eval-print loop over
+//! `main` runs the [`tairix_elsh`] interpreter as a read-eval-print loop over
 //! its **inherited standard streams**: it reads command
 //! lines from standard input (fd 0), writes the prompt and command output to
 //! standard output and standard error (fd 1 / fd 2), and emits advisory
@@ -22,12 +22,12 @@
 //! fd 1 / fd 2, and `RtProcessHost` launches external commands through the
 //! `spawn` syscall and reaps them through `wait`. A command word is resolved
 //! to a runnable bundle through the shared candidate policy
-//! ([`rustos_cmdres::resolution_candidates`]): the system app store first,
+//! ([`tairix_cmdres::resolution_candidates`]): the system app store first,
 //! then the user's `PATH`, attempted in order. The command's words travel
 //! to the child as its argument vector and the shell's exported variables
 //! (with any `NAME=v cmd` prefix overrides) as its environment, through
 //! the `spawn` startup-strings block. Pipes and redirections run end to
-//! end (`plans/SPAWN.md` SP10): the pure `rustos_elsh::wireplan` planner
+//! end (`plans/SPAWN.md` SP10): the pure `tairix_elsh::wireplan` planner
 //! lowers each pipeline into pre-opened targets, per-member spawn attach
 //! blocks, and the here-string / multios byte pumps this host executes
 //! over `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`.
@@ -49,21 +49,21 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::elevate::{
+    use tairix_abi::elevate::{
         elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
     };
-    use rustos_abi::fs::{DirEntry, FS_IO_MAX};
-    use rustos_abi::{Errno, FileKind, InputMode, LimitKind, ResourceLimit};
-    use rustos_elsh::{
+    use tairix_abi::fs::{DirEntry, FS_IO_MAX};
+    use tairix_abi::{Errno, FileKind, InputMode, LimitKind, ResourceLimit};
+    use tairix_elsh::{
         parse_invocation, Console, DirEntryInfo, DirLister, Elevator, Environment, Invocation,
         LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask, ReplInput,
         ResolvedCommand, Shell, Signal, WaitOutcome, USAGE,
     };
-    use rustos_help::{own_short_help, BundleHelp};
-    use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_help::{own_short_help, BundleHelp};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
-    /// and standard error (fd 2) through the shared `rustos_rt::io` layer — the
+    /// and standard error (fd 2) through the shared `tairix_rt::io` layer — the
     /// one `Write::write_all` short-write loop, never a shell-private copy
     /// (the charter forbids that duplication).
     struct RtConsole;
@@ -82,21 +82,21 @@ mod program {
     }
 
     /// The shell's standard-input (fd 0) and standard-information (fd 3) seam,
-    /// backed by `rustos_rt`.
+    /// backed by `tairix_rt`.
     struct RtInput;
 
     impl ReplInput for RtInput {
         fn read(&mut self, buf: &mut [u8]) -> usize {
-            rustos_rt::stdin(buf)
+            tairix_rt::stdin(buf)
         }
 
         fn write_info(&mut self, bytes: &[u8]) {
             // fd 3 is best-effort and ignorable: discard the accepted count.
-            let _ = rustos_rt::stdinfo(bytes);
+            let _ = tairix_rt::stdinfo(bytes);
         }
 
         fn set_mode(&mut self, mode: InputMode) -> Result<(), Errno> {
-            let ret = rustos_rt::set_input_mode(mode);
+            let ret = tairix_rt::set_input_mode(mode);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -105,9 +105,9 @@ mod program {
 
         fn terminal_width(&self) -> Option<u16> {
             // The prompt renders on standard output; ask its backing.
-            rustos_rt::terminal_size(rustos_abi::STDOUT)
+            tairix_rt::terminal_size(tairix_abi::STDOUT)
                 .ok()
-                .map(rustos_abi::TerminalSize::cols)
+                .map(tairix_abi::TerminalSize::cols)
         }
     }
 
@@ -123,7 +123,7 @@ mod program {
 
     impl DirLister for RtDirLister {
         fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
-            let handle = rustos_rt::open_dir(dir.as_bytes()).map_err(Errno::from_syscall)?;
+            let handle = tairix_rt::open_dir(dir.as_bytes()).map_err(Errno::from_syscall)?;
             let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
             let used = loop {
                 match handle.read(&mut buf) {
@@ -176,7 +176,7 @@ mod program {
 
     /// Produce every planned handle, in plan order, returning the real
     /// descriptor numbers indexed by
-    /// [`rustos_elsh::OpenId`]. All-or-nothing: any
+    /// [`tairix_elsh::OpenId`]. All-or-nothing: any
     /// refusal closes everything already opened and surfaces the `Errno`
     /// verbatim, so a failed launch leaks no descriptor and a multios is
     /// never partially applied.
@@ -192,7 +192,7 @@ mod program {
         for open in opens {
             match open {
                 PlannedOpen::Path { path, flags } => {
-                    let ret = rustos_rt::fs_open(path.as_bytes(), *flags);
+                    let ret = tairix_rt::fs_open(path.as_bytes(), *flags);
                     if ret < 0 {
                         return fail(&fds, pending_write, errno_from(ret));
                     }
@@ -201,7 +201,7 @@ mod program {
                     fds.push(ret as u32);
                 }
                 PlannedOpen::Resource { reference, flags } => {
-                    let ret = rustos_rt::resource_open(reference.as_bytes(), *flags);
+                    let ret = tairix_rt::resource_open(reference.as_bytes(), *flags);
                     if ret < 0 {
                         return fail(&fds, pending_write, errno_from(ret));
                     }
@@ -209,7 +209,7 @@ mod program {
                     fds.push(ret as u32);
                 }
                 PlannedOpen::PipeRead => {
-                    let (read, write) = match rustos_rt::pipe_create() {
+                    let (read, write) = match tairix_rt::pipe_create() {
                         Ok(ends) => ends,
                         Err(ret) => return fail(&fds, pending_write, errno_from(ret)),
                     };
@@ -238,7 +238,7 @@ mod program {
     /// already-released descriptor fails closed kernel-side and is ignored).
     fn close_fds(fds: impl Iterator<Item = u32>) {
         for fd in fds {
-            let _ = rustos_rt::fs_close(fd);
+            let _ = tairix_rt::fs_close(fd);
         }
     }
 
@@ -248,9 +248,9 @@ mod program {
     /// is simply reaped, and a refusal leaves nothing more to do.
     fn kill_and_reap(pids: &[i32]) {
         for &pid in pids {
-            let _ = rustos_rt::signal(pid, rustos_abi::Signal::Kill);
-            let mut status = rustos_abi::WaitStatus::Exited(0);
-            let _ = rustos_rt::wait(pid, &mut status, rustos_abi::WaitFlags::empty());
+            let _ = tairix_rt::signal(pid, tairix_abi::Signal::Kill);
+            let mut status = tairix_abi::WaitStatus::Exited(0);
+            let _ = tairix_rt::wait(pid, &mut status, tairix_abi::WaitFlags::empty());
         }
     }
 
@@ -266,7 +266,7 @@ mod program {
     fn spawn_member(
         spec: &LaunchSpec<'_>,
         command: &ResolvedCommand,
-        wires: &[PlannedWire; rustos_abi::STD_STREAM_COUNT],
+        wires: &[PlannedWire; tairix_abi::STD_STREAM_COUNT],
         fds: &[u32],
     ) -> Result<i32, Errno> {
         let Some(word) = command.argv.first() else {
@@ -295,13 +295,13 @@ mod program {
         let arg_bytes: Vec<&[u8]> = command.argv.iter().map(String::as_bytes).collect();
         // The attach block: the caller's own credential and console, with
         // the planned wires resolved onto the descriptors just opened.
-        let mut attach = rustos_abi::SpawnAttach::INHERIT;
+        let mut attach = tairix_abi::SpawnAttach::INHERIT;
         for (slot, wire) in wires.iter().enumerate() {
             attach.wires[slot] = match wire {
-                PlannedWire::Inherit => rustos_abi::FdWire::Inherit,
-                PlannedWire::InheritSlot(source) => rustos_abi::FdWire::InheritSlot(*source),
-                PlannedWire::Closed => rustos_abi::FdWire::Closed,
-                PlannedWire::Handle(id) => rustos_abi::FdWire::Handle(fds[id.0]),
+                PlannedWire::Inherit => tairix_abi::FdWire::Inherit,
+                PlannedWire::InheritSlot(source) => tairix_abi::FdWire::InheritSlot(*source),
+                PlannedWire::Closed => tairix_abi::FdWire::Closed,
+                PlannedWire::Handle(id) => tairix_abi::FdWire::Handle(fds[id.0]),
             };
         }
         let path_var = spec
@@ -309,9 +309,9 @@ mod program {
             .iter()
             .find(|(name, _)| *name == "PATH")
             .map(|(_, value)| *value);
-        for candidate in rustos_cmdres::resolution_candidates(word, path_var) {
+        for candidate in tairix_cmdres::resolution_candidates(word, path_var) {
             let ret =
-                rustos_rt::spawn_attached(candidate.as_bytes(), &attach, &arg_bytes, &env_bytes);
+                tairix_rt::spawn_attached(candidate.as_bytes(), &attach, &arg_bytes, &env_bytes);
             if ret >= 0 {
                 // PIDs fit an `i32` on this ABI and `ret >= 0` here, so the
                 // cast preserves the PID value.
@@ -335,7 +335,7 @@ mod program {
         let mut written = 0;
         while written < bytes.len() {
             let end = (written + PUMP_BUF).min(bytes.len());
-            match rustos_rt::fs_write(fd, 0, &bytes[written..end]) {
+            match tairix_rt::fs_write(fd, 0, &bytes[written..end]) {
                 Ok(0) => {
                     // A zero-byte acceptance cannot make progress; treat it
                     // as the stream refusing further bytes.
@@ -372,7 +372,7 @@ mod program {
                 // reported once, the rest keep receiving.
                 let mut offsets: Vec<Option<u64>> = alloc::vec![Some(0); sinks.len()];
                 loop {
-                    let n = match rustos_rt::fs_read(fds[from.0], 0, &mut buf) {
+                    let n = match tairix_rt::fs_read(fds[from.0], 0, &mut buf) {
                         Ok(0) => break,
                         Ok(n) => n,
                         Err(ret) => {
@@ -397,7 +397,7 @@ mod program {
                 'sources: for source in sources {
                     let mut offset: u64 = 0;
                     loop {
-                        let n = match rustos_rt::fs_read(fds[source.0], offset, &mut buf) {
+                        let n = match tairix_rt::fs_read(fds[source.0], offset, &mut buf) {
                             Ok(0) => break,
                             Ok(n) => n,
                             Err(ret) => {
@@ -427,7 +427,7 @@ mod program {
     fn write_all_at(fd: u32, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
         let mut written = 0;
         while written < bytes.len() {
-            match rustos_rt::fs_write(fd, offset + written as u64, &bytes[written..]) {
+            match tairix_rt::fs_write(fd, offset + written as u64, &bytes[written..]) {
                 Ok(0) => return Err(Errno::NotImplemented),
                 Ok(n) => written += n,
                 Err(ret) => return Err(errno_from(ret)),
@@ -449,7 +449,7 @@ mod program {
     /// (`plans/APPS.md` §8: the system app store first, then `PATH`).
     ///
     /// Redirections and pipelines are lowered by the pure
-    /// [`rustos_elsh::wireplan`] planner and executed here: every target is
+    /// [`tairix_elsh::wireplan`] planner and executed here: every target is
     /// pre-opened in the shell's own descriptor table, each pipeline member
     /// spawns with its attach block, the transferred ends are closed, and
     /// the here-string / multios byte pumps run on the shell's retained
@@ -477,7 +477,7 @@ mod program {
             // launch before anything is opened), then execute it: open
             // every target, spawn every member with its attach block,
             // close the transferred ends, and run the byte pumps.
-            let plan = rustos_elsh::lower_wire_plan(spec)?;
+            let plan = tairix_elsh::lower_wire_plan(spec)?;
             let fds = open_planned(&plan.opens)?;
             let mut pids: Vec<i32> = Vec::with_capacity(plan.members.len());
             for member in &plan.members {
@@ -533,21 +533,21 @@ mod program {
             // console backing, an unwired kernel) is not fatal — the wait
             // proceeds without interactive signal routing, exactly as a
             // non-interactive session should.
-            let marked = rustos_rt::console_foreground(rustos_abi::STDIN, pid_i32) >= 0;
-            let mut status = rustos_abi::WaitStatus::Exited(0);
+            let marked = tairix_rt::console_foreground(tairix_abi::STDIN, pid_i32) >= 0;
+            let mut status = tairix_abi::WaitStatus::Exited(0);
             // `STOPPED` opts into stop reports, so a `^Z`-stopped foreground
             // job returns control to the shell instead of blocking forever.
-            let ret = rustos_rt::wait(pid_i32, &mut status, rustos_abi::WaitFlags::STOPPED);
+            let ret = tairix_rt::wait(pid_i32, &mut status, tairix_abi::WaitFlags::STOPPED);
             if marked {
                 // Reclaim the terminal: back at the prompt (or handling a
                 // stop), bytes flow to the shell again.
-                let _ = rustos_rt::console_foreground(rustos_abi::STDIN, 0);
+                let _ = tairix_rt::console_foreground(tairix_abi::STDIN, 0);
             }
             if ret < 0 {
                 return Err(errno_from(ret));
             }
             Ok(match status {
-                rustos_abi::WaitStatus::Exited(code) => {
+                tairix_abi::WaitStatus::Exited(code) => {
                     // The leader is gone for good: reap this pipeline's
                     // remaining members so none is left a zombie. Their
                     // pipe ends close as they exit, so each blocking wait
@@ -563,11 +563,11 @@ mod program {
                     };
                     if let Some((_, others)) = entry {
                         for member in others {
-                            let mut reaped = rustos_abi::WaitStatus::Exited(0);
-                            let _ = rustos_rt::wait(
+                            let mut reaped = tairix_abi::WaitStatus::Exited(0);
+                            let _ = tairix_rt::wait(
                                 member,
                                 &mut reaped,
-                                rustos_abi::WaitFlags::empty(),
+                                tairix_abi::WaitFlags::empty(),
                             );
                         }
                     }
@@ -576,7 +576,7 @@ mod program {
                 // The shell's job vocabulary speaks the POSIX numbers a
                 // user scripts against: a stop reports as SIGTSTP (20), so
                 // `$?` becomes the familiar 148.
-                rustos_abi::WaitStatus::Stopped(_) => WaitOutcome::Stopped(STOP_SIGNAL_NUMBER),
+                tairix_abi::WaitStatus::Stopped(_) => WaitOutcome::Stopped(STOP_SIGNAL_NUMBER),
             })
         }
 
@@ -588,13 +588,13 @@ mod program {
             // closed; until its signal producer is installed the call surfaces
             // `NotImplemented` honestly rather than pretending it landed.
             let abi_signal = match signal {
-                Signal::Continue => rustos_abi::Signal::Continue,
-                Signal::Terminate => rustos_abi::Signal::Terminate,
-                Signal::Kill => rustos_abi::Signal::Kill,
+                Signal::Continue => tairix_abi::Signal::Continue,
+                Signal::Terminate => tairix_abi::Signal::Terminate,
+                Signal::Kill => tairix_abi::Signal::Kill,
             };
             // PIDs fit an `i32` on this ABI; `signal` takes a signed PID.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let ret = rustos_rt::signal(pid.as_u64() as i32, abi_signal);
+            let ret = tairix_rt::signal(pid.as_u64() as i32, abi_signal);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -613,15 +613,15 @@ mod program {
             // searchable directory, and only then moves the process. A refusal
             // surfaces as its `Errno`; the shell holds no ambient filesystem
             // authority of its own.
-            let ret = rustos_rt::fs_chdir(path.as_bytes());
+            let ret = tairix_rt::fs_chdir(path.as_bytes());
             if ret < 0 {
                 return Err(errno_from(ret));
             }
             // Report the resolved absolute directory the kernel settled on
             // (for the prompt and `cd`'s echo). A normalised absolute path
             // never exceeds `FS_PATH_MAX`, so this buffer always holds it.
-            let mut buf = alloc::vec![0u8; rustos_abi::FS_PATH_MAX];
-            let n = rustos_rt::fs_getcwd(&mut buf).map_err(errno_from)?;
+            let mut buf = alloc::vec![0u8; tairix_abi::FS_PATH_MAX];
+            let n = tairix_rt::fs_getcwd(&mut buf).map_err(errno_from)?;
             core::str::from_utf8(&buf[..n])
                 .map(String::from)
                 .map_err(|_| Errno::OutOfRange)
@@ -635,11 +635,11 @@ mod program {
 
     impl LimitStore for RtLimitStore {
         fn get(&self, kind: LimitKind) -> Result<ResourceLimit, Errno> {
-            rustos_rt::rlimit_get(kind).map_err(errno_from)
+            tairix_rt::rlimit_get(kind).map_err(errno_from)
         }
 
         fn set(&self, kind: LimitKind, value: ResourceLimit) -> Result<(), Errno> {
-            let ret = rustos_rt::rlimit_set(kind, value);
+            let ret = tairix_rt::rlimit_set(kind, value);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -661,22 +661,22 @@ mod program {
     impl RtElevator {
         /// Read one edited input line (without its terminator) from standard
         /// input — the read line discipline's **buffer** half
-        /// ([`rustos_vt::line::LineEditor`]) over `rustos_rt::stdin`, exactly
+        /// ([`tairix_vt::line::LineEditor`]) over `tairix_rt::stdin`, exactly
         /// as the REPL reads a command line. A zero-length read means the
         /// stream closed and fails closed; a line longer than `buf` is
         /// refused, never truncated.
         fn read_line_raw(buf: &mut [u8]) -> Result<usize, Errno> {
-            let mut editor = rustos_vt::line::LineEditor::new();
+            let mut editor = tairix_vt::line::LineEditor::new();
             let mut len = 0;
             let mut byte = [0u8; 1];
             loop {
-                if rustos_rt::stdin(&mut byte) == 0 {
+                if tairix_rt::stdin(&mut byte) == 0 {
                     return Err(Errno::NotFound);
                 }
                 match editor.push(buf, &mut len, byte[0]) {
-                    rustos_vt::line::LineFeed::Pending => {}
-                    rustos_vt::line::LineFeed::Complete => return Ok(len),
-                    rustos_vt::line::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
+                    tairix_vt::line::LineFeed::Pending => {}
+                    tairix_vt::line::LineFeed::Complete => return Ok(len),
+                    tairix_vt::line::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
                 }
             }
         }
@@ -686,7 +686,7 @@ mod program {
         fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
             // A credential must never render: select the secret discipline
             // for the read and fail closed if it cannot be selected.
-            let toggled = rustos_rt::set_input_mode(InputMode::Secret);
+            let toggled = tairix_rt::set_input_mode(InputMode::Secret);
             if toggled < 0 {
                 return Err(errno_from(toggled));
             }
@@ -695,13 +695,13 @@ mod program {
             // compromise the secret already read. The un-echoed Return key
             // advanced no line, so advance one ourselves with a plain line
             // feed, which the console line discipline cooks to CR-LF.
-            let _ = rustos_rt::set_input_mode(InputMode::Cooked);
+            let _ = tairix_rt::set_input_mode(InputMode::Cooked);
             let _ = Stdout.write_all(b"\n");
             result
         }
 
         fn elevate(&self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
-            let console = rustos_rt::self_origin().map_err(errno_from)?.console();
+            let console = tairix_rt::self_origin().map_err(errno_from)?.console();
             // `elevate_endpoint` refuses the "no console" sentinel, so a
             // stream-fed shell (a pipe, a network session) cannot name a
             // rendezvous it is not sitting on.
@@ -720,7 +720,7 @@ mod program {
                 }
             };
             let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
-            let posted = rustos_rt::ipc_call(endpoint, &request_buf[..encoded], &mut reply_buf);
+            let posted = tairix_rt::ipc_call(endpoint, &request_buf[..encoded], &mut reply_buf);
             // The request carries the offered password: zero it as soon as
             // the exchange resolves, before the reply is even decoded.
             request_buf.fill(0);
@@ -738,7 +738,7 @@ mod program {
     /// documents) the usage banner stands in — the shell's own text, not
     /// fabricated help content — so `-h` never fails.
     fn short_help() -> i32 {
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let bytes = own_short_help(&BundleHelp::new("elsh"), locale, "elsh")
             .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
         match Stdout.write_all(&bytes) {
@@ -747,7 +747,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Runs the interpreter as a read-eval-print loop over the inherited
@@ -759,7 +759,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -783,22 +783,22 @@ mod program {
         // line.
         let mut env = Environment::new();
         env.seed_interactive(|name| {
-            rustos_rt::env_var(name.as_bytes())
+            tairix_rt::env_var(name.as_bytes())
                 .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
         });
         let mut shell = Shell::with_environment(&host, &console, env)
             .with_limits(&limits)
             .with_elevator(&elevator);
-        rustos_elsh::run_repl(&mut shell, &console, &mut input, &RtDirLister)
+        tairix_elsh::run_repl(&mut shell, &console, &mut input, &RtDirLister)
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

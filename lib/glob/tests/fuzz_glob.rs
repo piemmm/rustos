@@ -1,8 +1,8 @@
 //! Deterministic fuzz harness for the `lib/glob` matcher (its untrusted-pattern
 //! decoder and match loop).
 //!
-//! [`rustos_glob::Pattern::new`] compiles a pattern supplied by a user or a
-//! script — untrusted input — and [`rustos_glob::Pattern::matches`] runs the
+//! [`tairix_glob::Pattern::new`] compiles a pattern supplied by a user or a
+//! script — untrusted input — and [`tairix_glob::Pattern::matches`] runs the
 //! compiled pattern against a candidate. The harness's invariants are:
 //!
 //! * compiling any byte string (as UTF-8) never panics — it returns a
@@ -11,14 +11,14 @@
 //!   always terminates (the algorithm is backtracking-free, so a hostile
 //!   pattern or candidate cannot trigger runaway work).
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG draws
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
 //! pseudo-random pattern strings, mutates real glob templates, and matches them
 //! against mutated candidates. A plain `cargo test` runs the
 //! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask fuzz`
-//! exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock
+//! exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock
 //! budget.
 
-use rustos_glob::Pattern;
+use tairix_glob::Pattern;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -77,13 +77,13 @@ fn exercise(pattern: &str, extra: &str) {
 
 #[test]
 fn compile_and_match_never_panic_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh per
-    // run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh per
+    // run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "compile_and_match_never_panic_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -136,7 +136,7 @@ fn compile_and_match_never_panic_for_any_input() {
         exercise(&noise_str, &noise_str);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

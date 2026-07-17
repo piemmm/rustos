@@ -1,6 +1,6 @@
 # ext4 driver
 
-`drivers/filesystem/ext4` (`rustos-drv-fs-ext4`) is a **read/write**
+`drivers/filesystem/ext4` (`tairix-drv-fs-ext4`) is a **read/write**
 driver for ext2/ext3/ext4 volumes behind any
 [`Block`](../abi/driver_traits.md) device. It implements the versioned
 `FilesystemRead`, `FilesystemWrite`, and `FilesystemSecurity` traits; the
@@ -192,7 +192,7 @@ runs in user space and does not request `CAP_DRV_KERNEL`.
 
 ## Tests
 
-`cargo test -p rustos-drv-fs-ext4` builds an in-memory ext4 image (block
+`cargo test -p tairix-drv-fs-ext4` builds an in-memory ext4 image (block
 size 1024, one block group, 128-byte inodes, `filetype` on, with block
 and inode bitmaps and free space) holding an extent-mapped root, an
 extent-mapped file, a subdirectory with a nested file, and a classic

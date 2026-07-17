@@ -15,16 +15,16 @@
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a
 //! fresh, logged seed so the suite stays fast. When `cargo xtask fuzz
-//! --soak` exports `RUSTOS_FUZZ_BUDGET_SECS`, the PRNG-driven harness
+//! --soak` exports `TAIRIX_FUZZ_BUDGET_SECS`, the PRNG-driven harness
 //! keeps drawing fresh inputs from the *same continuing* stream until
 //! the deadline elapses. The seed is logged at the start, so a
-//! fresh-seed crash stays reproducible via `RUSTOS_FUZZ_SEED`.
+//! fresh-seed crash stays reproducible via `TAIRIX_FUZZ_SEED`.
 
 use core::num::NonZeroU32;
 
-use rustos_net::addr::{Ipv6Scope, ScopedIpv6Addr};
-use rustos_net::checksum::Checksum;
-use rustos_net::{internet_checksum, Ipv4Addr, Ipv6Addr};
+use tairix_net::addr::{Ipv6Scope, ScopedIpv6Addr};
+use tairix_net::checksum::Checksum;
+use tairix_net::{internet_checksum, Ipv4Addr, Ipv6Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -136,18 +136,18 @@ fn exercise_checksum(rng: &mut Lcg, buf: &mut [u8]) {
 
 #[test]
 fn random_inputs_uphold_address_and_checksum_invariants() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "random_inputs_uphold_address_and_checksum_invariants",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut buf = [0u8; 128];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             exercise_scope(&mut rng);
             exercise_checksum(&mut rng, &mut buf);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

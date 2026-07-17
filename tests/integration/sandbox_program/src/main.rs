@@ -3,13 +3,13 @@
 //!
 //! One binary, four roles, selected by the **registry path** it is spawned
 //! under (`arg(0)`) plus the seam's worker marker (`arg(1)`), because the
-//! production launcher (`rustos_sandbox::rt::RtLauncher`) always passes
+//! production launcher (`tairix_sandbox::rt::RtLauncher`) always passes
 //! `[path, WORKER_ROLE_ARG]`:
 //!
 //! * **parent** (`/bin/sbx`, no worker marker) — drives the whole seam over
 //!   the real syscalls and exits 0 only when every check passed;
 //! * **decode worker** (`/bin/sbx` + marker) — serves the
-//!   `rustos_sandbox::decode::DecodeService` over its wired fd 0/1 inside
+//!   `tairix_sandbox::decode::DecodeService` over its wired fd 0/1 inside
 //!   the kernel sandbox spawn mode;
 //! * **dying worker** (`/bin/sbx-die` + marker) — exits immediately without
 //!   serving: the real-process stand-in for a crashed parser;
@@ -24,7 +24,7 @@
 //! failure site exits with a distinct diagnostic code the chassis folds
 //! into its failure finisher.
 //!
-//! It is a **pure-Rust** program: it links `rustos-rt` (which supplies
+//! It is a **pure-Rust** program: it links `tairix-rt` (which supplies
 //! `_start` and the global allocator), never the C ABI. It is built
 //! position-independent and converted to an `rxe` blob by the consuming
 //! test's build script. On the host it is an inert stub so
@@ -44,15 +44,15 @@ mod program {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use rustos_abi::{Errno, OpenFlags};
-    use rustos_log::{Event, Sink};
-    use rustos_sandbox::decode::{
+    use tairix_abi::{Errno, OpenFlags};
+    use tairix_log::{Event, Sink};
+    use tairix_sandbox::decode::{
         container_summary, disassemble, ContainerFormat, DecodeFailure, DecodeRefusal,
         DecodeService, Isa,
     };
-    use rustos_sandbox::host::{ParserSandbox, SandboxError, EVENT_WORKER_CRASHED};
-    use rustos_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use rustos_sandbox::worker::{ServeEnd, Service};
+    use tairix_sandbox::host::{ParserSandbox, SandboxError, EVENT_WORKER_CRASHED};
+    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::worker::{ServeEnd, Service};
 
     /// Registry path of the parent role — and of the decode worker the
     /// seam spawns from it.
@@ -116,8 +116,8 @@ mod program {
 
     impl Service for ProbeService {
         fn handle(&mut self, _request: &[u8]) -> Vec<u8> {
-            let open_denied = is_denied(rustos_rt::fs_open(SBX_PATH, OpenFlags::READ));
-            let spawn_denied = is_denied(rustos_rt::spawn(SBX_PATH));
+            let open_denied = is_denied(tairix_rt::fs_open(SBX_PATH, OpenFlags::READ));
+            let spawn_denied = is_denied(tairix_rt::spawn(SBX_PATH));
             vec![u8::from(open_denied), u8::from(spawn_denied)]
         }
     }
@@ -210,7 +210,7 @@ mod program {
     /// registry rows are the only spawners.
     fn main() -> i32 {
         if worker_role() {
-            return match rustos_rt::arg(0) {
+            return match tairix_rt::arg(0) {
                 Some(path) if path == DIE_PATH => DIE_EXIT,
                 Some(path) if path == PROBE_PATH => run_worker(&mut ProbeService),
                 _ => run_worker(&mut DecodeService),
@@ -219,13 +219,13 @@ mod program {
         parent()
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the
 // crate building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

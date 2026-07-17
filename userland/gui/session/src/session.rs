@@ -1,10 +1,10 @@
 //! The desktop session: the theme registry, the taskbar, and the glue that
 //! resolves taskbar responses into session-level events.
 
-use rustos_cursor::CursorTheme;
-use rustos_icon::IconSet;
-use rustos_taskbar::{MenuAction, Taskbar, TaskbarConfig, TaskbarResponse};
-use rustos_theme::{Theme, ThemeError, ThemeId, ThemeRegistry};
+use tairix_cursor::CursorTheme;
+use tairix_icon::IconSet;
+use tairix_taskbar::{MenuAction, Taskbar, TaskbarConfig, TaskbarResponse};
+use tairix_theme::{Theme, ThemeError, ThemeId, ThemeRegistry};
 
 use crate::assets::{load_cursor_theme, load_icon_set, GraphicsAssetReader};
 
@@ -125,7 +125,7 @@ impl DesktopSession {
     /// registry.
     ///
     /// Reads the asset named by the active theme's
-    /// [`CursorSet`](rustos_theme::CursorSet) for each cursor kind through
+    /// [`CursorSet`](tairix_theme::CursorSet) for each cursor kind through
     /// `reader`. It cannot fail: a kind whose asset is missing, unreadable, or
     /// malformed keeps its built-in cursor, so a corrupt or
     /// absent `/System/Graphics` simply yields the built-in cursor set.

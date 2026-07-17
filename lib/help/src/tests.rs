@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_vt::{encode_all_into, Op};
+use tairix_vt::{encode_all_into, Op};
 
 /// Encode a sequence of operations into a fresh `Vec` over the sink API.
 fn encode_all(ops: &[Op]) -> Vec<u8> {

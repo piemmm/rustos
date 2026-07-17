@@ -1,6 +1,6 @@
 //! wasm32 timer programming ("timer programming").
 //!
-//! Implements the Arch HAL [`Timer`](rustos_arch_api::Timer) surface for
+//! Implements the Arch HAL [`Timer`](tairix_arch_api::Timer) surface for
 //! wasm32 over the cooperative `requestAnimationFrame` loop wired in
 //! [`crate::preempt`]. The HAL handle is the architecture-neutral half
 //! of the timer path: it installs the one scheduler-tick callback and
@@ -8,7 +8,7 @@
 //! [`crate::preempt`] — it is host-binding work with no
 //! architecture-neutral shape — and
 //! [`crate::preempt::on_animation_frame`] dispatches each frame's tick
-//! through [`Timer::dispatch_tick`](rustos_arch_api::Timer::dispatch_tick),
+//! through [`Timer::dispatch_tick`](tairix_arch_api::Timer::dispatch_tick),
 //! so the callback invoke lives in exactly one place.
 //!
 //! The handle is zero-sized: the callback lives in [`crate::preempt`]'s
@@ -18,7 +18,7 @@
 //! host-callable, so the handle and the frame loop must share that one
 //! store rather than the handle keeping a private host cell.
 
-use rustos_arch_api::{CpuId, TickFn, Timer};
+use tairix_arch_api::{CpuId, TickFn, Timer};
 
 /// wasm32 implementation of the Arch HAL timer-programming surface.
 ///
@@ -77,7 +77,7 @@ impl Timer for TimerHal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::timer::conformance;
+    use tairix_arch_api::timer::conformance;
 
     #[test]
     fn passes_timer_conformance() {

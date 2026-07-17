@@ -1,4 +1,4 @@
-//! RustOS `seq` — print a sequence of numbers (`plans/APPS.md` §12.1
+//! TAIRiX `seq` — print a sequence of numbers (`plans/APPS.md` §12.1
 //! Stage C).
 //!
 //! The GNU coreutils `seq`: print the numbers from FIRST to LAST in steps
@@ -26,7 +26,7 @@
 //!   C-locale semantics), all writing through the injected [`Output`].
 //!
 //! One deliberate platform divergence: GNU `seq`'s floating-point path
-//! computes in C `long double`; RustOS computes in `f64`. The exact
+//! computes in C `long double`; TAIRiX computes in `f64`. The exact
 //! decimal path (which GNU also prefers) is unaffected, and `f64` *is*
 //! the `double` the GNU format contract names — only non-integer
 //! sequences whose operands need more than 53 bits of significand can
@@ -45,7 +45,7 @@
 //! The bundle's `Help/` documents are **not** embedded in this crate:
 //! they are authored once in the bundle's on-disk `Help/` tree, planted
 //! onto `/System` by the image builder from that source (`tools/syshelp`),
-//! and read back at runtime through the injected [`rustos_help::HelpSource`]
+//! and read back at runtime through the injected [`tairix_help::HelpSource`]
 //! seam. Help is never hardcoded into the program (`plans/APPS.md`).
 
 #![no_std]

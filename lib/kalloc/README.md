@@ -1,9 +1,9 @@
-# rustos-kalloc
+# tairix-kalloc
 
-Shared `no_std` freeing kernel heap allocator for freestanding RustOS
+Shared `no_std` freeing kernel heap allocator for freestanding TAIRiX
 images.
 
-Every freestanding boot binary (the production `rustos-kernel`, every
+Every freestanding boot binary (the production `tairix-kernel`, every
 `tests/integration/*` QEMU bin, and every architecture port's boot
 harness) registers a `FreeListAllocator` over a per-binary `Heap` static
 as its `#[global_allocator]`. Defining the allocator once here satisfies

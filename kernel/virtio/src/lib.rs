@@ -6,11 +6,11 @@
 //! * [`virtio_factory`] — the per-driver [`KernelVirtioFactory`] that
 //!   mints one capability-checked
 //!   [`KernelVirtioHost`] over a
-//!   fresh per-process [`DmaPool`](rustos_kernel_mem::DmaPool) for every
+//!   fresh per-process [`DmaPool`](tairix_kernel_mem::DmaPool) for every
 //!   loaded virtio-class driver.
 //! * [`virtio_pci_walk`] — the ring-0 walk that maps a virtio-PCI
 //!   device's register windows into a
-//!   [`PciTransportWindows`](rustos_virtio::PciTransportWindows) and
+//!   [`PciTransportWindows`](tairix_virtio::PciTransportWindows) and
 //!   hands them to a caller-supplied transport builder.
 //! * [`virtio_mmio_walk`] — the ring-0 walk that maps a `virt`-board
 //!   virtio-MMIO slot's register window and hands it to a
@@ -21,11 +21,11 @@
 //! `drivers/bus/virtio` transports — keeping ring 0 off any
 //! `drivers/bus/*` crate (: `kernel/* → lib/*`, never
 //! a driver). The production builders are
-//! `rustos_drv_bus_virtio::{PciTransport, MmioTransport}::new`.
+//! `tairix_drv_bus_virtio::{PciTransport, MmioTransport}::new`.
 //!
 //! # Why a separate crate
 //!
-//! These facilities used to live in the `rustos-kernel` binary crate,
+//! These facilities used to live in the `tairix-kernel` binary crate,
 //! which depends on the x86_64 architecture port and therefore does not
 //! build for the `riscv64gc-unknown-none-elf` / `aarch64-unknown-none`
 //! `virt`-board targets. The riscv64 virtio-MMIO QEMU verticals need the
@@ -33,7 +33,7 @@
 //! arch-neutral code moved here where every Tier-1 freestanding target
 //! can link it without pulling in a foreign architecture port
 //! (no duplication — shared code lives in one
-//! place). `rustos-kernel` re-exports every item below, so its public
+//! place). `tairix-kernel` re-exports every item below, so its public
 //! API is unchanged.
 
 #![no_std]

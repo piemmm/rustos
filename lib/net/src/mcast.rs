@@ -28,7 +28,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use rustos_abi::time::Duration64;
+use tairix_abi::time::Duration64;
 
 use crate::addr::{Ipv4Addr, Ipv6Addr, ALL_NODES};
 use crate::timeutil::{from_nanos, nanos, NEVER};

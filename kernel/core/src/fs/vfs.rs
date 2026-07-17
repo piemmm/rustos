@@ -12,14 +12,14 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
     NodeInfo as DriverNodeInfo, NodeKind as DriverNodeKind,
 };
-use rustos_abi::time::Time64;
-use rustos_abi::CapabilityId;
-use rustos_kernel_sec::{GroupId, UserId};
-use rustos_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tairix_abi::time::Time64;
+use tairix_abi::CapabilityId;
+use tairix_kernel_sec::{GroupId, UserId};
+use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::delegate::{DelegatedFs, DelegatedInfo};
 use super::mount::MountTable;

@@ -5,7 +5,7 @@
 //! rewritten at will. Per ("every parser of untrusted input... has a
 //! fuzz target") it is driven here against arbitrary device contents.
 //!
-//! RustOS does not pull in an external fuzz runner: a
+//! TAIRiX does not pull in an external fuzz runner: a
 //! deterministic, per-run-seeded PRNG drives random pages, slots, and byte-level
 //! tampering against an in-memory swap device and asserts the invariants the
 //! restore path must uphold no matter what is on the platter:
@@ -26,15 +26,15 @@
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed. When
-//! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
+//! `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing from the *same continuing* PRNG stream until the budget elapses,
 //! while the logged seed keeps any failure reproducible.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rustos_kernel_mem::swap::SWAP_RECORD_LEN;
-use rustos_kernel_mem::{
+use tairix_kernel_mem::swap::SWAP_RECORD_LEN;
+use tairix_kernel_mem::{
     EncryptedSwap, EntropySource, SealError, SealKey, SwapBackend, SwapError, SwapPage,
 };
 
@@ -133,9 +133,9 @@ impl SwapBackend for MockBackend {
 
 #[test]
 fn fuzz_swap_restore_is_fail_closed() {
-    let mut rng = Rng::new(rustos_fuzzseed::start(
+    let mut rng = Rng::new(tairix_fuzzseed::start(
         "fuzz_swap_restore_is_fail_closed",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let device = MockBackend::new(SLOTS);
     let key = SealKey::generate(&mut RngEntropy(Rng::new(1))).expect("key");
@@ -144,7 +144,7 @@ fn fuzz_swap_restore_is_fail_closed() {
 
     let mut round_trips = 0u64;
     let mut tamper_rejected = 0u64;
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let slot = rng.next_u64() % SLOTS;
@@ -192,7 +192,7 @@ fn fuzz_swap_restore_is_fail_closed() {
                 _ => {}
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

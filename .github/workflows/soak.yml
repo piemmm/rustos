@@ -35,7 +35,7 @@ name: soak
 # `schedule` (which always runs from the base repo's default branch, never a
 # fork) and on `workflow_dispatch` — never on `pull_request`/`pull_request_target`.
 # Every job is additionally gated (see the job `if:` below) to the owner
-# (`piemmm`) in the canonical `piemmm/rustos` repo, so a fork or any other
+# (`piemmm`) in the canonical `piemmm/tairix` repo, so a fork or any other
 # actor manually dispatching is refused before any step runs.
 on:
   schedule:
@@ -70,8 +70,8 @@ env:
   # 22.1.8; no distro package ships that build, so the official llvm.org
   # release is unpacked once onto the runner's persistent disk (see the
   # "Install pinned C toolchain" step) and resolved through these overrides.
-  RUSTOS_CC_CLANG: /var/lib/actions-runner/rustos-cache/llvm-22.1.8/bin/clang
-  RUSTOS_CC_LLD: /var/lib/actions-runner/rustos-cache/llvm-22.1.8/bin/ld.lld
+  TAIRIX_CC_CLANG: /var/lib/actions-runner/tairix-cache/llvm-22.1.8/bin/clang
+  TAIRIX_CC_LLD: /var/lib/actions-runner/tairix-cache/llvm-22.1.8/bin/ld.lld
   # Self-hosted runner: persist build outputs in one fixed dir on the runner's
   # own disk instead of round-tripping a >1 GB `target/` tarball through
   # GitHub's hosted cache service (no `actions/cache` step is used here).
@@ -80,7 +80,7 @@ env:
   # self-hosted runner. The soak runs on its *own* runner instance (the `soak`
   # label) concurrently with `ci.yml` on the same host, so it gets a distinct
   # target dir to avoid two concurrent jobs stomping on a shared `target/`.
-  CARGO_TARGET_DIR: /var/lib/actions-runner/rustos-cache/target-soak
+  CARGO_TARGET_DIR: /var/lib/actions-runner/tairix-cache/target-soak
 
 jobs:
   soak:
@@ -88,7 +88,7 @@ jobs:
     # Fail closed: only the owner in the canonical repo may execute on the
     # self-hosted runner. Refuses forks (different `github.repository`) and any
     # non-owner actor (e.g. a collaborator's manual dispatch) before checkout.
-    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
+    if: github.repository == 'piemmm/tairix' && github.actor == 'piemmm'
     # Dedicated `soak` label so the window runs on its own runner instance and
     # never queues `ci.yml` (which uses the bare `[self-hosted, linux]`) behind
     # it; the two run concurrently on the same host (see the runner README for
@@ -115,22 +115,22 @@ jobs:
       # clang/ld.lld report exactly 22.1.8 (REQUIRED_CLANG_VERSION /
       # REQUIRED_LLD_VERSION). No distro package ships that build, so unpack
       # the official llvm.org release tarball once onto the runner's
-      # persistent disk; RUSTOS_CC_CLANG / RUSTOS_CC_LLD (workflow env above)
+      # persistent disk; TAIRIX_CC_CLANG / TAIRIX_CC_LLD (workflow env above)
       # point the wrapper at it, and the wrapper's own exact-version check
       # re-verifies every build.
       - name: Install pinned C toolchain (clang/lld 22.1.8)
         run: |
-          if ! "$RUSTOS_CC_CLANG" --version 2>/dev/null | grep -q 'clang version 22\.1\.8'; then
+          if ! "$TAIRIX_CC_CLANG" --version 2>/dev/null | grep -q 'clang version 22\.1\.8'; then
             wget -qO /tmp/llvm-22.1.8.tar.xz \
               https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz
-            rm -rf /var/lib/actions-runner/rustos-cache/llvm-22.1.8
-            mkdir -p /var/lib/actions-runner/rustos-cache/llvm-22.1.8
+            rm -rf /var/lib/actions-runner/tairix-cache/llvm-22.1.8
+            mkdir -p /var/lib/actions-runner/tairix-cache/llvm-22.1.8
             tar -xJf /tmp/llvm-22.1.8.tar.xz --strip-components=1 \
-              -C /var/lib/actions-runner/rustos-cache/llvm-22.1.8
+              -C /var/lib/actions-runner/tairix-cache/llvm-22.1.8
             rm /tmp/llvm-22.1.8.tar.xz
           fi
-          "$RUSTOS_CC_CLANG" --version
-          "$RUSTOS_CC_LLD" --version
+          "$TAIRIX_CC_CLANG" --version
+          "$TAIRIX_CC_LLD" --version
 
       # Start every run from a clean slate: the self-hosted runner persists
       # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before
@@ -143,7 +143,7 @@ jobs:
         env:
           # Keep soak logs out of the tracked tree (AGENTS.md §3); upload them
           # below so a failing reproducer can be pulled off the run.
-          RUSTOS_CI_LOGDIR: ${{ runner.temp }}/rustos-soak-logs
+          TAIRIX_CI_LOGDIR: ${{ runner.temp }}/tairix-soak-logs
         run: |
           KIND="${{ github.event.inputs.kind || 'all' }}"
           SECS="${{ github.event.inputs.secs }}"
@@ -161,6 +161,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: soak-logs-${{ github.run_id }}
-          path: ${{ runner.temp }}/rustos-soak-logs/
+          path: ${{ runner.temp }}/tairix-soak-logs/
           if-no-files-found: warn
           retention-days: 14

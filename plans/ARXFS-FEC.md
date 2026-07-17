@@ -13,7 +13,7 @@ Possible shared code area: `lib/fec`, only if at least two production crates nee
 the same FEC code and `AGENTS.md` section 3 plus `PLAN.md` are updated in the same
 change.
 
-This document is written for an AI agent with access to the RustOS repository and
+This document is written for an AI agent with access to the TAIRiX repository and
 bound by `AGENTS.md`. It is not a changelog. It states the current design,
 invariants, staged deliverables, tests, documentation requirements, and
 acceptance criteria for adding always-on FEC, multi-device redundancy, live pool
@@ -44,8 +44,8 @@ If this document conflicts with `AGENTS.md`, `AGENTS.md` wins. If it conflicts
 with the actual ARXFS code or `arxfs-spec.md`, the implementing agent must stop
 and surface the mismatch before implementing a guess.
 
-The agent must not assume Linux device paths, `/dev`, `/proc`, or `/sys`. RustOS
-has none of those top-level interfaces. Disks are reached the RustOS way: a
+The agent must not assume Linux device paths, `/dev`, `/proc`, or `/sys`. TAIRiX
+has none of those top-level interfaces. Disks are reached the TAIRiX way: a
 user-space block driver publishes each logical unit as a block-service call
 endpoint plus shared data window, granted on the storage-class hardware-tree
 node it emits (`lib/abi/src/blkio.rs`, `plans/DEVICES.md`); the volume manager
@@ -224,7 +224,7 @@ This work must not implement any of the following:
 - A guaranteed completion-time estimate. Progress and measured throughput may
   be shown; any ETA must be clearly labelled as an estimate.
 
-RustOS has not shipped. The ARXFS-native format evolves in place. Obsolete
+TAIRiX has not shipped. The ARXFS-native format evolves in place. Obsolete
 no-FEC fixtures, code, docs, and generated images must be deleted or regenerated
 in the same change that makes them obsolete.
 
@@ -2456,7 +2456,7 @@ end to end:
 An implementation agent may use this prompt:
 
 ```text
-You are implementing the next stage of `plans/ARXFS-FEC.md` for RustOS.
+You are implementing the next stage of `plans/ARXFS-FEC.md` for TAIRiX.
 Before coding, read `AGENTS.md`, `PLAN.md`,
 `docs/src/filesystem/arxfs-spec.md`, `docs/src/filesystem/arxfs.md`,
 `docs/src/filesystem/drives.md`, `plans/DEVICES.md`, this plan, and all

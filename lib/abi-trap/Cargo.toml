@@ -1,6 +1,6 @@
 [package]
-name = "rustos-abi-trap"
-description = "Raw abi-v1 user->kernel syscall trap primitive: the single per-architecture syscall/svc/ecall carve-out, shared by the C-ABI stub runtime (rustos-abi-sys) and the Rust userland runtime (rustos-rt) so the trap assembly exists exactly once."
+name = "tairix-abi-trap"
+description = "Raw abi-v1 user->kernel syscall trap primitive: the single per-architecture syscall/svc/ecall carve-out, shared by the C-ABI stub runtime (tairix-abi-sys) and the Rust userland runtime (tairix-rt) so the trap assembly exists exactly once."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,4 +21,4 @@ workspace = true
 host-seam = []
 
 [dependencies]
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }

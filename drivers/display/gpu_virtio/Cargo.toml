@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-display-gpu-virtio"
-description = "RustOS placeholder: virtio-gpu driver."
+name = "tairix-drv-display-gpu-virtio"
+description = "TAIRiX placeholder: virtio-gpu driver."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

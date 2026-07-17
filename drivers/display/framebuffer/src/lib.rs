@@ -7,7 +7,7 @@
 //! table is authored from (`tools/xtask` `image_drivers`, the autoload
 //! fixtures) and `devmgr` (or the in-kernel bootstrap-floor autoload)
 //! resolves a discovered display node against — and the service's stable
-//! [`rustos_log::EventId`] constants ([`FIRST_PRESENT`]), so the emitting
+//! [`tairix_log::EventId`] constants ([`FIRST_PRESENT`]), so the emitting
 //! binary and every log consumer (the D7d QEMU vertical keys its
 //! host-side scan-out readback on the rendered [`FIRST_PRESENT_MESSAGE`])
 //! share one definition.
@@ -24,8 +24,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_abi::{DriverBindKey, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
-use rustos_log::EventId;
+use tairix_abi::{DriverBindKey, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
+use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for the display service's event
 /// identifiers. Per `lib/log` convention every subsystem owns a

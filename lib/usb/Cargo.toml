@@ -1,6 +1,6 @@
 [package]
-name = "rustos-usb"
-description = "RustOS bus-agnostic xHCI USB host-controller protocol: the XhciHost register seam, the Xhci controller engine, the TRB/ring vocabulary, and the single-device HID enumeration engine, shared by the USB bus driver and an arch-neutral user-space keyboard driver."
+name = "tairix-usb"
+description = "TAIRiX bus-agnostic xHCI USB host-controller protocol: the XhciHost register seam, the Xhci controller engine, the TRB/ring vocabulary, and the single-device HID enumeration engine, shared by the USB bus driver and an arch-neutral user-space keyboard driver."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,13 +18,13 @@ workspace = true
 # only on the stable ABI types in `lib/abi`, so it builds for every
 # Tier-1 target. This is the USB analogue of `lib/virtio`.
 [dependencies]
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # DMA memory-ordering barriers (`AGENTS.md` §2.2): the controller is a
 # separate, possibly non-I/O-coherent, bus master, so the driver must order
 # its TRB/ring writes before the doorbell that hands them over, and order the
 # event-ring cycle-bit read before the entry body. Arch-specific instruction,
 # host/wasm32 no-op.
-rustos-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
+tairix-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 
 [dev-dependencies]
 # End-to-end seam proof: the boot-protocol decoders polling reports
@@ -34,4 +34,4 @@ rustos-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 # decoders live in `lib/hid` (`BootKeyboard`); the §18.3 bind keys a class
 # driver carries are constructed inline in the test, so this protocol crate
 # depends on no concrete driver.
-rustos-hid = { path = "../hid", version = "=0.0.0" }
+tairix-hid = { path = "../hid", version = "=0.0.0" }

@@ -1,4 +1,4 @@
-//! RustOS traditional desktop **taskbar** (`userland/gui/taskbar`).
+//! TAIRiX traditional desktop **taskbar** (`userland/gui/taskbar`).
 //!
 //! The taskbar is the GNOME/Windows-style bar pinned to a configured screen
 //! edge (`PLAN.md` Stage 7). Along its main axis it is laid
@@ -22,15 +22,15 @@
 //! every region ([`BarLayout`]), pointer [`hit_test`](BarLayout::hit_test)ing
 //! for input routing, the start-menu / task-list / notification-area state
 //! machines, and the [`TaskbarRenderer`] that paints those regions into a
-//! themed pixel [`Surface`](rustos_raster::Surface). It sources its corner
-//! radius and colours from the active theme ([`rustos_theme`]) and exposes
+//! themed pixel [`Surface`](tairix_raster::Surface). It sources its corner
+//! radius and colours from the active theme ([`tairix_theme`]) and exposes
 //! the radius through [`BarLayout::corner_radius`]; the taskbar never rounds its own
 //! corners — the window manager applies that radius through its single
 //! anti-aliased rounded-corner path, exactly as it rounds
 //! windows.
 //!
 //! Glyph rendering (clock and task-title text) and notification-icon artwork
-//! (scalable, themeable [`rustos_icon`] vector glyphs) are wired here; the
+//! (scalable, themeable [`tairix_icon`] vector glyphs) are wired here; the
 //! live IPC wiring to the window manager builds on this model in later Stage 7
 //! increments.
 //!
@@ -39,8 +39,8 @@
 //! # Where it sits
 //!
 //! As a `userland/gui/*` crate it depends only on `lib/*` — the shared
-//! [`rustos_geometry`] coordinate types, the shared [`rustos_raster`]
-//! surface, and the shared [`rustos_theme`] definition — never on the window
+//! [`tairix_geometry`] coordinate types, the shared [`tairix_raster`]
+//! surface, and the shared [`tairix_theme`] definition — never on the window
 //! manager or any sibling userland crate. Nothing depends
 //! on it in turn: the desktop is an optional, one-way-dependent
 //! frontend.

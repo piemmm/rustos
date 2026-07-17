@@ -1,16 +1,16 @@
 <!doctype html>
 <meta charset="utf-8" />
-<title>RustOS wasm32 boot vertical</title>
+<title>TAIRiX wasm32 boot vertical</title>
 <!--
   Browser entry point for the Stage 3d wasm32 boot vertical. It fetches
   the compiled kernel module (its URL is passed in the `wasm` query
   parameter by `web/harness.mjs`), hands it to the shared host loader
-  (`kernel/arch/wasm32/web/rustos.js`, served at `/rustos.js`), and logs
+  (`kernel/arch/wasm32/web/tairix.js`, served at `/tairix.js`), and logs
   each kernel console line to the page console. The puppeteer harness
   scrapes those lines to decide PASS/FAIL.
 -->
 <script type="module">
-  import { boot } from "/rustos.js";
+  import { boot } from "/tairix.js";
 
   const wasmUrl = new URLSearchParams(location.search).get("wasm");
   try {

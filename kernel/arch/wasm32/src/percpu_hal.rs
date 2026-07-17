@@ -1,6 +1,6 @@
 //! wasm32 per-CPU storage ("per-CPU storage").
 //!
-//! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
+//! Implements the Arch HAL [`PerCpu`](tairix_arch_api::PerCpu) surface
 //! for wasm32. A WebAssembly module has **no per-CPU register** — the
 //! bare-metal ports' GS base / `TPIDR_EL1` / `tp` have no analogue. But
 //! a "CPU" on this port is a Web Worker context (`crate::kernel_arch`),
@@ -11,7 +11,7 @@
 //! instance boundary, not by a shared register the host must partition.
 //!
 //! The stored word is opaque to this surface (see the
-//! [`PerCpu`](rustos_arch_api::PerCpu) trait docs). The same in-handle
+//! [`PerCpu`](tairix_arch_api::PerCpu) trait docs). The same in-handle
 //! cell backs both the wasm build (where it is the genuine per-worker
 //! slot) and the host build (where it lets the round-trip and isolation
 //! conformance verticals run under `cargo test`), so there is one code
@@ -19,7 +19,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_arch_api::PerCpu;
+use tairix_arch_api::PerCpu;
 
 /// wasm32 implementation of the Arch HAL per-CPU storage surface.
 ///
@@ -59,7 +59,7 @@ impl PerCpu for PerCpuStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::percpu::conformance;
+    use tairix_arch_api::percpu::conformance;
 
     #[test]
     fn passes_per_cpu_conformance() {

@@ -13,7 +13,7 @@
 //! formats chapter.
 
 use crate::volume::{get_u16, get_u32, put_u16, put_u32};
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 /// Size of the on-disc disc record in bytes (`u32` form first so the
 /// byte form derives from it losslessly).

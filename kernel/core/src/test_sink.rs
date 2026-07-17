@@ -1,7 +1,7 @@
-//! In-memory [`rustos_log::Sink`] for host-side tests and feature-gated
+//! In-memory [`tairix_log::Sink`] for host-side tests and feature-gated
 //! integration harnesses.
 //!
-//! `TestSink` stores every received [`rustos_log::Event`] in order so a
+//! `TestSink` stores every received [`tairix_log::Event`] in order so a
 //! test can assert the exact sequence of audit IDs emitted by
 //! [`crate::kernel_main`] or [`crate::handle_panic`]. It is gated
 //! behind `cfg(any(test, feature = "test-arch"))` so it never links
@@ -10,8 +10,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_log::{Event, EventId, Level, Sink};
-use rustos_sync::SpinLock;
+use tairix_log::{Event, EventId, Level, Sink};
+use tairix_sync::SpinLock;
 
 /// One captured event. The contents mirror the public fields of
 /// [`Event`] but in owned form so the test can assert against them

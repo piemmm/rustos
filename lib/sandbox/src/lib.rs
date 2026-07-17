@@ -1,4 +1,4 @@
-//! RustOS parser-sandbox seam (`lib/sandbox`).
+//! TAIRiX parser-sandbox seam (`lib/sandbox`).
 //!
 //! Every parser of untrusted input runs in a minimum-capability sandbox
 //! process; the kernel primitive that creates such a process is the
@@ -22,7 +22,7 @@
 //!   run the full parent path without processes (the `Fs`/`Tty` seam
 //!   pattern).
 //! * [`decode`] — the first consumers behind the seam: executable-container
-//!   summaries (`rustos-binfmt`) and instruction windows (`rustos-disasm`),
+//!   summaries (`tairix-binfmt`) and instruction windows (`tairix-disasm`),
 //!   with fail-closed reply validation (the worker is hostile once it has
 //!   parsed a byte).
 //! * `rt` (feature `program`, freestanding only; not compiled on hosted

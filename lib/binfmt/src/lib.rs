@@ -1,12 +1,12 @@
-//! RustOS read-only executable-container decoder (`lib/binfmt`).
+//! TAIRiX read-only executable-container decoder (`lib/binfmt`).
 //!
-//! Several RustOS components need to *look inside* an executable file
+//! Several TAIRiX components need to *look inside* an executable file
 //! without loading it: the file manager's disassembly viewer first, and an
 //! `objdump`/`readelf`-class command app next. That decoding is identical
 //! wherever it happens, so it lives here once. The crate produces typed,
 //! borrowed views of three containers:
 //!
-//! - **`rxe`** ([`rxe::RxeView`], [`rxe::ManifestSummary`]) — the RustOS
+//! - **`rxe`** ([`rxe::RxeView`], [`rxe::ManifestSummary`]) — the TAIRiX
 //!   load image and the signed manifest, decoded *through* the `lib/abi`
 //!   wire types (`LoadImage::parse_for_inspection`,
 //!   `ManifestHeader::from_bytes`, `decode_capability_ids`), so the
@@ -34,7 +34,7 @@
 //! # Example
 //!
 //! ```
-//! use rustos_binfmt::{detect, Format};
+//! use tairix_binfmt::{detect, Format};
 //!
 //! assert_eq!(detect(b"\x7fELF\x02\x01\x01\x00"), Some(Format::Elf64));
 //! assert_eq!(detect(b"\0asm\x01\x00\x00\x00"), Some(Format::Wasm));
@@ -53,7 +53,7 @@ pub mod wasm;
 /// An executable-container format this crate can decode.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Format {
-    /// A RustOS `rxe` load image (`RXEL` magic).
+    /// A TAIRiX `rxe` load image (`RXEL` magic).
     Rxe,
     /// A 64-bit little-endian ELF file (`\x7fELF`, `ELFCLASS64`,
     /// `ELFDATA2LSB`).
@@ -72,7 +72,7 @@ pub enum Format {
 /// back honestly (to a hex view) instead of failing half-way in.
 #[must_use]
 pub fn detect(bytes: &[u8]) -> Option<Format> {
-    if bytes.len() >= 4 && bytes[0..4] == rustos_abi::LOAD_MAGIC.to_le_bytes() {
+    if bytes.len() >= 4 && bytes[0..4] == tairix_abi::LOAD_MAGIC.to_le_bytes() {
         return Some(Format::Rxe);
     }
     if bytes.len() >= 6

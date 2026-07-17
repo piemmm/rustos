@@ -7,7 +7,7 @@
 # a crashed full-screen program may have left off; CAP_FS_ACCESS covers
 # the short-help read of the bundle's own Help/ documents through the
 # secured VFS.
-id = "os.rustos.reset"
+id = "os.tairix.reset"
 name = "reset"
 version = "0.1.0"
 kind = "command"

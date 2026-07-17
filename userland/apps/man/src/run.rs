@@ -1,11 +1,11 @@
 //! The `Run` entry-point binary of the `man` tool — the program a shell
 //! spawns to read a command's bundled help.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
@@ -46,14 +46,14 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::{DirEntry, OpenFlags};
-    use rustos_abi::{Errno, InputMode, STDOUT};
-    use rustos_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
-    use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
-    use rustos_sandbox::helpdoc::HelpService;
-    use rustos_sandbox::host::ParserSandbox;
-    use rustos_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use rustos_sandbox::worker::ServeEnd;
+    use tairix_abi::fs::{DirEntry, OpenFlags};
+    use tairix_abi::{Errno, InputMode, STDOUT};
+    use tairix_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
+    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_sandbox::helpdoc::HelpService;
+    use tairix_sandbox::host::ParserSandbox;
+    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::worker::ServeEnd;
 
     /// Initial byte size of the directory-listing buffer. A `Help/` tree
     /// lists a handful of locale directories and a store directory a
@@ -81,12 +81,12 @@ mod program {
             // A resolve-only directory open: no read authority is requested,
             // the descriptor is closed at once, and only existence is
             // learned.
-            let ret = rustos_rt::fs_open(bundle_dir.as_bytes(), OpenFlags::DIRECTORY);
+            let ret = tairix_rt::fs_open(bundle_dir.as_bytes(), OpenFlags::DIRECTORY);
             if ret >= 0 {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 // A non-negative fs_open result is a descriptor the kernel
                 // allocated from the fd range; the conversion is exact.
-                let _ = rustos_rt::fs_close(ret as u32);
+                let _ = tairix_rt::fs_close(ret as u32);
                 return Ok(true);
             }
             match Errno::from_syscall(ret) {
@@ -114,7 +114,7 @@ mod program {
             limit: usize,
         ) -> Result<Option<Vec<u8>>, Errno> {
             let path = format!("{bundle_dir}/Help/{locale_dir}/{file_name}");
-            let file = match rustos_rt::open(path.as_bytes()) {
+            let file = match tairix_rt::open(path.as_bytes()) {
                 Ok(file) => file,
                 Err(ret) => {
                     return match Errno::from_syscall(ret) {
@@ -147,7 +147,7 @@ mod program {
     /// `path` has no children (`Ok(vec![])`); any other refusal is the
     /// kernel's own [`Errno`], surfaced verbatim.
     fn list_dirs(path: &str) -> Result<Vec<String>, Errno> {
-        let dir = match rustos_rt::open_dir(path.as_bytes()) {
+        let dir = match tairix_rt::open_dir(path.as_bytes()) {
             Ok(dir) => dir,
             Err(ret) => {
                 return match Errno::from_syscall(ret) {
@@ -207,7 +207,7 @@ mod program {
         }
 
         fn rows(&self) -> Option<u16> {
-            rustos_rt::terminal_size(STDOUT)
+            tairix_rt::terminal_size(STDOUT)
                 .ok()
                 .map(|grid| grid.rows())
         }
@@ -216,12 +216,12 @@ mod program {
             let mut buf = [0u8; 1];
             // Parks in the kernel until a byte arrives; zero means the
             // input stream ended.
-            let read = rustos_rt::stdin(&mut buf);
+            let read = tairix_rt::stdin(&mut buf);
             Ok(if read == 0 { None } else { Some(buf[0]) })
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` when the command, its bundle, its
@@ -242,7 +242,7 @@ mod program {
 
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -253,9 +253,9 @@ mod program {
                 return 2;
             }
         };
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let path = rustos_rt::env_var(b"PATH").and_then(|raw| core::str::from_utf8(raw).ok());
-        let home = rustos_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let path = tairix_rt::env_var(b"PATH").and_then(|raw| core::str::from_utf8(raw).ok());
+        let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
         let request = Request { locale, path, home };
 
         // The parser sandbox the untrusted help document is rendered in:
@@ -263,7 +263,7 @@ mod program {
         // reserved self token (the kernel substitutes the path it admitted
         // this process from — argv is data, not authority), containment
         // events routed to the system log.
-        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), rustos_rt::LogSink);
+        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
 
         let console = RtConsole;
         // The raw discipline (no echo, no indicator) only while the pager
@@ -274,11 +274,11 @@ mod program {
         // console sees normal interactive echo again.
         let interactive = console.rows().is_some();
         if interactive {
-            let _ = rustos_rt::set_input_mode(InputMode::Raw);
+            let _ = tairix_rt::set_input_mode(InputMode::Raw);
         }
         let result = run(&command, &request, &RtStore, &console, &mut sandbox);
         if interactive {
-            let _ = rustos_rt::set_input_mode(InputMode::Cooked);
+            let _ = tairix_rt::set_input_mode(InputMode::Cooked);
         }
 
         match result {
@@ -294,13 +294,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

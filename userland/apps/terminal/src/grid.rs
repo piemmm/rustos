@@ -9,7 +9,7 @@
 //! turning a byte stream into these calls is the
 //! [`Parser`](crate::parser::Parser)'s job, so the two concerns stay separate.
 //!
-//! The [`Cell`] and its [`Attributes`] are [`lib/vt`](rustos_vt)'s shared
+//! The [`Cell`] and its [`Attributes`] are [`lib/vt`](tairix_vt)'s shared
 //! representation, not a second copy: the emulator is a *consumer* of the one
 //! ANSI/VT/xterm vocabulary, so a cell here is exactly the
 //! cell a curses renderer emits.
@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_vt::{char_width, Attributes, Cell, EraseMode, CONTINUATION};
+use tairix_vt::{char_width, Attributes, Cell, EraseMode, CONTINUATION};
 
 /// The largest grid dimension, in cells, the terminal will allocate.
 ///

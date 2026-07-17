@@ -13,7 +13,7 @@
 //!
 //! On boot the test reads the GICv2 bases + generic-timer rate from the
 //! embedded `virt` device tree, brings up the EL1 vectors + GICv2, registers
-//! the **production** `rustos_arch_aarch64::preempt` surface verbatim
+//! the **production** `tairix_arch_aarch64::preempt` surface verbatim
 //! (a per-CPU `PreemptStorage`, the EL0-preemption callback,
 //! a timer-tick callback, and the enabled generic-timer PPI), builds a live
 //! eevdf `Scheduler`, and admits one in-kernel kthread. The kthread arms the
@@ -36,7 +36,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-preempt-inkernel-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-preempt-inkernel-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

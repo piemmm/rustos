@@ -4,7 +4,7 @@
 //! whether it is a directory (which the user can descend into) or a regular
 //! file. This is the *userland* listing vocabulary — what an application sees
 //! once the VFS has resolved a path and authorised the read — not the
-//! driver↔VFS structural surface (`rustos_abi::driver::filesystem`), which
+//! driver↔VFS structural surface (`tairix_abi::driver::filesystem`), which
 //! belongs to a different layer.
 
 use alloc::string::String;

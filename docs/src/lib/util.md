@@ -1,4 +1,4 @@
-# `rustos-util`
+# `tairix-util`
 
 The strictly justified shared-utility crate: every item here is used by
 **two or more** independent crates (`AGENTS.md` §2.3, §3), and promoting

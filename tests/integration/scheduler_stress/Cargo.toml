@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-scheduler-stress"
+name = "tairix-test-scheduler-stress"
 description = "Stage 2 integration test: ≥ 4-core scheduler stress, deadlock-free, bounded latency."
 version.workspace = true
 edition.workspace = true
@@ -14,7 +14,7 @@ workspace = true
 # Workspace-level integration test that exercises the kernel scheduler on
 # ≥ 4 simulated cores with a large task population, asserting deadlock-
 # freedom and bounded first-run latency end-to-end across the
-# `rustos-kernel-sched-mlfq` crate boundary (`AGENTS.md` §7 — cross-crate /
+# `tairix-kernel-sched-mlfq` crate boundary (`AGENTS.md` §7 — cross-crate /
 # end-to-end tests live in the top-level `tests/`).
 #
 # The kernel/sched stress test in `kernel/sched/tests/stress.rs`
@@ -31,7 +31,7 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-rustos-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0", features = ["test-arch"] }
+tairix-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0", features = ["test-arch"] }
 
 [dev-dependencies]
-rustos-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0", features = ["test-arch"] }
+tairix-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0", features = ["test-arch"] }

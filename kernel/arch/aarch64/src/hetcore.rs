@@ -2,7 +2,7 @@
 //!
 //! Arm asymmetric parts mix high-throughput `big` cores with low-power
 //! `LITTLE` cores. The scheduler needs each logical CPU's
-//! [`rustos_arch_api::CoreClass`] so it can keep background work on the
+//! [`tairix_arch_api::CoreClass`] so it can keep background work on the
 //! efficiency cores and migrate
 //! throughput-bound work onto the performance cores
 //! (`docs/src/architecture/scheduler.md`).
@@ -13,24 +13,24 @@
 //! flattened device tree: each `/cpus/cpu@*` node carries an optional
 //! `capacity-dmips-mhz` rating (Devicetree Specification, the CPU
 //! capacity binding). [`crate::kernel_arch::Aarch64Arch`] reads those
-//! ratings through [`rustos_fdt::Fdt::each_cpu`] and classifies them
+//! ratings through [`tairix_fdt::Fdt::each_cpu`] and classifies them
 //! here.
 //!
 //! The classifier is pure and host-testable; the device-tree read that
-//! feeds it is itself host-testable against the `rustos_fdt` fixture
+//! feeds it is itself host-testable against the `tairix_fdt` fixture
 //! builder, so no part of heterogeneous-core discovery needs a
 //! freestanding target (no fake hardware in production
 //! paths).
 //!
 //! It fails conservative: a homogeneous machine (every
 //! advertised rating equal, or no ratings at all) classifies every core
-//! as [`rustos_arch_api::CoreClass::Performance`], the safe homogeneous
+//! as [`tairix_arch_api::CoreClass::Performance`], the safe homogeneous
 //! default the Arch HAL mandates for
-//! [`rustos_arch_api::SchedulerArch::core_class`]. A core
+//! [`tairix_arch_api::SchedulerArch::core_class`]. A core
 //! with no advertised rating on an otherwise heterogeneous part is also
 //! treated as a performance core rather than guessed.
 
-use rustos_arch_api::CoreClass;
+use tairix_arch_api::CoreClass;
 
 /// Classify one core from its `capacity-dmips-mhz` rating against the
 /// machine's peak rating.

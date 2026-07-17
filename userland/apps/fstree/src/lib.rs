@@ -1,4 +1,4 @@
-//! RustOS `fstree` — the full-screen tree file manager
+//! TAIRiX `fstree` — the full-screen tree file manager
 //! (`.junie/fstree-next-plan.md`).
 //!
 //! A persistent directory-tree pane plus a file pane over the storage
@@ -33,7 +33,7 @@
 //! * [`fs::Fs`] — the directory-listing and free-space channel; the `Run`
 //!   binary implements it over the kernel-authorised `fs_*` syscalls, the
 //!   tests over an in-memory tree.
-//! * `Tty` (from `rustos-curses`) — the terminal byte channel; an
+//! * `Tty` (from `tairix-curses`) — the terminal byte channel; an
 //!   in-memory channel makes the whole session drivable without a kernel.
 //! * [`model::Model`] — the I/O-free state machine that [`render::render`]
 //!   draws and [`app::run`] drives.
@@ -60,9 +60,9 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`). It links only `lib/*` crates — the audited
-//! `rustos-abi`, the OS-provided `rustos-curses`/`rustos-termcap`/
-//! `rustos-vt`/`rustos-help`, and the sandbox seam `rustos-sandbox` (with
-//! `rustos-binfmt` solely for magic-prefix routing) — never a kernel or
+//! `tairix-abi`, the OS-provided `tairix-curses`/`tairix-termcap`/
+//! `tairix-vt`/`tairix-help`, and the sandbox seam `tairix-sandbox` (with
+//! `tairix-binfmt` solely for magic-prefix routing) — never a kernel or
 //! driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
 //! production paths; a refused listing fails closed onto the message
 //! line. Nothing writes to fd 3 (`stdinfo`).

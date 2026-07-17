@@ -1,20 +1,20 @@
 //! Deterministic fuzz harness for the `lib/fsprobe` signature probe (a
 //! parser of untrusted on-disk bytes).
 //!
-//! The probe head is read straight off removable media outside RustOS's
+//! The probe head is read straight off removable media outside TAIRiX's
 //! trust boundary: a hostile stick can carry any bytes at the signature,
 //! label, geometry, and identity offsets. Whatever the head holds, the
 //! probe must either recognise a supported filesystem or return `None` —
 //! it must never panic, read out of bounds, or fabricate a match. The run
 //! aborting *is* the failure.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG mutates
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates
 //! valid seed heads (a structurally sound FAT32 boot sector, an ext4
 //! superblock, and a `ARXFS` superblock slot), truncates them, and feeds
 //! pure noise. A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`]
 //! sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
-use rustos_fsprobe::{
+use tairix_fsprobe::{
     fingerprint, probe, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, PROBE_HEAD_LEN,
 };
 
@@ -85,12 +85,12 @@ fn exercise_never_panics(bytes: &[u8]) {
 
 #[test]
 fn probing_any_head_never_panics() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = [fat32_head(), ext4_head(), arxfs_head()];
 
-    let mut state: u64 = rustos_fuzzseed::start(
+    let mut state: u64 = tairix_fuzzseed::start(
         "probing_any_head_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -123,7 +123,7 @@ fn probing_any_head_never_panics() {
         exercise_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

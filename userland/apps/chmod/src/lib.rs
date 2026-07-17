@@ -1,4 +1,4 @@
-//! RustOS `chmod` — change file mode bits (Stage 6
+//! TAIRiX `chmod` — change file mode bits (Stage 6
 //! `userland/apps/`).
 //!
 //! `chmod` applies a mode to each of its file operands. The mode is either an
@@ -36,7 +36,7 @@
 //! An unknown option or a missing operand is a [`ChmodError::Usage`] that
 //! changes nothing; a mode operand that is neither octal nor symbolic is a
 //! [`ChmodError::BadMode`]; an operand that cannot be inspected surfaces the
-//! underlying [`Errno`](rustos_abi::Errno) as [`ChmodError::Stat`]; a mode that
+//! underlying [`Errno`](tairix_abi::Errno) as [`ChmodError::Stat`]; a mode that
 //! cannot be applied is [`ChmodError::Apply`]; a directory whose entries cannot
 //! be read during a recursive descent is [`ChmodError::Read`]. The first
 //! failure stops the run before any later operand, and there is no panic.

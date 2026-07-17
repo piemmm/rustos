@@ -53,7 +53,7 @@ use crate::field::{
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::Errno;
 
-/// Highest valid `level` byte — the `rustos_log::Level::Critical` discriminant.
+/// Highest valid `level` byte — the `tairix_log::Level::Critical` discriminant.
 pub const LOG_LEVEL_MAX: u8 = 5;
 
 /// Maximum length, in bytes, of a record's message (a security bound, fixed).

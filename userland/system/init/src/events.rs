@@ -1,4 +1,4 @@
-//! Stable [`rustos_log::EventId`] constants emitted by `init`.
+//! Stable [`tairix_log::EventId`] constants emitted by `init`.
 //!
 //! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. PID 1 occupies `9000..10000` (adjacent to the
@@ -6,7 +6,7 @@
 //! values must never be re-used or re-numbered — external audit-log
 //! consumers rely on them.
 
-use rustos_log::EventId;
+use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `init` event identifiers.
 ///

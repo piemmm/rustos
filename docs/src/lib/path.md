@@ -1,7 +1,7 @@
-# `rustos-path` — filesystem path-spelling parser
+# `tairix-path` — filesystem path-spelling parser
 
-`rustos_path` (`lib/path`) is RustOS's one definition of how a path *string* is
-lexed and normalised into a structured value. RustOS storage is a **forest of
+`tairix_path` (`lib/path`) is TAIRiX's one definition of how a path *string* is
+lexed and normalised into a structured value. TAIRiX storage is a **forest of
 named roots**, not one global Unix tree, so a path names its root explicitly;
 turning that spelling into a typed form is identical wherever it happens (the
 shell's `cd`, prompt display, word and tilde expansion, and completion first,
@@ -42,7 +42,7 @@ lowercase UUID spelling (`8-4-4-4-12` hex digits), decoded into a typed
 16-byte `VolumeId`; any other spelling is refused (`VolumeIdInvalid`), never
 "fixed up", so a rendered path always re-parses to the same value. Resolving
 the id to a live root is the kernel volume forest's job
-(`rustos_kernel_core::fs::volumes`), not this crate's.
+(`tairix_kernel_core::fs::volumes`), not this crate's.
 
 ## Boundary with resource references
 

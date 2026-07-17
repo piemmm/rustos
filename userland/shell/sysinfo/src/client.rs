@@ -6,16 +6,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats, RamzipStats,
     ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
     SysinfoQueryId, SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT,
     RECLAIM_CLASS_NAMES,
 };
-use rustos_abi::{Errno, LimitKind};
+use tairix_abi::{Errno, LimitKind};
 
-use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{
+use tairix_help::{own_short_help, HelpSource};
+use tairix_procinfo::{
     call, emit_self_scope_omission, fetch_tree, for_each_process, render_limit_bound,
     render_process, Output, Transport, PROCESS_HEADER,
 };
@@ -464,17 +464,17 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
-    use rustos_abi::sysinfo::{
+    use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
+    use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats, ProcessListRequest,
         ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
         ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
         SystemIdentity, Uptime, SEAT_FLAG_OWNED,
     };
-    use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
-    use rustos_help::{HelpSource, SourceError};
-    use rustos_procinfo::{Output, Transport};
+    use tairix_abi::time::{Duration64, Time64};
+    use tairix_abi::{Errno, LimitKind, ProcId, ResourceLimit, RLIMIT_INFINITY};
+    use tairix_help::{HelpSource, SourceError};
+    use tairix_procinfo::{Output, Transport};
 
     /// A Help tree with no documents at all: the short-help fallback path.
     struct NoHelp;

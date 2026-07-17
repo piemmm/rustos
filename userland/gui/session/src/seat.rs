@@ -10,9 +10,9 @@
 //! owner).
 //!
 //! On a running system the records arrive through the seat-addressed
-//! [`POINTER_READ`](rustos_abi::SyscallNumber::POINTER_READ) /
-//! [`KEYBOARD_READ`](rustos_abi::SyscallNumber::KEYBOARD_READ) syscalls
-//! (`rustos_rt::pointer_read` / `rustos_rt::keyboard_read`); those calls are
+//! [`POINTER_READ`](tairix_abi::SyscallNumber::POINTER_READ) /
+//! [`KEYBOARD_READ`](tairix_abi::SyscallNumber::KEYBOARD_READ) syscalls
+//! (`tairix_rt::pointer_read` / `tairix_rt::keyboard_read`); those calls are
 //! wrapped behind the injected [`SeatEventReader`] seam, so this
 //! `userland/gui` crate holds no seat lease of its own and stays
 //! host-testable. Tests back the seam with an in-memory queue.
@@ -22,7 +22,7 @@
 //! only the task that acquired the seat (the window manager session) ever
 //! receives the stream — another `CAP_INPUT_READ` holder cannot siphon it.
 //! The channel's own job is narrow and fail-closed: a whole record
-//! ([`WIRE_LEN`](rustos_abi::input::PointerInput::WIRE_LEN) bytes) is handed
+//! ([`WIRE_LEN`](tairix_abi::input::PointerInput::WIRE_LEN) bytes) is handed
 //! to the decoder, an empty drain is `None`, and a reader that produces a
 //! partial record surfaces an [`Errno`] rather than being misinterpreted —
 //! a truncated read can never be decoded as a spurious pointer move or key
@@ -34,8 +34,8 @@
 //! validation path; which records flow is decided by the reader it wraps
 //! (a pointer reader or a keyboard reader), not by the channel type.
 
-use rustos_abi::input::{KeyInput, PointerInput};
-use rustos_abi::Errno;
+use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::Errno;
 
 use crate::device::PointerInputChannel;
 use crate::keyboard::KeyInputChannel;
@@ -44,8 +44,8 @@ use crate::keyboard::KeyInputChannel;
 /// registry.
 ///
 /// On a running system this wraps one seat-addressed drain syscall for the
-/// seat the desktop session owns — `rustos_rt::pointer_read` for a pointer
-/// channel, `rustos_rt::keyboard_read` for a keyboard channel — mapping a
+/// seat the desktop session owns — `tairix_rt::pointer_read` for a pointer
+/// channel, `tairix_rt::keyboard_read` for a keyboard channel — mapping a
 /// negative return onto its [`Errno`]; tests back it with an in-memory
 /// queue. It deals only in raw record bytes: validating the drained length
 /// and decoding are [`SeatInputChannel`]'s and the input sources' jobs.
@@ -146,12 +146,12 @@ mod tests {
     use crate::shell::InputSource;
     use alloc::collections::VecDeque;
     use alloc::vec::Vec;
-    use rustos_abi::input::{
+    use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
         PointerInput,
     };
-    use rustos_abi::Errno;
-    use rustos_wm::{InputEvent, Key, NamedKey, Point, Rect};
+    use tairix_abi::Errno;
+    use tairix_wm::{InputEvent, Key, NamedKey, Point, Rect};
 
     /// The screen the pointer sources resolve motion against: 640×480 at
     /// the origin, so the pointer starts at its centre (320, 240).
@@ -244,9 +244,9 @@ mod tests {
             source.poll(),
             Ok(Some(InputEvent::KeyPressed {
                 key: Key::Named(NamedKey::Enter),
-                modifiers: rustos_wm::Modifiers {
+                modifiers: tairix_wm::Modifiers {
                     ctrl: true,
-                    ..rustos_wm::Modifiers::default()
+                    ..tairix_wm::Modifiers::default()
                 },
             }))
         );

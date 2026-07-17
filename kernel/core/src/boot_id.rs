@@ -18,13 +18,13 @@
 //! is not yet seeded (e.g. a port whose platform entropy source is still
 //! `Pending`) the mint yields [`BootId::UNSET`] rather than a predictable
 //! substitute, and the `boot_id_get` syscall then reports
-//! [`Errno::EntropyNotReady`](rustos_abi::Errno::EntropyNotReady) — the kernel
+//! [`Errno::EntropyNotReady`](tairix_abi::Errno::EntropyNotReady) — the kernel
 //! never hands out the all-zero sentinel as if it were a real id.
 
 use alloc::boxed::Box;
 
-use rustos_abi::{BootId, BOOT_ID_LEN};
-use rustos_sync::RwLock;
+use tairix_abi::{BootId, BOOT_ID_LEN};
+use tairix_sync::RwLock;
 
 use crate::random::RandomReserve;
 
@@ -50,8 +50,8 @@ mod tests {
     use super::mint_boot_id;
     use crate::random::{BootReserve, RandomReserve};
     use alloc::boxed::Box;
-    use rustos_abi::BootId;
-    use rustos_sync::RwLock;
+    use tairix_abi::BootId;
+    use tairix_sync::RwLock;
 
     fn unseeded_rng() -> RwLock<Box<dyn RandomReserve + Send + Sync>> {
         RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>)

@@ -1,7 +1,7 @@
-//! Stage 4 QEMU integration test: boot the production `rustos-kernel`
+//! Stage 4 QEMU integration test: boot the production `tairix-kernel`
 //! pipeline to `AuditEvent::BootCompleted`, load the signed PS/2 input
-//! driver through `rustos_drvhost::Host`, then drive a real
-//! `rustos_drv_input_ps2::Ps2Keyboard` over the emulated i8042
+//! driver through `tairix_drvhost::Host`, then drive a real
+//! `tairix_drv_input_ps2::Ps2Keyboard` over the emulated i8042
 //! controller through `load -> use -> unload -> reload`, and signal
 //! QEMU success.
 //!
@@ -11,7 +11,7 @@
 //!
 //! "Use the device" is **interrupt-driven**, not polled: the test binds
 //! the keyboard line (ISA IRQ-1 → GSI 1) in the production
-//! `rustos_kernel_irq::IrqTable`, enables the i8042's keyboard-interrupt
+//! `tairix_kernel_irq::IrqTable`, enables the i8042's keyboard-interrupt
 //! config bit, masks the legacy 8259 PIC, and unmasks GSI 1 through the
 //! published `IoApicController`. It then makes a keypress deterministic
 //! without physical hardware via the controller's `0xD2` ("write
@@ -53,26 +53,26 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use alloc::vec::Vec;
-    use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
-    use rustos_abi::{CapabilityId, DriverHandle, Errno, IrqHandle, PortIo8};
-    use rustos_arch_x86_64::irq as arch_irq;
-    use rustos_arch_x86_64::pio::{x86_port_io8, X86PortIo8};
-    use rustos_arch_x86_64::qemu_exit;
-    use rustos_caps::CapabilitySet;
-    use rustos_crypto::Ed25519PublicKey;
-    use rustos_drv_input_ps2::Ps2Keyboard;
-    use rustos_drvhost::{
+    use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+    use tairix_abi::{CapabilityId, DriverHandle, Errno, IrqHandle, PortIo8};
+    use tairix_arch_x86_64::irq as arch_irq;
+    use tairix_arch_x86_64::pio::{x86_port_io8, X86PortIo8};
+    use tairix_arch_x86_64::qemu_exit;
+    use tairix_caps::CapabilitySet;
+    use tairix_crypto::Ed25519PublicKey;
+    use tairix_drv_input_ps2::Ps2Keyboard;
+    use tairix_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::x86_64::arch_wrapper::published_irq_table;
-    use rustos_kernel::x86_64::ioapic_controller::published_typed;
-    use rustos_kernel::{
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
+    use tairix_kernel::x86_64::ioapic_controller::published_typed;
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_kernel_irq::WaitStep;
-    use rustos_kernel_sec::TaskId as SecTaskId;
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_kernel_irq::WaitStep;
+    use tairix_kernel_sec::TaskId as SecTaskId;
+    use tairix_log::{Event, EventId, Sink};
 
     use crate::fixture::{PS2_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -171,14 +171,14 @@ mod kernel {
 
     /// Spawner that registers every manifest in-process through the real
     /// PS/2 driver entry point, so the host's load path runs the
-    /// production `rustos_drv_input_ps2::register` capability gate.
+    /// production `tairix_drv_input_ps2::register` capability gate.
     struct ResolvePs2;
     impl DriverSpawner for ResolvePs2 {
         fn spawn_and_register(
             &self,
             ctx: &SpawnContext<'_>,
         ) -> Result<DriverHandle, SpawnRegisterError> {
-            rustos_drv_input_ps2::register(ctx.host).map_err(SpawnRegisterError::Register)
+            tairix_drv_input_ps2::register(ctx.host).map_err(SpawnRegisterError::Register)
         }
     }
 
@@ -320,7 +320,7 @@ mod kernel {
     /// vertical, which cannot reach the boot-measured `Calibration` from
     /// outside `KernelState`).
     fn rdtsc_ns() -> u64 {
-        // SAFETY: RDTSC is unprivileged on every x86_64 CPU RustOS
+        // SAFETY: RDTSC is unprivileged on every x86_64 CPU TAIRiX
         // supports and has no architectural side effects beyond producing
         // the timestamp.
         unsafe {
@@ -442,7 +442,7 @@ mod kernel {
         let cfg = HostConfig {
             trusted_signers: &trusted,
             syscall_table_hash: SYSCALL_TABLE_HASH,
-            accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
             source: &source,
             spawner: &spawner,
             sink: &SerialSink::new(),
@@ -453,7 +453,7 @@ mod kernel {
         let mut host = Host::new(cfg);
 
         // load: the signed PS/2 `.rxe` clears the load gate through
-        // the real `rustos_drv_input_ps2::register`.
+        // the real `tairix_drv_input_ps2::register`.
         let Ok(h1) = host.load("/d/ps2", &caller) else {
             qemu_exit::exit_failure();
         };
@@ -509,13 +509,13 @@ mod kernel {
 
     static AUDIT_SINK: BootObserverSink = BootObserverSink;
 
-    /// Panic handler — forwards through `rustos_kernel`'s shared bridge.
+    /// Panic handler — forwards through `tairix_kernel`'s shared bridge.
     #[panic_handler]
     fn ps2_qemu_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
-    /// Boot entry point — same surface the production `rustos-kernel`
+    /// Boot entry point — same surface the production `tairix-kernel`
     /// bin exposes, but with our audit sink in place.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
@@ -523,7 +523,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }

@@ -25,7 +25,7 @@ est absente ou invalide, l'affichage se replie sur les identifiants
 bruts avec la raison sur la sortie d'erreur standard — l'inventaire
 lui-même reste listé.
 
-RustOS n'a pas de registre Linux de numéros de bus/périphérique : les
+TAIRiX n'a pas de registre Linux de numéros de bus/périphérique : les
 numéros de bus et de périphérique sont de petits ordinaux commençant à
 1 sur l'inventaire courant (les bus dans l'ordre de découverte, les
 périphériques dans l'ordre d'affichage sur chaque bus), stables tant

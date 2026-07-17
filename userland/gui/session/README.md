@@ -1,6 +1,6 @@
-# rustos-desktop-session
+# tairix-desktop-session
 
-The RustOS desktop **session glue** (`AGENTS.md` §10, `PLAN.md` Stage 7): the
+The TAIRiX desktop **session glue** (`AGENTS.md` §10, `PLAN.md` Stage 7): the
 component that owns the shared theme registry and the taskbar model and ties
 the desktop's parts together. The crate also ships the `Run` binary of the
 `desktop` **command app** (`desktop.app` in the system app store): a shell
@@ -18,9 +18,9 @@ crate is that glue's first increment — the runtime **light/dark switch**.
 
 ## What this crate owns
 
-- **The shared `rustos-theme` `ThemeRegistry`** — the one runtime registry the
+- **The shared `tairix-theme` `ThemeRegistry`** — the one runtime registry the
   whole desktop reads its theme from (`AGENTS.md` §6, §10).
-- **The `rustos-taskbar` `Taskbar` model** — so a theme switch is a single
+- **The `tairix-taskbar` `Taskbar` model** — so a theme switch is a single
   in-place operation: the registry's active theme changes and the taskbar is
   re-themed to match.
 
@@ -77,9 +77,9 @@ pointer or a status icon — it simply yields the built-in set.
 ## Presenting the taskbar through the window manager
 
 `TaskbarPresenter` joins the taskbar to the compositor. The taskbar paints a
-*rectangular* `rustos_raster::Surface` and the window manager composites and
+*rectangular* `tairix_raster::Surface` and the window manager composites and
 rounds windows; neither depends on the other (`AGENTS.md` §17.4), so the join
-is session glue. Given a `&mut rustos_wm::Compositor` and the taskbar's own
+is session glue. Given a `&mut tairix_wm::Compositor` and the taskbar's own
 `TaskbarRenderer` (which holds the across-frame glyph cache), `present`:
 
 - paints the bar, places it at `BarLayout::bar`'s origin, and rounds it with
@@ -99,7 +99,7 @@ is re-created on the next present, and `teardown` removes both windows.
 ## Routing one input stream to both routers
 
 The desktop has two input routers — the window manager's `InputRouter` and the
-taskbar's `TaskbarInput` — and both consume the **same** shared `rustos_input`
+taskbar's `TaskbarInput` — and both consume the **same** shared `tairix_input`
 event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source produces one
 stream, so `SessionInputRouter` fans it to the right router through
 `handle(event, &mut Compositor, &mut Taskbar)`:
@@ -149,7 +149,7 @@ down with `teardown`.
 `InputSource` seam. It wraps an injected `PointerInputChannel` — a
 capability-checked kernel input channel on a running system, an in-memory queue
 in tests (`AGENTS.md` §7) — that hands the desktop one framed
-`rustos_abi::input::PointerInput` record at a time. Each `poll` decodes one
+`tairix_abi::input::PointerInput` record at a time. Each `poll` decodes one
 record through `PointerInput::from_bytes` into the `lib/input` `InputEvent` the
 window manager and taskbar route: an absolute `PointerMoved`, or a
 `PointerPressed` / `PointerReleased` carrying the resolved `PointerButton`. The
@@ -165,7 +165,7 @@ device-level driver input ABI, not a duplicate of it (`AGENTS.md` §2.2).
 `DeviceInputSource`. It wraps an injected `KeyInputChannel` — a
 capability-checked kernel keyboard channel on a running system, an in-memory
 queue in tests (`AGENTS.md` §7) — and each `poll` decodes one framed
-`rustos_abi::input::KeyInput` record through `KeyInput::from_bytes` into the
+`tairix_abi::input::KeyInput` record through `KeyInput::from_bytes` into the
 same `lib/input` `InputEvent` stream the shell pumps: a `KeyPressed` /
 `KeyReleased` carrying the resolved `Key` (a produced `Char`, or a `NamedKey` —
 the twelve wire function-key codes fold into one `NamedKey::Function`) and the
@@ -182,7 +182,7 @@ fixed-width input record from the per-seat, owner-gated channel the kernel
 seat registry routed the desktop's input to (`plans/DISPLAY.md`;
 `docs/src/desktop/seat.md`). The records arrive through an injected
 `SeatEventReader` seam — the seat-addressed `pointer_read` / `keyboard_read`
-syscalls (`rustos_rt::pointer_read` / `rustos_rt::keyboard_read`) on a
+syscalls (`tairix_rt::pointer_read` / `tairix_rt::keyboard_read`) on a
 running system, an in-memory queue in tests (`AGENTS.md` §7) — so the crate
 holds no seat lease of its own and stays host-testable (`AGENTS.md` §17.4).
 
@@ -265,17 +265,17 @@ end-to-end QEMU vertical ride the D7d autoload world (`plans/DISPLAY.md`).
 
 ## Dependencies and layering
 
-The crate composes the other GUI crates and `lib/*` only — `rustos-taskbar`,
-`rustos-wm`, and the shared `rustos-theme` definition, plus `rustos-cursor` /
-`rustos-icon` (the SVG set builders) and `rustos-abi` (the `Errno` the read
+The crate composes the other GUI crates and `lib/*` only — `tairix-taskbar`,
+`tairix-wm`, and the shared `tairix-theme` definition, plus `tairix-cursor` /
+`tairix-icon` (the SVG set builders) and `tairix-abi` (the `Errno` the read
 seam returns and the `PointerInput` / `KeyInput` records the device and
 keyboard sources decode)
 (`AGENTS.md` §17.4). Composing GUI crates is the permitted
 `userland/gui/*` edge; nothing outside `userland/gui/*` depends on it (§17.3),
 so a headless image omits it cleanly.
 
-The `Run` binary additionally links `rustos-display` (the client half of the
-present protocol) and `rustos-rt` (the pure-Rust userland runtime), for the
+The `Run` binary additionally links `tairix-display` (the client half of the
+present protocol) and `tairix-rt` (the pure-Rust userland runtime), for the
 bare-metal targets only.
 
 The library is `no_std` with `#![forbid(unsafe_code)]`; no

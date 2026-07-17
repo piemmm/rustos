@@ -1,6 +1,6 @@
-# `rustos-rng`
+# `tairix-rng`
 
-The single place RustOS gets randomness. It separates three generators
+The single place TAIRiX gets randomness. It separates three generators
 by purpose so the wrong one is hard to reach for by accident:
 
 | Type                     | Kind                        | Use it for |
@@ -80,7 +80,7 @@ issue calls for:
 `AGENTS.md` §22 mandates exactly one kernel cryptographic random
 subsystem, reached from userland only through a single versioned random
 syscall. The contract lives in `lib/abi`
-(`rustos_abi::random` — `RandomFlags`, `RANDOM_RESERVE_DEFAULT_BYTES` =
+(`tairix_abi::random` — `RandomFlags`, `RANDOM_RESERVE_DEFAULT_BYTES` =
 2 KiB, `RANDOM_REQUEST_MAX_BYTES`) and the syscall is
 `SyscallNumber::RANDOM_GET` (`abi-v1`, appended to the table). Drawing
 randomness needs no capability; an over-large request is refused with
@@ -124,7 +124,7 @@ is wired.
 
 The reserve is only useful once it is **seeded**, and the raw entropy that
 seeds it is an architecture resource. The Arch HAL exposes it as a closed
-slice, `rustos_arch_api::entropy` (modelled on the memory-tagging and
+slice, `tairix_arch_api::entropy` (modelled on the memory-tagging and
 side-channel slices, §17.2): a port implements `PlatformEntropy` — a
 `HardwareRng` plus an honest `EntropyProfile` declaring its hardware-RNG
 source `Supported`, `Unsupported`, or `Pending` (with a justification, like

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# lib.sh — shared helpers for the RustOS CI/build-host scripts.
+# lib.sh — shared helpers for the TAIRiX CI/build-host scripts.
 #
 # This file is *sourced*, never executed. It centralises the three things
 # every CI-host script needs (AGENTS.md §2.2 — no duplication): the pinned
@@ -13,14 +13,14 @@
 # Repository root, resolved from this file's own location so the scripts work
 # regardless of the caller's working directory (cron and launchd start with an
 # unpredictable CWD).
-RUSTOS_CI_REPO="${RUSTOS_CI_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+TAIRIX_CI_REPO="${TAIRIX_CI_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 # Where run logs land. Deliberately outside the repo: CI artefacts must not
 # land in the tracked tree (AGENTS.md §3).
-RUSTOS_CI_LOGDIR="${RUSTOS_CI_LOGDIR:-$HOME/ci-logs/rustos}"
+TAIRIX_CI_LOGDIR="${TAIRIX_CI_LOGDIR:-$HOME/ci-logs/tairix}"
 
-# The branch a dedicated CI host tracks. Only consulted when RUSTOS_CI_SYNC=1.
-RUSTOS_CI_BRANCH="${RUSTOS_CI_BRANCH:-master}"
+# The branch a dedicated CI host tracks. Only consulted when TAIRIX_CI_SYNC=1.
+TAIRIX_CI_BRANCH="${TAIRIX_CI_BRANCH:-master}"
 
 # ci_prepare: make the environment safe for an unattended `cargo xtask` run.
 #
@@ -32,9 +32,9 @@ RUSTOS_CI_BRANCH="${RUSTOS_CI_BRANCH:-master}"
 #   Linux and macOS). If cargo is already on PATH (a system-wide install) we
 #   leave PATH untouched.
 # - Forces plain-text cargo output so logs paste back cleanly.
-# - Optionally fast-forwards the checkout to the branch tip (RUSTOS_CI_SYNC=1).
+# - Optionally fast-forwards the checkout to the branch tip (TAIRIX_CI_SYNC=1).
 #   Off by default so the scripts never destroy uncommitted local work by
-#   surprise; a dedicated builder sets RUSTOS_CI_SYNC=1.
+#   surprise; a dedicated builder sets TAIRIX_CI_SYNC=1.
 ci_prepare() {
     local cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
     case ":$PATH:" in
@@ -49,12 +49,12 @@ ci_prepare() {
         return 127
     fi
 
-    mkdir -p "$RUSTOS_CI_LOGDIR"
-    cd "$RUSTOS_CI_REPO" || return 1
+    mkdir -p "$TAIRIX_CI_LOGDIR"
+    cd "$TAIRIX_CI_REPO" || return 1
 
-    if [ "${RUSTOS_CI_SYNC:-0}" = "1" ]; then
-        git fetch --quiet origin "$RUSTOS_CI_BRANCH"
-        git reset --hard "origin/$RUSTOS_CI_BRANCH"
+    if [ "${TAIRIX_CI_SYNC:-0}" = "1" ]; then
+        git fetch --quiet origin "$TAIRIX_CI_BRANCH"
+        git reset --hard "origin/$TAIRIX_CI_BRANCH"
     fi
 }
 

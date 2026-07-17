@@ -18,7 +18,7 @@
 //! real tty. A failing seam call surfaces the boundary [`Errno`] and leaves
 //! the screen unchanged.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::grid::Grid;
 use crate::parser::Parser;

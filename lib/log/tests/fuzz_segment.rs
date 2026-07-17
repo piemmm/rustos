@@ -2,19 +2,19 @@
 //!
 //! A log segment under `/System/Logs` is attacker-influenced (a compromised
 //! journal, a tampered or torn-on-power-loss file, a volume lifted from
-//! another machine), so every segment-reading path — [`rustos_log::SegmentHeader::parse`],
-//! the forward-scanning [`rustos_log::SegmentReader`], and the full
-//! [`rustos_log::verify_segment`] — must refuse malformed bytes cleanly and
+//! another machine), so every segment-reading path — [`tairix_log::SegmentHeader::parse`],
+//! the forward-scanning [`tairix_log::SegmentReader`], and the full
+//! [`tairix_log::verify_segment`] — must refuse malformed bytes cleanly and
 //! never panic. This harness drives all three on both pseudo-random bytes and
 //! single-byte mutations of a genuine segment (so the checksum, chain, footer,
 //! and seal paths are actually reached), asserting only that they never panic
 //! and that a forward scan always terminates.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
-use rustos_abi::{BootId, Duration64, Time64, WallClockReading, WallTimeState, BOOT_ID_LEN};
-use rustos_log::{
+use tairix_abi::{BootId, Duration64, Time64, WallClockReading, WallTimeState, BOOT_ID_LEN};
+use tairix_log::{
     machine_id_hash, stream_genesis, LogAttestationKey, SegmentHeader, SegmentReader,
     SegmentWriter, Stream, MAX_RECORD_PAYLOAD,
 };
@@ -71,15 +71,15 @@ fn exercise(bytes: &[u8], k: &LogAttestationKey) {
         let _ = reader.end();
         let _ = reader.head_hash();
     }
-    let _ = rustos_log::verify_segment(bytes, None);
-    let _ = rustos_log::verify_segment(bytes, Some(k));
+    let _ = tairix_log::verify_segment(bytes, None);
+    let _ = tairix_log::verify_segment(bytes, Some(k));
 }
 
 #[test]
 fn random_and_mutated_segments_never_panic() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "random_and_mutated_segments_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let k = key();
 
@@ -87,7 +87,7 @@ fn random_and_mutated_segments_never_panic() {
     let base_len = base_segment(&mut base);
 
     let mut buf = [0u8; 1024];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for i in 0..SMOKE_ITERATIONS {
             if i % 2 == 0 {
@@ -106,7 +106,7 @@ fn random_and_mutated_segments_never_panic() {
                 exercise(&buf[..base_len], &k);
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

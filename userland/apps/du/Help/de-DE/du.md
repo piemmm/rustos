@@ -27,7 +27,7 @@ Ein unlesbarer Pfad wird auf der Standardfehlerausgabe gemeldet, und
 der Lauf fährt mit dem Rest fort; ein unlesbares Verzeichnis trägt
 nichts bei statt einer geratenen Teilsumme.
 
-RustOS hat noch keine harten Verknüpfungen, daher kann kein Eintrag
+TAIRiX hat noch keine harten Verknüpfungen, daher kann kein Eintrag
 doppelt gezählt werden und die GNU-Schalter zur
 Verknüpfungs-Deduplizierung existieren nicht; `-x` (ein Dateisystem)
 ist noch nicht verfügbar; die Umgebungsvariablen der

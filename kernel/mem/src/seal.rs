@@ -21,7 +21,7 @@
 //! paired with. Counter exhaustion fails closed
 //! ([`SealError::NonceExhausted`]) rather than wrapping.
 
-use rustos_crypto::aead::{AeadKey, AeadNonce, AEAD_KEY_LEN, AEAD_NONCE_LEN};
+use tairix_crypto::aead::{AeadKey, AeadNonce, AEAD_KEY_LEN, AEAD_NONCE_LEN};
 use zeroize::Zeroize;
 
 /// Reason a sealing primitive could not be constructed or advanced.

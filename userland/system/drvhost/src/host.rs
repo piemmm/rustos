@@ -1,7 +1,7 @@
 //! Driver host state machine — `load`, `unload`, `reload`.
 //!
 //! Owns the verified-and-bound set of currently loaded driver modules.
-//! Every state transition is audited through [`rustos_log`] (see
+//! Every state transition is audited through [`tairix_log`] (see
 //! [`crate::events`]) and the per-record sensitive buffers are wiped
 //! through [`crate::zeroize::secure_clear`] on drop.
 
@@ -9,15 +9,15 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_abi::driver::VirtioHost;
-use rustos_abi::{
+use tairix_abi::driver::VirtioHost;
+use tairix_abi::{
     CapabilityId, DriverBindKey, DriverHandle, DriverHost, DriverKind, HwMatchKey, MmioMapper,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
 };
-use rustos_caps::CapabilitySet;
-use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
-use rustos_log::{log as log_event, Event, EventId, Field, Level, Sink};
-use rustos_virtio::VirtioHostFactory;
+use tairix_caps::CapabilitySet;
+use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
+use tairix_log::{log as log_event, Event, EventId, Field, Level, Sink};
+use tairix_virtio::VirtioHostFactory;
 
 use crate::events;
 use crate::image::ParsedImage;
@@ -88,7 +88,7 @@ pub struct HostConfig<'h> {
     /// `KernelMmioMapper` here so an in-kernel bus driver
     /// (`drivers/bus/pcie_brcm`, `drivers/bus/usb`) can map a
     /// device's register window through the capability-gated
-    /// `rustos_kernel_sec::map_mmio` path (no
+    /// `tairix_kernel_sec::map_mmio` path (no
     /// pointer the driver synthesises). The mapper enforces
     /// [`CapabilityId::MMIO_MAP`] at every
     /// [`map_window`](MmioMapper::map_window) call; the host borrows
@@ -499,11 +499,11 @@ impl<'h> Host<'h> {
         let fields = [
             Field {
                 key: "path",
-                value: rustos_log::FieldValue::Str(path),
+                value: tairix_log::FieldValue::Str(path),
             },
             Field {
                 key: "handle",
-                value: rustos_log::FieldValue::Str(handle_str),
+                value: tairix_log::FieldValue::Str(handle_str),
             },
         ];
         log_event(
@@ -521,11 +521,11 @@ impl<'h> Host<'h> {
         let fields = [
             Field {
                 key: "path",
-                value: rustos_log::FieldValue::Str(path),
+                value: tairix_log::FieldValue::Str(path),
             },
             Field {
                 key: "reason",
-                value: rustos_log::FieldValue::Str(reason),
+                value: tairix_log::FieldValue::Str(reason),
             },
         ];
         log_event(

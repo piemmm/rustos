@@ -97,7 +97,7 @@ pub const USBSTS_HCH: u32 = 1 << 0;
 
 /// `USBSTS` Host System Error: a write-1-to-clear latched controller
 /// error. The host-controller reset path may observe this when
-/// firmware left a stale error before RustOS takes ownership.
+/// firmware left a stale error before TAIRiX takes ownership.
 pub const USBSTS_HSE: u32 = 1 << 2;
 
 /// `USBSTS` Event Interrupt: a write-1-to-clear latched indication that an
@@ -107,7 +107,7 @@ pub const USBSTS_HSE: u32 = 1 << 2;
 pub const USBSTS_EINT: u32 = 1 << 3;
 
 /// `USBSTS` Port Change Detect: a write-1-to-clear latched port-change
-/// status bit. Firmware handoff can leave it set before RustOS
+/// status bit. Firmware handoff can leave it set before TAIRiX
 /// resets the controller.
 pub const USBSTS_PCD: u32 = 1 << 4;
 

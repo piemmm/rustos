@@ -10,18 +10,18 @@
 //! 2. Sign a synthetic virtio-blk `.rxe` manifest requesting
 //!    [`CapabilityId::MEM_DMA`] with a deterministic test seed, and emit
 //!    a Rust source file the bin pulls in via `include!`. The bin loads
-//!    this image through `rustos_drvhost::Host` to bring the block
+//!    this image through `tairix_drvhost::Host` to bring the block
 //!    device online before the shared arxfs tail mounts the volume.
 //!
 //! Re-running `build.rs` produces byte-identical output for the same
 //! seed; the test is therefore deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
-use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 
 /// Deterministic signing seed so the trust anchor is stable across
 /// builds. Distinct from the other QEMU fixtures' seeds so the images
@@ -37,7 +37,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x33; 32];
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();
@@ -65,7 +65,7 @@ fn main() {
     ];
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         kind: DriverKind::UserSpace,
         bind_key_count: 0,
         capability_count: u16::try_from(caps.len()).expect("caps fit in u16"),

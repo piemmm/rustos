@@ -30,7 +30,7 @@
 //! stopped wait report, and the signalled reap end to end.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland runtime
-//! `rustos-rt` (which provides `_start`, the stack canary, the panic handler,
+//! `tairix-rt` (which provides `_start`, the stack canary, the panic handler,
 //! and the `signal`/`wait`/`yield`/`exit` syscall wrappers), never the C ABI
 //! (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built
 //! position-independent and converted to an `rxe` blob by the consuming test's
@@ -44,19 +44,19 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::{Signal, WaitFlags, WaitStatus};
+    use tairix_abi::{Signal, WaitFlags, WaitStatus};
 
     /// `true` when this build is the parent role, selected by
-    /// `RUSTOS_SIGNAL_ROLE == "parent"`; any other value (including the child
+    /// `TAIRIX_SIGNAL_ROLE == "parent"`; any other value (including the child
     /// role and an absent variable) builds the child.
-    const IS_PARENT: bool = match option_env!("RUSTOS_SIGNAL_ROLE") {
+    const IS_PARENT: bool = match option_env!("TAIRIX_SIGNAL_ROLE") {
         Some(s) => bytes_eq(s.as_bytes(), b"parent"),
         None => false,
     };
 
     /// `true` when this build is the intake role (`plans/STRESSTEST.md` ST3),
-    /// selected by `RUSTOS_SIGNAL_ROLE == "intake"`.
-    const IS_INTAKE: bool = match option_env!("RUSTOS_SIGNAL_ROLE") {
+    /// selected by `TAIRIX_SIGNAL_ROLE == "intake"`.
+    const IS_INTAKE: bool = match option_env!("TAIRIX_SIGNAL_ROLE") {
         Some(s) => bytes_eq(s.as_bytes(), b"intake"),
         None => false,
     };
@@ -99,10 +99,10 @@ mod program {
     /// a diagnostic only on a failure — the success path never returns (the
     /// program ends terminated by the escalated second `^C`).
     fn run_intake() -> i32 {
-        use rustos_abi::{Errno, SignalIntakeOp};
+        use tairix_abi::{Errno, SignalIntakeOp};
         // Opt in: with the intake enabled a foreground `^C` is recorded as
         // an observable event instead of terminating this process.
-        if rustos_rt::signal_intake(SignalIntakeOp::Enable) != 0 {
+        if tairix_rt::signal_intake(SignalIntakeOp::Enable) != 0 {
             return 30;
         }
         // Drain until the first observed Interrupt arrives. `WouldBlock`
@@ -110,12 +110,12 @@ mod program {
         // fixture chassis is a cooperative single-CPU slice; production
         // callers park on a wait-set `Signal` member instead).
         loop {
-            let ret = rustos_rt::signal_intake(SignalIntakeOp::Take);
-            if ret == i64::from(rustos_abi::Signal::Interrupt.as_u32()) {
+            let ret = tairix_rt::signal_intake(SignalIntakeOp::Take);
+            if ret == i64::from(tairix_abi::Signal::Interrupt.as_u32()) {
                 break;
             }
             if ret == -i64::from(Errno::WouldBlock.as_i32()) {
-                rustos_rt::yield_now();
+                tairix_rt::yield_now();
                 continue;
             }
             // Any other outcome (a different signal, a decode error) is a
@@ -127,11 +127,11 @@ mod program {
         // pending, and the one after that finds the slot occupied and
         // escalates to the default terminate (the vertical reaps 130).
         loop {
-            rustos_rt::yield_now();
+            tairix_rt::yield_now();
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     ///
     /// The child yields forever (it is terminated by the parent's signal, so
@@ -147,26 +147,26 @@ mod program {
             // wait to be terminated by the parent's signal. A tight spin would
             // starve the parent on the single cooperative CPU, so yield.
             loop {
-                rustos_rt::yield_now();
+                tairix_rt::yield_now();
             }
         }
 
         // Parent: the child's PID is the second inherited argument (arg 0 is
         // the program name the vertical chose). Fail closed if it is missing or
         // malformed rather than signalling an arbitrary PID.
-        let Some(child_pid) = rustos_rt::arg(1).and_then(parse_pid) else {
+        let Some(child_pid) = tairix_rt::arg(1).and_then(parse_pid) else {
             return 20;
         };
 
         // Stop the running child (`plans/SPAWN.md` SP9): it is parked and
         // held by the stop overlay, not terminated.
-        if rustos_rt::signal(child_pid, Signal::Stop) != 0 {
+        if tairix_rt::signal(child_pid, Signal::Stop) != 0 {
             return 21;
         }
 
         // A `STOPPED` wait observes the stop — without reaping the child.
         let mut status = WaitStatus::Exited(-1);
-        let ret = rustos_rt::wait(child_pid, &mut status, WaitFlags::STOPPED);
+        let ret = tairix_rt::wait(child_pid, &mut status, WaitFlags::STOPPED);
         if ret < 0 {
             return 22;
         }
@@ -178,19 +178,19 @@ mod program {
         }
 
         // Resume it: a stopped child is still live and signallable.
-        if rustos_rt::signal(child_pid, Signal::Continue) != 0 {
+        if tairix_rt::signal(child_pid, Signal::Continue) != 0 {
             return 25;
         }
 
         // Deliver a graceful terminate to our (resumed) child. `signal`
         // returns 0 on success, `-errno` otherwise.
-        if rustos_rt::signal(child_pid, Signal::Terminate) != 0 {
+        if tairix_rt::signal(child_pid, Signal::Terminate) != 0 {
             return 26;
         }
 
         // Reap the child and read back the status the kernel recorded for it.
         let mut status: i32 = -1;
-        if rustos_rt::wait_exit(child_pid, &mut status) < 0 {
+        if tairix_rt::wait_exit(child_pid, &mut status) < 0 {
             return 27;
         }
 
@@ -206,13 +206,13 @@ mod program {
         0
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the crate
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

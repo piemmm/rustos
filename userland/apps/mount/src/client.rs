@@ -1,7 +1,7 @@
 //! The mount engine: list the mount table through the System Information
 //! API, or hand a parsed attach request to the kernel.
 
-use rustos_procinfo::{for_each_mount, render_mount, Output, Transport};
+use tairix_procinfo::{for_each_mount, render_mount, Output, Transport};
 
 use crate::command::Command;
 use crate::error::MountError;
@@ -71,12 +71,12 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
-    use rustos_abi::sysinfo::{
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::sysinfo::{
         MountAvailability, MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use rustos_abi::Errno;
-    use rustos_procinfo::{Output, Transport};
+    use tairix_abi::Errno;
+    use tairix_procinfo::{Output, Transport};
 
     /// An in-memory `sysinfod` stand-in answering mount-list queries from a
     /// fixture, decoding the request the same way the real service does.

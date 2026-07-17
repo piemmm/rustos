@@ -16,7 +16,7 @@
 //!   on.
 //!
 //! The manifest requests exactly `CAP_DRV_LOAD`:
-//! `rustos_drv_input_ps2::register` gates on it, and the driver-visible
+//! `tairix_drv_input_ps2::register` gates on it, and the driver-visible
 //! capability set the host installs at register time is the manifest's
 //! requested set intersected with the caller's grants, so the capability must appear in *both*. The generator
 //! mirrors `tests/integration/drvhost_qemu/build.rs`
@@ -25,11 +25,11 @@
 //! is deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
-use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 
 /// Deterministic Ed25519 seed for the PS/2 fixture signer. Distinct
 /// from the `drvhost_qemu` seed so the two fixtures cannot be confused.
@@ -45,7 +45,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x22; 32];
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     // Hand the kernel linker script (which carries the multiboot
@@ -74,7 +74,7 @@ fn main() {
     let caps: &[u16] = &[CapabilityId::DRV_LOAD.as_u16()];
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         kind: DriverKind::UserSpace,
         bind_key_count: 0,
         capability_count: u16::try_from(caps.len()).expect("caps fit in u16"),

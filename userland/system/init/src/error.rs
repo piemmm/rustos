@@ -17,7 +17,7 @@
 
 use core::fmt;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// A structural defect in the registered service set that prevents bring-up.
 ///
@@ -79,7 +79,7 @@ impl fmt::Display for StartFailure {
 #[cfg(test)]
 mod tests {
     use super::{InitError, StartFailure};
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     extern crate alloc;
     use alloc::format;

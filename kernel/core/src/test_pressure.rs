@@ -7,7 +7,7 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_kernel_mem::{FreeMemorySource, MemoryPressure, PressureBand};
+use tairix_kernel_mem::{FreeMemorySource, MemoryPressure, PressureBand};
 
 /// The test gauge's backing size (1 GiB), so the band watermarks land
 /// on readable byte counts.

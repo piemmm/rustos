@@ -15,8 +15,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_curses::{Pos, Window};
-use rustos_vt::Attributes;
+use tairix_curses::{Pos, Window};
+use tairix_vt::Attributes;
 
 use crate::editor::{Editor, Mode};
 

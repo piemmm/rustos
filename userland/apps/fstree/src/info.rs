@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 
 use crate::model::Model;
 

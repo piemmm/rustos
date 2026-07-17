@@ -7,16 +7,16 @@
 //! and installs a syscall-dispatch callback. It builds one hardware-isolated
 //! EL0 address space — its own stage-1 page-table hierarchy — from the `rxe`
 //! fixture program through the production capability-checked, audited
-//! `rustos_kernel_core::spawn_image` caller, wraps it in the **production**
-//! `rustos_kernel_mem::LiveSpace`, and admits the program through
-//! `rustos_kernel_core::spawn_user_kthread_with_stack_live` so the retained
+//! `tairix_kernel_core::spawn_image` caller, wraps it in the **production**
+//! `tairix_kernel_mem::LiveSpace`, and admits the program through
+//! `tairix_kernel_core::spawn_user_kthread_with_stack_live` so the retained
 //! live space is published on the per-CPU live-space slot while the program
 //! runs (exactly the production aarch64 spawn path, `plans/PI.md`
 //! 5d-0-ii (b′)-2).
 //!
 //! The dispatch callback routes the program's `mmio_map` `svc` through the
-//! retained space — `rustos_kernel_core::with_current_live_space` +
-//! `rustos_kernel_mem::LiveSpace::map_device_window` — for the granted
+//! retained space — `tairix_kernel_core::with_current_live_space` +
+//! `tairix_kernel_mem::LiveSpace::map_device_window` — for the granted
 //! virtio-MMIO transport window. The program maps the window, reads the
 //! device's `MagicValue` register back through the returned base, and exits 0;
 //! the callback reports exit 0 as PASS. Any shortfall (a refused map, the wrong
@@ -33,7 +33,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-mmio-map-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-mmio-map-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

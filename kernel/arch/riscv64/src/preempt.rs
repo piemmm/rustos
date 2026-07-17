@@ -4,7 +4,7 @@
 //! per-hart preemption surface:
 //!
 //! * The set-once callback ([`set_timer_callback`]) the timer trap path
-//!   forwards each tick to, with the hart's `rustos_arch_api::CpuId`.
+//!   forwards each tick to, with the hart's `tairix_arch_api::CpuId`.
 //! * The supervisor-timer enable bit ([`SIE_STIE`]) and the `scause`
 //!   code ([`SCAUSE_SUPERVISOR_TIMER`]) the trap handler matches.
 //! * `init_local_preempt`, which records the tick interval and the
@@ -45,7 +45,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::CpuId;
+use tairix_arch_api::CpuId;
 
 use crate::smp::current_hartid;
 
@@ -435,7 +435,7 @@ pub fn recorded_deadlines() -> (Option<u64>, Option<u64>) {
 /// is armed only for a real pending event).
 ///
 /// The combining math is the shared, host-tested
-/// [`rustos_arch_api::wakeup`] helper; only the `time`-CSR read and the
+/// [`tairix_arch_api::wakeup`] helper; only the `time`-CSR read and the
 /// `arm_oneshot` / `disarm` SBI programming are riscv64-specific. Off the
 /// freestanding target there is no SBI timer, so the arming is inert (the
 /// deadline bookkeeping above still runs for host tests).
@@ -445,13 +445,13 @@ fn reprogram() {
     };
     let quantum = slot_deadline(quantum_slot(idx).load(Ordering::Relaxed));
     let wakeup = slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed));
-    let target = rustos_arch_api::wakeup::earliest(quantum, wakeup);
+    let target = tairix_arch_api::wakeup::earliest(quantum, wakeup);
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     {
         match target {
             Some(abs) => {
                 let now = crate::kernel_arch::read_time();
-                arm_oneshot(rustos_arch_api::wakeup::ticks_from_now(abs, now));
+                arm_oneshot(tairix_arch_api::wakeup::ticks_from_now(abs, now));
             }
             None => disarm(),
         }
@@ -557,7 +557,7 @@ pub fn disarm() {
 ///
 /// Records the hart `cpu` and the per-quantum `interval_ticks` (the value
 /// the scheduler's one-shot is later armed to) and enables `sie.STIE`,
-/// but **leaves the timer disarmed** (`set_timer(u64::MAX)`): RustOS is
+/// but **leaves the timer disarmed** (`set_timer(u64::MAX)`): TAIRiX is
 /// tickless, so the timer is armed only when the scheduler has a task to
 /// bound, via [`arm_oneshot`] from [`crate::kernel_arch::RiscvArch`]'s
 /// `set_preemption` (`NO_HZ`). The function does **not**
@@ -599,7 +599,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 /// pending `sip.STIP`) and dispatch the (observation-only) scheduler-tick
 /// callback.
 ///
-/// RustOS is tickless: the timer was armed **one-shot**
+/// TAIRiX is tickless: the timer was armed **one-shot**
 /// by the scheduler, so this handler does **not** re-arm it — the next
 /// fire happens only when the scheduler arms another quantum via
 /// [`arm_oneshot`]. It disarms (`set_timer(u64::MAX)`, which clears the
@@ -611,7 +611,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 /// disabled (hardware cleared `sstatus.SIE` on trap entry).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt() {
-    use rustos_arch_api::Timer;
+    use tairix_arch_api::Timer;
     // Acknowledge + disarm: `set_timer(u64::MAX)` clears the pending
     // `sip.STIP` so the trap deasserts; the scheduler re-arms a fresh
     // one-shot on its next dispatch.

@@ -10,9 +10,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_caps::CapabilitySet;
+use tairix_caps::CapabilitySet;
 
-use rustos_abi::{Errno, LibraryScope};
+use tairix_abi::{Errno, LibraryScope};
 
 /// Reads an application bundle from storage.
 ///
@@ -95,7 +95,7 @@ pub trait Clock {
 ///
 /// Holding a `ResolvedLibrary` is proof the reference passed the
 /// dynamic-loader policy: it lies inside the bundle's own `Libraries/` or
-/// the curated [`rustos_abi::SYSTEM_LIBRARIES_DIR`], with no `..` component.
+/// the curated [`tairix_abi::SYSTEM_LIBRARIES_DIR`], with no `..` component.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedLibrary {
     /// The shared-library reference path, exactly as the binary declared it.
@@ -192,7 +192,7 @@ impl LoadedApp {
     }
 
     /// The exact entry-point `rxe` bytes the pipeline validated — the bytes
-    /// [`rustos_abi::LoadImage::parse`] accepted after the content hash
+    /// [`tairix_abi::LoadImage::parse`] accepted after the content hash
     /// checked out. A spawner maps **these** bytes, never a re-read of
     /// [`run_path`](Self::run_path), so what runs is what was verified.
     #[must_use]
@@ -210,7 +210,7 @@ impl LoadedApp {
     /// The shared libraries the entry-point binary declared it needs, each
     /// already resolved against the dynamic-loader policy (the
     /// bundle's own `Libraries/` or the curated
-    /// [`rustos_abi::SYSTEM_LIBRARIES_DIR`]).
+    /// [`tairix_abi::SYSTEM_LIBRARIES_DIR`]).
     #[must_use]
     pub fn libraries(&self) -> &[ResolvedLibrary] {
         &self.libraries

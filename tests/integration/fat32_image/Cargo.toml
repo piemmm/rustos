@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-fat32-image"
+name = "tairix-test-fat32-image"
 description = "Shared, specification-shaped FAT32 disk-image fixture for the end-to-end QEMU FAT32-over-virtio_blk vertical. The host harness (xtask) plants the image returned by `build_image` on the backing disk; the freestanding guest tail mounts the same volume through the real FAT32 driver and round-trips the planted file plus a fresh write, so both sides agree on the layout through one source of truth (AGENTS.md §2.2)."
 version.workspace = true
 edition.workspace = true
@@ -20,5 +20,5 @@ path = "src/lib.rs"
 # fixed file names and contents to verify). The round-trip unit tests run
 # the real FAT32 driver over the built image on the host.
 [dev-dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }

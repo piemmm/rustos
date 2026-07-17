@@ -1,14 +1,14 @@
 # 64-bit-native time (`abi-v1`)
 
-RustOS is 64-bit-time-native (`AGENTS.md` §21). No kernel ABI, userland
+TAIRiX is 64-bit-time-native (`AGENTS.md` §21). No kernel ABI, userland
 ABI, IPC type, log format, native filesystem, or persistent OS metadata
 may store absolute time as 32-bit seconds. The canonical time types live
-in `lib/abi/src/time.rs` (`rustos_abi::time`).
+in `lib/abi/src/time.rs` (`tairix_abi::time`).
 
 ## The types
 
 - [`Time64`] — an absolute instant: signed 64-bit seconds since the Unix
-  epoch plus a nanosecond field in `0..`[`NANOS_PER_SEC`]. It is RustOS's
+  epoch plus a nanosecond field in `0..`[`NANOS_PER_SEC`]. It is TAIRiX's
   equivalent of Linux's `timespec64` (seconds *and* nanoseconds), not a
   seconds-only `time64_t`.
 - [`Duration64`] — a span of time: signed 64-bit seconds plus the same
@@ -39,10 +39,10 @@ and 2106 (`u32`) boundaries, non-canonical nanosecond rejection, and the
 checked narrowing at both ends. Both decoders are also driven by the
 `lib/abi` fuzz harness (`AGENTS.md` §19.6).
 
-[`Time64`]: ../../rustos_abi/time/struct.Time64.html
-[`Duration64`]: ../../rustos_abi/time/struct.Duration64.html
-[`Duration64::from_nanos`]: ../../rustos_abi/time/struct.Duration64.html#method.from_nanos
-[`Time64::secs_i32`]: ../../rustos_abi/time/struct.Time64.html#method.secs_i32
-[`Time64::secs_u32`]: ../../rustos_abi/time/struct.Time64.html#method.secs_u32
-[`NANOS_PER_SEC`]: ../../rustos_abi/time/constant.NANOS_PER_SEC.html
-[`Errno::TimestampOutOfRange`]: ../../rustos_abi/error/enum.Errno.html
+[`Time64`]: ../../tairix_abi/time/struct.Time64.html
+[`Duration64`]: ../../tairix_abi/time/struct.Duration64.html
+[`Duration64::from_nanos`]: ../../tairix_abi/time/struct.Duration64.html#method.from_nanos
+[`Time64::secs_i32`]: ../../tairix_abi/time/struct.Time64.html#method.secs_i32
+[`Time64::secs_u32`]: ../../tairix_abi/time/struct.Time64.html#method.secs_u32
+[`NANOS_PER_SEC`]: ../../tairix_abi/time/constant.NANOS_PER_SEC.html
+[`Errno::TimestampOutOfRange`]: ../../tairix_abi/error/enum.Errno.html

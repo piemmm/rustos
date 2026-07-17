@@ -1,8 +1,8 @@
-//! RustOS userland device manager (Stage 4.HW).
+//! TAIRiX userland device manager (Stage 4.HW).
 //!
 //! This crate is the user-space service that owns driver **autoload**:
 //! it reads the architecture-neutral hardware tree
-//! ([`rustos_abi::HwNode`], emitted by the early-boot platform
+//! ([`tairix_abi::HwNode`], emitted by the early-boot platform
 //! discovery), matches each node's match keys against the bind table
 //! every driver declares in its signed manifest,
 //! and loads each winning driver through the driver-host load gate.
@@ -20,7 +20,7 @@
 //!   only that node, closed; the walk continues so
 //!   one bad image cannot block boot.
 //! * Every match, load, skip, and failure is logged through
-//!   [`rustos_log`] with a stable [`events`] identifier
+//!   [`tairix_log`] with a stable [`events`] identifier
 //!   (`13000..14000`).
 //!
 //! # Layering
@@ -37,7 +37,7 @@
 //!
 //! Tier: `experimental` (). The wire formats consumed
 //! (hardware-tree nodes, bind-table entries) are already frozen by
-//! `rustos-abi`.
+//! `tairix-abi`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -63,9 +63,9 @@ pub use service::{run, HwTreeService};
 pub use store::{fetch_catalogue, load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
 // The deterministic match policy is the shared `lib/devmatch` definition: re-exported here so existing consumers and the
 // crate's public surface are unchanged.
-pub use rustos_devmatch::{best_bind_priority, resolve, DriverCandidate, MatchResolution};
+pub use tairix_devmatch::{best_bind_priority, resolve, DriverCandidate, MatchResolution};
 
 // Re-export the `lib/log` items integration tests must implement to
-// observe audit records, mirroring `rustos-drvhost`'s surface so
+// observe audit records, mirroring `tairix-drvhost`'s surface so
 // downstream `Cargo.toml` files stay minimal.
-pub use rustos_log::{Event, EventId, Field, Level, Sink};
+pub use tairix_log::{Event, EventId, Field, Level, Sink};

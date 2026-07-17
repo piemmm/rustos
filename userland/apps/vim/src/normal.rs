@@ -8,7 +8,7 @@
 
 use alloc::string::String;
 
-use rustos_curses::Event;
+use tairix_curses::Event;
 
 use crate::buffer::Position;
 use crate::editor::{Editor, Mode};

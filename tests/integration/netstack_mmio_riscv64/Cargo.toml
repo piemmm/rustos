@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-netstack-mmio-riscv64"
-description = "QEMU netstack vertical (riscv64): boot the riscv64 virt-board pipeline, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, arm the device's PLIC source + S-mode trap path, mint a KernelVirtioHost over a carved per-device DMA pool, load the signed virtio-net `.rxe`, then drive the rustos-netstack engine's ring pump over the device against the harness-side peer stack on the QEMU dgram netdev: answer the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve and ping the peer over both families (plans/NETWORK.md N3c) before reporting SiFive Test success. The MMIO analogue of the x86_64 netstack-pci vertical; the device-tail ping is the same shared code."
+name = "tairix-test-netstack-mmio-riscv64"
+description = "QEMU netstack vertical (riscv64): boot the riscv64 virt-board pipeline, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, arm the device's PLIC source + S-mode trap path, mint a KernelVirtioHost over a carved per-device DMA pool, load the signed virtio-net `.rxe`, then drive the tairix-netstack engine's ring pump over the device against the harness-side peer stack on the QEMU dgram netdev: answer the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve and ping the peer over both families (plans/NETWORK.md N3c) before reporting SiFive Test success. The MMIO analogue of the x86_64 netstack-pci vertical; the device-tail ping is the same shared code."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,12 +12,12 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-netstack-mmio-riscv64"
+name = "tairix-test-netstack-mmio-riscv64"
 path = "src/main.rs"
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 # The device-agnostic bring-up scaffolding and the virtio-net ARP +
@@ -25,6 +25,6 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # only the abi and the virtio-net driver it resolves the loaded image to
 # (`AGENTS.md` §2.2).
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
-rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+tairix-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

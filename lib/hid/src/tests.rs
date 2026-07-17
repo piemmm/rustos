@@ -12,7 +12,7 @@ use core::cell::RefCell;
 use super::keyboard::{BOOT_KEYBOARD_REPORT_LEN, MODIFIER_USAGE_BASE};
 use super::POINTER_BUTTON_CODE_BASE as BUTTON_CODE_BASE;
 use super::*;
-use rustos_abi::driver::input::Input;
+use tairix_abi::driver::input::Input;
 
 /// Mock interrupt-IN endpoint: a FIFO of variable-length reports.
 struct MockSource {

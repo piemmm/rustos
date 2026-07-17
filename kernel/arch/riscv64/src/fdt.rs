@@ -1,10 +1,10 @@
 //! riscv64 device-tree access.
 //!
 //! The flattened-device-tree parser itself is architecture-neutral and
-//! lives once in [`rustos_fdt`] (no duplication); this
+//! lives once in [`tairix_fdt`] (no duplication); this
 //! module re-exports it so the riscv64 boot path and the QEMU integration
-//! tests keep naming `rustos_arch_riscv64::fdt::Fdt`. The riscv64-specific
-//! normalisation of the tree into [`rustos_abi::hwtree`] nodes lives in
+//! tests keep naming `tairix_arch_riscv64::fdt::Fdt`. The riscv64-specific
+//! normalisation of the tree into [`tairix_abi::hwtree`] nodes lives in
 //! [`crate::platform`].
 //!
 //! It also carries the riscv64-specific decode of a device's **PLIC**
@@ -14,12 +14,12 @@
 //! its PLIC source number directly in a single `interrupts` cell (there is
 //! no GIC-style `<type number flags>` triple). The bootstrap-floor
 //! virtio-MMIO discovery walks
-//! ([`rustos_kernel::hwdiscovery`](../../rustos_kernel/hwdiscovery/index.html))
+//! ([`tairix_kernel::hwdiscovery`](../../tairix_kernel/hwdiscovery/index.html))
 //! feed this decode as their per-slot `slot_irq` resolver, so an emitted
 //! device node carries the PLIC line its interrupt-driven user-space driver
 //! parks on — a discovered value, never a board constant.
 
-pub use rustos_fdt::{Fdt, FdtError};
+pub use tairix_fdt::{Fdt, FdtError};
 
 /// PLIC interrupt source `0` is the reserved "no interrupt" sentinel: a
 /// device whose `interrupts` cell is `0` routes to no line. The RISC-V
@@ -122,9 +122,9 @@ pub(crate) mod tests {
     //! Re-export of the shared DTB test fixtures so the `platform`
     //! discovery tests and the conformance handle drive the same builder
     //! as the parser's own tests. Enabled by the
-    //! `rustos-fdt/test-fixtures` feature this crate turns on in its
+    //! `tairix-fdt/test-fixtures` feature this crate turns on in its
     //! `[dev-dependencies]`.
-    pub(crate) use rustos_fdt::fixture::{virt_like, virt_like_with_virtio};
+    pub(crate) use tairix_fdt::fixture::{virt_like, virt_like_with_virtio};
 
     use super::{
         plic_base, plic_device_source, plic_ndev, plic_source_in_range, Fdt, PLIC_SOURCE_NONE,

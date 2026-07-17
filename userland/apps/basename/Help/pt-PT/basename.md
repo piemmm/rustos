@@ -17,7 +17,7 @@ disco. Com um `suffix` (o segundo operando, ou `-s`), um `suffix` final
 também é removido, salvo se for todo o nome restante.
 
 Uma raiz nunca é desfeita: `basename /` é `/`, e — o equivalente na
-floresta de armazenamento do RustOS — `basename Home:/` é `Home:/`. Uma
+floresta de armazenamento do TAIRiX — `basename Home:/` é `Home:/`. Uma
 raiz de alias (`Home:/`, `System:/`, …) desempenha exatamente o papel
 que `/` desempenha nos sistemas POSIX.
 

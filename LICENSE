@@ -1,6 +1,6 @@
-                         RustOS — Licensing
+                         TAIRiX — Licensing
 
-RustOS is free software: you can redistribute it and/or modify it under
+TAIRiX is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free
 Software Foundation, either version 2 of the License, or (at your option)
 any later version. The full, verbatim text of GNU General Public License,
@@ -8,24 +8,24 @@ Version 2, follows the exception below.
 
 
               Additional permission — Syscall / ABI Exception
-                       (SPDX: RustOS-syscall-note)
+                       (SPDX: TAIRiX-syscall-note)
 
 As an additional permission under the terms of the GNU General Public
 License version 2 (or, at your option, any later version), the copyright
-holders of RustOS grant the following exception:
+holders of TAIRiX grant the following exception:
 
     This copyright does *not* cover user-space programs that use kernel
     services by normal system calls, nor programs that merely include the
     project's stable, published syscall / ABI interface definitions. Such
     use is considered normal use of the system and does *not*, in itself,
     cause the using work to fall under the heading of a "derived work" of
-    RustOS. Neither the act of making a system call nor the inclusion of
+    TAIRiX. Neither the act of making a system call nor the inclusion of
     the public syscall / ABI interface definitions places the using
     program under the GNU General Public License.
 
 This exception does not invalidate any other reasons why the using work
 might be covered by the GNU General Public License. If you modify the
-RustOS kernel, libraries, or other covered components themselves, the
+TAIRiX kernel, libraries, or other covered components themselves, the
 ordinary terms of the GNU General Public License continue to apply to
 those modifications.
 

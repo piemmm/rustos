@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-session-ceiling-qemu-aarch64"
-description = "plans/CAPABILITY_USE.md CU3 acceptance QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board with the planted whole-disk encrypted-root image, unlock the root at the passphrase prompt, authenticate root/root at the console login, and drive the spawned shell through a real session under the seeded administrator ceiling — cd into the account's home, pwd, spawn ps — then prove the intersection still binds: a ulimit hard-limit raise from the shell (whose manifest requests only the session baseline, so its effective set lacks CAP_RLIMIT_RAISE even under the administrator ceiling) is refused with PermissionDenied. PASS once the audited rlimit_set rejection has been observed and the shell's scripted exit follows it, so the denial provably reached the transcript before the run ended."
+name = "tairix-test-session-ceiling-qemu-aarch64"
+description = "plans/CAPABILITY_USE.md CU3 acceptance QEMU integration test: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board with the planted whole-disk encrypted-root image, unlock the root at the passphrase prompt, authenticate root/root at the console login, and drive the spawned shell through a real session under the seeded administrator ceiling — cd into the account's home, pwd, spawn ps — then prove the intersection still binds: a ulimit hard-limit raise from the shell (whose manifest requests only the session baseline, so its effective set lacks CAP_RLIMIT_RAISE even under the administrator ceiling) is refused with PermissionDenied. PASS once the audited rlimit_set rejection has been observed and the shell's scripted exit follows it, so the denial provably reached the transcript before the run ended."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,25 +12,25 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-session-ceiling-qemu-aarch64"
+name = "tairix-test-session-ceiling-qemu-aarch64"
 path = "src/main.rs"
 
 # Freestanding "boot the production aarch64 pipeline with the planted
 # encrypted-root disk and prove a whole authenticated session works under
 # the seeded administrator ceiling" integration test. It reuses the entire
-# production boot pipeline through `rustos-kernel`'s library half —
+# production boot pipeline through `tairix-kernel`'s library half —
 # discovery, the unlock kthread, PID 1 supervision, login's spawn-as-user,
 # the shell, and the capability intersection — and only swaps the audit
 # sink (no duplication). Keeping the QEMU-exit shortcut in a dedicated bin
 # (not a Cargo feature on a production crate) prevents feature unification
 # from leaking it into any production build (fail closed).
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

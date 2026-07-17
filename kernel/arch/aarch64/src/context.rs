@@ -170,7 +170,7 @@ extern "C" {
     /// Defined in `context.s` (included via `global_asm!` in
     /// [`crate::lib`]). The `extern "C"` declaration gives the symbol
     /// the correct ABI so callers pass `TaskCtx` pointers in `x0`/`x1`.
-    pub fn rustos_arch_aarch64_switch(prev: *mut TaskCtx, next: *mut TaskCtx);
+    pub fn tairix_arch_aarch64_switch(prev: *mut TaskCtx, next: *mut TaskCtx);
 }
 
 /// Switch from `prev` to `next` on the current CPU.
@@ -198,7 +198,7 @@ pub unsafe fn switch(prev: *mut TaskCtx, next: *mut TaskCtx) {
     // SAFETY: forwarded from the caller's contract. The assembly saves
     // x19..x30/x0, d8..d15, and DAIF to `*prev`'s stack, swaps `sp`, and
     // restores from `*next`'s stack.
-    unsafe { rustos_arch_aarch64_switch(prev, next) }
+    unsafe { tairix_arch_aarch64_switch(prev, next) }
 }
 
 #[cfg(test)]

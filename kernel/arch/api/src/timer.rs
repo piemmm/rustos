@@ -1,7 +1,7 @@
 //! Timer-programming surface of the Arch HAL (
 //! "timer programming").
 //!
-//! RustOS is a **tickless (`NO_HZ`)** kernel: the timer
+//! TAIRiX is a **tickless (`NO_HZ`)** kernel: the timer
 //! is armed *one-shot*, to the next event the scheduler needs, never at a
 //! fixed frequency. Each port owns a per-CPU timer — the x86_64 LAPIC
 //! timer, the aarch64 EL1 generic timer, the riscv64 supervisor (SBI)
@@ -19,7 +19,7 @@
 //! [`crate::SchedulerArch::set_preemption`]), and only the per-port
 //! register/MMIO write differs, so the two arming verbs live on this one
 //! HAL surface while their bodies stay genuinely
-//! per-port. RustOS arms the timer **one-shot, to the next event
+//! per-port. TAIRiX arms the timer **one-shot, to the next event
 //! the scheduler needs, and leaves it disarmed when a CPU has nothing to
 //! preempt to** — there is no fixed-frequency periodic re-arm anywhere
 //! (PLAN P-4 retired the P-1 100 Hz arming).
@@ -68,7 +68,7 @@ use crate::CpuId;
 ///
 /// A `100 Hz` (~10 ms) slice bounds a runaway user task's hold on a
 /// *contended* CPU while costing negligible trap overhead. This is **not**
-/// a periodic tick: RustOS is tickless, so the timer
+/// a periodic tick: TAIRiX is tickless, so the timer
 /// is armed one-shot to one quantum only when a CPU has a competitor, and
 /// disarmed otherwise. The value lives here, once, so the aarch64 and
 /// riscv64 ports (which both derive their per-quantum counter-tick
@@ -121,7 +121,7 @@ pub trait Timer: Send + Sync {
     /// interrupt/frame handler. A tick that arrives before any callback
     /// is installed dispatches harmlessly (returns `false`), never a
     /// panic. The port's handler does **not** re-arm
-    /// the timer after this returns: RustOS is tickless, so the next fire
+    /// the timer after this returns: TAIRiX is tickless, so the next fire
     /// happens only if the scheduler arms it again via
     /// [`Self::arm_oneshot`].
     fn dispatch_tick(&self, cpu: CpuId) -> bool;

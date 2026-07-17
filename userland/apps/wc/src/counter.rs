@@ -13,9 +13,9 @@
 //!   next multiple of 8, `\n`/`\r`/`\x0C` close the line, a space is one
 //!   column, other ASCII controls are zero, and every printable character
 //!   is measured through the one OS-wide width definition
-//!   (`rustos_vt::char_width`).
+//!   (`tairix_vt::char_width`).
 
-use rustos_vt::char_width;
+use tairix_vt::char_width;
 
 /// The five counts of one input.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

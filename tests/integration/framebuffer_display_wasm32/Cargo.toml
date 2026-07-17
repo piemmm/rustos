@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-framebuffer-display-wasm32"
-description = "Stage W (plans/WIRING.md) wasm32 display vertical: boot the wasm32 Arch HAL in a real browser, load the signed generic framebuffer display `.rxe` through rustos_drvhost::Host, and drive it through load -> use (Framebuffer::open + present over a capability-gated linear-memory MmioMapper) -> unload -> reload, presenting each frame to an HTML canvas and proving the pixels survive the canvas round-trip. The wasm32 analogue of the framebuffer_display_qemu_{riscv64,aarch64} verticals."
+name = "tairix-test-framebuffer-display-wasm32"
+description = "Stage W (plans/WIRING.md) wasm32 display vertical: boot the wasm32 Arch HAL in a real browser, load the signed generic framebuffer display `.rxe` through tairix_drvhost::Host, and drive it through load -> use (Framebuffer::open + present over a capability-gated linear-memory MmioMapper) -> unload -> reload, presenting each frame to an HTML canvas and proving the pixels survive the canvas round-trip. The wasm32 analogue of the framebuffer_display_qemu_{riscv64,aarch64} verticals."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 
 # The wasm32 analogue of the bare-metal `framebuffer_display_qemu_*`
 # verticals. Built for `wasm32-unknown-unknown` it is a `cdylib`: the
-# host loader (`kernel/arch/wasm32/web/rustos.js`) instantiates it,
+# host loader (`kernel/arch/wasm32/web/tairix.js`) instantiates it,
 # calls its boot export, and the page's `presentFramebuffer` hook paints
 # the presented surface onto a canvas. The browser harness
 # (`web/harness.mjs`, launched by `cargo xtask test --wasm`) scrapes the
@@ -31,16 +31,16 @@ path = "src/lib.rs"
 # dependencies and an empty body (`AGENTS.md` §2.2 — the `itest_wasm32`
 # cfg, not a raw target predicate, selects the kernel body in source).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-wasm32 = { path = "../../../kernel/arch/wasm32", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
-rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-display = { path = "../../../lib/display", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-wasm32 = { path = "../../../kernel/arch/wasm32", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }

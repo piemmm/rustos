@@ -17,8 +17,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_termcap::ColorDepth;
-use rustos_vt::{BasicColor, Color};
+use tairix_termcap::ColorDepth;
+use tairix_vt::{BasicColor, Color};
 
 use crate::error::{CursesError, Result};
 

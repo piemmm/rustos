@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-mmio-map-qemu-aarch64"
-description = "PI P10 chunk 5d-0-ii (b′) QEMU integration test: prove an EL0 driver can map a granted device MMIO window at runtime via abi-v1 mmio_map on the aarch64 virt board. The build script compiles a pure-Rust EL0 program (tests/integration/mmio_map_program) PIE and converts it to an rxe blob; the kernel materialises one hardware-isolated EL0 address space with rustos_kernel_core::spawn_image, retains it live, and admits the program through the production rustos_kernel_core::spawn_user_kthread_with_stack_live so its retained LiveSpace is published on the per-CPU live-space slot, mints the task a grant for a real virtio-MMIO transport window, and routes the program's mmio_map syscall through rustos_kernel_core::with_current_live_space + rustos_kernel_mem::LiveSpace::map_device_window — PASS once the program mapped the window and read the device's MagicValue register back through it."
+name = "tairix-test-mmio-map-qemu-aarch64"
+description = "PI P10 chunk 5d-0-ii (b′) QEMU integration test: prove an EL0 driver can map a granted device MMIO window at runtime via abi-v1 mmio_map on the aarch64 virt board. The build script compiles a pure-Rust EL0 program (tests/integration/mmio_map_program) PIE and converts it to an rxe blob; the kernel materialises one hardware-isolated EL0 address space with tairix_kernel_core::spawn_image, retains it live, and admits the program through the production tairix_kernel_core::spawn_user_kthread_with_stack_live so its retained LiveSpace is published on the per-CPU live-space slot, mints the task a grant for a real virtio-MMIO transport window, and routes the program's mmio_map syscall through tairix_kernel_core::with_current_live_space + tairix_kernel_mem::LiveSpace::map_device_window — PASS once the program mapped the window and read the device's MagicValue register back through it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,13 @@ publish = false
 workspace = true
 
 # This bin is the `plans/PI.md` 5d-0-ii (b′)-2 aarch64 `mmio_map` vertical. The
-# fixture program (`rustos-test-mmio-map`) is built position-independent by
-# `build.rs` and converted to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+# fixture program (`tairix-test-mmio-map`) is built position-independent by
+# `build.rs` and converted to an `rxe` blob (`tairix_itest_harness::elf2rxe`)
 # carrying the kernel's compiled-in syscall CFI tag. On boot the test reads the
 # GICv2 base + timer rate from the embedded `virt` DTB, brings up the EL1
 # vectors + GICv2, builds one isolated EL0 address space via
-# `rustos_kernel_core::spawn_image` (capability-checked + audited), wraps it in
-# the production `rustos_kernel_mem::LiveSpace`, and admits the program through
+# `tairix_kernel_core::spawn_image` (capability-checked + audited), wraps it in
+# the production `tairix_kernel_mem::LiveSpace`, and admits the program through
 # `spawn_user_kthread_with_stack_live` so the retained space is published on the
 # per-CPU live-space slot for the running task. It mints the task a grant for a
 # real `virt` virtio-MMIO transport window and routes the program's `mmio_map`
@@ -38,22 +38,22 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-mmio-map-qemu-aarch64"
+name = "tairix-test-mmio-map-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

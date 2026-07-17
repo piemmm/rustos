@@ -30,8 +30,8 @@
 //! leaks one [`KernelWallClock`] and installs it; a trusted time source then
 //! drives it through the `wall_time_set` syscall.
 
-use rustos_abi::{Duration64, Errno, Time64, WallClockReading, WallTimeState};
-use rustos_sync::SpinLock;
+use tairix_abi::{Duration64, Errno, Time64, WallClockReading, WallTimeState};
+use tairix_sync::SpinLock;
 
 /// The mutable wall-clock state: the provenance state plus the
 /// (wall, monotonic) pair captured the last time it was set.
@@ -176,7 +176,7 @@ pub static NULL_WALL_CLOCK: NullWallClock = NullWallClock;
 #[cfg(test)]
 mod tests {
     use super::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};
-    use rustos_abi::{Errno, Time64, WallTimeState, NANOS_PER_SEC};
+    use tairix_abi::{Errno, Time64, WallTimeState, NANOS_PER_SEC};
 
     fn secs(t: i64) -> Time64 {
         Time64::from_secs(t)

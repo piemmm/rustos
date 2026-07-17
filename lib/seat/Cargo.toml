@@ -1,6 +1,6 @@
 [package]
-name = "rustos-seat"
-description = "RustOS arch-neutral seat model: the exclusive, owner-tracked, revocable lease on one display + keyboard + pointer, and its input-routing decision (plans/DISPLAY.md D1)."
+name = "tairix-seat"
+description = "TAIRiX arch-neutral seat model: the exclusive, owner-tracked, revocable lease on one display + keyboard + pointer, and its input-routing decision (plans/DISPLAY.md D1)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

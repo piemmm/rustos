@@ -1,6 +1,6 @@
 [package]
-name = "rustos-installer"
-description = "RustOS placeholder: first-boot installer."
+name = "tairix-installer"
+description = "TAIRiX placeholder: first-boot installer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

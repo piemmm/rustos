@@ -16,7 +16,7 @@
 use crate::addr::Ipv6Addr;
 use crate::checksum::{internet_checksum, Checksum};
 use crate::ipv6::NEXT_HEADER_ICMPV6;
-use rustos_abi::time::{Duration64, NANOS_PER_SEC};
+use tairix_abi::time::{Duration64, NANOS_PER_SEC};
 
 /// Length of the fixed 4-byte ICMP/`ICMPv6` header (type, code, checksum).
 pub const ICMP_FIXED_HEADER_LEN: usize = 4;

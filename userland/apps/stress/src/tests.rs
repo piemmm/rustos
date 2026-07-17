@@ -6,7 +6,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::Signal;
+use tairix_abi::Signal;
 
 use crate::command::{parse, Command, RunSpec, Workers};
 use crate::ctrl::{Action, Controller, Event};

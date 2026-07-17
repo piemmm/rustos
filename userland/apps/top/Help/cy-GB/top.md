@@ -37,7 +37,7 @@ ac mae'r sesiwn yn parhau.
 
 Mae'r llinell `%Cpu(s)` yn dangos y gyfran o'r cyfwng diwethaf a
 dreuliodd pob CPU gyda'i gilydd yn brysur (yn rhedeg tasgau) ac yn
-segur. Dim ond amser prysur a segur y mae RustOS yn eu cyfrifo, felly
+segur. Dim ond amser prysur a segur y mae TAIRiX yn eu cyfrifo, felly
 lle mae `top` GNU yn rhannu'r gyfran brysur yn ffigurau
 user/system/nice/iowait, mae'r llinell hon yn fwriadol yn dangos y ddau
 ffigur real yn eu lle.
@@ -67,7 +67,7 @@ yn cario:
   mewn eiliadau gyda ffracsiwn dewisol (dim ond y digid ffracsiynol
   cyntaf, degfedau, a gedwir): mae `top -d 1.5` yn adnewyddu bob 1.5
   eiliad. Y rhagosodiad yw 3.0. Mae `top` GNU yn derbyn oedi sero ac
-  yn adnewyddu mor gyflym ag y gall; nid yw RustOS byth yn troelli'n
+  yn adnewyddu mor gyflym ag y gall; nid yw TAIRiX byth yn troelli'n
   brysur, felly clampir sero i'r isafswm 0.1 e.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun a gadael. O
   fewn sesiwn sy'n rhedeg mae'r un bysellau'n toglo troshaen y

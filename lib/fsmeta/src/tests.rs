@@ -3,8 +3,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::DriverError;
-use rustos_abi::time::Time64;
+use tairix_abi::driver::DriverError;
+use tairix_abi::time::Time64;
 
 use crate::key::{AttrKey, Namespace, NamespaceAccess};
 use crate::preset::{acorn, amiga, atari, mac};
@@ -29,7 +29,7 @@ fn foreign_and_user_namespaces_are_file_permission() {
         Namespace::Amiga,
         Namespace::Atari,
         Namespace::Mac,
-        Namespace::Rustos,
+        Namespace::TAIRiX,
     ] {
         assert_eq!(ns.access(), NamespaceAccess::FilePermission);
         assert!(!ns.is_privileged());

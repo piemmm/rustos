@@ -1,6 +1,6 @@
 [package]
-name = "rustos-abi-sys"
-description = "C-callable abi-v1 syscall stub runtime (the ros_sys_* trap stubs)."
+name = "tairix-abi-sys"
+description = "C-callable abi-v1 syscall stub runtime (the tairix_sys_* trap stubs)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,15 +12,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 # The single per-architecture syscall trap (`AGENTS.md` §2.2): this crate
-# marshals each `ros_sys_*` call into register form and hands it to the shared
+# marshals each `tairix_sys_*` call into register form and hands it to the shared
 # `raw_syscall` primitive, so the trap assembly is not duplicated here.
-rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 
 # The host trap seam used to assert the marshalling of every stub without a
 # kernel (`AGENTS.md` §7). Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.
 [dev-dependencies]
-rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }

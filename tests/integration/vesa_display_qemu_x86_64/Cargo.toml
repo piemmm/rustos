@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-vesa-qemu-x86-64"
-description = "Stage 4 first-driver vertical: boot the rustos-kernel pipeline on x86_64, synthesise a real linear framebuffer with QEMU ramfb (programmed over the fw_cfg IOport DMA interface), publish a bootloader-captured VBE ModeInfoBlock as the boot hand-off, then load the signed vesa display `.rxe` through rustos_drvhost::Host and drive it through load -> use (VesaFramebuffer::open + present over the capability-gated KernelMmioMapper) -> unload -> reload, verifying the presented pixels land in the ramfb scan-out surface, before signalling QEMU success. The x86_64 sibling of the riscv64 framebuffer-display vertical."
+name = "tairix-test-vesa-qemu-x86-64"
+description = "Stage 4 first-driver vertical: boot the tairix-kernel pipeline on x86_64, synthesise a real linear framebuffer with QEMU ramfb (programmed over the fw_cfg IOport DMA interface), publish a bootloader-captured VBE ModeInfoBlock as the boot hand-off, then load the signed vesa display `.rxe` through tairix_drvhost::Host and drive it through load -> use (VesaFramebuffer::open + present over the capability-gated KernelMmioMapper) -> unload -> reload, verifying the presented pixels land in the ramfb scan-out surface, before signalling QEMU success. The x86_64 sibling of the riscv64 framebuffer-display vertical."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,27 +12,27 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-vesa-qemu-x86-64"
+name = "tairix-test-vesa-qemu-x86-64"
 path = "src/main.rs"
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 # The freestanding bin links only on the `x86_64-unknown-none` target; a
 # host `cargo build --workspace` compiles `src/main.rs` to an inert stub
 # (`AGENTS.md` §17.2 — the instruction-set choice lives in `build.rs`).
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
-rustos-drv-display-vesa = { path = "../../../drivers/display/vesa", version = "=0.0.0" }
-rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-drv-display-vesa = { path = "../../../drivers/display/vesa", version = "=0.0.0" }
+tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }

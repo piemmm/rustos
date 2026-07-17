@@ -1,4 +1,4 @@
-//! RustOS Broadcom BCM2711 (Raspberry Pi 4) PCIe root-complex bring-up.
+//! TAIRiX Broadcom BCM2711 (Raspberry Pi 4) PCIe root-complex bring-up.
 //!
 //! The Pi 4's VL805 xHCI controller hangs off the BCM2711 PCIe root
 //! complex, which ships with its link **down**: reaching the VL805's
@@ -31,7 +31,7 @@
 //!   (a generic-timer delay on metal, a no-op in tests).
 //!
 //! Once the link is up the register window is handed to
-//! `rustos_pci::mechanism_brcm`; this crate never enumerates.
+//! `tairix_pci::mechanism_brcm`; this crate never enumerates.
 //!
 //! # Public surface & capabilities
 //!
@@ -47,8 +47,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::mmio::WindowError;
-use rustos_abi::{
+use tairix_abi::driver::mmio::WindowError;
+use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
 };
 
@@ -140,11 +140,11 @@ impl PcieRegs for RegisterWindow {
 
 /// A microsecond timing seam: a busy-delay plus a monotonic clock.
 ///
-/// Re-exported from `lib/abi` (`rustos_abi::Delay`) — the single definition
+/// Re-exported from `lib/abi` (`tairix_abi::Delay`) — the single definition
 /// shared with the bus-agnostic USB stack (`lib/usb`), so the two driver
 /// crates depend on one trait rather than each declaring their own. The kernel supplies a generic-timer implementation
 /// (`CNTPCT_EL0`/`CNTFRQ_EL0`); host tests a deterministic stand-in.
-pub use rustos_abi::Delay;
+pub use tairix_abi::Delay;
 
 /// Driver entry point.
 ///

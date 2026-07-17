@@ -1,11 +1,11 @@
 //! The `Run` entry-point binary of the `useradd` tool — the program an
 //! administrator's shell spawns to create a user account.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
@@ -17,7 +17,7 @@
 //! refused at dispatch), the kernel CSPRNG through the unprivileged
 //! `sys:random` resource (the salt and throwaway secret behind the created
 //! account's unusable password record), the shared
-//! `rustos_help::BundleHelp`, which reads the tool's own bundle's `Help/`
+//! `tairix_help::BundleHelp`, which reads the tool's own bundle's `Help/`
 //! tree for the short-help switches, and the inherited standard output.
 //! The tool binds only to its inherited descriptors, never a console
 //! device, and holds no ambient authority.
@@ -36,11 +36,11 @@ mod program {
 
     use alloc::format;
 
-    use rustos_abi::{Errno, OpenFlags};
-    use rustos_help::BundleHelp;
-    use rustos_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-    use rustos_useradd::db::{AdminChannel, Entropy, UsersAdminDb};
-    use rustos_useradd::{parse, run, Output, USAGE};
+    use tairix_abi::{Errno, OpenFlags};
+    use tairix_help::BundleHelp;
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_useradd::db::{AdminChannel, Entropy, UsersAdminDb};
+    use tairix_useradd::{parse, run, Output, USAGE};
 
     /// The production [`AdminChannel`]: the `users_admin` syscall. It adds
     /// no authority — the capability check and every record rule stay
@@ -50,7 +50,7 @@ mod program {
 
     impl AdminChannel for RtChannel {
         fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno> {
-            rustos_rt::users_admin(req, out).map_err(Errno::from_syscall)
+            tairix_rt::users_admin(req, out).map_err(Errno::from_syscall)
         }
     }
 
@@ -61,10 +61,10 @@ mod program {
 
     impl Entropy for RtEntropy {
         fn fill(&self, buf: &mut [u8]) -> Result<(), Errno> {
-            let fd = rustos_rt::resource_open(b"sys:random", OpenFlags::READ);
+            let fd = tairix_rt::resource_open(b"sys:random", OpenFlags::READ);
             let fd = u32::try_from(fd).map_err(|_| Errno::NotImplemented)?;
-            let outcome = rustos_rt::fs_read(fd, 0, buf);
-            let _ = rustos_rt::fs_close(fd);
+            let outcome = tairix_rt::fs_read(fd, 0, buf);
+            let _ = tairix_rt::fs_close(fd);
             match outcome {
                 Ok(read) if read == buf.len() => Ok(()),
                 Ok(_) => Err(Errno::EntropyNotReady),
@@ -90,7 +90,7 @@ mod program {
         let _ = Stderr.write_all(USAGE.as_bytes());
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a database, entropy, or output
@@ -100,7 +100,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             report_usage();
             return 2;
         };
@@ -111,7 +111,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let db = UsersAdminDb::new(&RtChannel, &RtEntropy);
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
@@ -124,13 +124,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

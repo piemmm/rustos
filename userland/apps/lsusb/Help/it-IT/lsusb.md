@@ -25,7 +25,7 @@ Se la tabella inclusa manca o non supera la convalida, l'elenco
 degrada a identificatori nudi con la ragione sull'errore standard —
 l'inventario stesso viene comunque elencato.
 
-RustOS non ha il registro Linux dei numeri di bus/dispositivo: i
+TAIRiX non ha il registro Linux dei numeri di bus/dispositivo: i
 numeri di bus e di dispositivo sono piccoli ordinali che partono da 1
 sull'inventario corrente (i bus in ordine di rilevamento, i
 dispositivi in ordine di elenco su ciascun bus), stabili finché la

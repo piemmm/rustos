@@ -1,12 +1,12 @@
-# rustos-procinfo
+# tairix-procinfo
 
-Shared `no_std` client helpers for the RustOS System Information API
+Shared `no_std` client helpers for the TAIRiX System Information API
 (`sysinfo-v1`, `AGENTS.md` §16.6): the request/response seams, the
 capability-aware call mapping, a generic paged-list walk, and the
 process-list and mount-list row rendering used by the terminal tools that
 read live system state.
 
-RustOS has no `/proc` and no `/sys`; the `sysinfo` umbrella command, the
+TAIRiX has no `/proc` and no `/sys`; the `sysinfo` umbrella command, the
 POSIX-named `ps`, and the `mount` listing all speak the typed API served by
 `/System/Services/sysinfod.app/Run`. They would otherwise duplicate the request
 envelope, the page walk, and the row render, so that shape lives here in one
@@ -39,15 +39,15 @@ binary lands):
 
 - `IpcTransport` — a `Transport` that carries a framed `sysinfo-v1` request to
   `/System/Services/sysinfod.app/Run` over the well-known `SYSINFO_ENDPOINT` IPC call
-  (`rustos_rt::ipc_call`) and unwraps the reply frame (`decode_reply`),
+  (`tairix_rt::ipc_call`) and unwraps the reply frame (`decode_reply`),
   surfacing a per-query refusal as the exact `Errno`.
 - `RtOutput` — an `Output` that writes each rendered line to the inherited
-  standard output (fd 1) through `rustos-rt`.
+  standard output (fd 1) through `tairix-rt`.
 - `args` / `write_stderr_line` — the shared argument-vector walk and the
   standard-error diagnostic sink the tool `Run` binaries use, written once
   here rather than pasted into each (`AGENTS.md` §2.2).
 
-The feature pulls the freestanding userland runtime `rustos-rt` and is enabled
+The feature pulls the freestanding userland runtime `tairix-rt` and is enabled
 only for a bare-metal (`target_os = "none"`) program build; the host tooling
 and the pure library never link the runtime.
 

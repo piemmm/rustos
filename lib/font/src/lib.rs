@@ -19,7 +19,7 @@
 //! renders U+FFFD, visibly wrong rather than silently dropped. The cell model is
 //! one scalar per grid entry: a zero-advance combining mark occupies its own
 //! cell, while a wide Japanese or Korean bitmap may cover the lead and
-//! continuation cells reserved by `rustos_vt::char_width`.
+//! continuation cells reserved by `tairix_vt::char_width`.
 //!
 //! The [`atlas`] and [`glyph`] modules are dependency-free `no_std` data and
 //! lookup, so a consumer that brings its own blitter — the framebuffer
@@ -28,7 +28,7 @@
 //! stays `alloc`-free; the `lib/raster`-backed blitter rides the default-on
 //! `render` feature (one font definition either way).
 //!
-//! There is no installed-font machinery yet: a `rustos-theme` font role
+//! There is no installed-font machinery yet: a `tairix-theme` font role
 //! selects a font by family name under `/System/Fonts`, but no faces are
 //! installed, so everything draws with the built-in
 //! [`BitmapFont::inconsolata`] face. When installed faces arrive they extend

@@ -8,13 +8,13 @@
 
 use alloc::string::String;
 
-use rustos_abi::{
+use tairix_abi::{
     decode_capability_ids, resolve_library as resolve_library_policy, validate_bundle_layout,
     AppInfoHeader, CapabilityId, Duration64, Errno, LibraryScope, LoadImage,
     APPINFO_MAX_CAPABILITIES, SYSCALL_TABLE_HASH_LEN,
 };
-use rustos_caps::CapabilitySet;
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_caps::CapabilitySet;
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::bundle::{BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier};
 use crate::error::AppError;
@@ -225,7 +225,7 @@ impl<'a> AppLoader<'a> {
     /// Resolve every shared library the entry-point `image` declares it needs
     /// against the dynamic-loader policy, in declaration order.
     ///
-    /// This is where the C-ABI runtime (the curated `ros_sys_*` /
+    /// This is where the C-ABI runtime (the curated `tairix_sys_*` /
     /// `/System/Libraries/` *System runtime / C ABI* library) and any bundle
     /// `Libraries/` reference is bound; an out-of-tree reference fails closed.
     ///
@@ -364,19 +364,19 @@ impl<'a> AppLoader<'a> {
                 fields: &[
                     Field {
                         key: "bundle",
-                        value: rustos_log::FieldValue::Str(bundle),
+                        value: tairix_log::FieldValue::Str(bundle),
                     },
                     Field {
                         key: "detail",
-                        value: rustos_log::FieldValue::Str(name),
+                        value: tairix_log::FieldValue::Str(name),
                     },
                     Field {
                         key: "load",
-                        value: rustos_log::FieldValue::Duration(Duration64::from_nanos(load_ns)),
+                        value: tairix_log::FieldValue::Duration(Duration64::from_nanos(load_ns)),
                     },
                     Field {
                         key: "verify",
-                        value: rustos_log::FieldValue::Duration(Duration64::from_nanos(verify_ns)),
+                        value: tairix_log::FieldValue::Duration(Duration64::from_nanos(verify_ns)),
                     },
                 ],
             },
@@ -393,11 +393,11 @@ impl<'a> AppLoader<'a> {
                 fields: &[
                     Field {
                         key: "bundle",
-                        value: rustos_log::FieldValue::Str(bundle),
+                        value: tairix_log::FieldValue::Str(bundle),
                     },
                     Field {
                         key: "detail",
-                        value: rustos_log::FieldValue::Str(detail),
+                        value: tairix_log::FieldValue::Str(detail),
                     },
                 ],
             },
@@ -451,14 +451,14 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::{
+    use tairix_abi::{
         AppInfoHeader, BundleLayoutError, CapabilityId, Errno, LibraryError, LibraryScope,
         LoadHeader, NeededLibrary, RxeError, RxePermission, Segment, ABI_VERSION_CURRENT,
         APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LOAD_FLAG_PIE,
         LOAD_MAGIC, MIME_TYPE_MAX, SYSCALL_TABLE_HASH_LEN,
     };
-    use rustos_caps::CapabilitySet;
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_caps::CapabilitySet;
+    use tairix_log::{Event, EventId, Sink};
 
     const KERNEL_HASH: [u8; SYSCALL_TABLE_HASH_LEN] = [0x11; SYSCALL_TABLE_HASH_LEN];
     const CONTENT_HASH: [u8; 32] = [0x22; 32];
@@ -624,7 +624,7 @@ mod tests {
         events: RefCell<Vec<EventId>>,
         /// The `(load, verify)` durations carried by the last `APP_LOADED`
         /// record, so a test can assert both phases were timed and emitted.
-        loaded_phases: RefCell<Option<(rustos_abi::Duration64, rustos_abi::Duration64)>>,
+        loaded_phases: RefCell<Option<(tairix_abi::Duration64, tairix_abi::Duration64)>>,
     }
     impl RecordingSink {
         fn new() -> Self {
@@ -643,7 +643,7 @@ mod tests {
             if event.id == events::APP_LOADED {
                 let phase = |key| {
                     event.fields.iter().find_map(|f| match (f.key, f.value) {
-                        (k, rustos_log::FieldValue::Duration(d)) if k == key => Some(d),
+                        (k, tairix_log::FieldValue::Duration(d)) if k == key => Some(d),
                         _ => None,
                     })
                 };
@@ -1072,9 +1072,9 @@ mod tests {
             .loaded_phases
             .borrow()
             .expect("APP_LOADED carries load and verify durations");
-        assert_eq!(load, rustos_abi::Duration64::from_nanos(3_000));
+        assert_eq!(load, tairix_abi::Duration64::from_nanos(3_000));
         assert!(
-            verify > rustos_abi::Duration64::ZERO,
+            verify > tairix_abi::Duration64::ZERO,
             "verification time must be recorded"
         );
     }

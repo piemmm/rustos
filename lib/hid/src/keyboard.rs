@@ -14,8 +14,8 @@
 //! release events first, then presses, then modifier changes — exactly
 //! once per edge.
 
-use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
-use rustos_abi::DriverError;
+use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use tairix_abi::DriverError;
 
 use crate::{poll_source, PendingEvents, ReportDecode, ReportSource};
 

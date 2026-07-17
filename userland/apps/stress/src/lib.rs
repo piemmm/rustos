@@ -1,4 +1,4 @@
-//! RustOS `stress` — a comprehensive load-generation command app
+//! TAIRiX `stress` — a comprehensive load-generation command app
 //! (`plans/STRESSTEST.md` ST5).
 //!
 //! `stress` follows the established `stress`/`stress-ng` command surface

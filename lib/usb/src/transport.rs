@@ -28,11 +28,11 @@
 //! client reads back). No class driver ever sees a controller register or
 //! another interface's buffer.
 
-use rustos_abi::usb_urb::{
+use tairix_abi::usb_urb::{
     decode_completion, encode_completion, encode_error_completion, UrbRequest, UsbDirection,
     UsbTransferType, URB_COMPLETION_LEN, URB_REQUEST_LEN,
 };
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::{DriverError, Errno};
 
 /// The controller-side operations the URB transport server drives.
 ///
@@ -120,7 +120,7 @@ pub trait UrbEngine {
 /// outcome.
 ///
 /// This is the controller-side body the HCD runs after
-/// [`call_recv`](rustos_abi::SyscallNumber::CALL_RECV). It is **asynchronous**:
+/// [`call_recv`](tairix_abi::SyscallNumber::CALL_RECV). It is **asynchronous**:
 ///
 /// * `Ok(Some(n))` — the transfer completed; `n` bytes landed in `data`. The
 ///   HCD frames a completion with [`frame_completion`] and replies now.
@@ -227,7 +227,7 @@ pub fn drive_urb<E: UrbEngine>(
 /// `Err` becomes a status-framed error completion, so the blocked caller is
 /// always answered and fails closed. This is the wire transformation the HCD
 /// runs immediately before
-/// [`call_reply`](rustos_abi::SyscallNumber::CALL_REPLY).
+/// [`call_reply`](tairix_abi::SyscallNumber::CALL_REPLY).
 ///
 /// # Errors
 ///
@@ -243,7 +243,7 @@ pub fn frame_completion(reply: &mut [u8], result: Result<u32, Errno>) -> Result<
 /// The class-side transport: one synchronous URB call to the HCD's endpoint.
 ///
 /// A class driver implements this over the kernel
-/// [`ipc_call`](rustos_abi::SyscallNumber::IPC_CALL) surface (`plans/USB.md`
+/// [`ipc_call`](tairix_abi::SyscallNumber::IPC_CALL) surface (`plans/USB.md`
 /// U4); a host test implements it by routing the bytes through [`drive_urb`]
 /// and [`frame_completion`].
 pub trait UrbCall {

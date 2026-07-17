@@ -24,14 +24,14 @@
 //! host's per-pool slot reclaim never observes residual credentials
 //! (zero-on-free).
 
-use rustos_abi::driver::BufferClass;
+use tairix_abi::driver::BufferClass;
 
 // `PoolId`, `SlabFreeFn`, and `DmaSlab` moved into `lib/abi` at Stage
-// 4.D Item 0-tail so the host trait (`rustos_abi::DriverHost`) can
+// 4.D Item 0-tail so the host trait (`tairix_abi::DriverHost`) can
 // name them without inverting the dependency direction. Their unit tests stay in this module against the
 // re-export so they keep exercising the same call sites and continue
 // to enjoy `alloc` access (`lib/abi` is no-alloc).
-pub use rustos_abi::driver::{DmaSlab, PoolId, SlabFreeFn};
+pub use tairix_abi::driver::{DmaSlab, PoolId, SlabFreeFn};
 
 /// Bounce buffer wrapping an owned [`DmaSlab`] for a single virtio
 /// transaction.

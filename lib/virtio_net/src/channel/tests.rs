@@ -5,15 +5,15 @@
 extern crate alloc;
 
 use super::NetChannelServer;
-use rustos_abi::driver::net::{
+use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, Net, NetOffloads, ETHERNET_HEADER_LEN,
 };
-use rustos_abi::driver::net_channel::{decode_facts_reply, decode_service_reply, AttachParams};
-use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::DriverError;
-use rustos_abi::Errno;
+use tairix_abi::driver::net_channel::{decode_facts_reply, decode_service_reply, AttachParams};
+use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::DriverError;
+use tairix_abi::Errno;
 
 /// A representative notify endpoint id (any non-reserved value).
 const NOTIFY_ENDPOINT: u64 = 0x4E45_5453_5430_3030;

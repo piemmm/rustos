@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-mem-pin"
+name = "tairix-test-mem-pin"
 description = "STRESSTEST fixture: a separately-linked pure-Rust EL0 program with five roles (parent / deny / pin / child / ipc). The first four prove mem_pin policy, budget, and no-inheritance through production spawn/wait; ipc repeatedly blocks on a private call endpoint and verifies reply plus callee-saved integer/FP, stack, control-flow, and address-space-local state across CPU migration. Built PIE and converted to rxe by the shared aarch64 control/migration chassis."
 version.workspace = true
 edition.workspace = true
@@ -12,15 +12,15 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-mem-pin"
+name = "tairix-test-mem-pin"
 path = "src/main.rs"
 
-# The program is a pure-Rust RustOS program, so it links the pure-Rust
-# userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`), which
-# exists solely for non-Rust programs. It names `rustos-abi` only for the
+# The program is a pure-Rust TAIRiX program, so it links the pure-Rust
+# userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which
+# exists solely for non-Rust programs. It names `tairix-abi` only for the
 # rlimit/errno wire types. Only on the native Tier-1 targets
 # (`target_os = "none"`); on the host it is an inert stub so
 # `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

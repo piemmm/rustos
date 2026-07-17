@@ -15,8 +15,8 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
-use rustos_vt::{char_width, Attributes, BasicColor, Color};
+use tairix_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
+use tairix_vt::{char_width, Attributes, BasicColor, Color};
 
 use crate::buffer::width_of_prefix;
 use crate::error::EditError;

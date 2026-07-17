@@ -1,4 +1,4 @@
-//! RustOS instruction decoders (`lib/disasm`).
+//! TAIRiX instruction decoders (`lib/disasm`).
 //!
 //! The file manager's disassembly viewer — and next an `objdump`-class
 //! command app — need to render machine code as text for the four Tier-1

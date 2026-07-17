@@ -1,10 +1,10 @@
 //! CCOMPAT stage CC3 QEMU exercise: the x86_64 ring-3 round-trip for the
-//! Arch HAL "enter user mode" primitive (`rustos_arch_api::EnterUser`,
+//! Arch HAL "enter user mode" primitive (`tairix_arch_api::EnterUser`,
 //! `kernel/arch/x86_64/src/userentry.rs`).
 //!
 //! ## What this test asserts
 //!
-//! The sibling `rustos-test-abi-sys-syscall-qemu` issues the `abi-sys`
+//! The sibling `tairix-test-abi-sys-syscall-qemu` issues the `abi-sys`
 //! stub from **ring 0** — the x86_64 `syscall` instruction traps into the
 //! kernel entry path identically from any privilege level, so that test
 //! never crosses a privilege boundary. This test does: it drops the CPU
@@ -16,19 +16,19 @@
 //!
 //! ## How it asserts it
 //!
-//! The production `rustos-kernel` boot pipeline runs until
+//! The production `tairix-kernel` boot pipeline runs until
 //! `AuditEvent::BootCompleted` (`EventId(4004)`). By that point the GDT
 //! carries the ring-3 code/data descriptors, the TSS is installed, and
 //! `syscall`/`IA32_LSTAR` entry is enabled on the BSP
 //! (`init_local_syscalls`). The audit Sink that observes `BootCompleted`
 //! then, using the Stage-3 paging primitives
-//! (`rustos_arch_x86_64::paging`):
+//! (`tairix_arch_x86_64::paging`):
 //!
 //! 1. Builds one `paging::AddressSpace` that identity-maps the low
 //!    32 MiB **and** mirrors the higher-half kernel window, so the kernel
 //!    code/stack/data, the per-CPU `swapgs` TLS, the dispatch callback,
 //!    and this stub's page stay reachable after the CR3 switch.
-//! 2. Aliases the page(s) holding the `ros_sys_cap_query` stub at a
+//! 2. Aliases the page(s) holding the `tairix_sys_cap_query` stub at a
 //!    ring-3 virtual address (`USER_CODE_VA`) **user-accessible,
 //!    executable, not writable** (`map_4k_user(writable = false)` — W^X), and maps a USER read/write stack at
 //!    `USER_STACK_VA`. The kernel's own mappings carry no USER bit, so
@@ -56,7 +56,7 @@
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
 //! (no hacks; — fail closed), mirroring
-//! `rustos-test-abi-sys-syscall-qemu`.
+//! `tairix-test-abi-sys-syscall-qemu`.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -65,7 +65,7 @@
 // — test affordances must never reach a release binary.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-enter-user-qemu-x86_64: the `test-hooks` Cargo feature is a \
+    "tairix-test-enter-user-qemu-x86_64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
@@ -77,15 +77,15 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
-    use rustos_arch_api::{EnterUser, UserEntry};
-    use rustos_arch_x86_64::userentry::UserMode;
-    use rustos_arch_x86_64::{paging, qemu_exit, syscall_entry};
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
+    use tairix_arch_api::{EnterUser, UserEntry};
+    use tairix_arch_x86_64::userentry::UserMode;
+    use tairix_arch_x86_64::{paging, qemu_exit, syscall_entry};
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     /// Static heap for the bump allocator (per the production bin).
     static mut HEAP: Heap = Heap::ZERO;
@@ -102,7 +102,7 @@ mod kernel {
     /// `EventId` emitted when every boot init phase completed.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
-    /// Capability id passed to `ros_sys_cap_query` and expected in
+    /// Capability id passed to `tairix_sys_cap_query` and expected in
     /// argument 0. Any well-known [`CapabilityId`] works — the test
     /// asserts the stub's *marshalling*, not the kernel's grant decision.
     const EXPECTED_CAP: CapabilityId = CapabilityId::TIME_SET;
@@ -194,7 +194,7 @@ mod kernel {
         };
 
         // ---- Alias the stub's page(s) into ring 3 (USER|R|X). ----
-        let func_va = rustos_abi_sys::sys_cap_query as *const () as u64;
+        let func_va = tairix_abi_sys::sys_cap_query as *const () as u64;
         let func_phys = func_va - paging::KERNEL_VMA_BASE;
         let func_page = func_phys & !(page - 1);
         // Map the stub's page plus the following one as cheap insurance
@@ -249,8 +249,8 @@ mod kernel {
         if space
             .map_4k(
                 &PAGE_TABLE_POOL,
-                rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
-                rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+                tairix_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+                tairix_arch_x86_64::preempt::LAPIC_BASE_PHYS,
                 true,
             )
             .is_none()
@@ -269,7 +269,7 @@ mod kernel {
         // dispatch callback is installed and the GDT user selectors / TSS
         // / `syscall` entry were installed during boot. The `iretq`
         // sequence is the one HAL definition
-        // (`rustos_arch_x86_64::userentry`).
+        // (`tairix_arch_x86_64::userentry`).
         unsafe {
             UserMode::new().enter_user(UserEntry::new(
                 user_entry,
@@ -279,9 +279,9 @@ mod kernel {
         }
     }
 
-    /// Forward to the shared bridge in `rustos_kernel`.
+    /// Forward to the shared bridge in `tairix_kernel`.
     #[panic_handler]
-    fn rustos_test_enter_user_qemu_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_test_enter_user_qemu_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
@@ -292,7 +292,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }
@@ -313,7 +313,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[panic_handler]
-fn rustos_test_enter_user_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
+fn tairix_test_enter_user_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
         // SAFETY: same as above.
         unsafe {

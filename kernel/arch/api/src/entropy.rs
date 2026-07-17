@@ -1,10 +1,10 @@
 //! Platform entropy-source surface of the Arch HAL.
 //!
-//! RustOS has exactly one kernel cryptographic random subsystem, and it is
+//! TAIRiX has exactly one kernel cryptographic random subsystem, and it is
 //! useless until it is *seeded*: a CSPRNG with no entropy input produces no
 //! output (`random_get` fails closed, process-instance ids lose their
 //! unpredictable half, no key or nonce can be drawn). Raw entropy enters the
-//! system through `lib/rng`'s [`EntropySource`](rustos_rng::EntropySource)
+//! system through `lib/rng`'s [`EntropySource`](tairix_rng::EntropySource)
 //! seam, and the highest-quality, lowest-latency input on most machines is a
 //! CPU instruction the architecture exposes: x86 `RDSEED`/`RDRAND`, ARMv8.5
 //! `RNDR`/`RNDRRS`, the RISC-V `Zkr` `seed` CSR. Only the architecture port
@@ -16,8 +16,8 @@
 //!
 //! * [`PlatformEntropy`] — the per-port handle the kernel reaches through to
 //!   draw raw hardware entropy. It is a [`HardwareRng`] (so `lib/rng` can mix
-//!   it through [`HardwareEntropy`](rustos_rng::HardwareEntropy) and
-//!   [`CombinedSource`](rustos_rng::CombinedSource) before it ever feeds the
+//!   it through [`HardwareEntropy`](tairix_rng::HardwareEntropy) and
+//!   [`CombinedSource`](tairix_rng::CombinedSource) before it ever feeds the
 //!   DRBG — hardware output is *input material*, never final output) plus an
 //!   honest [`EntropyProfile`] declaration.
 //! * [`EntropyProfile`] / [`EntropySupport`] — the honest declaration,
@@ -43,7 +43,7 @@
 //! is one mixed input — additional software sources (boot-time timing jitter,
 //! an interrupt-arrival pool) are a tracked follow-up, not built here.
 
-use rustos_rng::{EntropyError, HardwareRng};
+use tairix_rng::{EntropyError, HardwareRng};
 
 /// One entropy feature's status on a given port.
 ///

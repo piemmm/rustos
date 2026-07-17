@@ -1,4 +1,4 @@
-# `rustos-rm` — remove files and directories
+# `tairix-rm` — remove files and directories
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `rm` removes each
 of its operands in order. A non-directory operand (a regular file, a
@@ -10,8 +10,8 @@ rather than reported. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
-depends only on the audited `rustos-abi` crate and the shared `lib/help`
-engine (plus `rustos-rt` for the freestanding `Run` binary), so it never
+depends only on the audited `tairix-abi` crate and the shared `lib/help`
+engine (plus `tairix-rt` for the freestanding `Run` binary), so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
 the removal library and the `rm` command app's `Run` binary
 (`src/run.rs`), registered as the self-contained store bundle
@@ -79,7 +79,7 @@ stops the run before any later operand, and there is no panic
 
 ## Tests
 
-`cargo test -p rustos-rm` drives the parser and the removal engine
+`cargo test -p tairix-rm` drives the parser and the removal engine
 against an in-memory tree and a recording output: the command grammar
 (every option, clustered short flags, `-`/`--`, the no-operand and
 usage-error paths), a single file, several files in order, the

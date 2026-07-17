@@ -1,6 +1,6 @@
 //! Build-time derivation of [`SYSCALL_TABLE_HASH`].
 //!
-//! the charter makes `rustos_abi::ENCODED_TABLE` the single source of
+//! the charter makes `tairix_abi::ENCODED_TABLE` the single source of
 //! truth for the `abi-v1` syscall table, and the charter forbids a second,
 //! hand-maintained definition of anything derived from it. The table's
 //! SHA-256 fingerprint is exactly such a derived value, so it is computed
@@ -9,8 +9,8 @@
 //! re-derives the fingerprint on the next build. The generated expression
 //! is `include!`d by `src/table.rs`.
 //!
-//! Running on the host, this script depends on `rustos-abi` and
-//! `rustos-crypto` as `[build-dependencies]`; both are the same path
+//! Running on the host, this script depends on `tairix-abi` and
+//! `tairix-crypto` as `[build-dependencies]`; both are the same path
 //! crates the library half links, so the digest computed here is the
 //! digest the kernel sees. `verify_table_hash` and `cargo xtask abi-check`
 //! still recompute and cross-check the linked value as defence in depth.
@@ -20,8 +20,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use rustos_abi::ENCODED_TABLE;
-use rustos_crypto::sha256;
+use tairix_abi::ENCODED_TABLE;
+use tairix_crypto::sha256;
 
 fn main() {
     let digest = sha256(&ENCODED_TABLE);

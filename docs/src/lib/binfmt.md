@@ -1,6 +1,6 @@
-# `rustos-binfmt` — executable-container decoder
+# `tairix-binfmt` — executable-container decoder
 
-`rustos_binfmt` (`lib/binfmt`) is RustOS's one definition of how an executable
+`tairix_binfmt` (`lib/binfmt`) is TAIRiX's one definition of how an executable
 *file* is read without being loaded: a typed, borrowed, fail-closed view of the
 `rxe` load image and manifest, of ELF64, and of wasm module structure. The file
 manager's disassembly viewer consumes it first; an `objdump`/`readelf`-class

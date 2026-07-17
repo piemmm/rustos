@@ -1,4 +1,4 @@
-# `rustos-rmdir` — remove empty directories
+# `tairix-rmdir` — remove empty directories
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/rmdir.app/` so the shell resolves the bare
@@ -17,13 +17,13 @@ from its bundled `Help/` tree through the shared `lib/help` engine, in
 the locale the inherited `LANG` variable names.
 
 The `-p` ancestor walk spells each prefix through the shared path
-grammar's own rule (`rustos_path::Path::prefix`), so an alias-rooted
+grammar's own rule (`tairix_path::Path::prefix`), so an alias-rooted
 operand (`Home:/tools/bin`) walks correctly, the bare root is never
 asked to be removed, and the tool carries no second path parser.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `rustos-abi`, `rustos-path`, and `rustos-help` crates, so it never
+shared `tairix-abi`, `tairix-path`, and `tairix-help` crates, so it never
 links a kernel or driver crate. Its manifest (`AppInfo.toml`) requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every removal per-inode under the

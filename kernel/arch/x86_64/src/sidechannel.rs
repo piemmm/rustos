@@ -1,14 +1,14 @@
 //! x86_64 side-channel mitigations.
 //!
 //! Implements the Arch HAL
-//! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
+//! [`SideChannelMitigation`](tairix_arch_api::SideChannelMitigation)
 //! surface for x86_64, whose silicon is vulnerable to the full microarchitectural
 //! side-channel zoo (Meltdown, Spectre v1/v2, MDS, L1TF, MMIO stale
 //! data). The barrier primitives the kernel calls on each privilege
 //! transition are emitted here; the declarative
-//! [`MitigationProfile`](rustos_arch_api::MitigationProfile) states
+//! [`MitigationProfile`](tairix_arch_api::MitigationProfile) states
 //! honestly which mitigations are applied today and which are
-//! tracked as [`Mitigation::Pending`](rustos_arch_api::Mitigation::Pending)
+//! tracked as [`Mitigation::Pending`](tairix_arch_api::Mitigation::Pending)
 //! behind a not-yet-landed subsystem.
 //!
 //! # What is applied today
@@ -38,10 +38,10 @@
 //!
 //! Both gaps are declared honestly so the conformance suite accepts the
 //! port today while
-//! [`MitigationProfile::is_release_ready`](rustos_arch_api::MitigationProfile::is_release_ready)
+//! [`MitigationProfile::is_release_ready`](tairix_arch_api::MitigationProfile::is_release_ready)
 //! continues to report the port as not-yet-shippable until they land.
 
-use rustos_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
+use tairix_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
 
 /// x86_64 implementation of the Arch HAL side-channel surface.
 ///
@@ -144,7 +144,7 @@ fn clear_cpu_buffers() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::sidechannel::conformance;
+    use tairix_arch_api::sidechannel::conformance;
 
     #[test]
     fn passes_side_channel_conformance() {

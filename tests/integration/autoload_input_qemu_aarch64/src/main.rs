@@ -1,6 +1,6 @@
 //! `plans/PI.md` P10 5d-2-ii(b-2-iii) + `plans/DISPLAY.md` D7d (first
 //! stage) QEMU integration test: boot the production aarch64
-//! `rustos-kernel` pipeline on the `virt` board **as a display world** —
+//! `tairix-kernel` pipeline on the `virt` board **as a display world** —
 //! a `ramfb` display beside the virtio keyboard and mouse — with a
 //! planted whole-disk encrypted-root image that carries the
 //! **kernel-signed virtio-input driver bundle and the framebuffer
@@ -25,7 +25,7 @@
 //!   process spawn handshake with a stub program.
 //!
 //! This vertical composes them on the production boot path: it attaches the
-//! shared `rustos_test_encrypted_root_image` whole-disk image, additionally
+//! shared `tairix_test_encrypted_root_image` whole-disk image, additionally
 //! planted with the autoload driver bundles the `image_drivers` pipeline
 //! cross-compiles and signs (a three-partition disk whose **read-only
 //! `/System` volume** carries the signed `virtio_kbd` bundle at the
@@ -103,7 +103,7 @@
 //!    spawn that can occur after the typing gate is the shell executing
 //!    the typed command).
 //!
-//! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: rustos_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+//! [`TERMINAL_ROUND_TRIP_DELIVERIES`]: tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
 //!
 //! Reaching them requires every preceding step to have succeeded: the
 //! `/System` volume mounted and served, the store listed, each signed
@@ -149,12 +149,12 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_kernel_core::AuditEvent;
-    use rustos_log::{Event, Sink};
-    use rustos_util::fmt::format_hex_u64;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::boot as boot_aarch64;
+    use tairix_kernel_core::AuditEvent;
+    use tairix_log::{Event, Sink};
+    use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -221,10 +221,10 @@ mod kernel {
                     continue;
                 }
                 match field.value {
-                    rustos_log::FieldValue::Str("key") => {
+                    tairix_log::FieldValue::Str("key") => {
                         self.key_delivered.store(true, Ordering::Release);
                     }
-                    rustos_log::FieldValue::Str("pointer") => {
+                    tairix_log::FieldValue::Str("pointer") => {
                         self.pointer_delivered.store(true, Ordering::Release);
                     }
                     _ => {}
@@ -240,12 +240,12 @@ mod kernel {
         fn note_endpoint_created(&self, event: &Event<'_>) {
             let mut expected_buf = [0u8; 16];
             let expected =
-                format_hex_u64(rustos_abi::display_ipc::DISPLAY_ENDPOINT, &mut expected_buf);
+                format_hex_u64(tairix_abi::display_ipc::DISPLAY_ENDPOINT, &mut expected_buf);
             for field in event.fields {
                 if field.key != "endpoint" {
                     continue;
                 }
-                if let rustos_log::FieldValue::Str(value) = field.value {
+                if let tairix_log::FieldValue::Str(value) = field.value {
                     if value == expected {
                         self.display_endpoint_bound.store(true, Ordering::Release);
                     }
@@ -264,9 +264,9 @@ mod kernel {
                 self.note_input_delivered(event);
             } else if event.id.0 == AuditEvent::UsersDbLoaded.id().0 {
                 self.users_db_loaded.store(true, Ordering::Release);
-            } else if event.id.0 == rustos_kernel_ipc::AuditEvent::CallEndpointCreated.id().0 {
+            } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallEndpointCreated.id().0 {
                 self.note_endpoint_created(event);
-            } else if event.id.0 == rustos_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
+            } else if event.id.0 == tairix_kernel_ipc::AuditEvent::MessageDelivered.id().0 {
                 self.window_events_delivered.fetch_add(1, Ordering::AcqRel);
             } else if event.id.0 == AuditEvent::ProcessSpawned.id().0 {
                 // Attributable by ordering, not by name: every other spawn
@@ -275,7 +275,7 @@ mod kernel {
                 // count can only be the shell executing the typed command
                 // (the contract crate's rationale).
                 if self.window_events_delivered.load(Ordering::Acquire)
-                    >= rustos_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
+                    >= tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_DELIVERIES
                 {
                     self.shell_round_trip.store(true, Ordering::Release);
                 }
@@ -299,12 +299,12 @@ mod kernel {
     /// finisher parks the CPU, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_autoload_input_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_autoload_input_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
     /// address is forwarded to the production boot pipeline with the
@@ -320,8 +320,8 @@ mod kernel {
             // default `Info` filter; the harness waits for this record's
             // `sc=irq_bind` serial marker before injecting the key, so
             // boot with the filter lowered.
-            rustos_log::Level::Debug,
-            &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
+            tairix_log::Level::Debug,
+            &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }
 }

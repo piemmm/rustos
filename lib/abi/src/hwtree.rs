@@ -1,6 +1,6 @@
 //! The architecture-neutral hardware tree.
 //!
-//! RustOS detects the hardware actually present at boot and autoloads the
+//! TAIRiX detects the hardware actually present at boot and autoloads the
 //! matching drivers; it does not ship a hand-maintained static device list. The *single* inventory contract is the **hardware
 //! tree** defined here: each architecture port normalises its platform's
 //! native source (ACPI on x86_64, a flattened device tree on aarch64 /

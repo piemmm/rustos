@@ -11,7 +11,7 @@ man — dangos dogfen gymorth gorchymyn
 Mae'n dangos y ddogfen gymorth y mae bwndel rhaglen gorchymyn yn ei
 chynnwys, yn eich iaith chi pan fo cyfieithiad ar gael.
 
-Mae pob rhaglen RustOS yn fwndel rhaglen sy'n cario coeden `Help/`: un
+Mae pob rhaglen TAIRiX yn fwndel rhaglen sy'n cario coeden `Help/`: un
 ddogfen strwythuredig i bob gorchymyn neu bwnc, i bob iaith. Mae `man` yn
 datrys `<command>` yn union fel y gragen — storfa raglenni'r system yn
 gyntaf, yna'r cyfeiriaduron ar `PATH` — felly mae'r dudalen a ddangosir

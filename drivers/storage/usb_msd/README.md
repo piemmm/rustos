@@ -1,4 +1,4 @@
-# `rustos-drv-storage-usb-msd` — USB mass-storage class driver
+# `tairix-drv-storage-usb-msd` — USB mass-storage class driver
 
 `plans/DEVICES.md` D2/D5. The autoloaded **user-space USB mass-storage
 *class* driver** — the `Run` binary `devmgr` spawns when a mass-storage
@@ -20,9 +20,9 @@ binary works behind any host controller that speaks the URB transport
 
 ## What it does
 
-`main` (a freestanding pure-Rust `rustos-rt` program):
+`main` (a freestanding pure-Rust `tairix-rt` program):
 
-1. Builds `rustos_drvrt::RtDriverHost::from_grants_query` over its granted
+1. Builds `tairix_drvrt::RtDriverHost::from_grants_query` over its granted
    resources (the interface node's two transport grants — no MMIO/DMA), reads
    the URB endpoint id and maps the shared URB data buffer.
 2. Reads the device's own **configuration descriptor** over control-IN and
@@ -39,8 +39,8 @@ binary works behind any host controller that speaks the URB transport
    16-byte form past the 32-bit LBA horizon), and the write-protect bit
    (`MODE SENSE(6)` for the transparent set, `MODE SENSE(10)` for UFI).
 4. Publishes one **storage-class** hardware-tree node per ready LUN, carrying
-   a `rustos,usb-msd-lun` compatible key and two grants: a block-service call
-   endpoint and a 32 KiB shared data window (`rustos_abi::blkio` — the
+   a `tairix,usb-msd-lun` compatible key and two grants: a block-service call
+   endpoint and a 32 KiB shared data window (`tairix_abi::blkio` — the
    request/completion frames a consumer such as the D3 volume manager
    drives).
 5. Parks on a kernel wait-set over the LUN endpoints and serves each

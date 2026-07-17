@@ -14,7 +14,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 
 use crate::edge::{Edge, Orientation};
 use crate::taskbar::TaskbarConfig;

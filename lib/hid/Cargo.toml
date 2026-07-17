@@ -1,6 +1,6 @@
 [package]
-name = "rustos-hid"
-description = "RustOS HID boot-protocol decode + console producer (§2.2, §6, §17.4 — plans/USB.md): the arch-neutral, transport-agnostic HID boot-report decode the USB-HID class drivers compose, so a class driver does not re-implement it. Controller bring-up lives in the host-controller driver, not here. no_std, fail-closed (§2.9)."
+name = "tairix-hid"
+description = "TAIRiX HID boot-protocol decode + console producer (§2.2, §6, §17.4 — plans/USB.md): the arch-neutral, transport-agnostic HID boot-report decode the USB-HID class drivers compose, so a class driver does not re-implement it. Controller bring-up lives in the host-controller driver, not here. no_std, fail-closed (§2.9)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,14 +13,14 @@ publish.workspace = true
 # decoders and orchestration are written against, and the `DriverError` /
 # `CapabilityId` / `HwResource` vocabulary they fail closed with — one ABI
 # definition (§2.2).
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The decoded keyboard `Key` vocabulary the console producer resolves HID
 # usages into (§17.4 — a `lib/*` crate).
-rustos-input = { path = "../input", version = "=0.0.0" }
+tairix-input = { path = "../input", version = "=0.0.0" }
 # The shared terminal key map that turns each resolved key press into the
 # `KeyInput` record a driver injects through `key_inject` — the one definition
 # of the `Key`→record map (§2.2).
-rustos-keymap = { path = "../keymap", version = "=0.0.0" }
+tairix-keymap = { path = "../keymap", version = "=0.0.0" }
 
 [lints]
 workspace = true

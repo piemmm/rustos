@@ -12,10 +12,10 @@
 //! closed rather than driving the scan-out engine off the end of its
 //! list.
 
-use rustos_abi::driver::display::{AccelLayer, DisplayFormat, DisplayMode};
-use rustos_abi::driver::mmio::WindowError;
-use rustos_abi::{DriverError, RegisterWindow};
-use rustos_vcmailbox::{FirmwareFramebuffer, MailboxError};
+use tairix_abi::driver::display::{AccelLayer, DisplayFormat, DisplayMode};
+use tairix_abi::driver::mmio::WindowError;
+use tairix_abi::{DriverError, RegisterWindow};
+use tairix_vcmailbox::{FirmwareFramebuffer, MailboxError};
 
 /// Maximum number of hardware planes (and per-plane source buffers) the
 /// driver tracks. The VC4 HVS exposes a small fixed plane budget; eight
@@ -94,7 +94,7 @@ impl ScanoutConfig {
     }
 
     /// Produce the scan-out config from the firmware's validated
-    /// framebuffer answer ([`rustos_vcmailbox::discover_framebuffer`]),
+    /// framebuffer answer ([`tairix_vcmailbox::discover_framebuffer`]),
     /// translating its `VideoCore` bus address to the ARM physical base
     /// the host maps.
     ///

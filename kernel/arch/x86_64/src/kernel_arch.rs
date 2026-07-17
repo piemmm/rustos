@@ -2,7 +2,7 @@
 //!
 //! `X86_64Arch` is the concrete handle the architecture-neutral
 //! kernel reaches for through the Arch HAL
-//! [`rustos_arch_api::SchedulerArch`]. It is the
+//! [`tairix_arch_api::SchedulerArch`]. It is the
 //! only production implementation of that trait inside the workspace
 //! (the host-side `TestArch` shipped by `kernel/sched` is
 //! feature-gated to `test-arch`).
@@ -28,17 +28,17 @@
 //!   on host builds, records the IPI in an in-instance counter so
 //!   host tests can assert preemption was requested.
 //! - `halt` — a free function that masks interrupts and parks the
-//!   CPU forever on `hlt`. The companion `rustos-kernel` bin crate
+//!   CPU forever on `hlt`. The companion `tairix-kernel` bin crate
 //!   (Stage 3a (c7-bin)) uses it to satisfy
-//!   `rustos_kernel_core::KernelArch::halt`. The trait impl lives in
-//!   the bin crate because pulling `rustos-kernel-core` into the arch
+//!   `tairix_kernel_core::KernelArch::halt`. The trait impl lives in
+//!   the bin crate because pulling `tairix-kernel-core` into the arch
 //!   crate would transitively force a `#[global_allocator]` into the
 //!   two pre-existing freestanding Stage-2 QEMU test bins — see the
 //!   note in `kernel/arch/x86_64/Cargo.toml`.
 
 use core::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{
+use tairix_arch_api::{
     CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
 };
 
@@ -472,7 +472,7 @@ impl SchedulerArch for X86_64Arch {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             let deadline = deadline_ns
-                .map(|ns| rustos_arch_api::wakeup::ns_to_ticks(ns, crate::preempt::tsc_hz()));
+                .map(|ns| tairix_arch_api::wakeup::ns_to_ticks(ns, crate::preempt::tsc_hz()));
             crate::preempt::record_wakeup_deadline(deadline);
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
@@ -733,7 +733,7 @@ mod tests {
         ];
         let madt = crate::acpi::tests::build_madt(0xFEE0_0000, 0x1, &entries);
         let discovery = crate::platform::AcpiDiscovery::new(&madt);
-        rustos_arch_api::conformance::run_all(
+        tairix_arch_api::conformance::run_all(
             &arch,
             &crate::sidechannel::SideChannel::new(),
             &crate::memtag::MemoryTags::new(),
@@ -752,9 +752,9 @@ mod tests {
     fn passes_cross_cpu_tlb_shootdown_conformance() {
         static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
         let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
-        rustos_arch_api::xtlb::conformance::run_all(&arch, 0x10_0000_0000);
+        tairix_arch_api::xtlb::conformance::run_all(&arch, 0x10_0000_0000);
         let erased: &dyn CrossCpuTlbShootdown = &arch;
-        rustos_arch_api::xtlb::conformance::run_all(erased, 0x10_0000_0000);
+        tairix_arch_api::xtlb::conformance::run_all(erased, 0x10_0000_0000);
     }
 
     /// / W14: the port passes the secondary-bring-up conformance
@@ -768,9 +768,9 @@ mod tests {
     fn passes_secondary_bringup_conformance() {
         static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
         let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
-        rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+        tairix_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
         let erased: &dyn SecondaryBringup = &arch;
-        rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+        tairix_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
     }
 
     /// The boot CPU and any unmapped dense id are refused before any

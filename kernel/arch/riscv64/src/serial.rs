@@ -1,9 +1,9 @@
-//! SBI-console-backed [`rustos_log::Sink`] for the freestanding riscv64
+//! SBI-console-backed [`tairix_log::Sink`] for the freestanding riscv64
 //! kernel.
 //!
-//! Mirrors the x86_64 COM1 sink (`rustos_kernel::x86_64::serial_sink`): one
+//! Mirrors the x86_64 COM1 sink (`tairix_kernel::x86_64::serial_sink`): one
 //! formatted line per event, in the one shared diagnostic format
-//! ([`rustos_log::write_diag_line`]) the `kernel/core` audit consumers and
+//! ([`tairix_log::write_diag_line`]) the `kernel/core` audit consumers and
 //! the QEMU serial scraper expect —
 //!
 //! ```text
@@ -17,7 +17,7 @@
 //! bootstrap area). The underlying shared mutable state is the UART
 //! behind the SBI console, not this wrapper.
 
-use rustos_log::{Event, Sink};
+use tairix_log::{Event, Sink};
 
 use crate::sbi;
 
@@ -83,7 +83,7 @@ impl Sink for SerialSink {
         // A serial capture renders ANSI SGR, so the level tag is coloured;
         // no monotonic-uptime seam is wired on this port yet, so the stamp
         // is omitted.
-        rustos_log::write_diag_line(&mut SbiWriter, None, true, event);
+        tairix_log::write_diag_line(&mut SbiWriter, None, true, event);
     }
 }
 

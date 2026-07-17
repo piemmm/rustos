@@ -15,7 +15,7 @@
 //! its behaviour identical to a correct production worker.
 
 use alloc::vec::Vec;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::host::Launcher;
 use crate::proto::{Channel, FRAME_HEADER_LEN, MAX_FRAME};
@@ -140,7 +140,7 @@ mod tests {
     use crate::host::ParserSandbox;
     use crate::worker::Service;
     use alloc::vec::Vec;
-    use rustos_log::{Event, Sink};
+    use tairix_log::{Event, Sink};
 
     /// Discards every event (the loopback happy path logs nothing).
     struct NullSink;

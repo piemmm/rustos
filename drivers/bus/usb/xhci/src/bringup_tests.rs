@@ -6,7 +6,7 @@
 //! heap, a DMA host minting leaked [`DmaSlab`]s, a no-op [`Delay`]). The live
 //! controller bring-up — the first 32-bit read off a real BAR returning a
 //! plausible `CAPLENGTH` — is the on-metal acceptance item; over the inert
-//! zeroed window here [`Xhci::open`](rustos_usb::Xhci::open) fails closed with
+//! zeroed window here [`Xhci::open`](tairix_usb::Xhci::open) fails closed with
 //! [`DriverError::DeviceFault`], which is exactly the boundary the "reaches the
 //! controller" test asserts.
 
@@ -15,9 +15,9 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::ptr::NonNull;
 
-use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
-use rustos_abi::hwtree::HwResource;
-use rustos_abi::{
+use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
+use tairix_abi::hwtree::HwResource;
+use tairix_abi::{
     CapabilityId, Delay, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper,
     RegisterWindow,
 };
@@ -26,8 +26,8 @@ use super::{
     bring_up_controller, bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
     ControllerResources,
 };
-use rustos_usb::device::EventWait;
-use rustos_usb::XhciOpenStage;
+use tairix_usb::device::EventWait;
+use tairix_usb::XhciOpenStage;
 
 /// The controller's register BAR base/len the HCD maps (the metal VL805 BAR0
 /// is 4 KiB).
@@ -191,7 +191,7 @@ fn requires_a_dma_host() {
 // The DMA aperture and allocation-failure refusals live in the bank the
 // engine allocates through, not in this orchestration: every chunk — the
 // shared structures and each device's region — is aperture-checked and
-// exhaustion-checked at allocation time. `rustos_usb`'s `SlabBank` unit
+// exhaustion-checked at allocation time. `tairix_usb`'s `SlabBank` unit
 // tests prove those paths; here the composition only wires the bank up
 // with the discovered aperture top.
 

@@ -12,7 +12,7 @@
 //! # Read line discipline
 //!
 //! Line assembly runs the read line discipline's **buffer** half
-//! ([`rustos_vt::line`]), the one shared definition the kernel console echo
+//! ([`tairix_vt::line`]), the one shared definition the kernel console echo
 //! and login's prompt reads also key off: CR and LF both terminate a line
 //! (a serial terminal sends CR for the Return key, a pipe or script LF, and
 //! a CRLF pair counts once), and the erase control (Backspace / Delete)
@@ -42,10 +42,10 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, Human, InputMode, Severity, StdInfoKind, StdInfoRecord};
-use rustos_curses::{Event, Input as KeyDecoder};
-use rustos_vt::control;
-use rustos_vt::line::{LineEditor, LineFeed};
+use tairix_abi::{Errno, Human, InputMode, Severity, StdInfoKind, StdInfoRecord};
+use tairix_curses::{Event, Input as KeyDecoder};
+use tairix_vt::control;
+use tairix_vt::line::{LineEditor, LineFeed};
 
 use crate::complete::{complete, Completion, DirLister};
 use crate::editor::{Completer, Editor, ReadOutcome, Session};
@@ -124,7 +124,7 @@ enum LineEvent {
 }
 
 /// Assembles edited command lines from `stdin` reads by running the read
-/// line discipline's **buffer** half ([`rustos_vt::line`]) over each input
+/// line discipline's **buffer** half ([`tairix_vt::line`]) over each input
 /// byte — the same shared definition login's prompt reads and the kernel
 /// console echo key off, so what the reader keeps always matches what the
 /// screen shows. CR and LF both terminate a line (a serial terminal sends CR
@@ -592,7 +592,7 @@ mod tests {
     struct RawScriptedInput {
         input: Vec<u8>,
         pos: usize,
-        modes: alloc::rc::Rc<core::cell::RefCell<Vec<rustos_abi::InputMode>>>,
+        modes: alloc::rc::Rc<core::cell::RefCell<Vec<tairix_abi::InputMode>>>,
     }
 
     impl RawScriptedInput {
@@ -616,7 +616,7 @@ mod tests {
 
         fn write_info(&mut self, _bytes: &[u8]) {}
 
-        fn set_mode(&mut self, mode: rustos_abi::InputMode) -> Result<(), rustos_abi::Errno> {
+        fn set_mode(&mut self, mode: tairix_abi::InputMode) -> Result<(), tairix_abi::Errno> {
             self.modes.borrow_mut().push(mode);
             Ok(())
         }
@@ -633,14 +633,14 @@ mod tests {
         fn list_dir(
             &self,
             dir: &str,
-        ) -> Result<Vec<crate::complete::DirEntryInfo>, rustos_abi::Errno> {
+        ) -> Result<Vec<crate::complete::DirEntryInfo>, tairix_abi::Errno> {
             if dir == "/System/Apps" {
                 return Ok(alloc::vec![crate::complete::DirEntryInfo {
                     name: String::from("cat.app"),
                     is_dir: true,
                 }]);
             }
-            Err(rustos_abi::Errno::NotFound)
+            Err(tairix_abi::Errno::NotFound)
         }
     }
 
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn interactive_session_switches_disciplines_around_commands() {
-        use rustos_abi::InputMode;
+        use tairix_abi::InputMode;
 
         let host = ScriptedHost::new();
         let console = RecordingConsole::new();

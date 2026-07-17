@@ -4,7 +4,7 @@
 //!
 //! The consuming vertical (`tests/integration/mem_map_qemu_aarch64`) builds
 //! this program into a hardware-isolated EL0 address space, installs a
-//! `MemMap` producer backed by `rustos_kernel_mem::map_anonymous` /
+//! `MemMap` producer backed by `tairix_kernel_mem::map_anonymous` /
 //! `unmap_anonymous` over that *live* space, and drives the program under the
 //! live scheduler. The program:
 //!
@@ -23,7 +23,7 @@
 //! final `return` at all (no fault) is itself a failure code.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt` and the shared `abi-v1` types (`rustos-abi`), never the
+//! runtime `tairix-rt` and the shared `abi-v1` types (`tairix-abi`), never the
 //! C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
 //! `rxe` blob by the consuming test's build script. On
 //! the host it is an inert stub so `cargo build --workspace`, clippy, and fmt
@@ -36,28 +36,28 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::MapFlags;
+    use tairix_abi::MapFlags;
 
     /// Default region base when the consuming build did not pin one through
-    /// `RUSTOS_MEM_MAP_ADDR`. 64 GiB + 16 MiB — well above both the kernel's
+    /// `TAIRIX_MEM_MAP_ADDR`. 64 GiB + 16 MiB — well above both the kernel's
     /// 2 GiB identity window and the program image / stack / startup block at
     /// the 64 GiB bias — so the region lands on freshly walked stage-1 tables.
     const DEFAULT_REGION_VA: u64 = (64 << 30) + (16 << 20);
 
     /// Default region length (two pages) when the consuming build did not pin
-    /// one through `RUSTOS_MEM_MAP_LEN`.
+    /// one through `TAIRIX_MEM_MAP_LEN`.
     const DEFAULT_REGION_LEN: usize = 2 * 4096;
 
     /// Virtual base the region is mapped at. The consuming vertical's build
-    /// script sets `RUSTOS_MEM_MAP_ADDR` (decimal) so the program and the
+    /// script sets `TAIRIX_MEM_MAP_ADDR` (decimal) so the program and the
     /// kernel's fault check agree on the address.
-    const REGION_VA: u64 = match option_env!("RUSTOS_MEM_MAP_ADDR") {
+    const REGION_VA: u64 = match option_env!("TAIRIX_MEM_MAP_ADDR") {
         Some(s) => parse_u64(s.as_bytes(), DEFAULT_REGION_VA),
         None => DEFAULT_REGION_VA,
     };
 
-    /// Length in bytes of the region, pinned by `RUSTOS_MEM_MAP_LEN` (decimal).
-    const REGION_LEN: usize = match option_env!("RUSTOS_MEM_MAP_LEN") {
+    /// Length in bytes of the region, pinned by `TAIRIX_MEM_MAP_LEN` (decimal).
+    const REGION_LEN: usize = match option_env!("TAIRIX_MEM_MAP_LEN") {
         Some(s) => parse_u64(s.as_bytes(), DEFAULT_REGION_LEN as u64) as usize,
         None => DEFAULT_REGION_LEN,
     };
@@ -111,13 +111,13 @@ mod program {
         ((i as u8) ^ 0xA5).wrapping_add(0x11)
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall — so
     /// any `return` here is observed by the kernel as an `exit` (a failure,
     /// since the success path is the deliberate fault that never returns).
     fn main() -> i32 {
         // 1. Map a fresh anonymous RW region at exactly REGION_VA.
-        let base = rustos_rt::mem_map(REGION_LEN, MapFlags::FIXED, REGION_VA);
+        let base = tairix_rt::mem_map(REGION_LEN, MapFlags::FIXED, REGION_VA);
         if base < 0 || base as u64 != REGION_VA {
             return FAIL_MAP;
         }
@@ -150,7 +150,7 @@ mod program {
         }
 
         // 3. Release the region.
-        if rustos_rt::mem_unmap(REGION_VA, REGION_LEN) != 0 {
+        if tairix_rt::mem_unmap(REGION_VA, REGION_LEN) != 0 {
             return FAIL_UNMAP;
         }
 
@@ -169,13 +169,13 @@ mod program {
         FAIL_NO_FAULT
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the crate
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

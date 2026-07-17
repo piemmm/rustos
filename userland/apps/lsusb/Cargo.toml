@@ -1,6 +1,6 @@
 [package]
-name = "rustos-lsusb"
-description = "RustOS `lsusb` CLI: list discovered USB devices (`plans/DEVICES.md` DEVICE1 V3)."
+name = "tairix-lsusb"
+description = "TAIRiX `lsusb` CLI: list discovered USB devices (`plans/DEVICES.md` DEVICE1 V3)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,39 +11,39 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-lspci`. `cargo
-# build -p rustos-lsusb` builds the tool program with it; host tooling builds
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-lspci`. `cargo
+# build -p tairix-lsusb` builds the tool program with it; host tooling builds
 # only the pure *library*, so the host test build never pulls the userland
 # runtime's `_start` / `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-lsusb` library (the pure decode + render
+# The package is both the `tairix-lsusb` library (the pure decode + render
 # engine below) and the `Run` entry-point binary of the `lsusb` tool. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets
 # and an inert host stub elsewhere (see `src/run.rs`).
 [[bin]]
-name = "rustos-lsusb-run"
+name = "tairix-lsusb-run"
 path = "src/run.rs"
 
 [dependencies]
 # The audited ABI vocabulary: `Errno`, the hardware-tree `HwNode` /
 # `HwMatchKey` wire records, and the fd-3 advisory record.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one PCI/USB ID-database engine: the alloc-free `DevIds` decoder over
 # the compiled table this bundle ships as `Resources/usb.ids.bin`. The
 # `textdb` import/vetting half is generator-side only and stays off here.
-rustos-devids = { path = "../../../lib/devids", version = "=0.0.0", default-features = false }
+tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", default-features = false }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-?`/`--help`
 # switches use (plans/APPS.md).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The shared System Information API client: the `HARDWARE_TREE` query goes
 # through the one `call` helper and `Transport` seam every sysinfo consumer
 # uses — never a second query client.
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 
 [dev-dependencies]
 # Host tests compile a tiny fixture database from `usb.ids`-grammar text
@@ -51,17 +51,17 @@ rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # engine is proven against real encoded tables, never a hand-rolled mock
 # format. Features are additive: the shipped library still builds without
 # the import half.
-rustos-devids = { path = "../../../lib/devids", version = "=0.0.0", features = ["textdb"] }
+tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", features = ["textdb"] }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, and the
 # standard-stream I/O). Pulled in only for the bare-metal targets the
 # program is actually built for; on the host it is not linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's
 # syscall-backed own-bundle `HelpSource` (`BundleHelp`) and the shared
 # production client seams in `lib/procinfo` (`IpcTransport`), enabled
 # through its `program` feature exactly as `lspci` does.
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }

@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-ipi-smp-qemu-aarch64"
+name = "tairix-test-ipi-smp-qemu-aarch64"
 description = "WIRING Stage W6 QEMU integration test: multi-core SMP bring-up — the boot core starts a secondary core via PSCI CPU_ON and delivers an inter-processor interrupt to it via a GICv2 directed SGI on the virt board."
 version.workspace = true
 edition.workspace = true
@@ -14,8 +14,8 @@ workspace = true
 # Freestanding "bring up a second core and deliver an IPI to it"
 # integration test — the aarch64 multi-core SMP deliverable of
 # `plans/WIRING.md` Stage W6, the EL1/GICv2 analogue of
-# `rustos-test-ipi-smp-qemu-riscv64`. It links only the
-# `rustos-arch-aarch64` port: the boot core starts core 1 through
+# `tairix-test-ipi-smp-qemu-riscv64`. It links only the
+# `tairix-arch-aarch64` port: the boot core starts core 1 through
 # `smp::start_secondary` (PSCI `CPU_ON`, conduit discovered from the
 # device tree), core 1 brings up its GICv2 interface and enables the IPI
 # SGI then signals ready, the boot core sends a directed IPI through
@@ -26,14 +26,14 @@ workspace = true
 # (`AGENTS.md` §5.4.5 — fail closed).
 
 [[bin]]
-name = "rustos-test-ipi-smp-qemu-aarch64"
+name = "tairix-test-ipi-smp-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

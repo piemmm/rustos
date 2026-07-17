@@ -7,17 +7,17 @@
 //! target this script:
 //!
 //! 1. hands the production x86_64 kernel linker script to `rustc` (the test
-//!    boots the real `rustos-kernel` pipeline, so it links exactly like the
+//!    boots the real `tairix-kernel` pipeline, so it links exactly like the
 //!    other freestanding x86_64 integration binaries);
 //! 2. compiles the fixture program **position-independent** for the
 //!    freestanding x86_64 target (its own `program.ld` roots crt0's `_start`),
 //!    into a private target directory under `OUT_DIR` so it never collides with
 //!    the outer build (one program source, built two ways);
 //! 3. converts the linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it;
+//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
+//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it;
 //! 4. emits the bytes and `USER_BIAS` as a Rust source the test `include!`s.
 //!
 //! On any non-x86_64 target (host `cargo build --workspace`, clippy) it emits
@@ -48,7 +48,7 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 const X86_64_TARGET: &str = "x86_64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -66,7 +66,7 @@ fn main() {
     if target == X86_64_TARGET {
         // Hand the production x86_64 kernel linker script to the test kernel
         // itself (the single per-arch script the architecture port owns);
-        // mirrors `kernel/rustos-kernel/build.rs` and the sibling x86_64
+        // mirrors `kernel/tairix-kernel/build.rs` and the sibling x86_64
         // integration binaries.
         let linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");
         println!("cargo:rerun-if-changed={linker}");
@@ -118,7 +118,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-cc3-program",
+            "tairix-test-cc3-program",
             "--target",
             X86_64_TARGET,
             "-Z",
@@ -130,12 +130,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .expect("spawn cargo to build the cc3 fixture program");
     assert!(status.success(), "building the cc3 fixture program failed");
 
-    let elf_path = format!("{target_dir}/{X86_64_TARGET}/debug/rustos-test-cc3-program");
+    let elf_path = format!("{target_dir}/{X86_64_TARGET}/debug/tairix-test-cc3-program");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert the cc3 fixture program ELF into an rxe image")

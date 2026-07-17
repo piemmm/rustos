@@ -1,11 +1,11 @@
 //! Canonical random-number ABI.
 //!
-//! RustOS has exactly one kernel cryptographic random subsystem. Userland
+//! TAIRiX has exactly one kernel cryptographic random subsystem. Userland
 //! never invents its own entropy collector, PRNG, or seeding path; it asks
 //! the kernel for bytes through the single versioned random syscall whose
 //! shape is pinned here. The implementation behind the syscall lives in the
 //! kernel and draws from `lib/rng`'s CSPRNG-backed output reserve
-//! (`rustos_rng::OutputReserve`); this module only fixes the *contract*.
+//! (`tairix_rng::OutputReserve`); this module only fixes the *contract*.
 //!
 //! # The contract
 //!

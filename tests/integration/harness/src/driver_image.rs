@@ -1,11 +1,11 @@
 //! Build-time signed `.rxe` driver-bundle composer shared by the QEMU
 //! integration fixtures that lay a kernel-trusted driver into the system.
 //!
-//! A signed driver bundle is a [`rustos_abi::DriverManifest`] header, the manifest's
+//! A signed driver bundle is a [`tairix_abi::DriverManifest`] header, the manifest's
 //! capability body, its bind table, and the program payload, with the
 //! manifest's Ed25519 signature taken over
 //! `header[..WIRE_LEN-64] || cap_body || bind_table || payload` — exactly
-//! what `rustos_drvhost::Host::verify_signature` reconstructs (the payload program is authenticated, not just the
+//! what `tairix_drvhost::Host::verify_signature` reconstructs (the payload program is authenticated, not just the
 //! header). Several build scripts need to emit such a bundle (the
 //! driver-spawn vertical, the autoload-root image fixture), so the one
 //! definition of how a bundle is assembled and signed lives here rather
@@ -16,7 +16,7 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 
-use rustos_abi::{
+use tairix_abi::{
     CapabilityId, DriverBindKey, DriverKind, DriverManifest, ABI_VERSION_CURRENT,
     DRIVER_MANIFEST_MAGIC,
 };

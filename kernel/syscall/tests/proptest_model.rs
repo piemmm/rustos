@@ -20,10 +20,10 @@
 //!
 //! ## Wall-clock budget
 //!
-//! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
+//! The shared `tairix_fuzzseed::prop::drive` runner owns the seed/budget
 //! policy (one definition): a plain `cargo test` runs [`SMOKE_CASES`]
 //! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
-//! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
+//! exports `TAIRIX_PROPTEST_BUDGET_SECS` and the runner repeats
 //! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
 //! deadline. The seed is logged at the start of each run (pinnable via
 //! `--seed`), so a fresh-seed counterexample is still reproducible.
@@ -31,14 +31,14 @@
 use core::cell::RefCell;
 
 use proptest::prelude::*;
-use rustos_abi::{
+use tairix_abi::{
     AbiType, CapabilityId, Errno, IrqHandle, OpenFlags, RandomFlags, SyscallNumber, SyscallSpec,
     UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
 };
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
-use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
-use rustos_log::{set_max_level, Event, Level, Sink};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
+use tairix_log::{set_max_level, Event, Level, Sink};
 
 /// Sequences run by a plain `cargo test` (no budget set).
 const SMOKE_CASES: u32 = 256;
@@ -180,7 +180,7 @@ impl SyscallHandlers for CountingHandlers {
         &self,
         _c: &CallerContext<'_>,
         _len: usize,
-        _flags: rustos_abi::MapFlags,
+        _flags: tairix_abi::MapFlags,
         _addr_hint: u64,
     ) -> SyscallResult {
         self.bump();
@@ -203,7 +203,7 @@ impl SyscallHandlers for CountingHandlers {
         _c: &CallerContext<'_>,
         _pid: i32,
         _status: u64,
-        _flags: rustos_abi::WaitFlags,
+        _flags: tairix_abi::WaitFlags,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -212,7 +212,7 @@ impl SyscallHandlers for CountingHandlers {
         &self,
         _c: &CallerContext<'_>,
         _pid: i32,
-        _signal: rustos_abi::Signal,
+        _signal: tairix_abi::Signal,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -220,7 +220,7 @@ impl SyscallHandlers for CountingHandlers {
     fn signal_intake(
         &self,
         _c: &CallerContext<'_>,
-        _op: rustos_abi::SignalIntakeOp,
+        _op: tairix_abi::SignalIntakeOp,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -396,7 +396,7 @@ impl SyscallHandlers for CountingHandlers {
         _buf: u64,
         _buf_cap: usize,
         _ticket_out: u64,
-        _flags: rustos_abi::CallRecvFlags,
+        _flags: tairix_abi::CallRecvFlags,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -783,7 +783,7 @@ fn dispatch_capability_gate_tracks_oracle() {
     let universe = required_universe();
     let unassigned = u16::try_from(SYSCALLS.len()).expect("table length fits u16");
 
-    rustos_fuzzseed::prop::drive(
+    tairix_fuzzseed::prop::drive(
         "dispatch_capability_gate_tracks_oracle",
         SMOKE_CASES,
         BUDGET_BATCH_CASES,

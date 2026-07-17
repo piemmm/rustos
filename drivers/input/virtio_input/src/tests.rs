@@ -3,7 +3,7 @@
 //! the logic in `lib/virtio_input`.
 
 use super::*;
-use rustos_abi::{CapabilityId, DriverError};
+use tairix_abi::{CapabilityId, DriverError};
 
 #[test]
 fn register_requires_drv_load() {
@@ -14,8 +14,8 @@ fn register_requires_drv_load() {
         fn has_capability(&self, cap: CapabilityId) -> bool {
             cap == CapabilityId::DRV_LOAD && self.grant
         }
-        fn kind(&self) -> rustos_abi::driver::DriverKind {
-            rustos_abi::driver::DriverKind::UserSpace
+        fn kind(&self) -> tairix_abi::driver::DriverKind {
+            tairix_abi::driver::DriverKind::UserSpace
         }
     }
     assert_eq!(

@@ -11,7 +11,7 @@ whoami — imprimir el nombre de cuenta del usuario actual
 Imprime el nombre de usuario asociado a la identidad de este proceso,
 seguido de un salto de línea, y nada más.
 
-RustOS no tiene `/etc/passwd`: el identificador de usuario proviene
+TAIRiX no tiene `/etc/passwd`: el identificador de usuario proviene
 del registro que el núcleo mantiene del proceso llamante, y el nombre
 de cuenta correspondiente proviene del directorio público de cuentas
 de la API de información del sistema. Si el directorio no contiene

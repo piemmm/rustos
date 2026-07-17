@@ -1,25 +1,25 @@
 //! aarch64 context switch ("context switch").
 //!
-//! Implements the Arch HAL [`ContextSwitch`](rustos_arch_api::ContextSwitch)
+//! Implements the Arch HAL [`ContextSwitch`](tairix_arch_api::ContextSwitch)
 //! surface for aarch64 over the bare-metal switch primitive in
 //! [`crate::context`]. The HAL handle is the architecture-neutral face of
 //! the task-switch path: it seeds a never-run task's first frame
-//! ([`ContextSwitch::prepare`](rustos_arch_api::ContextSwitch::prepare))
+//! ([`ContextSwitch::prepare`](tairix_arch_api::ContextSwitch::prepare))
 //! and performs the switch
-//! ([`ContextSwitch::switch`](rustos_arch_api::ContextSwitch::switch)). The
+//! ([`ContextSwitch::switch`](tairix_arch_api::ContextSwitch::switch)). The
 //! callee-saved (`x19`–`x30`) save/restore lives in [`crate::context`]'s
 //! `context.s` assembly — per-CPU register work with no architecture-neutral
 //! shape — so this module reinterprets the neutral
-//! [`TaskContext`](rustos_arch_api::TaskContext) as the port's
+//! [`TaskContext`](tairix_arch_api::TaskContext) as the port's
 //! [`crate::context::TaskCtx`] and forwards, keeping the switch invoke in
 //! exactly one place.
 //!
-//! The neutral [`TaskContext`](rustos_arch_api::TaskContext) and the port's
+//! The neutral [`TaskContext`](tairix_arch_api::TaskContext) and the port's
 //! [`crate::context::TaskCtx`] are both a single `#[repr(C)]` `u64` (the
 //! kernel stack pointer at suspension), so the forward is a layout-identical
 //! reinterpretation, not a copy; the const-assert below pins that equality.
 
-use rustos_arch_api::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
+use tairix_arch_api::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
 
 use crate::context::{self, TaskCtx};
 
@@ -96,7 +96,7 @@ impl ContextSwitch for ContextSwitchHal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::context::conformance;
+    use tairix_arch_api::context::conformance;
 
     #[test]
     fn passes_context_switch_conformance() {

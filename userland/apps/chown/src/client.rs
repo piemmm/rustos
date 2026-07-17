@@ -41,7 +41,7 @@ operand.
 /// # Errors
 ///
 /// * [`ChownError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](rustos_abi::Errno).
+///   underlying [`Errno`](tairix_abi::Errno).
 /// * [`ChownError::Apply`] — applying the new owner failed.
 /// * [`ChownError::Read`] — a directory's entries could not be read during a
 ///   recursive descent.
@@ -194,7 +194,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory tree. Each node carries its kind and current owner; a
     /// directory's children are derived by parent path. Failure injection

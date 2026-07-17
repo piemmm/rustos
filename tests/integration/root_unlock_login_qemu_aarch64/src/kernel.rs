@@ -3,7 +3,7 @@
 //!
 //! The device-agnostic bring-up (boot harness, DTB MMIO walk, GICv2 + EL1
 //! IRQ wiring, static DMA pool, signed-`.rxe` load) lives in the shared
-//! `rustos-test-virtio-qemu-support` crate. This module
+//! `tairix-test-virtio-qemu-support` crate. This module
 //! supplies the unlock-specific tail: once the signed virtio-blk driver is
 //! loaded over the planted whole-disk encrypted-root image, it drives the
 //! **production** interactive unlock policy
@@ -14,20 +14,20 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use rustos_abi::driver::virtio::VirtioHost;
-use rustos_abi::Errno;
-use rustos_drv_storage_virtio_blk::{register as virtio_blk_register, VirtioBlk};
-use rustos_kernel::root_mount::{
+use tairix_abi::driver::virtio::VirtioHost;
+use tairix_abi::Errno;
+use tairix_drv_storage_virtio_blk::{register as virtio_blk_register, VirtioBlk};
+use tairix_kernel::root_mount::{
     unlock_root_disk_interactively, NoWritableRootSink, UnlockInstall, UnlockOutcome,
 };
-use rustos_kernel::volume_policy::LateStorageGid;
-use rustos_kernel_core::{ConsoleRead, LateIdentity, LateUsersDb, NullConsole, UsersDbSource};
-use rustos_test_encrypted_root_image as disk_image;
-use rustos_test_virtio_qemu_support::{
+use tairix_kernel::volume_policy::LateStorageGid;
+use tairix_kernel_core::{ConsoleRead, LateIdentity, LateUsersDb, NullConsole, UsersDbSource};
+use tairix_test_encrypted_root_image as disk_image;
+use tairix_test_virtio_qemu_support::{
     define_mmio_boot_harness_aarch64, run_virtio_mmio_scenario, FixedSpawner, QemuEnv,
     ScenarioConfig, ScenarioTransport,
 };
-use rustos_users::UsersDb;
+use tairix_users::UsersDb;
 
 use crate::fixture::{DTB_BLOB, RXE_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -91,12 +91,12 @@ fn root_unlock_login(
     env.log("root-unlock: virtio-blk root device open");
 
     // A fresh set-once cell stands in for the boot-wired
-    // `rustos_kernel::root_mount::LATE_USERS_DB`: the policy under test is
+    // `tairix_kernel::root_mount::LATE_USERS_DB`: the policy under test is
     // the same, and a local cell keeps the one-shot scenario free of global
     // state.
     let late = LateUsersDb::new();
     // A fresh identity-table cell stands in for the boot-wired
-    // `rustos_kernel::root_mount::LATE_IDENTITY`, pre-loaded with the
+    // `tairix_kernel::root_mount::LATE_IDENTITY`, pre-loaded with the
     // compiled-in system identity exactly as the boot sec phase installs
     // it: the unlock then *replaces* the held table with the merged
     // system∪human table built from the planted root's
@@ -105,7 +105,7 @@ fn root_unlock_login(
     let late_identity = LateIdentity::new();
     late_identity
         .install(
-            rustos_kernel_core::system_identity_table(env.audit_sink())
+            tairix_kernel_core::system_identity_table(env.audit_sink())
                 .map_err(|_| "compiled identity build")?,
         )
         .map_err(|_| "compiled identity install")?;

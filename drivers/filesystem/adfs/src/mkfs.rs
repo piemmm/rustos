@@ -14,8 +14,8 @@ use crate::disc::{
 use crate::newmap::{bits_set, bits_set_field, zone_check, MAX_ZONE_BYTES};
 use crate::oldmap::{OldMap, OLD_SECTOR_SIZE};
 use crate::volume::Volume;
-use rustos_abi::driver::block::Block;
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::Block;
+use tairix_abi::DriverError;
 
 /// Disc id stamped into freshly formatted volumes.
 const FORMAT_DISC_ID: u16 = 0x5253; // "RS"
@@ -111,7 +111,7 @@ pub(crate) fn new_map_record(
         root: 0,
         disc_size: 0,
         disc_id: 0,
-        disc_name: *b"RustOS    ",
+        disc_name: *b"TAIRiX    ",
         disc_type: 0,
         log2sharesize: 0,
         big_flag: false,

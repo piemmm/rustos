@@ -8,15 +8,15 @@
 //!    per-arch script the architecture port owns).
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    mem_map_program`) **position-independent** for the freestanding riscv64
-//!    target (its own `program.ld` roots `rustos-rt`'s `_start`), into a
+//!    target (its own `program.ld` roots `tairix-rt`'s `_start`), into a
 //!    private target directory under `OUT_DIR`, pinning the anonymous-region
-//!    base + length through the `RUSTOS_MEM_MAP_ADDR` / `RUSTOS_MEM_MAP_LEN`
+//!    base + length through the `TAIRIX_MEM_MAP_ADDR` / `TAIRIX_MEM_MAP_LEN`
 //!    environment variables so this script is the single source of truth for
 //!    the region the program maps *and* the kernel's fault check verifies, then convert the linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
+//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
+//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes, the bias, and the matching [`REGION_VA`] / [`REGION_LEN`]
 //!    constants as a Rust source the test `include!`s.
 //!
@@ -47,13 +47,13 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 /// (FIXED). 16 MiB above [`USER_BIAS`] — clear of the program image, its user
 /// stack, and the startup-vector block — so the region lands on fresh Sv39
 /// tables and never overlaps the spawn-time image. The single source of truth:
-/// passed to the program build via `RUSTOS_MEM_MAP_ADDR` *and* emitted as the
+/// passed to the program build via `TAIRIX_MEM_MAP_ADDR` *and* emitted as the
 /// `REGION_VA` constant the kernel's fault handler checks the faulting address
 /// against, so the two halves can never disagree.
 const REGION_VA: u64 = USER_BIAS + (16 << 20);
 
 /// Length in bytes of the anonymous region (two pages). Passed to the program
-/// build via `RUSTOS_MEM_MAP_LEN` and emitted as the `REGION_LEN` constant the
+/// build via `TAIRIX_MEM_MAP_LEN` and emitted as the `REGION_LEN` constant the
 /// kernel sizes its fault-range check from.
 const REGION_LEN: u64 = 2 * 4096;
 
@@ -61,7 +61,7 @@ const REGION_LEN: u64 = 2 * 4096;
 const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -108,11 +108,11 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
+    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
     // position-independent. Scope the PIE link flags to the
     // riscv64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
+    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
     // `#[global_allocator]` (its `mem_map`-backed heap), so the program names
     // `alloc`; omitting it would pull `alloc` from the prebuilt sysroot while
     // `core` is built fresh, a duplicate-lang-item link error.
@@ -128,8 +128,8 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         // Pin the region base + length (the single source of truth).
-        .env("RUSTOS_MEM_MAP_ADDR", REGION_VA.to_string())
-        .env("RUSTOS_MEM_MAP_LEN", REGION_LEN.to_string())
+        .env("TAIRIX_MEM_MAP_ADDR", REGION_VA.to_string())
+        .env("TAIRIX_MEM_MAP_LEN", REGION_LEN.to_string())
         .env(
             "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS",
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
@@ -137,7 +137,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-mem-map",
+            "tairix-test-mem-map",
             "--target",
             RISCV64_TARGET,
             "-Z",
@@ -152,12 +152,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         "building the mem-map fixture program failed"
     );
 
-    let elf_path = format!("{target_dir}/{RISCV64_TARGET}/debug/rustos-test-mem-map");
+    let elf_path = format!("{target_dir}/{RISCV64_TARGET}/debug/tairix-test-mem-map");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert the mem-map fixture program ELF into an rxe image")

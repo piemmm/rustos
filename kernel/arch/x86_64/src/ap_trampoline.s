@@ -33,7 +33,7 @@
 //  6. The trampoline re-uses the BSP's `boot_pml4` unchanged — the BSP
 //     wrote `slot.cr3` to the bootstrap PML4 phys. APs therefore see
 //     exactly the same identity-mapped 0..4 GiB window the BSP sees.
-//  7. On entry to `rustos_arch_x86_64_ap_main` the AP holds:
+//  7. On entry to `tairix_arch_x86_64_ap_main` the AP holds:
 //        %rdi = slot.cpu_id (zero-extended from the 32-bit field)
 //        %rsi = AP_TRAMPOLINE_PHYS + AP_BOOT_SLOT_OFFSET
 //        %rsp = slot.stack_top (16-byte aligned by the BSP installer)

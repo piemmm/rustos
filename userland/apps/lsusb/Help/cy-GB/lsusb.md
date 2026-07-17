@@ -24,7 +24,7 @@ gludir ar goll neu'n methu'r dilysu, mae'r rhestr yn dirywio i
 ddynodwyr noeth gyda'r rheswm ar y gwall safonol — rhestrir y rhestr
 ei hun o hyd.
 
-Nid oes gan RustOS gofrestr rhifau bws/dyfais Linux: mae rhifau bws a
+Nid oes gan TAIRiX gofrestr rhifau bws/dyfais Linux: mae rhifau bws a
 dyfais yn rhifau trefnol bach sy'n dechrau ar 1 dros y rhestr
 gyfredol (y bysiau yn nhrefn eu darganfod, y dyfeisiau yn nhrefn eu
 rhestru ar bob bws), yn sefydlog cyhyd â bod y topoleg heb newid, ac

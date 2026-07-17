@@ -17,7 +17,7 @@ const IMPLEMENTER_ARM: u64 = 0x41;
 /// Marketing names of Arm Ltd parts by primary part number
 /// (`MIDR_EL1[15:4]`), per each core's Technical Reference Manual.
 ///
-/// The table carries the Cortex-A and Neoverse parts RustOS's Tier-1
+/// The table carries the Cortex-A and Neoverse parts TAIRiX's Tier-1
 /// aarch64 hardware actually presents (the Raspberry Pi 3/4/5 cores and
 /// the cores QEMU's `virt` board models) plus their common siblings; an
 /// unlisted part reports `None` and the boot facts stay honest.

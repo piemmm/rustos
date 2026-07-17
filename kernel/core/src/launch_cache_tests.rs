@@ -8,7 +8,7 @@ use super::*;
 
 use alloc::boxed::Box;
 
-use rustos_kernel_mem::{FreeMemorySource, PressureBand};
+use tairix_kernel_mem::{FreeMemorySource, PressureBand};
 
 use crate::test_bundle::{composed_bundle, gate_load, verified_app};
 use crate::test_pressure::{free_for, pressured, unpressured, TEST_TOTAL};
@@ -95,7 +95,7 @@ fn reclaim_cannot_make_an_app_unlaunchable() {
     // The source bundle is intact, so the full gate still accepts it and
     // returns the same decision the cache would have served.
     let reloaded = gate_load(&fs, anchor).expect("the gate re-verifies the intact bundle");
-    assert_eq!(reloaded.id(), "os.rustos.ps");
+    assert_eq!(reloaded.id(), "os.tairix.ps");
 }
 
 #[test]

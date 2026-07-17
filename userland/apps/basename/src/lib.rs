@@ -1,4 +1,4 @@
-//! RustOS `basename` — strip directory and suffix from names
+//! TAIRiX `basename` — strip directory and suffix from names
 //! (`plans/APPS.md` §12.1 Stage C).
 //!
 //! The GNU coreutils `basename`: print the final component of each path
@@ -8,12 +8,12 @@
 //!
 //! # Divergence from GNU `basename`
 //!
-//! RustOS paths may be anchored to a named alias root (`Home:/tools`,
+//! TAIRiX paths may be anchored to a named alias root (`Home:/tools`,
 //! `plans/DRIVES.md`) as well as to the view root `/`. An alias root is
 //! treated the way POSIX treats `/`: it is never stripped into, so
 //! `basename Home:/` is `Home:/`, exactly as `basename /` is `/`. Where
 //! the root prefix ends is decided by the shared path grammar's own rule
-//! (`rustos_path::alias_root_len`) — this tool carries no second path
+//! (`tairix_path::alias_root_len`) — this tool carries no second path
 //! parser. Documented in the tool's `Help/` documents.
 //!
 //! # What this crate is
@@ -43,7 +43,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_path::alias_root_len;
+use tairix_path::alias_root_len;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `basename`'s own Help tree is
@@ -209,7 +209,7 @@ pub fn parse(args: &[&str]) -> Result<Command, BasenameError> {
 ///
 /// The classic algorithm — strip trailing slashes, take the text after the
 /// last remaining `/`, then strip a trailing `suffix` that is neither the
-/// whole result nor empty — with one RustOS extension: a `Name:/` alias
+/// whole result nor empty — with one TAIRiX extension: a `Name:/` alias
 /// root (decided by the shared grammar's [`alias_root_len`]) plays the
 /// role POSIX gives `/`, so `basename_of("Home:/", None)` is `Home:/`
 /// exactly as `basename_of("/", None)` is `/`. The surgery is purely
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn alias_roots_behave_like_the_view_root() {
-        // The RustOS extension: `Name:/` plays the role of `/`.
+        // The TAIRiX extension: `Name:/` plays the role of `/`.
         assert_eq!(basename_of("Home:/tools/x", None), "x");
         assert_eq!(basename_of("Home:/tools/", None), "tools");
         assert_eq!(basename_of("Home:/", None), "Home:/");
@@ -426,7 +426,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/basename.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

@@ -15,7 +15,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileKind};
 
 use crate::fs::{Fs, RenameOutcome};
 use crate::model::join;
@@ -66,12 +66,12 @@ impl OpError {
 ///
 /// [`OpError::BadPath`] when the spelling fails the shared path grammar.
 pub fn resolve_destination(base: &str, typed: &str) -> Result<String, OpError> {
-    let parsed = rustos_path::parse(typed).map_err(|e| OpError::BadPath(e.to_string()))?;
+    let parsed = tairix_path::parse(typed).map_err(|e| OpError::BadPath(e.to_string()))?;
     if parsed.is_absolute() {
         return Ok(parsed.to_string());
     }
     let joined = join(base, typed);
-    let parsed = rustos_path::parse(&joined).map_err(|e| OpError::BadPath(e.to_string()))?;
+    let parsed = tairix_path::parse(&joined).map_err(|e| OpError::BadPath(e.to_string()))?;
     Ok(parsed.to_string())
 }
 

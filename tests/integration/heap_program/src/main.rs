@@ -1,12 +1,12 @@
-//! EL0 fixture program for the `rustos-rt` `mem_map`-backed global allocator
+//! EL0 fixture program for the `tairix-rt` `mem_map`-backed global allocator
 //! (the P6e-3b prerequisite increment — `plans/PI.md`).
 //!
 //! The consuming vertical (`tests/integration/heap_qemu_aarch64`) builds this
 //! program into a hardware-isolated EL0 address space, installs a `MemMap`
-//! producer backed by `rustos_kernel_mem::map_anonymous` / `unmap_anonymous`
+//! producer backed by `tairix_kernel_mem::map_anonymous` / `unmap_anonymous`
 //! over that *live* space, drives the program under the live scheduler, and
 //! routes the program's `mem_map` / `mem_unmap` `svc`s — issued by the heap
-//! allocator inside `rustos-rt` — through it. The program never calls
+//! allocator inside `tairix-rt` — through it. The program never calls
 //! `mem_map`/`mem_unmap` directly: it uses ordinary `alloc` types and the
 //! global allocator turns them into the syscalls.
 //!
@@ -27,7 +27,7 @@
 //! `exit(0)` is the success signal the vertical reports as PASS (fail loud, never silently pass).
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt` (which supplies both `_start` and the global allocator),
+//! runtime `tairix-rt` (which supplies both `_start` and the global allocator),
 //! never the C ABI. It is built position-independent and
 //! converted to an `rxe` blob by the consuming test's build script.
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
@@ -75,7 +75,7 @@ mod program {
         i ^ 0x5555_5555
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     fn main() -> i32 {
         // 1. Box round-trip — the first allocation maps the first arena page.
@@ -142,13 +142,13 @@ mod program {
         EXIT_OK
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the crate
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

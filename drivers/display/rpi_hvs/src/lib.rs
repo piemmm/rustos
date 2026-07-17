@@ -1,4 +1,4 @@
-//! RustOS Raspberry Pi `VideoCore` HVS hardware-layer display driver.
+//! TAIRiX Raspberry Pi `VideoCore` HVS hardware-layer display driver.
 //!
 //! The Raspberry Pi's `VideoCore` Hardware Video Scaler (HVS) is a
 //! fixed-function compositor: instead of the CPU blending the whole
@@ -20,7 +20,7 @@
 //! instantiate it through [`RpiHvs::open`]; the host never reaches into
 //! the type beyond the [`Display`] / [`AcceleratedDisplay`] traits. The
 //! firmware property-channel client the driver host uses to *discover*
-//! the [`HvsConfig`] scan-out surface is the shared [`rustos_vcmailbox`]
+//! the [`HvsConfig`] scan-out surface is the shared [`tairix_vcmailbox`]
 //! crate (the aarch64 port's framebuffer boot console speaks the
 //! same protocol), and the [`wiring`] module is the host-side bring-up
 //! seam that performs that discovery over the hardware-tree-discovered
@@ -41,11 +41,11 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::display::{
+use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayMode, SeatGate,
 };
-use rustos_abi::driver::mmio::{MmioMapError, WindowError};
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
+use tairix_abi::driver::mmio::{MmioMapError, WindowError};
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
 
 #[cfg(test)]
 mod tests;
@@ -54,7 +54,7 @@ mod dlist;
 pub mod wiring;
 
 pub use dlist::{HvsConfig, PlaneConfig, ScanoutConfig, MAX_PLANES};
-pub use rustos_vcmailbox::DEFAULT_BUS_ALIAS;
+pub use tairix_vcmailbox::DEFAULT_BUS_ALIAS;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///

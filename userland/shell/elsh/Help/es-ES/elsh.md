@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — el intérprete de comandos de RustOS
+elsh — el intérprete de comandos de TAIRiX
 
 ## SYNOPSIS
 

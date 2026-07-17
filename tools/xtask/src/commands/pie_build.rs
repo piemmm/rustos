@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rustos_itest_harness::pie::PieArch;
+use tairix_itest_harness::pie::PieArch;
 
 use crate::Context;
 

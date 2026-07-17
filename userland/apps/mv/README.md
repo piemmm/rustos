@@ -1,4 +1,4 @@
-# `rustos-mv` — move (rename) files and directories
+# `tairix-mv` — move (rename) files and directories
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `mv` relocates
 each of its source operands to a destination. With a single source and a
@@ -10,8 +10,8 @@ moved like any other operand. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
-depends only on the audited `rustos-abi` crate and the shared `lib/help`
-engine (plus `rustos-rt` for the freestanding `Run` binary), so it never
+depends only on the audited `tairix-abi` crate and the shared `lib/help`
+engine (plus `tairix-rt` for the freestanding `Run` binary), so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
 the move library and the `mv` command app's `Run` binary
 (`src/run.rs`), registered as the self-contained store bundle
@@ -93,7 +93,7 @@ any later operand, and there is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-mv` drives the parser and the move engine against
+`cargo test -p tairix-mv` drives the parser and the move engine against
 an in-memory tree and a recording output: the command grammar, a file
 renamed to a new path, a directory renamed, a file moved into a directory
 under its base name, several files into a directory, the

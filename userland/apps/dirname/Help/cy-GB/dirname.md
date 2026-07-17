@@ -15,7 +15,7 @@ gyffwrdd ar ddisg. Rhiant sillafiad heb slaes ar ôl yw `.`; rhiant sy'n
 gwacáu yw'r gwreiddyn.
 
 Ni ddatgymalir gwreiddyn byth: `dirname /tools` yw `/`, ac — union
-gyfateb fforest storio RustOS — `dirname Home:/tools` yw `Home:/`. Mae
+gyfateb fforest storio TAIRiX — `dirname Home:/tools` yw `Home:/`. Mae
 gwreiddyn alias (`Home:/`, `System:/`, …) yn chwarae'n union y rôl y
 mae `/` yn ei chwarae ar systemau POSIX.
 

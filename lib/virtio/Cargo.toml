@@ -1,6 +1,6 @@
 [package]
-name = "rustos-virtio"
-description = "RustOS bus-agnostic virtio 1.x split-virtqueue protocol: the Transport trait, SplitQueue management, owned DMA slabs / bounce buffers, and the in-process MockHost/MockTransport doubles, shared by every virtio class driver and the kernel-side virtio host."
+name = "tairix-virtio"
+description = "TAIRiX bus-agnostic virtio 1.x split-virtqueue protocol: the Transport trait, SplitQueue management, owned DMA slabs / bounce buffers, and the in-process MockHost/MockTransport doubles, shared by every virtio class driver and the kernel-side virtio host."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,12 +17,12 @@ workspace = true
 # than one crate consumes it (`AGENTS.md` §2.2 / §6) and depends only on
 # the stable ABI types in `lib/abi`, so it builds for every Tier-1 target.
 [dependencies]
-rustos-abi = { path = "../abi", version = "=0.0.0" }
-rustos-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+tairix-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 
 [dev-dependencies]
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget
-# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# §2.2). Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -1,7 +1,7 @@
 /* Link script for the CCOMPAT CC3 fixture program (`tests/integration/cc3_program`).
  *
  * The program is a position-independent C-ABI executable whose entry point is
- * crt0's `_start` (`rustos_crt0`). It links no architecture crate, so nothing
+ * crt0's `_start` (`tairix_crt0`). It links no architecture crate, so nothing
  * in the default object graph references `_start`; this script makes `_start`
  * the entry GC root and lays the loadable sections out at a fixed, non-zero
  * base so the consuming test maps the image at its link addresses with the

@@ -8,23 +8,23 @@
 //! decoupled from `kernel/ipc`, `kernel/sched`, and friends
 //! (no bloat).
 
-use rustos_abi::{
+use tairix_abi::{
     spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags,
     RandomFlags, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
     ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
     SYSCALL_MAX_ARGS,
 };
-use rustos_crypto::{sha256, Sha256Digest};
-use rustos_kernel_sec::{TaskCapabilities, TaskId};
-use rustos_log::{Field, Sink};
-use rustos_util::fmt::{format_hex_u64, format_i32};
+use tairix_crypto::{sha256, Sha256Digest};
+use tairix_kernel_sec::{TaskCapabilities, TaskId};
+use tairix_log::{Field, Sink};
+use tairix_util::fmt::{format_hex_u64, format_i32};
 
 use crate::audit::{record, AuditEvent};
 
-/// SHA-256 fingerprint of [`rustos_abi::ENCODED_TABLE`].
+/// SHA-256 fingerprint of [`tairix_abi::ENCODED_TABLE`].
 ///
 /// The value is **derived at build time** by this crate's `build.rs`
-/// from `rustos_abi::ENCODED_TABLE` — the single source of truth — and `include!`d here. There is no
+/// from `tairix_abi::ENCODED_TABLE` — the single source of truth — and `include!`d here. There is no
 /// hand-maintained literal to edit or to let drift out of sync with the
 /// table it fingerprints: changing the syscall table re-derives this
 /// value on the next build. The kernel still re-checks it via
@@ -35,13 +35,13 @@ use crate::audit::{record, AuditEvent};
 pub const SYSCALL_TABLE_HASH: Sha256Digest =
     include!(concat!(env!("OUT_DIR"), "/syscall_table_hash.rs"));
 
-/// Re-compute the SHA-256 of [`rustos_abi::ENCODED_TABLE`] and compare it
+/// Re-compute the SHA-256 of [`tairix_abi::ENCODED_TABLE`] and compare it
 /// to [`SYSCALL_TABLE_HASH`].
 ///
 /// # Errors
 ///
 /// Returns [`Errno::AbiVersionUnsupported`] when the two diverge, which
-/// can only happen if the dependency graph contains a `rustos-abi`
+/// can only happen if the dependency graph contains a `tairix-abi`
 /// older or newer than the one this crate was built against.
 pub fn verify_table_hash() -> Result<(), Errno> {
     if sha256(&ENCODED_TABLE) == SYSCALL_TABLE_HASH {
@@ -174,7 +174,7 @@ pub trait SyscallHandlers {
     /// Receive a message from an IPC message port the caller owns.
     ///
     /// `sender_out` names a caller buffer of exactly
-    /// `rustos_abi::ORIGIN_WIRE_LEN` bytes; the implementation writes the
+    /// `tairix_abi::ORIGIN_WIRE_LEN` bytes; the implementation writes the
     /// sending task's kernel-attested `Origin` (snapshotted at send time)
     /// through it alongside the payload copy, so the receiver can
     /// authenticate each message's principal fail-closed.
@@ -230,7 +230,7 @@ pub trait SyscallHandlers {
     /// The dispatcher has already validated that `buf` is non-null, that
     /// `len` fits in `usize`, and that `flags` carries no reserved bit.
     /// The implementation must refuse a `len` above
-    /// [`rustos_abi::RANDOM_REQUEST_MAX_BYTES`] with
+    /// [`tairix_abi::RANDOM_REQUEST_MAX_BYTES`] with
     /// [`Errno::LengthOutOfRange`], and — when `flags` requests
     /// non-blocking behaviour and the RNG is not yet seeded — return
     /// [`Errno::EntropyNotReady`] rather than blocking.
@@ -249,7 +249,7 @@ pub trait SyscallHandlers {
     /// [`CapabilityId::CONSOLE_WRITE`], that `buf` is non-null, that `fd`
     /// fits in `u32`, and that `len` fits in `usize`. The implementation
     /// resolves `fd` against the caller's per-process descriptor table
-    /// (`rustos_abi::DescriptorTable`): an `fd` that is not a writable
+    /// (`tairix_abi::DescriptorTable`): an `fd` that is not a writable
     /// inherited stream fails closed (the
     /// descriptor, not an ambient device, is the authority). It then
     /// copies the buffer through the validated `copy_from_user` boundary and emits it to that descriptor's kernel stream
@@ -283,22 +283,22 @@ pub trait SyscallHandlers {
     ///
     /// `(attach, attach_len)` optionally carry the child's *attach block*
     /// (`plans/SPAWN.md` SP10): a non-zero `attach` names an encoded
-    /// [`rustos_abi::SpawnAttach`] block in the caller's address space.
+    /// [`tairix_abi::SpawnAttach`] block in the caller's address space.
     /// The implementation stages exactly
-    /// [`rustos_abi::SPAWN_ATTACH_LEN`] bytes through the validated
+    /// [`tairix_abi::SPAWN_ATTACH_LEN`] bytes through the validated
     /// `copy_from_user` boundary and parses the block fail-closed; a
     /// malformed block is rejected whole, never partially applied. The
     /// block selects the child's credential
-    /// ([`rustos_abi::SPAWN_UID_INHERIT`] keeps the caller's own; a
+    /// ([`tairix_abi::SPAWN_UID_INHERIT`] keeps the caller's own; a
     /// concrete uid asks the kernel to resolve that user and switch the
     /// child into it, which requires [`CapabilityId::SPAWN_AS_USER`] and
     /// must fail closed with [`Errno::PermissionDenied`] otherwise — a
     /// running process can never change its *own* identity, there is no
     /// setuid-self), the console its base descriptor table comes from
-    /// ([`rustos_abi::CONSOLE_INHERIT`] = the caller's own table; any
+    /// ([`tairix_abi::CONSOLE_INHERIT`] = the caller's own table; any
     /// other value names an installed console index, failing closed with
     /// [`Errno::NotFound`] when none is installed there), and one
-    /// [`rustos_abi::FdWire`] per standard descriptor — wiring the
+    /// [`tairix_abi::FdWire`] per standard descriptor — wiring the
     /// child's fd 0/1/2/3 onto pre-opened descriptors of the **caller's
     /// own** open table (files, resources, pipe ends), each resolved
     /// owner-checked against the kernel-attested caller so a forged or
@@ -308,11 +308,11 @@ pub trait SyscallHandlers {
     ///
     /// `(strings, strings_len)` optionally carry the child's startup
     /// strings: a non-zero `strings` names an encoded
-    /// `rustos_abi::process` startup-vector block (the `PSV1` format) in
+    /// `tairix_abi::process` startup-vector block (the `PSV1` format) in
     /// the caller's address space holding the argument vector and
     /// environment the caller chose for the child. The implementation
     /// bounds `strings_len` against
-    /// [`rustos_abi::PROCESS_START_MAX_TOTAL_LEN`], stages the block
+    /// [`tairix_abi::PROCESS_START_MAX_TOTAL_LEN`], stages the block
     /// through the validated `copy_from_user` boundary, and parses it
     /// fail-closed; a malformed block is rejected with the decoder's
     /// stable [`Errno`], never partially applied. The strings
@@ -359,7 +359,7 @@ pub trait SyscallHandlers {
     /// [`CapabilityId::CONSOLE_READ`], that `buf` is non-null, that `fd`
     /// fits in `u32`, and that `len` fits in `usize`. The implementation
     /// resolves `fd` against the caller's per-process descriptor table
-    /// (`rustos_abi::DescriptorTable`): an `fd` that is not a readable
+    /// (`tairix_abi::DescriptorTable`): an `fd` that is not a readable
     /// inherited stream fails closed. It then
     /// reads from that descriptor's kernel stream backing — in the
     /// bootstrap session the first discovered keyboard/UART input source
@@ -421,7 +421,7 @@ pub trait SyscallHandlers {
     /// The dispatcher has already validated that `pid` is a sign-extended
     /// `i32`, that `status` is a non-null `UserPtr`, and that `flags` carries
     /// no reserved bit. `pid` is either a specific child's PID or
-    /// [`rustos_abi::WAIT_PID_ANY`] (wait for any child). The implementation
+    /// [`tairix_abi::WAIT_PID_ANY`] (wait for any child). The implementation
     /// validates the parent/child relationship — a process may only reap its
     /// **own** children — and copies the exit code out through the validated
     /// `copy_to_user` boundary. A `pid` that is not a child of the caller
@@ -436,7 +436,7 @@ pub trait SyscallHandlers {
     /// without parking the caller and leaves `status` untouched. With
     /// [`WaitFlags::STOPPED`] set the call also reports a child freshly
     /// stopped by [`Signal::Stop`] without reaping it. `status` receives
-    /// the typed [`rustos_abi::WaitStatusRecord`], not a bare exit code.
+    /// the typed [`tairix_abi::WaitStatusRecord`], not a bare exit code.
     fn wait(
         &self,
         caller: &CallerContext<'_>,
@@ -531,11 +531,11 @@ pub trait SyscallHandlers {
     }
 
     /// Read the calling task's effective limit for resource `kind`, writing
-    /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer.
+    /// the encoded [`tairix_abi::ResourceLimit`] to the user `out` pointer.
     ///
     /// The dispatcher has already validated that `kind` fits in a `u32`
     /// (upper bits zero) and that `out` is a non-null `UserPtr`. The
-    /// implementation validates `kind` against [`rustos_abi::LimitKind`] and
+    /// implementation validates `kind` against [`tairix_abi::LimitKind`] and
     /// fails closed on an unassigned value (validate every
     /// input). Returns `Ok(0)` on success.
     ///
@@ -547,7 +547,7 @@ pub trait SyscallHandlers {
     }
 
     /// Install the calling task's limit for resource `kind` from the encoded
-    /// [`rustos_abi::ResourceLimit`] at the user `value` pointer.
+    /// [`tairix_abi::ResourceLimit`] at the user `value` pointer.
     ///
     /// The dispatcher has already validated that `kind` fits in a `u32` and
     /// that `value` is a non-null `UserPtr`. The implementation copies the
@@ -555,7 +555,7 @@ pub trait SyscallHandlers {
     /// `kind` and the soft/hard pair, and — when the request would *raise* a
     /// hard bound above the inherited ceiling — refuses with
     /// [`Errno::PermissionDenied`] unless the caller holds
-    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`]. Returns `Ok(0)` on
+    /// [`tairix_abi::CapabilityId::RLIMIT_RAISE`]. Returns `Ok(0)` on
     /// success.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`]; the enforcement is installed in `kernel/core`.
@@ -568,7 +568,7 @@ pub trait SyscallHandlers {
     /// and any future lower swap tier (`plans/STRESSTEST.md` ST2).
     ///
     /// The dispatcher has already checked
-    /// [`rustos_abi::CapabilityId::MEM_PIN`] and emitted the audit
+    /// [`tairix_abi::CapabilityId::MEM_PIN`] and emitted the audit
     /// record. The implementation bounds the pin by the caller's
     /// effective `PinnedMemoryBytes` soft limit — a footprint already
     /// past the bound fails closed with [`Errno::OutOfRange`] — and
@@ -625,7 +625,7 @@ pub trait SyscallHandlers {
     /// `plans/PI.md` P11).
     ///
     /// The dispatcher has already checked
-    /// [`rustos_abi::CapabilityId::USERS_READ`] and that `buf` is a
+    /// [`tairix_abi::CapabilityId::USERS_READ`] and that `buf` is a
     /// non-null `UserPtr`. The implementation bounds `len`, copies the
     /// database's exact `users-v1` text through the validated
     /// `copy_to_user` boundary, and returns the byte
@@ -648,7 +648,7 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::USER_ADMIN`] and that `req` and `out` are non-null
     /// `UserPtr`s. `req`/`req_len` carry one versioned
-    /// `rustos_abi::users_admin::UsersAdminRequest` record;
+    /// `tairix_abi::users_admin::UsersAdminRequest` record;
     /// `out`/`out_cap` receive a list operation's response (mutating
     /// operations write nothing and answer `0`). The implementation
     /// decodes fail-closed, enforces the never-widen and
@@ -731,11 +731,11 @@ pub trait SyscallHandlers {
 
     /// Set the console read line discipline of one of the calling
     /// process's inherited input streams (`plans/PI.md` P11 — the
-    /// [`rustos_abi::InputMode`]: cooked, secret, or raw).
+    /// [`tairix_abi::InputMode`]: cooked, secret, or raw).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::CONSOLE_READ`]. `fd` must be a readable inherited
-    /// stream and `mode` an [`rustos_abi::InputMode`] discriminant (the
+    /// stream and `mode` an [`tairix_abi::InputMode`] discriminant (the
     /// reserved `0` and every unknown value fail closed). The
     /// implementation selects the resolved console's discipline: cooked
     /// echoes, secret suppresses echo and shows the activity indicator (a
@@ -792,7 +792,7 @@ pub trait SyscallHandlers {
     /// keyboard produced it); an unknown seat id fails closed with
     /// [`Errno::NotFound`]. The implementation copies up to `len` bytes in
     /// through the validated `copy_from_user` boundary, decodes
-    /// one [`rustos_abi::input::KeyInput`] record fail-closed, and hands it
+    /// one [`tairix_abi::input::KeyInput`] record fail-closed, and hands it
     /// to the arbiter, which decides the encoding and destination by who
     /// holds that seat: with the text console foreground it encodes the press
     /// to console (tty) bytes and enqueues them on the focused console's
@@ -863,9 +863,9 @@ pub trait SyscallHandlers {
     /// The implementation owner-gates the drain against the seat's live
     /// lease — a caller that does not hold the seat is refused with
     /// [`Errno::SeatNotOwner`] / [`Errno::SeatRevoked`] — then drains one
-    /// [`rustos_abi::input::KeyInput`] record
+    /// [`tairix_abi::input::KeyInput`] record
     /// the seat registry routed to the channel into `buf` (at least
-    /// [`rustos_abi::input::KeyInput::WIRE_LEN`] bytes), copies it out
+    /// [`tairix_abi::input::KeyInput::WIRE_LEN`] bytes), copies it out
     /// through the validated boundary, and returns the
     /// number of bytes written — or `0` when the channel is drained.
     ///
@@ -892,7 +892,7 @@ pub trait SyscallHandlers {
     /// whose pointing device produced it); an unknown seat id fails closed
     /// with [`Errno::NotFound`]. The implementation copies up to `len`
     /// bytes in through the validated `copy_from_user` boundary, decodes
-    /// one [`rustos_abi::input::PointerInput`] record fail-closed, and
+    /// one [`tairix_abi::input::PointerInput`] record fail-closed, and
     /// hands it to the seat registry, which routes by who holds that seat:
     /// a held seat's record goes to its pointer channel (drained by
     /// [`Self::pointer_read`]); an unowned seat's record is consumed and
@@ -924,9 +924,9 @@ pub trait SyscallHandlers {
     /// owner-gates the drain against the seat's live lease — a caller that
     /// does not hold the seat is refused with [`Errno::SeatNotOwner`] /
     /// [`Errno::SeatRevoked`] — then drains one
-    /// [`rustos_abi::input::PointerInput`] record the seat registry routed
+    /// [`tairix_abi::input::PointerInput`] record the seat registry routed
     /// to the channel into `buf` (at least
-    /// [`rustos_abi::input::PointerInput::WIRE_LEN`] bytes), copies it out
+    /// [`tairix_abi::input::PointerInput::WIRE_LEN`] bytes), copies it out
     /// through the validated boundary, and returns the number of bytes
     /// written — or `0` when the channel is drained.
     ///
@@ -1040,7 +1040,7 @@ pub trait SyscallHandlers {
     /// the call needs no capability (a task reads only its *own* grants,
     /// which confers no authority — the own-process-observer
     /// baseline). The implementation serialises the calling task's grant
-    /// set as consecutive [`rustos_abi::hwtree::GrantedResource`] records,
+    /// set as consecutive [`tairix_abi::hwtree::GrantedResource`] records,
     /// copies them out through the validated boundary,
     /// and returns the total byte count — `0` for a task with no grants. A
     /// buffer too small for the whole set fails closed with
@@ -1065,8 +1065,8 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::SYSINFO_HW`] and that `buf` is a non-null `UserPtr`.
     /// The implementation serialises the store's current snapshot as a
-    /// [`rustos_abi::hwtree::HwTreeHeader`] (generation + node count)
-    /// followed by that many [`rustos_abi::hwtree::HwNode`] records, copies
+    /// [`tairix_abi::hwtree::HwTreeHeader`] (generation + node count)
+    /// followed by that many [`tairix_abi::hwtree::HwNode`] records, copies
     /// them out through the validated boundary, and
     /// returns the total byte count. A buffer too small for the whole
     /// snapshot fails closed with [`Errno::BufferTooSmall`] rather than
@@ -1253,7 +1253,7 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Read the kernel-attested [`rustos_abi::Origin`] of the caller whose
+    /// Read the kernel-attested [`tairix_abi::Origin`] of the caller whose
     /// in-service call this server is currently handling (P-C — the
     /// server-side identity attestation half).
     ///
@@ -1264,7 +1264,7 @@ pub trait SyscallHandlers {
     /// attested origin captured for `ticket` when the call was posted and
     /// copies its wire image out (returning its byte length). A foreign
     /// endpoint, an unknown or not-in-service ticket, or a buffer shorter
-    /// than [`rustos_abi::ORIGIN_WIRE_LEN`] fails closed; the origin is never
+    /// than [`tairix_abi::ORIGIN_WIRE_LEN`] fails closed; the origin is never
     /// caller-supplied, so it cannot be forged.
     ///
     /// The default implementation fails closed with
@@ -1314,9 +1314,9 @@ pub trait SyscallHandlers {
     /// call is unprivileged (like `clock_get`). The implementation reads the
     /// monotonic clock on the issuing CPU, projects the stored wall instant
     /// forward by the elapsed monotonic time, and copies the
-    /// [`rustos_abi::WallClockReading`] (a [`rustos_abi::Time64`] plus a
-    /// [`rustos_abi::WallTimeState`] byte) out, returning its byte length. A
-    /// buffer shorter than [`rustos_abi::WallClockReading::WIRE_LEN`] fails
+    /// [`tairix_abi::WallClockReading`] (a [`tairix_abi::Time64`] plus a
+    /// [`tairix_abi::WallTimeState`] byte) out, returning its byte length. A
+    /// buffer shorter than [`tairix_abi::WallClockReading::WIRE_LEN`] fails
     /// closed. Before a trusted source has set it the reading is the Unix
     /// epoch tagged `Unset`.
     ///
@@ -1337,8 +1337,8 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::TIME_SET`] and that `time` is a non-null `UserPtr`.
     /// The implementation validates `state` is a settable
-    /// [`rustos_abi::WallTimeState`] (rejecting `Unset` and any undefined
-    /// discriminant), copies in a [`rustos_abi::Time64`] through the
+    /// [`tairix_abi::WallTimeState`] (rejecting `Unset` and any undefined
+    /// discriminant), copies in a [`tairix_abi::Time64`] through the
     /// validated boundary, rejects a non-canonical instant, and records the
     /// new wall offset and state — leaving the monotonic clock untouched.
     /// Returns `Ok(0)`; a malformed instant, a short buffer, or a
@@ -1362,11 +1362,11 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
     /// call is unprivileged (the boot id is a public per-boot nonce, not a
     /// secret). The implementation copies the 16-byte
-    /// [`rustos_abi::BootId`] minted for this boot out to `out` and returns
-    /// its byte length. A buffer shorter than [`rustos_abi::BOOT_ID_LEN`]
+    /// [`tairix_abi::BootId`] minted for this boot out to `out` and returns
+    /// its byte length. A buffer shorter than [`tairix_abi::BOOT_ID_LEN`]
     /// fails closed, as does a boot whose random subsystem could not be
     /// seeded in time (the kernel reports `EntropyNotReady` rather than the
-    /// all-zero [`rustos_abi::BootId::UNSET`] sentinel).
+    /// all-zero [`tairix_abi::BootId::UNSET`] sentinel).
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -1381,13 +1381,13 @@ pub trait SyscallHandlers {
     }
 
     /// Read the kernel's boot-static machine summary
-    /// ([`rustos_abi::BootFacts`]).
+    /// ([`tairix_abi::BootFacts`]).
     ///
     /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
     /// call is unprivileged (the facts are the machine's public shape —
     /// arch, core count, installed memory — minted once at boot, never live
     /// state and never a secret). The implementation copies the
-    /// [`rustos_abi::BOOT_FACTS_WIRE_LEN`]-byte encoding out to `out` and
+    /// [`tairix_abi::BOOT_FACTS_WIRE_LEN`]-byte encoding out to `out` and
     /// returns its byte length. A buffer shorter than the wire length fails
     /// closed with [`Errno::BufferTooSmall`].
     ///
@@ -1403,14 +1403,14 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Read the calling task's own kernel-attested [`rustos_abi::Origin`].
+    /// Read the calling task's own kernel-attested [`tairix_abi::Origin`].
     ///
     /// The dispatcher has already checked `out` is a non-null `UserPtr`; the
     /// call is unprivileged (a task may always learn its own identity). The
     /// implementation builds the caller's attested origin from its own
     /// kernel-held task record — never a caller-supplied value — and copies
     /// its wire image out, returning its byte length. A buffer shorter than
-    /// [`rustos_abi::ORIGIN_WIRE_LEN`] fails closed. This is the self-directed
+    /// [`tairix_abi::ORIGIN_WIRE_LEN`] fails closed. This is the self-directed
     /// twin of [`Self::call_peer_origin`]: the origin is read from kernel
     /// state, so a task can neither forge another principal's identity nor
     /// inflate its own.
@@ -1431,7 +1431,7 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::SYSINFO_INTROSPECT`] and that `out` is a non-null
-    /// `UserPtr`. `domain` is the [`rustos_abi::IntrospectDomain`]
+    /// `UserPtr`. `domain` is the [`tairix_abi::IntrospectDomain`]
     /// discriminant the handler validates; `arg` is a domain-specific
     /// selector (a record offset for the paged domains, or unused). The
     /// implementation writes the requested records to `out` little-endian
@@ -1442,7 +1442,7 @@ pub trait SyscallHandlers {
     /// to the `sysinfod` broker (the sole holder of the capability). Every
     /// field is validated and the call fails closed — a bad domain, a short
     /// buffer, or (for the per-task-limits domain) an unresolvable target
-    /// [`rustos_abi::ProcId`] all deny.
+    /// [`tairix_abi::ProcId`] all deny.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -1466,13 +1466,13 @@ pub trait SyscallHandlers {
     /// terminal is). The implementation resolves `fd` against the caller's
     /// descriptor table to the backing console, and — only for a console
     /// whose geometry the kernel actually knows (a framebuffer text console)
-    /// — writes its [`rustos_abi::TerminalSize`] out little-endian through the
+    /// — writes its [`tairix_abi::TerminalSize`] out little-endian through the
     /// validated boundary and returns its byte length. A byte-stream console
     /// (a UART), whose remote terminal size is unknowable to the kernel,
     /// fails closed with [`Errno::NotImplemented`] so the client applies the
     /// conventional fallback — the kernel never fabricates a size. An `fd`
     /// that is not an open stream, or a buffer shorter than
-    /// [`rustos_abi::TerminalSize::WIRE_LEN`], also fails closed.
+    /// [`tairix_abi::TerminalSize::WIRE_LEN`], also fails closed.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -1492,9 +1492,9 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::LOG_EMIT`] and that `record` is a non-null `UserPtr`.
-    /// The implementation copies in at most [`rustos_abi::LOG_RECORD_MAX`]
+    /// The implementation copies in at most [`tairix_abi::LOG_RECORD_MAX`]
     /// bytes through the validated boundary, fully validates the record with
-    /// [`rustos_abi::decode_log_record`], and emits it
+    /// [`tairix_abi::decode_log_record`], and emits it
     /// through the kernel's **diagnostic** `log_sink` — never the
     /// hash-chained security audit log — attributing it
     /// to the calling task (the caller cannot forge that attribution).
@@ -1512,10 +1512,10 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::HW_EMIT`] and that `node` is a non-null `UserPtr`. The
-    /// implementation copies in at most [`rustos_abi::hwtree::HwNode::WIRE_LEN`]
+    /// implementation copies in at most [`tairix_abi::hwtree::HwNode::WIRE_LEN`]
     /// bytes through the validated boundary, fully decodes the node with the
-    /// fail-closed [`rustos_abi::HwNode::from_bytes`] parser, and admits it **only** when every
-    /// [`rustos_abi::hwtree::HwResource`] it requests is wholly contained
+    /// fail-closed [`tairix_abi::HwNode::from_bytes`] parser, and admits it **only** when every
+    /// [`tairix_abi::hwtree::HwResource`] it requests is wholly contained
     /// within a device-resource grant the calling task already holds — so an
     /// emitted child can never carry more authority than its emitter
     /// (no ambient authority;). On success it appends
@@ -1563,13 +1563,13 @@ pub trait SyscallHandlers {
     /// platform's MSI controller up if it is not already, **grants the
     /// calling task a device resource for the resulting virtual interrupt
     /// line** (so it may both `irq_bind` it and forward it as an
-    /// [`rustos_abi::hwtree::HwResource::irq`] onto a child node), and writes
-    /// the encoded [`rustos_abi::MsiAllocation`] into the caller's `out`
+    /// [`tairix_abi::hwtree::HwResource::irq`] onto a child node), and writes
+    /// the encoded [`tairix_abi::MsiAllocation`] into the caller's `out`
     /// buffer through the validated boundary, returning the number of bytes
     /// written. A platform with no MSI controller fails closed with
     /// [`Errno::NotImplemented`]; an exhausted vector space fails closed with
     /// [`Errno::OutOfRange`]; a buffer shorter than
-    /// [`rustos_abi::MsiAllocation::WIRE_LEN`] fails closed.
+    /// [`tairix_abi::MsiAllocation::WIRE_LEN`] fails closed.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -1731,10 +1731,10 @@ pub trait SyscallHandlers {
 
     /// Add or remove a member of a wait-set (`plans/USB.md`).
     ///
-    /// `set` is the wait-set handle; `op` is a [`rustos_abi::WaitSetOp`];
-    /// `kind` is a [`rustos_abi::WaitSourceKind`]; `id` names the resource
+    /// `set` is the wait-set handle; `op` is a [`tairix_abi::WaitSetOp`];
+    /// `kind` is a [`tairix_abi::WaitSourceKind`]; `id` names the resource
     /// per the kind's own docs (an IPC call-endpoint id, an
-    /// [`rustos_abi::IrqHandle`] raw value, a child PID, a seat id, a message
+    /// [`tairix_abi::IrqHandle`] raw value, a child PID, a seat id, a message
     /// port id, or a pipe-read descriptor of the caller's own open table);
     /// `token` is the caller's opaque tag. On `Add` the implementation **resolves and
     /// owner-checks the named resource against the calling task** before
@@ -1856,7 +1856,7 @@ pub trait SyscallHandlers {
     }
 
     /// List open directory `fd` into the user buffer `buf`, returning the
-    /// number of bytes written as a packed [`rustos_abi::DirEntry`] stream
+    /// number of bytes written as a packed [`tairix_abi::DirEntry`] stream
     /// (`PREREQUISITES.md` P-A).
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
@@ -1870,7 +1870,7 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Write the [`rustos_abi::FileStat`] of open handle `fd` to the user
+    /// Write the [`tairix_abi::FileStat`] of open handle `fd` to the user
     /// buffer `out`, returning the number of bytes written
     /// (`PREREQUISITES.md` P-A).
     ///
@@ -2074,7 +2074,7 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked that `name` is a non-null
     /// `UserPtr` and decoded `name_len`. The implementation copies the
     /// name bytes in through the validated `copy_from_user` boundary,
-    /// validates them against the `rustos_abi::PortName` grammar (fail
+    /// validates them against the `tairix_abi::PortName` grammar (fail
     /// closed — malformed bytes are refused before the registry is
     /// consulted), and looks the name up in the named-port registry,
     /// returning the bound endpoint id or [`Errno::NotFound`] when no
@@ -2211,7 +2211,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
     /// * [`Errno::OutOfRange`] — `raw_number` is not a valid
     ///   [`SyscallNumber`] (above [`SyscallNumber::MAX`]).
     /// * [`Errno::NotFound`] — the number is in range but no entry of
-    ///   [`rustos_abi::SYSCALLS`] is assigned at that index (no gaps in
+    ///   [`tairix_abi::SYSCALLS`] is assigned at that index (no gaps in
     ///   `abi-v1` today).
     /// * [`Errno::PermissionDenied`] — the caller lacks the syscall's
     ///   `required_capability`.
@@ -2955,27 +2955,27 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         let mut pp = [0u8; PROC_ID_HEX_LEN];
         let mut fields = [Field {
             key: "",
-            value: rustos_log::FieldValue::Null,
+            value: tairix_log::FieldValue::Null,
         }; 7];
         fields[0] = Field {
             key: "task",
-            value: rustos_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),
         };
         fields[1] = Field {
             key: "proc",
-            value: rustos_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
+            value: tairix_log::FieldValue::Str(caller.caps.proc_id().write_hex(&mut p)),
         };
         fields[2] = Field {
             key: "pproc",
-            value: rustos_log::FieldValue::Str(caller.caps.parent_proc_id().write_hex(&mut pp)),
+            value: tairix_log::FieldValue::Str(caller.caps.parent_proc_id().write_hex(&mut pp)),
         };
         fields[3] = Field {
             key: "comm",
-            value: rustos_log::FieldValue::Str(caller.caps.name()),
+            value: tairix_log::FieldValue::Str(caller.caps.name()),
         };
         fields[4] = Field {
             key: "start",
-            value: rustos_log::FieldValue::UnsignedInt(caller.caps.start_time()),
+            value: tairix_log::FieldValue::UnsignedInt(caller.caps.start_time()),
         };
         let n = 5 + extra.len();
         fields[5..n].copy_from_slice(extra);
@@ -2991,7 +2991,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             caller,
             &[Field {
                 key: "no",
-                value: rustos_log::FieldValue::Str(rustos_util::fmt::format_usize(
+                value: tairix_log::FieldValue::Str(tairix_util::fmt::format_usize(
                     usize::from(number),
                     &mut n,
                 )),
@@ -3005,7 +3005,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             caller,
             &[Field {
                 key: "sc",
-                value: rustos_log::FieldValue::Str(spec.name),
+                value: tairix_log::FieldValue::Str(spec.name),
             }],
         );
     }
@@ -3016,7 +3016,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             caller,
             &[Field {
                 key: "sc",
-                value: rustos_log::FieldValue::Str(spec.name),
+                value: tairix_log::FieldValue::Str(spec.name),
             }],
         );
     }
@@ -3027,7 +3027,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             caller,
             &[Field {
                 key: "sc",
-                value: rustos_log::FieldValue::Str(spec.name),
+                value: tairix_log::FieldValue::Str(spec.name),
             }],
         );
     }
@@ -3038,7 +3038,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             caller,
             &[Field {
                 key: "sc",
-                value: rustos_log::FieldValue::Str(spec.name),
+                value: tairix_log::FieldValue::Str(spec.name),
             }],
         );
     }
@@ -3049,7 +3049,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             caller,
             &[Field {
                 key: "sc",
-                value: rustos_log::FieldValue::Str(spec.name),
+                value: tairix_log::FieldValue::Str(spec.name),
             }],
         );
     }
@@ -3066,11 +3066,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             &[
                 Field {
                     key: "sc",
-                    value: rustos_log::FieldValue::Str(spec.name),
+                    value: tairix_log::FieldValue::Str(spec.name),
                 },
                 Field {
                     key: "err",
-                    value: rustos_log::FieldValue::Str(err_field),
+                    value: tairix_log::FieldValue::Str(err_field),
                 },
             ],
         );
@@ -3169,10 +3169,10 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::{CapabilityId, SyscallNumber};
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_sec::{ProcName, TaskCapabilities, TaskId, UserId};
-    use rustos_log::{set_max_level, Event, Level};
+    use tairix_abi::{CapabilityId, SyscallNumber};
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_sec::{ProcName, TaskCapabilities, TaskId, UserId};
+    use tairix_log::{set_max_level, Event, Level};
 
     /// Single-threaded sink that records every event identifier.
     struct RecordingSink {
@@ -4167,7 +4167,7 @@ mod tests {
         let h = MockHandlers::default();
         let d = Dispatcher::new(&h, &sink);
 
-        for spec in rustos_abi::SYSCALLS {
+        for spec in tairix_abi::SYSCALLS {
             let mut args = RawArgs::ZERO;
             populate_valid_args(spec, &mut args);
             let r = d.dispatch(&ctx, spec.number.as_u16(), args);
@@ -4214,7 +4214,7 @@ mod tests {
         // The confinement list is a frozen security decision: widening it
         // must fail this test, so the widening is made deliberately, in
         // review, never by accident.
-        let mut allowed: Vec<&str> = rustos_abi::SYSCALLS
+        let mut allowed: Vec<&str> = tairix_abi::SYSCALLS
             .iter()
             .filter(|spec| sandbox_allows(spec.number))
             .map(|spec| spec.name)
@@ -4242,7 +4242,7 @@ mod tests {
         // its handler; every other syscall is refused before its handler
         // runs, with the denial audited. A fresh handler and sink per
         // syscall keeps the assertions independent.
-        for spec in rustos_abi::SYSCALLS {
+        for spec in tairix_abi::SYSCALLS {
             let sink = RecordingSink::new();
             let caps = build_caps(&[], &sink).as_sandboxed();
             let ctx = CallerContext {
@@ -4281,7 +4281,7 @@ mod tests {
 
     #[test]
     fn audit_records_carry_the_callers_attested_proc_id() {
-        use rustos_abi::{ProcId, PROC_ID_HEX_LEN};
+        use tairix_abi::{ProcId, PROC_ID_HEX_LEN};
 
         /// Sink that captures the value of the `proc` field of each event.
         struct ProcFieldSink {
@@ -4344,7 +4344,7 @@ mod tests {
 
     #[test]
     fn audit_records_carry_the_callers_attested_parent_proc_id() {
-        use rustos_abi::{ProcId, PROC_ID_HEX_LEN};
+        use tairix_abi::{ProcId, PROC_ID_HEX_LEN};
 
         /// Sink that captures the value of the `pproc` field of each event.
         struct PparentFieldSink {
@@ -4541,7 +4541,7 @@ mod tests {
             Err(Errno::OutOfRange)
         );
         // In range but unassigned = NotFound.
-        let unassigned = u16::try_from(rustos_abi::SYSCALLS.len()).unwrap();
+        let unassigned = u16::try_from(tairix_abi::SYSCALLS.len()).unwrap();
         assert_eq!(
             d.dispatch(&ctx, unassigned, RawArgs::ZERO),
             Err(Errno::NotFound)
@@ -5160,7 +5160,7 @@ mod tests {
         // echoes the pid back reinterpreted as `u32`, i.e. `u32::MAX`.
         let mut args = RawArgs::ZERO;
         #[allow(clippy::cast_sign_loss)]
-        let extended = i64::from(rustos_abi::WAIT_PID_ANY) as u64;
+        let extended = i64::from(tairix_abi::WAIT_PID_ANY) as u64;
         args.0[0] = extended;
         args.0[1] = 0x1000; // status
         assert_eq!(

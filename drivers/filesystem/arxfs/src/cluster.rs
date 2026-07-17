@@ -3,7 +3,7 @@
 //! A compression **cluster** is an aligned run of
 //! [`COMPRESS_CLUSTER_BLOCKS`] logical blocks.
 //! When a write covers a whole cluster with compressible data, the cluster's
-//! plaintext is compressed as one `rustos_compress` frame and stored in
+//! plaintext is compressed as one `tairix_compress` frame and stored in
 //! **fewer** contiguous physical blocks — the saved blocks are real free
 //! space, unlike a per-block compression that can never free anything inside
 //! a fixed 1:1 block. The mapping stays exact: offsets still divide into
@@ -26,7 +26,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 use crate::dedupe::{ChunkRecord, REVERSE_REF_CAP};
 use crate::integrity::{logical_hash, DataFault, StoredForm, LOGICAL_HASH_LEN};
@@ -99,7 +99,7 @@ impl<B: Block> ARXFS<B> {
         let capu = as_usize(self.data_capacity());
         let len_blocks = (plaintext.len() / capu) as u64;
         let mut frame = vec![0u8; plaintext.len()];
-        let Ok(frame_len) = rustos_compress::compress(plaintext, &mut frame) else {
+        let Ok(frame_len) = tairix_compress::compress(plaintext, &mut frame) else {
             // The frame would not even fit the plaintext-sized scratch:
             // incompressible, store per-block raw.
             return Ok(None);
@@ -171,7 +171,7 @@ impl<B: Block> ARXFS<B> {
             }
         };
         let mut plain = vec![0u8; as_usize(ext.len) * capu];
-        let produced = rustos_compress::decompress(&frame[..frame_len], &mut plain);
+        let produced = tairix_compress::decompress(&frame[..frame_len], &mut plain);
         // The frame holds the decrypted (compressed) content: wipe the
         // scratch before it returns to the heap, success or failure.
         xform::scrub(frame);

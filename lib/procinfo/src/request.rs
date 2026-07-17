@@ -7,10 +7,10 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     SysinfoQueryId, SysinfoRequestHeader, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
 };
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::transport::Transport;
 
@@ -83,8 +83,8 @@ mod tests {
     use super::{call, encode_request, CallError};
     use crate::transport::Transport;
     use alloc::vec::Vec;
-    use rustos_abi::sysinfo::{SysinfoQueryId, SysinfoRequestHeader};
-    use rustos_abi::Errno;
+    use tairix_abi::sysinfo::{SysinfoQueryId, SysinfoRequestHeader};
+    use tairix_abi::Errno;
 
     struct Echo {
         reply: Result<Vec<u8>, Errno>,

@@ -19,7 +19,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_sync::SpinLock;
+use tairix_sync::SpinLock;
 
 use crate::TaskId;
 

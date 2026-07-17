@@ -1,6 +1,6 @@
 //! Closed typed-field value model for structured log records.
 //!
-//! This module is the genuinely-foundational, reusable data model the RustOS
+//! This module is the genuinely-foundational, reusable data model the TAIRiX
 //! system log (`plans/SYSLOG.md`) builds its record schema on. It defines:
 //!
 //! * [`FieldName`] — a validated caller field name (`[a-z][a-z0-9_]{0,63}`)
@@ -793,7 +793,7 @@ fn decode_scalar_payload(
 /// through. The following does not compile, by design:
 ///
 /// ```compile_fail
-/// use rustos_abi::field::ToFieldValue;
+/// use tairix_abi::field::ToFieldValue;
 /// struct SecretKey([u8; 32]);
 /// fn record<V: ToFieldValue + ?Sized>(_value: &V) {}
 /// record(&SecretKey([0u8; 32]));

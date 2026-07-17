@@ -1,9 +1,9 @@
-//! RustOS aarch64 architecture port.
+//! TAIRiX aarch64 architecture port.
 //!
 //! Stage 3b delivers the QEMU `virt`-board boot and Arch-HAL primitives
 //! for the 64-bit Arm port: an EL1 boot trampoline (with an EL2→EL1
 //! drop), a PL011 UART console, the [`Aarch64Arch`] implementation of the
-//! Arch HAL ([`rustos_arch_api::SchedulerArch`]), the EL1 exception
+//! Arch HAL ([`tairix_arch_api::SchedulerArch`]), the EL1 exception
 //! vector table, a GICv2 driver, generic-timer preemption, the stage-1
 //! MMU primitives, the `svc` syscall-entry marshalling, and the ARM
 //! semihosting test finisher. (The freestanding-only modules are gated to
@@ -24,8 +24,8 @@
 //! | [`preempt`]   | EL1 physical-timer scheduler-tick callback + arming.            |
 //! | [`syscall_entry`] | `svc` argument marshalling + dispatch callback.             |
 //! | [`qemu_exit`] | ARM semihosting `SYS_EXIT` finisher used by the integration tests. |
-//! | `serial`      | PL011-backed `rustos_log::Sink` (freestanding only).            |
-//! | `entry`       | `rustos_arch_aarch64_main` Rust trampoline (freestanding only). |
+//! | `serial`      | PL011-backed `tairix_log::Sink` (freestanding only).            |
+//! | `entry`       | `tairix_arch_aarch64_main` Rust trampoline (freestanding only). |
 //! | `panic`       | Shared `#[panic_handler]` bridge (freestanding only).           |
 //!
 //! # Arch HAL boundary
@@ -95,7 +95,7 @@ pub mod brcm_msi;
 pub mod console;
 pub mod context;
 /// aarch64 implementation of the Arch HAL context-switch surface
-/// ([`rustos_arch_api::ContextSwitch`]): the
+/// ([`tairix_arch_api::ContextSwitch`]): the
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
@@ -108,34 +108,34 @@ pub mod cpuname;
 /// real silicon and an UNKNOWN `HCR_EL2.TVM` hangs the MMU switch.
 pub mod el2;
 /// aarch64 implementation of the Arch HAL platform-entropy surface
-/// ([`rustos_arch_api::PlatformEntropy`]): the ARMv8.5 `FEAT_RNG` `RNDR`
+/// ([`tairix_arch_api::PlatformEntropy`]): the ARMv8.5 `FEAT_RNG` `RNDR`
 /// system register the kernel seeds its CSPRNG reserve from.
 pub mod entropy;
 pub mod exceptions;
 pub mod fault;
 /// aarch64 device-tree access: the aarch64-specific `virt`-board queries
 /// (PSCI method, generic-timer PPI, `/memory`) layered on the shared
-/// [`rustos_fdt`] parser.
+/// [`tairix_fdt`] parser.
 pub mod fdt;
 pub mod gic;
 /// Heterogeneous (`big.LITTLE`) core classification: the pure
-/// `capacity-dmips-mhz` → [`rustos_arch_api::CoreClass`] classifier
+/// `capacity-dmips-mhz` → [`tairix_arch_api::CoreClass`] classifier
 /// [`crate::kernel_arch::Aarch64Arch`] feeds from the device tree
 /// (`plans/WIRING.md` Stage W10).
 pub mod hetcore;
 pub mod kernel_arch;
 /// aarch64 implementation of the Arch HAL memory-tagging surface
-/// ([`rustos_arch_api::MemoryTagging`]) — Arm MTE
+/// ([`tairix_arch_api::MemoryTagging`]) — Arm MTE
 /// (`stg` store sequence, 16-byte / 4-bit tag granule); both slots are
 /// honestly `Pending` on the Stage 6 MTE enable (see the module docs).
 pub mod memtag;
 pub mod paging;
 /// aarch64 implementation of the Arch HAL per-CPU storage surface
-/// ([`rustos_arch_api::PerCpu`]): the `TPIDR_EL1`
+/// ([`tairix_arch_api::PerCpu`]): the `TPIDR_EL1`
 /// system-register read/write the per-CPU anchor is reached through.
 pub mod percpu_hal;
 /// aarch64 implementation of the Arch HAL early-boot platform-discovery
-/// surface ([`rustos_arch_api::PlatformDiscovery`]): the FDT → [`rustos_abi::hwtree`] normalisation built on the
+/// surface ([`tairix_arch_api::PlatformDiscovery`]): the FDT → [`tairix_abi::hwtree`] normalisation built on the
 /// [`fdt`] reader.
 pub mod platform;
 pub mod preempt;
@@ -145,7 +145,7 @@ pub mod preempt;
 pub mod psci;
 pub mod qemu_exit;
 /// aarch64 implementation of the Arch HAL side-channel mitigation
-/// surface ([`rustos_arch_api::SideChannelMitigation`]).
+/// surface ([`tairix_arch_api::SideChannelMitigation`]).
 pub mod sidechannel;
 /// Multi-core (SMP) secondary-core bring-up primitives: the set-once
 /// secondary entry, the `MPIDR_EL1` per-core identity read, and the PSCI
@@ -153,12 +153,12 @@ pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 /// aarch64 implementation of the Arch HAL timer-programming surface
-/// ([`rustos_arch_api::Timer`]): the architecture-
+/// ([`tairix_arch_api::Timer`]): the architecture-
 /// neutral scheduler-tick callback install + dispatch over the EL1
 /// physical generic timer wired in [`preempt`].
 pub mod timer_hal;
 /// aarch64 fault-windowed user-copy routine backing the Arch HAL
-/// guarded-copy slot (`rustos_arch_api::uaccess`): a same-EL data abort
+/// guarded-copy slot (`tairix_arch_api::uaccess`): a same-EL data abort
 /// taken inside the copy resumes at its fix-up and surfaces as an error
 /// instead of the fatal path.
 pub mod uaccess;
@@ -168,7 +168,7 @@ pub mod uaccess;
 /// omission under emulation).
 pub mod uart_init;
 /// aarch64 implementation of the Arch HAL "enter user mode" surface
-/// ([`rustos_arch_api::EnterUser`]): the one `eret`
+/// ([`tairix_arch_api::EnterUser`]): the one `eret`
 /// sequence that drops a built process image into EL0.
 pub mod userentry;
 /// Framebuffer boot console (`plans/PI.md` P7b): console output defaults
@@ -180,7 +180,7 @@ pub mod video;
 pub mod entry;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod panic;
-/// PL011 / mini-UART-backed `rustos_log::Sink` plus the buffered,
+/// PL011 / mini-UART-backed `tairix_log::Sink` plus the buffered,
 /// non-blocking serial transmit ring shared by the diagnostic log and the
 /// `stream_write` console backing. The MMIO transmit/receive primitives
 /// are gated to the bare-metal target (host stubs make them inert), so the

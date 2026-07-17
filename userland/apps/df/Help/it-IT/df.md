@@ -49,7 +49,7 @@ continua con il resto. Le opzioni GNU `--output`, `--sync` e
 - `-P, --portability` — il formato portabile POSIX (intestazioni
   `1024-blocks` e `Capacity`).
 - `-l, --local` — limitare il rapporto ai filesystem locali (oggi
-  ogni montaggio RustOS: non si filtra nulla).
+  ogni montaggio TAIRiX: non si filtra nulla).
 - `--total` — aggiungere una riga etichettata `total` che somma le
   cifre mostrate.
 - `-k` — blocchi da 1024 byte (il valore predefinito).

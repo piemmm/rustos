@@ -109,14 +109,14 @@ into `kernel/core`'s `KernelState` as `ipc: RwLock<PortRegistry>`
 the syscall's endpoint against the live map: an unbound endpoint fails
 closed with `Errno::NotFound`. A bound `ipc_send` is fully wired — it
 copies the payload in through the kernel's `copy_from_user` boundary
-([`rustos_kernel_mem::copy_in`](./memory.md#3a-user-memory-copy-uaccess))
-and hands it to `Port::send`, returning `Errno::BadAddress` (the RustOS
+([`tairix_kernel_mem::copy_in`](./memory.md#3a-user-memory-copy-uaccess))
+and hands it to `Port::send`, returning `Errno::BadAddress` (the TAIRiX
 `EFAULT`) for a faulting buffer or a caller with no registered address
 space. A bound `ipc_recv` is now wired too: it copies the head message
 out through the kernel's `copy_to_user` boundary
-([`rustos_kernel_mem::copy_out`](./memory.md#3a-user-memory-copy-uaccess))
+([`tairix_kernel_mem::copy_out`](./memory.md#3a-user-memory-copy-uaccess))
 using `Port::recv_with` (below), returning `Errno::WouldBlock` (the
-RustOS `EAGAIN`) when the bound mailbox is momentarily empty and
+TAIRiX `EAGAIN`) when the bound mailbox is momentarily empty and
 `Errno::BadAddress` for a faulting buffer. See
 [the syscall handler-wiring table](./syscalls.md#handler-wiring-stage-27-follow-up-f3).
 

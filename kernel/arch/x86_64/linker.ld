@@ -1,4 +1,4 @@
-/* Linker script for RustOS x86_64 kernels (higher-half), bootable via
+/* Linker script for TAIRiX x86_64 kernels (higher-half), bootable via
  * multiboot2 (GRUB) and PVH direct boot (QEMU `-kernel`).
  *
  * Used by every QEMU integration test binary in `tests/integration/*` that
@@ -27,7 +27,7 @@
  *   - The multiboot2 header is placed in the first sub-section of the first
  *     PT_LOAD segment, well within the 32 KiB the loader scans (`boot.s`
  *     SAFETY-INVARIANT 1).
- *   - The PVH boot note (`.note.rustos_pvh`, boot.s) is placed explicitly
+ *   - The PVH boot note (`.note.tairix_pvh`, boot.s) is placed explicitly
  *     *before* the /DISCARD/ rule that drops every other note section, so
  *     the linker keeps it and emits the PT_NOTE segment QEMU's `-kernel`
  *     ELF loader scans for `XEN_ELFNOTE_PHYS32_ENTRY`.
@@ -67,9 +67,9 @@ SECTIONS
 
     /* PVH boot note. Input-section matching is first-match, so placing it
      * here exempts it from the `*(.note .note.*)` /DISCARD/ below. */
-    .note.rustos_pvh ALIGN(4) :
+    .note.tairix_pvh ALIGN(4) :
     {
-        KEEP(*(.note.rustos_pvh))
+        KEEP(*(.note.tairix_pvh))
     }
 
     .boot.bss ALIGN(4K) :

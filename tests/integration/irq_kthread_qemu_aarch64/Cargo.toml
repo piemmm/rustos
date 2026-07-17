@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-irq-kthread-qemu-aarch64"
+name = "tairix-test-irq-kthread-qemu-aarch64"
 description = "P11 Chunk B-2 INCREMENT (1) QEMU integration test: a device SPI (the PL031 RTC), discovered from the device tree via fdt::gic_device_intid and routed through the production aarch64 EL1/GICv2 device-IRQ path, wakes an in-kernel service kthread parked on it through kernel_core::KthreadIrqWaiter under the live eevdf scheduler on the aarch64 virt board."
 version.workspace = true
 edition.workspace = true
@@ -12,16 +12,16 @@ publish = false
 workspace = true
 
 # P11 Chunk B-2 INCREMENT (1) deliverable (`plans/PI.md`): the aarch64
-# device-SPI -> parked-kthread vertical. Where `rustos-test-irq-qemu-aarch64`
+# device-SPI -> parked-kthread vertical. Where `tairix-test-irq-qemu-aarch64`
 # proves the device-IRQ *delivery* path (EL1 vector -> `IrqTable::fire`
 # mask-before-wake) against a hard-coded INTID and a `wfi` poll loop, this
 # vertical proves the two INCREMENT (1) pieces that delivery path is *for*:
-#   1. the DTB SPI discovery `rustos_arch_aarch64::fdt::gic_device_intid`,
+#   1. the DTB SPI discovery `tairix_arch_aarch64::fdt::gic_device_intid`,
 #      which decodes the PL031 RTC node's `interrupts` triple into its GICv2
 #      INTID from the embedded `virt` device tree (no hard-coded line), and
-#   2. the kthread-cooperative `rustos_kernel_core::KthreadIrqWaiter`, which
+#   2. the kthread-cooperative `tairix_kernel_core::KthreadIrqWaiter`, which
 #      a real in-kernel service kthread drives through the shared
-#      `rustos_kernel_irq::block_until_ready` loop, yielding via the eevdf
+#      `tairix_kernel_irq::block_until_ready` loop, yielding via the eevdf
 #      `Scheduler` until the RTC SPI fires and wakes it.
 # PASS once the parked kthread observes `WaitOutcome::Ready` and the GIC line
 # re-reads masked (mask-before-wake, `docs/src/security/irq.md`).
@@ -34,20 +34,20 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-irq-kthread-qemu-aarch64"
+name = "tairix-test-irq-kthread-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

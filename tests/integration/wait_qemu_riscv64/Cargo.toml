@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-wait-qemu-riscv64"
-description = "plans/PI.md stage RV-X4 QEMU integration test (riscv64 sibling of wait_qemu_aarch64 / _x86_64): prove a parent process can wait on, reap, and read the exit code of its own child under the live scheduler on the riscv64 virt board. The build script compiles the pure-Rust EL0 program (tests/integration/wait_program) twice (child + parent roles) PIE and converts each to an rxe blob; the kernel materialises two hardware-isolated Sv39 U-mode address spaces with rustos_kernel_core::spawn_image, registers the parent/child link with a KernelProcessWait producer, admits each as a resumable user kthread, and drains the cooperative step loop while a dispatch callback routes wait/exit through the producer and reschedule_current — PASS once the parent reaped the child, read back its exit code, and exited 0; a wrong code, a missing reap, an unexpected syscall, or a stall flips qemu_exit::exit_failure or times out (fail-loud, AGENTS.md §7)."
+name = "tairix-test-wait-qemu-riscv64"
+description = "plans/PI.md stage RV-X4 QEMU integration test (riscv64 sibling of wait_qemu_aarch64 / _x86_64): prove a parent process can wait on, reap, and read the exit code of its own child under the live scheduler on the riscv64 virt board. The build script compiles the pure-Rust EL0 program (tests/integration/wait_program) twice (child + parent roles) PIE and converts each to an rxe blob; the kernel materialises two hardware-isolated Sv39 U-mode address spaces with tairix_kernel_core::spawn_image, registers the parent/child link with a KernelProcessWait producer, admits each as a resumable user kthread, and drains the cooperative step loop while a dispatch callback routes wait/exit through the producer and reschedule_current — PASS once the parent reaped the child, read back its exit code, and exited 0; a wrong code, a missing reap, an unexpected syscall, or a stall flips qemu_exit::exit_failure or times out (fail-loud, AGENTS.md §7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,22 +19,22 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-wait-qemu-riscv64"
+name = "tairix-test-wait-qemu-riscv64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

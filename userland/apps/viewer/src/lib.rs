@@ -1,4 +1,4 @@
-//! RustOS **file viewer** — the windowed read-only text viewer and the
+//! TAIRiX **file viewer** — the windowed read-only text viewer and the
 //! first consumer of the desktop's trusted file picker
 //! (`plans/APPWIN.md` AW5, `plans/CAPABILITY_USE.md` CU6).
 //!
@@ -41,9 +41,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_font::BitmapFont;
-use rustos_raster::Surface;
-use rustos_theme::Theme;
+use tairix_font::BitmapFont;
+use tairix_raster::Surface;
+use tairix_theme::Theme;
 
 /// Window content width of the viewer window, in pixels — the one
 /// definition the `Run` binary sizes its window with and a host-side
@@ -202,7 +202,7 @@ fn to_i32(value: u32) -> i32 {
 mod tests {
     use super::*;
     use alloc::vec;
-    use rustos_theme::ThemeRegistry;
+    use tairix_theme::ThemeRegistry;
 
     #[test]
     fn content_lines_split_on_line_feeds_and_bound_rows_and_cols() {

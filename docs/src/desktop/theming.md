@@ -1,7 +1,7 @@
 # Desktop theming
 
-`lib/theme` (`rustos-theme`) is the single shared theme definition for the
-RustOS desktop (`AGENTS.md` §6, §10). One theme drives the colours, corner
+`lib/theme` (`tairix-theme`) is the single shared theme definition for the
+TAIRiX desktop (`AGENTS.md` §6, §10). One theme drives the colours, corner
 radii, fonts, and cursors of the window manager, the taskbar, and the default
 apps, with a default dark theme and a light theme switchable at runtime.
 "Adding a theme is data, not new code" (`AGENTS.md` §10).
@@ -69,7 +69,7 @@ toggles to the light built-in, and vice versa). Both return the now-active
 present, so there is no unknown-id path to surface. The taskbar's start menu
 surfaces this control as a `MenuAction::ToggleAppearance` entry; the taskbar
 holds no registry, so it only reports the action and the session glue
-(`userland/gui/session`, `rustos-desktop-session`) performs the switch on the
+(`userland/gui/session`, `tairix-desktop-session`) performs the switch on the
 shared registry and re-applies the new theme: the taskbar is re-themed in
 place, the window manager's desktop background is re-coloured through the
 compositor's runtime `set_background` (full-screen damage, so the next present
@@ -79,12 +79,12 @@ surfaced to the apps as `SessionEvent::AppearanceChanged`. See
 
 ## Tests
 
-`cargo test -p rustos-theme` covers the built-in palettes (every role
+`cargo test -p tairix-theme` covers the built-in palettes (every role
 differs between dark and light, surfaces are opaque and distinct), the shared
 metrics/fonts/cursors, cursor lookup for every kind, and the registry: the
 dark default, runtime dark↔light switching, custom-theme registration and
 activation, and the fail-closed `UnknownTheme`/`DuplicateId` paths. The
-window manager's `cargo test -p rustos-wm` adds the integration tests that
+window manager's `cargo test -p tairix-wm` adds the integration tests that
 source the compositor background and a window's corner radius from the active
 theme and verify a dark→light switch changes the cleared screen. The
 appearance-toggle tests cover `set_appearance` selecting the matching built-in

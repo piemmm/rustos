@@ -97,7 +97,7 @@ mod tests {
 
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "rustos-qemu-disk-{}-{name}.img",
+            "tairix-qemu-disk-{}-{name}.img",
             std::process::id()
         ))
     }

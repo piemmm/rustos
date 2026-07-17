@@ -35,8 +35,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver::net::MacAddress;
-use rustos_abi::time::Duration64;
+use tairix_abi::driver::net::MacAddress;
+use tairix_abi::time::Duration64;
 
 use crate::addr::IpAddr;
 use crate::timeutil::{nanos, NEVER};

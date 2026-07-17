@@ -1,6 +1,6 @@
 [package]
-name = "rustos-sync"
-description = "RustOS synchronisation primitives: spin/MCS/RW locks, SeqLock, epoch-based reclamation, Once."
+name = "tairix-sync"
+description = "TAIRiX synchronisation primitives: spin/MCS/RW locks, SeqLock, epoch-based reclamation, Once."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

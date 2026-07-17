@@ -16,7 +16,7 @@ Só um **primeiro** argumento `-h`, `-?` ou `--help` é honrado (a posição
 em que o `false` do GNU honra `--help`); em qualquer posição posterior
 esses símbolos são ignorados como tudo o resto. Ao contrário do GNU
 `false --help`, que mesmo assim termina com `1`, uma ajuda curta servida
-termina aqui com `0` — a convenção de ajuda curta do RustOS.
+termina aqui com `0` — a convenção de ajuda curta do TAIRiX.
 
 ## OPTIONS
 

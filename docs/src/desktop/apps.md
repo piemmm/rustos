@@ -2,11 +2,11 @@
 
 The default graphical applications live under `userland/apps/`. They are
 ordinary `.app` bundles (`AGENTS.md` §16.5) that consume the shared desktop
-`lib/*` crates — `rustos-geometry`, `rustos-theme`, `rustos-raster`,
-`rustos-font` — exactly as the taskbar does, and never depend on the window
+`lib/*` crates — `tairix-geometry`, `tairix-theme`, `tairix-raster`,
+`tairix-font` — exactly as the taskbar does, and never depend on the window
 manager (`AGENTS.md` §17.4).
 
-## Filesystem browser (`rustos-files` over `lib/browse`)
+## Filesystem browser (`tairix-files` over `lib/browse`)
 
 The filesystem browser navigates the §16 filesystem layout and renders the
 current directory through the active theme. It is split into a navigation
@@ -14,8 +14,8 @@ current directory through the active theme. It is split into a navigation
 so the security-relevant logic is testable without a kernel (`AGENTS.md` §7).
 The engine — the model, the renderer and its row hit-test, and the validated
 path spelling described below — lives in the shared `lib/browse` crate
-(`rustos-browse`), because the desktop session's trusted file picker
-(`plans/APPWIN.md` AW5) drives exactly the same engine; the `rustos-files`
+(`tairix-browse`), because the desktop session's trusted file picker
+(`plans/APPWIN.md` AW5) drives exactly the same engine; the `tairix-files`
 package is only the `Run` binary that composes it over the live syscalls.
 
 ### The directory-read seam
@@ -42,12 +42,12 @@ AW1). It composes three pieces, each host-proven:
   (`LengthOutOfRange`) — validate every input, fail closed (`AGENTS.md`
   §5.4).
 - `entries_from_dir_stream` — the packed `fs_readdir` stream mapped onto
-  `Entry` values through the shared `rustos_abi::fs::DirEntries` walker (the
+  `Entry` values through the shared `tairix_abi::fs::DirEntries` walker (the
   same walker `ls` lists through); one malformed record or non-UTF-8 name
   refuses the whole listing, never a partial one.
 
 The directory fetch itself is injected (`fetch(path) -> stream`): the
-shipping program passes `rustos_rt::read_dir_all` — the kernel-authorised
+shipping program passes `tairix_rt::read_dir_all` — the kernel-authorised
 `fs_open` + grow-to-`FS_IO_MAX` `fs_readdir` transfer under the app's own
 attested identity — while tests pass an in-memory tree of encoded streams and
 drive a `Browser` over it end to end. The engine adds no authority and makes
@@ -77,8 +77,8 @@ showing. The fail-closed outcomes are the `BrowseError` variants: `Source`
 ### Rendering
 
 `render(browser, theme, viewport)` paints a path bar plus a scrolling entry
-list into a `rustos-raster` `Surface` sized to the viewport, using the theme's
-palette for every colour and the shared `rustos-font` face for every label.
+list into a `tairix-raster` `Surface` sized to the viewport, using the theme's
+palette for every colour and the shared `tairix-font` face for every label.
 Directory names carry a trailing `/`, and the selected row is filled with the
 accent role. The surface is rectangular; the compositor places and rounds it
 through its single anti-aliased rounded-corner path, so there is no rounding —
@@ -91,7 +91,7 @@ can rather than panicking (`AGENTS.md` §2.9).
 ### The `Run` bundle
 
 `files.app`'s entry point (`plans/APPWIN.md` AW3) wires `VfsDirectorySource`
-over `rustos_rt::read_dir_all`, creates and grants the zero-copy window
+over `tairix_rt::read_dir_all`, creates and grants the zero-copy window
 frame region, parks on its window-event mailbox, and drives the browser
 with the keyboard (`Down`/`Up` select, `Enter` opens a directory,
 `Backspace` climbs); a `CloseRequested` from the desktop ends it cleanly,
@@ -99,7 +99,7 @@ and every bring-up refusal exits fail-loud with its reason on `stderr`. The
 desktop session's start menu carries a `Files` entry that spawns the
 bundle.
 
-## Terminal emulator (`rustos-terminal`)
+## Terminal emulator (`tairix-terminal`)
 
 The terminal emulator hosts the system shell and shows its output on a
 character-cell screen rendered through the active theme. Like the browser it is
@@ -157,9 +157,9 @@ unchanged (`AGENTS.md` §5.4).
 
 ### Rendering
 
-`render(terminal, theme, viewport)` paints the grid into a `rustos-raster`
+`render(terminal, theme, viewport)` paints the grid into a `tairix-raster`
 `Surface` sized to the viewport, using the theme's palette and the shared
-`rustos-font` monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese,
+`tairix-font` monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese,
 D2Coding Korean, and Noto Sans Hebrew companions). Hebrew and Yiddish letters,
 final forms, punctuation, and marks occupy individual terminal cells;
 Japanese and precomposed Hangul full-width bitmaps paint their lead and
@@ -179,7 +179,7 @@ than the grid paints what fits rather than panicking (`AGENTS.md` §2.9).
 ### The `Run` bundle
 
 `terminal.app`'s entry point creates the two pipes, spawns the user's default
-shell (`rustos_users::policy::DEFAULT_SHELL`) with `TERM` exported and the
+shell (`tairix_users::policy::DEFAULT_SHELL`) with `TERM` exported and the
 child-side pipe ends closed after the spawn (so each side observes the
 other's end-of-file honestly), creates and grants the zero-copy window frame
 region, and **parks** on one wait-set with three members — its window-event
@@ -196,7 +196,7 @@ the autoload QEMU vertical types a real command into the served window at
 the seat keyboard, PASSing only on the kernel-attested keyboard → session →
 terminal → pipe → shell → spawn round trip.
 
-## File viewer (`rustos-viewer`)
+## File viewer (`tairix-viewer`)
 
 The read-only text viewer is the first consumer of the desktop's trusted
 file picker and the CU6 one-shot file delegation (`plans/APPWIN.md` AW5,

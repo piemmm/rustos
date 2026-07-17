@@ -1,4 +1,4 @@
-//! RustOS wasm32 architecture port.
+//! TAIRiX wasm32 architecture port.
 //!
 //! Stage 3d brings `kernel/arch/wasm32` from a placeholder to a full
 //! Arch HAL implementation for the browser sandbox
@@ -24,8 +24,8 @@
 //! | [`isolation`]     | WASM-linear-memory isolation model (the "MMU" analogue).          |
 //! | [`syscall_entry`] | Host-call argument marshalling + dispatch callback.               |
 //! | `bindings`        | The hand-rolled JS host imports (freestanding wasm only).         |
-//! | `console`         | `console.*`-backed `rustos_log::Sink` (freestanding wasm only).   |
-//! | `entry`           | `rustos_arch_wasm32_main` export trampoline (freestanding wasm only). |
+//! | `console`         | `console.*`-backed `tairix_log::Sink` (freestanding wasm only).   |
+//! | `entry`           | `tairix_arch_wasm32_main` export trampoline (freestanding wasm only). |
 //! | `panic`           | Shared `#[panic_handler]` bridge (freestanding wasm only).        |
 //!
 //! # Arch HAL boundary
@@ -45,7 +45,7 @@
 //!
 //! The host imports in `bindings` are declared as a plain `extern "C"`
 //! block resolved against the WebAssembly `env` import module, and the
-//! companion glue under `web/rustos.js` provides them. RustOS does not
+//! companion glue under `web/tairix.js` provides them. TAIRiX does not
 //! take a `wasm-bindgen` / `web-sys` dependency: that would widen the
 //! trusted computing base for a surface this small, against ("roll your own; do not trust external code").
 #![no_std]
@@ -65,29 +65,29 @@ extern crate alloc;
 extern crate std;
 
 /// wasm32 implementation of the Arch HAL platform-entropy surface
-/// ([`rustos_arch_api::PlatformEntropy`]): the host CSPRNG, honestly
+/// ([`tairix_arch_api::PlatformEntropy`]): the host CSPRNG, honestly
 /// `Pending` on the host entropy import (see the module docs).
 pub mod entropy;
 pub mod isolation;
 pub mod kernel_arch;
 /// wasm32 implementation of the Arch HAL memory-tagging surface
-/// ([`rustos_arch_api::MemoryTagging`]). WebAssembly
+/// ([`tairix_arch_api::MemoryTagging`]). WebAssembly
 /// exposes no per-granule tagging primitive — spatial safety is the host
 /// sandbox's per-worker linear memory — so the port declares it an honest
 /// `Unsupported` (see the module docs).
 pub mod memtag;
 /// wasm32 implementation of the Arch HAL per-CPU storage surface
-/// ([`rustos_arch_api::PerCpu`]): the worker-local
+/// ([`tairix_arch_api::PerCpu`]): the worker-local
 /// slot standing in for the bare-metal ports' per-CPU register (each Web
 /// Worker owns its own module instance, so the slot is private to it).
 pub mod percpu_hal;
 /// wasm32 implementation of the Arch HAL early-boot platform-discovery
-/// surface ([`rustos_arch_api::PlatformDiscovery`]): the host-environment capability query → [`rustos_abi::hwtree`]
+/// surface ([`tairix_arch_api::PlatformDiscovery`]): the host-environment capability query → [`tairix_abi::hwtree`]
 /// normalisation.
 pub mod platform;
 pub mod preempt;
 /// wasm32 implementation of the Arch HAL side-channel mitigation
-/// surface ([`rustos_arch_api::SideChannelMitigation`]).
+/// surface ([`tairix_arch_api::SideChannelMitigation`]).
 pub mod sidechannel;
 /// wasm32 multi-worker (SMP) bring-up: spawn a Web Worker as a secondary
 /// logical CPU and recover the running context's id. Kept port-side like the riscv64 / aarch64 ports, not behind an
@@ -95,7 +95,7 @@ pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 /// wasm32 implementation of the Arch HAL timer-programming surface
-/// ([`rustos_arch_api::Timer`]): the architecture-
+/// ([`tairix_arch_api::Timer`]): the architecture-
 /// neutral scheduler-tick callback install + dispatch over the
 /// cooperative `requestAnimationFrame` loop wired in [`preempt`].
 pub mod timer_hal;

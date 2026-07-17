@@ -1,4 +1,4 @@
-# `rustos-whoami` — print the current user's account name
+# `tairix-whoami` — print the current user's account name
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/whoami.app/` so the shell resolves the bare word
@@ -10,7 +10,7 @@ document from its bundled `Help/` tree through the shared `lib/help`
 engine, in the locale the inherited `LANG` variable names, falling back to
 the usage banner when the tree is unavailable.
 
-RustOS has no `/etc/passwd` and no ambient identity file. The uid comes
+TAIRiX has no `/etc/passwd` and no ambient identity file. The uid comes
 from the caller's kernel-attested origin record (the ungated `self_origin`
 syscall — a pure self-observer), and the uid → name pairing comes from the
 ungated `USER_DIRECTORY` query the System Information API serves
@@ -23,7 +23,7 @@ missing name.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `rustos-abi`, `rustos-procinfo`, and `rustos-help` crates, so it
+shared `tairix-abi`, `tairix-procinfo`, and `tairix-help` crates, so it
 never links a kernel or driver crate. Its manifest (`AppInfo.toml`)
 requests `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session
 baseline — and the secured VFS still authorises every path per-inode under

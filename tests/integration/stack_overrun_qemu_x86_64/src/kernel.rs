@@ -12,19 +12,19 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 extern crate alloc;
 use alloc::sync::Arc;
 
-use rustos_arch_api::mmu::AddressSpace as _;
-use rustos_arch_api::tlb::TlbShootdown as _;
-use rustos_arch_x86_64::context_hal::ContextSwitchHal;
-use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
-use rustos_arch_x86_64::paging::{self, BLOCK_2MIB, KERNEL_VMA_BASE, PAGE_SIZE};
-use rustos_arch_x86_64::{fault, qemu_exit, smp};
-use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::{
+use tairix_arch_api::mmu::AddressSpace as _;
+use tairix_arch_api::tlb::TlbShootdown as _;
+use tairix_arch_x86_64::context_hal::ContextSwitchHal;
+use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
+use tairix_arch_x86_64::paging::{self, BLOCK_2MIB, KERNEL_VMA_BASE, PAGE_SIZE};
+use tairix_arch_x86_64::{fault, qemu_exit, smp};
+use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
-use rustos_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 /// `EventId` emitted when every boot init phase completed.
 const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
@@ -48,7 +48,7 @@ const BOOT_CPU: u32 = 0;
 const IDENTITY_GIB: usize = 4;
 
 /// Width of the kthread-stack guard region: one 4 KiB page, matching
-/// `rustos_kernel_core::BoxStack` and the production `ArenaStack` (the
+/// `tairix_kernel_core::BoxStack` and the production `ArenaStack` (the
 /// guard sits immediately *below* the usable stack).
 const STACK_GUARD_BYTES: u64 = PAGE_SIZE as u64;
 
@@ -161,7 +161,7 @@ fn note(level: Level, id: EventId, message: &'static str) {
     );
 }
 
-/// Forward to the shared bridge in `rustos_kernel`.
+/// Forward to the shared bridge in `tairix_kernel`.
 #[panic_handler]
 fn stack_overrun_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
     handle_panic_via_kernel_core(info)
@@ -177,7 +177,7 @@ fn fail(what: &'static str) -> ! {
             message: "x86_64 stack-overrun test: setup failed",
             fields: &[Field {
                 key: "stage",
-                value: rustos_log::FieldValue::Str(what),
+                value: tairix_log::FieldValue::Str(what),
             }],
         },
     );
@@ -367,7 +367,7 @@ fn run_overrun_test() -> ! {
             message: "x86_64 stack-overrun test: kthread overran the guard page without faulting",
             fields: &[Field {
                 key: "drained",
-                value: rustos_log::FieldValue::Str(if sched.live_task_count() == 0 {
+                value: tairix_log::FieldValue::Str(if sched.live_task_count() == 0 {
                     "yes"
                 } else {
                     "timeout"
@@ -406,6 +406,6 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         multiboot_info,
         &SERIAL_SINK,
         &AUDIT_SINK,
-        rustos_log::Level::Info,
+        tairix_log::Level::Info,
     )
 }

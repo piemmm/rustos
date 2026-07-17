@@ -10,10 +10,10 @@
 extern crate std;
 
 use super::*;
-use rustos_abi::driver::block::BlockGeometry;
-use rustos_abi::DriverKind;
 use std::vec;
 use std::vec::Vec;
+use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::DriverKind;
 
 /// In-memory block device backing the test volumes.
 struct MemDisk {

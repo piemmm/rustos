@@ -1,4 +1,4 @@
-//! RustOS `ls` — list directory contents (Stage 6
+//! TAIRiX `ls` — list directory contents (Stage 6
 //! `userland/apps/`, a `plans/APPS.md` command app).
 //!
 //! `ls` inspects each of its path operands in order. A non-directory operand
@@ -21,7 +21,7 @@
 //! * [`Listing`] — stat a path and read a directory's entries.
 //! * [`Output`] — write the rendered listing to the terminal and advisory
 //!   records to the standard information stream (fd 3).
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by the
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
 //!   short-help switches.
 //!
 //! The binary that ships as `ls` wires the real syscall-backed filesystem and
@@ -42,7 +42,7 @@
 //!
 //! An unknown option is a [`LsError::Usage`] that lists nothing; an operand
 //! (or, under `-l`, a directory entry) that cannot be stat'd surfaces the
-//! underlying [`Errno`](rustos_abi::Errno) as [`LsError::Stat`] and stops; a
+//! underlying [`Errno`](tairix_abi::Errno) as [`LsError::Stat`] and stops; a
 //! directory that cannot be read is [`LsError::Read`]; a failed terminal
 //! write is [`LsError::Output`]. There is no partial-guess path and no panic.
 //!
@@ -57,7 +57,7 @@
 //! The bundle's `Help/` documents are **not** embedded in this crate: they
 //! are authored once in the bundle's on-disk `Help/` tree, planted onto
 //! `/System` by the image builder from that source (`tools/syshelp`), and read
-//! back at runtime through the injected [`rustos_help::HelpSource`] seam. Help
+//! back at runtime through the injected [`tairix_help::HelpSource`] seam. Help
 //! is never hardcoded into the program (`plans/APPS.md`).
 //!
 //! # Layering & safety

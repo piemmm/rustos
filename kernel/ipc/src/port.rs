@@ -10,7 +10,7 @@
 //! * `required_recv_caps` — the set the creator (and any later binder
 //!   in 2.7's syscall layer) must hold *at port creation*.
 //! * `max_payload` — the maximum payload length, bounded above by
-//!   [`rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN`].
+//!   [`tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN`].
 //! * a bounded mailbox; out-of-room sends fail with
 //!   [`Errno::LengthOutOfRange`] and an audit record.
 //!
@@ -26,12 +26,12 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use rustos_abi::{Errno, Origin};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_log::{Field, Sink};
-use rustos_util::fmt::{format_hex_u64, format_usize};
+use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
+use tairix_abi::{Errno, Origin};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_log::{Field, Sink};
+use tairix_util::fmt::{format_hex_u64, format_usize};
 
 use crate::audit::{record, AuditEvent};
 use crate::loom_compat::{AtomicU32, Ordering};
@@ -39,7 +39,7 @@ use crate::loom_compat::{AtomicU32, Ordering};
 /// Stable endpoint identifier carried in the IPC header.
 ///
 /// Wraps the same `u64` declared by
-/// [`rustos_abi::ipc::IpcMessageHeader::endpoint`]; the newtype keeps
+/// [`tairix_abi::ipc::IpcMessageHeader::endpoint`]; the newtype keeps
 /// port identifiers distinct from task identifiers, capability
 /// identifiers, and other 64-bit kernel handles.
 #[repr(transparent)]
@@ -99,7 +99,7 @@ pub struct Port {
     // Mailbox under a spinlock. We use `kernel/sync`'s `SpinLock`
     // because IPC sends never block on I/O and contention is bounded
     // by the mailbox capacity.
-    mailbox: rustos_sync::SpinLock<VecDeque<Message>>,
+    mailbox: tairix_sync::SpinLock<VecDeque<Message>>,
 }
 
 impl Port {
@@ -109,11 +109,11 @@ impl Port {
     /// `required_recv_caps`; this enforces the "bind-time check"
     /// half of (the sender check happens on every
     /// [`Self::send`]). The creator additionally must hold
-    /// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
+    /// [`tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
     /// `required_send_caps` is non-empty — i.e. a port that restricts
     /// who may *send* into it is by definition a privileged endpoint —
     /// **or** when `id` is a reserved well-known service rendezvous
-    /// ([`rustos_abi::ipc::is_reserved_endpoint`]): an open bind on a
+    /// ([`tairix_abi::ipc::is_reserved_endpoint`]): an open bind on a
     /// reserved id would let an unprivileged squatter claim traffic
     /// meant for the service, exactly the refusal
     /// [`crate::CallEndpoint::create`] makes. The creator becomes the
@@ -141,7 +141,7 @@ impl Port {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "port",
-            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
 
         if max_payload > IPC_MESSAGE_MAX_PAYLOAD_LEN || mailbox_capacity == 0 {
@@ -160,8 +160,8 @@ impl Port {
         // A port that restricts who may send is privileged, and so is a
         // reserved well-known rendezvous id (a squatter must not claim a
         // service's traffic); binding either requires IPC_BIND_PRIVILEGED.
-        if (!required_send_caps.is_empty() || rustos_abi::ipc::is_reserved_endpoint(id.0))
-            && !creator.has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
+        if (!required_send_caps.is_empty() || tairix_abi::ipc::is_reserved_endpoint(id.0))
+            && !creator.has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
         {
             record(audit, AuditEvent::PortCreateDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
@@ -177,7 +177,7 @@ impl Port {
             max_payload,
             mailbox_capacity,
             state: AtomicU32::new(state::OPEN),
-            mailbox: rustos_sync::SpinLock::new(VecDeque::new()),
+            mailbox: tairix_sync::SpinLock::new(VecDeque::new()),
         })
     }
 
@@ -254,11 +254,11 @@ impl Port {
             &[
                 Field {
                     key: "port",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
                 },
                 Field {
                     key: "drained",
-                    value: rustos_log::FieldValue::Str(format_usize(drained, &mut drained_buf)),
+                    value: tairix_log::FieldValue::Str(format_usize(drained, &mut drained_buf)),
                 },
             ],
         );
@@ -296,15 +296,15 @@ impl Port {
         let mut len_buf = [0u8; 12];
         let port_field = Field {
             key: "port",
-            value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
         };
         let sender_field = Field {
             key: "sender",
-            value: rustos_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: rustos_log::FieldValue::Str(format_usize(payload.len(), &mut len_buf)),
+            value: tairix_log::FieldValue::Str(format_usize(payload.len(), &mut len_buf)),
         };
 
         // 1. Fast path: reject sends to closed ports without locking.
@@ -437,9 +437,9 @@ impl Port {
 mod tests {
     use super::*;
     use crate::audit::RecordingSink;
-    use rustos_abi::CapabilityId;
-    use rustos_kernel_sec::captable::TaskId;
-    use rustos_kernel_sec::identity::UserId;
+    use tairix_abi::CapabilityId;
+    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
         let mut s = CapabilitySet::empty();

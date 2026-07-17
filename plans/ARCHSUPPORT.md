@@ -37,8 +37,8 @@ in all of them applies here without exception.
   no disk floor and is out of scope here.
 - **The boot floor binds by discovery-match, never by assumption (§18.6).**
   The x86_64 root storage path is the existing in-kernel
-  `rustos_drv_storage_virtio_blk` floor entry over the virtio-PCI
-  provisioning seam (`kernel/rustos-kernel/src/x86_64/virtio_boot.rs`),
+  `tairix_drv_storage_virtio_blk` floor entry over the virtio-PCI
+  provisioning seam (`kernel/tairix-kernel/src/x86_64/virtio_boot.rs`),
   bound because the ACPI/PCI-enumerated hardware tree matched its bind
   table through the shared `lib/devmatch` policy — no compile-time device
   address, no `cfg` fork outside the port (§2.20).
@@ -82,7 +82,7 @@ in all of them applies here without exception.
   the virtio-PCI provisioning seam and an in-kernel driver host
   (`x86_64/driver_host.rs`) exist.
 - **Production boot gap (the whole point of this plan):**
-  `kernel/rustos-kernel/src/x86_64/boot.rs` wires only COM1 consoles,
+  `kernel/tairix-kernel/src/x86_64/boot.rs` wires only COM1 consoles,
   installed memory, `LATE_IDENTITY`, init spawn, the embedded-registry
   spawn producer, and the ACPI hardware-tree source. It has no
   `root_unlock` module, no `with_app_store`/`with_users_db`/
@@ -94,7 +94,7 @@ in all of them applies here without exception.
 
 ### A1 — `tools/mkimage` x86_64 image builder (`planned`)
 
-The Stage 8 deliverable `images/rustos-x86_64.iso` / bootable disk image
+The Stage 8 deliverable `images/tairix-x86_64.iso` / bootable disk image
 (§12): GPT layout (hybrid BIOS/UEFI boot is the §12 target; the increment
 lands whatever QEMU boots the kernel from today, complete for that path —
 if genuine BIOS+UEFI hybrid boot needs boot-loader work beyond this plan,
@@ -180,7 +180,7 @@ because its blocker is not an aarch64-parity item.
 ## 3. Invariants (hold across every increment)
 
 - No `cfg(target_arch …)` outside the §17.2 allow-list; all new per-port
-  code lives under `kernel/rustos-kernel/src/x86_64/` or
+  code lives under `kernel/tairix-kernel/src/x86_64/` or
   `kernel/arch/x86_64/` (§2.20, §17.2).
 - Shared logic is hoisted, never copied: any routine an increment needs
   that aarch64 already has in a per-port file is moved to the shared home

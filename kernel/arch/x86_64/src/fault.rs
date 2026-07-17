@@ -10,8 +10,8 @@
 //! fault observer the kernel cannot otherwise reach.
 //!
 //! It is the x86_64 analogue of the riscv64 ([`crate`]'s sibling
-//! `rustos_arch_riscv64::fault`) and aarch64
-//! (`rustos_arch_aarch64::fault`) synchronous-fault hooks, with the same
+//! `tairix_arch_riscv64::fault`) and aarch64
+//! (`tairix_arch_aarch64::fault`) synchronous-fault hooks, with the same
 //! two-tier posture:
 //!
 //! * A **resolvable ring-3 data fault**
@@ -270,7 +270,7 @@ pub fn page_fault_isr_addr() -> u64 {
 /// architectural GPRs in the [`crate::interrupts::SavedRegs`] order
 /// (the same order `define_isr!` pins), marshals `(error_code, CR2,
 /// rip, &frame.rip)` into the SysV argument registers, and calls
-/// [`rustos_arch_x86_64_page_fault_dispatch`]. The dispatcher *returns
+/// [`tairix_arch_x86_64_page_fault_dispatch`]. The dispatcher *returns
 /// only when the fault was dealt with* — a resolved ring-3 demand-paging
 /// fault (the frame's untouched `RIP` re-runs the faulting instruction,
 /// which now succeeds) or a kernel-mode fault inside the guarded
@@ -352,7 +352,7 @@ pub unsafe extern "C" fn page_fault_isr() {
         "popq %rax",
         "addq $8, %rsp",
         "iretq",
-        dispatch = sym rustos_arch_x86_64_page_fault_dispatch,
+        dispatch = sym tairix_arch_x86_64_page_fault_dispatch,
         options(att_syntax),
     )
 }
@@ -386,7 +386,7 @@ pub unsafe extern "C" fn page_fault_isr() {
 /// non-resumable entry had.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-extern "C" fn rustos_arch_x86_64_page_fault_dispatch(
+extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
     error_code: u64,
     faulting_addr: u64,
     rip: u64,

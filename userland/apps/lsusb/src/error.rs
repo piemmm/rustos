@@ -2,8 +2,8 @@
 
 use core::fmt;
 
-use rustos_abi::Errno;
-use rustos_procinfo::CallError;
+use tairix_abi::Errno;
+use tairix_procinfo::CallError;
 
 /// Why an `lsusb` invocation did not complete.
 ///

@@ -12,27 +12,27 @@ capability model, kinds) lives in
 
 | Module                                | Purpose                                |
 |---------------------------------------|----------------------------------------|
-| [`rustos_abi::driver`]                | Shared types: host, handle, error, kind, manifest. |
-| [`rustos_abi::driver::display`]       | `Display` trait + pixel-format types.  |
-| [`rustos_abi::driver::filesystem`]    | `Filesystem` trait + mount flags.      |
-| [`rustos_abi::driver::block`]         | `Block` trait + geometry.              |
-| [`rustos_abi::driver::net`]           | `Net` trait + MAC address.             |
-| [`rustos_abi::driver::input`]         | `Input` trait + event records.         |
-| [`rustos_abi::driver::bus`]           | `Bus` trait + device records.          |
-| [`rustos_abi::driver::virtio_pci`]    | `VirtioPciBus` transport-provisioning seam. |
-| [`rustos_abi::driver::virtio_mmio`]   | `VirtioMmioBus` transport-provisioning seam. |
-| [`rustos_abi::driver::pci`]           | `PciBus` generic BAR / bus-master seam. |
+| [`tairix_abi::driver`]                | Shared types: host, handle, error, kind, manifest. |
+| [`tairix_abi::driver::display`]       | `Display` trait + pixel-format types.  |
+| [`tairix_abi::driver::filesystem`]    | `Filesystem` trait + mount flags.      |
+| [`tairix_abi::driver::block`]         | `Block` trait + geometry.              |
+| [`tairix_abi::driver::net`]           | `Net` trait + MAC address.             |
+| [`tairix_abi::driver::input`]         | `Input` trait + event records.         |
+| [`tairix_abi::driver::bus`]           | `Bus` trait + device records.          |
+| [`tairix_abi::driver::virtio_pci`]    | `VirtioPciBus` transport-provisioning seam. |
+| [`tairix_abi::driver::virtio_mmio`]   | `VirtioMmioBus` transport-provisioning seam. |
+| [`tairix_abi::driver::pci`]           | `PciBus` generic BAR / bus-master seam. |
 
-[`rustos_abi::driver`]: #shared-types
-[`rustos_abi::driver::display`]: #display
-[`rustos_abi::driver::filesystem`]: #filesystem
-[`rustos_abi::driver::block`]: #block
-[`rustos_abi::driver::net`]: #net
-[`rustos_abi::driver::input`]: #input
-[`rustos_abi::driver::bus`]: #bus
-[`rustos_abi::driver::virtio_pci`]: #virtio-pci-provisioning
-[`rustos_abi::driver::virtio_mmio`]: #virtio-mmio-provisioning
-[`rustos_abi::driver::pci`]: #generic-pci-provisioning
+[`tairix_abi::driver`]: #shared-types
+[`tairix_abi::driver::display`]: #display
+[`tairix_abi::driver::filesystem`]: #filesystem
+[`tairix_abi::driver::block`]: #block
+[`tairix_abi::driver::net`]: #net
+[`tairix_abi::driver::input`]: #input
+[`tairix_abi::driver::bus`]: #bus
+[`tairix_abi::driver::virtio_pci`]: #virtio-pci-provisioning
+[`tairix_abi::driver::virtio_mmio`]: #virtio-mmio-provisioning
+[`tairix_abi::driver::pci`]: #generic-pci-provisioning
 
 ## Shared types
 
@@ -86,7 +86,7 @@ node like any other discovered device, and the driver requests only what
 its enumeration found — no ambient authority (`AGENTS.md` §4).
 
 For a **user-space** bus driver this is no longer a no-op default: the
-rt-backed host `rustos_drvrt::RtDriverHost` forwards `emit_node` to the
+rt-backed host `tairix_drvrt::RtDriverHost` forwards `emit_node` to the
 `hw_emit_node` syscall (no. 37, gated on `CAP_HW_EMIT`). The kernel admits
 the published node only when every `HwResource` it requests is covered by
 one of the calling driver's own minted grants (`HwResource::covers`), so an
@@ -145,7 +145,7 @@ child), each free of ambient authority:
 * **`drivers/input/usb_kbd`** binds the `usb,xhci` node, brings the
   controller up, enumerates the boot keyboard, and pumps key edges.
 
-The board-specific PCIe half is `rustos_drv_bus_pcie_brcm::wiring`: it reads
+The board-specific PCIe half is `tairix_drv_bus_pcie_brcm::wiring`: it reads
 the controller register window + the inbound/outbound address windows off the
 discovered `brcm,bcm2711-pcie` `HwNode` (`pcie_bringup_from_resources`, never
 a compiled-in board constant — `AGENTS.md` §18.1), maps the window
@@ -156,7 +156,7 @@ prove the composition up to the root-port / link-up check; the live link
 training is the on-metal acceptance item.
 
 The board-neutral USB half is the landed
-`rustos_drv_bus_usb::wiring::bring_up_boot_input`: it maps the controller
+`tairix_drv_bus_usb::wiring::bring_up_boot_input`: it maps the controller
 BAR (`mmio_mapper()`), carves the device-shared DMA region (`dma_host()`
 — a USB host controller is not virtio, so it uses the bus-neutral DMA
 seam, not `virtio_host()`), brings the controller up, enumerates the boot
@@ -180,7 +180,7 @@ per `AGENTS.md` §8 is unchanged: the accessor takes `&self` to
 compose with the immutable driver-host loan, and `VirtioHost`'s
 own methods use interior mutability for state. The owned
 `DmaSlab`, `PoolId`, and `SlabFreeFn` types backing the trait now
-live in `rustos_abi::driver::dma`; `drivers/bus/virtio`
+live in `tairix_abi::driver::dma`; `drivers/bus/virtio`
 re-exports them so existing import sites remain unchanged.
 
 ### DriverHandle
@@ -201,14 +201,14 @@ to every successfully-loaded driver. The all-zero value is reserved
 `#[repr(i32)] #[non_exhaustive] enum DriverError`. Twelve variants
 covering every failure path the trait surface can produce. Numeric
 values are frozen at `abi-v1` and disjoint from
-[`rustos_abi::Errno`](../lib/abi.md); use
+[`tairix_abi::Errno`](../lib/abi.md); use
 `DriverError::as_errno` when bridging into a syscall result.
 
 ### DriverManifest
 
 `#[repr(C)] struct DriverManifest`. The signed prefix of a driver
 module's `rxe` manifest. Wire encoding mirrors
-[`rustos_abi::ManifestHeader`](../lib/abi.md) so a single verifier
+[`tairix_abi::ManifestHeader`](../lib/abi.md) so a single verifier
 serves both surfaces. Encoded length is `DriverManifest::WIRE_LEN`
 bytes; the signature byte range is the tail of that buffer
 (`DriverManifest::signed_range()` returns everything *before* the
@@ -235,7 +235,7 @@ authenticated and cannot be substituted after signing (`AGENTS.md` §8 /
 
 `#[repr(C)] struct DriverBindKey`. One entry of a driver manifest's
 bind table (`AGENTS.md` §18.3): a hardware-tree
-`rustos_abi::hwtree::HwMatchKey` plus the manifest-declared
+`tairix_abi::hwtree::HwMatchKey` plus the manifest-declared
 bind `priority`. The device manager matches each hardware-tree node's
 keys against every driver's bind table; when more than one driver
 matches the same node, the higher matched `priority` binds, and an
@@ -270,9 +270,9 @@ codes, and a `status`/`handle` pair that is inconsistent (a success
 with the zero sentinel handle, or a failure carrying a handle) — the
 whole record is refused on any failure (fail closed). The spawned
 driver builds the record with `registered(handle)` / `failed(error)`
-and sends it with the `rustos-rt` `ipc_send` wrapper to the reply
+and sends it with the `tairix-rt` `ipc_send` wrapper to the reply
 endpoint id its host handed it through its startup arguments
-(`rustos_rt::arg`).
+(`tairix_rt::arg`).
 
 ## Display
 
@@ -449,7 +449,7 @@ Buffer sizes must be a positive integer multiple of
 | `service(&mut rings)` | `CAP_NET_RAW` (plus handle).     |
 
 Frame I/O is the shared-memory frame-ring transport
-(`rustos_abi::driver::net_ring`): `service` drains the stack-owned TX
+(`tairix_abi::driver::net_ring`): `service` drains the stack-owned TX
 ring into the device and harvests delivered frames into the RX ring
 (see [Network drivers](../drivers/network.md)).
 
@@ -475,7 +475,7 @@ holds; consumers reject such a claim as a `DeviceFault` (`AGENTS.md`
 §5.4).
 
 Legacy x86 input controllers are byte-addressed, so the
-`rustos_abi::driver::port_io` module ships an 8-bit port-access seam,
+`tairix_abi::driver::port_io` module ships an 8-bit port-access seam,
 `trait PortIo8 { read8, write8 }`, alongside the existing 32-bit
 `PortIo` (which is reserved for PCI mechanism #1 configuration access).
 `PortIo` is frozen, so per
@@ -563,7 +563,7 @@ unused BARs); `enable_bus_master` sets the function's Memory Space + Bus
 Master Enable bits so the controller may issue upstream DMA. `Pci<C>`
 implements it by forwarding to the inherent methods, sharing the
 bus-master activation with `route_msix` (`AGENTS.md` §2.2). The xHCI
-bring-up consumes it in `rustos_drv_bus_usb::wiring::open_discovered`
+bring-up consumes it in `tairix_drv_bus_usb::wiring::open_discovered`
 (see [Bus drivers](../drivers/bus.md#generic-pci-bar-hand-off-the-xhci--vl805-path)).
 
 ## Versioning

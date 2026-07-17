@@ -3,9 +3,9 @@
 
 use super::*;
 use crate::fs::perm::Credentials;
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{GroupId, UserId};
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{GroupId, UserId};
 
 const ADMIN_UID: u32 = 1;
 const ADMIN_GID: u32 = 1;
@@ -104,7 +104,7 @@ fn system_logs_and_settings_are_writable() {
             &admin,
             &p("/System/Settings/hostname"),
             Mode::from_bits(0o644),
-            b"rustos".to_vec()
+            b"tairix".to_vec()
         )
         .is_ok());
 }

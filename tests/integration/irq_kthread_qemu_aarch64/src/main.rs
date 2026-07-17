@@ -9,13 +9,13 @@
 //!
 //! 1. **DTB SPI discovery.** It decodes the PL031 RTC node's `interrupts`
 //!    triple into its GICv2 INTID through
-//!    `rustos_arch_aarch64::fdt::gic_device_intid` over the embedded `virt`
+//!    `tairix_arch_aarch64::fdt::gic_device_intid` over the embedded `virt`
 //!    device tree — no board constant.
 //! 2. **The kthread-cooperative waiter.** A real in-kernel service kthread,
-//!    admitted on the `rustos_kernel_sched_eevdf::Scheduler` via
-//!    `rustos_kernel_core::spawn_kthread`, blocks on the bound line through
-//!    `rustos_kernel_core::KthreadIrqWaiter` + the shared
-//!    `rustos_kernel_irq::block_until_ready` loop, cooperatively yielding
+//!    admitted on the `tairix_kernel_sched_eevdf::Scheduler` via
+//!    `tairix_kernel_core::spawn_kthread`, blocks on the bound line through
+//!    `tairix_kernel_core::KthreadIrqWaiter` + the shared
+//!    `tairix_kernel_irq::block_until_ready` loop, cooperatively yielding
 //!    until the RTC SPI fires and wakes it.
 //!
 //! On boot the test discovers the board (GICv2 bases + timer rate + the RTC
@@ -38,7 +38,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-irq-kthread-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-irq-kthread-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

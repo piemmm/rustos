@@ -1,7 +1,7 @@
 //! Build-discovered system app-store bundle payload (Help documents and
 //! `Resources/` files) for image authoring.
 //!
-//! RustOS ships each command app's internationalised command help as a
+//! TAIRiX ships each command app's internationalised command help as a
 //! structured-Markdown `Help/` tree on the read-only `/System` volume, at
 //! `/System/Apps/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`), and
 //! each app's bundle resources (e.g. `lspci`'s compiled ID-database table,
@@ -98,7 +98,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::vec::Vec;
 
-    use rustos_help::{lint_help_trees, LintDoc};
+    use tairix_help::{lint_help_trees, LintDoc};
 
     use super::HELP_FILES;
 

@@ -11,7 +11,7 @@ man — afficher le document d'aide d'une commande
 Affiche le document d'aide fourni par le paquet applicatif d'une commande,
 dans votre langue lorsqu'une traduction existe.
 
-Chaque programme RustOS est un paquet applicatif portant une arborescence
+Chaque programme TAIRiX est un paquet applicatif portant une arborescence
 `Help/` : un document structuré par commande ou sujet, par langue. `man`
 résout `<command>` exactement comme l'interpréteur de commandes — d'abord
 le magasin d'applications système, puis les répertoires de `PATH` — la

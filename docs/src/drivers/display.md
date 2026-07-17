@@ -2,7 +2,7 @@
 
 Display drivers present a single linear pixel surface to the
 compositor (`userland/gui/wm`). They implement
-[`rustos_abi::driver::display::Display`](../abi/driver_traits.md) and
+[`tairix_abi::driver::display::Display`](../abi/driver_traits.md) and
 are loaded as user-space drivers; compositing, damage tracking, and
 GPU acceleration live above this trait, not inside it.
 
@@ -37,7 +37,7 @@ so a small screen update costs a small copy end to end.
 Every present/flip path is additionally gated on the presenting
 client's *current* seat lease (`plans/DISPLAY.md` D4): at `open` a
 driver captures its host's `DriverHost::seat_gate()` — a
-`rustos_abi::driver::display::SeatGate` the kernel bound to the
+`tairix_abi::driver::display::SeatGate` the kernel bound to the
 client's `SeatLease` — and consults it at the **top** of `present` (and
 `present_layers`), before any validation or surface access. A client
 whose lease was revoked is refused with the distinct
@@ -74,23 +74,23 @@ partial (§2.9).
 
 | Driver       | Crate                                | Surface source                            | Stage 4 status        |
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
-| framebuffer  | `rustos-drv-display-framebuffer` (Run process over `rustos_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
-| vesa         | `rustos-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
-| rpi_hvs      | `rustos-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
+| framebuffer  | `tairix-drv-display-framebuffer` (Run process over `tairix_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
+| vesa         | `tairix-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
+| rpi_hvs      | `tairix-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
 
 The two display drivers are deliberate siblings (`AGENTS.md` §2.2
 carve-out), not duplicates: `vesa` owns the VBE-specific decode, while
 the framebuffer path consumes an already-parsed geometry record.
 
-### `rustos-drv-display-framebuffer`
+### `tairix-drv-display-framebuffer`
 
 The framebuffer display service copies a presented frame into a
 firmware-provided linear surface. Its crate is **bin-only** — the `Run`
 entry point of the `/System/Drivers/` bundle `devmgr` autoloads when a
 display node carrying a `HwResourceKind::Framebuffer` resource is
 discovered — and it holds no device logic of its own: the
-linear-surface engine is `rustos_display::Framebuffer` and the
-protocol engine is `rustos_display::DisplayServer` (`lib/display`, one
+linear-surface engine is `tairix_display::Framebuffer` and the
+protocol engine is `tairix_display::DisplayServer` (`lib/display`, one
 shared definition, `plans/DISPLAY.md` D7b). Neither programs a display
 controller; the service resolves its surface's `(phys_base, mode)`
 fail-closed from its kernel-issued device-resource grants
@@ -143,7 +143,7 @@ that same shared engine.
 #### QEMU integration vertical
 
 `tests/integration/framebuffer_display_qemu_riscv64`
-(`rustos-test-framebuffer-display-qemu-riscv64`, enrolled in `cargo
+(`tairix-test-framebuffer-display-qemu-riscv64`, enrolled in `cargo
 xtask test --qemu`) drives the driver against a **real** emulated
 framebuffer on the riscv64 `virt` board, closing the `load → use →
 unload → reload` loop for a display driver.
@@ -154,9 +154,9 @@ a static, page-aligned guest-RAM scan-out surface into it over the
 `fw_cfg` MMIO DMA interface (find `etc/ramfb` in the file directory,
 DMA-write the big-endian `RAMFBCfg`). The resulting geometry is the
 `FramebufferConfig` boot hand-off. The harness then loads the signed
-framebuffer `.rxe` through `rustos_drvhost::Host` (the §8 load gate)
+framebuffer `.rxe` through `tairix_drvhost::Host` (the §8 load gate)
 and, for the "use" step, maps the surface through the
-capability-gated `rustos_kernel_virtio::KernelMmioMapper` — the same
+capability-gated `tairix_kernel_virtio::KernelMmioMapper` — the same
 real kernel MMIO-map facility the bus drivers use — and calls
 `present`. A second window mapped over the same physical range reads
 the pixels back to confirm they reached the scan-out memory QEMU
@@ -164,18 +164,18 @@ consumes, before and after the reload. The `ramfb`/`fw_cfg` bring-up
 is test-harness code, mirroring how the virtio verticals own their
 PLIC/trap bring-up rather than placing it in the production kernel.
 The `fw_cfg` DMA protocol itself lives once in the shared
-`lib/fwcfg` crate (`rustos-fwcfg`, which also serves the aarch64
+`lib/fwcfg` crate (`tairix-fwcfg`, which also serves the aarch64
 framebuffer boot console's ramfb path); this vertical supplies only
 the riscv64 MMIO transport (`AGENTS.md` §2.2).
 
 `tests/integration/framebuffer_display_qemu_aarch64`
-(`rustos-test-framebuffer-display-qemu-aarch64`, enrolled in `cargo
+(`tairix-test-framebuffer-display-qemu-aarch64`, enrolled in `cargo
 xtask test --qemu`) is the aarch64 `virt`-board sibling of the riscv64
 vertical, driving the same driver against a **real** emulated `ramfb`
 framebuffer over the EL1/GICv2 path. It reuses the shared aarch64
-bring-up (`rustos-test-virtio-qemu-support`'s FP-enable + 2 GiB identity
+bring-up (`tairix-test-virtio-qemu-support`'s FP-enable + 2 GiB identity
 MMU + EL1 vectors) and the **same** shared `fw_cfg` MMIO transport
-(`rustos-fwcfg`'s `MmioDma`) the riscv64 vertical uses — the two
+(`tairix-fwcfg`'s `MmioDma`) the riscv64 vertical uses — the two
 `virt` boards expose `fw_cfg` identically, so there is one transport,
 not two (`AGENTS.md` §2.2). Because QEMU's aarch64 `-kernel <ELF>` path
 passes no DTB pointer, the vertical embeds the canonical `virt` device
@@ -184,7 +184,7 @@ lifecycle, `ramfb` programming, and pixel read-back are otherwise the
 riscv64 scenario's siblings.
 
 `tests/integration/framebuffer_display_wasm32`
-(`rustos-test-framebuffer-display-wasm32`, enrolled in `cargo xtask test
+(`tairix-test-framebuffer-display-wasm32`, enrolled in `cargo xtask test
 --wasm`) is the wasm32 sibling: it drives the **same** framebuffer driver
 in a real headless browser, against a static RGBA8888 surface in WASM
 linear memory. Because wasm32 has no MMU, the surface is mapped through a
@@ -192,7 +192,7 @@ capability-checked `WasmMmioMapper` — a bounds- and `CAP_MMIO_MAP`-gated
 view of the one in-memory surface, the MMU-less analogue of
 `KernelMmioMapper`. Each presented frame is read back two ways: through a
 second independently-mapped window (the bytes reached linear memory) and
-through the new `rustos_host_present_framebuffer` host import, which
+through the new `tairix_host_present_framebuffer` host import, which
 paints the surface onto an HTML `<canvas>` and returns the count of
 pixels that survived the canvas round-trip — so the vertical proves the
 pixels reach a genuine display surface, not just memory. The signed
@@ -201,7 +201,7 @@ bare-metal verticals' siblings (`AGENTS.md` §2.2); the driver itself is
 byte-for-byte the same. See `docs/src/platform/wasm32.md` for the host
 loader and harness.
 
-### `rustos-drv-display-vesa`
+### `tairix-drv-display-vesa`
 
 The VESA driver presents the linear framebuffer a VESA BIOS Extensions
 (VBE) mode exposes on a legacy x86_64 PC. Because the kernel cannot
@@ -232,7 +232,7 @@ semantics match the framebuffer driver: `register` clears
 #### QEMU integration vertical
 
 `tests/integration/vesa_display_qemu_x86_64`
-(`rustos-test-vesa-qemu-x86-64`, enrolled in `cargo xtask test --qemu`)
+(`tairix-test-vesa-qemu-x86-64`, enrolled in `cargo xtask test --qemu`)
 is the x86_64 sibling of the framebuffer vertical: it drives the driver
 against a **real** emulated framebuffer, closing the `load → use →
 unload → reload` loop on x86_64.
@@ -243,19 +243,19 @@ the `fw_cfg` **IOport** DMA interface (registers `0x514`/`0x518`). It
 then synthesises the bootloader-captured VBE `ModeInfoBlock` describing
 that surface — the shape a real VBE mode query (`0x4F01`) would produce
 — as the boot hand-off, loads the signed vesa `.rxe` through
-`rustos_drvhost::Host` (the §8 load gate), and for the "use" step decodes
+`tairix_drvhost::Host` (the §8 load gate), and for the "use" step decodes
 the block with `VesaFramebuffer::open`, maps the surface through the
-capability-gated `rustos_kernel_virtio::KernelMmioMapper`, and calls
+capability-gated `tairix_kernel_virtio::KernelMmioMapper`, and calls
 `present`. A second window mapped over the same physical range reads the
 pixels back to confirm they reached the scan-out memory, before and
 after the reload.
 
 The `fw_cfg` DMA protocol lives once in the shared `lib/fwcfg` crate
-(`rustos-fwcfg`); this vertical supplies only the x86_64 IOport
+(`tairix-fwcfg`); this vertical supplies only the x86_64 IOport
 transport, the deliberate sibling of the riscv64 MMIO transport
 (`AGENTS.md` §2.2).
 
-### `rustos-drv-display-rpi-hvs`
+### `tairix-drv-display-rpi-hvs`
 
 The Raspberry Pi driver is the first to implement `AcceleratedDisplay`.
 It exposes the VideoCore Hardware Video Scaler (HVS) — a fixed-function
@@ -284,7 +284,7 @@ Like the other display drivers it runs in user space and is exercised
 by host-side tests against a multi-region mock `MmioMapper` that reads
 back both the uploaded plane pixels and the encoded DLIST words.
 
-#### Firmware framebuffer discovery (`rustos-vcmailbox`)
+#### Firmware framebuffer discovery (`tairix-vcmailbox`)
 
 The scan-out surface itself comes from the Pi's GPU firmware, spoken to
 over the BCM2711 **mailbox property channel**. That protocol lives once

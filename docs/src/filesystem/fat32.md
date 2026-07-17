@@ -1,6 +1,6 @@
 # FAT32 driver
 
-`drivers/filesystem/fat32` (`rustos-drv-fs-fat32`) is the read/write
+`drivers/filesystem/fat32` (`tairix-drv-fs-fat32`) is the read/write
 FAT32 driver. It is the first block-backed `drivers/filesystem/*`
 crate, chosen first because FAT32 backs the EFI system partition and SD
 cards (`AGENTS.md` §11).
@@ -84,7 +84,7 @@ planted FAT32 volume through `Fat32::open`, verifies the planted file
 reads back its known contents, and creates + writes + reads back a fresh
 file before signalling success.
 
-The on-disk image is built by the shared `rustos-test-fat32-image`
+The on-disk image is built by the shared `tairix-test-fat32-image`
 fixture (a 1 MiB volume, two mirrored FATs, one-sector clusters). The
 host harness (`cargo xtask test --qemu`) plants exactly that image on the
 backing disk, and the freestanding guest tail names the same planted and

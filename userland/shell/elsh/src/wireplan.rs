@@ -18,15 +18,15 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::fs::OpenFlags;
-use rustos_abi::Errno;
+use tairix_abi::fs::OpenFlags;
+use tairix_abi::Errno;
 
 use crate::host::{LaunchSpec, RedirAction, RedirTarget, ResolvedCommand};
 use crate::parser::OpenMode;
 
 /// Number of wirable standard descriptors (fd 0–3), the attach block's
-/// per-child wire count ([`rustos_abi::STD_STREAM_COUNT`]).
-pub const STD_FDS: usize = rustos_abi::STD_STREAM_COUNT;
+/// per-child wire count ([`tairix_abi::STD_STREAM_COUNT`]).
+pub const STD_FDS: usize = tairix_abi::STD_STREAM_COUNT;
 
 /// Identifies one planned open within a [`WirePlan`] — an index into
 /// [`WirePlan::opens`]. The executor maps each id to the real descriptor the
@@ -66,7 +66,7 @@ pub enum PlannedOpen {
 }
 
 /// How one of a member's standard descriptors is backed — the plan-level
-/// mirror of [`rustos_abi::FdWire`], with handles still abstract ids.
+/// mirror of [`tairix_abi::FdWire`], with handles still abstract ids.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PlannedWire {
     /// The base table's own slot (the unwired default).
@@ -372,8 +372,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::OpenFlags;
-    use rustos_abi::Errno;
+    use tairix_abi::fs::OpenFlags;
+    use tairix_abi::Errno;
 
     use super::{lower, open_flags, OpenId, PlannedOpen, PlannedWire, PumpTask};
     use crate::host::{

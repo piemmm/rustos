@@ -1,6 +1,6 @@
-//! RustOS `setcap` — set or clear a file's required-capability gate (Stage 6 `userland/apps/`).
+//! TAIRiX `setcap` — set or clear a file's required-capability gate (Stage 6 `userland/apps/`).
 //!
-//! Every inode in the RustOS permission model may carry an **optional
+//! Every inode in the TAIRiX permission model may carry an **optional
 //! capability requirement**: a capability the caller must hold to reach the
 //! node at all, on top of the mode/ACL checks. `setcap`
 //! changes that gate. The capability operand is either a canonical `CAP_*`
@@ -39,7 +39,7 @@
 //! An unknown option or a missing operand is a [`SetcapError::Usage`] that
 //! changes nothing; a capability operand that is neither a known `CAP_*` name
 //! nor `-` is a [`SetcapError::BadCapability`]; an operand that cannot be
-//! inspected surfaces the underlying [`Errno`](rustos_abi::Errno) as
+//! inspected surfaces the underlying [`Errno`](tairix_abi::Errno) as
 //! [`SetcapError::Stat`]; a gate that cannot be applied is
 //! [`SetcapError::Apply`]; a directory whose entries cannot be read during a
 //! recursive descent is [`SetcapError::Read`]. The first failure stops the

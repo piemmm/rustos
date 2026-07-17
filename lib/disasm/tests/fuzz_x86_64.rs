@@ -8,12 +8,12 @@
 //!   min(remaining, 15)), so a walk over any input terminates;
 //! * the retained bytes are exactly the leading encoding bytes.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG produces
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG produces
 //! the streams. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep
 //! once from a fresh, logged seed; `cargo xtask fuzz` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
-use rustos_disasm::x86_64;
+use tairix_disasm::x86_64;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -70,10 +70,10 @@ fn walk(stream: &[u8]) {
 
 #[test]
 fn decode_never_panics_and_always_advances() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = rustos_fuzzseed::start(
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut state: u64 = tairix_fuzzseed::start(
         "decode_never_panics_and_always_advances",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -113,7 +113,7 @@ fn decode_never_panics_and_always_advances() {
         walk(&storm);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

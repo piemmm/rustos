@@ -1,4 +1,4 @@
-//! RustOS `false` — do nothing, unsuccessfully (`plans/APPS.md` §12.1
+//! TAIRiX `false` — do nothing, unsuccessfully (`plans/APPS.md` §12.1
 //! Stage C).
 //!
 //! The GNU coreutils `false`: it ignores its arguments and exits `1`, so a
@@ -10,7 +10,7 @@
 //!
 //! # Divergence from GNU `false`
 //!
-//! GNU `false --help` prints its help and still exits `1`. The RustOS
+//! GNU `false --help` prints its help and still exits `1`. The TAIRiX
 //! reserved short-help convention (`plans/APPS.md` §4) defines a served
 //! short help as a successful invocation, so here `-h`/`-?`/`--help`
 //! exits `0`. Every other invocation exits `1`, exactly as under
@@ -109,7 +109,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/false.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

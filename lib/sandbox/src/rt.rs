@@ -18,7 +18,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, FdWire, SpawnAttach, STDIN, STDOUT, STD_STREAM_COUNT};
+use tairix_abi::{Errno, FdWire, SpawnAttach, STDIN, STDOUT, STD_STREAM_COUNT};
 
 use crate::host::Launcher;
 use crate::proto::Channel;
@@ -37,7 +37,7 @@ pub const WORKER_ROLE_ARG: &[u8] = b"--parser-sandbox-worker";
 /// interactive program.
 #[must_use]
 pub fn worker_role() -> bool {
-    rustos_rt::arg(1).is_some_and(|arg| arg == WORKER_ROLE_ARG)
+    tairix_rt::arg(1).is_some_and(|arg| arg == WORKER_ROLE_ARG)
 }
 
 /// Serve the sandbox protocol over the wired standard streams until the
@@ -56,11 +56,11 @@ impl Channel for StdioChannel {
         // A zero timeout waits indefinitely; the pipe backing parks the
         // worker until bytes arrive or every write end closes (then
         // end-of-stream, 0).
-        rustos_rt::stdin_timeout(buf, 0).map_err(errno_from)
+        tairix_rt::stdin_timeout(buf, 0).map_err(errno_from)
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        match rustos_rt::stdout(buf) {
+        match tairix_rt::stdout(buf) {
             // `stdout` folds every failure to zero accepted bytes; with a
             // pipe backing that means the parent is gone, which the
             // framing's zero-progress rule reports as the peer closed.
@@ -97,14 +97,14 @@ impl RtLauncher {
     }
 
     /// Build a launcher over this program's own binary, via the kernel's
-    /// reserved self token ([`rustos_abi::SPAWN_SELF`]): the kernel
+    /// reserved self token ([`tairix_abi::SPAWN_SELF`]): the kernel
     /// substitutes the exact path it admitted the calling process from and
     /// runs the ordinary load gate over it. `argv[0]` is deliberately not
     /// used — it is data the spawner chose (a shell passes the typed
     /// word), never a spawnable spelling the worker launch could trust.
     #[must_use]
     pub fn own_binary() -> Self {
-        Self::new(rustos_abi::SPAWN_SELF)
+        Self::new(tairix_abi::SPAWN_SELF)
     }
 }
 
@@ -113,13 +113,13 @@ impl Launcher for RtLauncher {
 
     fn launch(&mut self) -> Result<RtChannel, Errno> {
         // Request pipe: parent writes, worker fd 0 reads.
-        let (req_read, req_write) = rustos_rt::pipe_create().map_err(errno_from)?;
+        let (req_read, req_write) = tairix_rt::pipe_create().map_err(errno_from)?;
         // Reply pipe: worker fd 1 writes, parent reads.
-        let (rep_read, rep_write) = match rustos_rt::pipe_create() {
+        let (rep_read, rep_write) = match tairix_rt::pipe_create() {
             Ok(pair) => pair,
             Err(ret) => {
-                let _ = rustos_rt::fs_close(req_read);
-                let _ = rustos_rt::fs_close(req_write);
+                let _ = tairix_rt::fs_close(req_read);
+                let _ = tairix_rt::fs_close(req_write);
                 return Err(errno_from(ret));
             }
         };
@@ -128,16 +128,16 @@ impl Launcher for RtLauncher {
         wires[STDOUT as usize] = FdWire::Handle(rep_write);
         let attach = SpawnAttach::sandbox(wires);
         let pid =
-            rustos_rt::spawn_attached(&self.path, &attach, &[&self.path, WORKER_ROLE_ARG], &[]);
+            tairix_rt::spawn_attached(&self.path, &attach, &[&self.path, WORKER_ROLE_ARG], &[]);
         // The child holds counted clones of its two wired ends; the
         // parent's own copies are closed regardless of the spawn outcome,
         // so a dead worker's reply pipe reports end-of-stream instead of
         // idling on the parent's dangling write end.
-        let _ = rustos_rt::fs_close(req_read);
-        let _ = rustos_rt::fs_close(rep_write);
+        let _ = tairix_rt::fs_close(req_read);
+        let _ = tairix_rt::fs_close(rep_write);
         if pid < 0 {
-            let _ = rustos_rt::fs_close(req_write);
-            let _ = rustos_rt::fs_close(rep_read);
+            let _ = tairix_rt::fs_close(req_write);
+            let _ = tairix_rt::fs_close(rep_read);
             return Err(errno_from(pid));
         }
         Ok(RtChannel {
@@ -154,7 +154,7 @@ impl Launcher for RtLauncher {
         // blocking reap below always completes.
         drop(channel);
         let mut code = 0i32;
-        let reaped = rustos_rt::wait_exit(pid, &mut code);
+        let reaped = tairix_rt::wait_exit(pid, &mut code);
         (reaped >= 0).then_some(code)
     }
 }
@@ -175,11 +175,11 @@ pub struct RtChannel {
 impl Channel for RtChannel {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         // A pipe ignores the file offset; end-of-stream reads 0.
-        rustos_rt::fs_read(self.read_fd, 0, buf).map_err(errno_from)
+        tairix_rt::fs_read(self.read_fd, 0, buf).map_err(errno_from)
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        rustos_rt::fs_write(self.write_fd, 0, buf).map_err(errno_from)
+        tairix_rt::fs_write(self.write_fd, 0, buf).map_err(errno_from)
     }
 }
 
@@ -188,7 +188,7 @@ impl Drop for RtChannel {
         // Closing the parent's ends is what tells the worker its parent is
         // done (end-of-stream on fd 0): the worker's serve loop then
         // finishes cleanly and the process exits.
-        let _ = rustos_rt::fs_close(self.write_fd);
-        let _ = rustos_rt::fs_close(self.read_fd);
+        let _ = tairix_rt::fs_close(self.write_fd);
+        let _ = tairix_rt::fs_close(self.read_fd);
     }
 }

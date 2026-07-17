@@ -3,7 +3,7 @@
 //!
 //! A user-space block driver (the USB mass-storage class driver) serves
 //! each logical unit as a call endpoint plus a shared data window
-//! ([`rustos_abi::blkio`]). This client is the kernel-side consumer the
+//! ([`tairix_abi::blkio`]). This client is the kernel-side consumer the
 //! runtime volume attach path builds a filesystem on: it posts one bounded
 //! [`BlkRequest`] at a time on the endpoint, wakes the serving driver,
 //! parks the calling task until the reply lands (never a busy-poll — the
@@ -21,17 +21,17 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_abi::blkio::{
+use tairix_abi::blkio::{
     decode_completion, BlkCompletion, BlkOp, BlkRequest, BLK_COMPLETION_LEN, BLK_DATA_LEN,
     BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::DriverError;
-use rustos_abi::{CapabilityId, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
-use rustos_kernel_sec::{TaskCapabilities, TaskId as SecTaskId, UserId};
-use rustos_log::Sink;
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::DriverError;
+use tairix_abi::{CapabilityId, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
+use tairix_kernel_sec::{TaskCapabilities, TaskId as SecTaskId, UserId};
+use tairix_log::Sink;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -374,13 +374,13 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use rustos_abi::blkio::{encode_error_completion, BLK_FLAG_READ_ONLY};
-    use rustos_kernel_ipc::{CallEndpointLimits, RecvCall};
+    use tairix_abi::blkio::{encode_error_completion, BLK_FLAG_READ_ONLY};
+    use tairix_kernel_ipc::{CallEndpointLimits, RecvCall};
 
     /// A throwaway audit sink.
     struct NullSink;
     impl Sink for NullSink {
-        fn write_event(&self, _event: &rustos_log::Event<'_>) {}
+        fn write_event(&self, _event: &tairix_log::Event<'_>) {}
     }
     static SINK: NullSink = NullSink;
 

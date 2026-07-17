@@ -1,12 +1,12 @@
 //! Verification of signed `rxe` manifests.
 //!
-//! An `rxe` binary carries a [`rustos_abi::ManifestHeader`] followed by a
+//! An `rxe` binary carries a [`tairix_abi::ManifestHeader`] followed by a
 //! body listing the [`CapabilityId`]s the binary wants to exercise. This
 //! module turns those bytes into a [`VerifiedManifest`] only when **every**
 //! check from the issue brief succeeds:
 //!
 //! 1. The header is well-formed (`ManifestHeader::from_bytes`).
-//! 2. The ABI version equals [`rustos_abi::ABI_VERSION_CURRENT`].
+//! 2. The ABI version equals [`tairix_abi::ABI_VERSION_CURRENT`].
 //! 3. The body has the exact length the header declared.
 //! 4. Every capability ID in the body is a *known* `abi-v1` identifier
 //!    (i.e. one of the constants exposed by `lib/abi`); unknown values
@@ -27,10 +27,10 @@ extern crate alloc;
 
 use core::mem::size_of;
 
-use rustos_abi::{CapabilityId, Errno, ManifestHeader, ABI_VERSION_CURRENT};
-use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
-use rustos_log::{Field, Sink};
+use tairix_abi::{CapabilityId, Errno, ManifestHeader, ABI_VERSION_CURRENT};
+use tairix_caps::CapabilitySet;
+use tairix_crypto::Ed25519PublicKey;
+use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 use crate::identity::format_i32;
@@ -157,9 +157,9 @@ pub fn verify_manifest<S: Sink + ?Sized>(
     //    duplicates idempotently — they are not themselves grounds for
     //    rejection but unknowns absolutely are.
     let body = &bytes[ManifestHeader::WIRE_LEN..manifest_end];
-    let mut decoded = [CapabilityId::FS_MOUNT; rustos_abi::MANIFEST_MAX_CAPABILITIES as usize];
+    let mut decoded = [CapabilityId::FS_MOUNT; tairix_abi::MANIFEST_MAX_CAPABILITIES as usize];
     let count = usize::from(header.capability_count);
-    if rustos_abi::decode_capability_ids(body, count, &mut decoded).is_err() {
+    if tairix_abi::decode_capability_ids(body, count, &mut decoded).is_err() {
         emit_errno(
             audit,
             AuditEvent::ManifestUnknownCapability,
@@ -200,10 +200,10 @@ pub fn verify_manifest<S: Sink + ?Sized>(
     let signing_input_len = signed_range.end - signed_range.start + body_len;
     let mut signing_input = [0u8;
         ManifestHeader::WIRE_LEN + // headroom for the largest legal payload
-        (rustos_abi::MANIFEST_MAX_CAPABILITIES as usize) * CAPABILITY_BODY_STRIDE];
+        (tairix_abi::MANIFEST_MAX_CAPABILITIES as usize) * CAPABILITY_BODY_STRIDE];
     signing_input[..signed_range.end].copy_from_slice(&bytes[..signed_range.end]);
     signing_input[signed_range.end..signing_input_len].copy_from_slice(body);
-    let signature = rustos_crypto::Ed25519Signature::from_bytes(header.signature);
+    let signature = tairix_crypto::Ed25519Signature::from_bytes(header.signature);
     if authority
         .verify(&signing_input[..signing_input_len], &signature)
         .is_err()
@@ -223,7 +223,7 @@ pub fn verify_manifest<S: Sink + ?Sized>(
         AuditEvent::ManifestVerified,
         &[Field {
             key: "caps",
-            value: rustos_log::FieldValue::Str(count),
+            value: tairix_log::FieldValue::Str(count),
         }],
     );
 
@@ -244,7 +244,7 @@ fn emit_errno<S: Sink + ?Sized>(audit: &S, event: AuditEvent, err: Errno) {
         event,
         &[Field {
             key: "errno",
-            value: rustos_log::FieldValue::Str(cause),
+            value: tairix_log::FieldValue::Str(cause),
         }],
     );
 }
@@ -254,7 +254,7 @@ mod tests {
     use super::*;
     use crate::audit::RecordingSink;
     use ed25519_dalek::{Signer, SigningKey};
-    use rustos_abi::{
+    use tairix_abi::{
         manifest::MANIFEST_MAGIC, syscall::SYSCALL_TABLE_HASH_LEN, MANIFEST_MAX_CAPABILITIES,
     };
 

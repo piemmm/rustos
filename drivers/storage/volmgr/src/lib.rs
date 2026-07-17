@@ -1,4 +1,4 @@
-//! RustOS **volume-manager policy driver** — shared library.
+//! TAIRiX **volume-manager policy driver** — shared library.
 //!
 //! This crate is a `lib` (the loadable-module identity — the [`BIND_KEYS`]
 //! bind table `devmgr` matches a discovered block-service storage node
@@ -13,7 +13,7 @@
 //! policy (`plans/DEVICES.md` D3c). A block driver that brings a
 //! hot-pluggable unit up publishes it as a storage-class hardware-tree
 //! node carrying two transport grants — a blkio call endpoint and a shared
-//! data window (`rustos_abi::blkio`). `devmgr` matches that node against
+//! data window (`tairix_abi::blkio`). `devmgr` matches that node against
 //! this crate's bind table and loads one volume-manager instance for it;
 //! the kernel spawns the instance holding **exactly that node's** grants,
 //! so an instance can probe and publish its own unit and can never reach a
@@ -50,7 +50,7 @@ pub mod blk;
 pub mod name;
 pub mod plan;
 
-use rustos_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{DriverBindKey, HwMatchKey};
 
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match on the block-service node ranks like the other exact-compatible
@@ -65,7 +65,7 @@ const BIND_PRIORITY: u16 = 10;
 /// image builder) and `devmgr` resolves a discovered storage node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(b"rustos,usb-msd-lun") {
+    match HwMatchKey::compatible(b"tairix,usb-msd-lun") {
         Ok(key) => key,
         // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
         // too-long literal would be a compile-time const-eval error here,

@@ -2,7 +2,7 @@
 //!
 //! A volume manager that has windowed a partition extent must decide, from
 //! the extent's own first bytes, **which** supported filesystem lives there
-//! before it can ask the kernel to attach it (`rustos_abi::volume`). This
+//! before it can ask the kernel to attach it (`tairix_abi::volume`). This
 //! crate is the one definition of that decision:
 //!
 //! * the on-disk **signatures** that identify a `ARXFS`, ext4, or FAT32
@@ -32,7 +32,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_abi::volume::VolumeFsType;
+use tairix_abi::volume::VolumeFsType;
 
 /// Bytes of an extent head the probe needs to see every supported
 /// signature: the FAT32 boot sector (512), the `ARXFS` metadata header

@@ -170,7 +170,7 @@ fn fallback_never_panics_and_is_the_replacement_character() {
 
 #[cfg(feature = "render")]
 mod render {
-    use rustos_raster::{Color, Surface};
+    use tairix_raster::{Color, Surface};
 
     use crate::atlas;
     use crate::font::BitmapFont;

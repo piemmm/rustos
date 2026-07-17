@@ -1,4 +1,4 @@
-//! Build script for the `rustos-abi-trap` crate.
+//! Build script for the `tairix-abi-trap` crate.
 //!
 //! Sole responsibility, and it is build glue (confines
 //! target-conditional decisions to the architecture ports and the build

@@ -1,4 +1,4 @@
-//! Minimal Markdown link checker for the RustOS mdBook.
+//! Minimal Markdown link checker for the TAIRiX mdBook.
 //!
 //! The mdbook preprocessor ecosystem trails the mdBook release schedule by
 //! enough that pinning a working pair becomes a maintenance burden in its
@@ -93,7 +93,7 @@ fn is_external(target: &str) -> bool {
 
 /// Extract the URL component of every inline Markdown link: `[text](url)`.
 ///
-/// This handles the common case used in the RustOS book; reference-style
+/// This handles the common case used in the TAIRiX book; reference-style
 /// links (`[text][id]` + `[id]: url`) are intentionally rejected by lint —
 /// the book is small enough that inline links keep it readable.
 fn extract_link_targets(markdown: &str) -> Vec<String> {

@@ -9,7 +9,7 @@
 //!   architecture-neutral GSI line numbers.
 //! * The Rust dispatcher invoked by the shared asm trampoline. The
 //!   dispatcher looks up the GSI through [`Routing`], forwards to the
-//!   architecture-neutral `rustos_kernel_irq::IrqTable::fire` via a
+//!   architecture-neutral `tairix_kernel_irq::IrqTable::fire` via a
 //!   one-shot-published callback ([`set_external_irq_dispatch`]), and
 //!   writes the LAPIC EOI register before returning.
 //! * The MADT IO-APIC discovery helper `discover_io_apics` consumed
@@ -21,10 +21,10 @@
 //! requires every controller to mask the line before signalling
 //! `ready = true`. The Rust dispatcher in this module **does not**
 //! perform the mask write itself — it calls
-//! `rustos_kernel_irq::IrqTable::fire`, which in turn invokes the
+//! `tairix_kernel_irq::IrqTable::fire`, which in turn invokes the
 //! installed controller's `mask` *before* setting `ready`. The
 //! production controller (`IoApicController` in
-//! `kernel/rustos-kernel`) issues a volatile, fenced write to the
+//! `kernel/tairix-kernel`) issues a volatile, fenced write to the
 //! IO-APIC's redirection-entry mask bit. The
 //! `mask_is_observed_before_wake` regression test in
 //! `kernel/irq` and the `ioapic_controller_mask_before_wake`
@@ -47,7 +47,7 @@ use crate::preempt::{LAPIC_BASE_PHYS, LAPIC_EOI_OFFSET};
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use rustos_abi::MsiMessage;
+use tairix_abi::MsiMessage;
 
 mod routing;
 
@@ -85,7 +85,7 @@ extern "C" {
     /// linear address of the per-vector stub the IDT delivers to.
     /// `'static` immutable data in `.rodata`; safe to read without
     /// synchronisation.
-    static rustos_arch_x86_64_external_irq_table: [usize; EXTERNAL_VECTOR_COUNT];
+    static tairix_arch_x86_64_external_irq_table: [usize; EXTERNAL_VECTOR_COUNT];
 }
 
 /// Linear address of the per-vector ISR stub for `vector`.
@@ -100,12 +100,12 @@ pub fn external_isr_addr(vector: u8) -> Option<u64> {
         return None;
     }
     let idx = (vector - EXTERNAL_VECTOR_FIRST) as usize;
-    // SAFETY: `rustos_arch_x86_64_external_irq_table` is a
+    // SAFETY: `tairix_arch_x86_64_external_irq_table` is a
     // `'static`-lifetime `.rodata` array of exactly
     // `EXTERNAL_VECTOR_COUNT` entries published by
     // `external_irq.s`; the `idx < EXTERNAL_VECTOR_COUNT` bound is
     // proved by the range check immediately above.
-    let addr = unsafe { rustos_arch_x86_64_external_irq_table[idx] };
+    let addr = unsafe { tairix_arch_x86_64_external_irq_table[idx] };
     Some(addr as u64)
 }
 
@@ -124,9 +124,9 @@ pub fn external_isr_addr(_vector: u8) -> Option<u64> {
 /// function pointer packed into a `usize`.
 ///
 /// The kernel binary installs the production dispatcher (which
-/// forwards to `rustos_kernel_irq::IrqTable::fire`) exactly once
+/// forwards to `tairix_kernel_irq::IrqTable::fire`) exactly once
 /// during boot via [`set_external_irq_dispatch`]. The asm trampoline
-/// calls `rustos_arch_x86_64_external_irq_dispatch` on every
+/// calls `tairix_arch_x86_64_external_irq_dispatch` on every
 /// delivery; that Rust function reads this slot, looks up the GSI
 /// through [`global_routing`], forwards, and writes EOI.
 static EXTERNAL_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
@@ -135,7 +135,7 @@ static EXTERNAL_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
 ///
 /// `vector` is the IDT vector the trap fired on; the dispatcher is
 /// responsible for translating it to a GSI through [`global_routing`]
-/// and invoking `rustos_kernel_irq::IrqTable::fire` before
+/// and invoking `tairix_kernel_irq::IrqTable::fire` before
 /// returning. The dispatcher must be safe to invoke from interrupt
 /// context (interrupts disabled, no allocation, no scheduler reentry).
 pub type ExternalIrqDispatchFn = extern "C" fn(vector: u8);
@@ -217,7 +217,7 @@ pub(crate) fn clear_routing_for_tests() {
 /// CPU whose local-APIC ID is `destination`.
 ///
 /// This is the architecture half of the PCI MSI-X routing seam
-/// ([`rustos_abi::MsixBus`]): the kernel picks a free external vector
+/// ([`tairix_abi::MsixBus`]): the kernel picks a free external vector
 /// (`0x30..=0xFE`) and a destination CPU, this function encodes the
 /// Intel-defined message, and the PCI bus driver writes it into the
 /// device's MSI-X table.
@@ -258,7 +258,7 @@ pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
 ///      is belt-and-braces.
 ///   2. Calls the installed [`ExternalIrqDispatchFn`] with the
 ///      truncated vector. The dispatcher forwards to
-///      `rustos_kernel_irq::IrqTable::fire`.
+///      `tairix_kernel_irq::IrqTable::fire`.
 ///   3. Writes `0` to the LAPIC EOI register releasing the
 ///      in-service bit (Intel SDM Vol 3A §11.8.5). EOI is performed
 ///      *after* the dispatcher because the dispatcher must observe
@@ -272,7 +272,7 @@ pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
 /// because the EOI write below assumes the in-service bit is set.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_arch_x86_64_external_irq_dispatch(regs: *mut SavedRegs, vector: u64) {
+unsafe extern "C" fn tairix_arch_x86_64_external_irq_dispatch(regs: *mut SavedRegs, vector: u64) {
     // The asm trampoline pushes a u64 that fits in u8 (every value
     // is ≤ 0xFE by construction). Documented narrowing.
     #[allow(clippy::cast_possible_truncation)]

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-procinfo"
-description = "RustOS shared System Information API client helpers: the request/response seams and the process-list paging + render shared by the `sysinfo` and `ps` tools, plus the userspace `info:`/`stats:` resolver that maps a parsed `resref` reference onto a sysinfo query and returns the ALIAS §14 response envelope (§6, §16.6 — `PLAN.md` Stage 6)."
+name = "tairix-procinfo"
+description = "TAIRiX shared System Information API client helpers: the request/response seams and the process-list paging + render shared by the `sysinfo` and `ps` tools, plus the userspace `info:`/`stats:` resolver that maps a parsed `resref` reference onto a sysinfo query and returns the ALIAS §14 response envelope (§6, §16.6 — `PLAN.md` Stage 6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,12 @@ workspace = true
 
 # The `program` feature adds the production client seams (`IpcTransport`,
 # `RtOutput`) that the `sysinfo`/`ps`/`top` `Run` binaries link. It pulls the
-# freestanding userland runtime `rustos-rt` (the `ipc_call` and standard-stream
+# freestanding userland runtime `tairix-rt` (the `ipc_call` and standard-stream
 # wrappers), so it is enabled only when a bare-metal program binary is built —
 # the pure library and host tooling never pull the runtime. Mirrors
-# `rustos-sysinfod`'s split.
+# `tairix-sysinfod`'s split.
 [features]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
 [dependencies]
 # The frozen `sysinfo-v1` wire surface plus the stable `Errno`: this crate
@@ -26,22 +26,22 @@ program = ["dep:rustos-rt"]
 # through these ABI types and invents no parallel format or error set
 # (§2.2, §16.6). As a `lib/*` crate it depends only on other `lib/*` crates
 # (§17.4).
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 # The single shared resource-reference parser: the `info:`/`stats:` resolver
 # dispatches on a parsed `ResourceRef` rather than re-lexing references, so it
 # never embeds a second reference parser (§2.2).
-rustos-resref = { path = "../resref", version = "=0.0.0" }
+tairix-resref = { path = "../resref", version = "=0.0.0" }
 
 # The `program`-feature client seams (`IpcTransport`, `RtOutput`) link the
 # freestanding userland runtime for `ipc_call` and the standard streams. It is
 # pulled only for the bare-metal targets a `Run` binary is actually built for;
 # on the host the seams are not compiled and the runtime is never linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../rt", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 
 [dev-dependencies]
 # The `fuzz_resinfo` harness draws its inputs through the shared seed/budget
 # seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
-# loop. Test scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

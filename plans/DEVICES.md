@@ -1,6 +1,6 @@
 # DEVICES.md — Device inventory commands and USB mass storage
 
-This is the staged build plan for RustOS's next tier of device support:
+This is the staged build plan for TAIRiX's next tier of device support:
 
 - **DEVICE1** — `lspci` and `lsusb` system command apps that list the
   discovered PCI/PCIe and USB devices with human-readable vendor/device
@@ -60,7 +60,7 @@ Facts the stages below build on, so no stage re-derives them:
   per-port enumeration is skipped with its slot released
   (`plans/USB.md` §1.1).
 - **The block-driver contract exists**
-  (`rustos_abi::driver::block::Block`), implemented by
+  (`tairix_abi::driver::block::Block`), implemented by
   `drivers/storage/virtio_blk` and `drivers/storage/emmc2` with bounded,
   fixed-cost DMA staging. Filesystem crates exist for ext4, FAT32, and
   ARXFS; `lib/partition` is the shared MBR/GPT layer.
@@ -154,7 +154,7 @@ the raw-text parser (§19.6): it consumes genuinely untrusted bytes.
 
 ### 1.2 `lib/devids` — the lookup engine
 
-A new `lib/*` crate (`rustos-devids`, `no_std`+`alloc`-free lookup;
+A new `lib/*` crate (`tairix-devids`, `no_std`+`alloc`-free lookup;
 adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
 
 - **Compact table format.** The generator emits, per database, a sorted
@@ -197,7 +197,7 @@ adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
   `-n` (numeric), `-nn` (names + ids), `-d <vendor>:<device>` and
   `-s <slot>` filters, `-v` (the node's resources: MMIO windows, IRQ
   lines — the grant *requests* the tree records, no secrets), `-t` (tree
-  view). Where RustOS's model genuinely lacks a field Linux has the
+  view). Where TAIRiX's model genuinely lacks a field Linux has the
   option is withheld or degrades honestly rather than fabricating:
   subsystem ids are not recorded by the hardware tree today (extending
   `hwtree` is a deliberate carve-out for a later ABI revision, not
@@ -224,7 +224,7 @@ adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
   vvvv:pppp Vendor Product` lines — **one line per physical device**,
   never per interface — with bus and device numbers rendered as 1-based
   per-snapshot ordinals in stable bus order (a deliberate, documented
-  divergence: RustOS has no Linux devnum registry, so the numbers are
+  divergence: TAIRiX has no Linux devnum registry, so the numbers are
   small dense orderings of the snapshot, §16.7 divergence-by-concept),
   `-v` (each interface's class/subclass/protocol names from the usb.ids
   class table, one triple per interface), `-s`/`-d` filters on the
@@ -257,7 +257,7 @@ Each increment ends green on the whole-project gate (§7).
   (fail-closed `HwNode` decode, stable parent-chain bus order, the
   `-n`/`-nn`/`-v`/`-t`/`-d`/`-s` surface, numeric fallbacks, the
   `pci.names_unresolved` fd-3 advisory) over the shared
-  `rustos_procinfo::call`/`Output`/`HelpSource` seams; the freestanding
+  `tairix_procinfo::call`/`Output`/`HelpSource` seams; the freestanding
   `Run` loads `Resources/pci.ids.bin` through the VFS and degrades to
   numeric ids (reason on stderr) on a missing/invalid table, and treats a
   refused `CAP_SYSINFO_HW` as fatal with its reason. Thirteen-locale
@@ -270,7 +270,7 @@ Each increment ends green on the whole-project gate (§7).
   pci table moved into the bundle (`userland/apps/lspci/Resources/`, one
   tree copy, `cargo xtask devids` retargeted). Enabling
   infrastructure landed with it: generic bundle-`Resources/` discovery
-  (`rustos_syshelp::RESOURCE_FILES` — build-discovered from each crate's
+  (`tairix_syshelp::RESOURCE_FILES` — build-discovered from each crate's
   on-disk `Resources/`, never a per-bundle list) feeding the signed
   `AppInfo` content digest and both planters (`tools/mkimage`, the QEMU
   encrypted-root fixture); the kernel load gate already re-hashes the
@@ -298,12 +298,12 @@ Each increment ends green on the whole-project gate (§7).
   `HwNode::address` (the xHCI slot id; two identical devices carry
   distinct addresses, an address-less node is never guessed into a
   group) — with 1-based ordinal bus/device numbers in stable bus order
-  (RustOS has no Linux devnum registry — the §1.4 documented
+  (TAIRiX has no Linux devnum registry — the §1.4 documented
   divergence) and no root-hub pseudo-devices; an identity the
   database does not name shows only its `ID vvvv:pppp` (the `usbutils`
   omission shape), counted on fd 3. The shared hardware-tree walk
   (fail-closed decode, stable bus order, depth, ancestor-keep, class
-  labels) was hoisted into `rustos_procinfo::hwtree` and `lspci`
+  labels) was hoisted into `tairix_procinfo::hwtree` and `lspci`
   refitted onto it, so the two listing tools render through one
   definition; `cargo xtask devids` now writes `usb.ids.bin` into the
   bundle and the `lib/devids/tables/` staging home is deleted. QEMU
@@ -405,7 +405,7 @@ names a sibling crate.
   `MODE SENSE(6)` WP bit (a refused MODE SENSE reports write-enabled —
   the established meaning — while enforcement stays driver-side:
   `LunBlock` refuses writes to protected media before any byte reaches
-  the device). Each LUN is a `rustos_abi::driver::block::Block`
+  the device). Each LUN is a `tairix_abi::driver::block::Block`
   (`LunBlock`, chunked through the fixed 32 KiB window so per-device cost
   never scales with request length) plus a `Flush` seam (the `Block`
   trait carries no flush).
@@ -417,7 +417,7 @@ names a sibling crate.
   window, the same call-endpoint + shared-window IPC shape as the URB
   transport; covered by the `fuzz_decode` harness. The `Run` binds one
   endpoint + window per ready LUN and emits one Storage-class node
-  carrying them (compatible key `rustos,usb-msd-lun` — the D3 volume
+  carrying them (compatible key `tairix,usb-msd-lun` — the D3 volume
   manager's selector), served on a wait-set; detach retracts the nodes
   and exits 0 for reload. (2) The emitted interface node carries no
   endpoint numbers and the bulk server validates them, so the driver
@@ -497,7 +497,7 @@ volume-policy service.
   cover **both** transport resources the request names (the endpoint and
   the shared window forwarded on the matched storage node), so the mount
   authority alone can never reach another driver's transport. `lib/rt`
-  wrappers and `ros_sys_*` stubs landed; C headers regenerated.
+  wrappers and `tairix_sys_*` stubs landed; C headers regenerated.
 - **The kernel blkio client** (`kernel/core::fs::blkclient::BlkClient`):
   a `Block` over the per-LUN call endpoint + shared window, using the
   `ipc_call` post → wake-server → park → take-reply discipline (a
@@ -517,7 +517,7 @@ volume-policy service.
   permission template (`MountTable::mount_with_template`) because its
   mount point has no node in the boot layout tree; ancestor search
   authorisation still walks the real tree.
-- **The service** (`kernel/rustos-kernel::volume_service`, installed via
+- **The service** (`kernel/tairix-kernel::volume_service`, installed via
   the `BootInfo::with_volume_service` seam → `NULL_VOLUME_SERVICE`
   fail-closed default): windows the extent (`PartitionBlock`), opens the
   matched filesystem (ARXFS / ext4 / FAT32), mounts under
@@ -569,7 +569,7 @@ volume-policy service.
   machinery gives the per-node instance exactly one device's transport
   authority — least privilege, zero new kernel surface. The crate's
   `BIND_KEYS` selects the block-service node's compatible key
-  (`rustos,usb-msd-lun` today; a future hot-pluggable block source adds
+  (`tairix,usb-msd-lun` today; a future hot-pluggable block source adds
   its key as data — the engine names no bus, §2.20).
 - **The instance** (caps: `CAP_SHM`, `CAP_IPC_ENDPOINT`, `CAP_FS_MOUNT`,
   `CAP_LOG_EMIT`; no MMIO/DMA/IRQ/emit): connects a **read-only** blkio
@@ -594,7 +594,7 @@ volume-policy service.
      per-type ordinal in device order;
   3. a name the kernel reports in use (`AlreadyExists`) gets the
      volume-identity fingerprint appended (ALIAS.md §3.8, rendered by
-     `rustos_fsprobe::fingerprint` — lowercase Crockford base32, spelled
+     `tairix_fsprobe::fingerprint` — lowercase Crockford base32, spelled
      with `-` because the volume-name grammar has no `@`), lengthened
      4 → 8 → full per retry; distinct identities have distinct full
      fingerprints, so the sequence terminates. Re-inserting the same
@@ -625,11 +625,11 @@ volume-policy service.
 #### 2.4.4 D3d — mount-policy permissions and the catalog view. **Done.**
 
 - **The storage-group identity map** (§5.3, §16.3): the well-known
-  `storage` group is defined once (`rustos_users::STORAGE_GROUP`, seed gid
+  `storage` group is defined once (`tairix_users::STORAGE_GROUP`, seed gid
   `STORAGE_GID` = 100) and resolved **by name** from the loaded
   `/System/Security/Groups` registry by the trusted root-unlock step
   (`UnlockInstall::storage_gid` → the set-once
-  `rustos_kernel::volume_policy::LATE_STORAGE_GID` cell). A runtime-attached
+  `tairix_kernel::volume_policy::LATE_STORAGE_GID` cell). A runtime-attached
   ownerless filesystem (FAT32) is wrapped in `GroupMappedFs`: every node
   reports system ownership under that group — directories `0o775`, files
   `0o664`, `set_security` refused (the format cannot hold a record) — and
@@ -717,7 +717,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
   `VfsError::Io` mapped to `Errno::NotImplemented`, misreporting a dead
   device as "interface intentionally inert" — now `Errno::DeviceFault`;
   and `Fat32::format` wrote a **zero BPB volume serial**, so any two
-  RustOS-formatted FAT32 volumes shared one content-derived identity and
+  TAIRiX-formatted FAT32 volumes shared one content-derived identity and
   the second could never attach while the first was mounted — `format`
   now takes a caller-minted serial and refuses zero (the ext4
   nil-`s_uuid` precedent; `tools/mkimage`'s boot partition uses a fixed,
@@ -772,7 +772,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
   or mount-point path — over the shared `for_each_mount` walk, refuse
   an unknown name or an identity-less mount locally, hand the identity
   to the `Detacher` seam) plus the freestanding `Run` over
-  `rustos_rt::volume_detach`; caps `CAP_CONSOLE_WRITE` +
+  `tairix_rt::volume_detach`; caps `CAP_CONSOLE_WRITE` +
   `CAP_FS_ACCESS` + `CAP_FS_MOUNT`. A refused plain detach of an
   unavailable volume spells out the `--force` consequence on stderr and
   emits the fd-3 `suggestion` record
@@ -780,7 +780,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
   Thirteen-locale `Help/` with the switch-pinning test; `mount`'s
   listing renders the additive ` [unavailable-dirty]` /
   ` [unavailable-lost]` marker through the one shared
-  `rustos_procinfo::render_mount` definition.
+  `tairix_procinfo::render_mount` definition.
 - Host-proven: abi round-trips (force byte, availability byte, hostile
   wire images), `discard_all` unit tests (dirty→clean, lost→clean),
   the volume-service lifecycle scenarios (snapshot marks availability +
@@ -837,7 +837,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
   observer. Never a silent merge (§5.4, §26.5).
 - **Defects fixed en route (§2.18), each with a regression test:**
   `Fat32::format` wrote no FSInfo sector and no backup boot sector
-  (BPB 48/50 zero) — format-nonconformant, and it left RustOS-formatted
+  (BPB 48/50 zero) — format-nonconformant, and it left TAIRiX-formatted
   FAT32 volumes without an evidence window; it now lays out FSInfo
   (sector 1, "unknown" hints — deterministic, images stay
   bit-reproducible) and the backup boot/FSInfo pair (sectors 6/7). Six

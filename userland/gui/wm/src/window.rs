@@ -1,6 +1,6 @@
 //! Windows: a placed surface with compositing attributes.
 
-use rustos_theme::CursorKind;
+use tairix_theme::CursorKind;
 
 use crate::color::{div255, Pixel};
 use crate::corner::Corners;

@@ -2,7 +2,7 @@
 //! program links against.
 //!
 //! The C program (`csrc/main.c`) is compiled by `clang` into a freestanding
-//! relocatable object that references crt0's `_start`, the `ros_sys_*` syscall
+//! relocatable object that references crt0's `_start`, the `tairix_sys_*` syscall
 //! stubs, and the compiler-emitted stack-canary symbols. None of those are in
 //! the C object — they live in the curated *System runtime / C ABI* class
 //! (`lib/crt0` + `lib/abi-sys`). This crate is built as a
@@ -14,7 +14,7 @@
 //!
 //! The crate names the two runtime crates only for their link-time side effect
 //! (`extern crate`): rustc emits a dependency's archive members only when the
-//! crate is referenced, so without these the crt0 `_start` and the `ros_sys_*`
+//! crate is referenced, so without these the crt0 `_start` and the `tairix_sys_*`
 //! stubs would be dropped from the static archive. The link script's
 //! `ENTRY(_start)` then roots the trampoline.
 //!
@@ -29,13 +29,13 @@
 #[cfg(target_os = "none")]
 mod runtime {
     // Pull crt0 (`_start`, `__stack_chk_guard`/`__stack_chk_fail`) and the
-    // `ros_sys_*` syscall stubs into the static archive. Named solely for the
+    // `tairix_sys_*` syscall stubs into the static archive. Named solely for the
     // link-time side effect, so the rust-2018 "unused extern crate" idiom lint
     // does not apply.
     #[allow(unused_extern_crates)]
-    extern crate rustos_abi_sys;
+    extern crate tairix_abi_sys;
     #[allow(unused_extern_crates)]
-    extern crate rustos_crt0;
+    extern crate tairix_crt0;
 
     /// Exit code used if the program ever panics. A hosted program has no
     /// unwinder, so a panic is unrecoverable; terminate through the `exit`
@@ -46,6 +46,6 @@ mod runtime {
     /// Panic handler for the freestanding image.
     #[panic_handler]
     fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-        rustos_abi_sys::sys_exit(EXIT_RUNTIME_PANIC)
+        tairix_abi_sys::sys_exit(EXIT_RUNTIME_PANIC)
     }
 }

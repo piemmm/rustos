@@ -1,4 +1,4 @@
-# `rustos-chmod` — change file mode bits
+# `tairix-chmod` — change file mode bits
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `chmod` applies a
 mode to each of its file operands. The mode is either an absolute octal
@@ -10,7 +10,7 @@ recursively. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ## Usage
@@ -75,7 +75,7 @@ before any later operand, and there is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-chmod` drives the parser, the symbolic-mode algebra,
+`cargo test -p tairix-chmod` drives the parser, the symbolic-mode algebra,
 and the engine against an in-memory tree and a recording output: the
 command grammar (octal and symbolic modes, the recursive flag, the
 `-r`-is-not-recursive and unknown-option refusals, `--`, too-few-operands

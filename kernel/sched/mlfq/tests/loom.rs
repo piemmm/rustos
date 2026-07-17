@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p rustos-kernel-sched-mlfq --release
+//!     -p tairix-kernel-sched-mlfq --release
 //! ```
 //!
 //! When the `loom` cfg is *not* enabled, the file compiles to an empty
@@ -26,7 +26,7 @@
 use loom::sync::Arc;
 use loom::thread;
 
-use rustos_kernel_sched_mlfq::runqueue::{RunDeque, Steal};
+use tairix_kernel_sched_mlfq::runqueue::{RunDeque, Steal};
 
 #[test]
 fn loom_owner_push_then_pop_no_stealer() {

@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-service-ceiling"
+name = "tairix-test-service-ceiling"
 description = "USERS U4 service-ceiling fixture: a minimal, separately-linked pure-Rust EL0 program built once and driven in two argv-selected roles (parent / svc). The parent holds CAP_SPAWN_AS_USER and switches the svc role into the devmgr service account through the production spawn syscall; svc runs under devmgr's compiled capability ceiling intersected with a deliberately over-wide manifest that also requests every sibling service's defining capability. svc proves the intersection binds end to end: its own SYSINFO_HW-gated hw_tree_read succeeds, while spawn_as (CAP_SPAWN_AS_USER), users_db_read (CAP_USERS_READ), seat_switch (CAP_SEAT_ADMIN), and sysinfo_introspect (CAP_SYSINFO_INTROSPECT) are each refused PermissionDenied at the audited dispatcher gate — a compromised service cannot borrow a sibling's authority even when its manifest lies. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
 version.workspace = true
 edition.workspace = true
@@ -12,15 +12,15 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-service-ceiling"
+name = "tairix-test-service-ceiling"
 path = "src/main.rs"
 
-# The program is a pure-Rust RustOS program, so it links the pure-Rust
-# userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`), which
-# exists solely for non-Rust programs. It names `rustos-abi` only for the
+# The program is a pure-Rust TAIRiX program, so it links the pure-Rust
+# userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which
+# exists solely for non-Rust programs. It names `tairix-abi` only for the
 # errno/console wire types. Only on the native Tier-1 targets
 # (`target_os = "none"`); on the host it is an inert stub so
 # `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

@@ -1,6 +1,6 @@
 // aarch64 context-switch primitive.
 //
-// extern "C" fn rustos_arch_aarch64_switch(prev: *mut TaskCtx,
+// extern "C" fn tairix_arch_aarch64_switch(prev: *mut TaskCtx,
 //                                            next: *mut TaskCtx);
 //
 // Calling convention: AAPCS64. x0 = prev, x1 = next.
@@ -28,10 +28,10 @@
 
 .section .text
 .balign 4
-.global rustos_arch_aarch64_switch
-.type   rustos_arch_aarch64_switch, %function
+.global tairix_arch_aarch64_switch
+.type   tairix_arch_aarch64_switch, %function
 
-rustos_arch_aarch64_switch:
+tairix_arch_aarch64_switch:
     // --- Suspend half ---
     // Reserve a 192-byte frame and save x19..x30, x0, d8..d15, and DAIF in
     // ascending address order so the resume half restores matching offsets.
@@ -89,4 +89,4 @@ rustos_arch_aarch64_switch:
     // address after the inbound task's suspend-time call site.
     ret
 
-.size rustos_arch_aarch64_switch, . - rustos_arch_aarch64_switch
+.size tairix_arch_aarch64_switch, . - tairix_arch_aarch64_switch

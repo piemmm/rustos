@@ -1,6 +1,6 @@
 [package]
-name = "rustos-geometry"
-description = "RustOS shared integer screen geometry (points and rectangles) for the window manager, taskbar, and graphical apps (§6, §17.4 — PLAN.md Stage 7)."
+name = "tairix-geometry"
+description = "TAIRiX shared integer screen geometry (points and rectangles) for the window manager, taskbar, and graphical apps (§6, §17.4 — PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

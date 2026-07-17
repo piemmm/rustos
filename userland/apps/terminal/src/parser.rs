@@ -1,6 +1,6 @@
 //! The byte-stream interpreter that drives a [`Grid`].
 //!
-//! [`Parser`] is a thin adapter over [`lib/vt`](rustos_vt)'s streaming parser:
+//! [`Parser`] is a thin adapter over [`lib/vt`](tairix_vt)'s streaming parser:
 //! it consumes the shell's output bytes, lets `lib/vt` turn them into the
 //! shared [`Op`] vocabulary, and applies each [`Op`] to a [`Grid`]. There is no
 //! second escape-sequence definition in this app — the emulator is a *consumer*
@@ -15,7 +15,7 @@
 //! panic. Holding the escape-sequence state in the parser (rather than the
 //! grid) keeps the screen model free of parsing concerns.
 
-use rustos_vt::{Op, Parser as VtParser};
+use tairix_vt::{Op, Parser as VtParser};
 
 use crate::grid::Grid;
 

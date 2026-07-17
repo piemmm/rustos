@@ -45,8 +45,8 @@ pub enum Namespace {
     Atari,
     /// Classic Mac OS / HFS preset metadata. File-permission access.
     Mac,
-    /// RustOS-native extended metadata. File-permission access.
-    Rustos,
+    /// TAIRiX-native extended metadata. File-permission access.
+    TAIRiX,
     /// Security-sensitive, ACL-adjacent metadata. Privileged access.
     System,
     /// Metadata only privileged services may set. Privileged access.
@@ -61,7 +61,7 @@ impl Namespace {
         Namespace::Amiga,
         Namespace::Atari,
         Namespace::Mac,
-        Namespace::Rustos,
+        Namespace::TAIRiX,
         Namespace::System,
         Namespace::Trusted,
     ];
@@ -75,7 +75,7 @@ impl Namespace {
             Namespace::Amiga => "amiga",
             Namespace::Atari => "atari",
             Namespace::Mac => "mac",
-            Namespace::Rustos => "rustos",
+            Namespace::TAIRiX => "tairix",
             Namespace::System => "system",
             Namespace::Trusted => "trusted",
         }
@@ -97,7 +97,7 @@ impl Namespace {
             | Namespace::Amiga
             | Namespace::Atari
             | Namespace::Mac
-            | Namespace::Rustos => NamespaceAccess::FilePermission,
+            | Namespace::TAIRiX => NamespaceAccess::FilePermission,
             Namespace::System | Namespace::Trusted => NamespaceAccess::Privileged,
         }
     }

@@ -55,7 +55,7 @@ a'r defnyddwyr mwyaf yn ôl `%CPU` a chof a ddangosir.
   mewn eiliadau gyda ffracsiwn dewisol (dim ond y digid degol cyntaf,
   y degfedau, a gedwir): mae `sysmon -d 1.5` yn adnewyddu bob 1.5
   eiliad. Rhagosodiad 3.0. Mae GNU `top` yn derbyn cyfwng sero ac yn
-  adnewyddu mor gyflym ag y gall; nid yw RustOS byth yn troelli'n
+  adnewyddu mor gyflym ag y gall; nid yw TAIRiX byth yn troelli'n
   wag, felly codir sero i'r isafswm o 0.1 eiliad.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn a gadael. O fewn
   sesiwn sy'n rhedeg, mae'r un bysellau'n toglo'r trosolwg bysellau yn

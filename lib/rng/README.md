@@ -1,6 +1,6 @@
-# rustos-rng
+# tairix-rng
 
-Random number generation for RustOS. One crate, three layers, separated by
+Random number generation for TAIRiX. One crate, three layers, separated by
 purpose so the wrong tool is hard to reach for by accident:
 
 | Type                      | Kind                         | Use it for |

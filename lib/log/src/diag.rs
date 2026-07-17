@@ -106,7 +106,7 @@ mod tests {
 
     use alloc::string::String;
 
-    use rustos_abi::FieldValue;
+    use tairix_abi::FieldValue;
 
     use super::{level_tag, write_diag_line};
     use crate::{Event, EventId, Field, Level};

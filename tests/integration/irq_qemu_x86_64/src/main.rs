@@ -4,20 +4,20 @@
 //!
 //! ## What this test asserts
 //!
-//! The production `rustos-kernel` boot pipeline runs through
-//! `rustos_kernel::boot` until `AuditEvent::BootCompleted`
+//! The production `tairix-kernel` boot pipeline runs through
+//! `tairix_kernel::boot` until `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) fires. The audit Sink that observes the event
 //! hijacks the boot CPU before `kernel_main`'s trailing
 //! `arch.halt()` and drives a real hardware-interrupt round-trip:
 //!
-//! 1. Read the published `rustos_kernel_irq::IrqTable` via
-//!    `rustos_kernel::x86_64::arch_wrapper::published_irq_table` and the
+//! 1. Read the published `tairix_kernel_irq::IrqTable` via
+//!    `tairix_kernel::x86_64::arch_wrapper::published_irq_table` and the
 //!    typed `IoApicController` via
-//!    `rustos_kernel::x86_64::ioapic_controller::published_typed`.
+//!    `tairix_kernel::x86_64::ioapic_controller::published_typed`.
 //! 2. Look up the IDT vector assigned to **GSI 2** (the legacy
 //!    IRQ-0 line under QEMU's PC/Q35 default `InterruptSourceOverride`
 //!    `source = 0 → gsi = 2`) through
-//!    `rustos_arch_x86_64::irq::global_routing().vector_for_gsi(2)`.
+//!    `tairix_arch_x86_64::irq::global_routing().vector_for_gsi(2)`.
 //! 3. Bind GSI 2 in the `IrqTable` for the synthesised
 //!    `TaskId(0)`; the kernel boot pipeline programmed the line
 //!    `masked = true`, so no spurious delivery has reached the LAPIC.
@@ -47,7 +47,7 @@
 //!
 //! The synthesised observer only compiles under
 //! `#[cfg(feature = "test-hooks")]`. The feature is on by default
-//! for this crate so `cargo build -p rustos-test-irq-qemu-x86-64`
+//! for this crate so `cargo build -p tairix-test-irq-qemu-x86-64`
 //! and `cargo xtask test --qemu` do the obvious thing; release
 //! builds that enable it are rejected by the `compile_error!` guard
 //! below (no hacks; — fail closed).
@@ -66,7 +66,7 @@ extern crate alloc;
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-irq-qemu-x86-64: the `test-hooks` Cargo feature is a \
+    "tairix-test-irq-qemu-x86-64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
@@ -78,23 +78,23 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_abi::IrqHandle;
-    use rustos_arch_x86_64::irq as arch_irq;
-    use rustos_arch_x86_64::qemu_exit;
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::x86_64::arch_wrapper::published_irq_table;
-    use rustos_kernel::x86_64::ioapic_controller::published_typed;
-    use rustos_kernel::{
+    use tairix_abi::IrqHandle;
+    use tairix_arch_x86_64::irq as arch_irq;
+    use tairix_arch_x86_64::qemu_exit;
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
+    use tairix_kernel::x86_64::ioapic_controller::published_typed;
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_kernel_irq::WaitStep;
-    use rustos_kernel_sec::TaskId as SecTaskId;
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_kernel_irq::WaitStep;
+    use tairix_kernel_sec::TaskId as SecTaskId;
+    use tairix_log::{Event, EventId, Sink};
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
 
     /// Static heap for the bump allocator. Mirrors the production
-    /// `rustos-kernel` binary's allocator wiring.
+    /// `tairix-kernel` binary's allocator wiring.
     static mut HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by the module-private `HEAP` static.
@@ -238,7 +238,7 @@ mod kernel {
 
     // --- Audit observer Sink -------------------------------------
 
-    /// Outer audit sink installed via `rustos_kernel::boot`.
+    /// Outer audit sink installed via `tairix_kernel::boot`.
     ///
     /// Forwards every event through the serial sink, and on
     /// observing [`BOOT_COMPLETED_EVENT_ID`] drives
@@ -320,7 +320,7 @@ mod kernel {
 
         // 7. Enable interrupts and poll the WaitStep until either
         //    `Ready` or `TimedOut` fires. The boot pipeline has
-        //    already wired `rustos_kernel::production_external_irq_dispatch`
+        //    already wired `tairix_kernel::production_external_irq_dispatch`
         //    so the trap path is live.
         //
         //    `published_irq_table` returns a `&'static IrqTable` —
@@ -390,7 +390,7 @@ mod kernel {
     /// (1 s vs. a sub-millisecond IRQ latency) that the actual TSC
     /// frequency does not matter for the pass/fail decision.
     fn rdtsc_ns() -> u64 {
-        // SAFETY: RDTSC is unprivileged on every x86_64 CPU RustOS
+        // SAFETY: RDTSC is unprivileged on every x86_64 CPU TAIRiX
         // supports; the instruction has no architectural side
         // effects beyond producing the timestamp value.
         let value: u64;
@@ -410,9 +410,9 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
+    /// Forward to the shared bridge in `tairix_kernel::x86_64::panic_ctx`.
     #[panic_handler]
-    fn rustos_test_irq_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_test_irq_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
@@ -420,7 +420,7 @@ mod kernel {
 
     /// The symbol the arch crate's boot trampoline calls.
     ///
-    /// Forwards to `rustos_kernel::boot` with the production COM1
+    /// Forwards to `tairix_kernel::boot` with the production COM1
     /// log sink and our audit-observer sink.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
@@ -428,7 +428,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }
@@ -453,7 +453,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[panic_handler]
-fn rustos_test_irq_qemu_x86_64_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
+fn tairix_test_irq_qemu_x86_64_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
         // SAFETY: same as above.
         unsafe {

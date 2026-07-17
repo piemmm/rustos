@@ -6,7 +6,7 @@
 # covers the short-help read of the bundle's own Help/ documents through
 # the secured VFS. The tool reads no input, so it requests no
 # CAP_CONSOLE_READ.
-id = "os.rustos.seq"
+id = "os.tairix.seq"
 name = "seq"
 version = "0.1.0"
 kind = "command"

@@ -1,4 +1,4 @@
-//! RustOS `mkdir` — make directories (`plans/APPS.md` §12.1 Stage C).
+//! TAIRiX `mkdir` — make directories (`plans/APPS.md` §12.1 Stage C).
 //!
 //! `mkdir` creates each directory operand, in order. With `-p`/`--parents`
 //! it creates every missing ancestor first and tolerates operands that
@@ -21,7 +21,7 @@
 //! * [`Filesystem`] — create a directory; learn what kind of object a path
 //!   is (only ever consulted to tolerate an existing directory under `-p`).
 //! * [`Output`] — write `-v` reports to the terminal.
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by the
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
 //!   short-help switches.
 //!
 //! The binary that ships as `mkdir` wires the real syscall-backed
@@ -30,7 +30,7 @@
 //!
 //! The kernel stays the one path validator: an operand is handed to
 //! `fs_mkdir` as spelled, and only the `-p` ancestor walk parses it —
-//! through the one shared grammar (`rustos_path`, `Path::prefix`) — with an
+//! through the one shared grammar (`tairix_path`, `Path::prefix`) — with an
 //! unparseable operand falling back to a single kernel call so no second
 //! validator exists.
 //!
@@ -53,8 +53,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_abi::{Errno, FileKind};
-use rustos_help::{own_short_help, HelpSource};
+use tairix_abi::{Errno, FileKind};
+use tairix_help::{own_short_help, HelpSource};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `mkdir`'s own Help tree is unavailable.
@@ -272,7 +272,7 @@ fn make_one(
 /// prefixes that already exist as directories (the GNU `-p` semantics).
 ///
 /// The ancestor spellings come from the one shared path grammar
-/// (`rustos_path::Path::prefix`); an operand that grammar cannot parse is
+/// (`tairix_path::Path::prefix`); an operand that grammar cannot parse is
 /// handed to the kernel whole, so the kernel stays the one validator.
 fn make_parents(
     fs: &dyn Filesystem,
@@ -280,7 +280,7 @@ fn make_parents(
     verbose: bool,
     operand: &str,
 ) -> Result<(), MkdirError> {
-    let Ok(parsed) = rustos_path::parse(operand) else {
+    let Ok(parsed) = tairix_path::parse(operand) else {
         return make_one(fs, out, verbose, operand);
     };
     let count = parsed.components().len();

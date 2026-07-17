@@ -24,7 +24,7 @@ use crate::multiboot2::{
 };
 use crate::pvh::{self, PvhMemoryEntry, PvhMemoryKind};
 
-/// Mirror of `rustos_kernel_mem::RegionKind`. Locked by a host-side
+/// Mirror of `tairix_kernel_mem::RegionKind`. Locked by a host-side
 /// round-trip test in the `tests` module (`#[cfg(test)]`-only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegionKind {
@@ -36,7 +36,7 @@ pub enum RegionKind {
 
 /// One physical-memory region produced by the bridge.
 ///
-/// Mirrors `rustos_kernel_mem::MemoryRegion` exactly so a consumer can
+/// Mirrors `tairix_kernel_mem::MemoryRegion` exactly so a consumer can
 /// translate one-to-one without inspecting the field types beyond the
 /// kind discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,11 +142,11 @@ pub fn iter_from_pvh<'a>(
 #[cfg(test)]
 mod tests {
     //! Host-side tests, including the round-trip lock against the
-    //! canonical `rustos_kernel_mem::RegionKind`.
+    //! canonical `tairix_kernel_mem::RegionKind`.
 
     use super::*;
     use crate::multiboot2::{EfiMemoryDescriptor, Mb2MemoryEntry, Mb2MemoryKind};
-    use rustos_kernel_mem::{MemoryRegion as KMemRegion, RegionKind as KRegionKind};
+    use tairix_kernel_mem::{MemoryRegion as KMemRegion, RegionKind as KRegionKind};
 
     /// Translate our mirror enum to the canonical kernel/mem enum.
     fn lift(k: RegionKind) -> KRegionKind {
@@ -158,7 +158,7 @@ mod tests {
 
     fn lift_region(d: MemoryRegionDescriptor) -> KMemRegion {
         KMemRegion {
-            start: rustos_kernel_mem::PhysAddr::new(d.start),
+            start: tairix_kernel_mem::PhysAddr::new(d.start),
             length: d.length,
             kind: lift(d.kind),
         }
@@ -292,7 +292,7 @@ mod tests {
             },
         ];
 
-        let mut map = rustos_kernel_mem::BootMemoryMap::new();
+        let mut map = tairix_kernel_mem::BootMemoryMap::new();
         for e in entries {
             let d = from_multiboot2(e);
             map.push(lift_region(d));

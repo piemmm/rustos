@@ -1,7 +1,7 @@
 # Virtio transport
 
 The bus-agnostic virtqueue protocol lives in `lib/virtio`
-(crate `rustos-virtio`), together with the concrete virtio-MMIO
+(crate `tairix-virtio`), together with the concrete virtio-MMIO
 `Transport` (`MmioTransport`); `drivers/bus/virtio` adds only the
 concrete PCI `Transport` implementation (and the register-window
 backends) on top of it. The MMIO transport sits in `lib/virtio` so an
@@ -334,7 +334,7 @@ of every `kernel/*` dependency and `kernel/virtio` stays free of
 every `userland/*` dependency. `kernel/virtio` links
 `kernel/{mem,sec,irq}` for the concrete host, while the bus driver
 and device drivers stay on `lib/*` only. `mint` gates on the
-driver's granted capabilities through `&dyn rustos_abi::CapabilityQuery`,
+driver's granted capabilities through `&dyn tairix_abi::CapabilityQuery`,
 so the seam never names `lib/caps`.
 
 Each `mint` call builds a brand-new `AddressSpace` (via a
@@ -379,7 +379,7 @@ closed (§5.4) rather than trusting the device.
 The protocol and the kernel host are tested in the crates that own
 them (`AGENTS.md` §7 — unit tests next to the code):
 
-- `cargo test -p rustos-virtio` covers the bus-agnostic protocol:
+- `cargo test -p tairix-virtio` covers the bus-agnostic protocol:
   split-queue free-list initialisation, descriptor chaining (single
   + multi), exhaustion, used-ring wrap-around, status progression,
   mock-peer round-trip, sensitive-class scrub on drop, and the
@@ -405,7 +405,7 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   rejection, single-register notify, device-config read with zero-fill
   overflow, and a `SplitQueue`-drives-`MmioTransport` integration
   check.
-- `cargo test -p rustos-drv-bus-virtio` covers the concrete PCI
+- `cargo test -p tairix-drv-bus-virtio` covers the concrete PCI
   transport: the `transport_pci` tests (short-window rejection,
   `num_queues` read, status write/read + reset, driver-feature
   halves, queue-select range check, queue programming + notify-offset
@@ -413,7 +413,7 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   notify for an unprogrammed queue, device-config read with zero-fill
   overflow, and a `SplitQueue`-drives-`PciTransport` integration
   check).
-- `cargo test -p rustos-kernel-virtio` covers the kernel host and
+- `cargo test -p tairix-kernel-virtio` covers the kernel host and
   MMIO mapper: zero-initialisation + audit emit, drop routes through
   `free_dma`, `CapabilityId::MEM_DMA` refusal returns
   `PermissionDenied`, zero-size short-circuit, two simultaneous

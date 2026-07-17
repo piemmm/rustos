@@ -2,28 +2,28 @@
 //! URB-backed transport, LUN bring-up, per-LUN block-service publication,
 //! and the wait-set serve loop (`plans/DEVICES.md` D2).
 
-use rustos_abi::blkio::{BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN};
-use rustos_abi::hwtree::HW_NODE_ROOT;
-use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
-use rustos_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
-use rustos_caps::CapabilitySet;
-use rustos_drv_storage_usb_msd::bot::{Bot, MsdTransport};
-use rustos_drv_storage_usb_msd::cbi::{Cbi, CbiStatus};
-use rustos_drv_storage_usb_msd::desc::{
+use tairix_abi::blkio::{BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN};
+use tairix_abi::hwtree::HW_NODE_ROOT;
+use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
+use tairix_caps::CapabilitySet;
+use tairix_drv_storage_usb_msd::bot::{Bot, MsdTransport};
+use tairix_drv_storage_usb_msd::cbi::{Cbi, CbiStatus};
+use tairix_drv_storage_usb_msd::desc::{
     configuration_total_length, find_storage_interface, StorageProtocol, UasEndpoints,
     CONFIGURATION_HEADER_LEN,
 };
-use rustos_drv_storage_usb_msd::scsi::{
+use tairix_drv_storage_usb_msd::scsi::{
     CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
-use rustos_drv_storage_usb_msd::serve::{blk_block_for, serve_request};
-use rustos_drv_storage_usb_msd::uas::{Uas, UasPipes};
-use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-use rustos_log::{log, Event, EventId, Field, FieldValue, Level};
-use rustos_rt::LogSink;
-use rustos_usb::device::BULK_BUF_LEN;
-use rustos_usb::transport::{UrbCall, UrbClient};
-use rustos_util::fmt::format_hex_u64;
+use tairix_drv_storage_usb_msd::serve::{blk_block_for, serve_request};
+use tairix_drv_storage_usb_msd::uas::{Uas, UasPipes};
+use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
+use tairix_rt::LogSink;
+use tairix_usb::device::BULK_BUF_LEN;
+use tairix_usb::transport::{UrbCall, UrbClient};
+use tairix_util::fmt::format_hex_u64;
 
 /// Exit code when the rt-backed driver host could not be built from the
 /// kernel-delivered grants. A reserved, fail-closed value.
@@ -100,7 +100,7 @@ struct IpcUrbCall {
 
 impl UrbCall for IpcUrbCall {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-        match rustos_rt::ipc_call(self.endpoint, request, reply) {
+        match tairix_rt::ipc_call(self.endpoint, request, reply) {
             Ok(len) => Ok(len),
             Err(neg) => {
                 let errno =
@@ -317,7 +317,7 @@ fn create_blk_endpoint(id: u64) -> bool {
     let mut send_caps = CapabilitySet::empty();
     send_caps.insert(CapabilityId::IPC_ENDPOINT);
     let recv_caps = CapabilitySet::empty();
-    rustos_rt::call_create(
+    tairix_rt::call_create(
         id,
         &send_caps,
         &recv_caps,
@@ -344,7 +344,7 @@ fn bind_blk_endpoint(block_base: u64, lun: u8) -> Option<u64> {
 /// the shm id forwarded as the node's grant.
 fn create_window() -> Option<(&'static mut [u8], u64)> {
     let mut shm_id = 0u64;
-    let base = rustos_rt::shm_create(BLK_DATA_LEN, &mut shm_id);
+    let base = tairix_rt::shm_create(BLK_DATA_LEN, &mut shm_id);
     if base < 0 {
         return None;
     }
@@ -360,16 +360,16 @@ fn create_window() -> Option<(&'static mut [u8], u64)> {
 }
 
 /// Publish one LUN's storage node: class `Storage`, a
-/// `rustos,usb-msd-lun` compatible key the volume layer selects on, and
+/// `tairix,usb-msd-lun` compatible key the volume layer selects on, and
 /// the two transport grants (the block-service endpoint and the shared
 /// data window). Returns the kernel-assigned node id.
 fn emit_lun_node(endpoint: u64, shm_id: u64) -> Option<u32> {
     let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Storage);
-    let key = HwMatchKey::compatible(b"rustos,usb-msd-lun").ok()?;
+    let key = HwMatchKey::compatible(b"tairix,usb-msd-lun").ok()?;
     node.push_match_key(key).ok()?;
     node.push_resource(HwResource::endpoint(endpoint)).ok()?;
     node.push_resource(HwResource::shared(shm_id)).ok()?;
-    let emit = rustos_rt::hw_emit_node(&node);
+    let emit = tairix_rt::hw_emit_node(&node);
     if emit < 0 {
         return None;
     }
@@ -418,11 +418,11 @@ fn bring_up_lun<T: ScsiTransport>(
 /// Retract every published LUN node (device unplugged / fatal exit).
 fn retract_all(luns: &[Option<LunServe>]) {
     for lun in luns.iter().flatten() {
-        let _ = rustos_rt::hw_remove_node(lun.node_id);
+        let _ = tairix_rt::hw_remove_node(lun.node_id);
     }
 }
 
-/// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+/// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
 /// is set up and routes its return value through the `exit` syscall.
 ///
 /// On success this never returns: the block-service loop runs for the
@@ -644,7 +644,7 @@ where
 
     // The serve wait-set: one member per published LUN endpoint, token =
     // LUN number.
-    let set = rustos_rt::waitset_create();
+    let set = tairix_rt::waitset_create();
     if set < 0 {
         retract_all(&luns);
         return EXIT_NO_SERVICE;
@@ -653,7 +653,7 @@ where
     let set = set as u64;
     for (lun, serve) in luns.iter().enumerate() {
         let Some(serve) = serve else { continue };
-        let ret = rustos_rt::waitset_ctl(
+        let ret = tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Endpoint,
@@ -682,7 +682,7 @@ where
     // busy-poll.
     loop {
         let mut token = 0u64;
-        let ret = rustos_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+        let ret = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
         if ret < 0 {
             retract_all(&luns);
             return EXIT_NO_SERVICE;
@@ -696,7 +696,7 @@ where
         // Non-blocking: this wait-set serves every LUN's endpoint, and the
         // queued call the wake reported may have been cancelled by its
         // poster's exit — parking here would starve the other LUNs.
-        let Ok(n) = rustos_rt::call_recv_nonblock(serve.endpoint, &mut request, &mut ticket) else {
+        let Ok(n) = tairix_rt::call_recv_nonblock(serve.endpoint, &mut request, &mut ticket) else {
             continue;
         };
         let lun = index as u8;
@@ -712,7 +712,7 @@ where
                 &mut reply,
             )
         };
-        let _ = rustos_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
+        let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
         // A vanished URB endpoint means the HCD retracted the interface:
         // the device is gone. Retract the LUN nodes and exit cleanly so a
         // re-plug re-enumerates and reloads this driver.
@@ -732,4 +732,4 @@ where
     }
 }
 
-rustos_rt::entry!(main);
+tairix_rt::entry!(main);

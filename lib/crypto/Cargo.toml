@@ -1,6 +1,6 @@
 [package]
-name = "rustos-crypto"
-description = "Audited cryptographic primitives for RustOS — thin wrappers around vetted upstream crates."
+name = "tairix-crypto"
+description = "Audited cryptographic primitives for TAIRiX — thin wrappers around vetted upstream crates."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

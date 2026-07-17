@@ -1,6 +1,6 @@
 [package]
-name = "rustos-termcap"
-description = "RustOS first-party compiled-in terminal capability database (CURSES.md Stage C3): the closed, versioned set of recognised `TERM` values and a capability record per terminal expressed entirely in `lib/vt` terms (AGENTS.md §2.2) — colour depth, cursor addressing, erase, scroll region, alt-screen, cursor visibility, title, arrow-key input, mouse reporting, and bracketed paste. `from_term` parses an untrusted `TERM` and fails closed to `dumb` (§2.9, §5.4); there is no terminfo/termcap file read (§16.1). no_std + alloc, never panics."
+name = "tairix-termcap"
+description = "TAIRiX first-party compiled-in terminal capability database (CURSES.md Stage C3): the closed, versioned set of recognised `TERM` values and a capability record per terminal expressed entirely in `lib/vt` terms (AGENTS.md §2.2) — colour depth, cursor addressing, erase, scroll region, alt-screen, cursor visibility, title, arrow-key input, mouse reporting, and bracketed paste. `from_term` parses an untrusted `TERM` and fails closed to `dumb` (§2.9, §5.4); there is no terminfo/termcap file read (§16.1). no_std + alloc, never panics."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-vt = { path = "../vt", version = "=0.0.0" }
+tairix-vt = { path = "../vt", version = "=0.0.0" }
 
 [lints]
 workspace = true

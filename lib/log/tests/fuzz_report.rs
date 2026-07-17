@@ -3,8 +3,8 @@
 //! A committed log record carries attacker-controlled text (`caller.message`,
 //! `caller.component`, the caller's *requested* source, string `data.*`
 //! values). The JSON, Markdown, and table views
-//! ([`rustos_log::render_json`] / [`rustos_log::render_markdown`] /
-//! [`rustos_log::render_table_row`]) must turn any such record into output a
+//! ([`tairix_log::render_json`] / [`tairix_log::render_markdown`] /
+//! [`tairix_log::render_table_row`]) must turn any such record into output a
 //! hostile caller cannot use to inject escape sequences, forge lines, or (for
 //! JSON) break the document: the rendered bytes must be free of C0 controls
 //! and `DEL`, whatever the input, and rendering must never panic.
@@ -15,13 +15,13 @@
 //! (so the message/component/source/field escaping paths are actually reached).
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
-use rustos_abi::{
+use tairix_abi::{
     BootId, CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, TrustDomain,
     WallClockReading, BOOT_ID_LEN, ORIGIN_CONSOLE_NONE,
 };
-use rustos_log::{
+use tairix_log::{
     decode_record, render_json, render_markdown, render_table_row, CallerContent,
     DictionaryBuilder, DictionaryView, Level, LogRecord, LogRecordRef, RecordFrame, Stream,
 };
@@ -58,7 +58,7 @@ fn assert_json_shape(out: &str) {
 }
 
 /// Derive a [`RecordFrame`] from the PRNG so the container-owned facts vary too.
-fn frame(rng: &mut rustos_fuzzseed::Lcg) -> RecordFrame {
+fn frame(rng: &mut tairix_fuzzseed::Lcg) -> RecordFrame {
     let stream = Stream::from_u8((rng.next_u64() % 6) as u8).unwrap_or(Stream::Runtime);
     let mut boot = [0u8; BOOT_ID_LEN];
     rng.fill(&mut boot);
@@ -157,13 +157,13 @@ fn exercise_hostile(raw: &[u8], frame: &RecordFrame, level: Level) {
 
 #[test]
 fn rendered_views_are_control_free_and_never_panic() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "rendered_views_are_control_free_and_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
     let mut buf = [0u8; 512];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for i in 0..SMOKE_ITERATIONS {
             let frame = frame(&mut rng);
@@ -178,7 +178,7 @@ fn rendered_views_are_control_free_and_never_panic() {
                 exercise_hostile(&buf[..size], &frame, level);
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

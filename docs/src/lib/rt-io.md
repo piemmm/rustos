@@ -1,6 +1,6 @@
-# `rustos-rt::io` — userland I/O abstraction
+# `tairix-rt::io` — userland I/O abstraction
 
-`rustos_rt::io` is RustOS's ergonomic userland I/O layer: the counterpart of
+`tairix_rt::io` is TAIRiX's ergonomic userland I/O layer: the counterpart of
 `std::io` for a first-party Rust program. It is a **pure-Rust convenience layer**
 over the existing `abi-v1` `stream_read` / `stream_write` traps — it adds **no**
 syscall, capability, or `lib/abi` type, and reaches no authority a program does
@@ -78,6 +78,6 @@ bytes (never an infinite loop), and `read_exact` fails closed with
 
 Structured and audited log *records* travel through `lib/log`, never these
 traits; a `log`-viewing tool renders its text to the standard streams through
-this layer like any other program. RustOS ships no system-wide C `stdio`; the
+this layer like any other program. TAIRiX ships no system-wide C `stdio`; the
 C-ABI runtime class stays minimal, and a third-party C program brings its own
 libc in its app bundle.

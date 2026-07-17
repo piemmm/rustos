@@ -1,4 +1,4 @@
-# `rustos-groupadd` — create a group
+# `tairix-groupadd` — create a group
 
 A `plans/APPS.md` command app registered at
 `/System/Apps/groupadd.app/Run` so the shell resolves the bare word
@@ -17,8 +17,8 @@ discipline, narrowed to the two fields a group record carries.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary, the shared
-`rustos-help` engine, and the `rustos-users` account policy, so it never
+dependencies are the audited `tairix-abi` vocabulary, the shared
+`tairix-help` engine, and the `tairix-users` account policy, so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). Its manifest
 (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE`, `CAP_USER_ADMIN`, and
 `CAP_FS_ACCESS` — the administrative gate sits above the session
@@ -39,7 +39,7 @@ Exactly one name operand is required. `-g` accepts its value attached
 option parsing: every later argument is an operand.
 
 The bundle's thirteen-locale `Help/` tree (the canonical `en-US` plus the
-`rustos_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
+`tairix_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
 authored on disk in this crate and
 planted at `/System/Apps/groupadd.app/Help/` by the image builder from
 that source (`tools/syshelp`) — never embedded in the binary
@@ -53,7 +53,7 @@ the new record. The production `GroupDb` is `db::GroupsAdminDb`, the
 syscall in production, an in-memory registry in tests), so the whole
 client policy is host-tested:
 
-- an omitted gid is allocated by the shared `rustos_users::next_id`
+- an omitted gid is allocated by the shared `tairix_users::next_id`
   policy (interactive-user range, `1000..`: one above the highest taken
   id in the band, fail closed on band exhaustion);
 - the registry — not this tool — is the policy point: it enforces
@@ -75,7 +75,7 @@ a usage error.
 
 ## Tests
 
-`cargo test -p rustos-groupadd` drives the parser, the engine, and the
+`cargo test -p tairix-groupadd` drives the parser, the engine, and the
 production client against in-memory fixtures: the command grammar (the
 name-only and name+gid forms, long `--gid value`/`--gid=value` and
 attached short `-g0` spellings, `-h`/`-?`/`--help`, the

@@ -7,7 +7,7 @@
 //! `kernel/arch/x86_64/linker.ld`.
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
 
     let target = std::env::var("TARGET").unwrap_or_default();
     if target == "x86_64-unknown-none" {

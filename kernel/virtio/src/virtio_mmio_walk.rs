@@ -16,10 +16,10 @@
 //! a pointer of its own. The capability check that
 //! authorises the window lives inside the mapper.
 
-use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
-use rustos_abi::{DriverError, MmioMapper, RegisterWindow};
-use rustos_virtio::VirtioError;
+use tairix_abi::driver::bus::BusDevice;
+use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
+use tairix_abi::{DriverError, MmioMapper, RegisterWindow};
+use tairix_virtio::VirtioError;
 
 /// Upper bound on the number of bus slots the walk will record while
 /// searching for the virtio device.
@@ -74,7 +74,7 @@ pub struct VirtioMmioProvision<T> {
 ///
 /// The walk maps the window but never names a concrete transport type:
 /// the caller passes `build` (in production
-/// `rustos_drv_bus_virtio::MmioTransport::new`), so ring 0 depends only
+/// `tairix_drv_bus_virtio::MmioTransport::new`), so ring 0 depends only
 /// on `lib/*` and never on a `drivers/bus/*` crate (`kernel/* → lib/*`, never a driver).
 ///
 /// # Errors
@@ -88,7 +88,7 @@ pub struct VirtioMmioProvision<T> {
 /// # Capabilities
 ///
 /// The `mapper` enforces
-/// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) on the
+/// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP) on the
 /// window; this walk holds no ambient authority of its own.
 pub fn provision_virtio_mmio<T, B>(
     bus: &dyn VirtioMmioBus,
@@ -134,8 +134,8 @@ fn find_virtio_slot(bus: &dyn VirtioMmioBus, device_id: u32) -> Result<u64, Virt
 mod tests {
     use super::*;
     use core::cell::RefCell;
-    use rustos_abi::driver::mmio::MmioMapError;
-    use rustos_abi::RegisterWindow;
+    use tairix_abi::driver::mmio::MmioMapError;
+    use tairix_abi::RegisterWindow;
 
     const VIRTIO_BLK_DEVICE_ID: u32 = 2;
     const SLOT_BASE: u64 = 0x1000_4000;
@@ -191,7 +191,7 @@ mod tests {
         slots: alloc::vec::Vec<BusDevice>,
     }
 
-    impl rustos_abi::driver::bus::Bus for FakeBus {
+    impl tairix_abi::driver::bus::Bus for FakeBus {
         fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
             if out.len() < self.slots.len() {
                 return Err(DriverError::BufferTooSmall);

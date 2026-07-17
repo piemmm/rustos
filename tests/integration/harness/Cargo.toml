@@ -1,5 +1,5 @@
 [package]
-name = "rustos-itest-harness"
+name = "tairix-itest-harness"
 description = "Build-time target classification shared by the freestanding QEMU integration binaries: emits the central `freestanding`/`itest_*` cfg flags so the binaries never name the target architecture in their own source (AGENTS.md §2.2, §17.2)."
 version.workspace = true
 edition.workspace = true
@@ -22,14 +22,14 @@ driver-image = ["dep:ed25519-dalek"]
 # `AppInfo.toml` manifest discovery (`src/app_image.rs`): Ed25519 signing
 # plus the `lib/crypto` SHA-256 the canonical bundle content hash uses.
 # Opt-in for the same reason as `driver-image`.
-app-image = ["dep:ed25519-dalek", "dep:rustos-crypto"]
+app-image = ["dep:ed25519-dalek", "dep:tairix-crypto"]
 
 [dependencies]
 # The single source of truth for the `rxe` load-image wire format, reused so
 # the ELF->rxe converter never re-encodes the header/segment layout by hand
-# (`AGENTS.md` §2.2). `rustos-abi` is `no_std` but builds on the host, which
+# (`AGENTS.md` §2.2). `tairix-abi` is `no_std` but builds on the host, which
 # is where this build-time helper runs.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # Ed25519 signing for the `driver-image` signed-bundle composer (host-only
 # build glue, `AGENTS.md` §12); pulled in only when that feature is enabled.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = [
@@ -38,13 +38,13 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = [
 # The audited `lib/crypto` SHA-256 the canonical bundle content hash is
 # computed with (`app-image` only), so the composer and every store-side
 # verifier hash through the same wrapped primitive (`AGENTS.md` §2.12).
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0", optional = true }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0", optional = true }
 
 [dev-dependencies]
 # Build a real flattened device tree (the same fixture the `lib/fdt` unit
 # tests use) so the DTB-trimming helper is proven against a genuine FDT,
 # not a hand-rolled header (`AGENTS.md` §7).
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = [
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = [
     "test-fixtures",
 ] }
 

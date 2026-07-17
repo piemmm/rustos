@@ -11,7 +11,7 @@
 //! end-of-options. GNU `tee` does not treat a `-` operand specially: it
 //! names a file called `-`.
 //!
-//! GNU `tee -i`/`--ignore-interrupts` is deliberately absent: RustOS has
+//! GNU `tee -i`/`--ignore-interrupts` is deliberately absent: TAIRiX has
 //! no per-process signal disposition to set (the `signal` syscall only
 //! delivers a signal to a spawned child), so there is nothing the switch
 //! could honestly do. It is staged behind that kernel work — never
@@ -24,7 +24,7 @@ use crate::error::TeeError;
 
 /// How a failed output is treated (`--output-error`, GNU coreutils).
 ///
-/// RustOS has no `SIGPIPE`: a program's consumer going away surfaces as a
+/// TAIRiX has no `SIGPIPE`: a program's consumer going away surfaces as a
 /// *write error on standard output*, never a signal. The GNU modes key on
 /// `EPIPE`, and the one place that condition arises here is the standard
 /// output stream, so the "pipe" class maps to exactly that output: the
@@ -36,7 +36,7 @@ use crate::error::TeeError;
 pub enum OutputError {
     /// No `--output-error`/`-p` was given: a failed standard output stops
     /// the run (the analogue of GNU dying of `SIGPIPE`, stated on the
-    /// diagnostic stream — a RustOS process never ends silently); a failed
+    /// diagnostic stream — a TAIRiX process never ends silently); a failed
     /// file is diagnosed, dropped, and the run continues.
     #[default]
     Default,

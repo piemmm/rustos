@@ -9,25 +9,25 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::sync::Arc;
 
-use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use rustos_arch_api::{CpuId, EnterUser};
-use rustos_arch_riscv64::context_hal::ContextSwitchHal;
-use rustos_arch_riscv64::fdt::Fdt;
-use rustos_arch_riscv64::paging::{self, activate_user_root};
-use rustos_arch_riscv64::userentry::UserMode;
-use rustos_arch_riscv64::{
+use tairix_abi::rxe::LoadImage;
+use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_arch_api::{CpuId, EnterUser};
+use tairix_arch_riscv64::context_hal::ContextSwitchHal;
+use tairix_arch_riscv64::fdt::Fdt;
+use tairix_arch_riscv64::paging::{self, activate_user_root};
+use tairix_arch_riscv64::userentry::UserMode;
+use tairix_arch_riscv64::{
     handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, RiscvArchStorage,
     SERIAL_SINK,
 };
-use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-use rustos_kernel_core::{
+use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
 };
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
-use rustos_log::{log, Event, EventId, Level};
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
+use tairix_log::{log, Event, EventId, Level};
 
 // `PROGRAM_RXE: &[u8]`, `USER_BIAS: u64`, and `YIELDS_PER_TASK: u64`, generated
 // by `build.rs`.
@@ -41,7 +41,7 @@ const BOOT_CPU: CpuId = 0;
 /// [`USER_BIAS`] (64 GiB) sits far above, on freshly walked Sv39 tables.
 const IDENTITY_GIGABYTES: usize = 4;
 
-/// User stack base (1 MiB into the high user region) and size. `rustos-rt`
+/// User stack base (1 MiB into the high user region) and size. `tairix-rt`
 /// carves scratch space off the stack, so it must comfortably exceed it.
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
 /// User stack pages (1.125 MiB > the runtime's scratch span plus call frames).

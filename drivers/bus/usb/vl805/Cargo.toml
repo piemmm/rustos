@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-bus-usb-vl805"
-description = "RustOS autoloaded user-space Raspberry Pi 4 (BCM2711) VL805 USB bus driver: binds the discovered VL805 PCI node, reloads the controller firmware over the VideoCore mailbox IPC, and publishes the controller as a bindable xHCI node forwarding the BAR + DMA grants (AGENTS.md §4 / §18; plans/PI.md P10 D5c)."
+name = "tairix-drv-bus-usb-vl805"
+description = "TAIRiX autoloaded user-space Raspberry Pi 4 (BCM2711) VL805 USB bus driver: binds the discovered VL805 PCI node, reloads the controller firmware over the VideoCore mailbox IPC, and publishes the controller as a bindable xHCI node forwarding the BAR + DMA grants (AGENTS.md §4 / §18; plans/PI.md P10 D5c)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,7 +20,7 @@ workspace = true
 # The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
 # `/System/Drivers/` and autoloaded into user space by `devmgr` when the VL805
 # PCI node is discovered (`AGENTS.md` §18). It links the userland runtime
-# `rustos-rt`, so those bin-only deps are pulled in **only** for the bare-metal
+# `tairix-rt`, so those bin-only deps are pulled in **only** for the bare-metal
 # targets the binary is built for; on the host the binary is an inert stub and
 # only the `lib` target (and its host tests) compiles (`AGENTS.md` §2.2).
 
@@ -31,17 +31,17 @@ workspace = true
 # firmware policy runs over, the `HwNode` / `HwResource` / `HwMatchKey`
 # vocabulary the controller node is published with, and the `CapabilityId` /
 # `DriverError` types it fails closed with — one ABI definition (§2.2).
-rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # The BCM2711 VideoCore property-channel client (`AGENTS.md` §2.20 device
 # carve-out): the VL805 firmware-reload (`NOTIFY_XHCI_RESET`) and
 # firmware-revision property-message layout live there once; this crate
 # encodes/decodes those messages and runs them over the board-neutral
 # `lib/abi` `MailboxChannel` seam, never re-deriving the layout (§2.2).
-rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0" }
+tairix-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0" }
 # The bus-agnostic xHCI controller crate: the single definition of the
 # controller's `compatible` identity (`XHCI_COMPATIBLE`) the published node
 # carries, shared with the controller driver that binds the node (§2.2).
-rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
+tairix-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 
 [dev-dependencies]
 # Protocol-faithful mock firmware (`mock-firmware` feature) backing the
@@ -49,7 +49,7 @@ rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 # real property semantics rather than a hand-faked response (§2.1 / §2.2).
 # QEMU models no VideoCore, so the live doorbell is the on-metal acceptance
 # item (`plans/PI.md` Increment C).
-rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0", features = [
+tairix-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0", features = [
     "mock-firmware",
 ] }
 
@@ -58,11 +58,11 @@ rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0", fea
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over (§5.2).
-rustos-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
+tairix-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` (`resource_grants` / `ipc_call` for the mailbox /
 # `hw_emit_node` over the syscall surface, §5.4).
-rustos-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
+tairix-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
 # The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
 # canary §19.2, the panic handler, the syscall wrappers, and `yield_now`.
-rustos-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }

@@ -1,17 +1,17 @@
-//! `rustos-mkimage` — author flashable RustOS platform images.
+//! `tairix-mkimage` — author flashable TAIRiX platform images.
 //!
 //! ```text
-//! rustos-mkimage rpi \
-//!     --kernel <rustos-kernel ELF> \
+//! tairix-mkimage rpi \
+//!     --kernel <tairix-kernel ELF> \
 //!     --firmware <dir with the pinned blobs> \
 //!     [--manifest <firmware.lock>] \
 //!     [--profile debug|installer] \
-//!     [--out images/rustos-aarch64-rpi-<profile>.img] \
+//!     [--out images/tairix-aarch64-rpi-<profile>.img] \
 //!     [--root-key-out <key file>]
 //! ```
 //!
 //! The root volume is encrypted under a key **derived** from the
-//! profile's passphrase (`rustos_mkimage::passphrase_for`) — `root` for the debug image, blank for the installer; the
+//! profile's passphrase (`tairix_mkimage::passphrase_for`) — `root` for the debug image, blank for the installer; the
 //! unlock descriptor travels on the boot partition. `--root-key-out`
 //! names where the derived key is written for host-side mounting (default
 //! `<out>.rootkey`).
@@ -26,15 +26,15 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use rustos_mkimage::firmware::FirmwareManifest;
-use rustos_mkimage::{build_rpi_image, volume_key_to_hex, HostEntropy, ImageProfile};
+use tairix_mkimage::firmware::FirmwareManifest;
+use tairix_mkimage::{build_rpi_image, volume_key_to_hex, HostEntropy, ImageProfile};
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = env::args_os().skip(1).collect();
     match run(&argv) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("rustos-mkimage: {msg}");
+            eprintln!("tairix-mkimage: {msg}");
             ExitCode::FAILURE
         }
     }
@@ -172,14 +172,14 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
         }),
         profile,
         out: out.unwrap_or_else(|| {
-            PathBuf::from(format!("images/rustos-aarch64-rpi-{}.img", profile.label()))
+            PathBuf::from(format!("images/tairix-aarch64-rpi-{}.img", profile.label()))
         }),
         root_key_out,
     })
 }
 
 fn usage() -> String {
-    "usage: rustos-mkimage rpi --kernel <elf> --firmware <dir> \
+    "usage: tairix-mkimage rpi --kernel <elf> --firmware <dir> \
      [--manifest <firmware.lock>] [--profile debug|installer] [--out <img>] \
      [--root-key-out <file>]"
         .into()

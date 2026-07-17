@@ -8,7 +8,7 @@
 //! ## Inventory (Stage 1)
 //!
 //! * [`BitSet256`] — fixed-size bitmap over identifiers in `0..=255`.
-//!   Used by `rustos-caps` to represent a process's `CapabilityId`
+//!   Used by `tairix-caps` to represent a process's `CapabilityId`
 //!   membership, and reserved (and documented) for the kernel scheduler's
 //!   per-CPU ready bitmap landing in Stage 2.
 

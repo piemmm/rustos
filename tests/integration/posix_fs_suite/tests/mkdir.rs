@@ -5,7 +5,7 @@
 //! [`Vfs::mkdir_via_secured`], the per-inode-security delegation path the
 //! kernel uses for a native filesystem.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn mkdir_creates_a_directory() {

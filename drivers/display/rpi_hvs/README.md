@@ -1,9 +1,9 @@
-# `rustos-drv-display-rpi-hvs` — Raspberry Pi HVS display driver
+# `tairix-drv-display-rpi-hvs` — Raspberry Pi HVS display driver
 
 Stage 7 deliverable. The first **GPU-accelerated** display driver: it
 exposes the Raspberry Pi VideoCore Hardware Video Scaler (HVS) as a
 hardware **layer compositor** through the
-`rustos_abi::driver::display::AcceleratedDisplay` seam, so the desktop
+`tairix_abi::driver::display::AcceleratedDisplay` seam, so the desktop
 compositor (`userland/gui/wm`) can hand it the visible windows as
 layers and let the HVS composite and scan them out — the host never
 blends the whole screen in software.
@@ -114,7 +114,7 @@ reclaims the mappings). Reloading is calling `RpiHvs::open` again.
 
 ## Test surface
 
-`cargo test -p rustos-drv-display-rpi-hvs` exercises, against an
+`cargo test -p tairix-drv-display-rpi-hvs` exercises, against an
 in-process multi-region mock `MmioMapper`:
 
 - `register` capability gate.

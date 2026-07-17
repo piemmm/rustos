@@ -8,12 +8,12 @@
 //! **child** and a **parent** hardware-isolated Sv39 U-mode address space from
 //! the `rxe` fixture program (`tests/integration/wait_program`, built PIE in
 //! both roles) through the production capability-checked, audited
-//! `rustos_kernel_core::spawn_image` caller, admitting each as a resumable user
-//! kthread via `rustos_kernel_core::spawn_user_kthread`. It records the
-//! parent/child link with a `rustos_kernel_core::KernelProcessWait` producer and
+//! `tairix_kernel_core::spawn_image` caller, admitting each as a resumable user
+//! kthread via `tairix_kernel_core::spawn_user_kthread`. It records the
+//! parent/child link with a `tairix_kernel_core::KernelProcessWait` producer and
 //! drives the cooperative `Scheduler::step` loop. The dispatch callback routes
 //! the child's `exit` and the parent's `wait`/`exit` `ecall`s through the
-//! producer + `rustos_kernel_core::reschedule_current`: the producer parks the
+//! producer + `tairix_kernel_core::reschedule_current`: the producer parks the
 //! parent until the child is reapable (the RV1 mid-handler-park-safe path),
 //! then the kernel copies the reaped exit code out to the parent's `status`
 //! pointer.
@@ -29,7 +29,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-wait-qemu-riscv64: the `test-hooks` Cargo feature is a \
+    "tairix-test-wait-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

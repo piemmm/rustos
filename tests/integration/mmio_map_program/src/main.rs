@@ -4,11 +4,11 @@
 //!
 //! The consuming vertical (`tests/integration/mmio_map_qemu_aarch64`) builds
 //! this program into a hardware-isolated EL0 address space, **retains that
-//! space live** (the production `rustos_kernel_core::spawn_user_kthread_with_stack_live`
+//! space live** (the production `tairix_kernel_core::spawn_user_kthread_with_stack_live`
 //! path), mints the calling task a device-resource grant for a real `virt`
 //! virtio-MMIO transport window, and routes the program's `mmio_map` syscall
 //! through the production owner-checked resolution + the retained-space
-//! `rustos_kernel_mem::LiveSpace::map_device_window` mechanism. The program:
+//! `tairix_kernel_mem::LiveSpace::map_device_window` mechanism. The program:
 //!
 //! 1. `mmio_map`s its granted device window by handle, proving the kernel
 //!    resolved the grant for *this* task and mapped a real, caching-disabled
@@ -18,11 +18,11 @@
 //!    offset 0) through that base and checks it equals the expected magic —
 //!    proving the window points at genuine device MMIO, not blank memory.
 //! 3. Returns `0` (PASS) on a match, or a distinct non-zero code on any
-//!    failure, which `rustos-rt` routes through `exit`; the vertical reports
+//!    failure, which `tairix-rt` routes through `exit`; the vertical reports
 //!    exit code `0` as PASS and any other as a failure.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt`, never the C ABI (`crt0` + `abi-sys`), which exists
+//! runtime `tairix-rt`, never the C ABI (`crt0` + `abi-sys`), which exists
 //! solely for non-Rust programs. It is built
 //! position-independent and converted to an `rxe` blob by the consuming test's
 //! build script. On the host it is an inert stub so
@@ -36,26 +36,26 @@
 #[cfg(freestanding)]
 mod program {
     /// Default grant handle when the consuming build did not pin one through
-    /// `RUSTOS_MMIO_GRANT_HANDLE`. The first device-resource grant a task is
+    /// `TAIRIX_MMIO_GRANT_HANDLE`. The first device-resource grant a task is
     /// minted is handle `1` (the registry issues per-task handles monotonic
     /// from `1`, with `0` reserved-invalid), and the vertical mints exactly
     /// one grant for this task, so `1` names this program's only window.
     const DEFAULT_GRANT_HANDLE: u64 = 1;
 
     /// Default expected first-register value when the consuming build did not
-    /// pin one through `RUSTOS_MMIO_MAGIC`: the virtio-MMIO `MagicValue`
+    /// pin one through `TAIRIX_MMIO_MAGIC`: the virtio-MMIO `MagicValue`
     /// register ("virt", little-endian), which a QEMU `virt` virtio-MMIO
     /// transport reports at offset 0 unconditionally.
     const DEFAULT_MAGIC: u32 = 0x7472_6976;
 
     /// Default offset of the register read back, when the consuming build did
-    /// not pin one through `RUSTOS_MMIO_REG_OFFSET` (the virtio-MMIO
+    /// not pin one through `TAIRIX_MMIO_REG_OFFSET` (the virtio-MMIO
     /// `MagicValue` is at offset 0).
     const DEFAULT_REG_OFFSET: u64 = 0;
 
     /// The grant handle this program maps (pinned by the consuming build, the
     /// single source of truth, else the default).
-    const GRANT_HANDLE: u64 = match option_env!("RUSTOS_MMIO_GRANT_HANDLE") {
+    const GRANT_HANDLE: u64 = match option_env!("TAIRIX_MMIO_GRANT_HANDLE") {
         Some(s) => parse_u64(s.as_bytes(), DEFAULT_GRANT_HANDLE),
         None => DEFAULT_GRANT_HANDLE,
     };
@@ -63,14 +63,14 @@ mod program {
     /// The expected first-register value (pinned by the consuming build, else
     /// the default).
     #[allow(clippy::cast_possible_truncation)]
-    const MAGIC: u32 = match option_env!("RUSTOS_MMIO_MAGIC") {
+    const MAGIC: u32 = match option_env!("TAIRIX_MMIO_MAGIC") {
         Some(s) => parse_u64(s.as_bytes(), DEFAULT_MAGIC as u64) as u32,
         None => DEFAULT_MAGIC,
     };
 
     /// The offset of the register read back (pinned by the consuming build,
     /// else the default).
-    const REG_OFFSET: u64 = match option_env!("RUSTOS_MMIO_REG_OFFSET") {
+    const REG_OFFSET: u64 = match option_env!("TAIRIX_MMIO_REG_OFFSET") {
         Some(s) => parse_u64(s.as_bytes(), DEFAULT_REG_OFFSET),
         None => DEFAULT_REG_OFFSET,
     };
@@ -143,7 +143,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall — so a
     /// `0` return is observed by the kernel as `exit(0)` (PASS) and any other
     /// as a failure code.
@@ -155,7 +155,7 @@ mod program {
         //    the base VA of that sub-region. A negative result is the
         //    `-errno` the kernel returned (a refused or unresolved grant, or
         //    a sub-region escaping it).
-        let base = rustos_rt::mmio_map(GRANT_HANDLE, 0, (REG_OFFSET + 4) as usize);
+        let base = tairix_rt::mmio_map(GRANT_HANDLE, 0, (REG_OFFSET + 4) as usize);
         if base < 0 {
             return FAIL_MAP;
         }
@@ -181,7 +181,7 @@ mod program {
         //    (`plans/PI.md` 5d-0-ii (c)): ask the kernel to choose a base for
         //    two anonymous pages, prove they are genuine writable RAM by
         //    round-tripping a sentinel, then release them.
-        let placed = rustos_rt::mem_map(MEM_MAP_LEN, rustos_abi::MapFlags::empty(), 0);
+        let placed = tairix_rt::mem_map(MEM_MAP_LEN, tairix_abi::MapFlags::empty(), 0);
         if placed < 0 {
             return FAIL_MEM_MAP;
         }
@@ -199,7 +199,7 @@ mod program {
         if read_back != MEM_SENTINEL {
             return FAIL_MEM_RW;
         }
-        if rustos_rt::mem_unmap(placed as u64, MEM_MAP_LEN) < 0 {
+        if tairix_rt::mem_unmap(placed as u64, MEM_MAP_LEN) < 0 {
             return FAIL_MEM_UNMAP;
         }
 
@@ -210,7 +210,7 @@ mod program {
         //    device-visible base (unused here — the device-address copy-out is
         //    host-proven; this vertical proves the carve mechanism on metal).
         let mut device: u64 = 0;
-        let dma = rustos_rt::dma_alloc(DMA_GRANT_HANDLE, DMA_ALLOC_LEN, &mut device);
+        let dma = tairix_rt::dma_alloc(DMA_GRANT_HANDLE, DMA_ALLOC_LEN, &mut device);
         if dma < 0 {
             return FAIL_DMA_ALLOC;
         }
@@ -236,13 +236,13 @@ mod program {
         0
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the crate
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

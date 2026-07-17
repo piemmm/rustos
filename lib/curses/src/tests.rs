@@ -12,8 +12,8 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_termcap::TermType;
-use rustos_vt::{
+use tairix_termcap::TermType;
+use tairix_vt::{
     encode_all_into, encode_into, Attributes, BasicColor, Cell, Color, MouseButton, Op, Parser,
 };
 
@@ -40,7 +40,7 @@ use crate::render::{render, CursorState};
 use crate::screen::{InputMode, Screen, Tty};
 use crate::window::{BorderChars, Window};
 use core::time::Duration;
-use rustos_vt::CONTINUATION;
+use tairix_vt::CONTINUATION;
 
 /// Decode every event from one byte slice.
 fn decode(bytes: &[u8]) -> Vec<Event> {
@@ -245,7 +245,7 @@ fn render_emits_only_the_changed_cells() {
         ops,
         vec![
             Op::CursorPosition { row: 1, col: 1 },
-            Op::Sgr(rustos_vt::Sgr::Reset),
+            Op::Sgr(tairix_vt::Sgr::Reset),
             Op::Print('H'),
             Op::Print('i'),
             Op::CursorPosition { row: 1, col: 3 },
@@ -284,11 +284,11 @@ fn render_degrades_color_for_the_terminals_depth() {
     // as a raw `Rgb` the 16-colour terminal could not honour.
     assert!(ops.iter().any(|op| matches!(
         op,
-        Op::Sgr(rustos_vt::Sgr::Foreground(Color::Basic(BasicColor::Red)))
+        Op::Sgr(tairix_vt::Sgr::Foreground(Color::Basic(BasicColor::Red)))
     )));
     assert!(!ops
         .iter()
-        .any(|op| matches!(op, Op::Sgr(rustos_vt::Sgr::Foreground(Color::Rgb(_, _, _))))));
+        .any(|op| matches!(op, Op::Sgr(tairix_vt::Sgr::Foreground(Color::Rgb(_, _, _))))));
 }
 
 #[test]
@@ -363,7 +363,7 @@ fn ordinary_text_and_control_keys_decode() {
 
 #[test]
 fn del_decodes_as_the_backspace_key() {
-    // Regression: xterm-class terminals (and the RustOS keymap) send DEL
+    // Regression: xterm-class terminals (and the TAIRiX keymap) send DEL
     // for the Backspace key; the screen-op parser ignores DEL on output,
     // so the input decoder must map the byte itself.
     assert_eq!(
@@ -407,7 +407,7 @@ fn a_bare_escape_ending_a_read_is_the_escape_key() {
 
 #[test]
 fn alt_chorded_characters_decode() {
-    // Alt-F as the RustOS keymap (and xterm) send it: `ESC` then the
+    // Alt-F as the TAIRiX keymap (and xterm) send it: `ESC` then the
     // character — the accelerator the editor's menu bar opens on.
     assert_eq!(decode(b"\x1bf"), vec![Event::Alt('f')]);
     assert_eq!(decode(b"\x1bF"), vec![Event::Alt('F')]);
@@ -626,7 +626,7 @@ fn colored_attributes_serve_a_colour_terminal_and_refuse_a_monochrome_one() {
 fn enabling_mouse_is_a_no_op_on_a_terminal_without_mouse_support() {
     // `vt100` has no mouse reporting, so enabling it writes nothing.
     let mut screen = Screen::new(FakeTty::with_input(b""), TermType::Vt100, Size::new(2, 2));
-    assert_eq!(screen.enable_mouse(rustos_vt::MouseMode::Button), Ok(()));
+    assert_eq!(screen.enable_mouse(tairix_vt::MouseMode::Button), Ok(()));
 }
 
 #[test]
@@ -647,7 +647,7 @@ fn full_screen_uses_the_alternate_screen_and_erases_it_explicitly() {
     let want = encode_all(&[
         Op::EnterAltScreen,
         Op::CursorPosition { row: 1, col: 1 },
-        Op::EraseInDisplay(rustos_vt::EraseMode::All),
+        Op::EraseInDisplay(tairix_vt::EraseMode::All),
         Op::LeaveAltScreen,
     ]);
     assert_eq!(output, want);
@@ -664,7 +664,7 @@ fn full_screen_erases_the_display_in_place_without_an_alternate_screen() {
     let output = screen.into_tty().output;
     let want = encode_all(&[
         Op::CursorPosition { row: 1, col: 1 },
-        Op::EraseInDisplay(rustos_vt::EraseMode::All),
+        Op::EraseInDisplay(tairix_vt::EraseMode::All),
     ]);
     assert_eq!(output, want);
 }

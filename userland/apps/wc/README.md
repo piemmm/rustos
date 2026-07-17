@@ -1,4 +1,4 @@
-# `rustos-wc` — print newline, word, and byte counts for each file
+# `tairix-wc` — print newline, word, and byte counts for each file
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/wc.app/` so the shell resolves the bare word
@@ -23,7 +23,7 @@ Counting streams in constant memory with an incremental UTF-8 decoder:
 `-m` counts decoded characters (an encoding-error byte counts as a byte,
 not a character), words are maximal runs of non-whitespace, and `-L`
 measures display columns through the one OS-wide width definition
-(`rustos_vt::char_width` — the same table the OS terminal lays cells out
+(`tairix_vt::char_width` — the same table the OS terminal lays cells out
 with), with tabs advancing to 8-column stops. An input that cannot be
 read is diagnosed on standard error and the run continues; a row whose
 read failed mid-stream still prints its partial counts, exactly as in
@@ -31,8 +31,8 @@ the GNU tool.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-audited `rustos-abi` vocabulary, the shared `rustos-help` engine, and
-`rustos-vt`, so it never links a kernel or driver crate. Its manifest
+audited `tairix-abi` vocabulary, the shared `tairix-help` engine, and
+`tairix-vt`, so it never links a kernel or driver crate. Its manifest
 (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS
 still authorises every path per-inode under the caller's attested

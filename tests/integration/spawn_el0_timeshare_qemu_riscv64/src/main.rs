@@ -8,13 +8,13 @@
 //! hardware-isolated U-mode address spaces — each its own Sv39 page-table
 //! hierarchy (two `PageTablePool`s + a shared frame pool) —
 //! from the `rxe` fixture program through the production capability-checked,
-//! audited `rustos_kernel_core::spawn_image` caller, admitting each as a
-//! resumable user kthread via `rustos_kernel_core::spawn_user_kthread`. Each
+//! audited `tairix_kernel_core::spawn_image` caller, admitting each as a
+//! resumable user kthread via `tairix_kernel_core::spawn_user_kthread`. Each
 //! task's `pre_resume` hook reactivates *its own* `satp` root
 //! (`paging::activate_user_root`, the RV-X1 primitive) immediately before every
 //! switch-in. The cooperative `Scheduler::step` loop drives both; the dispatch
 //! callback maps each `yield`/`exit` `ecall` to
-//! `rustos_kernel_core::reschedule_current`, so the two tasks ping-pong with the
+//! `tairix_kernel_core::reschedule_current`, so the two tasks ping-pong with the
 //! dispatcher through real U-mode↔kernel context switches that park and resume
 //! mid-handler, each on its own kernel stack (the RV1 park-safe path).
 //!
@@ -29,7 +29,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-spawn-el0-timeshare-qemu-riscv64: the `test-hooks` Cargo feature is a \
+    "tairix-test-spawn-el0-timeshare-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

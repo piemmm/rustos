@@ -1,11 +1,11 @@
 //! The `Run` entry-point binary of the `rmdir` tool — the program a shell
 //! spawns to remove empty directories.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, parses it, and removes the
@@ -30,17 +30,17 @@ mod program {
 
     use alloc::format;
 
-    use rustos_abi::{Errno, UnlinkFlags};
-    use rustos_help::BundleHelp;
-    use rustos_rmdir::{parse, run, Filesystem, Output, USAGE};
-    use rustos_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_abi::{Errno, UnlinkFlags};
+    use tairix_help::BundleHelp;
+    use tairix_rmdir::{parse, run, Filesystem, Output, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stdout, Write};
 
     /// The production [`Filesystem`] over the directory-only `fs_unlink`.
     struct RtFilesystem;
 
     impl Filesystem for RtFilesystem {
         fn rmdir(&self, path: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_unlink(path.as_bytes(), UnlinkFlags::DIRECTORY);
+            let ret = tairix_rt::fs_unlink(path.as_bytes(), UnlinkFlags::DIRECTORY);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -66,7 +66,7 @@ mod program {
         write_stderr_line(USAGE);
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a filesystem or output failure,
@@ -75,7 +75,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             report_usage();
             return 2;
         };
@@ -86,7 +86,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(
@@ -104,13 +104,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

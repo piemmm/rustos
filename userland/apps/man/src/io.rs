@@ -11,13 +11,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Read-only access to installed application bundles and their `Help/`
 /// trees.
 ///
 /// `bundle_dir` values are the candidate spellings the shared
-/// `rustos_cmdres::bundle_candidates` policy computed; `locale_dir` and
+/// `tairix_cmdres::bundle_candidates` policy computed; `locale_dir` and
 /// `file_name` values are spellings the `lib/help` engine validated, so an
 /// implementation may join them onto the bundle path without re-parsing —
 /// a hostile name can never traverse outside a bundle's `Help/` tree.

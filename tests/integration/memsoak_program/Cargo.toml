@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-memsoak"
+name = "tairix-test-memsoak"
 description = "plans/APPS.md I2/I3 memory-stability fixture: the `memsoak` command app the aarch64 memory-stability QEMU vertical plants on its disk and runs from the scripted root shell. It samples KernelMemoryStats.free_bytes through the System Information API (sysinfod), drives repeated spawn/wait cycles plus the top-refresh-shaped work (timed stream_read, self process-list walk, memory query), and reports MEMSOAK PASS/FAIL; on failure it parks forever so the run fails loudly by timeout. Never planted on a production image."
 version.workspace = true
 edition.workspace = true
@@ -11,44 +11,44 @@ publish = false
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
 # optional, on-by-default build feature, mirroring the store command apps
-# (`rustos-true`, `rustos-top`). `cargo build -p rustos-test-memsoak` builds
+# (`tairix-true`, `tairix-top`). `cargo build -p tairix-test-memsoak` builds
 # the fixture program with it; host tooling builds only the pure verdict
 # *library*, so the host test build never pulls the userland runtime's
 # `_start` / `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-test-memsoak` verdict library (the pure
+# The package is both the `tairix-test-memsoak` verdict library (the pure
 # baseline/final comparison and report rendering below) and the `Run`
 # entry-point binary of the `memsoak` fixture. The binary is a freestanding
 # pure-Rust program on the native Tier-1 targets and an inert host stub
 # elsewhere (see `src/run.rs`).
 [[bin]]
-name = "rustos-test-memsoak-run"
+name = "tairix-test-memsoak-run"
 path = "src/run.rs"
 
 [dependencies]
 # The frozen `Errno` plus the `sysinfo-v1` `KernelMemoryStats` the fixture
 # samples; it invents no parallel error set and never links a kernel or
 # driver crate.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the request/response
 # seams, the capability-aware call mapping, and the process-list paging walk
 # shared with `sysinfo`/`ps`/`top`. The fixture consumes these rather than
 # duplicating them.
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, syscall/`ipc_call`
 # wrappers) and the production `sysinfo` transport seam in `lib/procinfo`
-# (`IpcTransport`), enabled through `rustos-procinfo`'s own `program`
+# (`IpcTransport`), enabled through `tairix-procinfo`'s own `program`
 # feature. Both are pulled in only for the bare-metal targets the program is
 # actually built for; on the host neither is linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }

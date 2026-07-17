@@ -18,7 +18,7 @@
 //! release ends through that one `Drop` path, so no count is ever leaked or
 //! double-decremented. When the last write end drops, a blocked reader wakes
 //! to end-of-stream; when the last read end drops, a blocked writer wakes to
-//! [`rustos_abi::Errno::BrokenPipe`].
+//! [`tairix_abi::Errno::BrokenPipe`].
 //!
 //! # Capacity
 //!
@@ -31,7 +31,7 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
-use rustos_sync::SpinLock;
+use tairix_sync::SpinLock;
 
 /// Byte capacity of one pipe's ring (64 KiB, the POSIX-conventional size).
 ///

@@ -130,7 +130,7 @@ fn passes_arch_hal_conformance_suite() {
     let discovery = crate::platform::HostCapabilityDiscovery::new(
         crate::platform::HostCapabilities::new(4, true),
     );
-    rustos_arch_api::conformance::run_all(
+    tairix_arch_api::conformance::run_all(
         &arch,
         &crate::sidechannel::SideChannel::new(),
         &crate::memtag::MemoryTags::new(),
@@ -148,9 +148,9 @@ fn passes_arch_hal_conformance_suite() {
 #[test]
 fn passes_secondary_bringup_conformance() {
     let arch = WasmArch::with_workers(0, &[0, 1]);
-    rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+    tairix_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
     let erased: &dyn SecondaryBringup = &arch;
-    rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+    tairix_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
 }
 
 /// The boot context and any unmapped dense id are refused before asking

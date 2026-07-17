@@ -1,6 +1,6 @@
 [package]
-name = "rustos-display"
-description = "RustOS display-service protocol engine: the one definition of the zero-copy, lease-gated frame-presentation semantics — the server engine a display driver's Run binary hosts and the RemoteDisplay client a desktop session presents through (plans/DISPLAY.md D7b)."
+name = "tairix-display"
+description = "TAIRiX display-service protocol engine: the one definition of the zero-copy, lease-gated frame-presentation semantics — the server engine a display driver's Run binary hosts and the RemoteDisplay client a desktop session presents through (plans/DISPLAY.md D7b)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,14 +9,14 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../abi", version = "=0.0.0" }
-rustos-rt = { path = "../rt", version = "=0.0.0", optional = true }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 
 [features]
 # The production, syscall-backed `ShmMapper` (`rt` module): pulled in only
-# by consumers that run on the RustOS runtime (the framebuffer display
+# by consumers that run on the TAIRiX runtime (the framebuffer display
 # service, the desktop session's window server).
-rt = ["dep:rustos-rt"]
+rt = ["dep:tairix-rt"]
 
 [lints]
 workspace = true

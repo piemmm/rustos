@@ -6,7 +6,7 @@
 //! of the other userland crates (`init`'s `Spawner`/`Reaper`, `login`'s
 //! `Prompt`, `sysinfo`'s `Transport`).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Reads a byte range of a named file.
 ///

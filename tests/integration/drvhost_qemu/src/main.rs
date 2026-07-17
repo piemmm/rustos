@@ -1,6 +1,6 @@
-//! Stage 4 QEMU integration test: boot the production `rustos-kernel`
+//! Stage 4 QEMU integration test: boot the production `tairix-kernel`
 //! pipeline to `AuditEvent::BootCompleted`, instantiate
-//! `rustos_drvhost::Host`, drive a baked-in signed mock `.rxe`
+//! `tairix_drvhost::Host`, drive a baked-in signed mock `.rxe`
 //! image through `load → snapshot → unload → reload`, and signal QEMU
 //! success.
 //!
@@ -33,18 +33,18 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use alloc::vec::Vec;
-    use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, Errno};
-    use rustos_arch_x86_64::qemu_exit;
-    use rustos_caps::CapabilitySet;
-    use rustos_crypto::Ed25519PublicKey;
-    use rustos_drvhost::{
+    use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, Errno};
+    use tairix_arch_x86_64::qemu_exit;
+    use tairix_caps::CapabilitySet;
+    use tairix_crypto::Ed25519PublicKey;
+    use tairix_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     use crate::fixture::{MOCK_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -115,7 +115,7 @@ mod kernel {
         let cfg = HostConfig {
             trusted_signers: &trusted,
             syscall_table_hash: SYSCALL_TABLE_HASH,
-            accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
             source: &source,
             spawner: &spawner,
             sink: &SerialSink::new(),
@@ -172,13 +172,13 @@ mod kernel {
 
     static AUDIT_SINK: BootObserverSink = BootObserverSink;
 
-    /// Panic handler — forwards through `rustos_kernel`'s shared bridge.
+    /// Panic handler — forwards through `tairix_kernel`'s shared bridge.
     #[panic_handler]
     fn drvhost_qemu_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
-    /// Boot entry point — same surface the production `rustos-kernel`
+    /// Boot entry point — same surface the production `tairix-kernel`
     /// bin exposes, but with our audit sink in place.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
@@ -186,7 +186,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }

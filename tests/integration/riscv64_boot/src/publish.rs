@@ -25,8 +25,8 @@
 //! `BootMemoryMap` requires naming `kernel/mem`, which the arch port no
 //! longer does.
 
-use rustos_kernel_mem::BootMemoryMap;
-use rustos_sync::once::OnceCell;
+use tairix_kernel_mem::BootMemoryMap;
+use tairix_sync::once::OnceCell;
 
 /// Set-once slot for a clone of the firmware [`BootMemoryMap`] the boot
 /// pipeline assembled.

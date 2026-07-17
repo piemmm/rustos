@@ -1,4 +1,4 @@
-//! RustOS USB HID boot-mouse **class driver** — shared library.
+//! TAIRiX USB HID boot-mouse **class driver** — shared library.
 //!
 //! This crate is a `lib` (the loadable-module identity: the [`BIND_KEYS`] bind
 //! table `devmgr` matches a discovered HID boot-mouse interface node against,
@@ -14,7 +14,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{DriverBindKey, HwMatchKey};
 
 /// The 24-bit USB class code of an HID **boot mouse** interface: class
 /// `0x03` (HID), sub-class `0x01` (boot), protocol `0x02` (mouse).

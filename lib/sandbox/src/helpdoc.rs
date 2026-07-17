@@ -3,7 +3,7 @@
 //! A help document read from a *foreign* bundle's `Help/` tree is untrusted
 //! input, so its parse must not run in the calling program's process. This
 //! module is the parser-sandbox service for it: the worker side parses the
-//! raw bytes with `rustos_help::HelpDoc::parse` and renders the page
+//! raw bytes with `tairix_help::HelpDoc::parse` and renders the page
 //! (`render_short` / `render_full`), replying with the vt-encoded render;
 //! the parent side ([`render_help`]) refuses to believe the reply blindly —
 //! it re-parses the returned bytes through the `lib/vt` streaming parser
@@ -13,20 +13,20 @@
 //! contained and replaced by the [`crate::host::ParserSandbox`] seam.
 //!
 //! `man` is the consumer: it locates and reads the document with its own
-//! file authority (`rustos_help::load_raw`), hands the bytes here, and
+//! file authority (`tairix_help::load_raw`), hands the bytes here, and
 //! writes the validated render to standard output.
 
 use alloc::vec::Vec;
 
-use rustos_help::{render_full, render_short, HelpDoc, HelpError, SectionKind, MAX_DOC_LEN};
-use rustos_vt::{encode_all_into, Op, Parser, Sgr};
+use tairix_help::{render_full, render_short, HelpDoc, HelpError, SectionKind, MAX_DOC_LEN};
+use tairix_vt::{encode_all_into, Op, Parser, Sgr};
 
 use crate::host::{Launcher, ParserSandbox, SandboxError};
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
 
 /// The reply cap for a rendered page. Every render of a document within
-/// the `rustos_help` document bounds encodes far smaller than this; a
+/// the `tairix_help` document bounds encodes far smaller than this; a
 /// reply that exceeds it cannot be believed.
 pub const MAX_RENDER: usize = 1 << 20;
 
@@ -72,7 +72,7 @@ impl RenderMode {
 pub enum HelpRefusal {
     /// The request payload violated the request grammar.
     MalformedRequest,
-    /// The document failed the fail-closed `rustos_help` parse; the
+    /// The document failed the fail-closed `tairix_help` parse; the
     /// carried reason is the parser's own, so the caller's diagnostic
     /// keeps full fidelity across the process boundary.
     Document(HelpError),
@@ -253,7 +253,7 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, HelpRefusal> {
 /// [`HelpRenderFailure`]: the sandbox failed, the worker refused the
 /// request (malformed request or a typed document-parse error), or the
 /// reply could not be believed.
-pub fn render_help<L: Launcher, S: rustos_log::Sink>(
+pub fn render_help<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     mode: RenderMode,
     document: &[u8],
@@ -328,7 +328,7 @@ fn validate_render(rendered: &[u8]) -> Result<Vec<u8>, HelpRenderFailure> {
     Ok(out)
 }
 
-/// The closed op whitelist of `rustos_help::render_short`/`render_full`.
+/// The closed op whitelist of `tairix_help::render_short`/`render_full`.
 fn is_render_op(op: &Op) -> bool {
     matches!(
         op,
@@ -343,14 +343,14 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use rustos_help::{render_full, render_short, HelpDoc, HelpError};
-    use rustos_vt::encode_all_into;
+    use tairix_help::{render_full, render_short, HelpDoc, HelpError};
+    use tairix_vt::encode_all_into;
 
     use super::{render_help, HelpRefusal, HelpRenderFailure, HelpService, RenderMode};
     use crate::host::ParserSandbox;
     use crate::loopback::LoopbackLauncher;
     use crate::worker::Service;
-    use rustos_log::{Event, Sink};
+    use tairix_log::{Event, Sink};
 
     /// Discards every event (the happy paths log nothing).
     struct NullSink;
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn an_oversize_document_is_refused_before_any_send() {
         let mut sandbox = sandbox();
-        let oversize = vec![b'a'; rustos_help::MAX_DOC_LEN + 1];
+        let oversize = vec![b'a'; tairix_help::MAX_DOC_LEN + 1];
         assert_eq!(
             render_help(&mut sandbox, RenderMode::Full, &oversize),
             Err(HelpRenderFailure::Refused(HelpRefusal::Document(

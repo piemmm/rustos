@@ -16,13 +16,13 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{
+use tairix_abi::{
     Errno, Signal, SignalIntakeOp, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus,
     CONSOLE_INHERIT, SPAWN_SELF, SPAWN_UID_INHERIT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
-use rustos_procinfo::{for_each_mount, IpcTransport};
-use rustos_rt::io::{write_stderr_line, Stdout, Write};
-use rustos_stress::{
+use tairix_procinfo::{for_each_mount, IpcTransport};
+use tairix_rt::io::{write_stderr_line, Stdout, Write};
+use tairix_stress::{
     completion_line, dispatch_line, refusal_line, run_scratch_paths, size_targets, summary_record,
     Action, Controller, Discovered, Event, RunSpec, WorkerKind, WorkerSpec, USAGE, WORKER_FLAG,
 };
@@ -48,7 +48,7 @@ pub fn run(spec: &RunSpec) -> i32 {
     // Pin before dispatch: the controller must never stall on its own
     // page fault-in under the very pressure it creates. Incidental — the
     // run continues unpinned on a refusal, stated once.
-    if rustos_rt::mem_pin() != 0 {
+    if tairix_rt::mem_pin() != 0 {
         write_stderr_line("stress: notice: running unpinned (mem_pin refused)");
     }
 
@@ -56,7 +56,7 @@ pub fn run(spec: &RunSpec) -> i32 {
     // (workers signalled, reaped, scratch removed) runs before exit. A
     // refused opt-in degrades to the default terminate disposition,
     // stated once — the load still runs.
-    let intake = rustos_rt::signal_intake(SignalIntakeOp::Enable) == 0;
+    let intake = tairix_rt::signal_intake(SignalIntakeOp::Enable) == 0;
     if !intake {
         write_stderr_line("stress: notice: signal observation unavailable; ^C will not tear down");
     }
@@ -77,17 +77,17 @@ pub fn run(spec: &RunSpec) -> i32 {
 
     // Size the byte targets from what the machine actually has.
     let discovered = Discovered {
-        ram_bytes: rustos_rt::boot_facts().ok().map(|facts| facts.memory_bytes),
+        ram_bytes: tairix_rt::boot_facts().ok().map(|facts| facts.memory_bytes),
         scratch_free_bytes: scratch_free_bytes(&scratch),
     };
     let targets = size_targets(spec, &discovered);
 
-    let own_pid = rustos_rt::self_origin().map_or(0, |origin| origin.pid());
+    let own_pid = tairix_rt::self_origin().map_or(0, |origin| origin.pid());
     if !spec.quiet {
         let _ = Stdout.write_all(dispatch_line(own_pid, &spec.workers).as_bytes());
     }
 
-    let started_ns = rustos_rt::clock_get();
+    let started_ns = tairix_rt::clock_get();
     let mut machine = Controller::new();
 
     // Dispatch the workers: each is this same binary re-entered through
@@ -133,7 +133,7 @@ pub fn run(spec: &RunSpec) -> i32 {
     // monitor implementation, never an embedded copy. A refused spawn is
     // a notice (the load is the purpose; the monitor is incidental).
     if spec.monitor {
-        let pid = rustos_rt::spawn(b"/System/Apps/sysmon.app/Run");
+        let pid = tairix_rt::spawn(b"/System/Apps/sysmon.app/Run");
         if pid >= 0 {
             #[allow(clippy::cast_possible_truncation)] // The kernel bounds PIDs to i32 range.
             let pid = pid as i32;
@@ -141,7 +141,7 @@ pub fn run(spec: &RunSpec) -> i32 {
             // Hand the console to the monitor so its keys (and the
             // console ^C) reach it; the console clears the grant when it
             // exits.
-            let _ = rustos_rt::console_foreground(0, pid);
+            let _ = tairix_rt::console_foreground(0, pid);
         } else {
             write_stderr_line("stress: notice: sysmon could not be started; running unmonitored");
         }
@@ -154,7 +154,7 @@ pub fn run(spec: &RunSpec) -> i32 {
 
     cleanup_scratch(spec, &scratch);
 
-    let elapsed_secs = rustos_rt::clock_get().saturating_sub(started_ns) / 1_000_000_000;
+    let elapsed_secs = tairix_rt::clock_get().saturating_sub(started_ns) / 1_000_000_000;
     let code = machine.exit_code();
     if !spec.quiet {
         let tally = machine.tally();
@@ -168,7 +168,7 @@ pub fn run(spec: &RunSpec) -> i32 {
     let mut buf = [0u8; 512];
     let len = summary_record(&machine.tally(), code, elapsed_secs, &mut buf);
     if len > 0 {
-        let _ = rustos_rt::stdinfo(&buf[..len]);
+        let _ = tairix_rt::stdinfo(&buf[..len]);
     }
     code
 }
@@ -181,7 +181,7 @@ fn drive(
     mut grace_deadline_ns: Option<u64>,
     started_ns: u64,
 ) {
-    let set = rustos_rt::waitset_create();
+    let set = tairix_rt::waitset_create();
     let set = if set >= 0 {
         #[allow(clippy::cast_sign_loss)] // A non-negative create result is the handle.
         Some(set as u64)
@@ -189,7 +189,7 @@ fn drive(
         None
     };
     if let Some(set) = set {
-        let _ = rustos_rt::waitset_ctl(
+        let _ = tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Child,
@@ -197,7 +197,7 @@ fn drive(
             TOKEN_CHILD,
         );
         if intake {
-            let _ = rustos_rt::waitset_ctl(
+            let _ = tairix_rt::waitset_ctl(
                 set,
                 WaitSetOp::Add,
                 WaitSourceKind::Signal,
@@ -213,7 +213,7 @@ fn drive(
         // its actions.
         loop {
             let mut status = WaitStatus::Exited(0);
-            let ret = rustos_rt::try_wait(WAIT_PID_ANY, &mut status);
+            let ret = tairix_rt::try_wait(WAIT_PID_ANY, &mut status);
             if ret < 0 {
                 break;
             }
@@ -228,7 +228,7 @@ fn drive(
         }
         if intake {
             loop {
-                let ret = rustos_rt::signal_intake(SignalIntakeOp::Take);
+                let ret = tairix_rt::signal_intake(SignalIntakeOp::Take);
                 if ret < 0 {
                     break;
                 }
@@ -241,7 +241,7 @@ fn drive(
                 execute(&actions, started_ns, &mut grace_deadline_ns);
             }
         }
-        let now = rustos_rt::clock_get();
+        let now = tairix_rt::clock_get();
         if let Some(deadline) = deadline_ns {
             if now >= deadline {
                 deadline_ns = None;
@@ -263,16 +263,16 @@ fn drive(
         // Park until the next event or the nearest armed deadline — the
         // controller never spins; the wait-set (or, if it could not be
         // built, a blocking reap) is the wake source.
-        let timeout = next_timeout(rustos_rt::clock_get(), deadline_ns, grace_deadline_ns);
+        let timeout = next_timeout(tairix_rt::clock_get(), deadline_ns, grace_deadline_ns);
         if let Some(set) = set {
             let mut token = 0u64;
-            let _ = rustos_rt::waitset_wait(set, timeout, &mut token);
+            let _ = tairix_rt::waitset_wait(set, timeout, &mut token);
         } else {
             // Fail-safe path without a wait-set: block on the next child
             // exit (the only other event source that can complete the
             // run).
             let mut status = WaitStatus::Exited(0);
-            let ret = rustos_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::empty());
+            let ret = tairix_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::empty());
             if ret < 0 {
                 // No children left to wait for and no set to park on:
                 // nothing further can happen.
@@ -293,10 +293,10 @@ fn execute(actions: &[Action], _started_ns: u64, grace_deadline_ns: &mut Option<
     for action in actions {
         match action {
             Action::Signal { pid, signal } => {
-                let _ = rustos_rt::signal(*pid, *signal);
+                let _ = tairix_rt::signal(*pid, *signal);
             }
             Action::ArmGrace => {
-                *grace_deadline_ns = Some(rustos_rt::clock_get().saturating_add(GRACE_NS));
+                *grace_deadline_ns = Some(tairix_rt::clock_get().saturating_add(GRACE_NS));
             }
         }
     }
@@ -323,7 +323,7 @@ fn next_timeout(now: u64, deadline_ns: Option<u64>, grace_ns: Option<u64>) -> u6
 fn spawn_worker(worker: &WorkerSpec) -> Result<i32, &'static str> {
     let argv = worker.encode_argv();
     let words: Vec<&[u8]> = argv.iter().map(String::as_bytes).collect();
-    let ret = rustos_rt::spawn_with(SPAWN_SELF, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &words, &[]);
+    let ret = tairix_rt::spawn_with(SPAWN_SELF, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &words, &[]);
     if ret < 0 {
         return Err("worker spawn refused");
     }
@@ -338,7 +338,7 @@ fn prepare_scratch(spec: &RunSpec) -> Result<String, &'static str> {
         ensure_dir(dir)?;
         return Ok(dir.clone());
     }
-    let home = rustos_rt::env_var(b"HOME")
+    let home = tairix_rt::env_var(b"HOME")
         .and_then(|raw| core::str::from_utf8(raw).ok())
         .filter(|home| !home.is_empty())
         .ok_or("no scratch directory: HOME is unset and no --temp-path was given")?;
@@ -352,7 +352,7 @@ fn prepare_scratch(spec: &RunSpec) -> Result<String, &'static str> {
 
 /// Create `dir` if it does not exist; an existing directory is fine.
 fn ensure_dir(dir: &str) -> Result<(), &'static str> {
-    let ret = rustos_rt::fs_mkdir(dir.as_bytes());
+    let ret = tairix_rt::fs_mkdir(dir.as_bytes());
     #[allow(clippy::cast_possible_truncation)] // The kernel encodes -errno in i32 range.
     let errno = -(ret as i32);
     if ret == 0 || errno == Errno::AlreadyExists.as_i32() {
@@ -370,7 +370,7 @@ fn cleanup_scratch(spec: &RunSpec, scratch: &str) {
         return;
     }
     for path in run_scratch_paths(&spec.workers, scratch) {
-        let _ = rustos_rt::fs_unlink(path.as_bytes(), rustos_abi::UnlinkFlags::empty());
+        let _ = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
     }
 }
 
@@ -419,7 +419,7 @@ fn path_covers(mount: &str, path: &str) -> bool {
 /// orphaned — the kernel prunes the dead parent's bookkeeping and the run
 /// carries on unsupervised.
 fn background_respawn() -> i32 {
-    let Some(arguments) = rustos_rt::args() else {
+    let Some(arguments) = tairix_rt::args() else {
         write_stderr_line(USAGE);
         return 2;
     };
@@ -435,7 +435,7 @@ fn background_respawn() -> i32 {
     // The detached controller still resolves its default scratch home
     // from `HOME`, so that one variable is threaded through; nothing
     // else of the caller's environment is authority a load run needs.
-    let home = rustos_rt::env_var(b"HOME").map(|value| {
+    let home = tairix_rt::env_var(b"HOME").map(|value| {
         let mut entry = alloc::vec::Vec::with_capacity(5 + value.len());
         entry.extend_from_slice(b"HOME=");
         entry.extend_from_slice(value);
@@ -445,7 +445,7 @@ fn background_respawn() -> i32 {
     if let Some(entry) = &home {
         env.push(entry.as_slice());
     }
-    let ret = rustos_rt::spawn_with(SPAWN_SELF, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &argv, &env);
+    let ret = tairix_rt::spawn_with(SPAWN_SELF, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &argv, &env);
     if ret < 0 {
         write_stderr_line("stress: the background controller could not be started");
         return 1;

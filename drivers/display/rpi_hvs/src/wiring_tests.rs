@@ -5,7 +5,7 @@
 //! mock firmware → wiring → `present` full chain); the real doorbell
 //! answer is the on-metal acceptance item (`plans/PI.md` P7).
 
-use rustos_vcmailbox::mock::MockFirmware;
+use tairix_vcmailbox::mock::MockFirmware;
 
 use super::*;
 use crate::tests::{MockHost, MockMapper};
@@ -17,7 +17,7 @@ fn request() -> FramebufferRequest {
     FramebufferRequest {
         width_px: 640,
         height_px: 480,
-        format: rustos_abi::driver::display::DisplayFormat::Bgra8888,
+        format: tairix_abi::driver::display::DisplayFormat::Bgra8888,
     }
 }
 
@@ -161,8 +161,8 @@ fn discovered_config_opens_the_hvs_driver() {
     extern crate alloc;
     use alloc::vec;
 
-    use rustos_abi::driver::display::Display;
-    use rustos_vcmailbox::discover_framebuffer;
+    use tairix_abi::driver::display::Display;
+    use tairix_vcmailbox::discover_framebuffer;
 
     const DLIST_PHYS: u64 = 0x1100_0000;
     const CONTROL_PHYS: u64 = 0x1200_0000;

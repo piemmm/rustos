@@ -1,24 +1,24 @@
-# `rustos-users`
+# `tairix-users`
 
 The user-account database **and** the first-class group registry: the single
-definition of a RustOS account, of a RustOS group, and of the versioned text
+definition of a TAIRiX account, of a TAIRiX group, and of the versioned text
 formats persisted at `/System/Security/Users` and `/System/Security/Groups`
 (`AGENTS.md` §5.1, §16.2). The installer (`AGENTS.md` §11) and the image
 builder (`tools/mkimage`) *author* the databases; the kernel's boot-time
-root-volume read paths (`rustos_kernel_core::users::load_users_db` and
-`rustos_kernel_core::groups::load_groups_db`, see the
+root-volume read paths (`tairix_kernel_core::users::load_users_db` and
+`tairix_kernel_core::groups::load_groups_db`, see the
 [kernel page](../architecture/kernel.md)) and the login path
 (`userland/session/login`) *read* them — one format each, defined once
 (`AGENTS.md` §2.2). The crate is `no_std` + `alloc`, has no `unsafe`, and
-depends only on `rustos-abi`, `rustos-caps`, and `rustos-crypto`.
+depends only on `tairix-abi`, `tairix-caps`, and `tairix-crypto`.
 
-## The format (`rustos-users-v1`)
+## The format (`tairix-users-v1`)
 
-Line one is exactly the header `rustos-users-v1`; every other line is
+Line one is exactly the header `tairix-users-v1`; every other line is
 blank, a `#` comment, or one record of ten `:`-separated fields:
 
 ```text
-rustos-users-v1
+tairix-users-v1
 root:1000:1000::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$<salt>$<hash>
 devmgr:10:101::Device Manager:none:none:CAP_DRV_LOAD:nologin:*
 ```
@@ -58,16 +58,16 @@ harness (`tests/fuzz_users.rs`, enrolled in `cargo xtask fuzz`) drives the
 parser with mutated, truncated, spliced, and noise inputs under the
 never-panic + round-trip invariants.
 
-## The group registry (`rustos-groups-v1`)
+## The group registry (`tairix-groups-v1`)
 
 Groups are first-class objects (`AGENTS.md` §5.1): every group a user may
 belong to is declared once in the group registry, by name and numeric gid.
-Line one is exactly the header `rustos-groups-v1`; every other line is
+Line one is exactly the header `tairix-groups-v1`; every other line is
 blank, a `#` comment, or one record of two `:`-separated fields
 `groupname:gid`:
 
 ```text
-rustos-groups-v1
+tairix-groups-v1
 wheel:0
 ada:1000
 ```
@@ -80,7 +80,7 @@ supplementary groups live in that user's `UserRecord`
 two files can never disagree about who is in a group. The registry answers
 only *which groups exist, and what they are called* — the authoritative set
 every user's group references are checked against when the kernel assembles
-its identity table (`rustos_kernel_core::groups::build_identity_table`): a
+its identity table (`tairix_kernel_core::groups::build_identity_table`): a
 user naming a group with no registry record is refused, fail closed
 (referential integrity, `AGENTS.md` §5.4).
 
@@ -90,7 +90,7 @@ OS-owned records — the no-login `system` account naming uid 0 plus one
 no-login account per system service — as kernel policy, tamper-proof
 exactly as the kernel text is. The kernel's sec boot phase builds and
 installs that half into the live identity cell before any volume exists
-(`rustos_kernel_core::system_identity_table`), so spawn-as-user and
+(`tairix_kernel_core::system_identity_table`), so spawn-as-user and
 filesystem group resolution for the system accounts work from first boot
 on every architecture; the encrypted-root unlock later replaces the held
 table with the merge of the same compiled half and the on-disk human
@@ -110,7 +110,7 @@ One group name is **well-known**: `STORAGE_GROUP` (`"storage"`, seeded as
 gid `STORAGE_GID` = 100 by the image builder and the installer). At root
 unlock the kernel resolves it **by name** from the loaded registry and
 arms the removable-volume identity map with its gid
-(`rustos_kernel::volume_policy`, `plans/DEVICES.md` D3d): a hotplug volume
+(`tairix_kernel::volume_policy`, `plans/DEVICES.md` D3d): a hotplug volume
 whose filesystem stores no owner model (FAT32) then appears system-owned
 under this group with group read/write, so any member uses the medium
 without ambient authority. A registry without the group simply leaves

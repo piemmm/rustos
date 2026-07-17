@@ -26,7 +26,7 @@ nicht, fällt die Auflistung auf numerische Kennungen zurück, mit der
 Begründung auf der Standardfehlerausgabe — das Inventar selbst wird
 weiterhin aufgelistet.
 
-RustOS führt keine PCI-Adresse `bus:device.function`: Die stabile
+TAIRiX führt keine PCI-Adresse `bus:device.function`: Die stabile
 Adresse einer Funktion ist ihre Hardwarebaum-Knotennummer, angezeigt
 als `#<node>`, und `-s` wählt diese Nummer aus (eine bewusste,
 dokumentierte Abweichung vom Linux-`lspci`). Die `-k`-Ansicht

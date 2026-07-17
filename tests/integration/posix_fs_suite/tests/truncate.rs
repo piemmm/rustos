@@ -1,7 +1,7 @@
 //! `truncate(2)` conformance: shrinking, growing (with a zero-filled
 //! extension), `EISDIR`, and `ENOENT`.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn truncate_shrinks_a_file() {

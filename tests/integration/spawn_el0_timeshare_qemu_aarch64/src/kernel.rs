@@ -6,27 +6,27 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use alloc::sync::Arc;
 
-use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use rustos_arch_aarch64::context_hal::ContextSwitchHal;
-use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
-use rustos_arch_aarch64::paging::{
+use tairix_abi::rxe::LoadImage;
+use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_arch_aarch64::context_hal::ContextSwitchHal;
+use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
+use tairix_arch_aarch64::paging::{
     self, activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
-use rustos_arch_aarch64::userentry::UserMode;
-use rustos_arch_aarch64::{
+use tairix_arch_aarch64::userentry::UserMode;
+use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
-use rustos_arch_api::{CpuId, EnterUser};
-use rustos_fdt::Fdt;
-use rustos_kalloc::FreeListAllocator;
-use rustos_kernel_core::{
+use tairix_arch_api::{CpuId, EnterUser};
+use tairix_fdt::Fdt;
+use tairix_kalloc::FreeListAllocator;
+use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
 };
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
-use rustos_log::{log, Event, EventId, Level};
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
+use tairix_log::{log, Event, EventId, Level};
 
 // `PROGRAM_RXE: &[u8]`, `USER_BIAS: u64`, and `YIELDS_PER_TASK: u64`, generated
 // by `build.rs`.
@@ -48,7 +48,7 @@ const TASK_COUNT: u64 = 2;
 /// address). [`USER_BIAS`] (64 GiB) sits far above, on freshly walked tables.
 const IDENTITY_GIB: usize = 2;
 
-/// User stack base (1 MiB into the high user region) and size. `rustos-rt`'s
+/// User stack base (1 MiB into the high user region) and size. `tairix-rt`'s
 /// `_start` only aligns the stack and calls, so a small stack suffices for the
 /// trivial yield-then-exit program; 256 KiB is generous headroom.
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
@@ -218,7 +218,7 @@ extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -
 fn build_el0_space(
     pool: &'static PageTablePool,
     image: &LoadImage,
-) -> (u64, rustos_arch_api::UserEntry) {
+) -> (u64, tairix_arch_api::UserEntry) {
     let Some(arch) = ArchAddressSpace::new_identity_gigapages(pool, IDENTITY_GIB) else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
@@ -269,7 +269,7 @@ fn build_el0_space(
 }
 
 /// Boot entry point — the symbol the arch crate's `boot.s` trampoline calls
-/// (via `rustos_arch_aarch64_main`).
+/// (via `tairix_arch_aarch64_main`).
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     note(TEST_START, "aarch64 EL0 timeshare test: starting");
@@ -320,9 +320,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Build the live scheduler over the arch port.
     // Per-CPU bookkeeping backing for this single-CPU vertical.
-    static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
-        rustos_arch_aarch64::Aarch64ArchStorage::new();
-    let arch = Arc::new(rustos_arch_aarch64::Aarch64Arch::new(
+    static ARCH_STORAGE: tairix_arch_aarch64::Aarch64ArchStorage<1> =
+        tairix_arch_aarch64::Aarch64ArchStorage::new();
+    let arch = Arc::new(tairix_arch_aarch64::Aarch64Arch::new(
         &ARCH_STORAGE,
         BOOT_CPU,
         counter_hz,

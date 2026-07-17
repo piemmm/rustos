@@ -16,14 +16,14 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
     VolumeStats,
 };
-use rustos_abi::driver::DriverError;
-use rustos_abi::time::Time64;
-use rustos_fsmeta::{AttrFlags, AttrSet};
+use tairix_abi::driver::DriverError;
+use tairix_abi::time::Time64;
+use tairix_fsmeta::{AttrFlags, AttrSet};
 
 /// Default owner uid baked into a freshly created node's security record.
 pub(crate) const ADMIN_UID: u32 = 1;

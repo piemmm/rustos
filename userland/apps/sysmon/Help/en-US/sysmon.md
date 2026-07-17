@@ -56,7 +56,7 @@ shows the census and the top consumers by `%CPU` and by memory only.
   in seconds with an optional fraction (only the first fractional
   digit, tenths, is kept): `sysmon -d 1.5` refreshes every 1.5
   seconds. Defaults to 3.0. GNU `top` accepts a zero delay and
-  refreshes as fast as it can; RustOS never busy-loops, so a zero is
+  refreshes as fast as it can; TAIRiX never busy-loops, so a zero is
   clamped to the 0.1 s minimum.
 - `-h, -?` — show this command's own short help and exit. Inside a
   running session the same keys toggle the key overlay instead.

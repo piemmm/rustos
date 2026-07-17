@@ -44,8 +44,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_arch_api::CpuId;
-use rustos_fdt::Fdt;
+use tairix_arch_api::CpuId;
+use tairix_fdt::Fdt;
 
 /// MMIO base the distributor points at before any discovery runs: the
 /// QEMU `virt` board's GICv2 distributor. A board with a different GIC
@@ -391,8 +391,8 @@ impl<M: GicMmio> Gicv2<M> {
 /// GICv2 controller: the policy layer over [`Gicv2`].
 ///
 /// Validates every INTID against `max_intid` and fails closed before touching a register. Implements the
-/// Arch HAL [`rustos_arch_api::IrqController`] (line masking) and
-/// [`rustos_arch_api::InterruptEntry`] (the claim/complete handshake).
+/// Arch HAL [`tairix_arch_api::IrqController`] (line masking) and
+/// [`tairix_arch_api::InterruptEntry`] (the claim/complete handshake).
 pub struct GicController<M: GicMmio> {
     gic: Gicv2<M>,
     max_intid: u32,
@@ -422,13 +422,13 @@ impl<M: GicMmio> GicController<M> {
     }
 }
 
-impl<M: GicMmio + Send + Sync> rustos_arch_api::IrqController for GicController<M> {
+impl<M: GicMmio + Send + Sync> tairix_arch_api::IrqController for GicController<M> {
     /// Mask `line` by clearing its distributor enable bit, then emit a
     /// `SeqCst` fence so the masked state is globally visible before a
     /// waiter observes `ready = true` (`docs/src/security/irq.md`).
-    fn mask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+    fn mask(&self, line: u32) -> Result<(), tairix_arch_api::IrqControlError> {
         if !self.in_range(line) {
-            return Err(rustos_arch_api::IrqControlError::OutOfRange);
+            return Err(tairix_arch_api::IrqControlError::OutOfRange);
         }
         self.gic.disable_intid(line);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -437,16 +437,16 @@ impl<M: GicMmio + Send + Sync> rustos_arch_api::IrqController for GicController<
 
     /// Unmask `line` by setting its distributor enable bit (priority is
     /// left at the mid value [`Gicv2::enable_intid`] installs).
-    fn unmask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+    fn unmask(&self, line: u32) -> Result<(), tairix_arch_api::IrqControlError> {
         if !self.in_range(line) {
-            return Err(rustos_arch_api::IrqControlError::OutOfRange);
+            return Err(tairix_arch_api::IrqControlError::OutOfRange);
         }
         self.gic.enable_intid(line);
         Ok(())
     }
 }
 
-impl<M: GicMmio + Send + Sync> rustos_arch_api::InterruptEntry for GicController<M> {
+impl<M: GicMmio + Send + Sync> tairix_arch_api::InterruptEntry for GicController<M> {
     /// Acknowledge the active interrupt, mapping the GICv2
     /// [`SPURIOUS_INTID`] ("nothing pending") to [`None`].
     fn claim(&self) -> Option<u32> {
@@ -796,13 +796,13 @@ mod tests {
     /// terminates ("nothing pending").
     #[test]
     fn gic_controller_passes_arch_hal_irq_conformance() {
-        use rustos_arch_api::{InterruptEntry, IrqController};
+        use tairix_arch_api::{InterruptEntry, IrqController};
 
         let c = GicController::new(Gicv2::new(MockGicMmio::new()), 1019);
         c.gic.mmio.gicc_write(GICC_IAR, SPURIOUS_INTID);
 
-        rustos_arch_api::irq::conformance::run_controller(&c, 42, 2000);
-        rustos_arch_api::irq::conformance::run_entry(&c);
+        tairix_arch_api::irq::conformance::run_controller(&c, 42, 2000);
+        tairix_arch_api::irq::conformance::run_entry(&c);
 
         // Object-safe behind `&dyn`, the way the kernel reaches it.
         let dyn_ctrl: &dyn IrqController = &c;
@@ -826,7 +826,7 @@ mod tests {
         // The Pi-shaped fixture carries a GIC-400 under `/soc` with bus
         // `reg` values; discovery translates them through the `ranges`
         // to the BCM2711 CPU-physical bases.
-        let blob = rustos_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
+        let blob = tairix_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let gic = find_gic(&fdt).expect("a GIC is present");
         assert_eq!(gic.gicd_base, 0xff84_1000);
@@ -836,7 +836,7 @@ mod tests {
     #[test]
     fn finds_gicv2_bases_in_a_virt_tree() {
         // The `virt`-shaped fixture carries the GICv2 at the default bases.
-        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
+        let blob = tairix_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let gic = find_gic(&fdt).expect("a GIC is present");
         assert_eq!(usize::try_from(gic.gicd_base).unwrap(), DEFAULT_GICD_BASE);
@@ -847,7 +847,7 @@ mod tests {
     fn no_gic_in_a_gicless_tree_is_none() {
         // A tree with only the two console UARTs (no `intc` node) yields
         // no GIC — the boot path then keeps the fail-safe default.
-        let mut b = rustos_fdt::fixture::DtbBuilder::new();
+        let mut b = tairix_fdt::fixture::DtbBuilder::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -870,7 +870,7 @@ mod tests {
         // back. This test owns the global GIC base slot for its duration;
         // the other tests here either exercise pure helpers (`find_gic`)
         // or the mock MMIO, so there is no cross-test interference.
-        let blob = rustos_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
+        let blob = tairix_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let applied = configure_from_fdt(&fdt).expect("GIC discovered");
         assert_eq!(applied.gicd_base, 0xff84_1000);

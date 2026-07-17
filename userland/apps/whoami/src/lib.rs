@@ -1,8 +1,8 @@
-//! RustOS `whoami` — print the current user's account name
+//! TAIRiX `whoami` — print the current user's account name
 //! (`plans/APPS.md` §12.1 Stage C).
 //!
 //! The GNU coreutils `whoami`: it prints the user name associated with the
-//! caller's identity and nothing else. RustOS has no `/etc/passwd` and no
+//! caller's identity and nothing else. TAIRiX has no `/etc/passwd` and no
 //! ambient identity file: the uid comes from the kernel-attested origin
 //! record (the ungated `self_origin` syscall — a pure self-observer), and
 //! the uid → name pairing comes from the ungated `USER_DIRECTORY` query the
@@ -22,7 +22,7 @@
 //!   `whoami foo -x` diagnoses `-x`.
 //! * [`run`] — the engine: read the caller's uid through the injected
 //!   [`Identity`] seam, walk the shared account directory
-//!   ([`rustos_procinfo::for_each_user`]) for the matching name, and write
+//!   ([`tairix_procinfo::for_each_user`]) for the matching name, and write
 //!   it through the injected [`Output`]. A missing name is the GNU
 //!   `cannot find name for user ID` diagnostic; a failed directory walk is
 //!   a service error, never misreported as a missing name.
@@ -39,7 +39,7 @@
 //! The bundle's `Help/` documents are **not** embedded in this crate: they
 //! are authored once in the bundle's on-disk `Help/` tree, planted onto
 //! `/System` by the image builder from that source (`tools/syshelp`), and
-//! read back at runtime through the injected [`rustos_help::HelpSource`]
+//! read back at runtime through the injected [`tairix_help::HelpSource`]
 //! seam. Help is never hardcoded into the program (`plans/APPS.md`).
 
 #![no_std]
@@ -51,9 +51,9 @@ extern crate alloc;
 use alloc::string::String;
 use core::fmt;
 
-use rustos_abi::Errno;
-use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{for_each_user, CallError, ListError, Output, Transport};
+use tairix_abi::Errno;
+use tairix_help::{own_short_help, HelpSource};
+use tairix_procinfo::{for_each_user, CallError, ListError, Output, Transport};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `whoami`'s own Help tree is unavailable.
@@ -264,12 +264,12 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::sysinfo::{
+    use tairix_abi::sysinfo::{
         SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
     };
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
-    use rustos_procinfo::{Output, Transport};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
+    use tairix_procinfo::{Output, Transport};
 
     use super::{parse, run, Command, Identity, WhoamiError, USAGE};
 
@@ -512,7 +512,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        for locale in rustos_help::REQUIRED_LOCALES {
+        for locale in tairix_help::REQUIRED_LOCALES {
             let path = format!("{help_root}/{locale}/whoami.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             let switch = "`-h, -?`";

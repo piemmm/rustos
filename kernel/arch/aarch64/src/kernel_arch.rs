@@ -1,5 +1,5 @@
 //! [`Aarch64Arch`] — the aarch64 implementation of the Arch HAL
-//! ([`rustos_arch_api::SchedulerArch`]).
+//! ([`tairix_arch_api::SchedulerArch`]).
 //!
 //! Like x86_64 and riscv64, the aarch64 port is a pure Arch HAL
 //! implementation: it implements [`SchedulerArch`]
@@ -36,7 +36,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use rustos_arch_api::{
+use tairix_arch_api::{
     CoreClass, CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
 };
 
@@ -331,7 +331,7 @@ impl Aarch64Arch {
     /// The downstream boot consumer discovers the mechanism from the
     /// device tree once on the boot core — the `/psci` conduit
     /// (`crate::fdt::psci_method`) or the per-CPU spin-table release
-    /// words (`rustos_fdt::CpuNode::spin_table_release`) — and installs
+    /// words (`tairix_fdt::CpuNode::spin_table_release`) — and installs
     /// it here before bringing secondaries up.
     #[must_use]
     pub fn with_secondary_start(mut self, start: SecondaryStart) -> Self {
@@ -363,7 +363,7 @@ impl Aarch64Arch {
 
     /// Discover the per-CPU [`CoreClass`] table from the device tree.
     ///
-    /// Walks every `/cpus/cpu@*` node (via [`rustos_fdt::Fdt::each_cpu`]),
+    /// Walks every `/cpus/cpu@*` node (via [`tairix_fdt::Fdt::each_cpu`]),
     /// maps each node's `reg` (its `MPIDR_EL1` affinity) to a dense
     /// [`CpuId`] through this handle's affinity map, and classifies each
     /// core's `capacity-dmips-mhz` rating against the peak rating with
@@ -468,12 +468,12 @@ impl Aarch64Arch {
     /// Convert a `CNTPCT_EL0` tick span into nanoseconds against this
     /// handle's `timer_hz` — the same frequency [`Self::monotonic_ns`]
     /// converts through (one conversion definition, shared with the
-    /// riscv64 port via `rustos_arch_api::ticks_to_ns`). The downstream
+    /// riscv64 port via `tairix_arch_api::ticks_to_ns`). The downstream
     /// `KernelArch` wrapper forwards its `ticks_to_ns` here so the
     /// scheduler's per-task tick accounting reads in real time.
     #[must_use]
     pub fn ticks_to_ns(&self, ticks: u64) -> u64 {
-        rustos_arch_api::ticks_to_ns(ticks, self.timer_hz)
+        tairix_arch_api::ticks_to_ns(ticks, self.timer_hz)
     }
 }
 
@@ -586,7 +586,7 @@ impl SchedulerArch for Aarch64Arch {
         {
             let cpu = self.current_cpu();
             let deadline =
-                deadline_ns.map(|ns| rustos_arch_api::wakeup::ns_to_ticks(ns, self.timer_hz));
+                deadline_ns.map(|ns| tairix_arch_api::wakeup::ns_to_ticks(ns, self.timer_hz));
             crate::preempt::record_wakeup_deadline(cpu, deadline);
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
@@ -1067,7 +1067,7 @@ mod tests {
         // affinity map places them at dense ids 0..=3.
         static S: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0x0, 0x1, 0x100, 0x101]);
-        let blob = rustos_fdt::fixture::arm_with_cpus(
+        let blob = tairix_fdt::fixture::arm_with_cpus(
             0x4000_0000,
             0x2000_0000,
             &[
@@ -1093,7 +1093,7 @@ mod tests {
         // a performance core (a homogeneous machine).
         static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0x0, 0x1]);
-        let blob = rustos_fdt::fixture::arm_with_cpus(
+        let blob = tairix_fdt::fixture::arm_with_cpus(
             0x4000_0000,
             0x2000_0000,
             &[(0x0, None), (0x1, None)],
@@ -1114,9 +1114,9 @@ mod tests {
     fn passes_cross_cpu_tlb_shootdown_conformance() {
         static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1]);
-        rustos_arch_api::xtlb::conformance::run_all(&arch, 64u64 << 30);
+        tairix_arch_api::xtlb::conformance::run_all(&arch, 64u64 << 30);
         let erased: &dyn CrossCpuTlbShootdown = &arch;
-        rustos_arch_api::xtlb::conformance::run_all(erased, 64u64 << 30);
+        tairix_arch_api::xtlb::conformance::run_all(erased, 64u64 << 30);
     }
 
     /// / W14: the port passes the secondary-bring-up conformance
@@ -1130,9 +1130,9 @@ mod tests {
         static S: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::with_cpus(&S, 0, 1_000, &[0, 1])
             .with_secondary_start(SecondaryStart::Psci(PsciMethod::Hvc));
-        rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+        tairix_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
         let erased: &dyn SecondaryBringup = &arch;
-        rustos_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
+        tairix_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
     }
 
     /// The boot core and any unmapped dense id are refused before any
@@ -1198,7 +1198,7 @@ mod tests {
                 release_addrs: &RELEASE2,
             },
         );
-        rustos_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
+        tairix_arch_api::smp::conformance::run_all(&arch, CpuId::MAX);
     }
 
     /// / W0: the port passes the shared Arch HAL conformance
@@ -1209,10 +1209,10 @@ mod tests {
     fn passes_arch_hal_conformance_suite() {
         static S: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::new(&S, 0, 1_000);
-        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let blob = tairix_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
         let fdt = crate::fdt::Fdt::new(&blob).expect("valid fdt");
         let discovery = crate::platform::FdtDiscovery::new(fdt);
-        rustos_arch_api::conformance::run_all(
+        tairix_arch_api::conformance::run_all(
             &arch,
             &crate::sidechannel::SideChannel::new(),
             &crate::memtag::MemoryTags::new(),

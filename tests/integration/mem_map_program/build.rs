@@ -8,8 +8,8 @@
 //! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
 //! cfg-check` stays clean.
 //!
-//! The consuming vertical (`mem_map_qemu_aarch64`) sets `RUSTOS_MEM_MAP_ADDR`
-//! and `RUSTOS_MEM_MAP_LEN` when it compiles this program, so a changed region
+//! The consuming vertical (`mem_map_qemu_aarch64`) sets `TAIRIX_MEM_MAP_ADDR`
+//! and `TAIRIX_MEM_MAP_LEN` when it compiles this program, so a changed region
 //! must force a recompile; declare those dependencies here.
 
 fn main() {
@@ -18,7 +18,7 @@ fn main() {
     if target_os == "none" {
         println!("cargo:rustc-cfg=freestanding");
     }
-    println!("cargo:rerun-if-env-changed=RUSTOS_MEM_MAP_ADDR");
-    println!("cargo:rerun-if-env-changed=RUSTOS_MEM_MAP_LEN");
+    println!("cargo:rerun-if-env-changed=TAIRIX_MEM_MAP_ADDR");
+    println!("cargo:rerun-if-env-changed=TAIRIX_MEM_MAP_LEN");
     println!("cargo:rerun-if-changed=build.rs");
 }

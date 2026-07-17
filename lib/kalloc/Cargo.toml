@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kalloc"
-description = "RustOS shared no_std freeing (coalescing free-list) kernel heap allocator for freestanding images."
+name = "tairix-kalloc"
+description = "TAIRiX shared no_std freeing (coalescing free-list) kernel heap allocator for freestanding images."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

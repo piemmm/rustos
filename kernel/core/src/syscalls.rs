@@ -28,9 +28,9 @@
 //!   only a shared lock.
 //! * `&'a RwLock<AddressSpaceRegistry>` — the per-task address-space
 //!   registry, so a handler can resolve `caller.task_id` to the user
-//!   [`AddressSpace`](rustos_kernel_mem::AddressSpace) +
+//!   [`AddressSpace`](tairix_kernel_mem::AddressSpace) +
 //!   [`PhysMap`] pair the
-//!   [`rustos_kernel_mem::uaccess`] copy path walks
+//!   [`tairix_kernel_mem::uaccess`] copy path walks
 //!   ([`KernelSyscallHandlers::with_caller_aspace`], increment C of
 //!   `PLAN.md` Stage 7). Reaching it here keeps the copy bridge inside
 //!   `kernel/core` so the decoupled dispatcher (`kernel/syscall`)
@@ -45,14 +45,14 @@
 //! Every consumer of `PLAN.md` Stage 7's "User-memory copy path" is now
 //! **fully wired**: `ipc_send` (increment D.1), `ipc_recv` (D.2),
 //! `cap_delegate` (D.3), and `random_get` (D.4) each move their bytes
-//! through the validated [`rustos_kernel_mem::copy_in`] /
-//! [`rustos_kernel_mem::copy_out`] boundary
+//! through the validated [`tairix_kernel_mem::copy_in`] /
+//! [`tairix_kernel_mem::copy_out`] boundary
 //! ([`KernelSyscallHandlers::with_caller_aspace`] → `copy_fault_errno`)
-//! and then run the backing subsystem ([`rustos_kernel_ipc::Port::send`]
+//! and then run the backing subsystem ([`tairix_kernel_ipc::Port::send`]
 //! / `recv_with`, the `CapTable` delegate path, and the kernel random
 //! output reserve [`crate::random::RandomReserve`]). A faulting user
 //! pointer — or a caller with no registered address space — fails closed
-//! with [`Errno::BadAddress`] (the RustOS `EFAULT`), never an oracle
+//! with [`Errno::BadAddress`] (the TAIRiX `EFAULT`), never an oracle
 //! that distinguishes the cause.
 //!
 //! `random_get` draws CSPRNG output from the reserve composed into
@@ -74,13 +74,13 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
-use rustos_abi::hwtree::{HwResource, HwResourceKind};
-use rustos_abi::input::{KeyInput, PointerInput};
-use rustos_abi::sysinfo::{
+use tairix_abi::hwtree::{HwResource, HwResourceKind};
+use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord,
     UserDirectoryRecord,
 };
-use rustos_abi::{
+use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
     Errno, FdWire, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
     OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SignalIntakeOp,
@@ -91,26 +91,26 @@ use rustos_abi::{
     RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
     WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
-use rustos_caps::CapabilitySet;
-use rustos_kernel_ipc::{
+use tairix_caps::CapabilitySet;
+use tairix_kernel_ipc::{
     CallEndpoint, CallEndpointLimits, CallTicket, EndpointId, PortRegistry, RecvCall, ReplyOutcome,
 };
-use rustos_kernel_irq::{
+use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
-use rustos_kernel_mem::{
+use tairix_kernel_mem::{
     copy_in, copy_out, FrameAllocator, Page, PhysMap, UaccessError, UserAddressSpace, VirtAddr,
     PAGE_SIZE,
 };
-use rustos_kernel_sched_api::Priority;
-use rustos_kernel_sec::{
+use tairix_kernel_sched_api::Priority;
+use tairix_kernel_sec::{
     CapTable, GroupId, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId,
 };
-use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
-use rustos_log::{Event, EventId, Field, Level, Sink};
-use rustos_seat::{ConsoleIndex, SeatOwner};
-use rustos_sync::RwLock;
-use rustos_util::fmt::format_hex_u64;
+use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
+use tairix_log::{Event, EventId, Field, Level, Sink};
+use tairix_seat::{ConsoleIndex, SeatOwner};
+use tairix_sync::RwLock;
+use tairix_util::fmt::format_hex_u64;
 use zeroize::Zeroize;
 
 use alloc::boxed::Box;
@@ -226,16 +226,16 @@ where
     irq_controller: &'a (dyn IrqController + Sync),
     /// Named-port registry consulted by `ipc_send` / `ipc_recv` to
     /// resolve the endpoint carried in the syscall to a live, kernel-
-    /// owned [`rustos_kernel_ipc::Port`]. Borrowed under the same
+    /// owned [`tairix_kernel_ipc::Port`]. Borrowed under the same
     /// reader-preferring lock `KernelState` wraps it in; the handlers
     /// take only a read guard (no global mutable
     /// static; the registry owns no lock of its own).
     ipc: &'a RwLock<PortRegistry>,
     /// Per-task address-space registry consulted to resolve the
-    /// caller's [`rustos_kernel_sec::TaskId`] to the user
-    /// [`AddressSpace`](rustos_kernel_mem::AddressSpace) and the
+    /// caller's [`tairix_kernel_sec::TaskId`] to the user
+    /// [`AddressSpace`](tairix_kernel_mem::AddressSpace) and the
     /// [`PhysMap`] backing it — the pair the
-    /// [`rustos_kernel_mem::uaccess`] copy path walks. Borrowed under the same reader-preferring lock as `caps`
+    /// [`tairix_kernel_mem::uaccess`] copy path walks. Borrowed under the same reader-preferring lock as `caps`
     /// / `ipc`; [`Self::with_caller_aspace`] takes only a read guard.
     /// Threading it here (increment C, `PLAN.md` Stage 7) lets a
     /// handler reach the caller's mappings without coupling the
@@ -832,7 +832,7 @@ where
     /// `'static`-typed seam exists because a port's `AddressSpace` retains
     /// its page-table frame source for the child's lifetime, so the source
     /// must be `'static` (the producer caches a single
-    /// [`rustos_kernel_mem::FrameTableSource`] over it). Until this is
+    /// [`tairix_kernel_mem::FrameTableSource`] over it). Until this is
     /// called the handler holds [`None`] and the producer fails closed, so a build can never over-spawn. The allocator
     /// is the leaked `KernelState`'s, which lives for the lifetime of the
     /// running kernel.
@@ -1099,7 +1099,7 @@ where
     /// syscall handler can reach the bytes of the calling task's user
     /// memory: the registry maps `caller.task_id` to the
     /// `(&dyn UserAddressSpace, &dyn PhysMap)` pair the
-    /// [`rustos_kernel_mem::uaccess`] copy path walks. The closure shape keeps the read guard alive for exactly
+    /// [`tairix_kernel_mem::uaccess`] copy path walks. The closure shape keeps the read guard alive for exactly
     /// the span the borrowed references are used and never hands a
     /// caller's mappings out past it; the registry exposes only
     /// `translate`, so the copy path can read but never mutate them.
@@ -1131,11 +1131,11 @@ where
         if self.seat_registry.note_first_delivery(kind) {
             crate::audit::emit(
                 self.audit,
-                rustos_log::Level::Info,
+                tairix_log::Level::Info,
                 AuditEvent::InputDelivered,
                 &[Field {
                     key: "kind",
-                    value: rustos_log::FieldValue::Str(kind.as_str()),
+                    value: tairix_log::FieldValue::Str(kind.as_str()),
                 }],
             );
         }
@@ -1316,7 +1316,7 @@ where
                         .read()
                         .open_file_entry(caller.task_id, handle)
                         .ok_or(Errno::NotFound)?;
-                    let direction_ok = if fd == rustos_abi::STDIN {
+                    let direction_ok = if fd == tairix_abi::STDIN {
                         entry.flags.is_read()
                     } else {
                         entry.flags.is_write()
@@ -1336,7 +1336,7 @@ where
     /// after a syscall has mutated it (`mem_map` / `mem_unmap` / `mmio_map`
     /// / `dma_alloc`).
     ///
-    /// The registry holds a `Send + Sync` [`rustos_kernel_mem::FrozenAddressSpace`]
+    /// The registry holds a `Send + Sync` [`tairix_kernel_mem::FrozenAddressSpace`]
     /// snapshot, not the live `!Sync` space; a snapshot frozen at spawn
     /// describes only the spawn-time image and stack. Once a task grows its
     /// own heap, frees part of it, or a driver maps a granted window, that
@@ -1415,16 +1415,16 @@ where
         };
         crate::audit::emit(
             self.audit,
-            rustos_log::Level::Warn,
+            tairix_log::Level::Warn,
             AuditEvent::TaskFaultKilled,
             &[
                 Field {
                     key: "task",
-                    value: rustos_log::FieldValue::UnsignedInt(task.0),
+                    value: tairix_log::FieldValue::UnsignedInt(task.0),
                 },
                 Field {
                     key: "fault_class",
-                    value: rustos_log::FieldValue::Str(fault_class),
+                    value: tairix_log::FieldValue::Str(fault_class),
                 },
             ],
         );
@@ -2337,24 +2337,24 @@ where
     /// code), and an alias spelling naming a root that does not exist is
     /// [`Errno::NotFound`].
     fn resolve_against_cwd(&self, caller: &CallerContext<'_>, raw: &str) -> Result<String, Errno> {
-        let parsed = rustos_path::parse(raw).map_err(|_| Errno::OutOfRange)?;
+        let parsed = tairix_path::parse(raw).map_err(|_| Errno::OutOfRange)?;
         match parsed.root() {
             // An absolute `/`-view path is already normalised (`.`/`..`
             // collapsed, no escape); its components are the answer.
-            rustos_path::Root::View => Ok(render_view_path(parsed.components())),
+            tairix_path::Root::View => Ok(render_view_path(parsed.components())),
             // A relative path is joined onto the caller's current working
             // directory and re-normalised as one absolute `/`-view string, so
             // a leading `..` pops the working directory and cannot escape the
             // root. The joined string always begins with `/`, so it parses as
             // a view path; its components are the normalised absolute path.
-            rustos_path::Root::Relative => {
+            tairix_path::Root::Relative => {
                 let cwd = self.aspaces.read().cwd(caller.task_id);
                 let mut joined = cwd;
                 if !joined.ends_with('/') {
                     joined.push('/');
                 }
                 joined.push_str(raw);
-                let abs = rustos_path::parse(&joined).map_err(|_| Errno::OutOfRange)?;
+                let abs = tairix_path::parse(&joined).map_err(|_| Errno::OutOfRange)?;
                 Ok(render_view_path(abs.components()))
             }
             // An alias spelling (`Alias:/…` or `alias::Name/…`) names a
@@ -2364,7 +2364,7 @@ where
             // already refused any `..` that would escape the alias root, so the
             // inner components sit safely beneath the alias's top-level
             // component. A name that is not a published root fails closed.
-            rustos_path::Root::Alias(name) => {
+            tairix_path::Root::Alias(name) => {
                 let base = crate::fs::resolve_machine_alias(name).ok_or(Errno::NotFound)?;
                 let mut components = Vec::with_capacity(parsed.components().len() + 1);
                 components.push(String::from(base));
@@ -2377,7 +2377,7 @@ where
             // authorised by the secured VFS exactly as the equivalent view
             // path would be, so the durable form is never a policy bypass.
             // An unpublished identity fails closed — never a guessed root.
-            rustos_path::Root::VolumeId(id) => {
+            tairix_path::Root::VolumeId(id) => {
                 let mut components = self.volumes.resolve(id.as_bytes()).ok_or(Errno::NotFound)?;
                 components.extend(parsed.components().iter().cloned());
                 Ok(render_view_path(&components))
@@ -2386,7 +2386,7 @@ where
     }
 
     /// Resolve, verify, and authorise the on-disk store bundle at `parsed`
-    /// through the one shared `rustos_appload` load gate, returning the
+    /// through the one shared `tairix_appload` load gate, returning the
     /// validated entry-point image and its manifest capability request.
     ///
     /// The bundle is read through the secured VFS under the **caller's**
@@ -2412,7 +2412,7 @@ where
         &self,
         caller: &CallerContext<'_>,
         parsed: &crate::appspawn::BundleRunPath<'_>,
-    ) -> Result<alloc::sync::Arc<rustos_appload::LoadedApp>, Errno> {
+    ) -> Result<alloc::sync::Arc<tairix_appload::LoadedApp>, Errno> {
         let Some(store) = self.app_store else {
             return Err(Errno::NotFound);
         };
@@ -2442,9 +2442,9 @@ where
             crate::appspawn::FsBundleStore::new(self.filesystem, uid, caller.caps.effective());
         let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
         let clock = crate::appspawn::ArchClock::new(self.arch);
-        let loader = rustos_appload::AppLoader::new(rustos_appload::AppLoaderConfig {
-            accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
-            syscall_table_hash: rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        let loader = tairix_appload::AppLoader::new(tairix_appload::AppLoaderConfig {
+            accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
+            syscall_table_hash: tairix_kernel_syscall::SYSCALL_TABLE_HASH,
             store: &fs_store,
             verifier: &verifier,
             clock: &clock,
@@ -2556,7 +2556,7 @@ where
                 AuditEvent::ProcessSpawnDenied,
                 &[Field {
                     key: "cause",
-                    value: rustos_log::FieldValue::Str("spawn_as_user_denied"),
+                    value: tairix_log::FieldValue::Str("spawn_as_user_denied"),
                 }],
             );
             return Err(Errno::PermissionDenied);
@@ -2589,7 +2589,7 @@ fn render_view_path(components: &[String]) -> String {
 }
 
 /// Collapse every [`UaccessError`] onto the single stable
-/// [`Errno::BadAddress`] (the RustOS `EFAULT`).
+/// [`Errno::BadAddress`] (the TAIRiX `EFAULT`).
 ///
 /// A syscall that copies through the kernel's `copy_from_user` /
 /// `copy_to_user` boundary returns one code for *every* faulting-pointer
@@ -2719,11 +2719,11 @@ where
                 &[
                     Field {
                         key: "task",
-                        value: rustos_log::FieldValue::UnsignedInt(caller.task_id.0),
+                        value: tairix_log::FieldValue::UnsignedInt(caller.task_id.0),
                     },
                     Field {
                         key: "code",
-                        value: rustos_log::FieldValue::SignedInt(i64::from(code)),
+                        value: tairix_log::FieldValue::SignedInt(i64::from(code)),
                     },
                 ],
             );
@@ -2973,7 +2973,7 @@ where
         if caller.caps.has(CapabilityId::TIME_HIRES) {
             Ok(ns)
         } else {
-            Ok(rustos_abi::coarsen_clock_ns(ns))
+            Ok(tairix_abi::coarsen_clock_ns(ns))
         }
     }
 
@@ -3147,7 +3147,7 @@ where
         timeout_ns: u64,
     ) -> SyscallResult {
         // The poll-and-park loop itself lives in
-        // `rustos_kernel_irq::block_until_ready` so the in-kernel
+        // `tairix_kernel_irq::block_until_ready` so the in-kernel
         // `KernelVirtioHost::notify_wait` path can drive the same
         // implementation without a second copy.
         // This handler supplies the scheduler + arch seam through
@@ -3301,7 +3301,7 @@ where
         // across a blocking pipe write — a writer parked on a full ring
         // holding this lock would wedge every registry writer (`mem_map`,
         // a sibling spawn) on the non-preemptible kernel.
-        if (fd as usize) < rustos_abi::STD_STREAM_COUNT {
+        if (fd as usize) < tairix_abi::STD_STREAM_COUNT {
             let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
             if let Some(entry) = entry {
                 return self.wired_stream_write(caller, &entry, buf, len);
@@ -3324,7 +3324,7 @@ where
             // back to a device. The bytes are reported consumed without
             // being read: nothing consumes them, so copying them in would
             // be work paid for no observer.
-            if fd == rustos_abi::STDINFO && streams.mode(fd) == StreamMode::Closed {
+            if fd == tairix_abi::STDINFO && streams.mode(fd) == StreamMode::Closed {
                 return Ok(len as u64);
             }
             return Err(Errno::NotFound);
@@ -3390,7 +3390,7 @@ where
         // an empty ring holding this lock would wedge every registry
         // writer (`mem_map`, a sibling spawn) on the non-preemptible
         // kernel.
-        if (fd as usize) < rustos_abi::STD_STREAM_COUNT {
+        if (fd as usize) < tairix_abi::STD_STREAM_COUNT {
             let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
             if let Some(entry) = entry {
                 return self.wired_stream_read(caller, &entry, buf, len, timeout_ns);
@@ -3569,7 +3569,7 @@ where
         // kernel thread) fails closed. The substituted path then runs the
         // ordinary resolution and load gate below — the token never
         // bypasses a check.
-        if path_buf == rustos_abi::SPAWN_SELF {
+        if path_buf == tairix_abi::SPAWN_SELF {
             let own = caller.caps.spawn_path();
             if own.is_empty() {
                 return Err(Errno::NotFound);
@@ -3909,16 +3909,16 @@ where
         // record names the seat and the new foreground.
         crate::audit::emit(
             self.audit,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
             AuditEvent::SeatSwitched,
             &[
                 Field {
                     key: "seat",
-                    value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                    value: tairix_log::FieldValue::UnsignedInt(seat_id),
                 },
                 Field {
                     key: "console",
-                    value: rustos_log::FieldValue::UnsignedInt(u64::from(console)),
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(console)),
                 },
             ],
         );
@@ -3938,16 +3938,16 @@ where
         // observable, never silent.
         crate::audit::emit(
             self.audit,
-            rustos_log::Level::Warn,
+            tairix_log::Level::Warn,
             AuditEvent::SeatLeaseRevoked,
             &[
                 Field {
                     key: "seat",
-                    value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                    value: tairix_log::FieldValue::UnsignedInt(seat_id),
                 },
                 Field {
                     key: "evicted",
-                    value: rustos_log::FieldValue::UnsignedInt(evicted.0),
+                    value: tairix_log::FieldValue::UnsignedInt(evicted.0),
                 },
             ],
         );
@@ -4505,7 +4505,7 @@ where
     ) -> SyscallResult {
         // Bound the copy before allocating: an attach frame has a fixed
         // maximum encoding.
-        if request_len > rustos_abi::volume::VOLUME_ATTACH_MAX_LEN {
+        if request_len > tairix_abi::volume::VOLUME_ATTACH_MAX_LEN {
             return Err(Errno::LengthOutOfRange);
         }
         let mut payload = alloc::vec![0u8; request_len];
@@ -4518,7 +4518,7 @@ where
         }
         // Decode fail-closed: every field is validated (extent shape,
         // filesystem type, name spelling) before anything is looked up.
-        let decoded = rustos_abi::volume::VolumeAttachRequest::decode(&payload)?;
+        let decoded = tairix_abi::volume::VolumeAttachRequest::decode(&payload)?;
         // The dispatcher verified `CAP_FS_MOUNT`; the transport resources
         // the request names must additionally be covered by the caller's
         // own kernel-minted grants — the endpoint and window forwarded on
@@ -4544,10 +4544,10 @@ where
     ) -> SyscallResult {
         // A detach frame is exactly the 16-byte volume identity plus the
         // force byte.
-        if request_len != rustos_abi::volume::VOLUME_DETACH_LEN {
+        if request_len != tairix_abi::volume::VOLUME_DETACH_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut payload = [0u8; rustos_abi::volume::VOLUME_DETACH_LEN];
+        let mut payload = [0u8; tairix_abi::volume::VOLUME_DETACH_LEN];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(request), &mut payload)
         }) {
@@ -4555,7 +4555,7 @@ where
             Some(Err(err)) => return Err(copy_fault_errno(err)),
             None => return Err(Errno::BadAddress),
         }
-        let decoded = rustos_abi::volume::VolumeDetachRequest::decode(&payload)?;
+        let decoded = tairix_abi::volume::VolumeDetachRequest::decode(&payload)?;
         self.volume_service.detach(&decoded).map(|()| 0)
     }
 
@@ -4638,7 +4638,7 @@ where
         // fail-closed `BadAddress` an actual fault produces and never leaks
         // which case occurred. `with_caller_aspace` yields `None`
         // when the caller has no registered address space; fail closed.
-        let status_bytes = rustos_abi::WaitStatusRecord::encode(reported.status).to_ne_bytes();
+        let status_bytes = tairix_abi::WaitStatusRecord::encode(reported.status).to_ne_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(status), &status_bytes)
         }) {
@@ -4786,7 +4786,7 @@ where
         // The dispatcher already checked `CAP_USER_ADMIN` and that both
         // pointers are non-null `UserPtr`s. Bound the request before
         // copying a byte (validation bound, fail closed).
-        if req_len > rustos_abi::users_admin::USERS_ADMIN_MAX_REQUEST {
+        if req_len > tairix_abi::users_admin::USERS_ADMIN_MAX_REQUEST {
             return Err(Errno::LengthOutOfRange);
         }
         let mut req_buf = vec![0u8; req_len];
@@ -4797,7 +4797,7 @@ where
         // request bytes are scrubbed (they may carry a password record).
         let mut out_buf = vec![0u8; out_cap.min(crate::useradmin::USERS_ADMIN_MAX_RESPONSE)];
         let uid = caller.caps.owner().0;
-        let result = match rustos_abi::users_admin::UsersAdminRequest::decode(&req_buf) {
+        let result = match tairix_abi::users_admin::UsersAdminRequest::decode(&req_buf) {
             Ok(request) => {
                 self.users_admin
                     .handle(uid, caller.caps.effective(), &request, &mut out_buf)
@@ -5173,7 +5173,7 @@ where
         // endpoint's own `post` still re-checks the class capability.
         if ep
             .required_send_caps()
-            .contains(rustos_abi::CapabilityId::IPC_ENDPOINT)
+            .contains(tairix_abi::CapabilityId::IPC_ENDPOINT)
             && !self
                 .aspaces
                 .read()
@@ -5362,10 +5362,10 @@ where
             max_reply,
             capacity,
         };
-        let seat_attested = endpoint_id == rustos_abi::window_ipc::WINDOW_ENDPOINT
+        let seat_attested = endpoint_id == tairix_abi::window_ipc::WINDOW_ENDPOINT
             && !caller
                 .caps
-                .has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
+                .has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
             && self
                 .seat_registry
                 .holds_live_lease(SeatOwner(caller.task_id.0));
@@ -5593,7 +5593,7 @@ where
 
         // The reader's buffer must hold a whole origin; a short buffer fails
         // closed rather than truncating the record.
-        if origin_cap < rustos_abi::ORIGIN_WIRE_LEN {
+        if origin_cap < tairix_abi::ORIGIN_WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
 
@@ -5656,7 +5656,7 @@ where
     fn self_origin(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
         // The reader's buffer must hold a whole origin; a short buffer fails
         // closed rather than truncating the record.
-        if out_cap < rustos_abi::ORIGIN_WIRE_LEN {
+        if out_cap < tairix_abi::ORIGIN_WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
 
@@ -5701,11 +5701,11 @@ where
         // fixed array never overflows.
         let mut fields_buf = [Field {
             key: "",
-            value: rustos_log::FieldValue::Null,
+            value: tairix_log::FieldValue::Null,
         }; LOG_FIELDS_MAX + 1];
         fields_buf[0] = Field {
             key: "task",
-            value: rustos_log::FieldValue::UnsignedInt(caller.task_id.0),
+            value: tairix_log::FieldValue::UnsignedInt(caller.task_id.0),
         };
         let mut field_count = 1;
         for (key, value) in decoded.fields() {
@@ -5724,7 +5724,7 @@ where
         // Emit through the kernel's diagnostic sink only — never the audit
         // sink. Below the active level threshold the
         // record is dropped in O(1).
-        rustos_log::log(self.log_sink, &event);
+        tairix_log::log(self.log_sink, &event);
         Ok(0)
     }
 
@@ -5734,7 +5734,7 @@ where
         // `HwNode` is exactly `HwNode::WIRE_LEN` bytes, so any other `len`
         // is malformed and is rejected before copying — a hostile `len`
         // cannot drive a large copy, and a short one cannot decode.
-        if len != rustos_abi::HwNode::WIRE_LEN {
+        if len != tairix_abi::HwNode::WIRE_LEN {
             return Err(Errno::LengthOutOfRange);
         }
 
@@ -5743,12 +5743,12 @@ where
         // registered address space — fails closed with `BadAddress`, never
         // an oracle distinguishing the cause. The buffer
         // is a fixed `WIRE_LEN` stack array (no allocation).
-        let mut bytes = [0u8; rustos_abi::HwNode::WIRE_LEN];
+        let mut bytes = [0u8; tairix_abi::HwNode::WIRE_LEN];
         self.copy_in_user(caller, node, &mut bytes)?;
 
         // Fully decode and validate the node (lengths, discriminants,
         // bounded match-key / resource counts) before touching state.
-        let decoded = rustos_abi::HwNode::from_bytes(&bytes)?;
+        let decoded = tairix_abi::HwNode::from_bytes(&bytes)?;
 
         // Security spine of recursive, user-space hardware discovery
         // (no ambient authority;). Two checks, both
@@ -5800,20 +5800,20 @@ where
         // (`plans/DISPLAY.md` D6). A new input-routing destination coming
         // into existence is a security-relevant topology change, so it is
         // audited with the seat and node ids.
-        if class == Some(rustos_abi::hwtree::HwDeviceClass::Display) {
+        if class == Some(tairix_abi::hwtree::HwDeviceClass::Display) {
             let seat_id = self.seat_registry.attach_display(node_id);
             crate::audit::emit(
                 self.audit,
-                rustos_log::Level::Info,
+                tairix_log::Level::Info,
                 AuditEvent::SeatCreated,
                 &[
                     Field {
                         key: "seat",
-                        value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                        value: tairix_log::FieldValue::UnsignedInt(seat_id),
                     },
                     Field {
                         key: "node",
-                        value: rustos_log::FieldValue::UnsignedInt(u64::from(node_id)),
+                        value: tairix_log::FieldValue::UnsignedInt(u64::from(node_id)),
                     },
                 ],
             );
@@ -5866,16 +5866,16 @@ where
             if let Some(seat_id) = self.seat_registry.detach_display(vanished) {
                 crate::audit::emit(
                     self.audit,
-                    rustos_log::Level::Warn,
+                    tairix_log::Level::Warn,
                     AuditEvent::SeatDestroyed,
                     &[
                         Field {
                             key: "seat",
-                            value: rustos_log::FieldValue::UnsignedInt(seat_id),
+                            value: tairix_log::FieldValue::UnsignedInt(seat_id),
                         },
                         Field {
                             key: "node",
-                            value: rustos_log::FieldValue::UnsignedInt(u64::from(vanished)),
+                            value: tairix_log::FieldValue::UnsignedInt(u64::from(vanished)),
                         },
                     ],
                 );
@@ -5890,7 +5890,7 @@ where
         // buffer must be able to hold the whole encoded record before
         // anything is allocated, so a short buffer fails closed without
         // consuming a vector.
-        if out_len < rustos_abi::MsiAllocation::WIRE_LEN {
+        if out_len < tairix_abi::MsiAllocation::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
         // Mechanism: the installed arch producer mints a free MSI vector,
@@ -5923,7 +5923,7 @@ where
             caller.task_id,
             HwResource::irq(u64::from(allocation.line), 1),
         );
-        Ok(rustos_abi::MsiAllocation::WIRE_LEN as u64)
+        Ok(tairix_abi::MsiAllocation::WIRE_LEN as u64)
     }
 
     fn shm_create(&self, caller: &CallerContext<'_>, len: usize, id_out: u64) -> SyscallResult {
@@ -7011,7 +7011,7 @@ where
         // sets: sender authentication is the receiver's job over each
         // message's kernel-attested origin, and the mailbox is already
         // private to its owner (`ipc_recv` owner-gates every drain).
-        let port = rustos_kernel_ipc::Port::create(
+        let port = tairix_kernel_ipc::Port::create(
             EndpointId(endpoint),
             caller.caps,
             CapabilitySet::empty(),
@@ -7255,7 +7255,7 @@ where
     name: ProcName,
     /// The kernel-resolved program path the child is admitted from,
     /// recorded on its capability record so the reserved self-spawn token
-    /// (`rustos_abi::SPAWN_SELF`) can later re-spawn the same program as a
+    /// (`tairix_abi::SPAWN_SELF`) can later re-spawn the same program as a
     /// parser-sandbox worker. The resolved registry or store-bundle path
     /// for a `spawn`; empty for an admit path with no spawnable path (a
     /// kernel principal), which fails a later self-spawn closed. Derived
@@ -7267,7 +7267,7 @@ where
     /// switched to a target user by a [`CapabilityId::SPAWN_AS_USER`] holder,
     /// or the fixed system credential for a boot principal — never a
     /// caller-supplied value. Snapshotted onto the child's capability record
-    /// so its later filesystem checks and its attested [`rustos_abi::Origin`]
+    /// so its later filesystem checks and its attested [`tairix_abi::Origin`]
     /// run under an authoritative identity.
     credential: SpawnCredential,
     /// Whether the child is admitted as a **parser sandbox**
@@ -7374,7 +7374,7 @@ where
         let console = self
             .streams
             .session_console()
-            .map_or(rustos_abi::ORIGIN_CONSOLE_NONE, u64::from);
+            .map_or(tairix_abi::ORIGIN_CONSOLE_NONE, u64::from);
         // Effective set = `user ceiling ∩ manifest request`
         // (`plans/CAPABILITY_USE.md` CU1): `caps` is the manifest request and
         // the ceiling rides on the credential. A system-principal credential
@@ -7435,7 +7435,7 @@ where
         stack_span: crate::aspace::StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
-        live: Option<Box<dyn rustos_kernel_mem::LiveUserSpace + Send>>,
+        live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
         mut enter: Box<dyn FnMut() + Send>,
     ) -> Result<u64, AdmitError> {
         let cpu = SchedulerArch::current_cpu(self.arch);
@@ -8130,23 +8130,23 @@ where
     fn audit_no_caller_context(&self, cpu: u32, cause: &'static str) {
         let mut cpu_buf = [0u8; 16];
         let ev = AuditEvent::SyscallNoCallerContext;
-        rustos_log::log(
+        tairix_log::log(
             self.audit,
-            &rustos_log::Event {
-                level: rustos_log::Level::Error,
+            &tairix_log::Event {
+                level: tairix_log::Level::Error,
                 id: ev.id(),
                 message: ev.message(),
                 fields: &[
                     Field {
                         key: "cpu",
-                        value: rustos_log::FieldValue::Str(format_hex_u64(
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
                             u64::from(cpu),
                             &mut cpu_buf,
                         )),
                     },
                     Field {
                         key: "cause",
-                        value: rustos_log::FieldValue::Str(cause),
+                        value: tairix_log::FieldValue::Str(cause),
                     },
                 ],
             },
@@ -8378,26 +8378,26 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
-    use rustos_abi::input::{KeyValue, Modifiers};
-    use rustos_abi::seat::SEAT_PRIMARY;
-    use rustos_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT};
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
-    use rustos_kernel_irq::{IrqTable, UnsupportedController};
-    use rustos_kernel_mem::{
+    use tairix_abi::input::{KeyValue, Modifiers};
+    use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT};
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
+    use tairix_kernel_irq::{IrqTable, UnsupportedController};
+    use tairix_kernel_mem::{
         AddressSpace, AnonError, BootMemoryMap, DmaError, DmaMapping, Frame, FrameAllocator,
         FrozenAddressSpace, HostPageTable, LiveSpaceError, LiveUserSpace, MapFlags, MemoryRegion,
         Page, PhysAddr, RegionKind, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
-    use rustos_kernel_sched_api::{Priority, TaskAction};
-    use rustos_kernel_sec::{TaskCapabilities, UserId};
+    use tairix_kernel_sched_api::{Priority, TaskAction};
+    use tairix_kernel_sec::{TaskCapabilities, UserId};
 
     // `ProcessSpawn`, `ProgramRegistry`, `SpawnCtx`, and `AdmitError` are
     // already in scope through `use super::*`; only `EmbeddedProgram` is
     // additionally needed here.
     use crate::spawn::EmbeddedProgram;
-    use rustos_log::{set_max_level, Level};
-    use rustos_rng::{EntropyError, EntropySource, OutputReserve};
+    use tairix_log::{set_max_level, Level};
+    use tairix_rng::{EntropyError, EntropySource, OutputReserve};
 
     use crate::random::BootReserve;
 
@@ -8698,7 +8698,7 @@ mod tests {
             .expect("read end");
         aspaces
             .write()
-            .install_std_entry(SecTaskId(9), rustos_abi::STDIN, read)
+            .install_std_entry(SecTaskId(9), tairix_abi::STDIN, read)
             .expect("peer wired");
 
         let caps = make_caps_record(7, &[], sink);
@@ -8722,7 +8722,7 @@ mod tests {
         // reader is never left waiting on a writer that no longer exists.
         let peer = aspaces
             .read()
-            .open_file_entry(SecTaskId(9), rustos_abi::STDIN)
+            .open_file_entry(SecTaskId(9), tairix_abi::STDIN)
             .expect("peer entry");
         let OpenBacking::Pipe(end) = &peer.backing else {
             panic!("the peer's stdin is pipe-backed");
@@ -8916,7 +8916,7 @@ mod tests {
     /// User address of the `i`-th attach block a
     /// [`send_aspace_with_attach`] space stages (page 2, 48-byte strides).
     fn attach_addr(i: usize) -> u64 {
-        0x2000 + (i * rustos_abi::SPAWN_ATTACH_LEN) as u64
+        0x2000 + (i * tairix_abi::SPAWN_ATTACH_LEN) as u64
     }
 
     /// The attach block the spawn-as-user tests stage: switch the child to
@@ -9034,12 +9034,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
 
         let mut record = [0u8; LOG_RECORD_MAX];
-        let len = rustos_abi::encode_log_record(
+        let len = tairix_abi::encode_log_record(
             &mut record,
             Level::Info.as_u8(),
             7030,
             "bundle accepted",
-            &[("driver", rustos_abi::FieldValue::Str("vcmailbox"))],
+            &[("driver", tairix_abi::FieldValue::Str("vcmailbox"))],
         )
         .expect("encodes within bounds");
 
@@ -9154,7 +9154,7 @@ mod tests {
     }
 
     /// `ipc_send` to a bound endpoint with a faulting user pointer fails
-    /// closed with `BadAddress` (the RustOS `EFAULT`) and delivers
+    /// closed with `BadAddress` (the TAIRiX `EFAULT`) and delivers
     /// nothing: the page is not mapped in the caller's space.
     #[test]
     fn ipc_send_with_faulting_pointer_is_bad_address_and_delivers_nothing() {
@@ -9342,13 +9342,13 @@ mod tests {
             .with_caller_aspace(&ctx, |space, physmap| {
                 let mut buf = [0u8; 4];
                 copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
-                let mut origin = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
+                let mut origin = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
                 copy_in(space, physmap, VirtAddr::new(0x1800), &mut origin).expect("readable");
                 (buf, origin)
             })
             .expect("caller has a registered space");
         assert_eq!(read_back, payload);
-        let origin = rustos_abi::Origin::from_bytes(&origin_bytes).expect("well-formed origin");
+        let origin = tairix_abi::Origin::from_bytes(&origin_bytes).expect("well-formed origin");
         assert_eq!(origin.pid(), 0xB1);
         assert_eq!(origin.uid(), 1000);
     }
@@ -9866,7 +9866,7 @@ mod tests {
         // deferral record is announced.
         let ids = sink.event_ids();
         assert!(ids.contains(
-            &rustos_kernel_sec::AuditEvent::TaskCapabilitiesDelegated
+            &tairix_kernel_sec::AuditEvent::TaskCapabilitiesDelegated
                 .id()
                 .0
         ));
@@ -9947,7 +9947,7 @@ mod tests {
     }
 
     /// `cap_delegate` with a faulting set pointer fails closed with
-    /// `BadAddress` (the RustOS `EFAULT`) and never touches the table:
+    /// `BadAddress` (the TAIRiX `EFAULT`) and never touches the table:
     /// page 2 (`0x2000`) is unmapped in the caller's space.
     #[test]
     fn cap_delegate_with_faulting_pointer_is_bad_address() {
@@ -10225,15 +10225,15 @@ mod tests {
         );
     }
 
-    /// Permissive [`rustos_kernel_irq::IrqController`] for the
+    /// Permissive [`tairix_kernel_irq::IrqController`] for the
     /// pre-fired-ready test below. Accepts every line; the
     /// in-crate `UnsupportedController` would reject the test's
     /// `IrqTable::fire` call before the table could set the ready
     /// flag (`UnsupportedController::mask` always returns
     /// `MaskError::Unsupported`).
     struct PermissiveController;
-    impl rustos_kernel_irq::IrqController for PermissiveController {
-        fn mask(&self, _line: u32) -> Result<(), rustos_kernel_irq::MaskError> {
+    impl tairix_kernel_irq::IrqController for PermissiveController {
+        fn mask(&self, _line: u32) -> Result<(), tairix_kernel_irq::MaskError> {
             Ok(())
         }
     }
@@ -10362,7 +10362,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        let g = rustos_abi::COARSE_CLOCK_GRANULARITY_NS;
+        let g = tairix_abi::COARSE_CLOCK_GRANULARITY_NS;
 
         // Stage a known raw reading; the next `monotonic_ns` returns
         // `value + 1`, so a raw of `12_345` must floor to `12_000`.
@@ -10450,7 +10450,7 @@ mod tests {
             h.random_get(
                 &ctx,
                 0x4000,
-                rustos_abi::RANDOM_REQUEST_MAX_BYTES + 1,
+                tairix_abi::RANDOM_REQUEST_MAX_BYTES + 1,
                 RandomFlags::empty()
             ),
             Err(Errno::LengthOutOfRange)
@@ -10576,7 +10576,7 @@ mod tests {
     }
 
     /// `random_get` from a seeded reserve but a caller with no registered
-    /// address space fails closed with `BadAddress` (the RustOS
+    /// address space fails closed with `BadAddress` (the TAIRiX
     /// `EFAULT`) — the same code every copy-path handler returns.
     #[test]
     fn random_get_without_registered_aspace_is_bad_address() {
@@ -10781,13 +10781,13 @@ mod tests {
     /// A console sink that records every byte handed to it, for the
     /// `stream_write` handler tests.
     struct RecordingConsole {
-        written: rustos_sync::SpinLock<alloc::vec::Vec<u8>>,
+        written: tairix_sync::SpinLock<alloc::vec::Vec<u8>>,
     }
 
     impl RecordingConsole {
         fn new() -> Self {
             Self {
-                written: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+                written: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
             }
         }
     }
@@ -10801,14 +10801,14 @@ mod tests {
 
     /// A console sink that reports a fixed character-cell grid, standing in
     /// for a framebuffer text console in the `terminal_size` handler test.
-    struct GridConsole(rustos_abi::TerminalSize);
+    struct GridConsole(tairix_abi::TerminalSize);
 
     impl crate::console::ConsoleWrite for GridConsole {
         fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
             Ok(bytes.len())
         }
 
-        fn geometry(&self) -> Option<rustos_abi::TerminalSize> {
+        fn geometry(&self) -> Option<tairix_abi::TerminalSize> {
             Some(self.0)
         }
     }
@@ -10849,7 +10849,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let banner = b"RustOS init: hello\n";
+        let banner = b"TAIRiX init: hello\n";
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, banner);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
@@ -10880,7 +10880,7 @@ mod tests {
         );
         // The trailing line feed was cooked to CR-LF on the way to the
         // device, while the reported count stays the input length.
-        assert_eq!(console.written.lock().as_slice(), b"RustOS init: hello\r\n");
+        assert_eq!(console.written.lock().as_slice(), b"TAIRiX init: hello\r\n");
     }
 
     /// With no console installed the handler holds `NULL_CONSOLE` and
@@ -11056,14 +11056,14 @@ mod tests {
     /// short-read behaviour) and reports the count.
     struct RecordingConsoleRead {
         input: alloc::vec::Vec<u8>,
-        last_buf_len: rustos_sync::SpinLock<Option<usize>>,
+        last_buf_len: tairix_sync::SpinLock<Option<usize>>,
     }
 
     impl RecordingConsoleRead {
         fn new(input: &[u8]) -> Self {
             Self {
                 input: input.to_vec(),
-                last_buf_len: rustos_sync::SpinLock::new(None),
+                last_buf_len: tairix_sync::SpinLock::new(None),
             }
         }
     }
@@ -11425,7 +11425,7 @@ mod tests {
         // The whole record is reported consumed (the producer never loops
         // or fails), but nothing reaches any console device.
         assert_eq!(
-            h.stream_write(&ctx, rustos_abi::STDINFO, 0x1000, record.len()),
+            h.stream_write(&ctx, tairix_abi::STDINFO, 0x1000, record.len()),
             Ok(record.len() as u64)
         );
         assert!(console.written.lock().is_empty());
@@ -11536,17 +11536,17 @@ mod tests {
     /// without the arch-specific image build (`plans/SPAWN.md` SP3 host
     /// proof; `SP3b` wires the real aarch64 producer).
     struct RecordingSpawn {
-        rxe: rustos_sync::SpinLock<alloc::vec::Vec<u8>>,
-        args: rustos_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
-        env: rustos_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+        rxe: tairix_sync::SpinLock<alloc::vec::Vec<u8>>,
+        args: tairix_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+        env: tairix_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
     }
 
     impl RecordingSpawn {
         fn new() -> Self {
             Self {
-                rxe: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
-                args: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
-                env: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+                rxe: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+                args: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+                env: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
             }
         }
     }
@@ -11911,7 +11911,7 @@ mod tests {
         fn open(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             flags: OpenFlags,
         ) -> Result<(), Errno> {
@@ -11924,7 +11924,7 @@ mod tests {
         fn read(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             offset: u64,
             buf: &mut [u8],
@@ -11937,7 +11937,7 @@ mod tests {
         fn write(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             offset: u64,
             append: bool,
@@ -11949,7 +11949,7 @@ mod tests {
         fn readdir(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
         ) -> Result<alloc::vec::Vec<crate::fs::ReaddirEntry>, Errno> {
             self.inner.readdir(uid, caps, path)
@@ -11958,7 +11958,7 @@ mod tests {
         fn stat(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
         ) -> Result<FileStat, Errno> {
             self.inner.stat(uid, caps, path)
@@ -11967,21 +11967,21 @@ mod tests {
         fn truncate(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             size: u64,
         ) -> Result<(), Errno> {
             self.inner.truncate(uid, caps, path, size)
         }
 
-        fn sync(&self, uid: u32, caps: &dyn rustos_abi::CapabilityQuery) -> Result<(), Errno> {
+        fn sync(&self, uid: u32, caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
             self.inner.sync(uid, caps)
         }
 
         fn mkdir(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
         ) -> Result<(), Errno> {
             self.inner.mkdir(uid, caps, path)
@@ -11990,7 +11990,7 @@ mod tests {
         fn unlink(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             flags: UnlinkFlags,
         ) -> Result<(), Errno> {
@@ -12000,7 +12000,7 @@ mod tests {
         fn rename(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             src: &str,
             dst: &str,
         ) -> Result<(), Errno> {
@@ -12010,7 +12010,7 @@ mod tests {
         fn set_mode(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             mode: u32,
         ) -> Result<(), Errno> {
@@ -12020,7 +12020,7 @@ mod tests {
         fn attr_get(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             key: &[u8],
             value_out: &mut [u8],
@@ -12031,7 +12031,7 @@ mod tests {
         fn attr_set(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             key: &[u8],
             value: &[u8],
@@ -12042,7 +12042,7 @@ mod tests {
         fn attr_list(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             index: u64,
             key_out: &mut [u8],
@@ -12053,7 +12053,7 @@ mod tests {
         fn attr_remove(
             &self,
             uid: u32,
-            caps: &dyn rustos_abi::CapabilityQuery,
+            caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             key: &[u8],
         ) -> Result<(), Errno> {
@@ -12066,7 +12066,7 @@ mod tests {
     /// published, so the cache-behaviour tests exercise admission and hits.
     fn install_launch_cache(store: &crate::appspawn::AppStore) {
         struct PlentyFree;
-        impl rustos_kernel_mem::FreeMemorySource for PlentyFree {
+        impl tairix_kernel_mem::FreeMemorySource for PlentyFree {
             fn free_bytes(&self) -> usize {
                 1 << 29
             }
@@ -12075,12 +12075,12 @@ mod tests {
             }
         }
         let source: &'static PlentyFree = Box::leak(Box::new(PlentyFree));
-        let pressure: &'static rustos_kernel_mem::MemoryPressure =
-            Box::leak(Box::new(rustos_kernel_mem::MemoryPressure::over(source)));
+        let pressure: &'static tairix_kernel_mem::MemoryPressure =
+            Box::leak(Box::new(tairix_kernel_mem::MemoryPressure::over(source)));
         let audit: &'static crate::test_sink::TestSink =
             Box::leak(Box::new(crate::test_sink::TestSink::new()));
         store.install_reclaim(
-            rustos_kernel_mem::CacheBudget::from_backing(1 << 24),
+            tairix_kernel_mem::CacheBudget::from_backing(1 << 24),
             pressure,
             audit,
         );
@@ -12298,9 +12298,9 @@ mod tests {
         // built by the same shared encoder userland's `spawn_with` uses.
         let args: [&[u8]; 2] = [b"man", b"ps"];
         let env: [&[u8]; 1] = [b"LANG=fr-FR"];
-        let block_len = rustos_abi::process_start_encoded_len(&args, &env).expect("sized");
+        let block_len = tairix_abi::process_start_encoded_len(&args, &env).expect("sized");
         let mut block = alloc::vec![0u8; block_len];
-        rustos_abi::process_start_write_into(&mut block, &args, &env, 0).expect("encoded");
+        tairix_abi::process_start_write_into(&mut block, &args, &env, 0).expect("encoded");
         let mut payload = SPAWN_PATH.to_vec();
         payload.extend_from_slice(&block);
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &payload);
@@ -12577,7 +12577,7 @@ mod tests {
             Some(0x55),
             // A fixed minted identity so the admit path's attestation is
             // observable.
-            rustos_abi::ProcId::from_raw([0x11; 16]),
+            tairix_abi::ProcId::from_raw([0x11; 16]),
             // A fixed name so the admit path's name attestation is observable.
             ProcName::from_bytes_truncating(b"driverproc"),
             // The kernel-resolved path the admit path records for a later
@@ -12612,7 +12612,7 @@ mod tests {
         // capability record by `admit_process`, distinct from its numeric id.
         assert_eq!(
             table.read().caps_for(child).map(TaskCapabilities::proc_id),
-            Some(rustos_abi::ProcId::from_raw([0x11; 16]))
+            Some(tairix_abi::ProcId::from_raw([0x11; 16]))
         );
 
         // The kernel-attested process name is threaded from the spawn context
@@ -12660,14 +12660,14 @@ mod tests {
         let wire = aspaces.read().grants_to_le_bytes(child);
         assert_eq!(
             wire.len(),
-            2 * rustos_abi::hwtree::GrantedResource::WIRE_LEN
+            2 * tairix_abi::hwtree::GrantedResource::WIRE_LEN
         );
         let first =
-            rustos_abi::hwtree::GrantedResource::from_bytes(&wire).expect("first record decodes");
+            tairix_abi::hwtree::GrantedResource::from_bytes(&wire).expect("first record decodes");
         assert_eq!(first.handle, 1);
         assert_eq!(first.resource, regs);
-        let second = rustos_abi::hwtree::GrantedResource::from_bytes(
-            &wire[rustos_abi::hwtree::GrantedResource::WIRE_LEN..],
+        let second = tairix_abi::hwtree::GrantedResource::from_bytes(
+            &wire[tairix_abi::hwtree::GrantedResource::WIRE_LEN..],
         )
         .expect("second record decodes");
         assert_eq!(second.handle, 2);
@@ -12694,7 +12694,7 @@ mod tests {
         // id. This is what the admit path must copy onto the child — never a
         // caller-supplied value.
         let parent_task = SecTaskId(3);
-        let parent_proc = rustos_abi::ProcId::from_raw([0x22; 16]);
+        let parent_proc = tairix_abi::ProcId::from_raw([0x22; 16]);
         table.write().insert(
             TaskCapabilities::derive(
                 parent_task,
@@ -12715,7 +12715,7 @@ mod tests {
 
         // One ctx builder for both admits below: everything but the parent
         // and the minted child identity is the same live kernel state.
-        let make_ctx = |parent: SecTaskId, proc_id: rustos_abi::ProcId| {
+        let make_ctx = |parent: SecTaskId, proc_id: tairix_abi::ProcId| {
             KernelSpawnCtx::new(
                 &frames,
                 None,
@@ -12741,7 +12741,7 @@ mod tests {
         // A child spawned by that parent records the parent's attested
         // identity as its parentage, and its own (distinct) minted identity
         // as `proc_id`.
-        let child_proc = rustos_abi::ProcId::from_raw([0x11; 16]);
+        let child_proc = tairix_abi::ProcId::from_raw([0x11; 16]);
         let ctx = make_ctx(parent_task, child_proc);
         let pid = RecordingSpawn::new()
             .spawn_with(
@@ -12769,7 +12769,7 @@ mod tests {
 
         // A kernel-parented admit — the parent id names no capability record
         // — records the kernel sentinel, never a fabricated value.
-        let orphan_ctx = make_ctx(SecTaskId(9999), rustos_abi::ProcId::from_raw([0x33; 16]));
+        let orphan_ctx = make_ctx(SecTaskId(9999), tairix_abi::ProcId::from_raw([0x33; 16]));
         let orphan_pid = RecordingSpawn::new()
             .spawn_with(
                 program.rxe,
@@ -12784,7 +12784,7 @@ mod tests {
                 .read()
                 .caps_for(SecTaskId(orphan_pid))
                 .map(TaskCapabilities::parent_proc_id),
-            Some(rustos_abi::ProcId::KERNEL),
+            Some(tairix_abi::ProcId::KERNEL),
             "a parent with no record yields the kernel sentinel"
         );
     }
@@ -12999,7 +12999,7 @@ mod tests {
         let wait_producer: &'static RecordingProcessWait = Box::leak(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 0,
-                status: rustos_abi::WaitStatus::Exited(0),
+                status: tairix_abi::WaitStatus::Exited(0),
             })),
         ));
 
@@ -13337,16 +13337,16 @@ mod tests {
             let write = reg
                 .open_file_entry(SecTaskId(2), write_fd)
                 .expect("write end");
-            reg.install_std_entry(SecTaskId(2), rustos_abi::STDIN, read)
+            reg.install_std_entry(SecTaskId(2), tairix_abi::STDIN, read)
                 .expect("stdin wired");
-            reg.install_std_entry(SecTaskId(2), rustos_abi::STDOUT, write)
+            reg.install_std_entry(SecTaskId(2), tairix_abi::STDOUT, write)
                 .expect("stdout wired");
             reg.set_streams(SecTaskId(2), DescriptorTable::closed());
         }
 
         // stdout -> pipe -> stdin, no console anywhere.
-        assert_eq!(h.stream_write(&ctx, rustos_abi::STDOUT, 0x1000, 4), Ok(4));
-        assert_eq!(h.stream_read(&ctx, rustos_abi::STDIN, 0x1100, 4, 0), Ok(4));
+        assert_eq!(h.stream_write(&ctx, tairix_abi::STDOUT, 0x1000, 4), Ok(4));
+        assert_eq!(h.stream_read(&ctx, tairix_abi::STDIN, 0x1100, 4, 0), Ok(4));
         let mut out = [0u8; 4];
         h.with_caller_aspace(&ctx, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(0x1100), &mut out).expect("readable");
@@ -13357,17 +13357,17 @@ mod tests {
         // Direction is the entry's own open flags: a read of the write end
         // and a write of the read end both fail closed.
         assert_eq!(
-            h.stream_read(&ctx, rustos_abi::STDOUT, 0x1100, 4, 0),
+            h.stream_read(&ctx, tairix_abi::STDOUT, 0x1100, 4, 0),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
-            h.stream_write(&ctx, rustos_abi::STDIN, 0x1000, 4),
+            h.stream_write(&ctx, tairix_abi::STDIN, 0x1000, 4),
             Err(Errno::PermissionDenied)
         );
         // A wired descriptor is not a terminal: the console-only controls
         // fail closed with `NotFound`.
         assert_eq!(
-            h.stream_input_mode(&ctx, rustos_abi::STDIN, 1),
+            h.stream_input_mode(&ctx, tairix_abi::STDIN, 1),
             Err(Errno::NotFound)
         );
     }
@@ -13448,7 +13448,7 @@ mod tests {
         // The child's stdout is a counted clone of the parent's write end.
         let child_entry = aspaces
             .read()
-            .open_file_entry(SecTaskId(pid), rustos_abi::STDOUT)
+            .open_file_entry(SecTaskId(pid), tairix_abi::STDOUT)
             .expect("wired child entry");
         let parent_entry = aspaces
             .read()
@@ -13463,10 +13463,10 @@ mod tests {
         // wire closed stderr; the untouched slots inherit the parent's
         // console-1 table.
         let child_streams = aspaces.read().streams(SecTaskId(pid));
-        assert_eq!(child_streams.mode(rustos_abi::STDOUT), StreamMode::Closed);
-        assert_eq!(child_streams.mode(rustos_abi::STDERR), StreamMode::Closed);
-        assert_eq!(child_streams.mode(rustos_abi::STDIN), StreamMode::Read);
-        assert_eq!(child_streams.console(rustos_abi::STDIN), 1);
+        assert_eq!(child_streams.mode(tairix_abi::STDOUT), StreamMode::Closed);
+        assert_eq!(child_streams.mode(tairix_abi::STDERR), StreamMode::Closed);
+        assert_eq!(child_streams.mode(tairix_abi::STDIN), StreamMode::Read);
+        assert_eq!(child_streams.console(tairix_abi::STDIN), 1);
         // The child's end stays live independently of the parent's
         // descriptor: closing the parent's write end leaves the pipe
         // writable through the child's clone (the read end still lives).
@@ -13492,7 +13492,7 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         // A canonical sandbox block: every wire explicit (all closed
         // here), inherited credential, no console index.
-        let attach = SpawnAttach::sandbox([FdWire::Closed; rustos_abi::STD_STREAM_COUNT]);
+        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
         let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
@@ -13549,10 +13549,10 @@ mod tests {
         // the whole story, nothing ambient flowed in.
         let child_streams = aspaces.read().streams(SecTaskId(pid));
         for fd in [
-            rustos_abi::STDIN,
-            rustos_abi::STDOUT,
-            rustos_abi::STDERR,
-            rustos_abi::STDINFO,
+            tairix_abi::STDIN,
+            tairix_abi::STDOUT,
+            tairix_abi::STDERR,
+            tairix_abi::STDINFO,
         ] {
             assert_eq!(child_streams.mode(fd), StreamMode::Closed);
         }
@@ -13571,9 +13571,9 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let attach = SpawnAttach::sandbox([FdWire::Closed; rustos_abi::STD_STREAM_COUNT]);
+        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
         // The payload the caller passes is the token, not a path.
-        let (space, physmap) = send_aspace_with_attach(rustos_abi::SPAWN_SELF, &[attach]);
+        let (space, physmap) = send_aspace_with_attach(tairix_abi::SPAWN_SELF, &[attach]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -13610,7 +13610,7 @@ mod tests {
             .spawn(
                 &ctx,
                 0x1000,
-                rustos_abi::SPAWN_SELF.len(),
+                tairix_abi::SPAWN_SELF.len(),
                 attach_addr(0),
                 SPAWN_ATTACH_LEN,
                 0,
@@ -13640,7 +13640,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace_with_attach(rustos_abi::SPAWN_SELF, &[]);
+        let (space, physmap) = send_aspace_with_attach(tairix_abi::SPAWN_SELF, &[]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -13672,7 +13672,7 @@ mod tests {
         );
 
         let pid = h
-            .spawn(&ctx, 0x1000, rustos_abi::SPAWN_SELF.len(), 0, 0, 0, 0)
+            .spawn(&ctx, 0x1000, tairix_abi::SPAWN_SELF.len(), 0, 0, 0, 0)
             .expect("plain self-token spawn succeeds");
 
         let guard = table.read();
@@ -13699,8 +13699,8 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let attach = SpawnAttach::sandbox([FdWire::Closed; rustos_abi::STD_STREAM_COUNT]);
-        let (space, physmap) = send_aspace_with_attach(rustos_abi::SPAWN_SELF, &[attach]);
+        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
+        let (space, physmap) = send_aspace_with_attach(tairix_abi::SPAWN_SELF, &[attach]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -13735,7 +13735,7 @@ mod tests {
             h.spawn(
                 &ctx,
                 0x1000,
-                rustos_abi::SPAWN_SELF.len(),
+                tairix_abi::SPAWN_SELF.len(),
                 attach_addr(0),
                 SPAWN_ATTACH_LEN,
                 0,
@@ -14284,10 +14284,10 @@ mod tests {
         // The parent reaps the signalled exit with Terminate's `128 + n`
         // status, exactly as the immediate terminate path records it.
         assert_eq!(
-            wait.poll(SecTaskId(2), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(SecTaskId(2), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(crate::procwait::WaitedChild {
                 pid: 9,
-                status: rustos_abi::WaitStatus::Exited(143)
+                status: tairix_abi::WaitStatus::Exited(143)
             })
         );
         // The one shared teardown ran: the capability record is withdrawn.
@@ -15721,7 +15721,7 @@ mod tests {
     /// which uid.
     #[test]
     fn spawn_as_user_switches_to_the_resolved_credential() {
-        use rustos_kernel_sec::{GroupRecord, IdentityTableBuilder, UserRecord};
+        use tairix_kernel_sec::{GroupRecord, IdentityTableBuilder, UserRecord};
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -15806,7 +15806,7 @@ mod tests {
     /// dead data.
     #[test]
     fn spawn_as_user_intersects_the_manifest_with_the_account_ceiling() {
-        use rustos_kernel_sec::{GroupRecord, IdentityTableBuilder, UserRecord};
+        use tairix_kernel_sec::{GroupRecord, IdentityTableBuilder, UserRecord};
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -15896,7 +15896,7 @@ mod tests {
         let derived: alloc::vec::Vec<_> = sink
             .snapshot()
             .into_iter()
-            .filter(|e| e.id == rustos_kernel_sec::AuditEvent::TaskCapabilitiesDerived.id())
+            .filter(|e| e.id == tairix_kernel_sec::AuditEvent::TaskCapabilitiesDerived.id())
             .collect();
         let child_derive = derived.last().expect("child derive audited");
         assert!(child_derive
@@ -16024,11 +16024,11 @@ mod tests {
             &[CapabilityId::NET_RAW],
         ];
         let accounts: &[(u32, &[CapabilityId])] = &[
-            (rustos_users::DEVMGR_UID.0, rustos_users::DEVMGR_CEILING),
-            (rustos_users::SYSINFOD_UID.0, rustos_users::SYSINFOD_CEILING),
-            (rustos_users::SEATMGR_UID.0, rustos_users::SEATMGR_CEILING),
-            (rustos_users::LOGIN_UID.0, rustos_users::LOGIN_CEILING),
-            (rustos_users::NETSTACK_UID.0, rustos_users::NETSTACK_CEILING),
+            (tairix_users::DEVMGR_UID.0, tairix_users::DEVMGR_CEILING),
+            (tairix_users::SYSINFOD_UID.0, tairix_users::SYSINFOD_CEILING),
+            (tairix_users::SEATMGR_UID.0, tairix_users::SEATMGR_CEILING),
+            (tairix_users::LOGIN_UID.0, tairix_users::LOGIN_CEILING),
+            (tairix_users::NETSTACK_UID.0, tairix_users::NETSTACK_CEILING),
         ];
 
         for (index, (uid, ceiling)) in accounts.iter().enumerate() {
@@ -16181,7 +16181,7 @@ mod tests {
     /// `spawn_as_user_without_identity_table_fails_closed` below.)
     #[test]
     fn spawn_as_user_to_an_unknown_uid_is_denied() {
-        use rustos_kernel_sec::IdentityTableBuilder;
+        use tairix_kernel_sec::IdentityTableBuilder;
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -16311,16 +16311,16 @@ mod tests {
     /// can assert the arguments reached it without a real `kernel/mem`
     /// live-mapping path.
     struct RecordingMemMap {
-        reservation: rustos_sync::SpinLock<Option<(usize, u32, u64)>>,
-        mapping: rustos_sync::SpinLock<Option<(usize, u32, u64)>>,
-        release: rustos_sync::SpinLock<Option<(u64, usize)>>,
+        reservation: tairix_sync::SpinLock<Option<(usize, u32, u64)>>,
+        mapping: tairix_sync::SpinLock<Option<(usize, u32, u64)>>,
+        release: tairix_sync::SpinLock<Option<(u64, usize)>>,
     }
     impl RecordingMemMap {
         fn new() -> Self {
             Self {
-                reservation: rustos_sync::SpinLock::new(None),
-                mapping: rustos_sync::SpinLock::new(None),
-                release: rustos_sync::SpinLock::new(None),
+                reservation: tairix_sync::SpinLock::new(None),
+                mapping: tairix_sync::SpinLock::new(None),
+                release: tairix_sync::SpinLock::new(None),
             }
         }
     }
@@ -16328,7 +16328,7 @@ mod tests {
         fn reserve(
             &self,
             len: usize,
-            flags: rustos_abi::MapFlags,
+            flags: tairix_abi::MapFlags,
             addr_hint: u64,
         ) -> Result<u64, Errno> {
             *self.reservation.lock() = Some((len, flags.bits(), addr_hint));
@@ -16339,7 +16339,7 @@ mod tests {
         fn map(
             &self,
             len: usize,
-            flags: rustos_abi::MapFlags,
+            flags: tairix_abi::MapFlags,
             addr_hint: u64,
         ) -> Result<u64, Errno> {
             *self.mapping.lock() = Some((len, flags.bits(), addr_hint));
@@ -16378,7 +16378,7 @@ mod tests {
         )
         .with_mem_map(producer);
 
-        let flags = rustos_abi::MapFlags::FIXED;
+        let flags = tairix_abi::MapFlags::FIXED;
         assert_eq!(
             h.mem_map(&ctx, 0x2000, flags, 0x10_0000),
             Ok(0x5000_0000 | 0x10_0000)
@@ -16418,7 +16418,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.mem_map(&ctx, 0x1000, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, 0x1000, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::NotImplemented)
         );
     }
@@ -16449,7 +16449,7 @@ mod tests {
         .with_mem_map(producer);
 
         assert_eq!(
-            h.mem_map(&ctx, 0, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, 0, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::LengthOutOfRange)
         );
         // The producer was never reached: the zero-length guard fails
@@ -16496,7 +16496,7 @@ mod tests {
 
         // A request exactly at the ceiling is admitted and charged.
         let base = h
-            .mem_map(&ctx, 0x2000, rustos_abi::MapFlags::empty(), 0)
+            .mem_map(&ctx, 0x2000, tairix_abi::MapFlags::empty(), 0)
             .expect("a map at the ceiling succeeds");
         assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
 
@@ -16504,7 +16504,7 @@ mod tests {
         // the producer is never reached for the rejected request.
         *producer.mapping.lock() = None;
         assert_eq!(
-            h.mem_map(&ctx, 0x1000, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, 0x1000, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::OutOfRange)
         );
         assert!(producer.mapping.lock().is_none());
@@ -16516,7 +16516,7 @@ mod tests {
         assert_eq!(h.mem_unmap(&ctx, base, 0x2000), Ok(0));
         assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0);
         assert!(h
-            .mem_map(&ctx, 0x2000, rustos_abi::MapFlags::empty(), 0)
+            .mem_map(&ctx, 0x2000, tairix_abi::MapFlags::empty(), 0)
             .is_ok());
         assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
     }
@@ -16557,11 +16557,11 @@ mod tests {
 
         // One byte rounds up to a whole page and just fits the one-page
         // ceiling; it is charged as a full page, not a single byte.
-        assert!(h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0).is_ok());
+        assert!(h.mem_map(&ctx, 1, tairix_abi::MapFlags::empty(), 0).is_ok());
         assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x1000);
         // A second single byte would need a second page: denied.
         assert_eq!(
-            h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, 1, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::OutOfRange)
         );
     }
@@ -16575,19 +16575,19 @@ mod tests {
     /// [`FILE_REGION_BASE`], and returns a configurable `map_page` result so
     /// the resolver's race/failure folds are exercised without a page table.
     struct RecordingFileMap {
-        reserves: rustos_sync::SpinLock<Vec<u64>>,
-        pages: rustos_sync::SpinLock<Vec<(u64, usize)>>,
-        releases: rustos_sync::SpinLock<Vec<(u64, u64)>>,
-        map_page_result: rustos_sync::SpinLock<Result<(), Errno>>,
+        reserves: tairix_sync::SpinLock<Vec<u64>>,
+        pages: tairix_sync::SpinLock<Vec<(u64, usize)>>,
+        releases: tairix_sync::SpinLock<Vec<(u64, u64)>>,
+        map_page_result: tairix_sync::SpinLock<Result<(), Errno>>,
     }
 
     impl RecordingFileMap {
         fn new() -> Self {
             Self {
-                reserves: rustos_sync::SpinLock::new(Vec::new()),
-                pages: rustos_sync::SpinLock::new(Vec::new()),
-                releases: rustos_sync::SpinLock::new(Vec::new()),
-                map_page_result: rustos_sync::SpinLock::new(Ok(())),
+                reserves: tairix_sync::SpinLock::new(Vec::new()),
+                pages: tairix_sync::SpinLock::new(Vec::new()),
+                releases: tairix_sync::SpinLock::new(Vec::new()),
+                map_page_result: tairix_sync::SpinLock::new(Ok(())),
             }
         }
     }
@@ -16743,7 +16743,7 @@ mod tests {
         assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x1000);
         // The budget is shared: an anonymous map now exceeds it too.
         assert_eq!(
-            h.mem_map(&ctx, 1, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, 1, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::OutOfRange)
         );
         // Releasing the file region frees the budget again.
@@ -16937,7 +16937,7 @@ mod tests {
         assert!(h.resolve_anon_fault(SecTaskId(2), fault));
         assert_eq!(
             *producer.mapping.lock(),
-            Some((PAGE_SIZE, rustos_abi::MapFlags::FIXED.bits(), page_va))
+            Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), page_va))
         );
     }
 
@@ -16965,7 +16965,7 @@ mod tests {
             .filter(|e| e.id == AuditEvent::TaskFaultKilled.id())
             .collect();
         assert_eq!(kills.len(), 2);
-        assert_eq!(kills[0].level, rustos_log::Level::Warn);
+        assert_eq!(kills[0].level, tairix_log::Level::Warn);
         assert!(kills[0]
             .fields
             .contains(&(String::from("task"), String::from("2"))));
@@ -16995,16 +16995,16 @@ mod tests {
     /// onward fail with `OutOfMemory`, so a mid-walk frame exhaustion is
     /// exercisable too.
     struct StackGrowMemMap {
-        maps: rustos_sync::SpinLock<Vec<(usize, u32, u64)>>,
-        map_result: rustos_sync::SpinLock<Result<(), Errno>>,
-        fail_from: rustos_sync::SpinLock<Option<usize>>,
+        maps: tairix_sync::SpinLock<Vec<(usize, u32, u64)>>,
+        map_result: tairix_sync::SpinLock<Result<(), Errno>>,
+        fail_from: tairix_sync::SpinLock<Option<usize>>,
     }
     impl StackGrowMemMap {
         fn new() -> Self {
             Self {
-                maps: rustos_sync::SpinLock::new(Vec::new()),
-                map_result: rustos_sync::SpinLock::new(Ok(())),
-                fail_from: rustos_sync::SpinLock::new(None),
+                maps: tairix_sync::SpinLock::new(Vec::new()),
+                map_result: tairix_sync::SpinLock::new(Ok(())),
+                fail_from: tairix_sync::SpinLock::new(None),
             }
         }
     }
@@ -17012,7 +17012,7 @@ mod tests {
         fn reserve(
             &self,
             len: usize,
-            flags: rustos_abi::MapFlags,
+            flags: tairix_abi::MapFlags,
             addr_hint: u64,
         ) -> Result<u64, Errno> {
             // This double models the single-page stack-growth commit path
@@ -17023,7 +17023,7 @@ mod tests {
         fn map(
             &self,
             len: usize,
-            flags: rustos_abi::MapFlags,
+            flags: tairix_abi::MapFlags,
             addr_hint: u64,
         ) -> Result<u64, Errno> {
             let index = {
@@ -17085,7 +17085,7 @@ mod tests {
         assert!(h.resolve_stack_fault(SecTaskId(2), fault));
         assert_eq!(
             *producer.maps.lock(),
-            std::vec![(PAGE_SIZE, rustos_abi::MapFlags::FIXED.bits(), page_va)]
+            std::vec![(PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), page_va)]
         );
         let span = aspaces.read().stack_span(SecTaskId(2)).expect("recorded");
         assert_eq!(span.committed_base(), page_va);
@@ -17176,15 +17176,15 @@ mod tests {
             std::vec![
                 (
                     PAGE_SIZE,
-                    rustos_abi::MapFlags::FIXED.bits(),
+                    tairix_abi::MapFlags::FIXED.bits(),
                     fault_page + 2 * page
                 ),
                 (
                     PAGE_SIZE,
-                    rustos_abi::MapFlags::FIXED.bits(),
+                    tairix_abi::MapFlags::FIXED.bits(),
                     fault_page + page
                 ),
-                (PAGE_SIZE, rustos_abi::MapFlags::FIXED.bits(), fault_page),
+                (PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), fault_page),
             ]
         );
         assert_eq!(
@@ -17402,7 +17402,7 @@ mod tests {
         fn translate_page(
             &self,
             page: Page,
-        ) -> Option<(rustos_kernel_mem::Frame, rustos_kernel_mem::MapFlags)> {
+        ) -> Option<(tairix_kernel_mem::Frame, tairix_kernel_mem::MapFlags)> {
             self.space.translate(page)
         }
         fn alloc_dma(&mut self, _len: usize, _limit: u64) -> Result<DmaMapping, LiveSpaceError> {
@@ -17497,7 +17497,7 @@ mod tests {
         )
         .with_mem_map(producer);
 
-        h.mem_map(&ctx, 0x1000, rustos_abi::MapFlags::FIXED, 0x4000)
+        h.mem_map(&ctx, 0x1000, tairix_abi::MapFlags::FIXED, 0x4000)
             .expect("mem_map succeeds");
 
         // The re-freeze published the live space's mappings: the heap page
@@ -17578,8 +17578,8 @@ mod tests {
     /// assert the validated window reached the mechanism without a real
     /// `kernel/mem` mapping path.
     struct RecordingMmioFacility {
-        last: rustos_sync::SpinLock<Option<(u64, usize)>>,
-        last_kind: rustos_sync::SpinLock<Option<MmioMemoryKind>>,
+        last: tairix_sync::SpinLock<Option<(u64, usize)>>,
+        last_kind: tairix_sync::SpinLock<Option<MmioMemoryKind>>,
         ret: Result<u64, Errno>,
     }
     impl crate::devres::MmioMapFacility for RecordingMmioFacility {
@@ -17656,11 +17656,11 @@ mod tests {
         // Mint one grant for task 2, capturing its kernel-issued handle.
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: rustos_sync::SpinLock::new(None),
-            last_kind: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            last_kind: tairix_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17708,11 +17708,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: rustos_sync::SpinLock::new(None),
-            last_kind: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            last_kind: tairix_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17731,8 +17731,8 @@ mod tests {
 
     #[test]
     fn mmio_map_routes_each_framebuffer_memory_policy() {
-        use rustos_abi::driver::display::{DisplayFormat, DisplayMode};
-        use rustos_abi::hwtree::{FramebufferMemory, HwResource};
+        use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+        use tairix_abi::hwtree::{FramebufferMemory, HwResource};
 
         let sink = make_sink();
         let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
@@ -17760,8 +17760,8 @@ mod tests {
                 .expect("valid WC framebuffer"),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: rustos_sync::SpinLock::new(None),
-            last_kind: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            last_kind: tairix_sync::SpinLock::new(None),
             ret: Ok(0xA000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17798,7 +17798,7 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -17828,11 +17828,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: rustos_sync::SpinLock::new(None),
-            last_kind: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            last_kind: tairix_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17870,11 +17870,11 @@ mod tests {
         // 0x6_0000_0000, PCIe-space base 0xC000_0000.
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xC000_0000),
+            tairix_abi::hwtree::HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xC000_0000),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: rustos_sync::SpinLock::new(None),
-            last_kind: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            last_kind: tairix_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
         }));
         let h = KernelSyscallHandlers::new(
@@ -17905,8 +17905,8 @@ mod tests {
     /// tests can assert the validated request reached the mechanism without
     /// a real `kernel/mem` carve path.
     struct RecordingDmaFacility {
-        last: rustos_sync::SpinLock<Option<(usize, u64)>>,
-        freed: rustos_sync::SpinLock<Option<u64>>,
+        last: tairix_sync::SpinLock<Option<(usize, u64)>>,
+        freed: tairix_sync::SpinLock<Option<u64>>,
         ret: Result<crate::devres::DmaCarve, Errno>,
     }
     impl crate::devres::DmaAllocFacility for RecordingDmaFacility {
@@ -17953,11 +17953,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: rustos_sync::SpinLock::new(None),
-            freed: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -18007,11 +18007,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: rustos_sync::SpinLock::new(None),
-            freed: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -18052,15 +18052,15 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma_translated(
+            tairix_abi::hwtree::HwResource::dma_translated(
                 0x2_0000_0000,
                 0x2_0000_0000,
                 0x4_0000_0000,
             ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: rustos_sync::SpinLock::new(None),
-            freed: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x10_0000,
@@ -18101,11 +18101,11 @@ mod tests {
         // The grant declares a 0x1_0000-byte maximum extent.
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: rustos_sync::SpinLock::new(None),
-            freed: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -18144,7 +18144,7 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -18176,11 +18176,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: rustos_sync::SpinLock::new(None),
-            freed: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -18207,8 +18207,8 @@ mod tests {
     /// tests share this.
     fn recording_dma_facility() -> &'static RecordingDmaFacility {
         Box::leak(Box::new(RecordingDmaFacility {
-            last: rustos_sync::SpinLock::new(None),
-            freed: rustos_sync::SpinLock::new(None),
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
@@ -18232,7 +18232,7 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility = recording_dma_facility();
         let h = KernelSyscallHandlers::new(
@@ -18280,7 +18280,7 @@ mod tests {
         let caps = make_caps_record(2, &[], sink);
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility = recording_dma_facility();
         let h = KernelSyscallHandlers::new(
@@ -18325,7 +18325,7 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility = recording_dma_facility();
         let h = KernelSyscallHandlers::new(
@@ -18356,7 +18356,7 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -18416,7 +18416,7 @@ mod tests {
     }
 
     /// The caller's minted grants are serialised and copied out: the return
-    /// is the total byte count (one [`rustos_abi::hwtree::GrantedResource`]
+    /// is the total byte count (one [`tairix_abi::hwtree::GrantedResource`]
     /// record per grant), proving enumeration + the copy-out succeeded.
     #[test]
     fn resource_grants_returns_total_byte_count() {
@@ -18432,16 +18432,16 @@ mod tests {
         };
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        let expected = 2 * rustos_abi::hwtree::GrantedResource::WIRE_LEN as u64;
+        let expected = 2 * tairix_abi::hwtree::GrantedResource::WIRE_LEN as u64;
         assert_eq!(h.resource_grants(&ctx, 0x1000, 0x1000), Ok(expected));
     }
 
@@ -18461,7 +18461,7 @@ mod tests {
         };
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -18495,7 +18495,7 @@ mod tests {
         };
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -18534,7 +18534,7 @@ mod tests {
         // The grant belongs to task 2, not the calling task 3.
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -18547,21 +18547,21 @@ mod tests {
     /// assert the arguments reached it and the result flowed back without a
     /// real scheduler-side wait path.
     struct RecordingProcessWait {
-        last: rustos_sync::SpinLock<Option<(u64, i32)>>,
-        last_poll: rustos_sync::SpinLock<Option<(u64, i32)>>,
-        last_flags: rustos_sync::SpinLock<Option<WaitFlags>>,
-        last_exit: rustos_sync::SpinLock<Option<(u64, i32)>>,
-        last_register: rustos_sync::SpinLock<Option<(u64, u64)>>,
+        last: tairix_sync::SpinLock<Option<(u64, i32)>>,
+        last_poll: tairix_sync::SpinLock<Option<(u64, i32)>>,
+        last_flags: tairix_sync::SpinLock<Option<WaitFlags>>,
+        last_exit: tairix_sync::SpinLock<Option<(u64, i32)>>,
+        last_register: tairix_sync::SpinLock<Option<(u64, u64)>>,
         result: Result<crate::procwait::WaitedChild, Errno>,
     }
     impl RecordingProcessWait {
         fn new(result: Result<crate::procwait::WaitedChild, Errno>) -> Self {
             Self {
-                last: rustos_sync::SpinLock::new(None),
-                last_poll: rustos_sync::SpinLock::new(None),
-                last_flags: rustos_sync::SpinLock::new(None),
-                last_exit: rustos_sync::SpinLock::new(None),
-                last_register: rustos_sync::SpinLock::new(None),
+                last: tairix_sync::SpinLock::new(None),
+                last_poll: tairix_sync::SpinLock::new(None),
+                last_flags: tairix_sync::SpinLock::new(None),
+                last_exit: tairix_sync::SpinLock::new(None),
+                last_register: tairix_sync::SpinLock::new(None),
                 result,
             }
         }
@@ -18630,7 +18630,7 @@ mod tests {
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 42,
-                status: rustos_abi::WaitStatus::Exited(7),
+                status: tairix_abi::WaitStatus::Exited(7),
             })),
         ));
         let h = KernelSyscallHandlers::new(
@@ -18675,7 +18675,7 @@ mod tests {
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 42,
-                status: rustos_abi::WaitStatus::Exited(7),
+                status: tairix_abi::WaitStatus::Exited(7),
             })),
         ));
         let h = KernelSyscallHandlers::new(
@@ -18771,13 +18771,13 @@ mod tests {
     /// handler tests can assert the arguments reached it without a real
     /// scheduler-side delivery path.
     struct RecordingProcessSignal {
-        last: rustos_sync::SpinLock<Option<(u64, i32, Signal)>>,
+        last: tairix_sync::SpinLock<Option<(u64, i32, Signal)>>,
         result: Result<(), Errno>,
     }
     impl RecordingProcessSignal {
         fn new(result: Result<(), Errno>) -> Self {
             Self {
-                last: rustos_sync::SpinLock::new(None),
+                last: tairix_sync::SpinLock::new(None),
                 result,
             }
         }
@@ -18947,7 +18947,7 @@ mod tests {
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 42,
-                status: rustos_abi::WaitStatus::Exited(0),
+                status: tairix_abi::WaitStatus::Exited(0),
             })),
         ));
         let h = KernelSyscallHandlers::new(
@@ -18988,7 +18988,7 @@ mod tests {
         let producer: &'static RecordingProcessWait = Box::leak(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 0,
-                status: rustos_abi::WaitStatus::Exited(0),
+                status: tairix_abi::WaitStatus::Exited(0),
             })),
         ));
         let h = KernelSyscallHandlers::new(
@@ -19041,7 +19041,7 @@ mod tests {
             .filter(|e| e.id == AuditEvent::TaskExitedNonzero.id())
             .collect();
         assert_eq!(exits.len(), 1);
-        assert_eq!(exits[0].level, rustos_log::Level::Warn);
+        assert_eq!(exits[0].level, tairix_log::Level::Warn);
         assert!(exits[0]
             .fields
             .contains(&(String::from("task"), String::from("9"))));
@@ -19462,20 +19462,20 @@ mod tests {
         // One more page fits the budget: the bound admits it and the
         // request reaches the (inert) producer.
         assert_eq!(
-            h.mem_map(&ctx, PAGE_SIZE, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, PAGE_SIZE, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::NotImplemented)
         );
         // Two more pages would cross the budget: refused closed before
         // any producer work.
         assert_eq!(
-            h.mem_map(&ctx, 2 * PAGE_SIZE, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, 2 * PAGE_SIZE, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::OutOfRange)
         );
         // Unpinning lifts the pinned bound (the address-space ceiling
         // stays unlimited here), so the same request reaches the producer.
         assert_eq!(h.mem_unpin(&ctx), Ok(0));
         assert_eq!(
-            h.mem_map(&ctx, 2 * PAGE_SIZE, rustos_abi::MapFlags::empty(), 0),
+            h.mem_map(&ctx, 2 * PAGE_SIZE, tairix_abi::MapFlags::empty(), 0),
             Err(Errno::NotImplemented)
         );
     }
@@ -19518,7 +19518,7 @@ mod tests {
     /// forwarded identity and decoded request, and answers a fixed
     /// response payload.
     struct RecordingUsersAdmin {
-        calls: rustos_sync::SpinLock<Vec<(u32, bool, &'static str)>>,
+        calls: tairix_sync::SpinLock<Vec<(u32, bool, &'static str)>>,
         response: &'static [u8],
     }
 
@@ -19526,13 +19526,13 @@ mod tests {
         fn handle(
             &self,
             caller_uid: u32,
-            caller_caps: &dyn rustos_abi::CapabilityQuery,
-            request: &rustos_abi::users_admin::UsersAdminRequest<'_>,
+            caller_caps: &dyn tairix_abi::CapabilityQuery,
+            request: &tairix_abi::users_admin::UsersAdminRequest<'_>,
             out: &mut [u8],
         ) -> Result<u64, Errno> {
             let op = match request {
-                rustos_abi::users_admin::UsersAdminRequest::ListUsers => "list_users",
-                rustos_abi::users_admin::UsersAdminRequest::DeleteUser { .. } => "delete_user",
+                tairix_abi::users_admin::UsersAdminRequest::ListUsers => "list_users",
+                tairix_abi::users_admin::UsersAdminRequest::DeleteUser { .. } => "delete_user",
                 _ => "other",
             };
             self.calls
@@ -19611,7 +19611,7 @@ mod tests {
             h.users_admin(
                 &ctx,
                 0x1000,
-                rustos_abi::users_admin::USERS_ADMIN_MAX_REQUEST + 1,
+                tairix_abi::users_admin::USERS_ADMIN_MAX_REQUEST + 1,
                 0x1000,
                 0,
             ),
@@ -19650,7 +19650,7 @@ mod tests {
             caps: &caps,
         };
         let engine: &'static RecordingUsersAdmin = Box::leak(Box::new(RecordingUsersAdmin {
-            calls: rustos_sync::SpinLock::new(Vec::new()),
+            calls: tairix_sync::SpinLock::new(Vec::new()),
             response: RESPONSE,
         }));
         let h = KernelSyscallHandlers::new(
@@ -20072,7 +20072,7 @@ mod tests {
     struct StaticHwTree {
         generation: u64,
         blob: alloc::vec::Vec<u8>,
-        published: RwLock<alloc::vec::Vec<(u32, rustos_abi::HwNode)>>,
+        published: RwLock<alloc::vec::Vec<(u32, tairix_abi::HwNode)>>,
         // Every `(parent_id, node_id)` removed through `HwTreeSource::remove`,
         // so a `hw_remove_node` test can assert what the handler passed.
         removed: RwLock<alloc::vec::Vec<(u32, u32)>>,
@@ -20100,7 +20100,7 @@ mod tests {
         fn snapshot(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(self.blob.clone())
         }
-        fn publish(&self, parent_id: u32, node: rustos_abi::HwNode) -> Result<u32, Errno> {
+        fn publish(&self, parent_id: u32, node: tairix_abi::HwNode) -> Result<u32, Errno> {
             // Record the kernel-resolved parent the handler passed alongside
             // the node, so a test can assert the child is parented under the
             // emitter's own loaded node. Model the real store's identity
@@ -20125,8 +20125,8 @@ mod tests {
 
     /// Build a wire-encoded `[HwTreeHeader][HwNode; n]` snapshot at
     /// `generation` from `nodes`, exactly as the production source does.
-    fn encode_hw_snapshot(generation: u64, nodes: &[rustos_abi::HwNode]) -> alloc::vec::Vec<u8> {
-        let header = rustos_abi::HwTreeHeader::new(generation, nodes.len() as u64).to_le_bytes();
+    fn encode_hw_snapshot(generation: u64, nodes: &[tairix_abi::HwNode]) -> alloc::vec::Vec<u8> {
+        let header = tairix_abi::HwTreeHeader::new(generation, nodes.len() as u64).to_le_bytes();
         let mut blob = alloc::vec::Vec::with_capacity(header.len() + nodes.len() * 572);
         blob.extend_from_slice(&header);
         for node in nodes {
@@ -20239,7 +20239,7 @@ mod tests {
             ProcId::KERNEL,
             0,
             0,
-            rustos_abi::sysinfo::ProcessState::Running,
+            tairix_abi::sysinfo::ProcessState::Running,
             0,
             0,
             0,
@@ -20403,7 +20403,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let report = alloc::vec![7u8; rustos_abi::sysinfo::RESOURCE_LIMITS_REPORT_LEN];
+        let report = alloc::vec![7u8; tairix_abi::sysinfo::RESOURCE_LIMITS_REPORT_LEN];
         let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
             processes: alloc::vec::Vec::new(),
             kernel_memory: alloc::vec::Vec::new(),
@@ -20458,8 +20458,8 @@ mod tests {
         };
 
         let nodes = [
-            rustos_abi::HwNode::new(1, rustos_abi::HW_NODE_ROOT, rustos_abi::HwDeviceClass::Root),
-            rustos_abi::HwNode::new(2, 1, rustos_abi::HwDeviceClass::Bus),
+            tairix_abi::HwNode::new(1, tairix_abi::HW_NODE_ROOT, tairix_abi::HwDeviceClass::Root),
+            tairix_abi::HwNode::new(2, 1, tairix_abi::HwDeviceClass::Bus),
         ];
         let blob = encode_hw_snapshot(7, &nodes);
         let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(7, blob.clone())));
@@ -20479,7 +20479,7 @@ mod tests {
             })
             .expect("caller has a registered space");
         assert_eq!(delivered, blob);
-        let header = rustos_abi::HwTreeHeader::from_bytes(&delivered).expect("header");
+        let header = tairix_abi::HwTreeHeader::from_bytes(&delivered).expect("header");
         assert_eq!(header.generation(), 7);
         assert_eq!(header.node_count(), 2);
     }
@@ -20539,10 +20539,10 @@ mod tests {
             caps: &caps,
         };
 
-        let nodes = [rustos_abi::HwNode::new(
+        let nodes = [tairix_abi::HwNode::new(
             1,
-            rustos_abi::HW_NODE_ROOT,
-            rustos_abi::HwDeviceClass::Root,
+            tairix_abi::HW_NODE_ROOT,
+            tairix_abi::HwDeviceClass::Root,
         )];
         let blob = encode_hw_snapshot(1, &nodes);
         let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(1, blob.clone())));
@@ -20688,13 +20688,13 @@ mod tests {
 
     // ---- hw_emit_node ------------------------------------------------
 
-    /// An emitted single-resource [`rustos_abi::HwNode`] (an MMIO child
+    /// An emitted single-resource [`tairix_abi::HwNode`] (an MMIO child
     /// keyed by a USB-class match key), used by the publish tests.
-    fn emit_child_node() -> rustos_abi::HwNode {
-        let mut node = rustos_abi::HwNode::new(3, 2, rustos_abi::HwDeviceClass::Input);
-        node.push_match_key(rustos_abi::HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+    fn emit_child_node() -> tairix_abi::HwNode {
+        let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Input);
+        node.push_match_key(tairix_abi::HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
             .expect("match key fits");
-        node.push_resource(rustos_abi::HwResource::mmio(0xFE98_0000, 0x4000))
+        node.push_resource(tairix_abi::HwResource::mmio(0xFE98_0000, 0x4000))
             .expect("resource fits");
         node
     }
@@ -20731,7 +20731,7 @@ mod tests {
         )
         .with_hw_tree(source);
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN - 1),
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN - 1),
             Err(Errno::LengthOutOfRange)
         );
         assert!(source.published.read().is_empty(), "nothing was published");
@@ -20762,7 +20762,7 @@ mod tests {
         // node's resource is not covered.
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::HwResource::mmio(0x3F20_0000, 0x1000),
+            tairix_abi::HwResource::mmio(0x3F20_0000, 0x1000),
         );
         // The caller is a driver loaded for a node, so it passes the
         // loaded-node gate and the test exercises the *coverage* refusal.
@@ -20781,7 +20781,7 @@ mod tests {
         )
         .with_hw_tree(source);
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
             Err(Errno::PermissionDenied)
         );
         assert!(
@@ -20817,7 +20817,7 @@ mod tests {
         // recorded, so the emitter still cannot publish.
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
+            tairix_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20833,7 +20833,7 @@ mod tests {
         )
         .with_hw_tree(source);
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
             Err(Errno::PermissionDenied)
         );
         assert!(
@@ -20865,7 +20865,7 @@ mod tests {
         // A grant whose window contains the emitted resource fully covers it.
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
+            tairix_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
         // The emitter is a driver loaded for node 9; its published child is
         // parented under exactly that node.
@@ -20886,7 +20886,7 @@ mod tests {
         // The handler returns the store-assigned id (the test-double's first
         // assignment is 100), so the emitter can later retract the child.
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
             Ok(100)
         );
         let published = source.published.read();
@@ -20914,10 +20914,10 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let mut node = rustos_abi::HwNode::new(0, 2, rustos_abi::HwDeviceClass::Display);
-        node.push_match_key(rustos_abi::HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+        let mut node = tairix_abi::HwNode::new(0, 2, tairix_abi::HwDeviceClass::Display);
+        node.push_match_key(tairix_abi::HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
             .expect("match key fits");
-        node.push_resource(rustos_abi::HwResource::mmio(0xFE98_0000, 0x4000))
+        node.push_resource(tairix_abi::HwResource::mmio(0xFE98_0000, 0x4000))
             .expect("resource fits");
         let bytes = node.to_le_bytes();
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
@@ -20929,7 +20929,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
+            tairix_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
         aspaces.write().set_loaded_node(SecTaskId(2), 9);
         let irq = IrqTable::new(31);
@@ -20958,7 +20958,7 @@ mod tests {
         // Publishing the display node (store-assigned id 100) mints seat 1
         // through the discovery path, audited with both ids.
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
             Ok(100)
         );
         let created = sink
@@ -21025,7 +21025,7 @@ mod tests {
         // contains the child's BAR, so the bridge legitimately grants it.
         aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::HwResource::bus_window(0xFE00_0000, 0x100_0000, 0x6_0000_0000),
+            tairix_abi::HwResource::bus_window(0xFE00_0000, 0x100_0000, 0x6_0000_0000),
         );
         // The bridge driver is loaded for its own node; the child is parented
         // under it.
@@ -21045,7 +21045,7 @@ mod tests {
         .with_hw_tree(source);
         // The handler returns the store-assigned id (first assignment 100).
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
             Ok(100)
         );
         assert_eq!(
@@ -21067,7 +21067,7 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         // A resourceless node passes the (empty) grant check, so the publish
         // reaches the inert `NULL_HW_TREE`.
-        let node = rustos_abi::HwNode::new(3, 2, rustos_abi::HwDeviceClass::Input);
+        let node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Input);
         let bytes = node.to_le_bytes();
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
@@ -21091,7 +21091,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
             Err(Errno::NotImplemented)
         );
     }
@@ -21734,7 +21734,7 @@ mod tests {
         assert!(!crate::callreg::contains(EndpointId(id)));
         assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
         assert!(crate::callreg::contains(EndpointId(id)));
-        let denied = rustos_kernel_ipc::AuditEvent::CallEndpointRegisterDenied
+        let denied = tairix_kernel_ipc::AuditEvent::CallEndpointRegisterDenied
             .id()
             .0;
         assert!(
@@ -21792,7 +21792,7 @@ mod tests {
         )
         .with_seat_registry(seat);
 
-        let id = rustos_abi::window_ipc::WINDOW_ENDPOINT;
+        let id = tairix_abi::window_ipc::WINDOW_ENDPOINT;
         // No lease yet: the reserved id stays privileged and the bind is
         // refused with nothing registered.
         assert_eq!(
@@ -21862,16 +21862,16 @@ mod tests {
         // No grant for the endpoint before creation.
         assert!(!aspaces
             .read()
-            .grant_covers(SecTaskId(5), &rustos_abi::HwResource::endpoint(id)));
+            .grant_covers(SecTaskId(5), &tairix_abi::HwResource::endpoint(id)));
         assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
         // The creator now holds the per-endpoint grant for exactly this id.
         assert!(aspaces
             .read()
-            .grant_covers(SecTaskId(5), &rustos_abi::HwResource::endpoint(id)));
+            .grant_covers(SecTaskId(5), &tairix_abi::HwResource::endpoint(id)));
         // …and not for a neighbouring id (the grant is scoped to one endpoint).
         assert!(!aspaces
             .read()
-            .grant_covers(SecTaskId(5), &rustos_abi::HwResource::endpoint(id + 1)));
+            .grant_covers(SecTaskId(5), &tairix_abi::HwResource::endpoint(id + 1)));
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -21961,7 +21961,7 @@ mod tests {
         // driver would inherit it from its matched node).
         aspaces
             .write()
-            .mint_grant(SecTaskId(tid), rustos_abi::HwResource::endpoint(id));
+            .mint_grant(SecTaskId(tid), tairix_abi::HwResource::endpoint(id));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(tid, &[CapabilityId::IPC_ENDPOINT], sink);
@@ -22071,10 +22071,10 @@ mod tests {
         // not covered (the grant is scoped to one region).
         assert!(aspaces
             .read()
-            .grant_covers(SecTaskId(7), &rustos_abi::HwResource::shared(id)));
+            .grant_covers(SecTaskId(7), &tairix_abi::HwResource::shared(id)));
         assert!(!aspaces
             .read()
-            .grant_covers(SecTaskId(7), &rustos_abi::HwResource::shared(id + 1)));
+            .grant_covers(SecTaskId(7), &tairix_abi::HwResource::shared(id + 1)));
         // Cleanup so the global region registry does not leak across tests.
         let _ = crate::sharedreg::unmap(facility, SecTaskId(7), va);
     }
@@ -22114,7 +22114,7 @@ mod tests {
         // A grant of the wrong kind (an IRQ line) is refused before mapping.
         let handle = aspaces
             .write()
-            .mint_grant(SecTaskId(8), rustos_abi::HwResource::irq(33, 1));
+            .mint_grant(SecTaskId(8), tairix_abi::HwResource::irq(33, 1));
         assert_eq!(h.shm_map(&ctx, handle, 0x2000), Err(Errno::OutOfRange));
     }
 
@@ -22157,7 +22157,7 @@ mod tests {
             crate::sharedreg::create(facility, SecTaskId(10), 2).expect("region created");
         let handle = aspaces
             .write()
-            .mint_grant(SecTaskId(9), rustos_abi::HwResource::shared(id));
+            .mint_grant(SecTaskId(9), tairix_abi::HwResource::shared(id));
 
         let va = h.shm_map(&ctx, handle, 0x2000).expect("shm_map succeeds");
         assert_eq!(va, 0x2_0000_3000, "the mapped base flows back");
@@ -22208,7 +22208,7 @@ mod tests {
         // unknown: still refused, nothing minted.
         let _own = aspaces
             .write()
-            .mint_grant(SecTaskId(7), rustos_abi::HwResource::shared(42));
+            .mint_grant(SecTaskId(7), tairix_abi::HwResource::shared(42));
         assert_eq!(h.shm_grant(&ctx, 42, 0xD15_2001), Err(Errno::NotFound));
 
         // A live endpoint owned by the service task: the grant lands on the
@@ -22235,7 +22235,7 @@ mod tests {
         // The recipient resolves it to exactly the shared region…
         assert_eq!(
             aspaces.read().grant(SecTaskId(0x5707), handle),
-            Some(rustos_abi::HwResource::shared(42))
+            Some(tairix_abi::HwResource::shared(42))
         );
         // …and the handle is meaningless when presented by anyone else
         // (owner-checked at `shm_map`; the number is useless to a bystander).
@@ -22821,23 +22821,23 @@ mod tests {
 
     /// Wire constants for the wait-set control arguments, named so the tests
     /// read as the syscall's caller would write them.
-    const WS_OP_ADD: u32 = rustos_abi::WaitSetOp::Add as u32;
-    const WS_OP_DEL: u32 = rustos_abi::WaitSetOp::Del as u32;
-    const WS_KIND_ENDPOINT: u32 = rustos_abi::WaitSourceKind::Endpoint as u32;
-    const WS_KIND_IRQ: u32 = rustos_abi::WaitSourceKind::Irq as u32;
-    const WS_KIND_CHILD: u32 = rustos_abi::WaitSourceKind::Child as u32;
-    const WS_KIND_PORT: u32 = rustos_abi::WaitSourceKind::Port as u32;
-    const WS_KIND_STREAM: u32 = rustos_abi::WaitSourceKind::Stream as u32;
-    const WS_KIND_SIGNAL: u32 = rustos_abi::WaitSourceKind::Signal as u32;
+    const WS_OP_ADD: u32 = tairix_abi::WaitSetOp::Add as u32;
+    const WS_OP_DEL: u32 = tairix_abi::WaitSetOp::Del as u32;
+    const WS_KIND_ENDPOINT: u32 = tairix_abi::WaitSourceKind::Endpoint as u32;
+    const WS_KIND_IRQ: u32 = tairix_abi::WaitSourceKind::Irq as u32;
+    const WS_KIND_CHILD: u32 = tairix_abi::WaitSourceKind::Child as u32;
+    const WS_KIND_PORT: u32 = tairix_abi::WaitSourceKind::Port as u32;
+    const WS_KIND_STREAM: u32 = tairix_abi::WaitSourceKind::Stream as u32;
+    const WS_KIND_SIGNAL: u32 = tairix_abi::WaitSourceKind::Signal as u32;
 
     /// A [`ProcessWait`] test double over the real [`ProcessTable`]
     /// bookkeeping, so the wait-set `Child` tests exercise the same matcher
     /// the production producer uses.
-    struct TableWait(rustos_sync::SpinLock<crate::procwait::ProcessTable>);
+    struct TableWait(tairix_sync::SpinLock<crate::procwait::ProcessTable>);
 
     impl TableWait {
         fn leaked() -> &'static Self {
-            Box::leak(Box::new(Self(rustos_sync::SpinLock::new(
+            Box::leak(Box::new(Self(tairix_sync::SpinLock::new(
                 crate::procwait::ProcessTable::new(),
             ))))
         }
@@ -23153,7 +23153,7 @@ mod tests {
         assert_eq!(
             ipc.read()
                 .lookup(EndpointId(id))
-                .map(rustos_kernel_ipc::Port::owner),
+                .map(tairix_kernel_ipc::Port::owner),
             Some(0x5704)
         );
         // A live id is never silently re-pointed — not even by its owner.
@@ -23168,7 +23168,7 @@ mod tests {
             h.port_bind(
                 &ctx,
                 0x5EAD_0003,
-                rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN as usize + 1,
+                tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN as usize + 1,
                 4
             ),
             Err(Errno::LengthOutOfRange)
@@ -23192,7 +23192,7 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let reserved = rustos_abi::sysinfo::SYSINFO_ENDPOINT;
+        let reserved = tairix_abi::sysinfo::SYSINFO_ENDPOINT;
 
         let squatter_caps = make_caps_record(0x5705, &[], sink);
         let squatter = CallerContext {
@@ -23583,7 +23583,7 @@ mod tests {
                 set,
                 WS_OP_ADD,
                 WS_KIND_CHILD,
-                rustos_abi::WAITSET_CHILD_ANY,
+                tairix_abi::WAITSET_CHILD_ANY,
                 0x44
             ),
             Ok(0)
@@ -23630,7 +23630,7 @@ mod tests {
             set,
             WS_OP_ADD,
             WS_KIND_CHILD,
-            rustos_abi::WAITSET_CHILD_ANY,
+            tairix_abi::WAITSET_CHILD_ANY,
             0x55,
         )
         .expect("add child member");
@@ -23660,12 +23660,12 @@ mod tests {
         assert_eq!(
             pw.poll(
                 SecTaskId(0x5704),
-                rustos_abi::WAIT_PID_ANY,
+                tairix_abi::WAIT_PID_ANY,
                 WaitFlags::NONBLOCK
             ),
             Ok(crate::procwait::WaitedChild {
                 pid: 21,
-                status: rustos_abi::WaitStatus::Exited(3),
+                status: tairix_abi::WaitStatus::Exited(3),
             })
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
@@ -23970,7 +23970,7 @@ mod tests {
     /// service.
     #[test]
     fn call_peer_origin_attests_the_caller_and_fails_closed() {
-        use rustos_abi::{Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN};
+        use tairix_abi::{Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN};
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -24095,7 +24095,7 @@ mod tests {
     /// fails closed on a buffer shorter than a whole origin.
     #[test]
     fn self_origin_attests_the_caller_and_fails_closed() {
-        use rustos_abi::{Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN};
+        use tairix_abi::{Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN};
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -24160,7 +24160,7 @@ mod tests {
     /// instant (P-D).
     #[test]
     fn wall_time_get_and_set_round_trip_and_fail_closed() {
-        use rustos_abi::{Time64, WallClockReading, WallTimeState};
+        use tairix_abi::{Time64, WallClockReading, WallTimeState};
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -24371,8 +24371,8 @@ mod tests {
         // With facts installed: a short buffer is still rejected, and a
         // large-enough one copies the record out; it decodes back exactly.
         let facts = BootFacts {
-            arch: rustos_abi::Arch::Aarch64,
-            cpu_name: rustos_abi::CpuName::new("ARM Cortex-A72").expect("valid name"),
+            arch: tairix_abi::Arch::Aarch64,
+            cpu_name: tairix_abi::CpuName::new("ARM Cortex-A72").expect("valid name"),
             cpu_count: 4,
             memory_bytes: 8 * 1024 * 1024 * 1024,
         };
@@ -24422,7 +24422,7 @@ mod tests {
             caps: &caps,
         };
 
-        let grid = rustos_abi::TerminalSize::new(45, 100).expect("valid grid");
+        let grid = tairix_abi::TerminalSize::new(45, 100).expect("valid grid");
         // Console 0 is a framebuffer text console reporting a known grid;
         // console 1 is a UART that reports no geometry (a `RecordingConsole`,
         // which takes the trait's `geometry() -> None` default).
@@ -24449,7 +24449,7 @@ mod tests {
             let guard = aspaces.read();
             let (_s, pm) = guard.resolve(SecTaskId(2)).expect("aspace present");
             let bytes = read_server_page(pm, 1, TERMINAL_SIZE_WIRE_LEN);
-            assert_eq!(rustos_abi::TerminalSize::from_bytes(&bytes), Ok(grid));
+            assert_eq!(tairix_abi::TerminalSize::from_bytes(&bytes), Ok(grid));
         }
 
         // A short buffer fails closed rather than truncating the reading.
@@ -24483,7 +24483,7 @@ mod tests {
 
     // `DirEntry`, `FileStat`, and `OpenFlags` are already in scope through
     // `use super::*`; only `FileKind` is additionally needed here.
-    use rustos_abi::FileKind;
+    use tairix_abi::FileKind;
 
     /// A recording [`FilesystemService`] double: it logs each call's
     /// attested uid and arguments (so a test can prove the handler attested
@@ -24530,7 +24530,7 @@ mod tests {
         fn open(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             flags: OpenFlags,
         ) -> Result<(), Errno> {
@@ -24547,7 +24547,7 @@ mod tests {
         fn read(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             offset: u64,
             buf: &mut [u8],
@@ -24564,7 +24564,7 @@ mod tests {
         fn write(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             offset: u64,
             append: bool,
@@ -24579,7 +24579,7 @@ mod tests {
         fn readdir(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
         ) -> Result<Vec<crate::fs::ReaddirEntry>, Errno> {
             self.record(alloc::format!("readdir uid={uid} path={path}"));
@@ -24589,7 +24589,7 @@ mod tests {
         fn stat(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
         ) -> Result<FileStat, Errno> {
             self.record(alloc::format!("stat uid={uid} path={path}"));
@@ -24599,7 +24599,7 @@ mod tests {
         fn truncate(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             size: u64,
         ) -> Result<(), Errno> {
@@ -24607,7 +24607,7 @@ mod tests {
             Ok(())
         }
 
-        fn sync(&self, uid: u32, _caps: &dyn rustos_abi::CapabilityQuery) -> Result<(), Errno> {
+        fn sync(&self, uid: u32, _caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
             self.record(alloc::format!("sync uid={uid}"));
             Ok(())
         }
@@ -24615,7 +24615,7 @@ mod tests {
         fn mkdir(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
         ) -> Result<(), Errno> {
             self.record(alloc::format!("mkdir uid={uid} path={path}"));
@@ -24625,7 +24625,7 @@ mod tests {
         fn unlink(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             _flags: UnlinkFlags,
         ) -> Result<(), Errno> {
@@ -24636,7 +24636,7 @@ mod tests {
         fn rename(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             src: &str,
             dst: &str,
         ) -> Result<(), Errno> {
@@ -24647,7 +24647,7 @@ mod tests {
         fn set_mode(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             mode: u32,
         ) -> Result<(), Errno> {
@@ -24663,7 +24663,7 @@ mod tests {
         fn attr_get(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             key: &[u8],
             value_out: &mut [u8],
@@ -24686,7 +24686,7 @@ mod tests {
         fn attr_set(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             key: &[u8],
             value: &[u8],
@@ -24702,7 +24702,7 @@ mod tests {
         fn attr_list(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             index: u64,
             key_out: &mut [u8],
@@ -24722,7 +24722,7 @@ mod tests {
         fn attr_remove(
             &self,
             uid: u32,
-            _caps: &dyn rustos_abi::CapabilityQuery,
+            _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             key: &[u8],
         ) -> Result<(), Errno> {
@@ -25730,7 +25730,7 @@ mod tests {
             ProcId::KERNEL,
             0,
             0,
-            rustos_abi::sysinfo::ProcessState::Running,
+            tairix_abi::sysinfo::ProcessState::Running,
             0,
             0,
             0,

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-virtio-qemu-support"
-description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests. The production boot pipeline runs to AuditEvent::BootCompleted, then an arch-specific scenario carves a per-device DMA region, provisions a transport (x86_64 PCI / riscv64 virt-board MMIO), wires the device interrupt, mints a KernelVirtioHost, loads a signed `.rxe` through rustos_drvhost::Host, and drives a load/reload/unload cycle with a device-specific tail. The blk/net round-trip tails are shared, generic over the transport, so the PCI and MMIO verticals run identical device code (AGENTS.md §2.2)."
+name = "tairix-test-virtio-qemu-support"
+description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests. The production boot pipeline runs to AuditEvent::BootCompleted, then an arch-specific scenario carves a per-device DMA region, provisions a transport (x86_64 PCI / riscv64 virt-board MMIO), wires the device interrupt, mints a KernelVirtioHost, loads a signed `.rxe` through tairix_drvhost::Host, and drives a load/reload/unload cycle with a device-specific tail. The blk/net round-trip tails are shared, generic over the transport, so the PCI and MMIO verticals run identical device code (AGENTS.md §2.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ workspace = true
 path = "src/lib.rs"
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
 
 # The crate carries no host-buildable code: every item is gated behind a
 # freestanding (`target_os = "none"`) target so a host `cargo build
@@ -28,99 +28,99 @@ rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
 
 # --- x86_64 (PCI) ----------------------------------------------------
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
-rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
-rustos-pci = { path = "../../../lib/pci", version = "=0.0.0" }
-rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
-rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
-rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
-rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
-rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
-rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
-rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
-rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
-rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
-rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
-rustos-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
+tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
+tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+tairix-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
+tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
+tairix-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
+tairix-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+tairix-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
 
 # --- aarch64 (`virt`-board MMIO) -------------------------------------
 # The aarch64 vertical owns its bring-up directly from `kernel_main` (the
 # `virt` board hands EL1 a usable machine), so unlike riscv64 there is no
-# boot-pipeline consumer crate; the IRQ path is built on `rustos-arch-api`
-# (`IrqController`) + `rustos-kernel-irq` over a `GicController` bridge.
+# boot-pipeline consumer crate; the IRQ path is built on `tairix-arch-api`
+# (`IrqController`) + `tairix-kernel-irq` over a `GicController` bridge.
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
-rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
-rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
-rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
-rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
-rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
-rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
-rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
-rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
-rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
-rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
-rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
-rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
-rustos-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+tairix-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
+tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
+tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+tairix-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
+tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
+tairix-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
+tairix-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+tairix-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
 
 # --- riscv64 (`virt`-board MMIO) -------------------------------------
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 # The riscv64 boot pipeline (`boot`), the boot-state slots
 # (`published_*`), and the `IrqController` bridge (`PlicIrqController`)
 # live in the downstream boot consumer now that the arch port is a pure
 # Arch HAL implementation (`AGENTS.md` §17.2).
-rustos-test-riscv64-boot = { path = "../riscv64_boot", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
-rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
-rustos-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
-rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
-rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
-rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
-rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
-rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
-rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
-rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
-rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
-rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
-rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
-rustos-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
+tairix-test-riscv64-boot = { path = "../riscv64_boot", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+tairix-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
+tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
+tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+tairix-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
+tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
+tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
+tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
+tairix-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
+tairix-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+tairix-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }

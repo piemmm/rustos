@@ -11,8 +11,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_caps::CapabilitySet;
+use tairix_abi::Errno;
+use tairix_caps::CapabilitySet;
 
 /// Process identifier issued by the kernel when a service is spawned.
 ///
@@ -39,7 +39,7 @@ impl Pid {
 /// Static description of one long-running system service.
 ///
 /// The `manifest` is the signed manifest bytes of the service binary (the
-/// [`ManifestHeader`](rustos_abi::ManifestHeader) prefix followed by its
+/// [`ManifestHeader`](tairix_abi::ManifestHeader) prefix followed by its
 /// capability body). [`Init`](crate::Init) decodes it to learn the
 /// capabilities the service requests; it does **not** verify the signature
 /// — that is the [`Spawner`]'s responsibility at launch time.

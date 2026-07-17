@@ -6,7 +6,7 @@
 //! Both consuming build scripts (`file_map_qemu_aarch64` /
 //! `file_map_qemu_riscv64`) read the geometry from here, emit the content
 //! bytes for the kernel side, and pin the program's compile-time probe
-//! expectations through the `RUSTOS_FM_*` environment variables — so the
+//! expectations through the `TAIRIX_FM_*` environment variables — so the
 //! program, the filesystem double, and the registry paths can never
 //! disagree.
 //!
@@ -74,7 +74,7 @@ pub fn content() -> Vec<u8> {
     bytes
 }
 
-/// The `RUSTOS_FM_*` environment pairs pinning the program's compile-time
+/// The `TAIRIX_FM_*` environment pairs pinning the program's compile-time
 /// probe expectations, computed from [`content`] so the program's asserts
 /// and the kernel-served bytes share one origin.
 #[must_use]
@@ -82,13 +82,13 @@ pub fn geometry_env() -> Vec<(&'static str, String)> {
     let bytes = content();
     let at = |offset: u64| bytes[usize::try_from(offset).expect("offset fits usize")];
     vec![
-        ("RUSTOS_FM_FILE_LEN", FILE_LEN.to_string()),
-        ("RUSTOS_FM_PATH", FILE_PATH.to_string()),
-        ("RUSTOS_FM_PATH_OFFSET", PATH_OFFSET.to_string()),
-        ("RUSTOS_FM_INTERIOR_OFFSET", INTERIOR_OFFSET.to_string()),
-        ("RUSTOS_FM_BYTE_FIRST", at(0).to_string()),
-        ("RUSTOS_FM_BYTE_INTERIOR", at(INTERIOR_OFFSET).to_string()),
-        ("RUSTOS_FM_BYTE_LAST", at(FILE_LEN - 1).to_string()),
+        ("TAIRIX_FM_FILE_LEN", FILE_LEN.to_string()),
+        ("TAIRIX_FM_PATH", FILE_PATH.to_string()),
+        ("TAIRIX_FM_PATH_OFFSET", PATH_OFFSET.to_string()),
+        ("TAIRIX_FM_INTERIOR_OFFSET", INTERIOR_OFFSET.to_string()),
+        ("TAIRIX_FM_BYTE_FIRST", at(0).to_string()),
+        ("TAIRIX_FM_BYTE_INTERIOR", at(INTERIOR_OFFSET).to_string()),
+        ("TAIRIX_FM_BYTE_LAST", at(FILE_LEN - 1).to_string()),
     ]
 }
 
@@ -144,14 +144,14 @@ mod tests {
                 .map(|(_, v)| v.clone())
                 .expect("pinned geometry variable")
         };
-        assert_eq!(get("RUSTOS_FM_FILE_LEN"), FILE_LEN.to_string());
-        assert_eq!(get("RUSTOS_FM_BYTE_FIRST"), bytes[0].to_string());
+        assert_eq!(get("TAIRIX_FM_FILE_LEN"), FILE_LEN.to_string());
+        assert_eq!(get("TAIRIX_FM_BYTE_FIRST"), bytes[0].to_string());
         assert_eq!(
-            get("RUSTOS_FM_BYTE_INTERIOR"),
+            get("TAIRIX_FM_BYTE_INTERIOR"),
             bytes[idx(INTERIOR_OFFSET)].to_string()
         );
         assert_eq!(
-            get("RUSTOS_FM_BYTE_LAST"),
+            get("TAIRIX_FM_BYTE_LAST"),
             bytes[idx(FILE_LEN - 1)].to_string()
         );
     }

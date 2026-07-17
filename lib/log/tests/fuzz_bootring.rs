@@ -1,6 +1,6 @@
 //! Deterministic fuzz-style integration test for the early-boot log ring.
 //!
-//! A [`rustos_log::BootRing`] is a kernel-side, allocation-free FIFO that must
+//! A [`tairix_log::BootRing`] is a kernel-side, allocation-free FIFO that must
 //! never panic, never fabricate or lose a sequence silently, and always drain
 //! records in push order. This harness drives a random stream of push / pop
 //! operations against the ring while a simple shadow model (a `VecDeque` of the
@@ -15,13 +15,13 @@
 //! * the ring never panics on any operation ordering.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
 use std::collections::VecDeque;
 
-use rustos_abi::Duration64;
-use rustos_log::bootring::{FRAME_HEADER_LEN, MAX_BOOT_RECORD_BODY};
-use rustos_log::BootRing;
+use tairix_abi::Duration64;
+use tairix_log::bootring::{FRAME_HEADER_LEN, MAX_BOOT_RECORD_BODY};
+use tairix_log::BootRing;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -84,13 +84,13 @@ fn apply_loss(ring: &mut BootRing<'_>, model: &mut VecDeque<Shadow>) {
 
 #[test]
 fn boot_ring_matches_a_shadow_model_and_never_panics() {
-    let mut prng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut prng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "boot_ring_matches_a_shadow_model_and_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
     let mut scratch = [0u8; MAX_BOOT_RECORD_BODY];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             // A small ring so eviction is frequent, but big enough for a few
@@ -139,7 +139,7 @@ fn boot_ring_matches_a_shadow_model_and_never_panics() {
             }
             assert!(model.is_empty(), "model retained records the ring did not");
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

@@ -1,4 +1,4 @@
-# RustOS vetted snapshot of the public usb.ids database.
+# TAIRiX vetted snapshot of the public usb.ids database.
 # Imported by `cargo xtask devids --fetch`; do not hand-edit — refetch
 # and re-review instead. The compact lookup table is generated from
 # this file by

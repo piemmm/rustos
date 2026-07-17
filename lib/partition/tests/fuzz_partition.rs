@@ -1,7 +1,7 @@
 //! Deterministic fuzz harness for the `lib/partition` table parsers
 //! (a parser of untrusted on-disk bytes).
 //!
-//! A partition table is read off a disk that is outside RustOS's trust
+//! A partition table is read off a disk that is outside TAIRiX's trust
 //! boundary: a flashed SD card, a USB stick, or an attacker-supplied
 //! image. A corrupt MBR signature, an overlapping or out-of-range extent,
 //! a forged GPT header, a CRC that does not match, an entries-LBA that
@@ -10,22 +10,22 @@
 //! input ... has a fuzz target") the read path is driven here against
 //! arbitrary disks, with a single invariant:
 //!
-//! * feeding any byte image to [`rustos_partition::parse_partition_table`]
-//!   (and the lower [`rustos_partition::mbr::parse`] /
-//!   [`rustos_partition::gpt::crc32`]) never panics and never reads out of
-//!   bounds — the parser returns a validated [`rustos_partition::PartitionTable`]
-//!   or a [`rustos_partition::PartitionError`]. The run
+//! * feeding any byte image to [`tairix_partition::parse_partition_table`]
+//!   (and the lower [`tairix_partition::mbr::parse`] /
+//!   [`tairix_partition::gpt::crc32`]) never panics and never reads out of
+//!   bounds — the parser returns a validated [`tairix_partition::PartitionTable`]
+//!   or a [`tairix_partition::PartitionError`]. The run
 //!   aborting *is* the failure.
 //!
-//! RustOS pulls in no external fuzz runner: a
+//! TAIRiX pulls in no external fuzz runner: a
 //! per-run-seeded LCG mutates valid seed images (a real MBR from
-//! [`rustos_partition::mbr::encode`] and a CRC-correct GPT) and feeds pure
+//! [`tairix_partition::mbr::encode`] and a CRC-correct GPT) and feeds pure
 //! noise. A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep;
 //! `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::DriverError;
-use rustos_partition::{gpt, mbr, parse_partition_table, Partition, PartitionType};
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::DriverError;
+use tairix_partition::{gpt, mbr, parse_partition_table, Partition, PartitionType};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -181,12 +181,12 @@ fn exercise_never_panics(bytes: &[u8]) {
 
 #[test]
 fn parsing_any_partition_table_never_panics() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = [mbr_image(), gpt_image()];
 
-    let mut state: u64 = rustos_fuzzseed::start(
+    let mut state: u64 = tairix_fuzzseed::start(
         "parsing_any_partition_table_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -221,7 +221,7 @@ fn parsing_any_partition_table_never_panics() {
         exercise_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

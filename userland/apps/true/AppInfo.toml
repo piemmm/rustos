@@ -5,7 +5,7 @@
 # written to the inherited standard output; CAP_FS_ACCESS covers the
 # short-help read of the bundle's own Help/ documents through the secured
 # VFS. The tool reads no input, so it requests no CAP_CONSOLE_READ.
-id = "os.rustos.true"
+id = "os.tairix.true"
 name = "true"
 version = "0.1.0"
 kind = "command"

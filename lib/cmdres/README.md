@@ -1,6 +1,6 @@
-# rustos-cmdres
+# tairix-cmdres
 
-Shared command-word resolution policy for RustOS (`lib/cmdres`,
+Shared command-word resolution policy for TAIRiX (`lib/cmdres`,
 `plans/APPS.md` §8–§9).
 
 Every runnable program is an application bundle, `<name>.app`, whose entry
@@ -31,7 +31,7 @@ second resolution policy.
   resolve.
 - `search_roots(home)` — the app-store roots `man`'s recursive bundle
   search walks when the ordered candidates find nothing: the machine-wide
-  `/Apps` (`rustos_abi::USER_APP_STORE`), then the user's own
+  `/Apps` (`tairix_abi::USER_APP_STORE`), then the user's own
   `<home>/Apps`. Spelling only — the bounded walk itself lives in the
   consumer; an unset or empty `home` contributes no per-user root. Launch
   is unaffected: the shell never consults these roots.

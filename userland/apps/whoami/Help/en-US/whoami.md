@@ -11,7 +11,7 @@ whoami — print the current user's account name
 Prints the user name associated with this process's identity, followed
 by a newline, and nothing else.
 
-RustOS has no `/etc/passwd`: the user identifier comes from the
+TAIRiX has no `/etc/passwd`: the user identifier comes from the
 kernel's own record of the calling process, and the matching account
 name comes from the System Information API's public account directory.
 If the directory holds no name for the identifier, the command reports

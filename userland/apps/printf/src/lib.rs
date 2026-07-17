@@ -1,4 +1,4 @@
-//! RustOS `printf` — format and print data
+//! TAIRiX `printf` — format and print data
 //! (`plans/APPS.md` §12.1 Stage C).
 //!
 //! The GNU coreutils `printf`: print ARGUMENTs under the control of
@@ -20,7 +20,7 @@
 //!
 //! * [`Output`] — one instance each for standard output and standard
 //!   error (the diagnostics stream).
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by
 //!   the short-help switches.
 //!
 //! The binary that ships as `printf` wires the real inherited standard
@@ -41,9 +41,9 @@
 //! * [`error`] — [`PrintfError`], the fatal outcomes.
 //! * [`command`] — the [`Command`] shape and its [`parse`]r.
 //! * [`number`] — C-locale numeric argument conversion over the shared
-//!   `rustos_util::cnum` scanner.
+//!   `tairix_util::cnum` scanner.
 //! * [`template`] — the FORMAT walk: escapes and directives, rendering
-//!   floats through the shared `rustos_util::cfloat` engine.
+//!   floats through the shared `tairix_util::cfloat` engine.
 //! * [`quote`] — `%q` shell quoting.
 //! * [`client`] — the [`run`] loop: format reuse, diagnostics, status.
 //!
@@ -51,7 +51,7 @@
 //! they are authored once in the bundle's on-disk `Help/` tree, planted
 //! onto `/System` by the image builder from that source
 //! (`tools/syshelp`), and read back at runtime through the injected
-//! [`rustos_help::HelpSource`] seam. Help is never hardcoded into the
+//! [`tairix_help::HelpSource`] seam. Help is never hardcoded into the
 //! program (`plans/APPS.md`).
 //!
 //! # Layering & safety

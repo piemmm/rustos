@@ -5,10 +5,10 @@
 //! system by the never-returning kernel driver-store service, which keeps
 //! the read-only signed-bundle `/System` volume mounted. The user-space device manager reaches that service through a
 //! single capability-gated synchronous IPC call endpoint — the
-//! [`rustos_abi::SyscallNumber::IPC_CALL`] surface served by the kernel over
-//! the well-known [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`].
+//! [`tairix_abi::SyscallNumber::IPC_CALL`] surface served by the kernel over
+//! the well-known [`tairix_abi::driver_store::DRIVER_STORE_ENDPOINT`].
 //!
-//! This module is the client half of the [`rustos_abi::driver_store`] wire
+//! This module is the client half of the [`tairix_abi::driver_store`] wire
 //! protocol. It owns *policy* only: it
 //! [`fetch_catalogue`]s the store (opaque `bundle_id` + the bind table the
 //! kernel decoded from each bundle's signed manifest), and — once it has
@@ -17,28 +17,28 @@
 //! kernel TCB; this client never sees a `/System` path or an image byte. The
 //! [`DriverStoreCall`] seam abstracts the one `ipc_call` transition so the
 //! framing/decoding is host-tested against a scripted double, independently
-//! of the freestanding `rustos_rt::ipc_call` syscall it binds in production. The kernel re-checks the caller's
-//! [`rustos_abi::CapabilityId::DRV_LOAD`] on every call;
+//! of the freestanding `tairix_rt::ipc_call` syscall it binds in production. The kernel re-checks the caller's
+//! [`tairix_abi::CapabilityId::DRV_LOAD`] on every call;
 //! this client adds no authority.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver_store::{
+use tairix_abi::driver_store::{
     decode_catalogue_reply, decode_load_reply, decode_unload_reply, StoreRequest, LOAD_REQUEST_LEN,
     UNLOAD_REQUEST_LEN,
 };
-use rustos_abi::{DriverBindKey, Errno, DRIVER_MANIFEST_MAX_BIND_KEYS};
-use rustos_devmatch::DriverCandidate;
+use tairix_abi::{DriverBindKey, Errno, DRIVER_MANIFEST_MAX_BIND_KEYS};
+use tairix_devmatch::DriverCandidate;
 
 /// The single synchronous driver-store IPC call the client issues,
 /// abstracted so the protocol logic is host-testable against a scripted
 /// double.
 ///
 /// The production implementation (the freestanding `devmgr` `Run` binary)
-/// backs it with `rustos_rt::ipc_call` to
-/// [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`]; the host tests back
+/// backs it with `tairix_rt::ipc_call` to
+/// [`tairix_abi::driver_store::DRIVER_STORE_ENDPOINT`]; the host tests back
 /// it with an in-memory store.
 pub trait DriverStoreCall {
     /// Post `request` to the driver-store endpoint and copy the reply into
@@ -58,7 +58,7 @@ pub trait DriverStoreCall {
 /// table the kernel decoded from the bundle's signed manifest.
 ///
 /// The device manager matches [`Self::candidate`] against each discovered
-/// hardware-tree node with [`rustos_devmatch::resolve`]; the matched
+/// hardware-tree node with [`tairix_devmatch::resolve`]; the matched
 /// bundle's [`Self::bundle_id`] is what it then asks the kernel to load.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogueDriver {
@@ -73,7 +73,7 @@ pub struct CatalogueDriver {
 impl CatalogueDriver {
     /// Borrow this bundle as a [`DriverCandidate`] for the matcher.
     ///
-    /// The `path` field is unused by [`rustos_devmatch::resolve`] (matching
+    /// The `path` field is unused by [`tairix_devmatch::resolve`] (matching
     /// is pure bind-key comparison); the device manager keys the load on
     /// [`Self::bundle_id`], so the kernel resolves the path itself and no
     /// `/System` path ever crosses to user space.
@@ -108,7 +108,7 @@ pub fn fetch_catalogue<C: DriverStoreCall + ?Sized>(
     let reply_len = call.call(&request[..request_len], reply_buf)?;
 
     let mut drivers = Vec::new();
-    let mut keys = [DriverBindKey::new(0, rustos_abi::HwMatchKey::virtio(0));
+    let mut keys = [DriverBindKey::new(0, tairix_abi::HwMatchKey::virtio(0));
         DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
     for entry in decode_catalogue_reply(&reply_buf[..reply_len])? {
         // A truncated entry fails the whole catalogue closed rather than
@@ -180,10 +180,10 @@ mod tests {
 
     use alloc::vec;
 
-    use rustos_abi::driver_store::{
+    use tairix_abi::driver_store::{
         encode_catalogue_reply, encode_error_reply, encode_load_reply, encode_unload_reply,
     };
-    use rustos_abi::HwMatchKey;
+    use tairix_abi::HwMatchKey;
 
     fn bind(priority: u16, virtio: u32) -> DriverBindKey {
         DriverBindKey::new(priority, HwMatchKey::virtio(virtio))

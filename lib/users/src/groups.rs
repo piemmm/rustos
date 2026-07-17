@@ -17,13 +17,13 @@
 //! uniqueness, and fails closed on the first defect — a database the parser
 //! cannot fully understand yields **no** [`GroupsDb`].
 //!
-//! # Format (`rustos-groups-v1`)
+//! # Format (`tairix-groups-v1`)
 //!
 //! Line one is exactly [`GROUPS_FORMAT_HEADER`]. Every other line is blank, a
 //! `#` comment, or one [`GroupRecord`] line `groupname:gid`:
 //!
 //! ```text
-//! rustos-groups-v1
+//! tairix-groups-v1
 //! # groupname:gid
 //! wheel:0
 //! ada:1000
@@ -36,7 +36,7 @@ use crate::record::{name_charset_ok, parse_canonical_u32, Gid};
 use crate::ParseError;
 
 /// The exact first line of every `groups-v1` database.
-pub const GROUPS_FORMAT_HEADER: &str = "rustos-groups-v1";
+pub const GROUPS_FORMAT_HEADER: &str = "tairix-groups-v1";
 
 /// Longest group name, in bytes (the same bound as a username, since both
 /// obey the one identifier grammar).
@@ -255,7 +255,7 @@ mod tests {
     fn serialise_parse_round_trips() {
         let original = db();
         let text = original.serialise();
-        assert!(text.starts_with("rustos-groups-v1\n"));
+        assert!(text.starts_with("tairix-groups-v1\n"));
         assert_eq!(GroupsDb::parse(&text), Ok(original));
     }
 
@@ -279,7 +279,7 @@ mod tests {
     fn missing_or_wrong_header_is_rejected() {
         assert_eq!(GroupsDb::parse(""), Err(ParseError::Header));
         assert_eq!(
-            GroupsDb::parse("rustos-groups-v2\n"),
+            GroupsDb::parse("tairix-groups-v2\n"),
             Err(ParseError::Header)
         );
         assert_eq!(GroupsDb::parse("wheel:0\n"), Err(ParseError::Header));

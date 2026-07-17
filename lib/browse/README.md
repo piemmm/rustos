@@ -1,4 +1,4 @@
-# rustos-browse
+# tairix-browse
 
 Stability tier: **experimental**.
 

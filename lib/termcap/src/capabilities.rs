@@ -11,7 +11,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_vt::{BasicColor, Color, EraseMode, Op, Sgr, Title};
+use tairix_vt::{BasicColor, Color, EraseMode, Op, Sgr, Title};
 
 use crate::term_type::TermType;
 
@@ -137,7 +137,7 @@ impl MouseSupport {
 ///
 /// In normal cursor mode an arrow key sends the same `CSI` sequence the
 /// emitter writes for the matching cursor movement, so the input is expressed
-/// as the [`Op`] the bytes parse back to through [`rustos_vt::Parser`] — one
+/// as the [`Op`] the bytes parse back to through [`tairix_vt::Parser`] — one
 /// vocabulary for output and input alike.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArrowKeys {
@@ -193,7 +193,7 @@ pub struct KeyInput {
 //
 // The booleans are independent capability facts, not a state machine: a
 // terminal supports any combination of them, so a flat record models them more
-// clearly than an enum (the same rationale `rustos_vt::Attributes` documents
+// clearly than an enum (the same rationale `tairix_vt::Attributes` documents
 // for its independent rendition flags).
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -286,7 +286,7 @@ impl Capabilities {
             ops.push(Op::HideCursor);
         }
         if self.set_title {
-            ops.push(Op::SetTitle(Title::from_text("rustos")));
+            ops.push(Op::SetTitle(Title::from_text("tairix")));
         }
         for color in self.color.sample_colors() {
             ops.push(Op::Sgr(Sgr::Foreground(color)));

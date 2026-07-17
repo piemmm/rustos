@@ -23,8 +23,8 @@
 //! the active scale and composites it onto the bar.
 //!
 //! ```
-//! use rustos_icon::{builtin_icon, IconKind};
-//! use rustos_raster::Color;
+//! use tairix_icon::{builtin_icon, IconKind};
+//! use tairix_raster::Color;
 //!
 //! let icon = builtin_icon(IconKind::Battery, Color::rgb(230, 230, 235));
 //! let image = icon.rasterise(16).expect("renderable");
@@ -34,8 +34,8 @@
 //! assert!(image.pixels().iter().any(|p| p.a > 0));
 //! ```
 //!
-//! [`Surface`]: rustos_raster::Surface
-//! [`Surface::fill_polygon`]: rustos_raster::Surface::fill_polygon
+//! [`Surface`]: tairix_raster::Surface
+//! [`Surface::fill_polygon`]: tairix_raster::Surface::fill_polygon
 
 #![no_std]
 #![forbid(unsafe_code)]

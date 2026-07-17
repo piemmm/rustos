@@ -15,13 +15,13 @@ cannot clear (an unknown `TERM` degrades to the dumb baseline) makes
 the command fail rather than print bytes the terminal would render as
 garbage.
 
-RustOS consoles keep no scrollback, so there is no scrollback to
+TAIRiX consoles keep no scrollback, so there is no scrollback to
 clear: `-x` (the GNU option that preserves the scrollback) is accepted
 for script compatibility and changes nothing.
 
 ## OPTIONS
 
-- `-x` — accepted for GNU compatibility; a RustOS console keeps no
+- `-x` — accepted for GNU compatibility; a TAIRiX console keeps no
   scrollback, so the output is identical with and without it.
 - `-h, -?` — show this command's own short help.
 

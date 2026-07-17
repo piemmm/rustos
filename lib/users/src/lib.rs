@@ -1,6 +1,6 @@
-//! The RustOS user-account database.
+//! The TAIRiX user-account database.
 //!
-//! `rustos-users` owns the single definition of a user account and of the
+//! `tairix-users` owns the single definition of a user account and of the
 //! versioned text format persisted at `/System/Security/Users`: the
 //! installer and the image builder (`tools/mkimage`)
 //! *author* it, and the login path (`userland/session/login`) *reads* it —

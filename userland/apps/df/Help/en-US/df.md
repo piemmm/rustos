@@ -44,7 +44,7 @@ available.
 - `-P, --portability` — the POSIX portable format (`1024-blocks` and
   `Capacity` header wording).
 - `-l, --local` — restrict the report to local filesystems (every
-  RustOS mount today, so nothing is filtered away).
+  TAIRiX mount today, so nothing is filtered away).
 - `--total` — append a row labelled `total` summing the displayed
   figures.
 - `-k` — 1024-byte blocks (the default).

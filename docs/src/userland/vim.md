@@ -1,6 +1,6 @@
 # The `vim` editor
 
-`rustos-vim` is the system's modal text editor: an implementation of the
+`tairix-vim` is the system's modal text editor: an implementation of the
 core of the well-known vim editor, drawn with the OS curses library
 (`lib/curses`) and shipped as the `vim.app` command bundle in the system
 app store. The staged plan for the features beyond this core is
@@ -65,7 +65,7 @@ enforced editor-side on top of, never instead of, the kernel's checks.
 
 ## Testing
 
-`cargo test -p rustos-vim` covers the buffer's undo/redo groups, the
+`cargo test -p tairix-vim` covers the buffer's undo/redo groups, the
 motion and text-object families, operators with counts and registers,
 dot-repeat, the search engine and its budget, the ex command set over an
 in-memory file seam, command-line editing, readonly enforcement, and the

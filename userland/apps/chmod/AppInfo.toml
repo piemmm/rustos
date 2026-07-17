@@ -6,7 +6,7 @@
 # with the launching user's grants, never more. `chmod` writes reports and
 # changes modes through the owner-checked `fs_set_mode` syscall; it never
 # reads standard input, so no read capability is requested.
-id = "os.rustos.chmod"
+id = "os.tairix.chmod"
 name = "chmod"
 version = "0.1.0"
 kind = "command"

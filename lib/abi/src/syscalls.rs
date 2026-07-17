@@ -347,7 +347,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::UserPtr,
             AbiType::Len,
             // The attach block: the address of an encoded
-            // `rustos_abi::SpawnAttach` block selecting the child's
+            // `tairix_abi::SpawnAttach` block selecting the child's
             // target user (`SPAWN_UID_INHERIT` or a concrete uid,
             // kernel-gated on `CAP_SPAWN_AS_USER`), its base console
             // (`CONSOLE_INHERIT` or an installed index), and one `FdWire`
@@ -363,7 +363,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // fails closed before staging.
             AbiType::Len,
             // The child's startup strings: the address of an encoded
-            // `rustos_abi::process` startup-vector block (the same `PSV1`
+            // `tairix_abi::process` startup-vector block (the same `PSV1`
             // format the kernel writes into a child's image) carrying the
             // argument vector and environment the caller chose. Zero means
             // "no block": the child receives the program's registered

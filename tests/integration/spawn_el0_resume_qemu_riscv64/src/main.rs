@@ -9,13 +9,13 @@
 //! activates it (`satp`), and installs the trap vector + a syscall-dispatch
 //! callback. It builds one hardware-isolated U-mode address space — its own
 //! Sv39 page-table hierarchy — from the `rxe` fixture program through the
-//! production capability-checked, audited `rustos_kernel_core::spawn_image`
+//! production capability-checked, audited `tairix_kernel_core::spawn_image`
 //! caller, and admits it as a resumable user kthread via
-//! `rustos_kernel_core::spawn_user_kthread`. The task's `pre_resume` hook
+//! `tairix_kernel_core::spawn_user_kthread`. The task's `pre_resume` hook
 //! reactivates the task's own `satp` root (`paging::activate_user_root`, the
 //! RV-X1 primitive) immediately before every switch-in. The cooperative
 //! `Scheduler::step` loop drives it; the dispatch callback maps each
-//! `yield`/`exit` `ecall` to `rustos_kernel_core::reschedule_current`, so the
+//! `yield`/`exit` `ecall` to `tairix_kernel_core::reschedule_current`, so the
 //! task ping-pongs with the dispatcher through real U-mode↔kernel context
 //! switches that park and resume mid-handler (the first exerciser of RV1's
 //! park-safety on a user task).
@@ -31,7 +31,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-spawn-el0-resume-qemu-riscv64: the `test-hooks` Cargo feature is a \
+    "tairix-test-spawn-el0-resume-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

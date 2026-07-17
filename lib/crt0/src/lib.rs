@@ -1,18 +1,18 @@
-//! `rustos-crt0` — the C-callable `abi-v1` program startup/teardown object.
+//! `tairix-crt0` — the C-callable `abi-v1` program startup/teardown object.
 //!
 //! When the `rxe` loader drops into a freshly spawned
 //! program it hands the program's entry trampoline a pointer to a
-//! position-independent *startup-vector block* ([`rustos_abi::process`]).
+//! position-independent *startup-vector block* ([`tairix_abi::process`]).
 //! This crate is that entry trampoline (crt0): on each native Tier-1 target
 //! it provides the program's `_start` symbol, sets up the C runtime
 //! environment (stack alignment per the platform C ABI, the `argc` / `argv` /
 //! `envp` a C `main` expects), installs the per-process stack canary, calls
 //! the program entry point, and routes its return value through the
-//! `exit` syscall (`rustos_abi_sys::sys_exit`, the `ros_sys_exit` stub).
+//! `exit` syscall (`tairix_abi_sys::sys_exit`, the `tairix_sys_exit` stub).
 //!
-//! Together with `rustos_abi_sys` (the `ros_sys_<name>` syscall stubs) it
+//! Together with `tairix_abi_sys` (the `tairix_sys_<name>` syscall stubs) it
 //! forms the curated `/System/Libraries/` class *System runtime / C ABI*: the minimal libc-equivalent a program **not** written
-//! in Rust links to run on RustOS. It is deliberately minimal — it starts and
+//! in Rust links to run on TAIRiX. It is deliberately minimal — it starts and
 //! stops the program and marshals the startup vector, nothing more — and is
 //! **not** a privileged path: every capability and input check happens
 //! kernel-side (`plans/CCOMPAT.md` §4). See
@@ -36,8 +36,8 @@
 
 use core::ffi::{c_char, c_int};
 
-use rustos_abi::process::{ProcessStart, ProcessStartHeader};
-use rustos_abi::Errno;
+use tairix_abi::process::{ProcessStart, ProcessStartHeader};
+use tairix_abi::Errno;
 
 #[cfg(any(crt0_native_x86_64, crt0_native_aarch64, crt0_native_riscv64))]
 mod start;
@@ -58,7 +58,7 @@ pub struct CRuntime {
     /// NULL-terminated environment vector.
     pub envp: *mut *const c_char,
     /// The per-process stack-canary seed the kernel supplied
-    /// (`rustos_abi::process::ProcessStart::canary`).
+    /// (`tairix_abi::process::ProcessStart::canary`).
     pub canary: u64,
 }
 

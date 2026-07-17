@@ -5,28 +5,28 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::sync::Arc;
 
-use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use rustos_arch_aarch64::context_hal::ContextSwitchHal;
-use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
-use rustos_arch_aarch64::paging::{
+use tairix_abi::rxe::LoadImage;
+use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_arch_aarch64::context_hal::ContextSwitchHal;
+use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
+use tairix_arch_aarch64::paging::{
     self, activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
-use rustos_arch_aarch64::userentry::UserMode;
-use rustos_arch_aarch64::{
+use tairix_arch_aarch64::userentry::UserMode;
+use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
-use rustos_arch_api::{CpuId, EnterUser};
-use rustos_fdt::Fdt;
-use rustos_kalloc::FreeListAllocator;
-use rustos_kernel_core::{
+use tairix_arch_api::{CpuId, EnterUser};
+use tairix_fdt::Fdt;
+use tairix_kalloc::FreeListAllocator;
+use tairix_kernel_core::{
     note_preempt_tick, reschedule_current, spawn_image, spawn_user_kthread, take_preempt_pending,
     RescheduleAction, SpawnRequest, Yielder,
 };
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
-use rustos_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
-use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
-use rustos_log::{log, Event, EventId, Level};
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
+use tairix_log::{log, Event, EventId, Level};
 
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
@@ -172,7 +172,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 fn build_el0_space(
     image: &LoadImage,
     page_tables: &'static PageTablePool,
-) -> (u64, rustos_arch_api::UserEntry) {
+) -> (u64, tairix_arch_api::UserEntry) {
     let Some(arch) = ArchAddressSpace::new_identity_gigapages(page_tables, IDENTITY_GIB) else {
         qemu_exit::exit_failure(FAIL_POOL);
     };
@@ -239,14 +239,14 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
     syscall_entry::set_dispatch_callback(dispatch);
 
-    static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
-        rustos_arch_aarch64::Aarch64ArchStorage::new();
-    let arch = Arc::new(rustos_arch_aarch64::Aarch64Arch::new(
+    static ARCH_STORAGE: tairix_arch_aarch64::Aarch64ArchStorage<1> =
+        tairix_arch_aarch64::Aarch64ArchStorage::new();
+    let arch = Arc::new(tairix_arch_aarch64::Aarch64Arch::new(
         &ARCH_STORAGE,
         BOOT_CPU,
         counter_hz,
     ));
-    if rustos_kernel_core::initialize_cpu_state(1).is_err() {
+    if tairix_kernel_core::initialize_cpu_state(1).is_err() {
         qemu_exit::exit_failure(FAIL_SCHEDULER);
     }
     let Ok(scheduler) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {

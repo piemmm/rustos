@@ -8,14 +8,14 @@
 
 use core::cell::{Cell, RefCell};
 
-use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
-use rustos_abi::{
+use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, HwDeviceClass, HwMatchKey, HwNode,
     HwResource, HwResourceKind,
 };
-use rustos_usb::XHCI_COMPATIBLE;
+use tairix_usb::XHCI_COMPATIBLE;
 
-use rustos_vcmailbox::mock::MockFirmware;
+use tairix_vcmailbox::mock::MockFirmware;
 
 use super::{build_xhci_node, reload_firmware_and_publish};
 use crate::{FirmwareResetFailure, FirmwareResetOutcome, VL805_FIRMWARE_DEV_ADDR};

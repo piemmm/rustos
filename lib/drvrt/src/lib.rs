@@ -1,21 +1,21 @@
-//! RustOS user-space driver runtime host (`lib/drvrt`).
+//! TAIRiX user-space driver runtime host (`lib/drvrt`).
 //!
 //! A first-party driver that runs in **user space** (the microkernel goal)
 //! gets its `register(host: &dyn DriverHost)` entry the same
-//! [`DriverHost`](rustos_abi::DriverHost) surface an in-kernel driver gets —
+//! [`DriverHost`](tairix_abi::DriverHost) surface an in-kernel driver gets —
 //! but the concrete host can no longer reach the kernel's frame allocator or
 //! identity map directly. Instead it maps a **granted** device resource over
 //! the `abi-v1` syscall surface (`plans/PI.md` P10 chunk 5d-0): the kernel
-//! mints the driver one unforgeable handle per [`HwResource`](rustos_abi::hwtree::HwResource) its matched
+//! mints the driver one unforgeable handle per [`HwResource`](tairix_abi::hwtree::HwResource) its matched
 //! hardware-tree node requested (and *no more*), and
 //! the driver maps a register window with the `mmio_map` syscall and carves a
 //! coherent DMA buffer with the `dma_alloc` syscall, passing those handles.
 //!
 //! [`RtDriverHost`] is that host. It is the user-space analogue of the
 //! in-kernel keyboard service's `IdentityMmioMapper` + frame-allocator DMA
-//! host: it implements [`DriverHost`](rustos_abi::DriverHost),
-//! [`MmioMapper`](rustos_abi::MmioMapper),
-//! and [`VirtioHost`](rustos_abi::driver::virtio::VirtioHost) over a small
+//! host: it implements [`DriverHost`](tairix_abi::DriverHost),
+//! [`MmioMapper`](tairix_abi::MmioMapper),
+//! and [`VirtioHost`](tairix_abi::driver::virtio::VirtioHost) over a small
 //! table of kernel-issued grants, resolving a driver's requested
 //! `(phys_base, len)` window to the grant that covers it and mapping it once.
 //!
@@ -43,7 +43,7 @@
 //! The two syscalls the host issues live behind the [`GrantSyscalls`] trait so
 //! the resolution and translation logic is exercised on the host without a
 //! kernel. Production driver processes use [`RtGrantSyscalls`], which forwards
-//! to `rustos_rt`'s wrappers — the one syscall trap.
+//! to `tairix_rt`'s wrappers — the one syscall trap.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]

@@ -1,4 +1,4 @@
-//! RustOS `sysmon` — a live, fullscreen kernel-memory and load monitor
+//! TAIRiX `sysmon` — a live, fullscreen kernel-memory and load monitor
 //! (`plans/STRESSTEST.md` ST4).
 //!
 //! `sysmon` observes every aspect of the kernel's memory through the System
@@ -62,5 +62,5 @@ pub use command::{
 };
 pub use error::SysmonError;
 pub use model::{Action, CpuBusy, Focus, Gauge, Model, PinState, Snapshot, BAND_HISTORY_MAX};
-pub use rustos_curses::{Screen, Tty};
-pub use rustos_procinfo::Transport;
+pub use tairix_curses::{Screen, Tty};
+pub use tairix_procinfo::Transport;

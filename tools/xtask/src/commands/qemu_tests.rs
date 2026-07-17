@@ -4,7 +4,7 @@
 //! as host-side tests and that each QEMU run has a *strict* per-test
 //! timeout with **no retries**. This module enforces both: it builds the
 //! enrolled kernels per target triple, then drives each one through
-//! [`rustos_qemu::Runner::run`], failing the whole `xtask test` invocation
+//! [`tairix_qemu::Runner::run`], failing the whole `xtask test` invocation
 //! if any guest fails or times out.
 //!
 //! The guests run **concurrently** through the shared weighted-concurrency
@@ -20,8 +20,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rustos_itest_harness::pie::PieArch;
-use rustos_qemu::{Outcome, Runner, Spec};
+use tairix_itest_harness::pie::PieArch;
+use tairix_qemu::{Outcome, Runner, Spec};
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
@@ -108,7 +108,7 @@ struct QemuTest {
 /// Builds an enrolment's ordered pointer script at run time (the click
 /// coordinates come from the production desktop's own layout code), or
 /// describes why it cannot.
-type PointerScriptBuilder = fn() -> Result<Vec<rustos_qemu::PointerStep>, String>;
+type PointerScriptBuilder = fn() -> Result<Vec<tairix_qemu::PointerStep>, String>;
 
 /// The pixel assertion a [`ScreendumpPlan`] applies to its dumped image.
 type ScreendumpAssert = fn(&QemuTest, &Path) -> Result<(), String>;
@@ -141,7 +141,7 @@ enum NetPeerMode {
     /// families (the single-process `netstack_*` verticals).
     DualStack,
     /// A v6-link-local-only peer: the device MAC is pinned to
-    /// `rustos_test_netstack_wire::GUEST_MAC` so the guest's EUI-64
+    /// `tairix_test_netstack_wire::GUEST_MAC` so the guest's EUI-64
     /// link-local is deterministic, and the peer campaigns over that
     /// link-local alone (the two-process autoload vertical, whose guest
     /// has no admin-assigned IPv4).
@@ -159,15 +159,15 @@ enum NetPeerMode {
 enum FsDisk {
     /// No filesystem volume (the test uses `disk_sectors` or no disk).
     None,
-    /// The shared [`rustos_test_fat32_image`] FAT32 volume.
+    /// The shared [`tairix_test_fat32_image`] FAT32 volume.
     Fat32,
-    /// The shared [`rustos_test_arxfs_image`] arxfs volume.
+    /// The shared [`tairix_test_arxfs_image`] arxfs volume.
     ARXFS,
-    /// The shared [`rustos_test_arxfs_image`] users-root volume:
+    /// The shared [`tairix_test_arxfs_image`] users-root volume:
     /// the standard filesystem tree with `/System/Security/Users` planted
     /// (`plans/PI.md` P11).
     UsersRoot,
-    /// The shared [`rustos_test_encrypted_root_image`] whole-disk image: an
+    /// The shared [`tairix_test_encrypted_root_image`] whole-disk image: an
     /// MBR, a FAT boot partition carrying the `root.unlock` descriptor, and
     /// a passphrase-derived encrypted `ARXFS` root carrying
     /// `/System/Security/Users` — the root-mount->login vertical's backing
@@ -196,7 +196,7 @@ enum FsDisk {
 ///
 /// Used by the compile-time checks that keep the root-unlock-admission
 /// vertical's serial script in lockstep with the shared
-/// [`rustos_test_encrypted_root_image`] fixture: the serial table needs
+/// [`tairix_test_encrypted_root_image`] fixture: the serial table needs
 /// `&'static str` literals, so each typed line is verified against the
 /// fixture's own constant at build time (single source
 /// of truth; drift fails the build rather than silently mistyping at the
@@ -284,21 +284,21 @@ const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 /// each occurrence is one delivered window event, kernel-attested —
 /// imported from the kernel/ipc vocabulary, never a literal.
 const AUTOLOAD_WINDOW_EVENT_MARKER: &str =
-    rustos_kernel_ipc::AuditEvent::MessageDelivered.message();
+    tairix_kernel_ipc::AuditEvent::MessageDelivered.message();
 
 /// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences key the second
 /// screendump (the served files window on the dark desktop) — the
 /// vertical's shared interaction contract, defined once beside the guest
 /// PASS gate that also consumes it.
 const AUTOLOAD_WINDOW_DUMP_OCCURRENCES: u32 =
-    rustos_test_autoload_input_qemu_aarch64::WINDOW_DUMP_DELIVERIES;
+    tairix_test_autoload_input_qemu_aarch64::WINDOW_DUMP_DELIVERIES;
 
 /// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences key the third
 /// screendump (the light-theme desktop with the window still composited)
 /// — the same shared contract (a wake boundary past the re-theme
 /// present, see the contract crate's rationale).
 const AUTOLOAD_APPEARANCE_DUMP_OCCURRENCES: u32 =
-    rustos_test_autoload_input_qemu_aarch64::APPEARANCE_DUMP_DELIVERIES;
+    tairix_test_autoload_input_qemu_aarch64::APPEARANCE_DUMP_DELIVERIES;
 
 /// The post-toggle in-window click's own delivery count: the first
 /// handshake click is keyed on it, so it lands in a wake after the
@@ -310,7 +310,7 @@ const AUTOLOAD_TOGGLE_CLICK_OCCURRENCES: u32 = 3;
 /// create and first present — the shared contract, so the click can
 /// never race the window's existence.
 const AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES: u32 =
-    rustos_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_REPLIES;
+    tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_REPLIES;
 
 /// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences gate the typed
 /// shell command: the terminal-window click's own deliveries (the files
@@ -318,13 +318,13 @@ const AUTOLOAD_TERMINAL_WINDOW_REPLY_OCCURRENCES: u32 =
 /// the terminal is provably the focused key recipient — the shared
 /// contract.
 const AUTOLOAD_TERMINAL_TYPE_OCCURRENCES: u32 =
-    rustos_test_autoload_input_qemu_aarch64::TERMINAL_TYPE_DELIVERIES;
+    tairix_test_autoload_input_qemu_aarch64::TERMINAL_TYPE_DELIVERIES;
 
 /// The shell command the autoload vertical types into the focused
 /// terminal at the seat keyboard — the shared contract (`true` plus
 /// Enter): the shell resolving and spawning it is the guest's AW4
 /// round-trip witness.
-const AUTOLOAD_TERMINAL_COMMAND: &str = rustos_test_autoload_input_qemu_aarch64::TERMINAL_COMMAND;
+const AUTOLOAD_TERMINAL_COMMAND: &str = tairix_test_autoload_input_qemu_aarch64::TERMINAL_COMMAND;
 
 /// Serial marker after which the autoload vertical types the login +
 /// desktop-command dialogue: the serial rendering of the kernel's
@@ -359,7 +359,7 @@ const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ndesktop\n";
 /// chain strictly ordered: present → verified dump → mouse motion → the
 /// guest's `kind=pointer` witness → PASS — a run can neither pass
 /// without presenting nor exit before the host holds the pixels.
-const AUTOLOAD_FIRST_PRESENT_MARKER: &str = rustos_drv_display_framebuffer::FIRST_PRESENT_MESSAGE;
+const AUTOLOAD_FIRST_PRESENT_MARKER: &str = tairix_drv_display_framebuffer::FIRST_PRESENT_MESSAGE;
 
 /// `true` if `text` begins with `prefix`.
 const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
@@ -383,8 +383,8 @@ const SESSION_USERNAME_LINE: &str = "root\n";
 /// One character beyond the account format's username bound. The byte array
 /// is generated from the shared bound, and its fixed ASCII payload is valid
 /// UTF-8 by construction.
-const OVERLONG_USERNAME_BYTES: [u8; rustos_users::MAX_USERNAME_LEN + 1] =
-    [b'x'; rustos_users::MAX_USERNAME_LEN + 1];
+const OVERLONG_USERNAME_BYTES: [u8; tairix_users::MAX_USERNAME_LEN + 1] =
+    [b'x'; tairix_users::MAX_USERNAME_LEN + 1];
 
 /// String view of [`OVERLONG_USERNAME_BYTES`] for the serial dialogue table.
 const OVERLONG_USERNAME: &str = match core::str::from_utf8(&OVERLONG_USERNAME_BYTES) {
@@ -399,7 +399,7 @@ const SESSION_PASSWORD_LINE: &str = "root\n";
 /// Serial marker the memory-stability vertical waits for before typing the
 /// shell `exit` that completes its PASS chain: the leading prefix of the
 /// memsoak fixture's success report line. Pinned to the fixture's own
-/// `rustos_test_memsoak::PASS_MARKER` by a unit test below, so the script
+/// `tairix_test_memsoak::PASS_MARKER` by a unit test below, so the script
 /// and the program cannot drift.
 const MEMSOAK_PASS_PREFIX: &str = "MEMSOAK PASS baseline=";
 
@@ -423,7 +423,7 @@ const _: () = {
     assert!(
         is_line_of(
             UNLOCK_PASSPHRASE_LINE.as_bytes(),
-            rustos_test_encrypted_root_image::PASSPHRASE
+            tairix_test_encrypted_root_image::PASSPHRASE
         ),
         "UNLOCK_PASSPHRASE_LINE drifted from the fixture passphrase"
     );
@@ -431,7 +431,7 @@ const _: () = {
         !WRONG_UNLOCK_PASSPHRASE_PREFIX.is_empty()
             && !bytes_eq(
                 WRONG_UNLOCK_PASSPHRASE_PREFIX.as_bytes(),
-                rustos_test_encrypted_root_image::PASSPHRASE
+                tairix_test_encrypted_root_image::PASSPHRASE
             ),
         "WRONG_UNLOCK_PASSPHRASE_PREFIX must be non-empty and not the fixture passphrase"
     );
@@ -468,14 +468,14 @@ const _: () = {
     assert!(
         is_line_of(
             SESSION_USERNAME_LINE.as_bytes(),
-            rustos_test_encrypted_root_image::USERNAME.as_bytes()
+            tairix_test_encrypted_root_image::USERNAME.as_bytes()
         ),
         "SESSION_USERNAME_LINE drifted from the fixture account"
     );
     assert!(
         is_line_of(
             SESSION_PASSWORD_LINE.as_bytes(),
-            rustos_test_encrypted_root_image::PASSWORD.as_bytes()
+            tairix_test_encrypted_root_image::PASSWORD.as_bytes()
         ),
         "SESSION_PASSWORD_LINE drifted from the fixture account"
     );
@@ -483,8 +483,8 @@ const _: () = {
 
 const TESTS: &[QemuTest] = &[
     QemuTest {
-        package: "rustos-test-memory-isolation",
-        binary: "rustos-test-memory-isolation",
+        package: "tairix-test-memory-isolation",
+        binary: "tairix-test-memory-isolation",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -499,13 +499,13 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
-    // (emulated) cores. The host-side `rustos-test-scheduler-stress`
+    // (emulated) cores. The host-side `tairix-test-scheduler-stress`
     // workspace test continues to satisfy the unit / cross-
     // crate contract; this enrolment is the QEMU-on-real-cores half of
     // the same Stage-2 deliverable mandated by `PLAN.md` lines 154-158.
     QemuTest {
-        package: "rustos-test-scheduler-stress-qemu",
-        binary: "rustos-test-scheduler-stress-qemu",
+        package: "tairix-test-scheduler-stress-qemu",
+        binary: "tairix-test-scheduler-stress-qemu",
         target: "x86_64-unknown-none",
         cpus: 4,
         timeout: Duration::from_secs(120),
@@ -520,12 +520,12 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // Stage 3a (c7-bin) deliverable: boot the production
-    // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
+    // `tairix-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
     // `X86_64Arch` → per-CPU init → `BootInfo` →
     // `kernel_core::kernel_main`) and assert
     // `AuditEvent::BootCompleted` (`EventId(4004)`) appears on the
-    // audit sink. The test binary `rustos-test-kernel-arch-boot`
-    // wraps the lib half of `rustos-kernel` with an audit-observer
+    // audit sink. The test binary `tairix-test-kernel-arch-boot`
+    // wraps the lib half of `tairix-kernel` with an audit-observer
     // Sink that flips `qemu_exit::exit_success` on observing
     // `BootCompleted` — see
     // `tests/integration/kernel_arch_boot/src/main.rs`. Single CPU
@@ -533,8 +533,8 @@ const TESTS: &[QemuTest] = &[
     // 60-second budget matches `memory_isolation`'s — both are
     // strictly bring-up tests with no workload.
     QemuTest {
-        package: "rustos-test-kernel-arch-boot",
-        binary: "rustos-test-kernel-arch-boot",
+        package: "tairix-test-kernel-arch-boot",
+        binary: "tairix-test-kernel-arch-boot",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -549,7 +549,7 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
-    // `rustos-kernel` boot pipeline and, on observing
+    // `tairix-kernel` boot pipeline and, on observing
     // `AuditEvent::BootCompleted`, synthesise a Scheduler / CapTable /
     // KernelSyscallHandlers / Dispatcher quartet locally and drive
     // `Dispatcher::dispatch` with `(cap_query, CAP_TIME_SET)` then
@@ -563,8 +563,8 @@ const TESTS: &[QemuTest] = &[
     // 60-second budget matches `kernel_arch_boot`'s — same boot
     // pipeline plus a fixed-size dispatcher exercise.
     QemuTest {
-        package: "rustos-test-syscall-dispatch-qemu",
-        binary: "rustos-test-syscall-dispatch-qemu",
+        package: "tairix-test-syscall-dispatch-qemu",
+        binary: "tairix-test-syscall-dispatch-qemu",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -580,23 +580,23 @@ const TESTS: &[QemuTest] = &[
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
     // target QEMU round-trip for the C-callable syscall stub runtime
-    // (`lib/abi-sys`). Unlike `rustos-test-syscall-dispatch-qemu` (which
+    // (`lib/abi-sys`). Unlike `tairix-test-syscall-dispatch-qemu` (which
     // drives `Dispatcher::dispatch` directly and never executes a trap),
     // this test boots the production kernel pipeline and, on
     // `AuditEvent::BootCompleted`, overrides the syscall dispatch callback
-    // and then *issues* the `abi-sys` `ros_sys_cap_query` stub — exercising
+    // and then *issues* the `abi-sys` `tairix_sys_cap_query` stub — exercising
     // the real x86_64 `syscall` instruction (`lib/abi-sys/src/trap.rs`) and
     // the kernel's `IA32_LSTAR` entry stub
     // (`kernel/arch/x86_64/src/syscall_entry.rs`) together. The installed
     // callback asserts the kernel-observed `(number, args)` are exactly
-    // what `ros_sys_cap_query` should have marshalled into the syscall
+    // what `tairix_sys_cap_query` should have marshalled into the syscall
     // registers and flips `qemu_exit::exit_success`; any mismatch (or the
     // `syscall` returning to its caller at all) flips
     // `qemu_exit::exit_failure`. Single CPU suffices and the 60-second
     // budget matches the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-abi-sys-syscall-qemu",
-        binary: "rustos-test-abi-sys-syscall-qemu",
+        package: "tairix-test-abi-sys-syscall-qemu",
+        binary: "tairix-test-abi-sys-syscall-qemu",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -616,20 +616,20 @@ const TESTS: &[QemuTest] = &[
     // kernel routes only an `ecall` *from U-mode* to the syscall dispatch
     // callback (`kernel/arch/riscv64/src/syscall_entry.rs`) — so this test
     // stands up a minimal U-mode context with the Stage-3 Sv39 primitives:
-    // it identity-maps the kernel (S-mode), aliases the `ros_sys_cap_query`
+    // it identity-maps the kernel (S-mode), aliases the `tairix_sys_cap_query`
     // stub page at a user virtual address with the U bit set plus a user
     // stack, installs the dispatch callback, sets `sstatus.SUM`, and
     // `sret`s to U-mode. The stub's real `ecall` (`lib/abi-sys/src/trap.rs`)
     // then traps into the kernel S-mode trap vector, and the installed
     // callback asserts the kernel-observed `(number, args)` are exactly
-    // what `ros_sys_cap_query` should have marshalled into `a7`/`a0` before
+    // what `tairix_sys_cap_query` should have marshalled into `a7`/`a0` before
     // writing the `SiFive` Test PASS finisher; any mismatch (or the `ecall`
     // resuming in U-mode at all) writes a distinct failure finisher. Single
     // CPU suffices and the 60-second budget matches the other
     // boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-abi-sys-syscall-qemu-riscv64",
-        binary: "rustos-test-abi-sys-syscall-qemu-riscv64",
+        package: "tairix-test-abi-sys-syscall-qemu-riscv64",
+        binary: "tairix-test-abi-sys-syscall-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -650,20 +650,20 @@ const TESTS: &[QemuTest] = &[
     // synchronous exception) to the syscall dispatch callback
     // (`kernel/arch/aarch64/src/exceptions.rs`) — so this test stands up a
     // minimal EL0 context with the Stage-3 stage-1 primitives: it
-    // identity-maps the kernel (EL1), aliases the `ros_sys_cap_query` stub
+    // identity-maps the kernel (EL1), aliases the `tairix_sys_cap_query` stub
     // page at a user virtual address with EL0-executable attributes plus
     // an EL0 stack, installs the dispatch callback and the EL1 vector
     // table, and `eret`s to EL0. The stub's real `svc`
     // (`lib/abi-sys/src/trap.rs`) then traps into the EL1 vector, and the
     // installed callback asserts the kernel-observed `(number, args)` are
-    // exactly what `ros_sys_cap_query` should have marshalled into
+    // exactly what `tairix_sys_cap_query` should have marshalled into
     // `x8`/`x0` before the ARM semihosting PASS finisher; any mismatch (or
     // the `svc` resuming in EL0 at all) writes a distinct failure
     // finisher. Single CPU suffices and the 60-second budget matches the
     // other boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-abi-sys-syscall-qemu-aarch64",
-        binary: "rustos-test-abi-sys-syscall-qemu-aarch64",
+        package: "tairix-test-abi-sys-syscall-qemu-aarch64",
+        binary: "tairix-test-abi-sys-syscall-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -679,26 +679,26 @@ const TESTS: &[QemuTest] = &[
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // ring-3 exercise for the Arch HAL "enter user mode" primitive
-    // (`kernel/arch/x86_64/src/userentry.rs`, `rustos_arch_api::EnterUser`). Unlike `rustos-test-abi-sys-syscall-qemu`, which
+    // (`kernel/arch/x86_64/src/userentry.rs`, `tairix_arch_api::EnterUser`). Unlike `tairix-test-abi-sys-syscall-qemu`, which
     // issues the same `abi-sys` stub from ring 0 (the x86_64 `syscall`
     // traps identically from any privilege level and never crosses a
     // boundary), this test boots the production kernel and, on
     // `AuditEvent::BootCompleted`, builds a ring-3 address space — a
     // user-accessible, executable, non-writable alias of the
-    // `ros_sys_cap_query` stub page (W^X) plus a USER read/write
+    // `tairix_sys_cap_query` stub page (W^X) plus a USER read/write
     // stack — switches CR3, and `iretq`s to ring 3 through
     // `UserMode::new().enter_user(...)`. The stub's real `syscall`
     // (`lib/abi-sys/src/trap.rs`) then traps back through the kernel's
     // `IA32_LSTAR` entry stub; reaching the installed dispatch callback
     // at all proves the `iretq` entry succeeded, and the callback asserts
     // the kernel-observed `(number, args)` are exactly what
-    // `ros_sys_cap_query` should have marshalled into the syscall
+    // `tairix_sys_cap_query` should have marshalled into the syscall
     // registers before flipping `qemu_exit::exit_success`; any mismatch
     // flips `qemu_exit::exit_failure`. Single CPU suffices and the
     // 60-second budget matches the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-enter-user-qemu-x86_64",
-        binary: "rustos-test-enter-user-qemu-x86_64",
+        package: "tairix-test-enter-user-qemu-x86_64",
+        binary: "tairix-test-enter-user-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -727,8 +727,8 @@ const TESTS: &[QemuTest] = &[
     // Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-syscall-regs-qemu-x86_64",
-        binary: "rustos-test-syscall-regs-qemu-x86_64",
+        package: "tairix-test-syscall-regs-qemu-x86_64",
+        binary: "tairix-test-syscall-regs-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -746,11 +746,11 @@ const TESTS: &[QemuTest] = &[
     // crt0-linked-program spawn round-trip. The build script compiles the
     // separate fixture program (`tests/integration/cc3_program`, crt0 +
     // abi-sys) position-independent and converts it to an `rxe` blob
-    // (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
+    // (`tairix_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
     // On boot the test stands up an Sv39 address space (identity-mapping the
     // kernel + MMIO), activates it, installs the trap vector and a dispatch
     // callback, then calls the production capability-checked, audited spawn
-    // caller (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`)
+    // caller (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`)
     // to build the program's U-mode image — segments mapped + filled, user
     // stack, startup-vector block — and `sret`s into it through the Arch HAL
     // `EnterUser` primitive. The program (built via `build_process_image` at a
@@ -762,8 +762,8 @@ const TESTS: &[QemuTest] = &[
     // finisher. Single CPU suffices and the 60-second budget matches the other
     // boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-spawn-program-qemu-riscv64",
-        binary: "rustos-test-spawn-program-qemu-riscv64",
+        package: "tairix-test-spawn-program-qemu-riscv64",
+        binary: "tairix-test-spawn-program-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -781,12 +781,12 @@ const TESTS: &[QemuTest] = &[
     // crt0-linked-program spawn round-trip — the EL0 analogue of the riscv64
     // test above. The build script compiles the separate fixture program
     // (`tests/integration/cc3_program`, crt0 + abi-sys) position-independent
-    // and converts it to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+    // and converts it to an `rxe` blob (`tairix_itest_harness::elf2rxe`)
     // carrying the kernel's syscall CFI tag. On boot the test stands up a
     // stage-1 address space (identity-mapping the kernel + MMIO, EL1),
     // activates it, installs the EL1 vector table and a dispatch callback, then
     // calls the production capability-checked, audited spawn caller
-    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
     // build the program's EL0 image — segments mapped + filled, user stack,
     // startup-vector block — and `eret`s into it through the Arch HAL
     // `EnterUser` primitive. The program (built via `build_process_image` at a
@@ -798,8 +798,8 @@ const TESTS: &[QemuTest] = &[
     // Single CPU suffices and the 60-second budget matches the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-spawn-program-qemu-aarch64",
-        binary: "rustos-test-spawn-program-qemu-aarch64",
+        package: "tairix-test-spawn-program-qemu-aarch64",
+        binary: "tairix-test-spawn-program-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -818,14 +818,14 @@ const TESTS: &[QemuTest] = &[
     // riscv64/aarch64 tests above, completing CC3. The build script compiles
     // the separate fixture program (`tests/integration/cc3_program`, crt0 +
     // abi-sys) position-independent and converts it to an `rxe` blob
-    // (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
+    // (`tairix_itest_harness::elf2rxe`) carrying the kernel's syscall CFI tag.
     // Because the x86_64 ring-3 transition needs the GDT user selectors, the
     // TSS, and `syscall`/`IA32_LSTAR` entry installed, the test boots the
     // production kernel pipeline and, on `AuditEvent::BootCompleted`, enables
     // `IA32_EFER.NXE`, builds a fresh address space (low 32 MiB identity +
     // higher-half kernel window), switches CR3, installs a dispatch callback,
     // then calls the production capability-checked, audited spawn caller
-    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
     // build the program's ring-3 image — segments mapped + filled W^X (code RX,
     // data RW-NX, rodata R-NX), user stack, startup-vector block — and `iretq`s
     // into it through the Arch HAL `EnterUser` primitive. The program (built via
@@ -837,8 +837,8 @@ const TESTS: &[QemuTest] = &[
     // flips `qemu_exit::exit_failure`. Single CPU suffices and the 60-second
     // budget matches the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-spawn-program-qemu-x86_64",
-        binary: "rustos-test-spawn-program-qemu-x86_64",
+        package: "tairix-test-spawn-program-qemu-x86_64",
+        binary: "tairix-test-spawn-program-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -854,25 +854,25 @@ const TESTS: &[QemuTest] = &[
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
     // end-to-end C-program round-trip — the headline CC5 work. The build
-    // script builds the Rust crt0 + `ros_sys_*` runtime shim
+    // script builds the Rust crt0 + `tairix_sys_*` runtime shim
     // (`tests/integration/cc5_program`) as a PIE `staticlib`, compiles the
     // genuinely C-language program (`cc5_program/csrc/main.c`) with the audited,
     // version-pinned, checksummed `clang`/`ld.lld` wrapper (`tools/cc`), links them into one PIE image, and converts it to an `rxe`
-    // blob (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI
+    // blob (`tairix_itest_harness::elf2rxe`) carrying the kernel's syscall CFI
     // tag. On boot the test stands up an Sv39 address space (identity-mapping
     // the kernel + MMIO), installs the trap vector and a dispatch callback, then
     // calls the production capability-checked, audited spawn caller
-    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
+    // (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
     // the program's U-mode image and `sret` into it. The C program checks a
     // Time64 value across the pre-1970/post-2038 boundaries, an ipc header,
     // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
     // services those (asserting the marshalled cap id, returning a 64-bit
     // sentinel) and asserts the `exit` code is 99 before the `SiFive` Test PASS
-    // finisher. Proves the generated C header, the `ros_sys_*` runtime, and crt0
+    // finisher. Proves the generated C header, the `tairix_sys_*` runtime, and crt0
     // agree with the Rust side end to end. Single CPU; 60-second run budget.
     QemuTest {
-        package: "rustos-test-c-program-qemu-riscv64",
-        binary: "rustos-test-c-program-qemu-riscv64",
+        package: "tairix-test-c-program-qemu-riscv64",
+        binary: "tairix-test-c-program-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -888,17 +888,17 @@ const TESTS: &[QemuTest] = &[
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
     // end-to-end C-program round-trip — the EL0 analogue of the riscv64
-    // vertical above. The build script builds the Rust crt0 + `ros_sys_*`
+    // vertical above. The build script builds the Rust crt0 + `tairix_sys_*`
     // runtime shim (`tests/integration/cc5_program`) as a PIE `staticlib`,
     // compiles the genuinely C-language program (`cc5_program/csrc/main.c`)
     // with the audited, version-pinned, checksummed `clang`/`ld.lld` wrapper
     // (`tools/cc`), links them into one PIE image, and converts
-    // it to an `rxe` blob (`rustos_itest_harness::elf2rxe`) carrying the
+    // it to an `rxe` blob (`tairix_itest_harness::elf2rxe`) carrying the
     // kernel's syscall CFI tag. On boot the test enables `CPACR_EL1.FPEN`,
     // stands up a stage-1 address space (identity-mapping the kernel + MMIO,
     // EL1), installs the EL1 vector table and a dispatch callback, then calls
     // the production capability-checked, audited spawn caller
-    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
+    // (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
     // build the program's EL0 image and `eret` into it. The C program checks a
     // Time64 value across the pre-1970/post-2038 boundaries, an ipc header,
     // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
@@ -906,8 +906,8 @@ const TESTS: &[QemuTest] = &[
     // sentinel) and asserts the `exit` code is 99 before the ARM semihosting
     // PASS finisher. Single CPU; 60-second run budget.
     QemuTest {
-        package: "rustos-test-c-program-qemu-aarch64",
-        binary: "rustos-test-c-program-qemu-aarch64",
+        package: "tairix-test-c-program-qemu-aarch64",
+        binary: "tairix-test-c-program-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -924,11 +924,11 @@ const TESTS: &[QemuTest] = &[
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
     // end-to-end C-program round-trip — the ring-3 analogue of the
     // riscv64/aarch64 verticals above, completing CC5. The build script builds
-    // the Rust crt0 + `ros_sys_*` runtime shim (`tests/integration/cc5_program`)
+    // the Rust crt0 + `tairix_sys_*` runtime shim (`tests/integration/cc5_program`)
     // as a PIE `staticlib`, compiles the genuinely C-language program
     // (`cc5_program/csrc/main.c`) with the audited, version-pinned, checksummed
     // `clang`/`ld.lld` wrapper (`tools/cc`), links them into one
-    // PIE image, and converts it to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+    // PIE image, and converts it to an `rxe` blob (`tairix_itest_harness::elf2rxe`)
     // carrying the kernel's syscall CFI tag. Because the x86_64 ring-3
     // transition needs the GDT user selectors, the TSS, and `syscall`/
     // `IA32_LSTAR` entry installed, the test boots the production kernel pipeline
@@ -936,7 +936,7 @@ const TESTS: &[QemuTest] = &[
     // fresh address space (low 32 MiB identity + higher-half kernel window),
     // switches CR3, installs a dispatch callback, then calls the production
     // capability-checked, audited spawn caller
-    // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
+    // (`tairix_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
     // the program's ring-3 image (W^X: code RX, data RW-NX, rodata R-NX) and
     // `iretq` into it. The C program checks a Time64 value across the
     // pre-1970/post-2038 boundaries, an ipc header, and a sysinfo header, then
@@ -944,8 +944,8 @@ const TESTS: &[QemuTest] = &[
     // the marshalled cap id, returning a 64-bit sentinel) and asserts the `exit`
     // code is 99 before `qemu_exit::exit_success`. Single CPU; 60-second budget.
     QemuTest {
-        package: "rustos-test-c-program-qemu-x86_64",
-        binary: "rustos-test-c-program-qemu-x86_64",
+        package: "tairix-test-c-program-qemu-x86_64",
+        binary: "tairix-test-c-program-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -960,14 +960,14 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
-    // instantiate `rustos_drvhost::Host`, load a baked-in signed
+    // instantiate `tairix_drvhost::Host`, load a baked-in signed
     // mock `.rxe` image, exercise `load → snapshot → reload →
     // unload`, then flip `qemu_exit::exit_success`. Single CPU
     // suffices and the 60-second budget matches the other Stage 3a
     // boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-drvhost-qemu",
-        binary: "rustos-test-drvhost-qemu",
+        package: "tairix-test-drvhost-qemu",
+        binary: "tairix-test-drvhost-qemu",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -984,10 +984,10 @@ const TESTS: &[QemuTest] = &[
     // Stage 4 first-driver vertical: boot the production kernel
     // pipeline, then on `AuditEvent::BootCompleted` load the signed
     // PS/2 input driver (`drivers/input/ps2`) through
-    // `rustos_drvhost::Host` and drive it through load -> use ->
+    // `tairix_drvhost::Host` and drive it through load -> use ->
     // unload -> reload. "Use" is interrupt-driven: it binds the
     // keyboard line (ISA IRQ-1 -> GSI 1) in the production
-    // `rustos_kernel_irq::IrqTable`, enables the i8042 keyboard-
+    // `tairix_kernel_irq::IrqTable`, enables the i8042 keyboard-
     // interrupt config bit, masks the legacy PIC, unmasks GSI 1 at the
     // IO-APIC, then injects a deterministic scancode via the
     // controller's `0xD2` ("write keyboard output buffer") command —
@@ -1003,8 +1003,8 @@ const TESTS: &[QemuTest] = &[
     // and the 60-second budget matches the other Stage-3/4
     // boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-ps2-qemu-x86-64",
-        binary: "rustos-test-ps2-qemu-x86-64",
+        package: "tairix-test-ps2-qemu-x86-64",
+        binary: "tairix-test-ps2-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1021,7 +1021,7 @@ const TESTS: &[QemuTest] = &[
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
     // trip on the legacy IRQ-0 GSI through the IO-APIC + PIT. The
-    // test binary `rustos-test-irq-qemu-x86-64` installs an audit
+    // test binary `tairix-test-irq-qemu-x86-64` installs an audit
     // sink that — on observing `AuditEvent::BootCompleted` — binds
     // the line in the published `IrqTable`, unmasks through the
     // production `IoApicController`, programs PIT channel 0 as a
@@ -1033,8 +1033,8 @@ const TESTS: &[QemuTest] = &[
     // budget matches the other Stage-3/4 boot-then-do-fixed-work
     // tests.
     QemuTest {
-        package: "rustos-test-irq-qemu-x86-64",
-        binary: "rustos-test-irq-qemu-x86-64",
+        package: "tairix-test-irq-qemu-x86-64",
+        binary: "tairix-test-irq-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1048,7 +1048,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
+    // Stage 4.D Item 4: `tairix-test-virtio-blk-pci-x86-64` performs a
     // full real virtio-blk-pci round-trip — boot → `mechanism_one`
     // PCI walk → map the four virtio register windows → route MSI-X →
     // mint a `KernelVirtioHost` over a per-device DMA pool → load the
@@ -1065,8 +1065,8 @@ const TESTS: &[QemuTest] = &[
     // headroom for the sector-1 write/read-back. A 60-second budget
     // matches the other Stage-3/4 boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-virtio-blk-pci-x86-64",
-        binary: "rustos-test-virtio-blk-pci-x86-64",
+        package: "tairix-test-virtio-blk-pci-x86-64",
+        binary: "tairix-test-virtio-blk-pci-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1080,18 +1080,18 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 5 end-to-end FAT32 vertical: `rustos-test-fat32-virtio-blk-
+    // Stage 5 end-to-end FAT32 vertical: `tairix-test-fat32-virtio-blk-
     // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
     // instead of a raw sector round-trip it mounts the planted FAT32
     // volume through the real FAT32 driver, verifies the planted file,
     // and creates+writes+reads-back a fresh file before `qemu_exit`.
-    // The backing image is the shared `rustos-test-fat32-image` FAT32
+    // The backing image is the shared `tairix-test-fat32-image` FAT32
     // volume (`FsDisk::Fat32`), not the sector-0 pattern, so its geometry
     // is the image's own size. Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-fat32-virtio-blk-pci-x86-64",
-        binary: "rustos-test-fat32-virtio-blk-pci-x86-64",
+        package: "tairix-test-fat32-virtio-blk-pci-x86-64",
+        binary: "tairix-test-fat32-virtio-blk-pci-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1105,19 +1105,19 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 5 end-to-end arxfs vertical: `rustos-test-arxfs-virtio-blk-
+    // Stage 5 end-to-end arxfs vertical: `tairix-test-arxfs-virtio-blk-
     // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
     // instead of a raw sector round-trip it mounts the planted arxfs
     // volume through the real arxfs driver, verifies the planted file,
     // and creates+writes+reads-back a fresh file before `qemu_exit`.
-    // The backing image is the shared `rustos-test-arxfs-image` arxfs
+    // The backing image is the shared `tairix-test-arxfs-image` arxfs
     // volume (`FsDisk::ARXFS`) — which the driver itself authored — not
     // the sector-0 pattern, so its geometry is the image's own size.
     // Single CPU and a 60-second budget match the FAT32 vertical and the
     // other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-arxfs-virtio-blk-pci-x86-64",
-        binary: "rustos-test-arxfs-virtio-blk-pci-x86-64",
+        package: "tairix-test-arxfs-virtio-blk-pci-x86-64",
+        binary: "tairix-test-arxfs-virtio-blk-pci-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1131,12 +1131,12 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // `plans/NETWORK.md` N3c: `rustos-test-netstack-pci-x86-64` performs a
+    // `plans/NETWORK.md` N3c: `tairix-test-netstack-pci-x86-64` performs a
     // full real netstack-over-virtio-net-pci round-trip on the same shared
     // bring-up scaffolding as the virtio-blk vertical — boot →
     // `mechanism_one` PCI walk → map the four virtio register windows →
     // route MSI-X → mint a `KernelVirtioHost` over a per-device DMA pool →
-    // load the signed virtio-net `.rxe` → drive the `rustos-netstack`
+    // load the signed virtio-net `.rxe` → drive the `tairix-netstack`
     // engine's ring pump over the device against the harness-side
     // `netpeer` link peer on the QEMU dgram netdev: answer the peer's
     // ARP/NS resolution and v4+v6 echo campaign, then resolve and ping
@@ -1146,8 +1146,8 @@ const TESTS: &[QemuTest] = &[
     // 60-second budget match the other Stage-3/4 boot-then-do-fixed-work
     // tests.
     QemuTest {
-        package: "rustos-test-netstack-pci-x86-64",
-        binary: "rustos-test-netstack-pci-x86-64",
+        package: "tairix-test-netstack-pci-x86-64",
+        binary: "tairix-test-netstack-pci-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1161,7 +1161,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
+    // Stage 4.D Item 4: `tairix-test-kernel-arch-boot-riscv64` boots
     // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
     // FDT `/memory` parse → `RiscvArch` → `BootInfo` →
     // `kernel_core::kernel_main`) and asserts `AuditEvent::BootCompleted`
@@ -1170,8 +1170,8 @@ const TESTS: &[QemuTest] = &[
     // brings up one hart) and a 60-second budget matches the x86_64
     // `kernel_arch_boot` bring-up test.
     QemuTest {
-        package: "rustos-test-kernel-arch-boot-riscv64",
-        binary: "rustos-test-kernel-arch-boot-riscv64",
+        package: "tairix-test-kernel-arch-boot-riscv64",
+        binary: "tairix-test-kernel-arch-boot-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1185,8 +1185,8 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // PI Stage RV-P3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-riscv64`
-    // boots the *production* riscv64 `rustos-kernel` pipeline
+    // PI Stage RV-P3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-riscv64`
+    // boots the *production* riscv64 `tairix-kernel` pipeline
     // (`boot_riscv64::boot`) on the `virt` board, then drops into PID 1
     // (`init`) in U-mode through the `InitSpawn` seam `boot_riscv64` installs
     // into the `BootInfo` hand-off. After `kernel_core::kernel_main` emits
@@ -1203,8 +1203,8 @@ const TESTS: &[QemuTest] = &[
     // `spawn-init-qemu` verticals). Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-spawn-init-qemu-riscv64",
-        binary: "rustos-test-spawn-init-qemu-riscv64",
+        package: "tairix-test-spawn-init-qemu-riscv64",
+        binary: "tairix-test-spawn-init-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1218,7 +1218,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
+    // Stage 3c: `tairix-test-timer-preempt-qemu-riscv64` is the riscv64
     // half of the Stage-3 "timer interrupt drives the scheduler"
     // per-sub-stage deliverable. It boots the `virt` board, reads the
     // device-tree `timebase-frequency`, installs a `preempt`
@@ -1231,8 +1231,8 @@ const TESTS: &[QemuTest] = &[
     // slice brings up one hart) and a 60-second budget match the other
     // boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-timer-preempt-qemu-riscv64",
-        binary: "rustos-test-timer-preempt-qemu-riscv64",
+        package: "tairix-test-timer-preempt-qemu-riscv64",
+        binary: "tairix-test-timer-preempt-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1246,7 +1246,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 3c: `rustos-test-ipi-smp-qemu-riscv64` is the riscv64
+    // Stage 3c: `tairix-test-ipi-smp-qemu-riscv64` is the riscv64
     // multi-hart SMP deliverable. It boots the `virt` board with two
     // harts, derives the boot hart id at runtime (OpenSBI may boot on
     // either), starts the other hart through `smp::start_secondary` (the
@@ -1260,8 +1260,8 @@ const TESTS: &[QemuTest] = &[
     // reaches the PASS finisher, so the run times out. Two CPUs (the
     // point of the test) and a 60-second budget.
     QemuTest {
-        package: "rustos-test-ipi-smp-qemu-riscv64",
-        binary: "rustos-test-ipi-smp-qemu-riscv64",
+        package: "tairix-test-ipi-smp-qemu-riscv64",
+        binary: "tairix-test-ipi-smp-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 2,
         timeout: Duration::from_secs(60),
@@ -1288,8 +1288,8 @@ const TESTS: &[QemuTest] = &[
     // deliver the IPI never reaches the PASS finisher, so the run times
     // out. Four CPUs mirror the Raspberry Pi 4 and use a 60-second budget.
     QemuTest {
-        package: "rustos-test-ipi-smp-qemu-aarch64",
-        binary: "rustos-test-ipi-smp-qemu-aarch64",
+        package: "tairix-test-ipi-smp-qemu-aarch64",
+        binary: "tairix-test-ipi-smp-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 4,
         timeout: Duration::from_secs(60),
@@ -1303,14 +1303,14 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
+    // Stage 3c: `tairix-test-sched-drive-qemu-riscv64` is the riscv64
     // "arch primitives drive the live scheduler" deliverable — the wiring
     // that connects the `preempt` (timer + IPI) and `context` primitives
     // into the architecture-neutral `kernel/sched` `Scheduler`, rather
     // than the test-local counting callbacks the `timer_preempt` /
     // `ipi_smp` verticals use. It boots the `virt` board, performs a real
     // bidirectional `context::switch` round-trip (interrupts off), builds
-    // a real `rustos-kernel-sched-mlfq::Scheduler` over `RiscvArch`,
+    // a real `tairix-kernel-sched-mlfq::Scheduler` over `RiscvArch`,
     // installs the `preempt` timer callback and the IPI software-interrupt
     // callback so both drive `Scheduler::on_timer_tick`, arms the 100 Hz
     // SBI timer + IPI, spawns a batch of tasks, sends itself a directed
@@ -1323,8 +1323,8 @@ const TESTS: &[QemuTest] = &[
     // slice brings up one hart) and a 60-second budget match the other
     // boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-sched-drive-qemu-riscv64",
-        binary: "rustos-test-sched-drive-qemu-riscv64",
+        package: "tairix-test-sched-drive-qemu-riscv64",
+        binary: "tairix-test-sched-drive-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1342,7 +1342,7 @@ const TESTS: &[QemuTest] = &[
     // primitives drive the live scheduler" deliverable — the EL1/GICv2
     // analogue of `sched_drive_qemu_riscv64`. It boots the `virt` board,
     // performs a real bidirectional `context::switch` round-trip
-    // (interrupts off), builds a real `rustos-kernel-sched-mlfq::Scheduler`
+    // (interrupts off), builds a real `tairix-kernel-sched-mlfq::Scheduler`
     // over `Aarch64Arch`, installs the `preempt` generic-timer callback
     // and the GICv2 IPI (SGI) callback so both drive
     // `Scheduler::on_timer_tick`, brings up the EL1 vectors + GICv2, arms
@@ -1361,8 +1361,8 @@ const TESTS: &[QemuTest] = &[
     // brings up one core) and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-sched-drive-qemu-aarch64",
-        binary: "rustos-test-sched-drive-qemu-aarch64",
+        package: "tairix-test-sched-drive-qemu-aarch64",
+        binary: "tairix-test-sched-drive-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1378,14 +1378,14 @@ const TESTS: &[QemuTest] = &[
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the `kernel/core` kthread
     // runtime proven on real silicon — two kernel-thread tasks ping-pong
-    // through the *real* `rustos_arch_api::ContextSwitch::switch` under the
+    // through the *real* `tairix_arch_api::ContextSwitch::switch` under the
     // live scheduler, making that primitive a production scheduling path
     // for the first time (until now it was exercised only by the W7
     // `sched_drive` round-trip). It boots the `virt` board, reads the
     // GICv2 base + timer rate from the embedded `virt` DTB and brings up
     // the EL1 vectors + GICv2 (interrupts stay masked — dispatch is the
     // cooperative `step` loop, so the kthread switches are the only
-    // mechanism under test), builds a real `rustos-kernel-sched-mlfq`
+    // mechanism under test), builds a real `tairix-kernel-sched-mlfq`
     // `Scheduler` over `Aarch64Arch`, spawns two kthreads via
     // `kernel_core::spawn_kthread` whose bodies `yield_now` back and forth,
     // and drains the `step` loop. PASS once both kthreads have run their
@@ -1393,8 +1393,8 @@ const TESTS: &[QemuTest] = &[
     // task stalls the drain and the harness reports a timeout (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-kthread-switch-qemu-aarch64",
-        binary: "rustos-test-kthread-switch-qemu-aarch64",
+        package: "tairix-test-kthread-switch-qemu-aarch64",
+        binary: "tairix-test-kthread-switch-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1410,12 +1410,12 @@ const TESTS: &[QemuTest] = &[
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the riscv64 sibling of the
     // aarch64 kthread-switch vertical above — the same "two kthreads
-    // ping-pong through the *real* `rustos_arch_api::ContextSwitch::switch`
+    // ping-pong through the *real* `tairix_arch_api::ContextSwitch::switch`
     // under the live scheduler" proof, now on the riscv64 `virt` board, so
     // the `kernel/core` kthread runtime is a production scheduling path on
     // riscv64 too. It boots `virt`, reads the generic-timer rate from the
     // firmware DTB (the verbatim `a1` pointer), builds a real
-    // `rustos-kernel-sched-eevdf` `Scheduler` over `RiscvArch`, spawns two
+    // `tairix-kernel-sched-eevdf` `Scheduler` over `RiscvArch`, spawns two
     // kthreads via `kernel_core::spawn_kthread` whose bodies `yield_now`
     // back and forth (interrupts stay masked — dispatch is the cooperative
     // `step` loop), and drains the loop. PASS once both kthreads have run
@@ -1424,8 +1424,8 @@ const TESTS: &[QemuTest] = &[
     // (fail-loud). Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-kthread-switch-qemu-riscv64",
-        binary: "rustos-test-kthread-switch-qemu-riscv64",
+        package: "tairix-test-kthread-switch-qemu-riscv64",
+        binary: "tairix-test-kthread-switch-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1441,11 +1441,11 @@ const TESTS: &[QemuTest] = &[
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the x86_64 sibling of the
     // kthread-switch vertical — the same "two kthreads ping-pong through
-    // the *real* `rustos_arch_api::ContextSwitch::switch` under the live
+    // the *real* `tairix_arch_api::ContextSwitch::switch` under the live
     // scheduler" proof on the multiboot-loaded x86_64 kernel, so the
     // `kernel/core` kthread runtime is a production scheduling path on
     // x86_64 too. On the boot CPU it installs the per-CPU GDT/IDT, builds a
-    // real `rustos-kernel-sched-eevdf` `Scheduler` over the production
+    // real `tairix-kernel-sched-eevdf` `Scheduler` over the production
     // `X86_64Arch` handle (no AP bring-up, no LAPIC timer — interrupts stay
     // masked, so the spawn self-IPI is latched and never delivered), spawns
     // two kthreads via `kernel_core::spawn_kthread` whose bodies `yield_now`
@@ -1455,8 +1455,8 @@ const TESTS: &[QemuTest] = &[
     // timeout (fail-loud). Single CPU and a 60-second budget
     // match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-kthread-switch-qemu-x86-64",
-        binary: "rustos-test-kthread-switch-qemu-x86-64",
+        package: "tairix-test-kthread-switch-qemu-x86-64",
+        binary: "tairix-test-kthread-switch-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1471,7 +1471,7 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
-    // HAL slice (`rustos_arch_api::CrossCpuTlbShootdown`) proven on real
+    // HAL slice (`tairix_arch_api::CrossCpuTlbShootdown`) proven on real
     // emulated cores, one vertical per bare-metal port. riscv64: the boot
     // hart starts a second hart, then `RiscvArch::shootdown_page` runs the
     // local `sfence.vma` + the SBI RFENCE `remote_sfence_vma` firmware call
@@ -1479,8 +1479,8 @@ const TESTS: &[QemuTest] = &[
     // remote fence reached it. Two CPUs (the point of the test) and a
     // 60-second budget match the other multi-hart riscv64 tests.
     QemuTest {
-        package: "rustos-test-cross-cpu-tlb-shootdown-qemu-riscv64",
-        binary: "rustos-test-cross-cpu-tlb-shootdown-qemu-riscv64",
+        package: "tairix-test-cross-cpu-tlb-shootdown-qemu-riscv64",
+        binary: "tairix-test-cross-cpu-tlb-shootdown-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 2,
         timeout: Duration::from_secs(60),
@@ -1502,8 +1502,8 @@ const TESTS: &[QemuTest] = &[
     // Reaching PASS proves the broadcast executes on a real two-core
     // machine without faulting. Two CPUs and a 60-second budget.
     QemuTest {
-        package: "rustos-test-cross-cpu-tlb-shootdown-qemu-aarch64",
-        binary: "rustos-test-cross-cpu-tlb-shootdown-qemu-aarch64",
+        package: "tairix-test-cross-cpu-tlb-shootdown-qemu-aarch64",
+        binary: "tairix-test-cross-cpu-tlb-shootdown-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 2,
         timeout: Duration::from_secs(60),
@@ -1527,8 +1527,8 @@ const TESTS: &[QemuTest] = &[
     // round-trip ran on a second real core. Two CPUs and a 60-second
     // budget.
     QemuTest {
-        package: "rustos-test-cross-cpu-tlb-shootdown-qemu-x86-64",
-        binary: "rustos-test-cross-cpu-tlb-shootdown-qemu-x86-64",
+        package: "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",
+        binary: "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 2,
         timeout: Duration::from_secs(60),
@@ -1542,9 +1542,9 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
+    // Stage 3c: `tairix-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
-    // deliverable — the riscv64 analogue of `rustos-test-memory-isolation`
+    // deliverable — the riscv64 analogue of `tairix-test-memory-isolation`
     // (x86_64). It boots the `virt` board, builds a victim and an attacker
     // Sv39 `paging::AddressSpace` (each identity-maps the low 4 GiB) that
     // disagree on a single 64 GiB virtual address, installs a `fault`
@@ -1556,8 +1556,8 @@ const TESTS: &[QemuTest] = &[
     // CPU (the slice brings up one hart) and a 60-second budget match the
     // other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-memory-isolation-qemu-riscv64",
-        binary: "rustos-test-memory-isolation-qemu-riscv64",
+        package: "tairix-test-memory-isolation-qemu-riscv64",
+        binary: "tairix-test-memory-isolation-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1572,8 +1572,8 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G1):
-    // `rustos-test-stack-guard-qemu-riscv64` is the riscv64 sibling of
-    // `rustos-test-stack-guard-qemu-aarch64` — it proves the live Sv39
+    // `tairix-test-stack-guard-qemu-riscv64` is the riscv64 sibling of
+    // `tairix-test-stack-guard-qemu-aarch64` — it proves the live Sv39
     // block-split the riscv64 kthread kernel-stack guard page is built on.
     // It builds one `paging::AddressSpace` (identity-maps the low 4 GiB),
     // calls `AddressSpace::split_block` to shatter the coarse identity leaf
@@ -1589,8 +1589,8 @@ const TESTS: &[QemuTest] = &[
     // faults (timing out). Single CPU and a 60-second budget match the
     // other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-stack-guard-qemu-riscv64",
-        binary: "rustos-test-stack-guard-qemu-riscv64",
+        package: "tairix-test-stack-guard-qemu-riscv64",
+        binary: "tairix-test-stack-guard-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1614,11 +1614,11 @@ const TESTS: &[QemuTest] = &[
     // riscv64/aarch64 members stand up a minimal identity-mapped kernel
     // around their trap-vector installers (which arm the Arch HAL
     // guarded-copy slot); all three drive the one shared
-    // `rustos_arch_api::uaccess::conformance` checks. Single CPU and a
+    // `tairix_arch_api::uaccess::conformance` checks. Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-uaccess-fault-qemu-riscv64",
-        binary: "rustos-test-uaccess-fault-qemu-riscv64",
+        package: "tairix-test-uaccess-fault-qemu-riscv64",
+        binary: "tairix-test-uaccess-fault-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1633,8 +1633,8 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     QemuTest {
-        package: "rustos-test-uaccess-fault-qemu-aarch64",
-        binary: "rustos-test-uaccess-fault-qemu-aarch64",
+        package: "tairix-test-uaccess-fault-qemu-aarch64",
+        binary: "tairix-test-uaccess-fault-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1648,12 +1648,12 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // The x86_64 member boots the **production** `rustos-kernel` pipeline
+    // The x86_64 member boots the **production** `tairix-kernel` pipeline
     // (the dedicated `#PF` entry install + guarded-copy arm live on the
     // real boot path) and drives the shared checks on `BootCompleted`.
     QemuTest {
-        package: "rustos-test-uaccess-fault-qemu-x86_64",
-        binary: "rustos-test-uaccess-fault-qemu-x86_64",
+        package: "tairix-test-uaccess-fault-qemu-x86_64",
+        binary: "tairix-test-uaccess-fault-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1669,8 +1669,8 @@ const TESTS: &[QemuTest] = &[
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
     // *production* fault-form, the riscv64 sibling of
-    // `rustos-test-stack-overrun-qemu-aarch64`.
-    // `rustos-test-stack-overrun-qemu-riscv64` proves that an overrunning
+    // `tairix-test-stack-overrun-qemu-aarch64`.
+    // `tairix-test-stack-overrun-qemu-riscv64` proves that an overrunning
     // kthread takes a synchronous store page fault, not a next-reschedule
     // canary detection. It builds an Sv39 identity `AddressSpace`, prepares
     // a 2 MiB-aligned guard arena (`AddressSpace::prepare_guard_arena`, G2),
@@ -1678,7 +1678,7 @@ const TESTS: &[QemuTest] = &[
     // it, installs the S-mode trap vector + a `fault` handler, turns paging
     // on, then `unmap`s the guard page through the Arch HAL + `flush_page`s
     // it — the production guard-page mechanism (G3b-2). It then builds the
-    // live `rustos-kernel-sched-eevdf` `Scheduler` over `RiscvArch`, admits a
+    // live `tairix-kernel-sched-eevdf` `Scheduler` over `RiscvArch`, admits a
     // kthread on that stack via `kernel_core::spawn_kthread_with_stack`, and
     // drives the cooperative `step` loop. The kthread body overruns its
     // stack (writes the highest guard byte, the first byte a contiguous
@@ -1690,8 +1690,8 @@ const TESTS: &[QemuTest] = &[
     // explicitly rather than passing. Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-stack-overrun-qemu-riscv64",
-        binary: "rustos-test-stack-overrun-qemu-riscv64",
+        package: "tairix-test-stack-overrun-qemu-riscv64",
+        binary: "tairix-test-stack-overrun-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1705,7 +1705,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
+    // Stage 4.D Item 4: `tairix-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
     // vertical — boot → build the virtio-MMIO bus from the device tree →
     // provision an `MmioTransport` through the capability-gated
@@ -1718,8 +1718,8 @@ const TESTS: &[QemuTest] = &[
     // the planted sector-0 pattern plus headroom; single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-virtio-blk-mmio-riscv64",
-        binary: "rustos-test-virtio-blk-mmio-riscv64",
+        package: "tairix-test-virtio-blk-mmio-riscv64",
+        binary: "tairix-test-virtio-blk-mmio-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1733,10 +1733,10 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // `plans/NETWORK.md` N3c: `rustos-test-netstack-mmio-riscv64` is the
+    // `plans/NETWORK.md` N3c: `tairix-test-netstack-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 netstack-pci
     // vertical — same bring-up as the blk MMIO vertical, then drive the
-    // `rustos-netstack` engine's ring pump over the device against the
+    // `tairix-netstack` engine's ring pump over the device against the
     // harness-side `netpeer` link peer on the QEMU dgram netdev: answer
     // the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve
     // and ping the peer over both families → `SiFive` Test PASS. The
@@ -1745,8 +1745,8 @@ const TESTS: &[QemuTest] = &[
     // `<binary>.pcap` lets a host inspect the exchange. Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-netstack-mmio-riscv64",
-        binary: "rustos-test-netstack-mmio-riscv64",
+        package: "tairix-test-netstack-mmio-riscv64",
+        binary: "tairix-test-netstack-mmio-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1761,12 +1761,12 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class):
-    // `rustos-test-framebuffer-display-qemu-riscv64` boots the riscv64
+    // `tairix-test-framebuffer-display-qemu-riscv64` boots the riscv64
     // `virt`-board pipeline, programs QEMU's `ramfb` over the `fw_cfg`
     // MMIO DMA interface so a static guest-RAM surface becomes a real
     // scan-out framebuffer, publishes the geometry as a
     // `FramebufferConfig` boot hand-off, then loads the signed
-    // framebuffer display `.rxe` through `rustos_drvhost::Host` and
+    // framebuffer display `.rxe` through `tairix_drvhost::Host` and
     // drives it through load -> use -> unload -> reload. "Use" maps the
     // surface through the capability-gated `KernelMmioMapper` and
     // `present`s a frame; a second independently-mapped window reads the
@@ -1774,8 +1774,8 @@ const TESTS: &[QemuTest] = &[
     // deviation flips the `SiFive` Test failure finisher. Single CPU and
     // a 60-second budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-framebuffer-display-qemu-riscv64",
-        binary: "rustos-test-framebuffer-display-qemu-riscv64",
+        package: "tairix-test-framebuffer-display-qemu-riscv64",
+        binary: "tairix-test-framebuffer-display-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1790,12 +1790,12 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
-    // framebuffer vertical): `rustos-test-vesa-qemu-x86-64` boots the
+    // framebuffer vertical): `tairix-test-vesa-qemu-x86-64` boots the
     // production kernel pipeline, programs QEMU's `ramfb` over the
     // `fw_cfg` IOport DMA interface so a static guest-RAM surface becomes
     // a real scan-out framebuffer, publishes a bootloader-captured VBE
     // `ModeInfoBlock` describing it as the boot hand-off, then loads the
-    // signed vesa display `.rxe` through `rustos_drvhost::Host` and drives
+    // signed vesa display `.rxe` through `tairix_drvhost::Host` and drives
     // it through load -> use -> unload -> reload. "Use" decodes the block
     // with `VesaFramebuffer::open`, maps the surface through the
     // capability-gated `KernelMmioMapper`, and `present`s a frame; a
@@ -1804,8 +1804,8 @@ const TESTS: &[QemuTest] = &[
     // `qemu_exit::exit_failure`. Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-vesa-qemu-x86-64",
-        binary: "rustos-test-vesa-qemu-x86-64",
+        package: "tairix-test-vesa-qemu-x86-64",
+        binary: "tairix-test-vesa-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1819,8 +1819,8 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // PI Stage P6c-2 (`plans/PI.md`): `rustos-test-kernel-arch-boot-aarch64`
-    // boots the *production* aarch64 `rustos-kernel` pipeline
+    // PI Stage P6c-2 (`plans/PI.md`): `tairix-test-kernel-arch-boot-aarch64`
+    // boots the *production* aarch64 `tairix-kernel` pipeline
     // (`boot_aarch64::boot`) on the `virt` board all the way to
     // `AuditEvent::BootCompleted` — the aarch64 analogue of the x86_64
     // `kernel-arch-boot` and the riscv64 `kernel-arch-boot-riscv64`
@@ -1843,8 +1843,8 @@ const TESTS: &[QemuTest] = &[
     // `SecondaryCpuStartFailed` (`EventId(4071)`) is an immediate FAIL.
     // A 60-second budget matches the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-kernel-arch-boot-aarch64",
-        binary: "rustos-test-kernel-arch-boot-aarch64",
+        package: "tairix-test-kernel-arch-boot-aarch64",
+        binary: "tairix-test-kernel-arch-boot-aarch64",
         target: "aarch64-unknown-none",
         cpus: 4,
         timeout: Duration::from_secs(60),
@@ -1858,15 +1858,15 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // PI Stage P6c-3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-aarch64`
-    // boots the *production* aarch64 `rustos-kernel` pipeline
+    // PI Stage P6c-3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-aarch64`
+    // boots the *production* aarch64 `tairix-kernel` pipeline
     // (`boot_aarch64::boot`) on the `virt` board, then drops into PID 1
     // (`init`) in EL0 through the `InitSpawn` seam `boot_aarch64` installs
     // into the `BootInfo` hand-off. After `kernel_core::kernel_main` emits
     // `AuditEvent::BootCompleted` it builds the embedded `init` (`Run`) EL0
     // image through the capability-checked, audited `spawn_and_enter`
     // (emitting `ProcessSpawned`, `EventId(4030)`) and `eret`s into it;
-    // `init` returns and the `rustos-rt` runtime routes the return through
+    // `init` returns and the `tairix-rt` runtime routes the return through
     // the audited `exit` syscall, whose `svc` traps back through the EL1
     // vector to the production dispatch callback (emitting `SyscallInvoked`,
     // `EventId(5000)`). The audit sink reports PASS through the ARM
@@ -1875,8 +1875,8 @@ const TESTS: &[QemuTest] = &[
     // Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-spawn-init-qemu-aarch64",
-        binary: "rustos-test-spawn-init-qemu-aarch64",
+        package: "tairix-test-spawn-init-qemu-aarch64",
+        binary: "tairix-test-spawn-init-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -1891,8 +1891,8 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // SPAWN Stage SP3b (`plans/SPAWN.md`) + `plans/PI.md` P11:
-    // `rustos-test-spawn-session-qemu-aarch64` boots the *production*
-    // aarch64 `rustos-kernel` pipeline (`boot_aarch64::boot`) on the `virt`
+    // `tairix-test-spawn-session-qemu-aarch64` boots the *production*
+    // aarch64 `tairix-kernel` pipeline (`boot_aarch64::boot`) on the `virt`
     // board with both the `InitSpawn` seam and the runtime `ProcessSpawn`
     // producer installed. The aarch64 production boot embeds no program
     // rows (`plans/APPS.md` deliverable 8): every service is spawned from
@@ -1929,8 +1929,8 @@ const TESTS: &[QemuTest] = &[
     // unlock's key derivation on top of the boot-then-do-fixed-work
     // baseline.
     QemuTest {
-        package: "rustos-test-spawn-session-qemu-aarch64",
-        binary: "rustos-test-spawn-session-qemu-aarch64",
+        package: "tairix-test-spawn-session-qemu-aarch64",
+        binary: "tairix-test-spawn-session-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -1950,8 +1950,8 @@ const TESTS: &[QemuTest] = &[
         ],
     },
     // PI Design D P-3 (`.junie/next-pi-prompt.md`):
-    // `rustos-test-devmgr-hwtree-qemu-aarch64` boots the *production* aarch64
-    // `rustos-kernel` pipeline (`boot_aarch64::boot`) verbatim on the `virt`
+    // `tairix-test-devmgr-hwtree-qemu-aarch64` boots the *production* aarch64
+    // `tairix-kernel` pipeline (`boot_aarch64::boot`) verbatim on the `virt`
     // board and proves the **device-manager service's reactive observe loop**
     // end to end. PID 1 `init` now launches the perpetual `devmgr` service
     // (`/System/Services/devmgr`, in `spawn_layout::SPAWN_PROGRAMS`) before the
@@ -1986,8 +1986,8 @@ const TESTS: &[QemuTest] = &[
     // witness). Single CPU; the 120-second budget covers the disk bring-up
     // on top of the boot-then-do-fixed-work baseline.
     QemuTest {
-        package: "rustos-test-devmgr-hwtree-qemu-aarch64",
-        binary: "rustos-test-devmgr-hwtree-qemu-aarch64",
+        package: "tairix-test-devmgr-hwtree-qemu-aarch64",
+        binary: "tairix-test-devmgr-hwtree-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -2007,7 +2007,7 @@ const TESTS: &[QemuTest] = &[
     // base + timer rate from the embedded `virt` DTB (P3/P4), brings up the
     // EL1 vectors + GICv2 (interrupts stay masked — dispatch is the cooperative
     // `step` loop), and builds **two** hardware-isolated EL0 address spaces from
-    // the pure-Rust `rustos-test-el0-yielder` fixture (built PIE + converted to
+    // the pure-Rust `tairix-test-el0-yielder` fixture (built PIE + converted to
     // `rxe` by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It admits each as a resumable user kthread via
     // `spawn_user_kthread` (its `pre_resume` hook reactivates that task's
@@ -2018,8 +2018,8 @@ const TESTS: &[QemuTest] = &[
     // that never resumes stalls the drain and the harness times out (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-spawn-el0-timeshare-qemu-aarch64",
-        binary: "rustos-test-spawn-el0-timeshare-qemu-aarch64",
+        package: "tairix-test-spawn-el0-timeshare-qemu-aarch64",
+        binary: "tairix-test-spawn-el0-timeshare-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2039,10 +2039,10 @@ const TESTS: &[QemuTest] = &[
     // boot matrix only covered by non-regression). It reads the GICv2 base +
     // timer rate from the embedded `virt` DTB (P3/P4), brings up the EL1 vectors
     // + GICv2, and builds **one** hardware-isolated EL0 address space from the
-    // pure-Rust `rustos-test-el0-spinner` fixture (a `black_box`-guarded busy
+    // pure-Rust `tairix-test-el0-spinner` fixture (a `black_box`-guarded busy
     // loop that issues no syscall, built PIE + converted to `rxe` by `build.rs`)
     // through the capability-checked, audited `kernel_core::spawn_image`. It
-    // then arms the **production** preemption path verbatim (the `rustos_arch_aarch64::preempt` surface the bin crate's
+    // then arms the **production** preemption path verbatim (the `tairix_arch_aarch64::preempt` surface the bin crate's
     // `arm_preemption` uses): a per-CPU `PreemptStorage`, an EL0-preemption
     // callback that `reschedule_current(_, Yield)`s the running task, and the
     // periodic generic timer; EL0 runs preemptible (`SPSR_EL0T_PREEMPTIBLE`), so
@@ -2055,8 +2055,8 @@ const TESTS: &[QemuTest] = &[
     // times out (fail-loud). Single CPU; a 120-second budget
     // covers the multi-tick busy loop under QEMU TCG.
     QemuTest {
-        package: "rustos-test-preempt-el0-qemu-aarch64",
-        binary: "rustos-test-preempt-el0-qemu-aarch64",
+        package: "tairix-test-preempt-el0-qemu-aarch64",
+        binary: "tairix-test-preempt-el0-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -2075,7 +2075,7 @@ const TESTS: &[QemuTest] = &[
     // CPU-bound EL0 task. Where the sibling above proves the *timer* preempts a
     // *contended* task, this proves the behaviour the fix adds — the reported
     // `stress --cpu 1` hang. It brings up the EL1 vectors + GICv2, builds one
-    // hardware-isolated EL0 address space from the same `rustos-test-el0-spinner`
+    // hardware-isolated EL0 address space from the same `tairix-test-el0-spinner`
     // fixture, and wires the **production** preemption surface: the latch-gated
     // EL0-preemption callback (reschedules only when `take_preempt_pending` is
     // set — the `production_preempt_dispatch` shape) and the reschedule-IPI
@@ -2091,8 +2091,8 @@ const TESTS: &[QemuTest] = &[
     // unpreempted forever, timing out (fail-loud). Single CPU; a 120-second
     // budget matches the sibling under QEMU TCG.
     QemuTest {
-        package: "rustos-test-preempt-wake-qemu-aarch64",
-        binary: "rustos-test-preempt-wake-qemu-aarch64",
+        package: "tairix-test-preempt-wake-qemu-aarch64",
+        binary: "tairix-test-preempt-wake-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -2114,8 +2114,8 @@ const TESTS: &[QemuTest] = &[
     // exception frame cannot be hidden by another wake; either defect reaches
     // the bounded harness timeout rather than a raised application deadline.
     QemuTest {
-        package: "rustos-test-syscall-resume-qemu-aarch64",
-        binary: "rustos-test-syscall-resume-qemu-aarch64",
+        package: "tairix-test-syscall-resume-qemu-aarch64",
+        binary: "tairix-test-syscall-resume-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2137,11 +2137,11 @@ const TESTS: &[QemuTest] = &[
     // `trap::install_trap_vector` — NOT `init_traps`, so `sstatus.SIE` stays
     // clear and the kernel itself is never preempted — and builds **one**
     // hardware-isolated Sv39 U-mode address space from the pure-Rust
-    // `rustos-test-el0-spinner` fixture (a `black_box`-guarded busy loop that
+    // `tairix-test-el0-spinner` fixture (a `black_box`-guarded busy loop that
     // issues no syscall, built PIE + converted to `rxe` by `build.rs`) through
     // the capability-checked, audited `kernel_core::spawn_image`. It then arms
     // the **production** preemption path verbatim (the
-    // `rustos_arch_riscv64::preempt` surface the bin crate's `arm_preemption`
+    // `tairix_arch_riscv64::preempt` surface the bin crate's `arm_preemption`
     // uses): a per-hart `PreemptStorage`, a U-mode-preemption callback that
     // `reschedule_current(_, Yield)`s the running task, and the periodic SBI
     // timer (`init_local_preempt` sets `sie.STIE`). A supervisor-timer interrupt
@@ -2154,8 +2154,8 @@ const TESTS: &[QemuTest] = &[
     // U-mode) or a botched resume (the task never exits) times out (fail-loud). Single CPU; a 120-second budget covers the multi-tick
     // busy loop under QEMU TCG.
     QemuTest {
-        package: "rustos-test-preempt-el0-qemu-riscv64",
-        binary: "rustos-test-preempt-el0-qemu-riscv64",
+        package: "tairix-test-preempt-el0-qemu-riscv64",
+        binary: "tairix-test-preempt-el0-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -2174,11 +2174,11 @@ const TESTS: &[QemuTest] = &[
     // proving the production LAPIC-timer interrupt preempts a **runaway** ring-3
     // task. Unlike the other ports, the ring-3 transition needs the GDT ring-3
     // selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, so the
-    // test boots the production `rustos-kernel` pipeline (which also programs
+    // test boots the production `tairix-kernel` pipeline (which also programs
     // the periodic LAPIC timer in `preempt::init_local_preempt`); only the audit
     // sink is replaced. On `BootCompleted` it enables `IA32_EFER.NXE`, builds
     // **one** hardware-isolated ring-3 address space from the pure-Rust
-    // `rustos-test-el0-spinner` fixture (a `black_box`-guarded busy loop that
+    // `tairix-test-el0-spinner` fixture (a `black_box`-guarded busy loop that
     // issues no syscall, built PIE + converted to `rxe` by `build.rs`) through
     // the capability-checked, audited `kernel_core::spawn_image`, and admits it
     // as a resumable user kthread whose `pre_resume` hook reloads CR3 and
@@ -2186,7 +2186,7 @@ const TESTS: &[QemuTest] = &[
     // (`syscall_entry::set_kernel_rsp0`) and the `TSS.RSP0` trap stack
     // (`percpu::install_tss_rsp0`) at the task's own kernel stack. It then arms
     // the **production** ring-3-preemption path verbatim (the
-    // `rustos_arch_x86_64::preempt::set_preempt_callback` surface the bin crate's
+    // `tairix_arch_x86_64::preempt::set_preempt_callback` surface the bin crate's
     // `install_irq_dispatch` uses): a callback that `reschedule_current(_,
     // Yield)`s the running task. Ring 3 runs preemptible (`userentry`'s `IF`-set
     // `RFLAGS`), so a LAPIC-timer tick taken while the spinner runs lands on the
@@ -2199,8 +2199,8 @@ const TESTS: &[QemuTest] = &[
     // times out (fail-loud). Single CPU; a 120-second budget
     // covers the multi-tick busy loop under QEMU TCG.
     QemuTest {
-        package: "rustos-test-preempt-el0-qemu-x86-64",
-        binary: "rustos-test-preempt-el0-qemu-x86-64",
+        package: "tairix-test-preempt-el0-qemu-x86-64",
+        binary: "tairix-test-preempt-el0-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -2225,7 +2225,7 @@ const TESTS: &[QemuTest] = &[
     // (the kernel is non-preemptible), so the EL0-preemption callback never
     // fires. It reads the GICv2 base + timer rate from the embedded `virt` DTB,
     // brings up the EL1 vectors + GICv2, registers the production
-    // `rustos_arch_aarch64::preempt` surface verbatim (a
+    // `tairix_arch_aarch64::preempt` surface verbatim (a
     // per-CPU `PreemptStorage`, the EL0-preemption callback, a timer-tick
     // callback, and the enabled generic-timer PPI), builds a live eevdf
     // `Scheduler`, admits one in-kernel kthread that arms the timer one-shot and
@@ -2238,8 +2238,8 @@ const TESTS: &[QemuTest] = &[
     // the run fails loudly — a failure finisher or the harness timeout. Single CPU; a 120-second budget covers the busy loop
     // under QEMU TCG.
     QemuTest {
-        package: "rustos-test-preempt-inkernel-qemu-aarch64",
-        binary: "rustos-test-preempt-inkernel-qemu-aarch64",
+        package: "tairix-test-preempt-inkernel-qemu-aarch64",
+        binary: "tairix-test-preempt-inkernel-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -2256,7 +2256,7 @@ const TESTS: &[QemuTest] = &[
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
     // script compiles the pure-Rust driver-stub fixture
-    // (`rustos-test-driver-register-program`) PIE and converts it to an
+    // (`tairix-test-driver-register-program`) PIE and converts it to an
     // `rxe` blob carrying the kernel's syscall CFI tag, registered under a
     // `/System/Drivers/` path. On boot the test discovers the board from the
     // embedded `virt` DTB, enables the identity MMU + EL1 vectors, builds a
@@ -2277,8 +2277,8 @@ const TESTS: &[QemuTest] = &[
     // and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
-        package: "rustos-test-driver-spawn-qemu-aarch64",
-        binary: "rustos-test-driver-spawn-qemu-aarch64",
+        package: "tairix-test-driver-spawn-qemu-aarch64",
+        binary: "tairix-test-driver-spawn-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2309,8 +2309,8 @@ const TESTS: &[QemuTest] = &[
     // is never dispatched, so it issues no syscall and needs no reply port.
     // Single CPU and a 60-second budget match the driver-spawn vertical.
     QemuTest {
-        package: "rustos-test-driver-unload-qemu-aarch64",
-        binary: "rustos-test-driver-unload-qemu-aarch64",
+        package: "tairix-test-driver-unload-qemu-aarch64",
+        binary: "tairix-test-driver-unload-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2329,7 +2329,7 @@ const TESTS: &[QemuTest] = &[
     // releases anonymous `RW` memory at runtime via `abi-v1`, on the `virt`
     // board. It reads the GICv2 base + timer rate from the embedded `virt` DTB
     // (P3/P4), brings up the EL1 vectors + GICv2, and builds **one** hardware-
-    // isolated EL0 address space from the pure-Rust `rustos-test-mem-map`
+    // isolated EL0 address space from the pure-Rust `tairix-test-mem-map`
     // fixture (built PIE + converted to `rxe` by `build.rs`) through the
     // capability-checked, audited `kernel_core::spawn_image`. It **retains** that
     // space live behind a `kernel_core::MemMap` producer backed by
@@ -2343,8 +2343,8 @@ const TESTS: &[QemuTest] = &[
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
-        package: "rustos-test-mem-map-qemu-aarch64",
-        binary: "rustos-test-mem-map-qemu-aarch64",
+        package: "tairix-test-mem-map-qemu-aarch64",
+        binary: "tairix-test-mem-map-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2379,8 +2379,8 @@ const TESTS: &[QemuTest] = &[
     // diagnostic exit code is folded in). Single CPU and a 60-second budget
     // match the other boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-file-map-qemu-aarch64",
-        binary: "rustos-test-file-map-qemu-aarch64",
+        package: "tairix-test-file-map-qemu-aarch64",
+        binary: "tairix-test-file-map-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2400,8 +2400,8 @@ const TESTS: &[QemuTest] = &[
     // store/AMO U-mode page faults offered to the production resolver) and
     // the riscv64 production spawn producer.
     QemuTest {
-        package: "rustos-test-file-map-qemu-riscv64",
-        binary: "rustos-test-file-map-qemu-riscv64",
+        package: "tairix-test-file-map-qemu-riscv64",
+        binary: "tairix-test-file-map-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2438,8 +2438,8 @@ const TESTS: &[QemuTest] = &[
     // Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-stack-grow-qemu-aarch64",
-        binary: "rustos-test-stack-grow-qemu-aarch64",
+        package: "tairix-test-stack-grow-qemu-aarch64",
+        binary: "tairix-test-stack-grow-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2473,8 +2473,8 @@ const TESTS: &[QemuTest] = &[
     // private call/reply cycles with saved integer/FP/stack/address-space
     // checks as the one-CPU migration control.
     QemuTest {
-        package: "rustos-test-mem-pin-qemu-aarch64",
-        binary: "rustos-test-mem-pin-qemu-aarch64",
+        package: "tairix-test-mem-pin-qemu-aarch64",
+        binary: "tairix-test-mem-pin-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2489,8 +2489,8 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     QemuTest {
-        package: "rustos-test-mem-pin-migration-qemu-aarch64",
-        binary: "rustos-test-mem-pin-migration-qemu-aarch64",
+        package: "tairix-test-mem-pin-migration-qemu-aarch64",
+        binary: "tairix-test-mem-pin-migration-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 4,
         timeout: Duration::from_secs(60),
@@ -2524,8 +2524,8 @@ const TESTS: &[QemuTest] = &[
     // 60-second budget match the other boot-then-do-fixed-work aarch64
     // tests.
     QemuTest {
-        package: "rustos-test-service-ceiling-qemu-aarch64",
-        binary: "rustos-test-service-ceiling-qemu-aarch64",
+        package: "tairix-test-service-ceiling-qemu-aarch64",
+        binary: "tairix-test-service-ceiling-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2545,8 +2545,8 @@ const TESTS: &[QemuTest] = &[
     // path (load *and* store/AMO U-mode page faults offered to the
     // production resolver) and the riscv64 production spawn producer.
     QemuTest {
-        package: "rustos-test-stack-grow-qemu-riscv64",
-        binary: "rustos-test-stack-grow-qemu-riscv64",
+        package: "tairix-test-stack-grow-qemu-riscv64",
+        binary: "tairix-test-stack-grow-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2570,8 +2570,8 @@ const TESTS: &[QemuTest] = &[
     // production stack-growth resolver over the x86_64 dedicated `#PF`
     // entry and the x86_64 production spawn producer.
     QemuTest {
-        package: "rustos-test-stack-grow-qemu-x86_64",
-        binary: "rustos-test-stack-grow-qemu-x86_64",
+        package: "tairix-test-stack-grow-qemu-x86_64",
+        binary: "tairix-test-stack-grow-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2589,7 +2589,7 @@ const TESTS: &[QemuTest] = &[
     // `.junie/fstree-next-plan.md` S8b): prove the `lib/sandbox` seam end
     // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`
     // board. The chassis installs the production `KernelDispatchHook`
-    // (LiveMemMap for the `rustos-rt` heaps, a real `KernelProcessWait`, a
+    // (LiveMemMap for the `tairix-rt` heaps, a real `KernelProcessWait`, a
     // `ProgramRegistry` carrying the fixture's three worker paths) and
     // spawns the four-role fixture program's parent through the production
     // `InitSpawnCtx::spawn_driver_process` seam. The parent drives the
@@ -2605,8 +2605,8 @@ const TESTS: &[QemuTest] = &[
     // 60-second budget match the other boot-then-do-fixed-work aarch64
     // tests.
     QemuTest {
-        package: "rustos-test-sandbox-qemu-aarch64",
-        binary: "rustos-test-sandbox-qemu-aarch64",
+        package: "tairix-test-sandbox-qemu-aarch64",
+        binary: "tairix-test-sandbox-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2626,7 +2626,7 @@ const TESTS: &[QemuTest] = &[
     // address space**, on the `virt` board. It reads the GICv2 base + timer
     // rate from the embedded `virt` DTB (P3/P4), brings up the EL1 vectors +
     // GICv2, and builds **one** hardware-isolated EL0 address space from the
-    // pure-Rust `rustos-test-mmio-map` fixture (built PIE + converted to `rxe`
+    // pure-Rust `tairix-test-mmio-map` fixture (built PIE + converted to `rxe`
     // by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It wraps that space in the production
     // `kernel_mem::LiveSpace` and admits the program through the production
@@ -2644,8 +2644,8 @@ const TESTS: &[QemuTest] = &[
     // `kernel/core`. Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-mmio-map-qemu-aarch64",
-        binary: "rustos-test-mmio-map-qemu-aarch64",
+        package: "tairix-test-mmio-map-qemu-aarch64",
+        binary: "tairix-test-mmio-map-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2666,7 +2666,7 @@ const TESTS: &[QemuTest] = &[
     // space (identity-mapping the kernel + MMIO), activates `satp`, installs
     // the trap vector + a dispatch callback + a fault handler, and builds
     // **one** hardware-isolated U-mode address space from the same pure-Rust
-    // `rustos-test-mem-map` fixture (built PIE + converted to `rxe` by
+    // `tairix-test-mem-map` fixture (built PIE + converted to `rxe` by
     // `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It **retains** that space live behind a
     // `kernel_core::MemMap` producer backed by
@@ -2681,8 +2681,8 @@ const TESTS: &[QemuTest] = &[
     // missing fault stalls (fail-loud). Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-mem-map-qemu-riscv64",
-        binary: "rustos-test-mem-map-qemu-riscv64",
+        package: "tairix-test-mem-map-qemu-riscv64",
+        binary: "tairix-test-mem-map-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2706,7 +2706,7 @@ const TESTS: &[QemuTest] = &[
     // Sv39 address space (identity-mapping the kernel + MMIO), activates `satp`,
     // and installs the trap vector + a dispatch callback. It builds **one**
     // hardware-isolated U-mode address space from the pure-Rust
-    // `rustos-test-el0-yielder` fixture (built PIE + converted to `rxe` by
+    // `tairix-test-el0-yielder` fixture (built PIE + converted to `rxe` by
     // `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`, and admits it via `spawn_user_kthread`. The
     // task's `pre_resume` hook reactivates the task's own `satp` root
@@ -2719,8 +2719,8 @@ const TESTS: &[QemuTest] = &[
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // riscv64 tests.
     QemuTest {
-        package: "rustos-test-spawn-el0-resume-qemu-riscv64",
-        binary: "rustos-test-spawn-el0-resume-qemu-riscv64",
+        package: "tairix-test-spawn-el0-resume-qemu-riscv64",
+        binary: "tairix-test-spawn-el0-resume-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2742,7 +2742,7 @@ const TESTS: &[QemuTest] = &[
     // generic-timer rate from the firmware device tree, installs the trap vector
     // + a dispatch callback, and builds **two** hardware-isolated U-mode address
     // spaces (two `PageTablePool`s + a shared frame pool) from
-    // the pure-Rust `rustos-test-el0-yielder` fixture (built PIE + converted to
+    // the pure-Rust `tairix-test-el0-yielder` fixture (built PIE + converted to
     // `rxe` by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`, and admits each via `spawn_user_kthread`. Each
     // task's `pre_resume` hook reactivates its own `satp` root
@@ -2758,8 +2758,8 @@ const TESTS: &[QemuTest] = &[
     // out (fail-loud). Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-spawn-el0-timeshare-qemu-riscv64",
-        binary: "rustos-test-spawn-el0-timeshare-qemu-riscv64",
+        package: "tairix-test-spawn-el0-timeshare-qemu-riscv64",
+        binary: "tairix-test-spawn-el0-timeshare-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2778,7 +2778,7 @@ const TESTS: &[QemuTest] = &[
     // `spawn_session_qemu_aarch64` / `_x86_64`, proving a parent task's
     // `CAP_PROC_SPAWN`-gated `spawn` builds a fresh, hardware-isolated Sv39
     // child space and admits it Ready concurrently on the riscv64 `virt` board.
-    // The build script compiles the pure-Rust `rustos-test-spawn-session-program`
+    // The build script compiles the pure-Rust `tairix-test-spawn-session-program`
     // fixture twice (the parent role and the child/session role, built PIE +
     // converted to `rxe`). On boot it reads the generic-timer rate from the
     // firmware device tree, installs the trap vector + a dispatch callback,
@@ -2796,8 +2796,8 @@ const TESTS: &[QemuTest] = &[
     // stall flips `qemu_exit::exit_failure` or times out (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-spawn-session-qemu-riscv64",
-        binary: "rustos-test-spawn-session-qemu-riscv64",
+        package: "tairix-test-spawn-session-qemu-riscv64",
+        binary: "tairix-test-spawn-session-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2817,12 +2817,12 @@ const TESTS: &[QemuTest] = &[
     // `RW` memory at runtime via `abi-v1`. Unlike those self-contained test
     // kernels the x86_64 ring-3 transition needs the GDT user selectors, the
     // TSS, and `syscall`/`IA32_LSTAR` entry, so it boots the production
-    // `rustos-kernel` pipeline (like `spawn_program_qemu_x86_64`); that
+    // `tairix-kernel` pipeline (like `spawn_program_qemu_x86_64`); that
     // pipeline now also installs the dedicated, error-code-aware page-fault
-    // entry (`rustos_arch_x86_64::fault`), so the deliberate use-after-unmap
+    // entry (`tairix_arch_x86_64::fault`), so the deliberate use-after-unmap
     // `#PF` is observable. On `BootCompleted` it enables `IA32_EFER.NXE`,
     // installs a `fault` observer, builds **one** hardware-isolated user
-    // address space from the same pure-Rust `rustos-test-mem-map` fixture
+    // address space from the same pure-Rust `tairix-test-mem-map` fixture
     // (built PIE + converted to `rxe` by `build.rs`) through the capability-
     // checked, audited `kernel_core::spawn_image`, **retains** it live behind a
     // `kernel_core::MemMap` producer backed by
@@ -2835,8 +2835,8 @@ const TESTS: &[QemuTest] = &[
     // times out (fail-loud). Single CPU and a 60-second budget
     // match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-mem-map-qemu-x86_64",
-        binary: "rustos-test-mem-map-qemu-x86_64",
+        package: "tairix-test-mem-map-qemu-x86_64",
+        binary: "tairix-test-mem-map-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2856,21 +2856,21 @@ const TESTS: &[QemuTest] = &[
     // `stack_guard_qemu_{aarch64,riscv64}`. Unlike those self-contained test
     // kernels, x86_64 long-mode bring-up (GDT, the dedicated error-code-aware
     // `#PF` entry, the bump heap) is the production boot pipeline's job, so it
-    // boots the real `rustos-kernel` pipeline (like the x86_64 `mem_map`
+    // boots the real `tairix-kernel` pipeline (like the x86_64 `mem_map`
     // vertical) and does the split / unmap / fault work on `BootCompleted`. It
     // builds a 4 GiB-identity `paging::AddressSpace`, activates it (CR3),
     // `split_block`s the 2 MiB huge page covering a dedicated guard static
     // (reached through its low-identity physical alias), proves the split
     // preserved the mapping (sentinel write/read-back), then `unmap`s +
     // `flush_page`s the single guard page and reads it — the
-    // `rustos_arch_x86_64::fault` observer reports the supervisor not-present
+    // `tairix_arch_x86_64::fault` observer reports the supervisor not-present
     // `#PF` on exactly that page as PASS. A split/unmap failure, a read that
     // does not fault, or a fault elsewhere flips `qemu_exit::exit_failure` or
     // times out (fail-loud). Single CPU and a 60-second budget
     // match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-stack-guard-qemu-x86_64",
-        binary: "rustos-test-stack-guard-qemu-x86_64",
+        package: "tairix-test-stack-guard-qemu-x86_64",
+        binary: "tairix-test-stack-guard-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2888,24 +2888,24 @@ const TESTS: &[QemuTest] = &[
     // fault-form vertical — the proof that an *overrunning kthread* faults
     // synchronously in hardware under the live scheduler, the sibling of
     // `stack_overrun_qemu_aarch64`. Like the x86_64 `stack_guard` vertical it
-    // boots the real `rustos-kernel` pipeline (so the GDT, the dedicated
+    // boots the real `tairix-kernel` pipeline (so the GDT, the dedicated
     // error-code-aware `#PF` entry, and the bump heap are installed) and does
     // the work on `BootCompleted`: it builds a 4 GiB-identity
     // `paging::AddressSpace`, activates it (CR3), re-expresses a 2 MiB guard
     // arena at 4 KiB granularity (`prepare_guard_arena`), `unmap`s +
     // `flush_page`s one kthread stack's guard page, builds the live
-    // `rustos-kernel-sched-eevdf` `Scheduler` over `X86_64Arch`, and admits a
+    // `tairix-kernel-sched-eevdf` `Scheduler` over `X86_64Arch`, and admits a
     // kthread on that arena stack via `spawn_kthread_with_stack`. The
     // kthread's overrun into the unmapped guard page raises a supervisor
-    // not-present `#PF`; the `rustos_arch_x86_64::fault` observer confirms the
+    // not-present `#PF`; the `tairix_arch_x86_64::fault` observer confirms the
     // cause + faulting address and reports PASS. A body that returns without
     // faulting (guard regression) drains the loop and flips
     // `qemu_exit::exit_failure`, or times out (fail-loud).
     // Single CPU and a 60-second budget match the other boot-then-do-fixed-
     // work x86_64 tests.
     QemuTest {
-        package: "rustos-test-stack-overrun-qemu-x86_64",
-        binary: "rustos-test-stack-overrun-qemu-x86_64",
+        package: "tairix-test-stack-overrun-qemu-x86_64",
+        binary: "tairix-test-stack-overrun-qemu-x86_64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2924,10 +2924,10 @@ const TESTS: &[QemuTest] = &[
     // user kthread on x86_64 and cooperatively parks/resumes under the live
     // scheduler, the cross-port sibling of the aarch64 SP2c timeshare (one task;
     // the two-task `gs:8` durable-save hazard is X2). Like the x86_64 `mem_map`
-    // vertical it boots the production `rustos-kernel` pipeline (so the GDT user
+    // vertical it boots the production `tairix-kernel` pipeline (so the GDT user
     // selectors, the TSS, and `syscall`/`IA32_LSTAR` entry are installed). On
     // `BootCompleted` it enables `IA32_EFER.NXE`, builds **one** hardware-
-    // isolated user address space from the pure-Rust `rustos-test-el0-yielder`
+    // isolated user address space from the pure-Rust `tairix-test-el0-yielder`
     // fixture (built PIE + converted to `rxe` by `build.rs`) through the
     // capability-checked, audited `kernel_core::spawn_image`, and admits it via
     // `spawn_user_kthread`. The task's `pre_resume` hook reloads CR3
@@ -2942,8 +2942,8 @@ const TESTS: &[QemuTest] = &[
     // CPU and a 60-second budget match the other boot-then-do-fixed-work x86_64
     // tests.
     QemuTest {
-        package: "rustos-test-spawn-el0-resume-qemu-x86-64",
-        binary: "rustos-test-spawn-el0-resume-qemu-x86-64",
+        package: "tairix-test-spawn-el0-resume-qemu-x86-64",
+        binary: "tairix-test-spawn-el0-resume-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -2969,10 +2969,10 @@ const TESTS: &[QemuTest] = &[
     // `swapgs` is balanced before the dispatcher enters a *different* task, so
     // the next ring-3 entry never observes an unbalanced GS-swap and `#DF`s).
     // Like the x86_64 `mem_map`/X1 verticals it boots the production
-    // `rustos-kernel` pipeline (so the GDT user selectors, the TSS, and
+    // `tairix-kernel` pipeline (so the GDT user selectors, the TSS, and
     // `syscall`/`IA32_LSTAR` entry are installed). On `BootCompleted` it enables
     // `IA32_EFER.NXE`, builds **two** hardware-isolated user address spaces (two
-    // PML4s, one shared frame pool) from the pure-Rust `rustos-test-el0-yielder`
+    // PML4s, one shared frame pool) from the pure-Rust `tairix-test-el0-yielder`
     // fixture (built PIE + converted to `rxe` by `build.rs`) through the
     // capability-checked, audited `kernel_core::spawn_image`, and admits each
     // via `spawn_user_kthread`. Each task's `pre_resume` hook reloads CR3
@@ -2986,8 +2986,8 @@ const TESTS: &[QemuTest] = &[
     // (fail-loud). Single CPU and a 60-second budget match the
     // other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-spawn-el0-timeshare-qemu-x86-64",
-        binary: "rustos-test-spawn-el0-timeshare-qemu-x86-64",
+        package: "tairix-test-spawn-el0-timeshare-qemu-x86-64",
+        binary: "tairix-test-spawn-el0-timeshare-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3006,7 +3006,7 @@ const TESTS: &[QemuTest] = &[
     // `spawn-init-qemu-aarch64` (P6c-3), proving the production x86_64 boot
     // pipeline reaches ring 3 through the real `kernel_main` + `InitSpawn`
     // path (not a test-driven ad-hoc scheduler like X1/X2). It reuses
-    // `rustos_kernel::boot`, which now installs the x86_64 PID 1 spawn seam
+    // `tairix_kernel::boot`, which now installs the x86_64 PID 1 spawn seam
     // (`init_spawn_x86_64`, via `BootInfo::with_init`) and the COM1 console
     // backing (`BootInfo::with_consoles`); only the audit sink is replaced.
     // After `BootCompleted`, `kernel_main` builds `init`'s ring-3 image
@@ -3022,8 +3022,8 @@ const TESTS: &[QemuTest] = &[
     // run times out (fail-loud). Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-spawn-init-qemu-x86-64",
-        binary: "rustos-test-spawn-init-qemu-x86-64",
+        package: "tairix-test-spawn-init-qemu-x86-64",
+        binary: "tairix-test-spawn-init-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3042,7 +3042,7 @@ const TESTS: &[QemuTest] = &[
     // the cross-port sibling of the aarch64 `spawn-session-qemu-aarch64`,
     // proving PID 1 `init` launches a second, hardware-isolated process under
     // the live scheduler and then reaps+relaunches it. It reuses
-    // `rustos_kernel::boot`, which installs the runtime `ProcessSpawn` producer
+    // `tairix_kernel::boot`, which installs the runtime `ProcessSpawn` producer
     // + embedded-program registry (`spawn_producer_x86_64`, via
     // `BootInfo::with_spawn`) beside the X3a `with_init` seam and the COM1
     // console backing; only the audit sink is replaced. After `BootCompleted`,
@@ -3066,8 +3066,8 @@ const TESTS: &[QemuTest] = &[
     // the run times out (fail-loud). Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-spawn-session-qemu-x86-64",
-        binary: "rustos-test-spawn-session-qemu-x86-64",
+        package: "tairix-test-spawn-session-qemu-x86-64",
+        binary: "tairix-test-spawn-session-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3082,13 +3082,13 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
-    // vertical — the proof that the `rustos-rt` `mem_map`-backed
+    // vertical — the proof that the `tairix-rt` `mem_map`-backed
     // `#[global_allocator]` works end to end in an EL0 process on the `virt`
     // board, so a first-party Rust program can use `alloc` (`Box`/`Vec`/
     // `String`) before the shell REPL is wired in. It reads the GICv2 base +
     // timer rate from the embedded `virt` DTB (P3/P4), brings up the EL1
     // vectors + GICv2, and builds **one** hardware-isolated EL0 address space
-    // from the pure-Rust `rustos-test-heap` fixture (built PIE + converted to
+    // from the pure-Rust `tairix-test-heap` fixture (built PIE + converted to
     // `rxe` by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It **retains** that space live behind a
     // `kernel_core::MemMap` producer backed by
@@ -3101,8 +3101,8 @@ const TESTS: &[QemuTest] = &[
     // distinct failure finisher; a stall times out (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-heap-qemu-aarch64",
-        binary: "rustos-test-heap-qemu-aarch64",
+        package: "tairix-test-heap-qemu-aarch64",
+        binary: "tairix-test-heap-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3122,7 +3122,7 @@ const TESTS: &[QemuTest] = &[
     // It reads the GICv2 base + timer rate from the embedded `virt` DTB
     // (P3/P4), brings up the EL1 vectors + GICv2, and builds **two** hardware-
     // isolated EL0 address spaces — a child and a parent — from the pure-Rust
-    // `rustos-test-wait` fixture (built PIE in both roles + converted to `rxe`
+    // `tairix-test-wait` fixture (built PIE in both roles + converted to `rxe`
     // by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It records the parent/child link with a
     // `kernel_core::KernelProcessWait` producer, admits each as a resumable
@@ -3135,8 +3135,8 @@ const TESTS: &[QemuTest] = &[
     // syscall, or a stall writes a distinct failure finisher (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-wait-qemu-aarch64",
-        binary: "rustos-test-wait-qemu-aarch64",
+        package: "tairix-test-wait-qemu-aarch64",
+        binary: "tairix-test-wait-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3157,7 +3157,7 @@ const TESTS: &[QemuTest] = &[
     // half. It reads the GICv2 base + timer rate from the embedded `virt`
     // DTB (P3/P4), brings up the EL1 vectors + GICv2, and builds **three**
     // hardware-isolated EL0 address spaces — a child, a parent, and an
-    // intake role — from the pure-Rust `rustos-test-signal` fixture (built
+    // intake role — from the pure-Rust `tairix-test-signal` fixture (built
     // PIE per role + converted to `rxe` by `build.rs`) through the
     // capability-checked, audited `kernel_core::spawn_image`. It admits the
     // child, threads its scheduler-assigned PID into the parent's startup
@@ -3181,8 +3181,8 @@ const TESTS: &[QemuTest] = &[
     // finisher (fail-loud). Single CPU and a 60-second budget match the
     // other boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-signal-qemu-aarch64",
-        binary: "rustos-test-signal-qemu-aarch64",
+        package: "tairix-test-signal-qemu-aarch64",
+        binary: "tairix-test-signal-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3200,11 +3200,11 @@ const TESTS: &[QemuTest] = &[
     // sibling of the aarch64 `wait_qemu_aarch64`, proving a parent ring-3
     // process can block on, reap, and read back the exit code of its own child
     // under the live scheduler on x86_64. It boots the production
-    // `rustos-kernel` pipeline (so the GDT ring-3 selectors, the TSS, and
+    // `tairix-kernel` pipeline (so the GDT ring-3 selectors, the TSS, and
     // `syscall`/`IA32_LSTAR` entry are installed) and, on
     // `AuditEvent::BootCompleted`, builds **two** hardware-isolated ring-3
     // address spaces — a child and a parent — from the pure-Rust
-    // `rustos-test-wait` fixture (built PIE in both roles + converted to `rxe`
+    // `tairix-test-wait` fixture (built PIE in both roles + converted to `rxe`
     // by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It records the parent/child link with a
     // `kernel_core::KernelProcessWait` producer, admits each as a resumable
@@ -3219,8 +3219,8 @@ const TESTS: &[QemuTest] = &[
     // (fail-loud). Single CPU and a 60-second budget match the
     // other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
-        package: "rustos-test-wait-qemu-x86-64",
-        binary: "rustos-test-wait-qemu-x86-64",
+        package: "tairix-test-wait-qemu-x86-64",
+        binary: "tairix-test-wait-qemu-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3239,7 +3239,7 @@ const TESTS: &[QemuTest] = &[
     // `wait_qemu_x86_64`, proving a parent U-mode process can block on, reap,
     // and read back the exit code of its own child under the live scheduler on
     // the riscv64 `virt` board. The build script compiles the pure-Rust
-    // `rustos-test-wait` fixture twice (child + parent roles, built PIE +
+    // `tairix-test-wait` fixture twice (child + parent roles, built PIE +
     // converted to `rxe`). On boot it reads the generic-timer rate from the
     // live OpenSBI device tree, installs the trap vector + a dispatch callback,
     // and builds **two** hardware-isolated Sv39 U-mode address spaces — a child
@@ -3256,8 +3256,8 @@ const TESTS: &[QemuTest] = &[
     // failure finisher or times out (fail-loud). Single CPU and
     // a 60-second budget match the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
-        package: "rustos-test-wait-qemu-riscv64",
-        binary: "rustos-test-wait-qemu-riscv64",
+        package: "tairix-test-wait-qemu-riscv64",
+        binary: "tairix-test-wait-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3271,7 +3271,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
+    // PI Stage P2 (`plans/PI.md`): `tairix-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
     // `virt` board through the arch crate's EL1 trampoline, poisons the
     // console base with a deliberately-wrong value, parses the canonical
@@ -3288,8 +3288,8 @@ const TESTS: &[QemuTest] = &[
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
-        package: "rustos-test-uart-console-qemu-aarch64",
-        binary: "rustos-test-uart-console-qemu-aarch64",
+        package: "tairix-test-uart-console-qemu-aarch64",
+        binary: "tairix-test-uart-console-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3304,7 +3304,7 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
-    // `rustos-test-virtio-blk-mmio-aarch64` is the aarch64 `virt`-board
+    // `tairix-test-virtio-blk-mmio-aarch64` is the aarch64 `virt`-board
     // MMIO analogue of the riscv64 virtio-blk-mmio vertical — boot the
     // arch crate's EL1 trampoline → build the virtio-MMIO bus from the
     // device tree → provision an `MmioTransport` through the capability-
@@ -3318,8 +3318,8 @@ const TESTS: &[QemuTest] = &[
     // and a 60-second budget match the other boot-then-do-fixed-work
     // tests.
     QemuTest {
-        package: "rustos-test-virtio-blk-mmio-aarch64",
-        binary: "rustos-test-virtio-blk-mmio-aarch64",
+        package: "tairix-test-virtio-blk-mmio-aarch64",
+        binary: "tairix-test-virtio-blk-mmio-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3334,11 +3334,11 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/PI.md` P11 (root-volume read path at boot):
-    // `rustos-test-users-db-qemu-aarch64` reuses the exact virtio-blk-mmio
+    // `tairix-test-users-db-qemu-aarch64` reuses the exact virtio-blk-mmio
     // bring-up above, then instead of a raw sector round-trip it mounts
     // the planted users-root arxfs volume through the real driver and
     // drives the kernel's boot-time users-database load
-    // (`rustos_kernel_core::load_users_db`) — /System/Security/Users read
+    // (`tairix_kernel_core::load_users_db`) — /System/Security/Users read
     // off the volume through the-checked VFS delegation — then
     // proves the parsed database authenticates the planted account and
     // refuses a wrong password before the ARM semihosting PASS. The
@@ -3347,8 +3347,8 @@ const TESTS: &[QemuTest] = &[
     // geometry is the image's own size. Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-users-db-qemu-aarch64",
-        binary: "rustos-test-users-db-qemu-aarch64",
+        package: "tairix-test-users-db-qemu-aarch64",
+        binary: "tairix-test-users-db-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3363,10 +3363,10 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 (root-mount->login): the
-    // `rustos-test-root-unlock-login-qemu-aarch64` vertical reuses the
+    // `tairix-test-root-unlock-login-qemu-aarch64` vertical reuses the
     // exact virtio-blk-mmio bring-up above, then drives the *production*
     // interactive unlock policy
-    // (`rustos_kernel::root_mount::unlock_root_disk_interactively`) over a
+    // (`tairix_kernel::root_mount::unlock_root_disk_interactively`) over a
     // planted **whole-disk** encrypted-root image (`FsDisk::EncryptedRootDisk`
     // — MBR + FAT boot carrying `root.unlock` + a passphrase-derived
     // encrypted ARXFS root): it reads the descriptor off the FAT boot
@@ -3382,8 +3382,8 @@ const TESTS: &[QemuTest] = &[
     // single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-root-unlock-login-qemu-aarch64",
-        binary: "rustos-test-root-unlock-login-qemu-aarch64",
+        package: "tairix-test-root-unlock-login-qemu-aarch64",
+        binary: "tairix-test-root-unlock-login-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3398,8 +3398,8 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 INCREMENT (2): the
-    // `rustos-test-root-unlock-admission-qemu-aarch64` vertical boots the
-    // *production* aarch64 `rustos-kernel` pipeline (`boot_aarch64::boot`)
+    // `tairix-test-root-unlock-admission-qemu-aarch64` vertical boots the
+    // *production* aarch64 `tairix-kernel` pipeline (`boot_aarch64::boot`)
     // on the `virt` board with the same planted whole-disk encrypted-root
     // image (`FsDisk::EncryptedRootDisk`) attached as a virtio-blk-mmio
     // device — but, unlike `root_unlock_login` (which drives the unlock
@@ -3442,8 +3442,8 @@ const TESTS: &[QemuTest] = &[
     // moment the audit witness fires. Single CPU like the other full-boot
     // verticals.
     QemuTest {
-        package: "rustos-test-root-unlock-admission-qemu-aarch64",
-        binary: "rustos-test-root-unlock-admission-qemu-aarch64",
+        package: "tairix-test-root-unlock-admission-qemu-aarch64",
+        binary: "tairix-test-root-unlock-admission-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(300),
@@ -3471,11 +3471,11 @@ const TESTS: &[QemuTest] = &[
         ],
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
-    // `rustos-test-session-ceiling-qemu-aarch64` boots the *production*
+    // `tairix-test-session-ceiling-qemu-aarch64` boots the *production*
     // aarch64 pipeline with the planted encrypted-root disk, unlocks the
     // root at the passphrase prompt, authenticates `root`/`root` at the
     // console login (the planted account's grant is the shared
-    // administrator ceiling, `rustos_users::administrator_ceiling` — the
+    // administrator ceiling, `tairix_users::administrator_ceiling` — the
     // same set `tools/mkimage`'s profile-keyed seeding gives a debug image),
     // and drives the spawned shell through a real session: `cd` into the
     // account's home (`CAP_FS_ACCESS` — the B3 regression), `pwd` proving
@@ -3505,8 +3505,8 @@ const TESTS: &[QemuTest] = &[
     // budget covers boot + bounded PBKDF2 + the multi-exchange dialogue on
     // QEMU TCG; single CPU like the other full-boot verticals.
     QemuTest {
-        package: "rustos-test-session-ceiling-qemu-aarch64",
-        binary: "rustos-test-session-ceiling-qemu-aarch64",
+        package: "tairix-test-session-ceiling-qemu-aarch64",
+        binary: "tairix-test-session-ceiling-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -3526,12 +3526,12 @@ const TESTS: &[QemuTest] = &[
             // without their trailing blanks.
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
-            // The default prompt is `\u@\h \w% ` (rustos_elsh env.rs): login
+            // The default prompt is `\u@\h \w% ` (tairix_elsh env.rs): login
             // spawns the shell as `root` with HOME=/Users/root, and the shell
-            // defaults HOSTNAME to `rustos`, so at home the prompt renders
-            // `root@rustos ~% ` (the home directory abbreviated to `~`).
-            ("root@rustos ~% ", Duration::ZERO, "cd /Users/root\n"),
-            ("root@rustos ~% ", Duration::ZERO, "pwd\n"),
+            // defaults HOSTNAME to `tairix`, so at home the prompt renders
+            // `root@tairix ~% ` (the home directory abbreviated to `~`).
+            ("root@tairix ~% ", Duration::ZERO, "cd /Users/root\n"),
+            ("root@tairix ~% ", Duration::ZERO, "pwd\n"),
             ("/Users/root", Duration::ZERO, "ps\n"),
             // The typed word `--bogus` must reach the child as `argv[1]`
             // through the spawn startup-strings block: `ps` refuses the
@@ -3556,7 +3556,7 @@ const TESTS: &[QemuTest] = &[
             ("SEE ALSO", Duration::ZERO, "ls /System/Apps\n"),
             ("man.app", Duration::ZERO, "ulimit processes 1000\n"),
             (
-                "root@rustos ~% ",
+                "root@tairix ~% ",
                 Duration::ZERO,
                 "ulimit -H processes 2000\n",
             ),
@@ -3568,7 +3568,7 @@ const TESTS: &[QemuTest] = &[
         ],
     },
     // `plans/APPS.md` "Immediate work" I2/I3: the memory-stability vertical.
-    // `rustos-test-memsoak-qemu-aarch64` boots the *production* aarch64
+    // `tairix-test-memsoak-qemu-aarch64` boots the *production* aarch64
     // pipeline with the encrypted-root disk that carries the standard
     // signed store bundles **plus** the test-only `memsoak` fixture bundle
     // (`FsDisk::MemsoakRootDisk`), unlocks the root, authenticates
@@ -3594,8 +3594,8 @@ const TESTS: &[QemuTest] = &[
     // session-ceiling verticals' 120-second boot-and-dialogue baseline);
     // single CPU like the other full-boot verticals.
     QemuTest {
-        package: "rustos-test-memsoak-qemu-aarch64",
-        binary: "rustos-test-memsoak-qemu-aarch64",
+        package: "tairix-test-memsoak-qemu-aarch64",
+        binary: "tairix-test-memsoak-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(300),
@@ -3611,12 +3611,12 @@ const TESTS: &[QemuTest] = &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
-            ("root@rustos ~% ", Duration::ZERO, "memsoak\n"),
+            ("root@tairix ~% ", Duration::ZERO, "memsoak\n"),
             (MEMSOAK_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
-    // `rustos-test-pipeline-qemu-aarch64` boots the *production* aarch64
+    // `tairix-test-pipeline-qemu-aarch64` boots the *production* aarch64
     // pipeline with the planted encrypted-root disk, unlocks the root,
     // authenticates `root`/`root` at the console login, and drives the
     // spawned shell through real pipelines and redirections over the spawn
@@ -3645,8 +3645,8 @@ const TESTS: &[QemuTest] = &[
     // covers boot + bounded PBKDF2 + the multi-exchange dialogue on QEMU
     // TCG; single CPU like the other full-boot verticals.
     QemuTest {
-        package: "rustos-test-pipeline-qemu-aarch64",
-        binary: "rustos-test-pipeline-qemu-aarch64",
+        package: "tairix-test-pipeline-qemu-aarch64",
+        binary: "tairix-test-pipeline-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -3662,10 +3662,10 @@ const TESTS: &[QemuTest] = &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
-            ("root@rustos ~% ", Duration::ZERO, "yes | head -n 2\n"),
+            ("root@tairix ~% ", Duration::ZERO, "yes | head -n 2\n"),
             // The pipeline terminating at all (the prompt returning) is the
             // broken-pipe + member-reap witness.
-            ("root@rustos ~% ", Duration::ZERO, "seq 1 1000 | wc -c\n"),
+            ("root@tairix ~% ", Duration::ZERO, "seq 1 1000 | wc -c\n"),
             // `lspci --help` then `lsusb --help` (plans/DEVICES.md DEVICE1
             // V2/V3) prove the resource-carrying bundles end to end: the
             // spawn's load gate re-hashes each whole on-disk bundle —
@@ -3678,7 +3678,7 @@ const TESTS: &[QemuTest] = &[
             // the tool ran. (The `virt` image drives virtio-mmio devices, so
             // the tree carries no PCI-function or USB-interface nodes to
             // list yet — the listing paths are host-proven in
-            // `rustos-lspci`'s / `rustos-lsusb`'s tests.) Typed before the
+            // `tairix-lspci`'s / `tairix-lsusb`'s tests.) Typed before the
             // round-trip `cat`, so the audit sink's arm-on-`cat` discipline
             // is untouched.
             ("3893", Duration::ZERO, "lspci --help\n"),
@@ -3689,7 +3689,7 @@ const TESTS: &[QemuTest] = &[
                 "seq 776001 776005 > /Users/root/nums.txt\n",
             ),
             (
-                "root@rustos ~% ",
+                "root@tairix ~% ",
                 Duration::ZERO,
                 "cat < /Users/root/nums.txt\n",
             ),
@@ -3697,7 +3697,7 @@ const TESTS: &[QemuTest] = &[
         ],
     },
     // `plans/STRESSTEST.md` ST4: the `sysmon` monitor acceptance vertical.
-    // `rustos-test-sysmon-qemu-aarch64` boots the *production* aarch64
+    // `tairix-test-sysmon-qemu-aarch64` boots the *production* aarch64
     // pipeline with the planted encrypted-root disk, unlocks the root,
     // authenticates `root`/`root` at the console login, and starts
     // `sysmon` from its store bundle (the load gate verifies the whole
@@ -3719,8 +3719,8 @@ const TESTS: &[QemuTest] = &[
     // PBKDF2 + the interactive session on QEMU TCG; single CPU like the
     // other full-boot verticals.
     QemuTest {
-        package: "rustos-test-sysmon-qemu-aarch64",
-        binary: "rustos-test-sysmon-qemu-aarch64",
+        package: "tairix-test-sysmon-qemu-aarch64",
+        binary: "tairix-test-sysmon-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
@@ -3736,7 +3736,7 @@ const TESTS: &[QemuTest] = &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
-            ("root@rustos ~% ", Duration::ZERO, "sysmon\n"),
+            ("root@tairix ~% ", Duration::ZERO, "sysmon\n"),
             // The first frame's pressure line rendered its gated figures.
             ("Pressure:", Duration::ZERO, "r"),
             // The refresh key was accepted (raw-mode input works); the
@@ -3744,11 +3744,11 @@ const TESTS: &[QemuTest] = &[
             ("reclaimable", Duration::ZERO, "q"),
             // The monitor quit and the shell repainted its prompt on the
             // restored screen.
-            ("root@rustos ~% ", Duration::ZERO, "exit\n"),
+            ("root@tairix ~% ", Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/STRESSTEST.md` ST5: the `stress` load-generator acceptance
-    // vertical. `rustos-test-stress-qemu-aarch64` boots the *production*
+    // vertical. `tairix-test-stress-qemu-aarch64` boots the *production*
     // aarch64 pipeline with the planted encrypted-root disk, unlocks the
     // root, authenticates `root`/`root` at the console login, and runs a
     // exact reported sequence: after the first authenticated shell prompt it
@@ -3767,8 +3767,8 @@ const TESTS: &[QemuTest] = &[
     // 120-second load, and teardown on QEMU TCG; four CPUs reproduce the RPi4
     // saturation shape.
     QemuTest {
-        package: "rustos-test-stress-qemu-aarch64",
-        binary: "rustos-test-stress-qemu-aarch64",
+        package: "tairix-test-stress-qemu-aarch64",
+        binary: "tairix-test-stress-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 4,
         timeout: Duration::from_secs(300),
@@ -3785,19 +3785,19 @@ const TESTS: &[QemuTest] = &[
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             (
-                "root@rustos ~% ",
+                "root@tairix ~% ",
                 Duration::from_secs(1),
                 "stress --cpu 10 --timeout 120s --background\n",
             ),
             // The detached launcher returned and the shell accepts a command.
-            ("root@rustos ~% ", Duration::ZERO, "sysmon\n"),
+            ("root@tairix ~% ", Duration::ZERO, "sysmon\n"),
             // The monitor rendered while the CPU workers were active.
             ("Pressure:", Duration::ZERO, "r"),
             // Raw input and a fresh sysinfo round trip remain live under load.
             ("reclaimable", Duration::ZERO, "q"),
             // Advance past the prompt restored by `sysmon`; the launcher's
             // earlier stress exit is now outside the remaining search window.
-            ("root@rustos ~% ", Duration::ZERO, ""),
+            ("root@tairix ~% ", Duration::ZERO, ""),
             // The detached controller exited only after its 120-second timeout
             // tore down and reaped all ten workers.
             ("comm=stress", Duration::ZERO, "exit\n"),
@@ -3805,7 +3805,7 @@ const TESTS: &[QemuTest] = &[
     },
     // `plans/PI.md` design B / B2 + `plans/DISPLAY.md` D7d (first stage): the
     // pre-unlock driver-loading-by-discovery autoload vertical, booted as a
-    // *display* world. `rustos-test-autoload-input-qemu-aarch64` boots the
+    // *display* world. `tairix-test-autoload-input-qemu-aarch64` boots the
     // *production* aarch64 pipeline on the `virt` board with the
     // `FsDisk::AutoloadRootDisk` whole-disk image — whose read-only `/System`
     // volume carries the kernel-signed virtio-input keyboard driver bundle
@@ -3885,8 +3885,8 @@ const TESTS: &[QemuTest] = &[
     // ~1 s login typing + session bring-up + the paced click script +
     // both app spawns + the typed command on QEMU TCG.
     QemuTest {
-        package: "rustos-test-autoload-input-qemu-aarch64",
-        binary: "rustos-test-autoload-input-qemu-aarch64",
+        package: "tairix-test-autoload-input-qemu-aarch64",
+        binary: "tairix-test-autoload-input-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(240),
@@ -3962,8 +3962,8 @@ const TESTS: &[QemuTest] = &[
     // driver bring-up + the injected key complete in a few seconds on QEMU
     // TCG, with ample headroom.
     QemuTest {
-        package: "rustos-test-autoload-input-qemu-riscv64",
-        binary: "rustos-test-autoload-input-qemu-riscv64",
+        package: "tairix-test-autoload-input-qemu-riscv64",
+        binary: "tairix-test-autoload-input-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -3981,10 +3981,10 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // `plans/NETWORK.md` N3c: `rustos-test-netstack-mmio-aarch64` is the
+    // `plans/NETWORK.md` N3c: `tairix-test-netstack-mmio-aarch64` is the
     // aarch64 `virt`-board MMIO analogue of the riscv64 netstack-mmio
     // vertical — same bring-up as the blk MMIO vertical, then drive the
-    // `rustos-netstack` engine's ring pump over the device against the
+    // `tairix-netstack` engine's ring pump over the device against the
     // harness-side `netpeer` link peer on the QEMU dgram netdev: answer
     // the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve
     // and ping the peer over both families → ARM semihosting PASS. The
@@ -3994,8 +3994,8 @@ const TESTS: &[QemuTest] = &[
     // Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-netstack-mmio-aarch64",
-        binary: "rustos-test-netstack-mmio-aarch64",
+        package: "tairix-test-netstack-mmio-aarch64",
+        binary: "tairix-test-netstack-mmio-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4012,8 +4012,8 @@ const TESTS: &[QemuTest] = &[
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
     // netstack vertical — the production-boot replacement for the
     // single-process `netstack_mmio_aarch64` scaffold above.
-    // `rustos-test-netstack-autoload-qemu-aarch64` boots the *production*
-    // aarch64 `rustos-kernel` pipeline on the `virt` board against the
+    // `tairix-test-netstack-autoload-qemu-aarch64` boots the *production*
+    // aarch64 `tairix-kernel` pipeline on the `virt` board against the
     // shared `FsDisk::AutoloadRootDisk` whole-disk image — whose read-only
     // `/System` store now carries the kernel-signed virtio-net driver
     // bundle beside the input and display bundles — with a
@@ -4041,8 +4041,8 @@ const TESTS: &[QemuTest] = &[
     // dialogue. A 240-second budget covers boot + autoload + service
     // bring-up + the bind + the paced echo campaign on QEMU TCG.
     QemuTest {
-        package: "rustos-test-netstack-autoload-qemu-aarch64",
-        binary: "rustos-test-netstack-autoload-qemu-aarch64",
+        package: "tairix-test-netstack-autoload-qemu-aarch64",
+        binary: "tairix-test-netstack-autoload-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(240),
@@ -4060,12 +4060,12 @@ const TESTS: &[QemuTest] = &[
     // netstack vertical — the production-boot replacement for the
     // single-process `netstack_mmio_riscv64` scaffold. It is the `virt`-board
     // virtio-mmio / PLIC analogue of the aarch64
-    // `rustos-test-netstack-autoload-qemu-aarch64` vertical, reduced to the
+    // `tairix-test-netstack-autoload-qemu-aarch64` vertical, reduced to the
     // headless boot world (no `ramfb`, no display): riscv64's SBI/NULL console
     // has no interactive input this slice, so the encrypted-root unlock fails
     // closed by design, but the `/System` store binds independently of the
     // passphrase and the network driver still autoloads. It boots the
-    // *production* riscv64 `rustos-kernel` pipeline against the shared
+    // *production* riscv64 `tairix-kernel` pipeline against the shared
     // `FsDisk::AutoloadRootDisk` whole-disk image — whose always-readable
     // `/System` store carries the kernel-signed virtio-net driver bundle
     // (cross-compiled for riscv64 by `image_drivers`) beside the input and
@@ -4087,8 +4087,8 @@ const TESTS: &[QemuTest] = &[
     // autoload + service bring-up + the bind + the paced echo campaign on QEMU
     // TCG.
     QemuTest {
-        package: "rustos-test-netstack-autoload-qemu-riscv64",
-        binary: "rustos-test-netstack-autoload-qemu-riscv64",
+        package: "tairix-test-netstack-autoload-qemu-riscv64",
+        binary: "tairix-test-netstack-autoload-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(240),
@@ -4104,13 +4104,13 @@ const TESTS: &[QemuTest] = &[
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
     // the EL1/GICv2 + ramfb analogue of the riscv64 framebuffer-display
-    // vertical. `rustos-test-framebuffer-display-qemu-aarch64` brings the
+    // vertical. `tairix-test-framebuffer-display-qemu-aarch64` brings the
     // `virt` board up to EL1 (FP enable + 2 GiB identity MMU + vectors,
     // shared from `virtio_qemu_support`), programs QEMU's `ramfb` over the
     // shared `fw_cfg` MMIO DMA interface so a static guest-RAM surface
     // becomes a real scan-out framebuffer, assembles the geometry as a
     // `FramebufferConfig`, then loads the signed framebuffer display
-    // `.rxe` through `rustos_drvhost::Host` and drives it through
+    // `.rxe` through `tairix_drvhost::Host` and drives it through
     // load -> use -> unload -> reload. "Use" maps the surface through the
     // capability-gated `KernelMmioMapper` and `present`s a frame; a second
     // independently-mapped window reads the pixels back to confirm they
@@ -4118,8 +4118,8 @@ const TESTS: &[QemuTest] = &[
     // failure finisher. Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-framebuffer-display-qemu-aarch64",
-        binary: "rustos-test-framebuffer-display-qemu-aarch64",
+        package: "tairix-test-framebuffer-display-qemu-aarch64",
+        binary: "tairix-test-framebuffer-display-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4133,7 +4133,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
+    // Stage 3b: `tairix-test-timer-preempt-qemu-aarch64` is the aarch64
     // half of the Stage-3 "timer interrupt drives the scheduler"
     // per-sub-stage deliverable. It installs the EL1 vectors, brings up
     // the GICv2, arms the EL1 physical generic timer at 100 Hz, unmasks
@@ -4142,8 +4142,8 @@ const TESTS: &[QemuTest] = &[
     // repeatedly delivers and re-arms — then reports PASS via semihosting.
     // Single CPU and a 60-second budget.
     QemuTest {
-        package: "rustos-test-timer-preempt-qemu-aarch64",
-        binary: "rustos-test-timer-preempt-qemu-aarch64",
+        package: "tairix-test-timer-preempt-qemu-aarch64",
+        binary: "tairix-test-timer-preempt-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4157,7 +4157,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 3b: `rustos-test-memory-isolation-qemu-aarch64` is the
+    // Stage 3b: `tairix-test-memory-isolation-qemu-aarch64` is the
     // aarch64 half of the Stage-3 "memory-isolation test passes"
     // per-sub-stage deliverable — the analogue of the x86_64 and riscv64
     // verticals. It builds a victim and an attacker stage-1
@@ -4170,8 +4170,8 @@ const TESTS: &[QemuTest] = &[
     // without faulting and reports FAILURE explicitly. Single CPU and a
     // 60-second budget.
     QemuTest {
-        package: "rustos-test-memory-isolation-qemu-aarch64",
-        binary: "rustos-test-memory-isolation-qemu-aarch64",
+        package: "tairix-test-memory-isolation-qemu-aarch64",
+        binary: "tairix-test-memory-isolation-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4186,7 +4186,7 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G1):
-    // `rustos-test-stack-guard-qemu-aarch64` proves the live mechanism the
+    // `tairix-test-stack-guard-qemu-aarch64` proves the live mechanism the
     // kthread kernel-stack guard page is built on. It builds one stage-1
     // `paging::AddressSpace` (identity-maps the low 2 GiB), calls
     // `AddressSpace::split_block` to shatter the coarse identity block that
@@ -4202,8 +4202,8 @@ const TESTS: &[QemuTest] = &[
     // Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-stack-guard-qemu-aarch64",
-        binary: "rustos-test-stack-guard-qemu-aarch64",
+        package: "tairix-test-stack-guard-qemu-aarch64",
+        binary: "tairix-test-stack-guard-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4218,7 +4218,7 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G2):
-    // `rustos-test-stack-arena-qemu-aarch64` proves the boot-time
+    // `tairix-test-stack-arena-qemu-aarch64` proves the boot-time
     // kthread-stack guard arena (`AddressSpace::prepare_guard_arena`). It
     // builds one stage-1 `paging::AddressSpace` (identity-maps the low
     // 2 GiB), prepares a 2 MiB-aligned, 2 MiB guard arena at 4 KiB
@@ -4236,8 +4236,8 @@ const TESTS: &[QemuTest] = &[
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
-        package: "rustos-test-stack-arena-qemu-aarch64",
-        binary: "rustos-test-stack-arena-qemu-aarch64",
+        package: "tairix-test-stack-arena-qemu-aarch64",
+        binary: "tairix-test-stack-arena-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4252,7 +4252,7 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
-    // fault-form. `rustos-test-stack-overrun-qemu-aarch64` proves that an
+    // fault-form. `tairix-test-stack-overrun-qemu-aarch64` proves that an
     // overrunning kthread takes a synchronous data abort, not a
     // next-reschedule canary detection. It builds a stage-1 identity
     // `AddressSpace`, prepares a 2 MiB-aligned guard arena
@@ -4261,7 +4261,7 @@ const TESTS: &[QemuTest] = &[
     // vectors + a `fault` handler, enables the MMU, then `unmap`s the guard
     // page through the Arch HAL + `flush_page`s it — the production
     // guard-page mechanism (G3b-2). It then builds the live
-    // `rustos-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`, admits a
+    // `tairix-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`, admits a
     // kthread on that stack via `kernel_core::spawn_kthread_with_stack`, and
     // drives the cooperative `step` loop. The kthread body overruns its
     // stack (touches the highest guard byte, the first byte a contiguous
@@ -4273,8 +4273,8 @@ const TESTS: &[QemuTest] = &[
     // than passing. Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-stack-overrun-qemu-aarch64",
-        binary: "rustos-test-stack-overrun-qemu-aarch64",
+        package: "tairix-test-stack-overrun-qemu-aarch64",
+        binary: "tairix-test-stack-overrun-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4289,9 +4289,9 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
-    // vertical — the EL1/GICv2-SPI analogue of `rustos-test-irq-qemu-x86-64`.
-    // `rustos-test-irq-qemu-aarch64` installs the EL1 vectors, brings up the
-    // GICv2, builds a kernel-neutral `rustos_kernel_irq::IrqTable`, binds the
+    // vertical — the EL1/GICv2-SPI analogue of `tairix-test-irq-qemu-x86-64`.
+    // `tairix-test-irq-qemu-aarch64` installs the EL1 vectors, brings up the
+    // GICv2, builds a kernel-neutral `tairix_kernel_irq::IrqTable`, binds the
     // PL031 RTC's shared-peripheral interrupt (INTID 34), routes that SPI to
     // CPU 0 through the new `gic::route_spi` (`GICD_ITARGETSR`), installs a
     // set-once device-IRQ dispatcher (`exceptions::set_device_irq_dispatch`)
@@ -4305,8 +4305,8 @@ const TESTS: &[QemuTest] = &[
     // or mask never reaches PASS, so the run times out. Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work aarch64 tests.
     QemuTest {
-        package: "rustos-test-irq-qemu-aarch64",
-        binary: "rustos-test-irq-qemu-aarch64",
+        package: "tairix-test-irq-qemu-aarch64",
+        binary: "tairix-test-irq-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4324,15 +4324,15 @@ const TESTS: &[QemuTest] = &[
     // -> parked-kthread vertical, the proof that the production aarch64
     // device-IRQ subsystem can wake an in-kernel service kthread (the
     // prerequisite for INCREMENT (2)'s root-unlock kthread). Where
-    // `rustos-test-irq-qemu-aarch64` proves the device-IRQ *delivery* path
+    // `tairix-test-irq-qemu-aarch64` proves the device-IRQ *delivery* path
     // against a hard-coded INTID and a `wfi` poll loop, this vertical proves
     // the two INCREMENT (1) pieces that path serves: (1) DTB SPI discovery
     // (`fdt::gic_device_intid` decodes the PL031 RTC node's `interrupts`
     // triple into its GICv2 INTID from the embedded `virt` tree — no board
     // constant), and (2) the kthread-cooperative
-    // `rustos_kernel_core::KthreadIrqWaiter`, driven by a real in-kernel
+    // `tairix_kernel_core::KthreadIrqWaiter`, driven by a real in-kernel
     // service kthread (`spawn_kthread`) through the shared
-    // `block_until_ready` loop on the live `rustos-kernel-sched-eevdf`
+    // `block_until_ready` loop on the live `tairix-kernel-sched-eevdf`
     // `Scheduler`. The kthread parks on the bound RTC SPI, yielding each
     // cooperative `step`; when the RTC fires the EL1 GICv2 path masks the
     // line and sets the ready flag, the kthread observes `WaitOutcome::Ready`
@@ -4343,8 +4343,8 @@ const TESTS: &[QemuTest] = &[
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
-        package: "rustos-test-irq-kthread-qemu-aarch64",
-        binary: "rustos-test-irq-kthread-qemu-aarch64",
+        package: "tairix-test-irq-kthread-qemu-aarch64",
+        binary: "tairix-test-irq-kthread-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4361,13 +4361,13 @@ const TESTS: &[QemuTest] = &[
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
     // the `virt`-board virtio-input analogue of the x86_64 PS/2 vertical,
     // completing the `input` row of the QEMU matrix for aarch64.
-    // `rustos-test-input-virtio-mmio-qemu-aarch64` brings the `virt` board
+    // `tairix-test-input-virtio-mmio-qemu-aarch64` brings the `virt` board
     // up to EL1 (FP enable + 2 GiB identity MMU + GICv2/EL1 IRQ path,
     // shared from `virtio_qemu_support`), builds the virtio-MMIO bus from
     // the embedded device tree, provisions an `MmioTransport` through the
     // capability-gated `KernelMmioMapper`, arms the device's GICv2 SPI,
     // mints a `KernelVirtioHost`, loads the signed virtio-input `.rxe`
-    // through `rustos_drvhost::Host`, and drives it through
+    // through `tairix_drvhost::Host`, and drives it through
     // load -> use -> unload -> reload. "Use" is a real injected key: once
     // the guest logs the event-queue-armed readiness marker, the runner
     // sends a key through the QEMU monitor (`sendkey`), the eventq IRQ
@@ -4376,8 +4376,8 @@ const TESTS: &[QemuTest] = &[
     // the injection; the guest never fabricates the event. Single CPU and
     // a 60-second budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-input-virtio-mmio-qemu-aarch64",
-        binary: "rustos-test-input-virtio-mmio-qemu-aarch64",
+        package: "tairix-test-input-virtio-mmio-qemu-aarch64",
+        binary: "tairix-test-input-virtio-mmio-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4394,12 +4394,12 @@ const TESTS: &[QemuTest] = &[
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
     // the `virt`-board virtio-input MMIO analogue of the aarch64 input
     // vertical, completing the `input` row of the QEMU matrix for
-    // riscv64. `rustos-test-input-virtio-mmio-qemu-riscv64` boots the
+    // riscv64. `tairix-test-input-virtio-mmio-qemu-riscv64` boots the
     // `virt`-board pipeline, builds the virtio-MMIO bus from the device
     // tree, provisions an `MmioTransport` through the capability-gated
     // `KernelMmioMapper`, arms the device's PLIC source + S-mode trap
     // path, mints a `KernelVirtioHost`, loads the signed virtio-input
-    // `.rxe` through `rustos_drvhost::Host`, and drives it through
+    // `.rxe` through `tairix_drvhost::Host`, and drives it through
     // load -> use -> unload -> reload. "Use" is a real injected key: once
     // the guest logs the event-queue-armed readiness marker, the runner
     // sends a key through the QEMU monitor (`sendkey`), the eventq IRQ
@@ -4410,8 +4410,8 @@ const TESTS: &[QemuTest] = &[
     // aarch64 vertical runs. Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-input-virtio-mmio-qemu-riscv64",
-        binary: "rustos-test-input-virtio-mmio-qemu-riscv64",
+        package: "tairix-test-input-virtio-mmio-qemu-riscv64",
+        binary: "tairix-test-input-virtio-mmio-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -4509,36 +4509,36 @@ pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {
 /// Resolve the audited C toolchain once and export its path to the child
 /// build scripts, so the CCOMPAT C-program builds skip the per-crate search.
 ///
-/// Each `c_program_qemu_*` build script calls `rustos_cc::Toolchain::discover`,
+/// Each `c_program_qemu_*` build script calls `tairix_cc::Toolchain::discover`,
 /// which — absent an override — searches `PATH` and every known LLVM install
 /// prefix, running `--version` on each candidate until one reports the pinned
 /// release. Doing that independently in every C build script, for every target
 /// triple, repeats the same subprocess "hunt" many times per run. Resolving it
-/// here once and exporting `RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD` makes each build
+/// here once and exporting `TAIRIX_CC_CLANG` / `TAIRIX_CC_LLD` makes each build
 /// script take the authoritative-override fast path (a single `--version` on
 /// the known binary) instead.
 ///
 /// The discovery logic itself is not duplicated: this only *calls* the one
-/// definition in `rustos-cc` and records its result. It is best-effort — an
+/// definition in `tairix-cc` and records its result. It is best-effort — an
 /// operator override is left untouched, and a discovery failure is not fatal
 /// here (a build script that actually needs the toolchain still fails closed
 /// with the full install hint), so a run that builds no C program is never
 /// blocked by an absent C toolchain.
 fn prime_c_toolchain() {
     let plan = PrimePlan::from_env(
-        std::env::var_os("RUSTOS_CC_CLANG").is_some(),
-        std::env::var_os("RUSTOS_CC_LLD").is_some(),
+        std::env::var_os("TAIRIX_CC_CLANG").is_some(),
+        std::env::var_os("TAIRIX_CC_LLD").is_some(),
     );
     if !plan.discover {
         return;
     }
-    match rustos_cc::Toolchain::discover() {
+    match tairix_cc::Toolchain::discover() {
         Ok(toolchain) => {
             if plan.set_clang {
-                std::env::set_var("RUSTOS_CC_CLANG", &toolchain.clang.path);
+                std::env::set_var("TAIRIX_CC_CLANG", &toolchain.clang.path);
             }
             if plan.set_lld {
-                std::env::set_var("RUSTOS_CC_LLD", &toolchain.lld.path);
+                std::env::set_var("TAIRIX_CC_LLD", &toolchain.lld.path);
             }
             eprintln!(
                 "xtask: [test --qemu] C toolchain primed: clang={} ld.lld={}",
@@ -4565,9 +4565,9 @@ fn prime_c_toolchain() {
 struct PrimePlan {
     /// Whether the toolchain must be resolved at all.
     discover: bool,
-    /// Whether to export `RUSTOS_CC_CLANG` from the resolved toolchain.
+    /// Whether to export `TAIRIX_CC_CLANG` from the resolved toolchain.
     set_clang: bool,
-    /// Whether to export `RUSTOS_CC_LLD` from the resolved toolchain.
+    /// Whether to export `TAIRIX_CC_LLD` from the resolved toolchain.
     set_lld: bool,
 }
 
@@ -4743,7 +4743,7 @@ fn encrypted_root_disk_bytes(
     apps: &[super::image_apps::AppStoreFile],
 ) -> Result<Vec<u8>, String> {
     super::image_apps::with_plant_refs(apps, |files| {
-        rustos_test_encrypted_root_image::build_image_with_apps(files)
+        tairix_test_encrypted_root_image::build_image_with_apps(files)
     })
     .map_err(|e| {
         format!(
@@ -4839,10 +4839,10 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     // pass on stale data.
     if let Some(sectors) = t.disk_sectors {
         let image = kernel.with_extension("blk.img");
-        let sector0: Vec<u8> = (0..rustos_qemu::disk::SECTOR_BYTES)
+        let sector0: Vec<u8> = (0..tairix_qemu::disk::SECTOR_BYTES)
             .map(|i| u8::try_from(i % 256).unwrap_or(0))
             .collect();
-        rustos_qemu::disk::plant_raw_disk(&image, sectors, &[(0, &sector0)])
+        tairix_qemu::disk::plant_raw_disk(&image, sectors, &[(0, &sector0)])
             .map_err(|e| format!("test --qemu ({}): plant backing disk: {e}", t.package))?;
         spec = spec.with_virtio_blk(&image);
     }
@@ -4857,7 +4857,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
         stores.autoload_drivers,
     )? {
         let image = kernel.with_extension(fs.extension);
-        let sector_bytes = rustos_qemu::disk::SECTOR_BYTES;
+        let sector_bytes = tairix_qemu::disk::SECTOR_BYTES;
         let planted: Vec<(u64, &[u8])> = fs
             .bytes
             .chunks(sector_bytes)
@@ -4865,7 +4865,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
             .filter(|(_, chunk)| chunk.iter().any(|&b| b != 0))
             .map(|(lba, chunk)| (lba as u64, chunk))
             .collect();
-        rustos_qemu::disk::plant_raw_disk(&image, fs.total_sectors, &planted)
+        tairix_qemu::disk::plant_raw_disk(&image, fs.total_sectors, &planted)
             .map_err(|e| format!("test --qemu ({}): plant filesystem disk: {e}", t.package))?;
         spec = spec.with_virtio_blk(&image);
     }
@@ -4876,13 +4876,13 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
 /// Decode a dumped scan-out and assert it is dominated by `theme`'s own
 /// desktop colour (the compositor's background), whatever the taskbar,
 /// cursor, window chrome, or menu overlays. The expected colour is read
-/// from `rustos_theme` — the one definition the desktop session itself
+/// from `tairix_theme` — the one definition the desktop session itself
 /// renders with — never a literal, so a theme change cannot silently
 /// diverge the test from the product.
 fn assert_desktop_screendump(
     t: &QemuTest,
     path: &Path,
-    theme: &rustos_theme::Theme,
+    theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
     // The desktop background covers everything but the taskbar, cursor,
     // and any window, so a genuinely presented frame is far above this
@@ -4905,23 +4905,23 @@ fn assert_desktop_screendump(
 }
 
 /// Read and fully decode a dumped scan-out image.
-fn read_screendump(t: &QemuTest, path: &Path) -> Result<rustos_qemu::screendump::Image, String> {
+fn read_screendump(t: &QemuTest, path: &Path) -> Result<tairix_qemu::screendump::Image, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("test --qemu ({}): read screendump: {e}", t.package))?;
-    rustos_qemu::screendump::parse_ppm(&bytes)
+    tairix_qemu::screendump::parse_ppm(&bytes)
         .map_err(|e| format!("test --qemu ({}): decode screendump: {e}", t.package))
 }
 
 /// [`ScreendumpPlan`] assertion: the dark-theme composited desktop — the
 /// session boots with the shared dark theme active.
 fn assert_dark_desktop_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
-    assert_desktop_screendump(t, path, &rustos_theme::Theme::dark())
+    assert_desktop_screendump(t, path, &tairix_theme::Theme::dark())
 }
 
 /// [`ScreendumpPlan`] assertion: the served files window on the
 /// dark-theme desktop (see [`assert_files_window_screendump`]).
 fn assert_files_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
-    assert_files_window_screendump(t, path, &rustos_theme::Theme::dark())
+    assert_files_window_screendump(t, path, &tairix_theme::Theme::dark())
 }
 
 /// [`ScreendumpPlan`] assertion: the served files window on the
@@ -4929,7 +4929,7 @@ fn assert_files_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), 
 /// was clicked, so the dumped frame must render the *other* palette with
 /// the window still composited.
 fn assert_files_window_light_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
-    assert_files_window_screendump(t, path, &rustos_theme::Theme::light())
+    assert_files_window_screendump(t, path, &tairix_theme::Theme::light())
 }
 
 /// The served files window is on the desktop rendered with `theme`. The
@@ -4942,7 +4942,7 @@ fn assert_files_window_light_screendump(t: &QemuTest, path: &Path) -> Result<(),
 fn assert_files_window_screendump(
     t: &QemuTest,
     path: &Path,
-    theme: &rustos_theme::Theme,
+    theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
     // Inside the window body — inset from every edge — effectively every
     // pixel belongs to the window's frame; a sliver of tolerance covers
@@ -4955,11 +4955,11 @@ fn assert_files_window_screendump(
     let image = read_screendump(t, path)?;
     let desktop = theme.palette().desktop;
     let background = (desktop.r, desktop.g, desktop.b);
-    let origin = rustos_desktop_session::windows::CASCADE_ORIGIN;
+    let origin = tairix_desktop_session::windows::CASCADE_ORIGIN;
     #[allow(clippy::cast_sign_loss)] // The cascade origin is a positive screen offset.
     let (left, top) = (origin as u32 + INSET_PX, origin as u32 + INSET_PX);
-    let right = left + rustos_browse::WIN_WIDTH - 2 * INSET_PX;
-    let bottom = top + rustos_browse::WIN_HEIGHT - 2 * INSET_PX;
+    let right = left + tairix_browse::WIN_WIDTH - 2 * INSET_PX;
+    let bottom = top + tairix_browse::WIN_HEIGHT - 2 * INSET_PX;
     let mut total = 0u64;
     let mut covered = 0u64;
     for y in top..bottom {
@@ -5026,18 +5026,18 @@ fn assert_files_window_screendump(
 /// captures exactly the staged frame and every stage is provably
 /// established before its step fires.
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
-fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, String> {
-    use rustos_desktop_session::windows::cascade_origin_for;
-    use rustos_desktop_session::{
+fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_desktop_session::windows::cascade_origin_for;
+    use tairix_desktop_session::{
         DesktopShell, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER, TERMINAL_LABEL,
         TERMINAL_LAUNCHER, VIEWER_LABEL, VIEWER_LAUNCHER,
     };
-    use rustos_geometry::{Point, Rect, Scale};
-    use rustos_qemu::{MouseButton, PointerAction, PointerStep};
-    use rustos_taskbar::TaskbarConfig;
+    use tairix_geometry::{Point, Rect, Scale};
+    use tairix_qemu::{MouseButton, PointerAction, PointerStep};
+    use tairix_taskbar::TaskbarConfig;
 
-    let width = rustos_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
-    let height = rustos_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
     let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(width, height), APPEARANCE_LABEL);
     // Registered in the same order the production session registers them
     // (`userland/gui/session/src/run.rs`), so the reconstructed menu rows
@@ -5096,8 +5096,8 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
         Rect::new(
             files_origin.x,
             files_origin.y,
-            rustos_browse::WIN_WIDTH,
-            rustos_browse::WIN_HEIGHT,
+            tairix_browse::WIN_WIDTH,
+            tairix_browse::WIN_HEIGHT,
         ),
         "files window",
     )?;
@@ -5106,8 +5106,8 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
         Rect::new(
             terminal_origin.x,
             terminal_origin.y,
-            rustos_terminal::WIN_WIDTH,
-            rustos_terminal::WIN_HEIGHT,
+            tairix_terminal::WIN_WIDTH,
+            tairix_terminal::WIN_HEIGHT,
         ),
         "terminal window",
     )?;
@@ -5120,9 +5120,9 @@ fn autoload_desktop_pointer_script() -> Result<Vec<rustos_qemu::PointerStep>, St
     let mut endpoint_hex = [0u8; 16];
     let created = format!(
         "{} endpoint={}",
-        rustos_kernel_ipc::AuditEvent::CallReplied.message(),
-        rustos_util::fmt::format_hex_u64(
-            rustos_abi::window_ipc::WINDOW_ENDPOINT,
+        tairix_kernel_ipc::AuditEvent::CallReplied.message(),
+        tairix_util::fmt::format_hex_u64(
+            tairix_abi::window_ipc::WINDOW_ENDPOINT,
             &mut endpoint_hex
         ),
     );
@@ -5319,26 +5319,26 @@ fn fs_disk_image(
         FsDisk::None => None,
         FsDisk::Fat32 => Some(FsImage {
             extension: "fat32.img",
-            bytes: rustos_test_fat32_image::build_image(),
-            total_sectors: rustos_test_fat32_image::TOTAL_SECTORS,
+            bytes: tairix_test_fat32_image::build_image(),
+            total_sectors: tairix_test_fat32_image::TOTAL_SECTORS,
         }),
         FsDisk::ARXFS => Some(FsImage {
             extension: "arxfs.img",
-            bytes: rustos_test_arxfs_image::build_image()
+            bytes: tairix_test_arxfs_image::build_image()
                 .map_err(|e| format!("test --qemu ({}): build arxfs image: {e:?}", t.package))?,
-            total_sectors: rustos_test_arxfs_image::TOTAL_SECTORS,
+            total_sectors: tairix_test_arxfs_image::TOTAL_SECTORS,
         }),
         FsDisk::UsersRoot => Some(FsImage {
             extension: "users.img",
-            bytes: rustos_test_arxfs_image::build_users_root_image().map_err(|e| {
+            bytes: tairix_test_arxfs_image::build_users_root_image().map_err(|e| {
                 format!("test --qemu ({}): build users-root image: {e:?}", t.package)
             })?,
-            total_sectors: rustos_test_arxfs_image::TOTAL_SECTORS,
+            total_sectors: tairix_test_arxfs_image::TOTAL_SECTORS,
         }),
         FsDisk::EncryptedRootDisk => Some(FsImage {
             extension: "encrypted-root.img",
             bytes: encrypted_root_disk_bytes(t, apps)?,
-            total_sectors: rustos_test_encrypted_root_image::TOTAL_SECTORS,
+            total_sectors: tairix_test_encrypted_root_image::TOTAL_SECTORS,
         }),
         FsDisk::AutoloadRootDisk => Some(FsImage {
             extension: "autoload-root.img",
@@ -5351,10 +5351,10 @@ fn fs_disk_image(
             // (`AGENTS.md` §2.2 — one whole-disk author, no per-fixture copy).
             bytes: super::image_apps::with_plant_refs(autoload_drivers, |driver_files| {
                 super::image_apps::with_plant_refs(apps, |app_files| {
-                    rustos_test_encrypted_root_image::build_image_with_contents(
+                    tairix_test_encrypted_root_image::build_image_with_contents(
                         driver_files,
                         app_files,
-                        rustos_test_encrypted_root_image::PASSPHRASE,
+                        tairix_test_encrypted_root_image::PASSPHRASE,
                     )
                 })
             })
@@ -5364,7 +5364,7 @@ fn fs_disk_image(
                     t.package
                 )
             })?,
-            total_sectors: rustos_test_encrypted_root_image::TOTAL_SECTORS,
+            total_sectors: tairix_test_encrypted_root_image::TOTAL_SECTORS,
         }),
         // The encrypted-root layout with the memsoak-augmented bundle set:
         // the same builder, planting the same store plus the one test-only
@@ -5372,7 +5372,7 @@ fn fs_disk_image(
         FsDisk::MemsoakRootDisk => Some(FsImage {
             extension: "memsoak-root.img",
             bytes: encrypted_root_disk_bytes(t, apps_with_memsoak)?,
-            total_sectors: rustos_test_encrypted_root_image::TOTAL_SECTORS,
+            total_sectors: tairix_test_encrypted_root_image::TOTAL_SECTORS,
         }),
     })
 }
@@ -5414,7 +5414,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
                 &qemu_sock,
                 &peer_sock,
                 &pcap,
-                rustos_test_netstack_wire::GUEST_MAC_STR,
+                tairix_test_netstack_wire::GUEST_MAC_STR,
             ),
             _ => spec.with_virtio_net_dgram(&qemu_sock, &peer_sock, &pcap),
         };
@@ -5555,8 +5555,8 @@ mod tests {
     /// `report_line` produces, so the script and the program cannot drift.
     #[test]
     fn memsoak_script_marker_matches_the_fixture_report() {
-        assert!(MEMSOAK_PASS_PREFIX.starts_with(rustos_test_memsoak::PASS_MARKER));
-        let pass = rustos_test_memsoak::report_line(rustos_test_memsoak::Verdict::Stable, 7, 7);
+        assert!(MEMSOAK_PASS_PREFIX.starts_with(tairix_test_memsoak::PASS_MARKER));
+        let pass = tairix_test_memsoak::report_line(tairix_test_memsoak::Verdict::Stable, 7, 7);
         assert!(
             pass.starts_with(MEMSOAK_PASS_PREFIX),
             "fixture PASS line {pass:?} must start with the script marker {MEMSOAK_PASS_PREFIX:?}"
@@ -5567,7 +5567,7 @@ mod tests {
     fn spawn_session_overlong_username_tracks_the_account_format_bound() {
         assert_eq!(
             super::OVERLONG_USERNAME.len(),
-            rustos_users::MAX_USERNAME_LEN + 1
+            tairix_users::MAX_USERNAME_LEN + 1
         );
         assert!(super::OVERLONG_USERNAME.bytes().all(|byte| byte == b'x'));
     }
@@ -5575,7 +5575,7 @@ mod tests {
     #[test]
     fn failed_guest_serial_is_persisted_verbatim() {
         let path = std::env::temp_dir().join(format!(
-            "rustos-xtask-serial-{}-{}.log",
+            "tairix-xtask-serial-{}-{}.log",
             std::process::id(),
             line!()
         ));

@@ -1,11 +1,11 @@
-# `rustos-top`
+# `tairix-top`
 
-A live process-overview TUI for RustOS, in the spirit of GNU `top`, and
+A live process-overview TUI for TAIRiX, in the spirit of GNU `top`, and
 the first in-tree consumer of the OS curses library (`plans/CURSES.md` Stage
 C5). It draws a scrolling, selectable process list that refreshes on demand,
 sorted by `%CPU` with a GNU-style summary block above it.
 
-`top` reads the same `sysinfo-v1` process list as `ps` — RustOS has no `/proc`
+`top` reads the same `sysinfo-v1` process list as `ps` — TAIRiX has no `/proc`
 to scrape (`AGENTS.md` §16.6) — and draws it through `lib/curses`'s screen
 model rather than emitting escape sequences by hand (`AGENTS.md` §2.2).
 
@@ -27,7 +27,7 @@ model rather than emitting escape sequences by hand (`AGENTS.md` §2.2).
   never credential material), degrading to the numeric uid when the name
   cannot be resolved.
 - The state letters follow the GNU convention where the states correspond
-  (`S` sleeping, `T` stopped, `Z` zombie) plus RustOS's running/runnable
+  (`S` sleeping, `T` stopped, `Z` zombie) plus TAIRiX's running/runnable
   split (`R` / `r`), coloured on a colour terminal (green/cyan/yellow/
   magenta) — the letter always carries the state; colour is reinforcement.
 - A selection highlight, a scrolling viewport, and a `?` help overlay.
@@ -63,10 +63,10 @@ Both the `sysinfo` transport and the curses tty are object-safe seams, so the
 whole viewer runs against in-memory fixtures with no kernel (`AGENTS.md` §7).
 
 - **`run` (the `Run` binary, `src/run.rs`)** — the freestanding pure-Rust
-  program a shell spawns. It links `rustos-rt` (behind the on-by-default
+  program a shell spawns. It links `tairix-rt` (behind the on-by-default
   `program` feature) and drives the viewer against two production seams: the
   shared `lib/procinfo` `IpcTransport` to `sysinfod`, and the shared
-  `rustos_curses::StreamTty`, the one curses
+  `tairix_curses::StreamTty`, the one curses
   channel over the inherited standard streams (writes to fd 1, blocking reads
   from fd 0, local echo suppressed for raw input). It sizes the screen from the
   `terminal_size` syscall — the console's real grid when the kernel knows it (a

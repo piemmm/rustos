@@ -4,9 +4,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use rustos_kernel_mem::LiveUserSpace;
-use rustos_kernel_sched_api::TaskAction;
-use rustos_sync::{OnceCell, SpinLock};
+use tairix_kernel_mem::LiveUserSpace;
+use tairix_kernel_sched_api::TaskAction;
+use tairix_sync::{OnceCell, SpinLock};
 
 /// Type-erased continuation handle for the task currently running on a CPU.
 #[derive(Copy, Clone)]

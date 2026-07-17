@@ -21,7 +21,7 @@
 //! `cargo xtask fuzz` extends the same PRNG stream until the exported
 //! wall-clock budget elapses.
 
-use rustos_kernel_mem::{
+use tairix_kernel_mem::{
     AddressSpace, BootMemoryMap, CompressRefusal, EntropySource, FaultError, FrameAllocator,
     FreeMemorySource, HostPageTable, MapFlags, MemoryPressure, MemoryRegion, Page, PageCandidate,
     PhysAddr, PhysMap, PressureBand, Ramzip, RamzipCaps, RegionKind, SealError, SimPhysMap,
@@ -64,8 +64,8 @@ impl EntropySource for RngEntropy {
 
 /// Audit sink that discards records.
 struct NullSink;
-impl rustos_log::Sink for NullSink {
-    fn write_event(&self, _event: &rustos_log::Event<'_>) {}
+impl tairix_log::Sink for NullSink {
+    fn write_event(&self, _event: &tairix_log::Event<'_>) {}
 }
 static NULL_SINK: NullSink = NullSink;
 
@@ -75,7 +75,7 @@ static NULL_SINK: NullSink = NullSink;
 fn rebalance_to_moderate(
     pressure: &MemoryPressure,
     frames: &'static FrameAllocator,
-    held: &mut Vec<rustos_kernel_mem::Frame>,
+    held: &mut Vec<tairix_kernel_mem::Frame>,
 ) {
     while pressure.sample() == PressureBand::Normal || pressure.sample() == PressureBand::Mild {
         held.push(frames.alloc().expect("pressure frame"));
@@ -142,9 +142,9 @@ fn maybe_corrupt_entry(rng: &mut Rng, ramzip: &mut Ramzip, page: Page) -> bool {
 
 #[test]
 fn fuzz_ramzip_restore_is_fail_closed() {
-    let mut rng = Rng::new(rustos_fuzzseed::start(
+    let mut rng = Rng::new(tairix_fuzzseed::start(
         "fuzz_ramzip_restore_is_fail_closed",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
     let mut map = BootMemoryMap::new();
@@ -171,7 +171,7 @@ fn fuzz_ramzip_restore_is_fail_closed() {
     let flags = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
     let mut round_trips = 0u64;
     let mut tamper_rejected = 0u64;
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             rebalance_to_moderate(&pressure, frames, &mut held);
@@ -248,7 +248,7 @@ fn fuzz_ramzip_restore_is_fail_closed() {
             assert_eq!(ramzip.ledger().entries(), 0, "entry leak");
             assert_eq!(ramzip.ledger().footprint(), 0, "footprint leak");
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

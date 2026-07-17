@@ -1,6 +1,6 @@
-# rustos-net
+# tairix-net
 
-RustOS network protocol engine (`lib/net`). Stability tier: **experimental**.
+TAIRiX network protocol engine (`lib/net`). Stability tier: **experimental**.
 
 This crate is the single home of the wire protocols the user-space network
 stack speaks (`plans/NETWORK.md`). It is pure and host-testable: no I/O, no

@@ -1,11 +1,11 @@
-//! RustOS HID boot-protocol decode + console producer (`lib/hid`).
+//! TAIRiX HID boot-protocol decode + console producer (`lib/hid`).
 //!
 //! This is the arch-neutral, transport-agnostic HID boot-protocol *decode*
 //! logic the USB-HID keyboard/mouse **class** drivers are built from. It lives
 //! in `lib/*` — not in a driver crate — so a class driver
 //! (`drivers/input/usb_kbd`, …) composes it without a `drivers/*`→`drivers/*`
 //! dependency, exactly as the bus-agnostic xHCI protocol lives in the
-//! `rustos_usb` crate rather than the xHCI driver. Controller bring-up and
+//! `tairix_usb` crate rather than the xHCI driver. Controller bring-up and
 //! enumeration are **not** here: they belong to the host-controller driver
 //! (`drivers/bus/usb/xhci`), which serves a class driver's transfers over the
 //! URB transport (`plans/USB.md`).
@@ -14,7 +14,7 @@
 //!
 //! The two **HID boot-protocol** report formats — the fixed 8-byte keyboard
 //! report and the 3-or-more-byte mouse report (USB HID 1.11 Appendix B) —
-//! into platform-neutral [`rustos_abi::driver::input::InputEvent`]s. Boot
+//! into platform-neutral [`tairix_abi::driver::input::InputEvent`]s. Boot
 //! protocol is the fixed report shape every USB keyboard and mouse must speak
 //! without a report-descriptor parse, which makes it the correct first
 //! bring-up path for the Pi 4's USB ports (`plans/PI.md` P10): the decoder
@@ -23,7 +23,7 @@
 //! # Layered seam
 //!
 //! The decoders ([`BootKeyboard`], [`BootMouse`]) are written against the
-//! [`ReportSource`] seam, defined in `lib/abi` (`rustos_abi::driver::input`)
+//! [`ReportSource`] seam, defined in `lib/abi` (`tairix_abi::driver::input`)
 //! because its producer is the class driver's URB transport (which submits
 //! interrupt-IN URBs to the host-controller driver servicing the device's
 //! interrupt-IN endpoint), and a `lib/*` crate depends only on other `lib/*`
@@ -38,9 +38,9 @@
 //!   ([`keyboard::MODIFIER_USAGE_BASE`]). `value` is `1` for a press and `0`
 //!   for a release.
 //! * For a directly attached keyboard the [`console`] producer resolves those
-//!   usage edges into the [`Key`](rustos_input::Key) a US layout produces —
+//!   usage edges into the [`Key`](tairix_input::Key) a US layout produces —
 //!   applying the held modifiers and caps/num lock — and emits the decoded
-//!   [`KeyInput`](rustos_abi::input::KeyInput) record through the shared
+//!   [`KeyInput`](tairix_abi::input::KeyInput) record through the shared
 //!   `lib/keymap` map; a driver loop injects each record through the
 //!   `key_inject` syscall ([`pump_once`], `plans/PI.md` P11), leaving the
 //!   encoding and routing to the kernel input-focus arbiter. Key repeat remains a higher-layer concern.
@@ -52,16 +52,16 @@
 //!   wheel motion as `Scroll` on [`AXIS_Y`], matching the `lib/abi` axis
 //!   encoding (`lib/abi/src/driver/input.rs`).
 //!
-//! [`Input`]: rustos_abi::driver::input::Input
-//! [`InputEventKind::Key`]: rustos_abi::driver::input::InputEventKind::Key
-//! [`Key`]: rustos_input::Key
+//! [`Input`]: tairix_abi::driver::input::Input
+//! [`InputEventKind::Key`]: tairix_abi::driver::input::InputEventKind::Key
+//! [`Key`]: tairix_input::Key
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::input::{InputEvent, InputEventKind};
-use rustos_abi::DriverError;
+use tairix_abi::driver::input::{InputEvent, InputEventKind};
+use tairix_abi::DriverError;
 
 pub mod console;
 pub mod keyboard;
@@ -75,11 +75,11 @@ pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
 // The axis and pointer-button codes are the platform-neutral `lib/abi`
 // vocabulary; one definition, imported rather than re-derived here.
-pub use rustos_abi::driver::input::{
+pub use tairix_abi::driver::input::{
     ReportSource, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE, POINTER_BUTTON_COUNT,
 };
 
-/// Byte length of the report buffer a [`poll`](rustos_abi::driver::input::Input::poll)
+/// Byte length of the report buffer a [`poll`](tairix_abi::driver::input::Input::poll)
 /// hands to [`ReportSource::next_report`].
 ///
 /// The boot keyboard report is exactly 8 bytes and the boot mouse

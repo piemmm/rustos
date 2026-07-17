@@ -38,8 +38,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::boxed::Box;
 
-use rustos_abi::ProcId;
-use rustos_sync::RwLock;
+use tairix_abi::ProcId;
+use tairix_sync::RwLock;
 
 use crate::random::RandomReserve;
 
@@ -101,8 +101,8 @@ mod tests {
     use super::{mint_proc_id, mint_proc_id_bootstrap};
     use crate::random::{BootReserve, RandomReserve};
     use alloc::boxed::Box;
-    use rustos_abi::ProcId;
-    use rustos_sync::RwLock;
+    use tairix_abi::ProcId;
+    use tairix_sync::RwLock;
 
     fn unseeded_rng() -> RwLock<Box<dyn RandomReserve + Send + Sync>> {
         RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>)

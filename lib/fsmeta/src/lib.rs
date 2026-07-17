@@ -1,4 +1,4 @@
-//! Shared extended-file-metadata model for RustOS filesystems.
+//! Shared extended-file-metadata model for TAIRiX filesystems.
 //!
 //! `ARXFS` gives every file a general-purpose, namespaced `key → value`
 //! extended-attribute store, and uses it to preserve foreign-filesystem
@@ -49,15 +49,15 @@ mod tests;
 pub use attr::{AttrEntry, AttrFlags, AttrSet};
 pub use key::{AttrKey, Namespace, NamespaceAccess};
 
-use rustos_abi::driver::DriverError;
+use tairix_abi::driver::DriverError;
 
 /// Longest attribute key, in bytes. A fixed *security* validation bound, not a
 /// tunable capacity: it caps untrusted stored data and never grows.
 ///
 /// One definition with the syscall wire bound: this is
-/// [`rustos_abi::FS_ATTR_KEY_MAX`], so a key the `fs_attr_*` dispatcher
+/// [`tairix_abi::FS_ATTR_KEY_MAX`], so a key the `fs_attr_*` dispatcher
 /// accepts always fits the stored set and the two can never diverge.
-pub const KEY_MAX: usize = rustos_abi::FS_ATTR_KEY_MAX;
+pub const KEY_MAX: usize = tairix_abi::FS_ATTR_KEY_MAX;
 
 /// Largest attribute value stored inline in the attribute set, in bytes.
 ///
@@ -68,9 +68,9 @@ pub const KEY_MAX: usize = rustos_abi::FS_ATTR_KEY_MAX;
 /// *named stream* (a fork), stored through the file-data pipeline.
 ///
 /// One definition with the syscall wire bound: this is
-/// [`rustos_abi::FS_ATTR_VALUE_MAX`], so a value the `fs_attr_*` dispatcher
+/// [`tairix_abi::FS_ATTR_VALUE_MAX`], so a value the `fs_attr_*` dispatcher
 /// accepts always fits the stored set and the two can never diverge.
-pub const VALUE_MAX: usize = rustos_abi::FS_ATTR_VALUE_MAX;
+pub const VALUE_MAX: usize = tairix_abi::FS_ATTR_VALUE_MAX;
 
 /// Largest number of attributes one inode may carry. A fixed security bound.
 pub const ATTRS_PER_INODE: usize = 32;

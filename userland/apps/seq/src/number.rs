@@ -1,7 +1,7 @@
 //! Operand scanning: the GNU `seq` `scan_arg`, faithfully.
 //!
 //! An operand is parsed the way C's `strtold` reads it in the C locale —
-//! through the one shared scanner (`rustos_util::cnum`, also consumed by
+//! through the one shared scanner (`tairix_util::cnum`, also consumed by
 //! `printf`) — and the whole token must be consumed. Alongside the value,
 //! the scan records the *print width* and *decimal precision* of the
 //! input spelling, which the default output format and `-w` are computed
@@ -9,7 +9,7 @@
 
 use alloc::string::String;
 
-use rustos_util::cnum::{c_isspace, scan_double};
+use tairix_util::cnum::{c_isspace, scan_double};
 
 use crate::error::SeqError;
 

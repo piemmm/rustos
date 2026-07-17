@@ -2,7 +2,7 @@
 //! `write`): creation, `EEXIST`, `ENOENT`, `EISDIR`, `ENOTDIR`, and the
 //! round-trip of bytes through the driver.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn create_makes_an_empty_regular_file() {

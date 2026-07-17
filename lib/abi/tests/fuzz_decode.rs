@@ -15,40 +15,40 @@
 //! ## Seed and budget
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition). A plain `cargo test`
+//! the shared `tairix_fuzzseed` seam (one definition). A plain `cargo test`
 //! runs the fixed [`SMOKE_ITERATIONS`] sweep **once** from a *fresh, logged*
-//! seed; `cargo xtask fuzz --soak` sets `RUSTOS_FUZZ_BUDGET_SECS` and the
+//! seed; `cargo xtask fuzz --soak` sets `TAIRIX_FUZZ_BUDGET_SECS` and the
 //! PRNG-driven harness keeps drawing inputs from the *same continuing* stream
 //! until the deadline elapses. The seed is logged at the start of the run (and
-//! pinnable via `--seed`/`RUSTOS_FUZZ_SEED`), so a fresh-seed crash is still
+//! pinnable via `--seed`/`TAIRIX_FUZZ_SEED`), so a fresh-seed crash is still
 //! reproducible. The bit-flip harness is an exhaustive boundary sweep, not a
 //! random one, so it does not draw a seed.
 
-use rustos_abi::display_ipc::{decode_mode_reply, DisplayRequest};
-use rustos_abi::driver::net_channel::{
+use tairix_abi::display_ipc::{decode_mode_reply, DisplayRequest};
+use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
 };
-use rustos_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
-use rustos_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
-use rustos_abi::input::{KeyInput, PointerInput};
-use rustos_abi::net::{decode_bind_reply, decode_socket_reply, SocketDatagram, SocketRequest};
-use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::rlimit::ResourceLimit;
-use rustos_abi::seat::SeatAdminRequest;
-use rustos_abi::sysinfo::{
+use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
+use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
+use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::net::{decode_bind_reply, decode_socket_reply, SocketDatagram, SocketRequest};
+use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::rlimit::ResourceLimit;
+use tairix_abi::seat::SeatAdminRequest;
+use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, CpuLoadRecord, CpuLoadRequest, IntrospectDomain,
     KernelMemoryStats, MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest,
     ProcessRecord, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
     SeatListRequest, SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime,
     SYSINFO_REPLY_STATUS_LEN,
 };
-use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::users_admin::{
+use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
-use rustos_abi::window_ipc::{decode_create_reply, WindowEvent, WindowRequest};
-use rustos_abi::{
+use tairix_abi::window_ipc::{decode_create_reply, WindowEvent, WindowRequest};
+use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
     SYSCALL_TABLE_HASH_LEN,
 };
@@ -477,7 +477,7 @@ fn exercise_fs(bytes: &[u8]) {
 /// through its encoder). The completion frame has no struct, so its decoder
 /// is exercised directly for the "must not panic" half of the contract.
 fn exercise_usb_urb(bytes: &[u8]) {
-    use rustos_abi::usb_urb::{UrbRequest, URB_REQUEST_LEN};
+    use tairix_abi::usb_urb::{UrbRequest, URB_REQUEST_LEN};
     if let Ok(req) = UrbRequest::decode(bytes) {
         let mut buf = [0u8; URB_REQUEST_LEN];
         req.encode(&mut buf)
@@ -489,7 +489,7 @@ fn exercise_usb_urb(bytes: &[u8]) {
     // The completion decoder accepts any byte slice and either reports the
     // transferred count or a fail-closed errno; the contract is that it never
     // panics for an arbitrary input.
-    let _ = rustos_abi::usb_urb::decode_completion(bytes);
+    let _ = tairix_abi::usb_urb::decode_completion(bytes);
 }
 
 /// Drive the block-service transport decoders on `bytes`.
@@ -499,7 +499,7 @@ fn exercise_usb_urb(bytes: &[u8]) {
 /// through its encoder). The completion decoder is exercised directly for
 /// the "must not panic" half of the contract, exactly as the URB one.
 fn exercise_blkio(bytes: &[u8]) {
-    use rustos_abi::blkio::{BlkRequest, BLK_REQUEST_LEN};
+    use tairix_abi::blkio::{BlkRequest, BLK_REQUEST_LEN};
     if let Ok(req) = BlkRequest::decode(bytes) {
         let mut buf = [0u8; BLK_REQUEST_LEN];
         req.encode(&mut buf)
@@ -508,7 +508,7 @@ fn exercise_blkio(bytes: &[u8]) {
             .expect("round-trip of an accepted block-service request must succeed");
         assert_eq!(req, redecoded);
     }
-    let _ = rustos_abi::blkio::decode_completion(bytes);
+    let _ = tairix_abi::blkio::decode_completion(bytes);
 }
 
 /// Drive the resource-limit decoder on `bytes`.
@@ -569,7 +569,7 @@ fn exercise_process(bytes: &[u8]) {
 /// Drive the production startup-vector *builder* on `bytes`.
 ///
 /// The fuzz bytes are split on `0xFF` into argument/environment strings and
-/// fed to [`rustos_abi::process::write_into`]; an accepted build must parse
+/// fed to [`tairix_abi::process::write_into`]; an accepted build must parse
 /// back to exactly those strings, and a rejected build (e.g. an embedded NUL)
 /// must fail closed rather than panic.
 fn exercise_process_builder(bytes: &[u8]) {
@@ -584,11 +584,11 @@ fn exercise_process_builder(bytes: &[u8]) {
     seed[..take].copy_from_slice(&bytes[..take]);
     let canary = u64::from_le_bytes(seed);
 
-    let Ok(len) = rustos_abi::process::encoded_len(args, env) else {
+    let Ok(len) = tairix_abi::process::encoded_len(args, env) else {
         return;
     };
     let mut buf = vec![0u8; len];
-    let Ok(written) = rustos_abi::process::write_into(&mut buf, args, env, canary) else {
+    let Ok(written) = tairix_abi::process::write_into(&mut buf, args, env, canary) else {
         // A rejected build (an embedded NUL, say) is a fail-closed outcome.
         return;
     };
@@ -611,12 +611,12 @@ fn exercise_process_builder(bytes: &[u8]) {
 
 #[test]
 fn random_short_inputs_never_panic() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "random_short_inputs_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut buf = [0u8; 256];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             // Random size in [0, buf.len()].
@@ -627,7 +627,7 @@ fn random_short_inputs_never_panic() {
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }
@@ -638,7 +638,7 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
     // Start from a well-formed IPC header, then bit-flip individual bytes
     // to walk the boundary between accepted and rejected.
     let mut base = IpcMessageHeader {
-        magic: rustos_abi::IPC_MESSAGE_HEADER_MAGIC,
+        magic: tairix_abi::IPC_MESSAGE_HEADER_MAGIC,
         version: 1,
         flags: 0,
         endpoint: 0xDEAD_BEEF_CAFE_F00D,

@@ -8,7 +8,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use rustos_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileKind};
 
 /// The metadata of one filesystem node, as `du` consumes it: what it is,
 /// its apparent byte length, and the on-disk bytes its data actually

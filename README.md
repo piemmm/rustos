@@ -1,4 +1,4 @@
-# RustOS (not it's final name) - An OS experiment.
+# TAIRiX (not it's final name) - An OS experiment.
 
 A security-first, multi-user, multi-core operating system written in Rust,
 targeting bare-metal x86_64, AArch64, RISC-V 64, and the browser via
@@ -64,14 +64,14 @@ next stage, hence still `◐`.
 
 This table compares the ARXFS *design as implemented* against what each
 foreign filesystem itself provides — the on-disk format and its canonical
-Linux implementation for ext4/btrfs/XFS/bcachefs — **not** against RustOS's
+Linux implementation for ext4/btrfs/XFS/bcachefs — **not** against TAIRiX's
 interoperability drivers.
 Legend: `✓` provided (optional features count) · `◐` partial ·
 `▢` recognised future stage · `—` not provided.
 
 | Feature | ARXFS | ext4 | btrfs | XFS | bcachefs |
 | --- | :-: | :-: | :-: | :-: | :-: |
-| RustOS driver | ✓ native | ✓ read/write | — | — | — |
+| TAIRiX driver | ✓ native | ✓ read/write | — | — | — |
 | Long file names (255 bytes) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | POSIX owner / mode / ACL | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Per-inode capability gate | ✓ | — | — | — | — |
@@ -94,7 +94,7 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Online grow | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Device-health monitoring → triggered scrub | ✓ | — | — | — | — |
 
-RustOS ships drivers for ARXFS (native) and for ext4, FAT32, and ADFS as
+TAIRiX ships drivers for ARXFS (native) and for ext4, FAT32, and ADFS as
 interoperability drivers for foreign volumes: ext4 maintains every on-disk
 checksum it mounts (`metadata_csum`, `gdt_csum`, `64bit`) and fails closed to
 read-only on feature sets outside its write allow-list; FAT32 has no on-disk
@@ -104,7 +104,7 @@ big directories, old- and new-map hard discs), validating every on-disc
 checksum and surfacing RISC OS load/exec/filetype/datestamp metadata through
 the shared `acorn.*` attribute keys. The
 drivers' declared-limit timestamp surface is staged per `AGENTS.md` §21.
-btrfs, XFS, and bcachefs have no RustOS driver and appear only for
+btrfs, XFS, and bcachefs have no TAIRiX driver and appear only for
 comparison — including what ARXFS does *not* do: snapshots, multi-device
 pooling/RAID, and self-healing of *data* (ARXFS today detects and classifies
 bad data blocks through its three-layer integrity pipeline but repairs only
@@ -115,7 +115,7 @@ Per-driver detail lives in each crate's `README.md` under
 
 ## Security & attack-vector prevention
 
-The attack classes RustOS forecloses, and where each defence stands per
+The attack classes TAIRiX forecloses, and where each defence stands per
 target. The structural defences (capability authority, process isolation,
 no ambient root, signed code) are designed in from the kernel up; the
 hardening defences below are the [`AGENTS.md`](./AGENTS.md) §4/§5/§19
@@ -175,7 +175,7 @@ cargo install --locked cargo-deny mdbook
 ```
 
 The C-ABI conformance tests (`cargo xtask test --qemu`) additionally need the
-pinned `clang` / `ld.lld` (`rustos_cc::REQUIRED_CLANG_VERSION`). Install them
+pinned `clang` / `ld.lld` (`tairix_cc::REQUIRED_CLANG_VERSION`). Install them
 once and the build finds them automatically — no environment variables — from
 Homebrew (`brew install llvm lld`) or apt.llvm.org (`apt install clang-22
 lld-22`); see [`tools/cc/README.md`](./tools/cc/README.md) for the search order.
@@ -184,9 +184,9 @@ lld-22`); see [`tools/cc/README.md`](./tools/cc/README.md) for the search order.
 
 Licensed under the [GNU General Public License v2.0 or later](./LICENSE)
 (GPL-2.0-or-later), with an additional syscall / ABI exception
-(`RustOS-syscall-note`) that keeps user-space programs which merely use the
+(`TAIRiX-syscall-note`) that keeps user-space programs which merely use the
 kernel's system calls or its published syscall / ABI interface definitions
 from being treated as derived works. See [`LICENSE`](./LICENSE) for the full
 text.
 
-RustOS is an independent, open-source hobby project. It is not affiliated with, endorsed by, or supported by the Rust Project or the Rust Foundation.
+TAIRiX is an independent, open-source hobby project. It is not affiliated with, endorsed by, or supported by the Rust Project or the Rust Foundation.

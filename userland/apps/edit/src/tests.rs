@@ -10,9 +10,9 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use std::collections::BTreeMap;
 
-use rustos_abi::Errno;
-use rustos_curses::{Event, Screen, Size};
-use rustos_termcap::TermType;
+use tairix_abi::Errno;
+use tairix_curses::{Event, Screen, Size};
+use tairix_termcap::TermType;
 
 use crate::buffer::{width_of_prefix, DecodeError, TextBuffer, MAX_FILE_BYTES};
 use crate::command::{parse, Command};
@@ -87,13 +87,13 @@ impl FakeTty {
     }
 }
 
-impl rustos_curses::Tty for FakeTty {
-    fn write(&mut self, bytes: &[u8]) -> rustos_curses::Result<()> {
+impl tairix_curses::Tty for FakeTty {
+    fn write(&mut self, bytes: &[u8]) -> tairix_curses::Result<()> {
         self.output.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn read(&mut self) -> rustos_curses::Result<Vec<u8>> {
+    fn read(&mut self) -> tairix_curses::Result<Vec<u8>> {
         Ok(Vec::new())
     }
 }
@@ -761,7 +761,7 @@ fn help_documents_the_parser_switches() {
     use std::fs;
 
     let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-    let locales = rustos_help::REQUIRED_LOCALES;
+    let locales = tairix_help::REQUIRED_LOCALES;
     for locale in locales {
         let path = format!("{help_root}/{locale}/edit.md");
         let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

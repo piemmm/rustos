@@ -3,7 +3,7 @@
 //! `.`/`..` components, embedded NUL bytes, and over-long components. A
 //! rejected path is reported as [`VfsError::InvalidPath`].
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn a_normalised_absolute_path_parses() {

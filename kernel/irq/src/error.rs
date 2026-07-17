@@ -2,13 +2,13 @@
 //!
 //! The [`IrqError`] enum is the *internal* failure surface;
 //! `kernel/core::syscalls::KernelSyscallHandlers` translates each
-//! variant into the stable `rustos_abi::Errno` documented in
+//! variant into the stable `tairix_abi::Errno` documented in
 //! `docs/src/security/irq.md` (the failure-mode table). The
 //! translation is intentionally one-to-one so the security audit
 //! trail can correlate a syscall-handler-side rejection to the
 //! exact kernel-side cause.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Failure modes of [`crate::IrqTable::bind`] and
 /// [`crate::IrqTable::fire`].

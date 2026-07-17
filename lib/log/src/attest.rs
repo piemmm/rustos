@@ -26,23 +26,23 @@
 //! All sealing uses the audited HMAC-SHA256 in `lib/crypto`; this module never
 //! names an upstream crypto crate and never hand-rolls a primitive.
 
-use rustos_abi::{BootId, Errno, BOOT_ID_LEN};
-use rustos_crypto::{
+use tairix_abi::{BootId, Errno, BOOT_ID_LEN};
+use tairix_crypto::{
     ct_eq, hmac_sha256_parts, sha256, MacKey, MacTag, Sha256Digest, MAC_KEY_LEN, SHA256_OUTPUT_LEN,
 };
 use zeroize::Zeroize;
 
 /// Length, in bytes, of a machine identifier (mirrors
-/// [`rustos_abi::MACHINE_ID_LEN`]). Re-stated here so the genesis preimage
+/// [`tairix_abi::MACHINE_ID_LEN`]). Re-stated here so the genesis preimage
 /// length is a `const` without reaching into `sysinfo`'s wire constants.
-pub const MACHINE_ID_LEN: usize = rustos_abi::MACHINE_ID_LEN;
+pub const MACHINE_ID_LEN: usize = tairix_abi::MACHINE_ID_LEN;
 
 /// Domain-separation tag for the machine-id hash. Distinct tags keep the two
 /// SHA-256 uses in this module from ever colliding on a shared preimage.
-const DOMAIN_MACHINE_ID: &[u8] = b"rustos.log.machine-id.v1";
+const DOMAIN_MACHINE_ID: &[u8] = b"tairix.log.machine-id.v1";
 
 /// Domain-separation tag for the stream-genesis derivation.
-const DOMAIN_GENESIS: &[u8] = b"rustos.log.stream-genesis.v1";
+const DOMAIN_GENESIS: &[u8] = b"tairix.log.stream-genesis.v1";
 
 /// Hash a machine identifier into the non-secret `machine id hash` the anchor
 /// records (SYSLOG §7.3) and the genesis binds to.
@@ -98,11 +98,11 @@ pub fn stream_genesis(
 }
 
 /// Length, in bytes, of a [`LogAttestationKey`]'s raw key material (a 256-bit
-/// HMAC-SHA256 key; mirrors [`rustos_crypto::MAC_KEY_LEN`]).
+/// HMAC-SHA256 key; mirrors [`tairix_crypto::MAC_KEY_LEN`]).
 pub const LOG_ATTESTATION_KEY_LEN: usize = MAC_KEY_LEN;
 
 /// Magic identifying the on-disk log-attestation key file.
-const KEY_FILE_MAGIC: [u8; 4] = *b"RLAK"; // RustOS Log Attestation Key.
+const KEY_FILE_MAGIC: [u8; 4] = *b"RLAK"; // TAIRiX Log Attestation Key.
 
 /// On-disk format version.
 const KEY_FILE_VERSION: u16 = 1;
@@ -216,7 +216,7 @@ mod tests {
         machine_id_hash, stream_genesis, LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN,
         LOG_ATTESTATION_KEY_LEN, MACHINE_ID_LEN,
     };
-    use rustos_abi::{BootId, Errno, BOOT_ID_LEN};
+    use tairix_abi::{BootId, Errno, BOOT_ID_LEN};
 
     fn sample_boot_id() -> BootId {
         BootId::from_raw([0x5A; BOOT_ID_LEN])
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(a, b, "same machine id hashes identically");
         assert_ne!(a, c, "different machine ids hash differently");
         // Domain separation: it is not the bare SHA-256 of the id.
-        assert_ne!(a, rustos_crypto::sha256(&[1u8; MACHINE_ID_LEN]));
+        assert_ne!(a, tairix_crypto::sha256(&[1u8; MACHINE_ID_LEN]));
     }
 
     #[test]

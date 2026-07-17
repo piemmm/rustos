@@ -3,7 +3,7 @@
 //! A GPT disk carries a protective MBR in LBA 0, a primary header in LBA
 //! 1 (signature `"EFI PART"`), and an array of 128-byte partition entries
 //! starting at the LBA the header names. Every field is CRC32-protected.
-//! RustOS reads GPT so a UEFI x86_64 disk is a first-class root device
+//! TAIRiX reads GPT so a UEFI x86_64 disk is a first-class root device
 //! (any scheme on any architecture); the write path
 //! lands with the UEFI image builder.
 //!
@@ -12,7 +12,7 @@
 //! table is rejected whole.
 
 use crate::{Partition, PartitionError, PartitionTable, PartitionType};
-use rustos_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry};
 
 /// Largest logical-block size this crate stages a single block of, in
 /// bytes. GPT (and MBR) disks use 512- or 4096-byte logical blocks; the

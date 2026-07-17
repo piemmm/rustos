@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-heap-qemu-aarch64"
-description = "PI P6e-3b prerequisite QEMU integration test: prove the rustos-rt mem_map-backed global allocator works end to end in an EL0 process on the aarch64 virt board. The build script compiles the pure-Rust EL0 fixture (tests/integration/heap_program) PIE and converts it to an rxe blob; the kernel materialises one hardware-isolated EL0 address space with rustos_kernel_core::spawn_image, retains it live, installs a rustos_kernel_core::MemMap producer backed by rustos_kernel_mem::map_anonymous/unmap_anonymous, and routes the program's allocator-issued mem_map/mem_unmap syscalls through it — PASS once the program Box-allocates, grows a Vec across pages, reallocates after freeing, verifies every value, and exits 0."
+name = "tairix-test-heap-qemu-aarch64"
+description = "PI P6e-3b prerequisite QEMU integration test: prove the tairix-rt mem_map-backed global allocator works end to end in an EL0 process on the aarch64 virt board. The build script compiles the pure-Rust EL0 fixture (tests/integration/heap_program) PIE and converts it to an rxe blob; the kernel materialises one hardware-isolated EL0 address space with tairix_kernel_core::spawn_image, retains it live, installs a tairix_kernel_core::MemMap producer backed by tairix_kernel_mem::map_anonymous/unmap_anonymous, and routes the program's allocator-issued mem_map/mem_unmap syscalls through it — PASS once the program Box-allocates, grows a Vec across pages, reallocates after freeing, verifies every value, and exits 0."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,12 +12,12 @@ publish = false
 workspace = true
 
 # This bin is the PI P6e-3b prerequisite aarch64 heap-allocator vertical. The
-# fixture program (`rustos-test-heap`) is built position-independent by
-# `build.rs` and converted to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+# fixture program (`tairix-test-heap`) is built position-independent by
+# `build.rs` and converted to an `rxe` blob (`tairix_itest_harness::elf2rxe`)
 # carrying the kernel's compiled-in syscall CFI tag. On boot the test reads the
 # GICv2 base + timer rate from the embedded `virt` DTB, brings up the EL1
 # vectors + GICv2, builds one isolated EL0 address space via
-# `rustos_kernel_core::spawn_image` (capability-checked + audited), retains it
+# `tairix_kernel_core::spawn_image` (capability-checked + audited), retains it
 # live, installs a `MemMap` producer over `map_anonymous` / `unmap_anonymous`,
 # and routes the program's allocator-issued `mem_map` / `mem_unmap` syscalls
 # through it; a clean `exit(0)` from the fixture is reported as PASS. Any
@@ -32,21 +32,21 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-heap-qemu-aarch64"
+name = "tairix-test-heap-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

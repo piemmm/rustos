@@ -14,7 +14,7 @@
 //! is why this crate depends on `lib/theme`: the conversion is owned in
 //! one place rather than re-implemented by each consumer.
 //!
-//! [`Rgba`]: rustos_theme::Rgba
+//! [`Rgba`]: tairix_theme::Rgba
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

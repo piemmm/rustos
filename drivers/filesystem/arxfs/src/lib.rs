@@ -1,12 +1,12 @@
-//! RustOS native filesystem driver (`arxfs`).
+//! TAIRiX native filesystem driver (`arxfs`).
 //!
-//! `arxfs` is the native RustOS filesystem: a block-backed, copy-on-write
+//! `arxfs` is the native TAIRiX filesystem: a block-backed, copy-on-write
 //! filesystem that stores full POSIX metadata plus an inline access-control
 //! list and an optional capability gate **per inode**. It
-//! sits behind any [`rustos_abi::driver::block::Block`] device and exposes
+//! sits behind any [`tairix_abi::driver::block::Block`] device and exposes
 //! itself through the versioned [`FilesystemRead`] / [`FilesystemWrite`] /
 //! [`FilesystemSecurity`] / [`FilesystemTimestamps`] surfaces (new behaviour ships as a new trait, never by widening the
-//! frozen mount/unmount [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
+//! frozen mount/unmount [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)).
 //!
 //! # Crash consistency (copy-on-write + superblock ring)
 //!
@@ -35,7 +35,7 @@
 //! # Capabilities
 //!
 //! Loading requires
-//! [`CapabilityId::DRV_LOAD`](rustos_abi::CapabilityId::DRV_LOAD). The driver
+//! [`CapabilityId::DRV_LOAD`](tairix_abi::CapabilityId::DRV_LOAD). The driver
 //! runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
@@ -48,19 +48,19 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemTimestamps, FilesystemWrite, NodeId, NodeInfo,
     NodeKind, NodeTimes, VolumeStats,
 };
-pub use rustos_abi::driver::filesystem::{
+pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
 };
-use rustos_abi::time::Time64;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
-use rustos_crypto::{AeadKey, MacKey};
-use rustos_fsmeta::{AttrFlags, AttrKey, AttrSet};
+use tairix_abi::time::Time64;
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_crypto::{AeadKey, MacKey};
+use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 
 mod btree;
 mod check;
@@ -196,7 +196,7 @@ const DIRENT_SIZE: usize = DIRENT_HEADER + NAME_MAX;
 
 /// Maximum number of inline ACL entries stored in an inode.
 const ACL_MAX: usize = 8;
-const _: () = assert!(ACL_MAX == rustos_abi::driver::filesystem::MAX_ACL_ENTRIES);
+const _: () = assert!(ACL_MAX == tairix_abi::driver::filesystem::MAX_ACL_ENTRIES);
 
 /// Inode-table index of the root directory. Index 0 is the reserved "no
 /// inode" sentinel, so a zeroed directory slot reads as free.
@@ -1262,9 +1262,9 @@ impl<B: Block> ARXFS<B> {
         let mut fs = Self {
             block,
             fs_uuid: 0,
-            mac_key: [0u8; rustos_crypto::MAC_KEY_LEN],
-            filename_key: [0u8; rustos_crypto::AEAD_KEY_LEN],
-            content_key: [0u8; rustos_crypto::AEAD_KEY_LEN],
+            mac_key: [0u8; tairix_crypto::MAC_KEY_LEN],
+            filename_key: [0u8; tairix_crypto::AEAD_KEY_LEN],
+            content_key: [0u8; tairix_crypto::AEAD_KEY_LEN],
             crypto_header: [0u8; CRYPTO_HEADER_LEN],
             block_size,
             total_blocks,

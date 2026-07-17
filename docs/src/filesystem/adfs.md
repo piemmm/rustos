@@ -1,8 +1,8 @@
 # ADFS driver
 
-`drivers/filesystem/adfs` (`rustos-drv-fs-adfs`) is the read/write
+`drivers/filesystem/adfs` (`tairix-drv-fs-adfs`) is the read/write
 interoperability driver for Acorn ADFS / RISC OS `FileCore` volumes. It
-attaches a volume behind any `rustos_abi::driver::block::Block` device
+attaches a volume behind any `tairix_abi::driver::block::Block` device
 and exposes it through the versioned `FilesystemRead`,
 `FilesystemWrite`, `FilesystemTimestamps`, `FilesystemAttrs`, and
 `FilesystemStats` traits.
@@ -41,7 +41,7 @@ The RISC OS load/exec words are surfaced through the canonical
 ([metadata registry](./metadata-registry.md)): `acorn.loadaddr`,
 `acorn.execaddr`, `acorn.attr`, and — for filetyped objects —
 `acorn.filetype` and `acorn.datestamp`. The conversions live in the
-`rustos_fsmeta` Acorn preset, so a copy to `ARXFS` and back reproduces
+`tairix_fsmeta` Acorn preset, so a copy to `ARXFS` and back reproduces
 the native fields byte-for-byte. A typed object's 40-bit centisecond
 stamp is reported (widened to `Time64`) as all four node timestamps;
 ADFS stores exactly one instant, and an untyped object honestly reports

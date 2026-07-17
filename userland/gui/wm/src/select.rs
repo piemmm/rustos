@@ -40,9 +40,9 @@
 //! cursor in place and reports that nothing changed rather than blanking the
 //! pointer or panicking.
 
-use rustos_cursor::{CursorImage, CursorRegistry, CursorSetId};
-use rustos_raster::RasterCache;
-use rustos_theme::CursorKind;
+use tairix_cursor::{CursorImage, CursorRegistry, CursorSetId};
+use tairix_raster::RasterCache;
+use tairix_theme::CursorKind;
 
 use crate::geometry::Point;
 use crate::input::InputRouter;

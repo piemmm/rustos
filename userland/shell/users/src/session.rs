@@ -7,12 +7,12 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::users_admin::{
+use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, gid_list_into, grant_list_into, AccountStateCode,
     CreateUser, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
-use rustos_abi::{CapabilityId, Errno};
-use rustos_users::{
+use tairix_abi::{CapabilityId, Errno};
+use tairix_users::{
     default_home, PasswordRecord, Salt, DEFAULT_ITERATIONS, DEFAULT_SHELL, MAX_DB_LEN,
     SESSION_BASELINE,
 };
@@ -33,7 +33,7 @@ pub trait ToolIo {
     fn read_secret(&mut self, prompt: &str) -> Option<Vec<u8>>;
 }
 
-/// The `users_admin` syscall seam (the `rustos_rt::users_admin` shape).
+/// The `users_admin` syscall seam (the `tairix_rt::users_admin` shape).
 pub trait AdminChannel {
     /// Submit one encoded request; a list response is written into `out`
     /// and its byte length returned. Errors are the raw negative kernel

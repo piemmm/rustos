@@ -1,6 +1,6 @@
-# `rustos-fstree`
+# `tairix-fstree`
 
-The RustOS `fstree`: the full-screen, keyboard-driven tree file manager,
+The TAIRiX `fstree`: the full-screen, keyboard-driven tree file manager,
 drawn with the OS curses library (`lib/curses`). It shows a persistent
 directory-tree pane beside a file pane over the storage forest. This crate
 delivers the plan's S1 model core, the S2 file operations, and the S3

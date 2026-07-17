@@ -1,6 +1,6 @@
 # CCOMPAT.md — A C-callable `abi-v1`: full `lib/abi` header surface, syscall stubs, and crt0
 
-This is a staged build plan for making the whole RustOS user/kernel ABI
+This is a staged build plan for making the whole TAIRiX user/kernel ABI
 (`abi-v1`) callable from programs **not written in Rust** (C first, then any
 language with a C FFI). It is **binding under `AGENTS.md`**; read `AGENTS.md`
 and `PLAN.md` first. Every rule in both applies here without exception. This
@@ -10,9 +10,9 @@ file *before* any of it is built (`AGENTS.md` §9, §16.4, §15.2).
 
 ## 0. Scope and decisions (binding for this plan)
 
-- **RustOS stays Rust-only (`AGENTS.md` §1).** We do not add C, C++, or a C
-  toolchain to the RustOS codebase. This plan makes the ABI *consumable* by
-  non-Rust programs; it does not make RustOS itself contain C. Hosting a C
+- **TAIRiX stays Rust-only (`AGENTS.md` §1).** We do not add C, C++, or a C
+  toolchain to the TAIRiX codebase. This plan makes the ABI *consumable* by
+  non-Rust programs; it does not make TAIRiX itself contain C. Hosting a C
   program is a different thing from authoring the OS in C, and §16.5 already
   anticipates non-Rust third-party apps.
 - **The whole of `lib/abi` is the C surface, not just the syscalls.**
@@ -40,7 +40,7 @@ file *before* any of it is built (`AGENTS.md` §9, §16.4, §15.2).
 - **Roll our own (`AGENTS.md` §2.12).** The header generator, the syscall stub
   runtime, and crt0 are all first-party. We do **not** take a load-bearing
   dependency on `cbindgen` or an external libc for a security-critical surface.
-- **`abi-v1` is NOT frozen.** RustOS has not shipped a release, so `abi-v1` is
+- **`abi-v1` is NOT frozen.** TAIRiX has not shipped a release, so `abi-v1` is
   still mutable. It becomes immutable only at the first release; until then,
   changing a `lib/abi` type is allowed and simply requires regenerating the
   header (the drift guard enforces that). After release, new behaviour ships
@@ -75,22 +75,22 @@ header means the same thing on every native Tier-1 target.
 - **Little-endian wire layout.** The encode/decode helpers in `lib/abi`
   (`le.rs`, the `to_le_bytes`/`from_bytes` pairs) are little-endian; the header
   documents this and the byte images do not depend on host endianness.
-- **Stable C names — the short `ros_` / `ROS_` prefix (`AGENTS.md` §9).** Rust
+- **Stable C names — the short `tairix_` / `TAIRIX_` prefix (`AGENTS.md` §9).** Rust
   newtypes and enums get a namespaced C spelling: constants as
-  `ROS_<AREA>_<NAME>`, enum discriminants pinned to their Rust value, structs
-  as `ros_<snake_case>_t`. The prefix exists to survive C's single flat symbol
+  `TAIRIX_<AREA>_<NAME>`, enum discriminants pinned to their Rust value, structs
+  as `tairix_<snake_case>_t`. The prefix exists to survive C's single flat symbol
   namespace against the hostile/sloppy third-party code §4 assumes, and it
   belongs **only** on the C-visible boundary — never on internal `lib/abi`
   Rust items (`AGENTS.md` §9, §2.3). The names are part of the frozen surface
   once `abi-v1` ships.
-- **Stable export symbols.** Each syscall is exported as `ros_sys_<name>`
-  (e.g. `ros_sys_ipc_send`). The Rust stub pins each with
-  `#[export_name = "ros_sys_<name>"]` (or `#[unsafe(no_mangle)]` where the
+- **Stable export symbols.** Each syscall is exported as `tairix_sys_<name>`
+  (e.g. `tairix_sys_ipc_send`). The Rust stub pins each with
+  `#[export_name = "tairix_sys_<name>"]` (or `#[unsafe(no_mangle)]` where the
   symbol equals the item name) so the compiler does not mangle it. `extern "C"`
   alone only fixes the *calling convention*; it does **not** stop mangling —
   hence the explicit pin.
 - **No panic across the boundary (`AGENTS.md` §2.9).** Every `extern "C"`
-  entry point is panic-free: errors are returned as `int32_t` `ROS_E_*`
+  entry point is panic-free: errors are returned as `int32_t` `TAIRIX_E_*`
   codes (an unwind across an FFI boundary is undefined behaviour and is
   forbidden).
 
@@ -105,103 +105,103 @@ before its predecessor is green on the whole-project gate (§7).
 ### Stage CC1 — Full `lib/abi` C header surface
 
 **Status: done.** The generator has been grown from a single
-`rustos_abi.h` into a per-module header set under `include/rustos/`: the
-umbrella `rustos_abi.h` now only carries `ROS_ABI_VERSION` and `#include`s
-the module headers `rustos_error.h`, `rustos_capability.h`, `rustos_time.h`,
-and `rustos_syscall.h`. The drift guard (`cargo xtask c-header`) checks the
+`tairix_abi.h` into a per-module header set under `include/tairix/`: the
+umbrella `tairix_abi.h` now only carries `TAIRIX_ABI_VERSION` and `#include`s
+the module headers `tairix_error.h`, `tairix_capability.h`, `tairix_time.h`,
+and `tairix_syscall.h`. The drift guard (`cargo xtask c-header`) checks the
 whole tree byte-for-byte and `--write` regenerates it. The first **grown**
-module is `time`: `rustos_time.h` declares `ros_time64_t` / `ros_duration64_t`
+module is `time`: `tairix_time.h` declares `tairix_time64_t` / `tairix_duration64_t`
 (mirroring the `#[repr(C)]` layout of `Time64` / `Duration64`) and the
-`ROS_NANOS_PER_SEC` / `ROS_COARSE_CLOCK_GRANULARITY_NS` / `*_WIRE_LEN`
+`TAIRIX_NANOS_PER_SEC` / `TAIRIX_COARSE_CLOCK_GRANULARITY_NS` / `*_WIRE_LEN`
 constants, every value read from `lib/abi` (never re-typed) and pinned by an
-in-module test. The `random` module has since landed too: `rustos_random.h`
-declares `ROS_RANDOM_FLAG_NON_BLOCKING` (read from `RandomFlags`) and the
-`ROS_RANDOM_RESERVE_DEFAULT_BYTES` / `ROS_RANDOM_REQUEST_MAX_BYTES` `uintptr_t`
+in-module test. The `random` module has since landed too: `tairix_random.h`
+declares `TAIRIX_RANDOM_FLAG_NON_BLOCKING` (read from `RandomFlags`) and the
+`TAIRIX_RANDOM_RESERVE_DEFAULT_BYTES` / `TAIRIX_RANDOM_REQUEST_MAX_BYTES` `uintptr_t`
 limits, pinned by an in-module test. The `ipc` module has now landed too:
-`rustos_ipc.h` declares the `#[repr(C)]` `ros_ipc_message_header_t` /
-`ros_port_name_t` structs (mirroring `IpcMessageHeader` / `PortName`) plus the
-`ROS_IPC_MESSAGE_HEADER_MAGIC` / `ROS_IPC_MESSAGE_MAX_PAYLOAD_LEN` /
-`ROS_IPC_MESSAGE_HEADER_WIRE_LEN` / `ROS_PORT_NAME_MAX_LEN` /
-`ROS_PORT_NAME_WIRE_LEN` constants, every value read from `lib/abi` and pinned
+`tairix_ipc.h` declares the `#[repr(C)]` `tairix_ipc_message_header_t` /
+`tairix_port_name_t` structs (mirroring `IpcMessageHeader` / `PortName`) plus the
+`TAIRIX_IPC_MESSAGE_HEADER_MAGIC` / `TAIRIX_IPC_MESSAGE_MAX_PAYLOAD_LEN` /
+`TAIRIX_IPC_MESSAGE_HEADER_WIRE_LEN` / `TAIRIX_PORT_NAME_MAX_LEN` /
+`TAIRIX_PORT_NAME_WIRE_LEN` constants, every value read from `lib/abi` and pinned
 by an in-module test. The `stdinfo` module has now landed too:
-`rustos_stdinfo.h` declares `ROS_STDINFO_FD`, the `ROS_STDINFO_VERSION_V1` /
-`ROS_STDINFO_VERSION_CURRENT` framing tags, and the `ROS_STDINFO_KIND_*` /
-`ROS_STDINFO_SEVERITY_*` `#[repr(u8)]` discriminants (the kinds and severities
+`tairix_stdinfo.h` declares `TAIRIX_STDINFO_FD`, the `TAIRIX_STDINFO_VERSION_V1` /
+`TAIRIX_STDINFO_VERSION_CURRENT` framing tags, and the `TAIRIX_STDINFO_KIND_*` /
+`TAIRIX_STDINFO_SEVERITY_*` `#[repr(u8)]` discriminants (the kinds and severities
 travel on the wire as strings; the discriminants give the C view a name for
 each variant), every value read from `lib/abi` and pinned by an in-module test.
-The `manifest` module has now landed too: `rustos_manifest.h` declares the
-`#[repr(C)]` `ros_manifest_header_t` struct (mirroring `ManifestHeader`) plus
-the `ROS_MANIFEST_MAGIC` / `ROS_MANIFEST_MAX_CAPABILITIES` /
-`ROS_SYSCALL_TABLE_HASH_LEN` / `ROS_MANIFEST_HEADER_WIRE_LEN` constants, every
+The `manifest` module has now landed too: `tairix_manifest.h` declares the
+`#[repr(C)]` `tairix_manifest_header_t` struct (mirroring `ManifestHeader`) plus
+the `TAIRIX_MANIFEST_MAGIC` / `TAIRIX_MANIFEST_MAX_CAPABILITIES` /
+`TAIRIX_SYSCALL_TABLE_HASH_LEN` / `TAIRIX_MANIFEST_HEADER_WIRE_LEN` constants, every
 value read from `lib/abi` and pinned by an in-module test. The `input` module
-has now landed too: `rustos_input.h` declares the `PointerInput` / `KeyInput`
-record magics (`ROS_POINTER_INPUT_MAGIC` / `ROS_KEY_INPUT_MAGIC`) and packed
-wire sizes (`ROS_POINTER_INPUT_WIRE_LEN` / `ROS_KEY_INPUT_WIRE_LEN`), the
-`ROS_INPUT_KIND_*` / `ROS_INPUT_BUTTON_NONE` / `ROS_KEY_CLASS_*` / `ROS_MOD_*`
-field codes, and the `ROS_POINTER_BUTTON_*` (`PointerButtonCode`) /
-`ROS_KEY_*` (`NamedKeyCode`) `#[repr(u16)]` discriminants — every value read
+has now landed too: `tairix_input.h` declares the `PointerInput` / `KeyInput`
+record magics (`TAIRIX_POINTER_INPUT_MAGIC` / `TAIRIX_KEY_INPUT_MAGIC`) and packed
+wire sizes (`TAIRIX_POINTER_INPUT_WIRE_LEN` / `TAIRIX_KEY_INPUT_WIRE_LEN`), the
+`TAIRIX_INPUT_KIND_*` / `TAIRIX_INPUT_BUTTON_NONE` / `TAIRIX_KEY_CLASS_*` / `TAIRIX_MOD_*`
+field codes, and the `TAIRIX_POINTER_BUTTON_*` (`PointerButtonCode`) /
+`TAIRIX_KEY_*` (`NamedKeyCode`) `#[repr(u16)]` discriminants — every value read
 from `lib/abi` (the records are hand-serialised byte images, so the header
 exports their field codes and wire sizes rather than a C struct mirror) and
 pinned by an in-module test. The `appinfo` module has now landed too:
-`rustos_appinfo.h` declares the `#[repr(C)]` `ros_appinfo_header_t` struct
-(mirroring `AppInfoHeader`) plus the `ROS_APPINFO_MAGIC` /
-`ROS_APPINFO_MAX_CAPABILITIES` / `ROS_APPINFO_MAX_MIME` / `ROS_BUNDLE_ID_MAX` /
-`ROS_BUNDLE_NAME_MAX` / `ROS_BUNDLE_VERSION_MAX` / `ROS_MIME_TYPE_MAX` /
-`ROS_MIME_ENTRY_LEN` / `ROS_APPINFO_HEADER_WIRE_LEN` constants, the curated
-`ROS_SYSTEM_LIBRARIES_DIR`, the fixed `ROS_BUNDLE_ENTRY_*` top-level entry
-names (read from `BundleEntry::as_str`), and the `ROS_LIBRARY_SCOPE_*`
+`tairix_appinfo.h` declares the `#[repr(C)]` `tairix_appinfo_header_t` struct
+(mirroring `AppInfoHeader`) plus the `TAIRIX_APPINFO_MAGIC` /
+`TAIRIX_APPINFO_MAX_CAPABILITIES` / `TAIRIX_APPINFO_MAX_MIME` / `TAIRIX_BUNDLE_ID_MAX` /
+`TAIRIX_BUNDLE_NAME_MAX` / `TAIRIX_BUNDLE_VERSION_MAX` / `TAIRIX_MIME_TYPE_MAX` /
+`TAIRIX_MIME_ENTRY_LEN` / `TAIRIX_APPINFO_HEADER_WIRE_LEN` constants, the curated
+`TAIRIX_SYSTEM_LIBRARIES_DIR`, the fixed `TAIRIX_BUNDLE_ENTRY_*` top-level entry
+names (read from `BundleEntry::as_str`), and the `TAIRIX_LIBRARY_SCOPE_*`
 discriminants — every value read from `lib/abi` and pinned by an in-module
-test. The `rxe` module has now landed too: `rustos_rxe.h` declares the
-`#[repr(C)]` `ros_load_header_t` struct (mirroring `LoadHeader`) plus the
-`ROS_LOAD_MAGIC` / `ROS_RXE_PAGE_SIZE` / `ROS_LOAD_MAX_SEGMENTS` /
-`ROS_LOAD_FLAG_PIE` / `ROS_SEG_FLAG_READ` / `ROS_SEG_FLAG_WRITE` /
-`ROS_SEG_FLAG_EXEC` / `ROS_LOAD_HEADER_WIRE_LEN` / `ROS_SEGMENT_WIRE_LEN`
-constants and the `ROS_RXE_PERMISSION_*` (`RxePermission`) `#[repr(u8)]`
+test. The `rxe` module has now landed too: `tairix_rxe.h` declares the
+`#[repr(C)]` `tairix_load_header_t` struct (mirroring `LoadHeader`) plus the
+`TAIRIX_LOAD_MAGIC` / `TAIRIX_RXE_PAGE_SIZE` / `TAIRIX_LOAD_MAX_SEGMENTS` /
+`TAIRIX_LOAD_FLAG_PIE` / `TAIRIX_SEG_FLAG_READ` / `TAIRIX_SEG_FLAG_WRITE` /
+`TAIRIX_SEG_FLAG_EXEC` / `TAIRIX_LOAD_HEADER_WIRE_LEN` / `TAIRIX_SEGMENT_WIRE_LEN`
+constants and the `TAIRIX_RXE_PERMISSION_*` (`RxePermission`) `#[repr(u8)]`
 discriminants — a `Segment` record is hand-serialised, so the header exports
-its wire size and `ROS_SEG_FLAG_*` field codes rather than a C struct mirror —
+its wire size and `TAIRIX_SEG_FLAG_*` field codes rather than a C struct mirror —
 every value read from `lib/abi` and pinned by an in-module test. The `sysinfo`
-module has now landed too: `rustos_sysinfo.h` declares C struct mirrors of the
+module has now landed too: `tairix_sysinfo.h` declares C struct mirrors of the
 eight `#[repr(C)]` System Information wire types (`SysinfoRequestHeader`,
 `ProcessListRequest`, `ProcessRecord`, `KernelMemoryStats`, `Uptime`,
-`SystemIdentity`, `MountListRequest`, `MountRecord`) — `ros_uptime_t`'s members
-are the `ros_duration64_t` / `ros_time64_t` types from `rustos_time.h`, which it
-`#include`s — plus the `ROS_SYSINFO_VERSION_*` / `ROS_SYSINFO_REQUEST_MAGIC` /
-`ROS_SYSINFO_MAX_PAYLOAD_LEN` / `ROS_SYSINFO_QUERY_ID_MAX` framing, the
-`ROS_SYSINFO_QUERY_*` well-known ids, the `ROS_SYSINFO_QUERY_NAME_MAX` /
+`SystemIdentity`, `MountListRequest`, `MountRecord`) — `tairix_uptime_t`'s members
+are the `tairix_duration64_t` / `tairix_time64_t` types from `tairix_time.h`, which it
+`#include`s — plus the `TAIRIX_SYSINFO_VERSION_*` / `TAIRIX_SYSINFO_REQUEST_MAGIC` /
+`TAIRIX_SYSINFO_MAX_PAYLOAD_LEN` / `TAIRIX_SYSINFO_QUERY_ID_MAX` framing, the
+`TAIRIX_SYSINFO_QUERY_*` well-known ids, the `TAIRIX_SYSINFO_QUERY_NAME_MAX` /
 `_RECORD_LEN` / `_ENCODED_QUERY_TABLE_LEN` registry constants, the
-`ROS_PROCESS_STATE_*` (`ProcessState`) `#[repr(u8)]` discriminants, the
-`ROS_PROCESS_NAME_MAX` / `ROS_MACHINE_ID_LEN` / `ROS_HOSTNAME_MAX` /
-`ROS_MOUNT_*_MAX` inline-buffer caps, and a packed `*_WIRE_LEN` macro per record
+`TAIRIX_PROCESS_STATE_*` (`ProcessState`) `#[repr(u8)]` discriminants, the
+`TAIRIX_PROCESS_NAME_MAX` / `TAIRIX_MACHINE_ID_LEN` / `TAIRIX_HOSTNAME_MAX` /
+`TAIRIX_MOUNT_*_MAX` inline-buffer caps, and a packed `*_WIRE_LEN` macro per record
 (the struct mirrors are the naturally-aligned in-memory layout; the wire image
 is the separate `*_WIRE_LEN`) — every value read from `lib/abi` and pinned by an
 in-module test (`MountRecord`'s `flags` is mirrored as `uint32_t`; the
 `MountFlags` bit constants belong to the forthcoming `driver/*` header, §2.2).
 The `capability` module needs no new header: its `CapabilityId` ids and
-`CAPABILITY_ID_MAX` already ship in `rustos_capability.h`, and `CapabilityQuery`
+`CAPABILITY_ID_MAX` already ship in `tairix_capability.h`, and `CapabilityQuery`
 is a Rust trait with no C representation. The `driver` core has now landed too:
-`rustos_driver.h` declares the `#[repr(C)]` `ros_driver_manifest_t` struct
-(mirroring `DriverManifest`) plus the `ROS_DRIVER_MANIFEST_MAGIC` /
-`_MAX_CAPABILITIES` / `ROS_DRIVER_SIGNER_PUBKEY_LEN` / `ROS_DRIVER_SIGNATURE_LEN`
-/ `ROS_DRIVER_MANIFEST_WIRE_LEN` constants, the `ROS_DRIVER_KIND_*`
-(`DriverKind`) / `ROS_BUFFER_CLASS_*` (`BufferClass`) `#[repr(u8)]` and
-`ROS_DRIVER_ERROR_*` (`DriverError`) `#[repr(i32)]` discriminant sets, and the
-`ROS_DRIVER_HANDLE_NONE` (`DriverHandle::NONE`) sentinel — a live driver handle
-travels as a `uint64_t`. It reuses `ROS_SYSCALL_TABLE_HASH_LEN` from
-`rustos_manifest.h` (which it `#include`s) rather than re-declaring it (§2.2);
+`tairix_driver.h` declares the `#[repr(C)]` `tairix_driver_manifest_t` struct
+(mirroring `DriverManifest`) plus the `TAIRIX_DRIVER_MANIFEST_MAGIC` /
+`_MAX_CAPABILITIES` / `TAIRIX_DRIVER_SIGNER_PUBKEY_LEN` / `TAIRIX_DRIVER_SIGNATURE_LEN`
+/ `TAIRIX_DRIVER_MANIFEST_WIRE_LEN` constants, the `TAIRIX_DRIVER_KIND_*`
+(`DriverKind`) / `TAIRIX_BUFFER_CLASS_*` (`BufferClass`) `#[repr(u8)]` and
+`TAIRIX_DRIVER_ERROR_*` (`DriverError`) `#[repr(i32)]` discriminant sets, and the
+`TAIRIX_DRIVER_HANDLE_NONE` (`DriverHandle::NONE`) sentinel — a live driver handle
+travels as a `uint64_t`. It reuses `TAIRIX_SYSCALL_TABLE_HASH_LEN` from
+`tairix_manifest.h` (which it `#include`s) rather than re-declaring it (§2.2);
 every value is read from `lib/abi` and pinned by an in-module test.
-The `driver/*` submodule POD surface has now landed in `rustos_driver.h`: the
-storage/bus/display/filesystem/input/net struct mirrors (`ros_block_geometry_t`,
-`ros_discard_capability_t`, `ros_health_snapshot_t`, `ros_bus_device_t`,
-`ros_display_mode_t`, `ros_accel_caps_t`, `ros_node_info_t`, `ros_dir_entry_t`,
-`ros_node_times_t` — built from `ros_time64_t`, so the header `#include`s
-`rustos_time.h` —, `ros_input_event_t`, and the `#[repr(transparent)]`
-`ros_mac_address_t`), the `ROS_VIRTIO_PCI_*` / `ROS_MAC_ADDRESS_LEN` /
-`ROS_MOUNT_FLAG_*` (with `KNOWN_MASK`) / `ROS_NODE_ID_NONE` constants, and the
-`ROS_DISPLAY_FORMAT_*` / `ROS_NODE_KIND_*` / `ROS_INPUT_EVENT_KIND_*`
+The `driver/*` submodule POD surface has now landed in `tairix_driver.h`: the
+storage/bus/display/filesystem/input/net struct mirrors (`tairix_block_geometry_t`,
+`tairix_discard_capability_t`, `tairix_health_snapshot_t`, `tairix_bus_device_t`,
+`tairix_display_mode_t`, `tairix_accel_caps_t`, `tairix_node_info_t`, `tairix_dir_entry_t`,
+`tairix_node_times_t` — built from `tairix_time64_t`, so the header `#include`s
+`tairix_time.h` —, `tairix_input_event_t`, and the `#[repr(transparent)]`
+`tairix_mac_address_t`), the `TAIRIX_VIRTIO_PCI_*` / `TAIRIX_MAC_ADDRESS_LEN` /
+`TAIRIX_MOUNT_FLAG_*` (with `KNOWN_MASK`) / `TAIRIX_NODE_ID_NONE` constants, and the
+`TAIRIX_DISPLAY_FORMAT_*` / `TAIRIX_NODE_KIND_*` / `TAIRIX_INPUT_EVENT_KIND_*`
 discriminants — every value read from `lib/abi`. `BusDevice::class` is spelled
 `device_class` in the mirror because `class` is reserved in C++; the driver
-input-event kinds are `ROS_INPUT_EVENT_KIND_*` to stay disjoint from the
-windowing `ROS_INPUT_KIND_*` in `rustos_input.h` (§2.2). The Rust-only error
+input-event kinds are `TAIRIX_INPUT_EVENT_KIND_*` to stay disjoint from the
+windowing `TAIRIX_INPUT_KIND_*` in `tairix_input.h` (§2.2). The Rust-only error
 enums (`WindowError`, `MmioMapError`), the opaque arch-built `MsiMessage`, the
 in-process policy records (`NodeSecurity`, `SecurityAcl`, `SecuritySubject`),
 and the runtime objects (`RegisterWindow`, `DmaSlab`, `PoolId`) carry no
@@ -220,8 +220,8 @@ CC1 is complete and green on the whole-project gate.
   `Time64`/`Duration64`, `IpcMessageHeader`, `ProcessRecord`,
   `SysinfoRequestHeader`, `Rxe`/`LoadHeader`, driver-trait POD types, etc.
 - Organise the output as one header per `lib/abi` module under
-  `include/rustos/` (e.g. `rustos_time.h`, `rustos_ipc.h`, `rustos_sysinfo.h`)
-  plus the existing umbrella `rustos_abi.h` that `#include`s them, so a
+  `include/tairix/` (e.g. `tairix_time.h`, `tairix_ipc.h`, `tairix_sysinfo.h`)
+  plus the existing umbrella `tairix_abi.h` that `#include`s them, so a
   developer can pull in exactly what they need.
 - Values are read from `lib/abi` (discriminants, constant values, struct field
   order/size) — never re-typed — so the header can never disagree with the
@@ -248,21 +248,21 @@ header list, endianness, the "not frozen yet" note); rustdoc on the generator.
 native targets (x86_64, riscv64, aarch64).**
 The per-architecture trap layer exists on all three native targets
 (`kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`).
-The crate `lib/abi-sys` (`rustos-abi-sys`) has landed: it exports the eleven
-`extern "C"`, export-name-pinned `ros_sys_<name>` functions matching the CC1
-header (`include/rustos/rustos_syscall.h`), each of which marshals its typed
+The crate `lib/abi-sys` (`tairix-abi-sys`) has landed: it exports the eleven
+`extern "C"`, export-name-pinned `tairix_sys_<name>` functions matching the CC1
+header (`include/tairix/tairix_syscall.h`), each of which marshals its typed
 arguments into the canonical `[u64; SYSCALL_MAX_ARGS]` register layout
-(reading the syscall numbers from `rustos_abi::SyscallNumber`, never
+(reading the syscall numbers from `tairix_abi::SyscallNumber`, never
 re-typing them — §2.2) and issues the real trap on each native target:
 `syscall` (x86_64, number in `rax`, args `rdi/rsi/rdx/r10/r8/r9`, result
 `rax`), `svc #0` (aarch64, `x8` / `x0`–`x5` / `x0`), and `ecall` (riscv64,
 `a7` / `a0`–`a5` / `a0`). Each per-arch block is the §1 assembly carve-out
 (justification header + `// SAFETY:`), gated on a **build-script-emitted**
 `abi_sys_trap_<arch>` cfg (`build.rs`) rather than `cfg(target_arch)` so the
-§17.2 `cfg-check` stays green (mirroring `kernel/rustos-kernel/build.rs`).
+§17.2 `cfg-check` stays green (mirroring `kernel/tairix-kernel/build.rs`).
 Every entry point is panic-free (only constant-index array writes and
 infallible casts before the trap, §2.9) and returns the typed value the C
-header declares (`int32_t` `ROS_E_*` for the `Errno`-returning calls,
+header declares (`int32_t` `TAIRIX_E_*` for the `Errno`-returning calls,
 `uint32_t`/`uint64_t` otherwise); `exit` is `-> !` and re-issues `exit` if a
 buggy kernel ever returns (fail-closed loop, not a busy-wait, §2.1). The
 runtime adds **no** authority (§4 / §5.4): every check happens kernel-side.
@@ -274,21 +274,21 @@ Host tests (the "trap injected behind a seam" requirement) inject a
 per-thread trap seam and assert the marshalled `(number, args)` and the
 return decoding for every stub, plus a drift test
 (`registry_covers_exactly_the_frozen_table`) that cross-checks every stub's
-number and arg count against `rustos_abi::SYSCALLS` — the dense/complete
+number and arg count against `tairix_abi::SYSCALLS` — the dense/complete
 discipline of CC1's completeness test. Verified: clippy `-D warnings` clean,
 the three native targets build, and `nm`/`llvm-objdump` confirm the eleven
-unmangled `ros_sys_*` symbols and the emitted `syscall`/`svc`/`ecall`.
+unmangled `tairix_sys_*` symbols and the emitted `syscall`/`svc`/`ecall`.
 
 **x86_64 QEMU round-trip — done.** The integration bin
-`tests/integration/abi_sys_syscall_qemu` (`rustos-test-abi-sys-syscall-qemu`,
+`tests/integration/abi_sys_syscall_qemu` (`tairix-test-abi-sys-syscall-qemu`,
 enrolled in `tools/xtask/src/commands/qemu_tests.rs`) boots the production
 kernel, and on `AuditEvent::BootCompleted` overrides the syscall dispatch
-callback and calls the `abi-sys` stub `ros_sys_cap_query`. Issuing `syscall`
+callback and calls the `abi-sys` stub `tairix_sys_cap_query`. Issuing `syscall`
 from ring 0 enters the kernel's `IA32_LSTAR` entry stub exactly as a ring-3
 call does (`swapgs`, switch to the per-CPU kernel stack, rebuild the canonical
 `[u64; SYSCALL_MAX_ARGS]` array), so the installed callback observes the
 register marshalling end-to-end and asserts the dispatched `(number, args)`
-match what `ros_sys_cap_query` should have placed in the registers before
+match what `tairix_sys_cap_query` should have placed in the registers before
 flipping `qemu_exit::exit_success` (any mismatch — or the `syscall` returning to
 its caller — flips `exit_failure`; verified PASS, and a deliberately-wrong
 expectation verified FAIL). This exercises the real `syscall` instruction
@@ -305,15 +305,15 @@ program loader, each test stands up a minimal lower-privilege context itself
 with the Stage-3 paging primitives:
 
 - **riscv64** (`tests/integration/abi_sys_syscall_qemu_riscv64`,
-  `rustos-test-abi-sys-syscall-qemu-riscv64`): identity-maps the kernel
-  (S-mode), aliases the `ros_sys_cap_query` stub page at a high user VA with the
+  `tairix-test-abi-sys-syscall-qemu-riscv64`): identity-maps the kernel
+  (S-mode), aliases the `tairix_sys_cap_query` stub page at a high user VA with the
   `U` bit (`paging::flags::USER`) + a user stack, installs the dispatch
   callback, sets `sstatus.SUM`, and `sret`s to U-mode. The stub's `ecall` is a
   genuine environment-call-from-U; the callback asserts `(number, args)` before
   the `SiFive` PASS finisher. The riscv64 trap handler already routed
   `ecall`-from-U to `dispatch_ecall`, so no arch change was needed.
 - **aarch64** (`tests/integration/abi_sys_syscall_qemu_aarch64`,
-  `rustos-test-abi-sys-syscall-qemu-aarch64`): identity-maps the kernel (EL1),
+  `tairix-test-abi-sys-syscall-qemu-aarch64`): identity-maps the kernel (EL1),
   aliases the stub page with EL0-executable attributes
   (`paging::el0_code_leaf_attrs`, via the new `map_4k_with_attrs`) + an EL0
   stack (`el0_data_leaf_attrs`), installs the dispatch callback + EL1 vector
@@ -331,14 +331,14 @@ Neither is part of the host-only `cargo xtask ci` gate; they run under
 `cargo xtask test --qemu`.
 
 **Deliverables**
-- A new crate (`lib/abi-sys`, `rustos-abi-sys`) providing one `extern "C"`,
-  export-name-pinned `ros_sys_<name>` function per `abi-v1` syscall that
+- A new crate (`lib/abi-sys`, `tairix-abi-sys`) providing one `extern "C"`,
+  export-name-pinned `tairix_sys_<name>` function per `abi-v1` syscall that
   issues the actual trap (`syscall` / `svc` / `ecall`) on the three native
   targets. The per-arch trap instruction is the §1-sanctioned assembly
   carve-out; each such file carries the §1 justification header and a
   `// SAFETY:` block (§2.10).
 - Panic-free at the boundary (§2.9): every stub marshals registers and returns
-  an `int32_t` `ROS_E_*` code; no unwind crosses `extern "C"`.
+  an `int32_t` `TAIRIX_E_*` code; no unwind crosses `extern "C"`.
 - This crate is the implementation behind the CC1 header. It is an
   **OS-provided shared library** (the new §16.4 class — see §5 of this plan),
   dynamically linked by consumers; OS-bundled apps must not vendor it.
@@ -357,7 +357,7 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 on all three native targets: on riscv64, aarch64, and x86_64 a separately-linked
 crt0+abi-sys program is built into a user (U-mode / EL0 / ring-3) address space
 by the production capability-checked, audited spawn caller
-(`rustos_kernel_core::spawn_and_enter`) and entered (`sret` / EL0 `eret` /
+(`tairix_kernel_core::spawn_and_enter`) and entered (`sret` / EL0 `eret` /
 `iretq`), and its `exit` syscall is observed to carry the spawned decimal
 argument (`tests/integration/spawn_program_qemu_{riscv64,aarch64,x86_64}`, each
 QEMU-proven PASS + a deliberately-wrong-expectation FAIL).** The crt0 object,
@@ -385,7 +385,7 @@ a genuine process spawn rather than a single-page alias. The riscv64 vertical
 (`tests/integration/spawn_program_qemu_riscv64`) is QEMU-proven; aarch64 and
 x86_64 follow as later chunks.
 
-The crt0 object has now landed: the new `lib/crt0` crate (`rustos-crt0`)
+The crt0 object has now landed: the new `lib/crt0` crate (`tairix-crt0`)
 provides the per-native-target `_start` trampoline — the §1 assembly carve-out
 gated on a build-script-emitted `crt0_native_*` cfg (so §17.2 `cfg-check` stays
 green, mirroring `lib/abi-sys`) — which aligns the stack to the platform C ABI,
@@ -397,10 +397,10 @@ NUL-terminates it, and builds the two NULL-terminated pointer arrays, all in
 the caller-supplied scratch with no allocation, failing closed
 (`Errno::BufferTooSmall`) rather than truncating (§2.9). crt0 then installs the
 per-process §19.2 stack canary into the compiler's `__stack_chk_guard` from the
-kernel-supplied seed, calls `main`, and routes its return through `ros_sys_exit`
+kernel-supplied seed, calls `main`, and routes its return through `tairix_sys_exit`
 (the CC2 stub); a startup-vector failure exits with a reserved non-zero code.
 The `rxe` hardening invariants (PIE / `RWX`-refusal / CFI tag) are enforced at
-load by `rustos_abi::rxe::LoadImage::parse` — the single enforcement point,
+load by `tairix_abi::rxe::LoadImage::parse` — the single enforcement point,
 already host-tested (`refuses_write_execute_segment` / `refuses_non_pie_image`
 / `refuses_cfi_tag_mismatch` in `lib/abi/src/rxe.rs`) — so a non-conforming
 image is refused, not patched, and crt0 does not duplicate that check (§2.2).
@@ -409,7 +409,7 @@ The crate is registered as the crt0 half of the curated `/System/Libraries/`
 `PLAN.md` were updated. Eight host tests cover the marshalling, the
 empty-vector and empty-string cases, parse-error propagation, the fail-closed
 scratch-too-small path, and `read_total_len`. Verified on this host:
-`cargo test -p rustos-crt0` green and clippy `-D warnings` clean on the host
+`cargo test -p tairix-crt0` green and clippy `-D warnings` clean on the host
 and all three native targets, with `_start` / `rust_crt0_start` /
 `__stack_chk_guard` confirmed in the emitted object.
 
@@ -430,8 +430,8 @@ round-trips and every rejection path, and the three new decoders
 (`ProcessStartHeader::from_bytes`, `StringSlot::from_bytes`,
 `ProcessStart::parse`) are enrolled in the `lib/abi` fuzz harness
 (`lib/abi/tests/fuzz_decode.rs`, §19.6). It is surfaced in the CC1 header as
-`include/rustos/rustos_process.h` (`ros_process_start_header_t` /
-`ros_string_slot_t` + the `ROS_PROCESS_START_*` macros), generated from
+`include/tairix/tairix_process.h` (`tairix_process_start_header_t` /
+`tairix_string_slot_t` + the `TAIRIX_PROCESS_START_*` macros), generated from
 `lib/abi` and pinned by the generator's per-module and completeness tests;
 `docs/src/abi/c-abi.md` and `include/README.md` document it.
 
@@ -440,7 +440,7 @@ builder the QEMU round-trip needs now exists: `kernel/mem/src/spawn.rs`
 (`build_process_image`) takes a validated `LoadImage` and **materialises a
 runnable user address space** — it maps and *fills* every segment page with its
 file content (zeroing the BSS tail), maps a zeroed user stack, and writes the
-`rustos_abi::process` startup-vector block into the new address space, returning
+`tairix_abi::process` startup-vector block into the new address space, returning
 a `ProcessImage` (relocated entry / user-sp / startup-block address). It shares
 one page-mapping loop with `map_image` (`map_region`, §2.2); content is written
 kernel-side through `PhysMap` (not `copy_out`) so a read-execute page is
@@ -480,11 +480,11 @@ adds **no** `swapgs`: the production syscall entry stub keeps the per-CPU TLS in
 pair, so entering ring 3 already leaves `IA32_KERNEL_GS_BASE` correct for the
 next `syscall`. It was **not** shipped untested — it lands with its own ring-3
 QEMU exercise, `tests/integration/enter_user_qemu_x86_64`
-(`rustos-test-enter-user-qemu-x86_64`, enrolled in
+(`tairix-test-enter-user-qemu-x86_64`, enrolled in
 `tools/xtask/src/commands/qemu_tests.rs` and the workspace `Cargo.toml`): the
 production kernel boots, and on `BootCompleted` the test builds a ring-3 address
 space — a USER-accessible, executable, non-writable alias of the
-`ros_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write stack, using
+`tairix_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write stack, using
 the new `paging::map_4k_user` (which OR-s the USER bit into the leaf and every
 intermediate table entry; `map_4k`/`map_4k_user` share one walk, §2.2) — switches
 CR3, and `iretq`s to ring 3 through `UserMode::new().enter_user(...)`. The stub's
@@ -500,22 +500,22 @@ round-trip).** The two build-time pieces the round-trip needs — a *separate*,
 position-independent program artifact and a way to turn it into the `rxe`
 image `build_process_image` consumes — now exist and are host-green:
 - **The separate fixture program** `tests/integration/cc3_program`
-  (`rustos-test-cc3-program`): a `no_std`/`no_main` C-ABI program whose `main`
+  (`tairix-test-cc3-program`): a `no_std`/`no_main` C-ABI program whose `main`
   parses `argv[1]` as a decimal integer and returns it. It links **only**
-  `rustos-crt0` + `rustos-abi-sys` (never an architecture crate, so no `_start`
+  `tairix-crt0` + `tairix-abi-sys` (never an architecture crate, so no `_start`
   collision, the trap the backed-out `crt0_program_qemu_riscv64` hit) and an
-  `extern crate rustos_crt0;` forces crt0's rlib (and thus `_start`) onto the
+  `extern crate tairix_crt0;` forces crt0's rlib (and thus `_start`) onto the
   link line. Built PIE with `tests/integration/cc3_program/program.ld`
   (`ENTRY(_start)`, fixed non-zero base, one architecture-neutral script,
   §2.2), the riscv64 build verified to root at `_start`, keep `main`, and carry
   only `R_RISCV_RELATIVE` relocations (clean PIE, no GOT/PLT). On the host it is
   an inert stub so the workspace tooling still covers it.
-- **The ELF→rxe converter** `rustos_itest_harness::elf2rxe::elf_to_rxe`
+- **The ELF→rxe converter** `tairix_itest_harness::elf2rxe::elf_to_rxe`
   (`tests/integration/harness`): parses a little-endian ELF64 `ET_DYN`,
   classifies each `PT_LOAD` into a W^X-clean `rxe` segment, applies **only**
   the architecture's `R_*_RELATIVE` relocations at a zero load bias (the image
   maps at its link addresses) and **fails closed** on any symbolic / GOT / PLT
-  / `REL`-form relocation, then re-emits the blob through `rustos_abi::rxe`'s
+  / `REL`-form relocation, then re-emits the blob through `tairix_abi::rxe`'s
   own `LoadHeader`/`Segment` encoders (the wire format is never re-encoded by
   hand, §2.2). 13 host unit tests over a synthetic ELF builder cover the valid
   round-trip through `LoadImage::parse`, the relocation-applied check, and every
@@ -530,7 +530,7 @@ adapter (`RiscvUserPageTable`) over the bare-metal Sv39 `paging::AddressSpace`
 — test-local rather than in `kernel/arch/riscv64` because §17.4 forbids an arch
 crate depending on `kernel/mem` where the trait lives; (2) the
 capability-checked, `lib/log`-audited spawn caller
-`rustos_kernel_core::spawn_and_enter` (gated on the new `CAP_PROC_SPAWN`,
+`tairix_kernel_core::spawn_and_enter` (gated on the new `CAP_PROC_SPAWN`,
 audited via `ProcessSpawned`/`ProcessSpawnDenied`/`ProcessSpawnFailed`,
 fail-closed, in the caller **not** `kernel/mem`, §4/§5.4/§17.4), with host
 tests for the deny and build-failure paths; and (3) the QEMU test whose
@@ -604,10 +604,10 @@ crt0 crate `README.md`.
 
 **Status: DONE.** A C-compiled `.app` bundle now loads through the
 language-agnostic application-bundle loader (`userland/system/appmgr`), which
-validates its `Run` `rxe` image and resolves the `ros_sys_*` runtime **only**
+validates its `Run` `rxe` image and resolves the `tairix_sys_*` runtime **only**
 from the curated `/System/Libraries/` class or the app's own bundle
 `Libraries/`. **Depended on** CC2, CC3, and `PLAN.md` Stage 6 (the
-`AppLoader` pipeline + `rustos_abi::resolve_library` policy, both already
+`AppLoader` pipeline + `tairix_abi::resolve_library` policy, both already
 green).
 
 **What landed this stage.**
@@ -620,8 +620,8 @@ green).
   cap) decodes fail-closed (`RxeError::TooManyNeeded` / `BadNeededLibrary`),
   and `LoadImage::needed_libraries()` exposes the validated list. The new
   decoder is enrolled in the `lib/abi` fuzz harness (`fuzz_decode.rs`, §19.6),
-  and `cargo xtask c-header --write` regenerated `include/rustos/rustos_rxe.h`
-  (`ROS_LOAD_MAX_NEEDED` / `ROS_LIBREF_MAX` / `ROS_NEEDED_LIBRARY_WIRE_LEN` +
+  and `cargo xtask c-header --write` regenerated `include/tairix/tairix_rxe.h`
+  (`TAIRIX_LOAD_MAX_NEEDED` / `TAIRIX_LIBREF_MAX` / `TAIRIX_NEEDED_LIBRARY_WIRE_LEN` +
   the `needed_count` field). 6 new rxe tests.
 - **The loader resolves the runtime, fail-closed.** `userland/system/appmgr`
   gained a `read_run` `BundleStore` seam; `AppLoader::load` now reads the
@@ -646,7 +646,7 @@ green).
 **Deliverables**
 - Confirm and, where needed, extend the `rxe` loader and the §16.4/§16.5
   dynamic-loader policy so a C-compiled, PIE, capability-manifested bundle
-  loads and resolves the `ros_sys_*` runtime **only** from the curated
+  loads and resolves the `tairix_sys_*` runtime **only** from the curated
   `/System/Libraries/` class or the app's own bundle `Libraries/` — never an
   arbitrary path (§16.4). The CFI tag / syscall-hash check (§19.2) applies to C
   binaries identically.
@@ -668,35 +668,35 @@ manifest/syscall-hash mismatch.
 C program, and the QEMU round-trips on **all three native Tier-1 targets**
 (riscv64, aarch64, x86_64) have all landed. The aarch64 (EL0) and x86_64
 (ring-3) C-program round-trips followed the same shape as CC3, reusing
-`cc5_program` + `rustos-cc` + `elf_to_rxe`; each is QEMU-proven PASS plus a
+`cc5_program` + `tairix-cc` + `elf_to_rxe`; each is QEMU-proven PASS plus a
 deliberately-wrong-expectation FAIL.** **Depended on** CC1–CC4 (all done).
 
 **What landed this session (the headline — riscv64 vertical).**
-- **Audited C toolchain wrapper `tools/cc` (`rustos-cc`).** A host-only,
+- **Audited C toolchain wrapper `tools/cc` (`tairix-cc`).** A host-only,
   `#![forbid(unsafe_code)]` wrapper around `clang` + `ld.lld` (`AGENTS.md` §12
   — no unaudited shell-out). It version-pins both tools (fails closed unless
   they report `REQUIRED_CLANG_VERSION` / `REQUIRED_LLD_VERSION`, currently
   `22.1.8`), SHA-256-checksums each resolved binary with the audited
   `lib/crypto` (recorded for the build transcript; verified against an optional
-  `RUSTOS_CC_*_SHA256` pin), and exposes pure, unit-tested argv builders for a
+  `TAIRIX_CC_*_SHA256` pin), and exposes pure, unit-tested argv builders for a
   freestanding/PIC/canary-protected compile and a hardened-PIE
   (`-pie --gc-sections -z noexecstack`) link, over a closed `CTarget` set of
   the three native Tier-1 targets. 17 host unit tests; clippy `-D warnings`
-  clean. RustOS stays Rust-only (§1) — this only *hosts* a C program.
+  clean. TAIRiX stays Rust-only (§1) — this only *hosts* a C program.
 - **A real in-tree C program.** `tests/integration/cc5_program/csrc/main.c` is
-  written in C, `#include`s `include/rustos/…`, and exercises a representative
+  written in C, `#include`s `include/tairix/…`, and exercises a representative
   slice of `abi-v1`: a `Time64` value across the §21 pre-1970 / post-2038
   boundaries, an `ipc` message header, a `sysinfo` request header, and two real
   syscall round-trips (`cap_query`, `clock_get`). It links the curated *System
-  runtime / C ABI* class (crt0 + the `ros_sys_*` stubs) via a sibling Rust
+  runtime / C ABI* class (crt0 + the `tairix_sys_*` stubs) via a sibling Rust
   `staticlib` shim (`tests/integration/cc5_program/src/lib.rs`,
-  `rustos-test-cc5-program`) that `extern crate`s `rustos-crt0` + `rustos-abi-sys`
-  so `_start` / `ros_sys_*` / `__stack_chk_guard` land in one `.a`.
+  `tairix-test-cc5-program`) that `extern crate`s `tairix-crt0` + `tairix-abi-sys`
+  so `_start` / `tairix_sys_*` / `__stack_chk_guard` land in one `.a`.
 - **The riscv64 QEMU round-trip.** `tests/integration/c_program_qemu_riscv64`
-  (`rustos-test-c-program-qemu-riscv64`, enrolled in
+  (`tairix-test-c-program-qemu-riscv64`, enrolled in
   `tools/xtask/src/commands/qemu_tests.rs` + the workspace `Cargo.toml`). Its
   `build.rs` builds the shim `staticlib` PIE (`-Z build-std` +
-  `relocation-model=pie`), compiles `main.c` with `rustos-cc`, links one PIE
+  `relocation-model=pie`), compiles `main.c` with `tairix-cc`, links one PIE
   ELF (carrying **only** `R_RISCV_RELATIVE` relocations, W^X-clean), and
   converts it to an `rxe` blob via `elf_to_rxe` stamped with the kernel's
   `SYSCALL_TABLE_HASH`. The kernel-side test reuses the CC3 spawn machinery
@@ -715,7 +715,7 @@ deliberately-wrong-expectation FAIL.** **Depended on** CC1–CC4 (all done).
   one the CC3 fixture already owns (reused, not duplicated, §2.2).
 
 **The aarch64 + x86_64 C-program round-trips (the EL0 / ring-3 analogues)** now
-landed too, reusing `cc5_program` + `rustos-cc` + `elf_to_rxe` exactly as CC3's
+landed too, reusing `cc5_program` + `tairix-cc` + `elf_to_rxe` exactly as CC3's
 verticals did:
 - **aarch64** (`tests/integration/c_program_qemu_aarch64`): `CTarget::Aarch64`
   (clang `--target=aarch64-unknown-elf`, no extra `-march`/`-mabi` needed), the
@@ -758,7 +758,7 @@ the QEMU round-trip — see the deliverables below.
 - A minimal in-tree C program (built by an audited, version-pinned, checksummed
   toolchain wrapper under `tools/`, in the spirit of
   `tools/mkimage/src/extern_tools.rs`, §12 — no unaudited shell-out) that
-  includes `include/rustos/…`, links the stub runtime + crt0, and exercises a
+  includes `include/tairix/…`, links the stub runtime + crt0, and exercises a
   representative slice of `abi-v1` (a syscall round-trip, a `Time64` value
   across §21's pre-1970 / post-2038 boundaries, an `sysinfo` request/response,
   an `ipc` header) under QEMU. This proves the header, the runtime, and crt0
@@ -770,7 +770,7 @@ the QEMU round-trip — see the deliverables below.
 **Tests** — the QEMU C-compile-and-run integration test; the §21 timestamp edge
 cases asserted from the C side; the fuzz registrations.
 
-**Docs** — a "calling RustOS from C" guide page under `docs/src/abi/`.
+**Docs** — a "calling TAIRiX from C" guide page under `docs/src/abi/`.
 
 ## 4. Security posture — third-party native code is hostile (binding)
 
@@ -778,7 +778,7 @@ Native third-party code is assumed **potentially hostile and/or poorly
 written**. Every stage upholds this; it is as non-negotiable as `AGENTS.md` §2.
 
 - **The kernel re-checks everything; the stub is not a bypass (`AGENTS.md`
-  §5.4).** The `ros_sys_*` runtime only marshals registers and traps. Every
+  §5.4).** The `tairix_sys_*` runtime only marshals registers and traps. Every
   capability check, every input validation, and every "fail closed" decision
   happens kernel-side, on the far side of the trap, exactly as for a Rust
   caller. A C program reaches no syscall, IPC endpoint, or filesystem op that a
@@ -804,12 +804,12 @@ written**. Every stage upholds this; it is as non-negotiable as `AGENTS.md` §2.
 
 ## 5. New curated `/System/Libraries/` class (charter amendment, §16.4)
 
-The runtime that exports `ros_sys_<name>` and provides crt0 is a new
+The runtime that exports `tairix_sys_<name>` and provides crt0 is a new
 OS-provided shared-library class. Per `AGENTS.md` §16.4, adding a class
 "requires an update to this list **and** to `PLAN.md`"; this plan drives both:
 
 - **Class:** *System runtime / C ABI* — the minimal libc-equivalent that lets a
-  non-Rust program call `abi-v1`: the `ros_sys_*` syscall stubs (CC2) and the
+  non-Rust program call `abi-v1`: the `tairix_sys_*` syscall stubs (CC2) and the
   crt0 startup/teardown (CC3). It is deliberately minimal (no sprawling libc):
   it marshals to the kernel and starts/stops the program; everything else a
   program wants it brings itself (§16.5) or links from another curated class.

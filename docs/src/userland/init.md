@@ -1,6 +1,6 @@
 # PID 1 service manager (`userland/system/init`)
 
-`rustos-init` is the first user-space process the kernel starts. It owns
+`tairix-init` is the first user-space process the kernel starts. It owns
 the lifecycle of every long-running system service under
 `/System/Services` (`AGENTS.md` §16.2): it brings them up in dependency
 order, grants each one the capability set its signed manifest requests
@@ -8,7 +8,7 @@ intersected with init's own authority (`AGENTS.md` §5.2), and reaps the
 children that any PID 1 inherits.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
-the audited `lib/*` crates `rustos-abi`, `rustos-caps`, and `rustos-log`,
+the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
 so a userland service never links a kernel or driver crate
 (`AGENTS.md` §17.4). The installed binary lives at
 `/System/Services/init`.
@@ -53,7 +53,7 @@ absent without the boot aborting.
 A service's grant is the intersection of the capability set its signed
 manifest requests with the authority init itself holds. init decodes the
 manifest request with the single shared decoder
-`rustos_abi::decode_capability_ids` (the same decoder `drvhost` uses, so
+`tairix_abi::decode_capability_ids` (the same decoder `drvhost` uses, so
 the manifest-body format has exactly one implementation — `AGENTS.md`
 §2.2) and refuses any service whose request is **not a subset** of its
 authority. Granting it would widen authority, so the service is denied
@@ -110,26 +110,26 @@ also builds the `init` application bundle's `Run` entry-point binary
 the moment it reaches user mode (`plans/PI.md` P6c, the "boot into user
 mode" milestone).
 
-That binary is a **pure-Rust freestanding program**. RustOS is Rust-only
-(`AGENTS.md` §1), so it links the pure-Rust userland runtime `rustos-rt` —
+That binary is a **pure-Rust freestanding program**. TAIRiX is Rust-only
+(`AGENTS.md` §1), so it links the pure-Rust userland runtime `tairix-rt` —
 never the C ABI (`crt0` + `abi-sys`), which exists solely for programs
-**not** written in Rust (`AGENTS.md` §16.4). `rustos-rt` provides the
+**not** written in Rust (`AGENTS.md` §16.4). `tairix-rt` provides the
 program's `_start`, the §19.2 stack canary, the panic handler, and
-idiomatic syscall wrappers; `rustos_rt::entry!` names the program's
+idiomatic syscall wrappers; `tairix_rt::entry!` names the program's
 `main`. `main` renders the startup banner from the kernel-attested
-`boot_facts_get` machine summary — `RustOS <version>: <installed memory>`
+`boot_facts_get` machine summary — `TAIRiX <version>: <installed memory>`
 (whole MiB rounded to nearest, whole GiB above 100 GiB), a blank line, then
 `<CPU name>, <n> core(s)` (e.g. `ARM Cortex-A72, 4 cores`), falling back to
 `Unknown <arch> processor, <n> core(s)` when the kernel discovered no CPU
 model; a kernel that installed no facts
 degrades the banner to the version line with the reason on fd 2, never a
 fabricated machine shape — and writes it to its inherited standard
-output (fd 1) through `rustos_rt::stdout` — the `abi-v1` `stream_write`
+output (fd 1) through `tairix_rt::stdout` — the `abi-v1` `stream_write`
 syscall (`AGENTS.md` §20; `init` binds to the inherited stream, never an
 ambient device) — then **supervises** the user's session (see below). The
 runtime routes `main`'s return value through the `exit` syscall. (Both the
 Rust runtime and the C ABI reach the kernel through the one shared trap,
-`rustos-abi-trap`, so the trap assembly is not duplicated — `AGENTS.md`
+`tairix-abi-trap`, so the trap assembly is not duplicated — `AGENTS.md`
 §2.2.) It links **only** the runtime and its own startup-config parser,
 never the orchestrator library above: dragging that crate's `alloc` +
 crypto dependency chain into a banner-printing program would be the bloat
@@ -191,7 +191,7 @@ that ran long enough) awaits a clock/session-state ABI.
 
 ## Tests
 
-`cargo test -p rustos-init` drives the manager against an in-memory
+`cargo test -p tairix-init` drives the manager against an in-memory
 `Spawner`/`Reaper` and a recording log sink, covering dependency-ordered
 start, the fail-closed missing-dependency and cycle paths, duplicate
 registration, the capability grant as `request ∩ authority`, an

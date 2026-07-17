@@ -11,20 +11,20 @@
 //!    motivated the watch logic added in Stage 0.
 //! 2. **Hash cross-check.** `SYSCALL_TABLE_HASH` is no longer a
 //!    hand-maintained literal — `kernel/syscall/build.rs` derives it
-//!    from `rustos_abi::ENCODED_TABLE` at build time, so there is
+//!    from `tairix_abi::ENCODED_TABLE` at build time, so there is
 //!    nothing on disk to parse or to drift. This check recomputes
-//!    SHA-256 of `rustos_abi::ENCODED_TABLE` here and compares it to the
-//!    *linked* `rustos_kernel_syscall::SYSCALL_TABLE_HASH`, catching the
+//!    SHA-256 of `tairix_abi::ENCODED_TABLE` here and compares it to the
+//!    *linked* `tairix_kernel_syscall::SYSCALL_TABLE_HASH`, catching the
 //!    pathological case where the workspace is being built against a
-//!    stale crate cache or a mismatched `rustos-abi`.
+//!    stale crate cache or a mismatched `tairix-abi`.
 //!
 //! The check is intentionally implemented in ordinary Rust without
 //! spawning sub-processes.
 
 use std::path::Path;
 
-use rustos_abi::ENCODED_TABLE;
-use rustos_crypto::{sha256, Sha256Digest};
+use tairix_abi::ENCODED_TABLE;
+use tairix_crypto::{sha256, Sha256Digest};
 
 /// Default on-disk location of the `lib/abi` half of the cross-check,
 /// relative to the workspace root.
@@ -67,19 +67,19 @@ pub fn check_sync(
 }
 
 /// Cross-check the linked kernel `SYSCALL_TABLE_HASH` against a freshly
-/// computed SHA-256 of `rustos_abi::ENCODED_TABLE`.
+/// computed SHA-256 of `tairix_abi::ENCODED_TABLE`.
 ///
 /// The kernel constant is derived from `ENCODED_TABLE` at build time
 /// (`kernel/syscall/build.rs`), so this can only diverge if the linked
-/// `rustos-abi` differs from the one this command links — e.g. a stale
+/// `tairix-abi` differs from the one this command links — e.g. a stale
 /// `target/` cache or a mismatched dependency graph.
 fn verify_hash() -> Result<(), String> {
     let expected: Sha256Digest = sha256(&ENCODED_TABLE);
-    if rustos_kernel_syscall::SYSCALL_TABLE_HASH != expected {
+    if tairix_kernel_syscall::SYSCALL_TABLE_HASH != expected {
         return Err(format!(
-            "abi-check: linked `rustos_kernel_syscall::SYSCALL_TABLE_HASH` \
-             does not match sha256(rustos_abi::ENCODED_TABLE).\n  linked : {}\n  expected: {}",
-            hex(&rustos_kernel_syscall::SYSCALL_TABLE_HASH),
+            "abi-check: linked `tairix_kernel_syscall::SYSCALL_TABLE_HASH` \
+             does not match sha256(tairix_abi::ENCODED_TABLE).\n  linked : {}\n  expected: {}",
+            hex(&tairix_kernel_syscall::SYSCALL_TABLE_HASH),
             hex(&expected),
         ));
     }
@@ -149,10 +149,10 @@ mod tests {
         // computed digest of the source-of-truth table. This is the
         // structural guarantee that replaces the old hand-maintained
         // literal: there is nothing to edit, so the only way these can
-        // diverge is a stale cache / mismatched `rustos-abi`.
+        // diverge is a stale cache / mismatched `tairix-abi`.
         verify_hash().expect("linked SYSCALL_TABLE_HASH must match sha256(ENCODED_TABLE)");
         assert_eq!(
-            rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+            tairix_kernel_syscall::SYSCALL_TABLE_HASH,
             sha256(&ENCODED_TABLE),
         );
     }

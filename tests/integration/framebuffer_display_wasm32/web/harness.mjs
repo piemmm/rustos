@@ -52,8 +52,8 @@ const CONTENT_TYPES = {
 // what the page needs, nothing more.
 function buildRoutes(wasmPath) {
   return {
-    "/rustos.js": {
-      file: resolve(REPO_ROOT, "kernel/arch/wasm32/web/rustos.js"),
+    "/tairix.js": {
+      file: resolve(REPO_ROOT, "kernel/arch/wasm32/web/tairix.js"),
       type: CONTENT_TYPES[".js"],
     },
     "/worker.js": {

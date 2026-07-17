@@ -1,5 +1,5 @@
 //! [`RiscvArch`] — the riscv64 implementation of the Arch HAL
-//! ([`rustos_arch_api::SchedulerArch`]).
+//! ([`tairix_arch_api::SchedulerArch`]).
 //!
 //! Like x86_64, the riscv64 port is a pure Arch HAL implementation: it implements [`SchedulerArch`] and exposes the
 //! monotonic clock and the hart-park primitive, but it does **not**
@@ -35,7 +35,7 @@
 // `Ordering` is live on the bare-metal path too.
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError};
+use tairix_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError};
 
 /// Sentinel stored in a [`RiscvArchStorage::cpu_to_hartid`] slot that no
 /// CPU maps to. A real hart id is a [`CpuId`] (a `u32`), so `u64::MAX`
@@ -261,12 +261,12 @@ impl RiscvArch {
     /// Convert a `time`-CSR tick span into nanoseconds against this
     /// handle's `timebase_hz` — the same frequency [`Self::monotonic_ns`]
     /// converts through (one conversion definition, shared with the
-    /// aarch64 port via `rustos_arch_api::ticks_to_ns`). The downstream
+    /// aarch64 port via `tairix_arch_api::ticks_to_ns`). The downstream
     /// `KernelArch` wrapper forwards its `ticks_to_ns` here so the
     /// scheduler's per-task tick accounting reads in real time.
     #[must_use]
     pub fn ticks_to_ns(&self, ticks: u64) -> u64 {
-        rustos_arch_api::ticks_to_ns(ticks, self.timebase_hz)
+        tairix_arch_api::ticks_to_ns(ticks, self.timebase_hz)
     }
 }
 
@@ -366,7 +366,7 @@ impl SchedulerArch for RiscvArch {
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         {
             let deadline =
-                deadline_ns.map(|ns| rustos_arch_api::wakeup::ns_to_ticks(ns, self.timebase_hz));
+                deadline_ns.map(|ns| tairix_arch_api::wakeup::ns_to_ticks(ns, self.timebase_hz));
             crate::preempt::record_wakeup_deadline(deadline);
         }
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
@@ -476,7 +476,7 @@ pub(crate) fn read_time() -> u64 {
     let ticks: u64;
     // SAFETY: `rdtime` reads the unprivileged `time` CSR; it has no
     // side effects and is available to S-mode on every riscv64 platform
-    // RustOS targets (QEMU `virt` delegates it).
+    // TAIRiX targets (QEMU `virt` delegates it).
     unsafe {
         core::arch::asm!("rdtime {}", out(reg) ticks, options(nomem, nostack, preserves_flags));
     }

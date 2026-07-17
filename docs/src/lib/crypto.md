@@ -1,6 +1,6 @@
-# `rustos-crypto`
+# `tairix-crypto`
 
-The single place RustOS calls cryptographic code. Per `AGENTS.md` §1 no
+The single place TAIRiX calls cryptographic code. Per `AGENTS.md` §1 no
 hand-rolled primitives are allowed; this crate exposes thin wrappers
 over vetted RustCrypto and dalek-cryptography implementations so the
 audit footprint never exceeds a handful of crates.
@@ -47,7 +47,7 @@ guessing of a stolen `/System/Security/Users` record expensive. The output
 length equals the HMAC output, so exactly one PBKDF2 block is computed, and
 the iteration count is a `NonZeroU32` — zero rounds is unrepresentable. It
 is a standard *construction* over the same audited HMAC primitive (the same
-shape as `rustos-rng`'s HMAC-DRBG), not a hand-rolled primitive
+shape as `tairix-rng`'s HMAC-DRBG), not a hand-rolled primitive
 (`AGENTS.md` §2.12). `pbkdf2_sha256_verify` compares through `ct_eq`, so a
 stored-hash comparison cannot leak through timing (`AGENTS.md` §19.1). The
 consumer is `lib/users`, which owns the salt, the accepted cost range, and
@@ -80,7 +80,7 @@ and an all-bytes difference all traverse exactly `len` pairs. A
 short-circuiting comparison would visit only one pair on a first-byte
 mismatch and fail the assertion. Because an optimiser can turn a
 branchless compare into a branching one, `cargo xtask ci` re-runs the
-`rustos-crypto` unit tests under the release profile (`-C opt-level=3`)
+`tairix-crypto` unit tests under the release profile (`-C opt-level=3`)
 as a dedicated step.
 
 ## Test vectors

@@ -1,4 +1,4 @@
-//! RustOS placeholder crate: virtio-gpu driver.
+//! TAIRiX placeholder crate: virtio-gpu driver.
 //!
 //! Stage 0 reserves this crate so the workspace builds end-to-end. The real
 //! implementation is delivered by **Stage 4** of `PLAN.md`; until then the

@@ -20,10 +20,10 @@
 //!
 //! ## Wall-clock budget
 //!
-//! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
+//! The shared `tairix_fuzzseed::prop::drive` runner owns the seed/budget
 //! policy (one definition): a plain `cargo test` runs [`SMOKE_CASES`]
 //! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
-//! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
+//! exports `TAIRIX_PROPTEST_BUDGET_SECS` and the runner repeats
 //! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
 //! deadline. The seed is logged at the start of each run (pinnable via
 //! `--seed`), so a fresh-seed counterexample is still reproducible.
@@ -32,10 +32,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId, UserId};
-use rustos_log::{Event, Sink};
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{CapTable, TaskCapabilities, TaskId, UserId};
+use tairix_log::{Event, Sink};
 
 /// Sequences run by a plain `cargo test` (no budget set).
 const SMOKE_CASES: u32 = 256;
@@ -125,7 +125,7 @@ fn program() -> impl Strategy<Value = Vec<Cmd>> {
 
 #[test]
 fn captable_tracks_reference_model() {
-    rustos_fuzzseed::prop::drive(
+    tairix_fuzzseed::prop::drive(
         "captable_tracks_reference_model",
         SMOKE_CASES,
         BUDGET_BATCH_CASES,

@@ -2,7 +2,7 @@
 //! (`plans/NETWORK.md` N3c).
 //!
 //! One emulated Ethernet link joins two `lib/net` stacks: the *guest*
-//! (the freestanding vertical's `rustos-netstack` engine pumping a live
+//! (the freestanding vertical's `tairix-netstack` engine pumping a live
 //! virtio-net device) and the *peer* (a host-side `Stack` the harness
 //! runs over the QEMU dgram netdev, one raw frame per datagram). Both
 //! ends configure themselves from the constants here, so the addresses
@@ -76,13 +76,13 @@ pub const PEER_ECHO_ID: u16 = 0x5EED;
 
 /// Payload of the peer's inbound campaign pings; the guest's engine
 /// mirrors it back and the peer verifies the reflection.
-pub const PEER_ECHO_PAYLOAD: &[u8] = b"rustos-netstack-peer";
+pub const PEER_ECHO_PAYLOAD: &[u8] = b"tairix-netstack-peer";
 
 /// Echo identifier of the guest's outbound pings.
 pub const GUEST_ECHO_ID: u16 = 0x1234;
 
 /// Payload of the guest's outbound pings; replies must mirror it.
-pub const GUEST_ECHO_PAYLOAD: &[u8] = b"rustos-netstack-vertical";
+pub const GUEST_ECHO_PAYLOAD: &[u8] = b"tairix-netstack-vertical";
 
 /// The link-local address formed from an interface identifier
 /// (`fe80::/64` + IID) — the one derivation both ends use.

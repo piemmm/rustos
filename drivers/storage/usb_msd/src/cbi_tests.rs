@@ -7,7 +7,7 @@ use super::*;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::block::BlockGeometry;
 
 use crate::scsi::{CommandSet, ScsiDevice};
 use crate::testutil::{InStep, ScriptedDevice};

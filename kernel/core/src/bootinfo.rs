@@ -24,12 +24,12 @@
 
 use alloc::sync::Arc;
 
-use rustos_arch_api::{ContextSwitch, PlatformEntropy, SecondaryBringup};
+use tairix_arch_api::{ContextSwitch, PlatformEntropy, SecondaryBringup};
 
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
-use rustos_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
-use rustos_kernel_mem::BootMemoryMap;
-use rustos_log::{Level, Sink};
+use tairix_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
+use tairix_kernel_mem::BootMemoryMap;
+use tairix_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
@@ -76,7 +76,7 @@ pub trait KernelArch: SchedulerArch {
     /// it back to the scheduler through the same [`ContextSwitch::switch`]
     /// (`plans/SPAWN.md` SP2). The handle is a zero-sized, `Copy` value on
     /// every port — the per-task state lives in the
-    /// [`rustos_arch_api::TaskContext`] the runtime owns, not in the
+    /// [`tairix_arch_api::TaskContext`] the runtime owns, not in the
     /// handle — so it is cheap to hand to the runtime by value.
     type Cs: ContextSwitch + Copy + Send + 'static;
 
@@ -151,25 +151,25 @@ pub trait KernelArch: SchedulerArch {
     /// The Tier-1 architecture identity of this port, or `None` for a
     /// port that is not a shippable target (the host test arch).
     ///
-    /// Consumed once at boot to mint the [`rustos_abi::BootFacts`] record
+    /// Consumed once at boot to mint the [`tairix_abi::BootFacts`] record
     /// the ungated `boot_facts_get` syscall reports. There is **no default
     /// impl**: every port must state its identity explicitly, so a new
     /// port cannot silently ship reporting another architecture's name
     /// (fail closed — a `None` leaves the boot facts uninstalled).
-    fn arch_id(&self) -> Option<rustos_abi::Arch>;
+    fn arch_id(&self) -> Option<tairix_abi::Arch>;
 
     /// The discovered model name of the boot CPU, or `None` when the
     /// port cannot derive one.
     ///
     /// Consumed once at boot, alongside [`Self::arch_id`], to mint the
-    /// [`rustos_abi::BootFacts`] record: a `None` is installed as
-    /// [`rustos_abi::CpuName::UNKNOWN`] and readers render their own
+    /// [`tairix_abi::BootFacts`] record: a `None` is installed as
+    /// [`tairix_abi::CpuName::UNKNOWN`] and readers render their own
     /// fallback. There is **no default impl**: every port must state
     /// what it discovered (the x86_64 CPUID brand string, the aarch64
     /// `MIDR_EL1` decode, the riscv64 device-tree cpu `compatible`) or
     /// an explicit `None`, so a port cannot silently ship a fabricated
     /// or missing name.
-    fn cpu_name(&self) -> Option<rustos_abi::CpuName>;
+    fn cpu_name(&self) -> Option<tairix_abi::CpuName>;
 
     /// Convert a span measured in [`SchedulerArch::ticks_now`] units into
     /// nanoseconds.
@@ -209,9 +209,9 @@ pub trait KernelArch: SchedulerArch {
     ///
     /// Consulted by [`crate::kernel_main`] during the [`crate::Phase::Irq`]
     /// init step (between `Sched` and `Syscall`). The kernel
-    /// constructs the [`rustos_kernel_irq::IrqTable`] with the
+    /// constructs the [`tairix_kernel_irq::IrqTable`] with the
     /// returned `max_line` and threads the returned controller
-    /// through every subsequent [`rustos_kernel_irq::IrqTable::fire`]
+    /// through every subsequent [`tairix_kernel_irq::IrqTable::fire`]
     /// call.
     ///
     /// # Contract
@@ -238,9 +238,9 @@ pub trait KernelArch: SchedulerArch {
     /// The default impl returns [`IrqRouting::unsupported`], which is
     /// the conservative fail-closed shape: `max_line = 0` so only
     /// line `0` can be bound, and every `mask` call returns
-    /// [`rustos_kernel_irq::MaskError::Unsupported`] —
-    /// [`rustos_kernel_irq::IrqTable::fire`] in turn surfaces
-    /// [`rustos_kernel_irq::IrqError::ArchUnsupported`]. Arch ports
+    /// [`tairix_kernel_irq::MaskError::Unsupported`] —
+    /// [`tairix_kernel_irq::IrqTable::fire`] in turn surfaces
+    /// [`tairix_kernel_irq::IrqError::ArchUnsupported`]. Arch ports
     /// without a programmable interrupt controller (`wasm32`, test
     /// harnesses) inherit this default; ports with one
     /// (`x86_64`, `aarch64`, `riscv64`) override it during their
@@ -268,7 +268,7 @@ pub trait KernelArch: SchedulerArch {
     /// The default returns [`None`]: a port with no MSI controller
     /// (`wasm32`, test harnesses, and ports that have not wired one) leaves
     /// the handler's fail-closed [`crate::devres::NullMsiAllocFacility`] in
-    /// place, so `msi_alloc` returns [`rustos_kernel_irq`]-style
+    /// place, so `msi_alloc` returns [`tairix_kernel_irq`]-style
     /// `NotImplemented`.
     #[must_use]
     fn msi_alloc_facility(
@@ -295,9 +295,9 @@ pub trait KernelArch: SchedulerArch {
     /// The default returns [`None`]: a port that wires no direct map (the
     /// `TestArch` mock, `wasm32`) leaves the handler's fail-closed
     /// [`crate::devres::NullSharedMemFacility`] in place, so `shm_*` return
-    /// [`rustos_abi::Errno::NotImplemented`].
+    /// [`tairix_abi::Errno::NotImplemented`].
     #[must_use]
-    fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
+    fn direct_phys_map(&self) -> Option<&'static (dyn tairix_kernel_mem::PhysMap + Sync)> {
         None
     }
 
@@ -317,7 +317,7 @@ pub trait KernelArch: SchedulerArch {
     ///
     /// The default returns [`None`]: a port that wires no source (the
     /// `TestArch` mock) leaves the reserve unseeded, so `random_get` keeps
-    /// failing closed with [`rustos_abi::Errno::EntropyNotReady`].
+    /// failing closed with [`tairix_abi::Errno::EntropyNotReady`].
     #[must_use]
     fn platform_entropy(&self) -> Option<&'static dyn PlatformEntropy> {
         None
@@ -398,7 +398,7 @@ pub trait KernelArch: SchedulerArch {
     /// Enable (`enabled = true`) or mask (`enabled = false`) device-IRQ
     /// taking at the processing element for the calling CPU.
     ///
-    /// This is what makes RustOS a **fully preemptive** kernel: the scheduler dispatch loop calls
+    /// This is what makes TAIRiX a **fully preemptive** kernel: the scheduler dispatch loop calls
     /// `set_device_irqs(true)` once it begins steady-state dispatching, so
     /// every in-kernel task and kthread it runs executes with device
     /// interrupts *enabled*. A long in-kernel operation (a slow MMIO
@@ -475,7 +475,7 @@ pub trait KernelArch: SchedulerArch {
 /// `max_line` is the inclusive upper bound on user-visible IRQ lines;
 /// `controller` is the `'static`-lifetime [`IrqController`] the trap
 /// dispatcher invokes to honour the mask-before-wake ordering. The
-/// reference is shared (`+ Sync`) because [`rustos_kernel_irq::IrqTable::fire`]
+/// reference is shared (`+ Sync`) because [`tairix_kernel_irq::IrqTable::fire`]
 /// is called from interrupt context, possibly on multiple CPUs.
 ///
 /// # Invariants
@@ -494,7 +494,7 @@ pub struct IrqRouting {
 
 impl IrqRouting {
     /// The conservative fail-closed routing: `max_line = 0`, every
-    /// `mask` returns [`rustos_kernel_irq::MaskError::Unsupported`].
+    /// `mask` returns [`tairix_kernel_irq::MaskError::Unsupported`].
     ///
     /// This is the [`KernelArch::irq_routing`] default; architecture
     /// ports with a programmable interrupt controller override the
@@ -572,8 +572,8 @@ where
     ///
     /// # SAFETY-INVARIANT
     ///
-    /// Every [`rustos_kernel_mem::MemoryRegion`] of kind
-    /// [`rustos_kernel_mem::RegionKind::Usable`] is genuinely free RAM —
+    /// Every [`tairix_kernel_mem::MemoryRegion`] of kind
+    /// [`tairix_kernel_mem::RegionKind::Usable`] is genuinely free RAM —
     /// the bootloader has flushed and invalidated any caches, and no
     /// firmware service still owns the range. Violations corrupt the
     /// frame allocator immediately; the arch port is the only place
@@ -597,7 +597,7 @@ where
     pub arch: Arc<A>,
 
     /// Sink that receives every kernel log record (everything routed
-    /// through `lib/log`'s [`rustos_log::log`]).
+    /// through `lib/log`'s [`tairix_log::log`]).
     ///
     /// `'static` because the sink lives for the lifetime of the
     /// running kernel; the arch port typically constructs it from a
@@ -644,7 +644,7 @@ where
     ///
     /// Defaults to the empty [`NO_CONSOLES`], so every console-backed
     /// stream access fails closed with
-    /// [`rustos_abi::Errno::NotImplemented`]: an arch
+    /// [`tairix_abi::Errno::NotImplemented`]: an arch
     /// port that has not discovered a console leaves this default and the
     /// streams announce an inert interface rather than touching a device
     /// that does not exist. A port installs its discovered list through
@@ -676,7 +676,7 @@ where
     /// path against (`plans/SPAWN.md` SP3).
     ///
     /// Defaults to [`EMPTY_PROGRAM_REGISTRY`]: a `spawn` of any path then
-    /// fails closed with [`rustos_abi::Errno::NotFound`] until the arch
+    /// fails closed with [`tairix_abi::Errno::NotFound`] until the arch
     /// port installs a populated registry through [`Self::with_spawn`]. The
     /// program bytes are `'static` (the host-only `elf2rxe` build glue bakes
     /// them into the kernel image), so the registry lives
@@ -688,7 +688,7 @@ where
     /// process (`plans/SPAWN.md` SP3).
     ///
     /// Defaults to [`NULL_PROCESS_SPAWN`], which fails closed with
-    /// [`rustos_abi::Errno::NotImplemented`]: a port that
+    /// [`tairix_abi::Errno::NotImplemented`]: a port that
     /// has no runtime-spawn producer wired leaves this default and `spawn`
     /// announces an inert subsystem rather than half-building a task. A port
     /// that can build a child address space installs its producer through
@@ -704,7 +704,7 @@ where
     ///
     /// Defaults to `None`: a port with no storage floor leaves it unset and
     /// a store-bundle spawn fails closed with
-    /// [`rustos_abi::Errno::NotFound`], parking nothing. A port whose boot
+    /// [`tairix_abi::Errno::NotFound`], parking nothing. A port whose boot
     /// path will publish (or explicitly give up on) the `/System` mount
     /// installs its store through [`Self::with_app_store`].
     pub app_store: Option<&'static crate::appspawn::AppStore>,
@@ -730,7 +730,7 @@ where
     /// `plans/PI.md` P11).
     ///
     /// Defaults to [`NULL_USERS_DB`], whose [`UsersDbSource::text`] fails
-    /// closed with [`rustos_abi::Errno::NotImplemented`]: a boot path that
+    /// closed with [`tairix_abi::Errno::NotImplemented`]: a boot path that
     /// has not mounted the root volume leaves this default and
     /// `users_db_read` announces an inert interface — login then runs its
     /// deny-all authenticator and refuses every attempt rather than
@@ -749,7 +749,7 @@ where
     /// dispatches into (`plans/CAPABILITY_USE.md` CU4).
     ///
     /// Defaults to [`crate::useradmin::NULL_USERS_ADMIN`], which fails
-    /// closed with [`rustos_abi::Errno::NotImplemented`] — a boot path
+    /// closed with [`tairix_abi::Errno::NotImplemented`] — a boot path
     /// with no unlocked root leaves the default and every `users_admin`
     /// call is refused. A boot path that unlocked the root hands the
     /// same `&'static LateUsersAdmin` cell its unlock step later
@@ -762,7 +762,7 @@ where
     /// `hw_tree_wait` (no. 30) syscalls serve (Design D).
     ///
     /// Defaults to [`NULL_HW_TREE`], whose reads fail closed with
-    /// [`rustos_abi::Errno::NotImplemented`]: a boot path that seeds no
+    /// [`tairix_abi::Errno::NotImplemented`]: a boot path that seeds no
     /// inventory leaves this default and both syscalls announce an inert
     /// interface. A boot path that seeds the discovered
     /// tree installs its store through [`Self::with_hw_tree`];
@@ -775,7 +775,7 @@ where
     /// (`PREREQUISITES.md` P-A).
     ///
     /// Defaults to [`NULL_FILESYSTEM`], whose every operation fails closed
-    /// with [`rustos_abi::Errno::NotImplemented`]: a boot path that has not
+    /// with [`tairix_abi::Errno::NotImplemented`]: a boot path that has not
     /// mounted a volume leaves this default and every `fs_*` syscall announces
     /// an inert interface rather than fabricating a handle or a read. A boot
     /// path that owns a mounted volume installs the disk-backed service
@@ -790,7 +790,7 @@ where
     ///
     /// Defaults to [`NULL_VOLUME_FOREST`], into which nothing is ever
     /// published, so every `id::<volume-id>/…` resolution fails closed with
-    /// [`rustos_abi::Errno::NotFound`]. A boot path that mounts volumes
+    /// [`tairix_abi::Errno::NotFound`]. A boot path that mounts volumes
     /// installs its own forest through [`Self::with_volumes`] and publishes
     /// each mounted volume's stable identity into it; `kernel_main` then
     /// threads it into the production dispatch hook. Held as a `'static`
@@ -802,7 +802,7 @@ where
     /// `volume_detach` syscalls delegate to (`plans/DEVICES.md` D3b).
     ///
     /// Defaults to [`NULL_VOLUME_SERVICE`], so every attach/detach fails
-    /// closed with [`rustos_abi::Errno::NotImplemented`]. A boot path
+    /// closed with [`tairix_abi::Errno::NotImplemented`]. A boot path
     /// that can host runtime volumes installs its service through
     /// [`Self::with_volume_service`]; `kernel_main` then threads it into
     /// the production dispatch hook. Held as a `'static` borrow, exactly
@@ -816,7 +816,7 @@ where
     ///
     /// During the `sec` phase [`crate::kernel_main`] builds the
     /// compiled-in system identity (the OS-owned accounts and groups,
-    /// kernel policy — `rustos_users::system_accounts`) and installs it
+    /// kernel policy — `tairix_users::system_accounts`) and installs it
     /// into this cell, so the system and service accounts resolve from
     /// first boot on every architecture, before any volume exists. The
     /// encrypted-root unlock later replaces the held table with the merge
@@ -826,18 +826,18 @@ where
     /// identity cell gets no install, `kernel_main` threads the inert
     /// [`crate::syscalls::NULL_IDENTITY`] into the dispatch hook, and
     /// every credential resolution fails closed with
-    /// [`rustos_abi::Errno::NotImplemented`]. A production port installs
+    /// [`tairix_abi::Errno::NotImplemented`]. A production port installs
     /// its cell through [`Self::with_spawn_identity`]. The default
     /// `spawn` (inherit) never consults it. Held `'static` because the
     /// cell lives for the running kernel's lifetime.
     pub spawn_identity: Option<&'static LateIdentity>,
 
     /// Committed size, in bytes, of the kernel heap region — reported as
-    /// [`rustos_abi::sysinfo::KernelMemoryStats::kernel_heap_bytes`] by the
+    /// [`tairix_abi::sysinfo::KernelMemoryStats::kernel_heap_bytes`] by the
     /// System Information introspection source (`PREREQUISITES.md` P-C).
     ///
     /// `kernel/core` does not own the `#[global_allocator]` (the binding
-    /// kernel does, over `rustos_kalloc`), so the boot path threads its
+    /// kernel does, over `tairix_kalloc`), so the boot path threads its
     /// committed heap size here. Defaults to `0` — a boot path that does not
     /// set it reports "no kernel heap accounted" rather than a fabricated
     /// figure.
@@ -952,7 +952,7 @@ where
             // inert `NULL_IDENTITY`.
             spawn_identity: None,
             // Kernel heap size unaccounted until the binding kernel threads
-            // its committed `rustos_kalloc::HEAP_BYTES` through
+            // its committed `tairix_kalloc::HEAP_BYTES` through
             // `with_kernel_heap_bytes`; reported as `0` until then.
             kernel_heap_bytes: 0,
             // Installed memory unknown until the boot path threads its
@@ -967,7 +967,7 @@ where
     /// consuming and returning `self` (`PREREQUISITES.md` P-C).
     ///
     /// The binding kernel owns the `#[global_allocator]`, so it passes its
-    /// `rustos_kalloc::HEAP_BYTES` here; `kernel_main` threads it into the
+    /// `tairix_kalloc::HEAP_BYTES` here; `kernel_main` threads it into the
     /// introspection source so the `KernelMemory` domain reports a truthful
     /// committed-heap figure. A boot path that never calls it reports `0`.
     #[must_use]
@@ -980,7 +980,7 @@ where
     /// boot memory source reports it before any kernel carve-outs,
     /// consuming and returning `self`.
     ///
-    /// `kernel_main` mints the [`rustos_abi::BootFacts`] record from this
+    /// `kernel_main` mints the [`tairix_abi::BootFacts`] record from this
     /// figure (with the arch identity and CPU count) and installs it into
     /// the syscall layer, so the ungated `boot_facts_get` reports the
     /// machine's true installed RAM. A boot path that never calls it — or
@@ -1002,7 +1002,7 @@ where
     /// each further entry an independent console with its own session
     /// context. Until this is called the handover holds the empty
     /// [`NO_CONSOLES`] and every console-backed stream access fails
-    /// closed with [`rustos_abi::Errno::NotImplemented`]. The list must
+    /// closed with [`tairix_abi::Errno::NotImplemented`]. The list must
     /// be `'static`: the boot path leaks it alongside the kernel state,
     /// which lives for the lifetime of the running kernel (the install is a one-shot move, not a global mutable
     /// static).
@@ -1038,7 +1038,7 @@ where
     /// address space and has embedded programs to launch. Until this is
     /// called the handover holds [`EMPTY_PROGRAM_REGISTRY`] and
     /// [`NULL_PROCESS_SPAWN`], so `spawn` fails closed
-    /// ([`rustos_abi::Errno::NotFound`] / [`rustos_abi::Errno::NotImplemented`]).
+    /// ([`tairix_abi::Errno::NotFound`] / [`tairix_abi::Errno::NotImplemented`]).
     /// Both must be `'static`: the program bytes and the producer live for
     /// the lifetime of the running kernel, exactly like the console device
     /// (the install is a one-shot move, not a global
@@ -1061,7 +1061,7 @@ where
     /// Called by a boot pipeline whose storage floor will publish (or
     /// explicitly give up on) the `/System` mount and resolve the store's
     /// readiness latch on every outcome. Until this is called a
-    /// store-bundle spawn fails closed ([`rustos_abi::Errno::NotFound`]),
+    /// store-bundle spawn fails closed ([`tairix_abi::Errno::NotFound`]),
     /// parking nothing. The store must be `'static`, exactly like the
     /// program registry.
     #[must_use]
@@ -1114,7 +1114,7 @@ where
     /// the `&'static LateUsersAdmin` cell its unlock step installs the
     /// built engine into. Until then the handover holds
     /// [`crate::useradmin::NULL_USERS_ADMIN`] and every `users_admin`
-    /// call fails closed with [`rustos_abi::Errno::NotImplemented`].
+    /// call fails closed with [`tairix_abi::Errno::NotImplemented`].
     #[must_use]
     pub fn with_users_admin(mut self, users_admin: &'static (dyn UsersAdmin + 'static)) -> Self {
         self.users_admin = users_admin;
@@ -1141,7 +1141,7 @@ where
     /// Called by a boot path that owns a mounted volume, handing the
     /// `Box::leak`'d production service here. Until this is called the
     /// handover holds [`NULL_FILESYSTEM`] and every `fs_*` syscall fails
-    /// closed with [`rustos_abi::Errno::NotImplemented`], so userland sees an
+    /// closed with [`tairix_abi::Errno::NotImplemented`], so userland sees an
     /// inert filesystem rather than a fabricated handle. The service must be
     /// `'static`: it lives for the lifetime of the running kernel, exactly
     /// like the users database.
@@ -1161,7 +1161,7 @@ where
     /// forest it publishes each mounted volume's stable identity into.
     /// Until this is called the handover holds [`NULL_VOLUME_FOREST`] and
     /// every `id::<volume-id>/…` path fails closed with
-    /// [`rustos_abi::Errno::NotFound`].
+    /// [`tairix_abi::Errno::NotFound`].
     #[must_use]
     pub const fn with_volumes(mut self, volumes: &'static VolumeForest) -> Self {
         self.volumes = volumes;
@@ -1175,7 +1175,7 @@ where
     /// Called by a boot path that can host runtime volumes. Until this is
     /// called the handover holds [`NULL_VOLUME_SERVICE`] and every
     /// attach/detach fails closed with
-    /// [`rustos_abi::Errno::NotImplemented`].
+    /// [`tairix_abi::Errno::NotImplemented`].
     #[must_use]
     pub const fn with_volume_service(
         mut self,
@@ -1197,7 +1197,7 @@ where
     /// called the handover carries `None`: nothing is installed, the
     /// dispatch hook falls to the inert [`crate::syscalls::NULL_IDENTITY`],
     /// and a spawn-as-user switch fails closed with
-    /// [`rustos_abi::Errno::NotImplemented`]; the default `spawn` (inherit)
+    /// [`tairix_abi::Errno::NotImplemented`]; the default `spawn` (inherit)
     /// never consults it. The cell must be `'static`: it lives for the
     /// lifetime of the running kernel, exactly like the filesystem service.
     #[must_use]
@@ -1288,7 +1288,7 @@ mod tests {
     use crate::sched::SchedulerConfig;
     use crate::test_arch::TestArch;
     use alloc::sync::Arc;
-    use rustos_log::Level;
+    use tairix_log::Level;
 
     fn empty_sink() -> &'static crate::test_sink::TestSink {
         // A `Box::leak`'d sink is intentional in tests — the sink
@@ -1365,7 +1365,7 @@ mod tests {
 
     #[test]
     fn users_db_defaults_to_fail_closed_and_with_users_db_installs_a_holder() {
-        use rustos_abi::Errno;
+        use tairix_abi::Errno;
 
         // A test users-db source serving fixed bytes, leaked to `'static`
         // exactly as a production boot leaks its `HeldUsersDbSource`.
@@ -1373,7 +1373,7 @@ mod tests {
         impl UsersDbSource for FixedUsersDb {
             fn text(&self) -> Result<crate::users::UsersDbText, Errno> {
                 Ok(crate::users::UsersDbText::new(
-                    b"rustos-users-v1\n".to_vec(),
+                    b"tairix-users-v1\n".to_vec(),
                 ))
             }
         }
@@ -1388,7 +1388,7 @@ mod tests {
         let b = fresh_boot_info().with_users_db(held);
         assert_eq!(
             b.users_db.text().expect("served text"),
-            &b"rustos-users-v1\n"[..]
+            &b"tairix-users-v1\n"[..]
         );
     }
 

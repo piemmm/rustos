@@ -1,25 +1,25 @@
 //! wasm32 memory tagging.
 //!
 //! Implements the Arch HAL
-//! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for the
+//! [`MemoryTagging`](tairix_arch_api::MemoryTagging) surface for the
 //! browser sandbox (`wasm32-unknown-unknown`).
 //!
 //! WebAssembly exposes no per-granule memory-tagging primitive: linear
 //! memory is a flat byte array and there is no host call to stamp or
 //! check a tag. Spatial and temporal safety in the browser is provided
 //! by the sandbox itself — each module instance owns a single bounds-
-//! checked linear memory, and RustOS runs one such memory per Web Worker
+//! checked linear memory, and TAIRiX runs one such memory per Web Worker
 //! (`kernel/arch/wasm32::isolation`), so a stray access traps at the
 //! WASM bounds check rather than escaping the instance.
 //!
 //! Both features are therefore an honest
-//! [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported)
+//! [`Tagging::Unsupported`](tairix_arch_api::Tagging::Unsupported)
 //! — the host owns the relevant protection. Use-after-free *within* a
 //! linear memory is still hardened by the architecture-neutral *software*
 //! tag check in `kernel/mem`, which shares the
-//! [`rustos_arch_api::next_free_tag`] rotation this HAL defines.
+//! [`tairix_arch_api::next_free_tag`] rotation this HAL defines.
 
-use rustos_arch_api::{MemoryTagging, Tagging, TaggingProfile};
+use tairix_arch_api::{MemoryTagging, Tagging, TaggingProfile};
 
 /// wasm32 implementation of the Arch HAL memory-tagging surface.
 ///
@@ -68,7 +68,7 @@ impl MemoryTagging for MemoryTags {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::memtag::conformance;
+    use tairix_arch_api::memtag::conformance;
 
     #[test]
     fn passes_memtag_conformance() {

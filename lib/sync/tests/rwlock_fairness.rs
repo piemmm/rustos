@@ -13,7 +13,7 @@
 #![cfg(not(loom))]
 
 use proptest::prelude::*;
-use rustos_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug, Clone, Copy)]
 enum Op {

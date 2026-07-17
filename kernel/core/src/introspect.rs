@@ -3,7 +3,7 @@
 //!
 //! The live data — the process table, kernel memory accounting, the mount
 //! table, machine identity, uptime, and any task's resource limits — lives
-//! in the binding kernel (`rustos-kernel`), which owns the `CapTable`, the
+//! in the binding kernel (`tairix-kernel`), which owns the `CapTable`, the
 //! scheduler, the frame allocator, and the mount table. This trait is the
 //! seam `kernel/core` reaches it through, exactly as [`crate::hwtree`]'s
 //! [`HwTreeSource`](crate::hwtree::HwTreeSource) is the seam for the
@@ -26,7 +26,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, ProcId};
+use tairix_abi::{Errno, ProcId};
 
 /// The kernel-held live system state the `sysinfo_introspect` syscall serves.
 ///
@@ -38,7 +38,7 @@ use rustos_abi::{Errno, ProcId};
 /// `Sync` because the single installed source is shared by the per-CPU
 /// syscall handlers, exactly like [`crate::hwtree::HwTreeSource`].
 pub trait IntrospectSource: Sync {
-    /// Encode up to `max_records` live [`rustos_abi::sysinfo::ProcessRecord`]s
+    /// Encode up to `max_records` live [`tairix_abi::sysinfo::ProcessRecord`]s
     /// beginning at record index `offset`, in a stable order, packed
     /// little-endian back-to-back.
     ///
@@ -53,14 +53,14 @@ pub trait IntrospectSource: Sync {
     fn processes(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
     /// The wire image of the current
-    /// [`rustos_abi::sysinfo::KernelMemoryStats`].
+    /// [`tairix_abi::sysinfo::KernelMemoryStats`].
     ///
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn kernel_memory(&self) -> Result<Vec<u8>, Errno>;
 
-    /// Encode up to `max_records` [`rustos_abi::sysinfo::MountRecord`]s
+    /// Encode up to `max_records` [`tairix_abi::sysinfo::MountRecord`]s
     /// beginning at record index `offset`, in a stable order, packed
     /// little-endian back-to-back. An `offset` past the end returns an empty
     /// `Vec`.
@@ -71,7 +71,7 @@ pub trait IntrospectSource: Sync {
     fn mounts(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
     /// The wire image of the current
-    /// [`rustos_abi::sysinfo::SystemIdentity`] (machine id, OS version,
+    /// [`tairix_abi::sysinfo::SystemIdentity`] (machine id, OS version,
     /// hostname).
     ///
     /// # Errors
@@ -79,7 +79,7 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn identity(&self) -> Result<Vec<u8>, Errno>;
 
-    /// The wire image of the current [`rustos_abi::sysinfo::Uptime`].
+    /// The wire image of the current [`tairix_abi::sysinfo::Uptime`].
     ///
     /// # Errors
     ///
@@ -87,7 +87,7 @@ pub trait IntrospectSource: Sync {
     fn uptime(&self) -> Result<Vec<u8>, Errno>;
 
     /// The wire image of the current
-    /// [`rustos_abi::sysinfo::LoadAverage`]: the damped 1/5/15-minute
+    /// [`tairix_abi::sysinfo::LoadAverage`]: the damped 1/5/15-minute
     /// run-queue averages plus the live runnable/total-task and
     /// logged-in-user censuses, all read from kernel-attested state.
     ///
@@ -112,7 +112,7 @@ pub trait IntrospectSource: Sync {
     fn task_limits(&self, proc_id: ProcId) -> Result<Vec<u8>, Errno>;
 
     /// Encode up to `max_records`
-    /// [`rustos_abi::sysinfo::UserDirectoryRecord`]s beginning at record
+    /// [`tairix_abi::sysinfo::UserDirectoryRecord`]s beginning at record
     /// index `offset`, in a stable order, packed little-endian
     /// back-to-back.
     ///
@@ -128,7 +128,7 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn user_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
-    /// Encode up to `max_records` [`rustos_abi::sysinfo::CpuTimeRecord`]s
+    /// Encode up to `max_records` [`tairix_abi::sysinfo::CpuTimeRecord`]s
     /// beginning at CPU index `offset`, in ascending CPU order, packed
     /// little-endian back-to-back.
     ///
@@ -144,7 +144,7 @@ pub trait IntrospectSource: Sync {
     fn cpu_times(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
     /// The wire image of the current
-    /// [`rustos_abi::sysinfo::MemoryPressureStats`]: the live band (a
+    /// [`tairix_abi::sysinfo::MemoryPressureStats`]: the live band (a
     /// fresh sample), the derived watermarks in force, the reserve
     /// floor, the free/total readings, and the per-band entry counters
     /// since boot (`plans/STRESSTEST.md` ST1).
@@ -155,7 +155,7 @@ pub trait IntrospectSource: Sync {
     fn memory_pressure(&self) -> Result<Vec<u8>, Errno>;
 
     /// Encode up to `max_records`
-    /// [`rustos_abi::sysinfo::ReclaimClassRecord`]s beginning at class
+    /// [`tairix_abi::sysinfo::ReclaimClassRecord`]s beginning at class
     /// index `offset`, in class-id order, packed little-endian
     /// back-to-back — the reclaimable-cache ledger aggregated across
     /// every registered live cache. An `offset` past the last class
@@ -167,7 +167,7 @@ pub trait IntrospectSource: Sync {
     fn reclaim(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
     /// The wire image of the current
-    /// [`rustos_abi::sysinfo::RamzipStats`]: counters only, never page
+    /// [`tairix_abi::sysinfo::RamzipStats`]: counters only, never page
     /// contents or key material; an undriven tier truthfully reports
     /// idle zeros.
     ///
@@ -177,7 +177,7 @@ pub trait IntrospectSource: Sync {
     fn ramzip(&self) -> Result<Vec<u8>, Errno>;
 
     /// Encode up to `max_records`
-    /// [`rustos_abi::sysinfo::CpuLoadRecord`]s beginning at CPU index
+    /// [`tairix_abi::sysinfo::CpuLoadRecord`]s beginning at CPU index
     /// `offset`, in ascending CPU order, packed little-endian
     /// back-to-back: the run-queue depth sample plus the context-switch
     /// and preemption counters (the busy/idle time split stays in

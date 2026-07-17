@@ -1,15 +1,15 @@
-# `rustos-virtio-input`
+# `tairix-virtio-input`
 
 `lib/virtio_input` is the arch-neutral, transport-agnostic virtio-input
 (keyboard / pointer) device logic the virtio-input driver is built from: the
 virtio-1.1 §5.8 open/poll/decode engine over the bus-agnostic `lib/virtio`
 `Transport`. It lives in `lib/*` — not in a driver crate — so **both** the
 in-kernel `-M virt` input verticals and the user-space input-driver process
-(`rustos-drv-input-virtio-kbd`) compose it without a `drivers/*`→`drivers/*`
+(`tairix-drv-input-virtio-kbd`) compose it without a `drivers/*`→`drivers/*`
 dependency (`AGENTS.md` §17.4 / §2.2), exactly as the bus-agnostic xHCI protocol
 lives in
-[`rustos-usb`](./usb.md) rather than the xHCI driver, and the HID logic lives
-in [`rustos-hid`](./hid.md) rather than the USB HID class drivers. The thin
+[`tairix-usb`](./usb.md) rather than the xHCI driver, and the HID logic lives
+in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
 `drivers/input/virtio_input` crate keeps only the §8 `register` entry and the
 §18.3 bind table.
 
@@ -22,7 +22,7 @@ in [`rustos-hid`](./hid.md) rather than the USB HID class drivers. The thin
   descriptor head the queue assigns. A single posted buffer is not enough: the
   device fills one buffer per event of a report, so a keypress's `EV_KEY` *and*
   its trailing `EV_SYN` each need a free buffer at once.
-- **`poll`** (`rustos_abi::driver::input::Input`): drains every completed event,
+- **`poll`** (`tairix_abi::driver::input::Input`): drains every completed event,
   decodes it, and hands each buffer straight back so the pool stays full. The
   wait is interrupt-driven through the host's `notify_wait` — never a busy spin
   (`AGENTS.md` §2.1). An empty caller buffer is `DriverError::BufferTooSmall`;
@@ -40,11 +40,11 @@ in [`rustos-hid`](./hid.md) rather than the USB HID class drivers. The thin
   logic and the bind table both depend on (`AGENTS.md` §2.2 / §18.3).
 - **`VirtioKeyboardConsole`** (`console` module): the keyboard producer half.
   `feed` turns each decoded `evdev`-keycode `Key` edge into the
-  `rustos_abi::input::KeyInput` record a driver injects through `key_inject`,
+  `tairix_abi::input::KeyInput` record a driver injects through `key_inject`,
   tracking the held modifiers (each of the eight modifier keys independently,
   collapsing left/right pairs) and the caps-/num-lock toggles and resolving the
   US layout. The `evdev`-keycode→`Key` table is `evdev`-specific, but the
-  `Key`→record map is the shared `rustos_keymap::key_input` — the one definition
+  `Key`→record map is the shared `tairix_keymap::key_input` — the one definition
   the `lib/hid` USB console producer reaches too (`AGENTS.md` §2.2). An unknown
   keycode or non-key event produces no record (fail closed, `AGENTS.md` §2.9).
 
@@ -63,7 +63,7 @@ only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
 
 ## Test surface
 
-`cargo test -p rustos-virtio-input` exercises, against the in-process
+`cargo test -p tairix-virtio-input` exercises, against the in-process
 `lib/virtio` `MockTransport` / `MockHost`:
 
 - decode: key press/release, relative pointer (X/Y) and scroll-wheel, and the

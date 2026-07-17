@@ -50,7 +50,7 @@ estão disponíveis.
 - `-P, --portability` — o formato portátil POSIX (cabeçalhos
   `1024-blocks` e `Capacity`).
 - `-l, --local` — restringir o relatório a sistemas de ficheiros
-  locais (hoje todas as montagens RustOS: nada é filtrado).
+  locais (hoje todas as montagens TAIRiX: nada é filtrado).
 - `--total` — acrescentar uma linha etiquetada `total` que soma os
   valores mostrados.
 - `-k` — blocos de 1024 bytes (a predefinição).

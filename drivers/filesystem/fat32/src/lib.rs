@@ -1,12 +1,12 @@
-//! RustOS FAT32 filesystem driver (read/write).
+//! TAIRiX FAT32 filesystem driver (read/write).
 //!
 //! Reads and writes a FAT32 volume sitting behind any
-//! [`rustos_abi::driver::block::Block`] device and exposes it through
-//! the versioned [`rustos_abi::driver::filesystem::FilesystemRead`] and
-//! [`rustos_abi::driver::filesystem::FilesystemWrite`] surfaces
+//! [`tairix_abi::driver::block::Block`] device and exposes it through
+//! the versioned [`tairix_abi::driver::filesystem::FilesystemRead`] and
+//! [`tairix_abi::driver::filesystem::FilesystemWrite`] surfaces
 //! (new behaviour ships as a new trait, never by
 //! widening the frozen mount/unmount
-//! [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
+//! [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)).
 //!
 //! FAT32 has no per-inode owner, mode, ACL, or capability gate; those
 //! live in the VFS metadata layer that mounts this
@@ -44,20 +44,20 @@
 //! # Capabilities
 //!
 //! Loading requires
-//! [`CapabilityId::DRV_LOAD`](rustos_abi::CapabilityId::DRV_LOAD). The
+//! [`CapabilityId::DRV_LOAD`](tairix_abi::CapabilityId::DRV_LOAD). The
 //! driver runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
     FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
-use rustos_abi::time::Time64;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_abi::time::Time64;
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4641_5433_3200_0001; // "FAT32" + index
@@ -288,10 +288,10 @@ pub struct Fat32<B: Block> {
 /// The volume's stable 16-byte identity, derived from the boot sector:
 /// the BPB volume serial + label when the extended boot signature declares
 /// them, else zeros. The one derivation lives in `lib/fsprobe`
-/// ([`rustos_fsprobe::fat32_identity_from_boot`]), which the volume
+/// ([`tairix_fsprobe::fat32_identity_from_boot`]), which the volume
 /// manager's signature probe shares, so a probe-side fingerprint always
 /// names the identity this driver publishes.
-use rustos_fsprobe::fat32_identity_from_boot as identity_from_boot;
+use tairix_fsprobe::fat32_identity_from_boot as identity_from_boot;
 
 /// One linear FAT scan counting the free data clusters, run once at open;
 /// the allocator and the chain-free path maintain the count from there,
@@ -496,7 +496,7 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
 /// day `1..=31` (bits 0..5); `time` packs hours (bits 11..16), minutes
 /// (bits 5..11), and two-second units (bits 0..5). FAT keeps no timezone,
 /// so the stored local wall time is reported as-is — the format's own
-/// declared precision and range limit, not a RustOS one. Every decodable
+/// declared precision and range limit, not a TAIRiX one. Every decodable
 /// pair (1980..=2107) is representable in [`Time64`], so the conversion
 /// never truncates; a field combination that is not a real calendar
 /// date/time is not decodable and yields [`Time64::UNIX_EPOCH`], the
@@ -890,7 +890,7 @@ impl<B: Block> Fat32<B> {
     /// `serial` is the caller-minted BPB volume serial — the four bytes
     /// FAT32's content-derived identity is built on
     /// ([`Fat32::volume_identity`]). The caller mints it (`mkfs.fat`
-    /// derives one from the clock; RustOS callers draw from their entropy
+    /// derives one from the clock; TAIRiX callers draw from their entropy
     /// or provenance source) because two volumes formatted with one
     /// serial are indistinguishable to the volume forest, so a duplicate
     /// can never mount while its twin is attached. Zero is refused: the
@@ -980,7 +980,7 @@ impl<B: Block> Fat32<B> {
         boot[0] = 0xEB;
         boot[1] = 0x58;
         boot[2] = 0x90;
-        boot[3..11].copy_from_slice(b"RUSTOS  ");
+        boot[3..11].copy_from_slice(b"TAIRIX  ");
         let bps_u16 = u16::try_from(bps).map_err(|_| DriverError::BadMagic)?;
         put_le16(&mut boot, 11, bps_u16);
         boot[13] = spc_u8;
@@ -2275,14 +2275,14 @@ impl<B: Block> FilesystemSecurity for Fat32<B> {
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
-        // The FAT32 on-disk format cannot store any part of a RustOS
+        // The FAT32 on-disk format cannot store any part of a TAIRiX
         // security record. Storing a silently-lossy record is forbidden,
         // so the write is refused whole (fail closed).
         Err(DriverError::Unsupported)
     }
 }
 
-/// The on-disk format has nowhere to store RustOS extended attributes, so
+/// The on-disk format has nowhere to store TAIRiX extended attributes, so
 /// the default facet answer stands: a mounted volume refuses the
 /// `fs_attr_*` surface with the typed unsupported-backing error.
 impl<B: Block> FilesystemAttrsProvider for Fat32<B> {}

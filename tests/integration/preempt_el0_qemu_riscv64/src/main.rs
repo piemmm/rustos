@@ -9,10 +9,10 @@
 //! so `sstatus.SIE` stays clear and the kernel itself is never preempted — and
 //! installs a syscall-dispatch callback. It builds one hardware-isolated Sv39
 //! U-mode address space from the `el0_spinner` `rxe` fixture through the
-//! production capability-checked, audited `rustos_kernel_core::spawn_image`
+//! production capability-checked, audited `tairix_kernel_core::spawn_image`
 //! caller and admits it as a resumable user kthread (`spawn_user_kthread`).
 //!
-//! It then arms the **production** preemption path verbatim (the same `rustos_arch_riscv64::preempt` surface the bin crate's
+//! It then arms the **production** preemption path verbatim (the same `tairix_arch_riscv64::preempt` surface the bin crate's
 //! `arm_preemption` uses): registers a per-hart `PreemptStorage`, installs a
 //! U-mode-preemption callback that suspends the running task back to the
 //! scheduler via `reschedule_current(_, Yield)`, and starts the periodic SBI
@@ -37,7 +37,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-preempt-el0-qemu-riscv64: the `test-hooks` Cargo feature is a \
+    "tairix-test-preempt-el0-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

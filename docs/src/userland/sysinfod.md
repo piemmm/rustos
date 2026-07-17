@@ -1,16 +1,16 @@
 # System Information service (`userland/system/sysinfod`)
 
-`rustos-sysinfod` is the user-space service that answers the System
-Information API (`AGENTS.md` §16.6). RustOS has no `/proc` and no `/sys`;
+`tairix-sysinfod` is the user-space service that answers the System
+Information API (`AGENTS.md` §16.6). TAIRiX has no `/proc` and no `/sys`;
 every piece of live system information those trees would have exposed is
 served here, through the typed, versioned `sysinfo-v1` wire surface
-defined in `rustos_abi::sysinfo` (see
+defined in `tairix_abi::sysinfo` (see
 [System Information API (`sysinfo-v1`)](../abi/sysinfo.md)). `sysinfod`
 is the only server of the API and the kernel exposes no path that
 bypasses it; the installed binary lives at `/System/Services/sysinfod.app/Run`.
 
 The crate is `no_std`, has no `unsafe`, and depends only on the audited
-`lib/*` crates `rustos-abi` and `rustos-log`, so a userland service never
+`lib/*` crates `tairix-abi` and `tairix-log`, so a userland service never
 links a kernel or driver crate (`AGENTS.md` §17.4).
 
 ## The dispatcher
@@ -25,7 +25,7 @@ failing closed at the first problem (`AGENTS.md` §5.4):
    reserved-but-unassigned identifier is rejected.
 3. Enforce the query's declared capability against the caller's
    `CapabilityQuery` view **before** touching any state.
-4. Emit a `rustos_log` audit record for every invocation of an audited
+4. Emit a `tairix_log` audit record for every invocation of an audited
    query, and for every capability denial.
 5. Page and encode the answer supplied by the injected data source.
 
@@ -116,7 +116,7 @@ drowning the log; the cross-principal, kernel, and hardware queries are.
 
 ## Tests
 
-`cargo test -p rustos-sysinfod` drives `serve` against an in-memory
+`cargo test -p tairix-sysinfod` drives `serve` against an in-memory
 `SysinfoSource` fixture and a recording log sink, covering every query,
 paging (`offset`/`limit` and the empty page past the end), the capability
 gates and their denial records, the audited-served record, the

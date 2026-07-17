@@ -20,8 +20,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_compress as compress;
-use rustos_crypto::aead::{self, AeadNonce, AeadTag, AEAD_NONCE_LEN, AEAD_TAG_LEN};
+use tairix_compress as compress;
+use tairix_crypto::aead::{self, AeadNonce, AeadTag, AEAD_NONCE_LEN, AEAD_TAG_LEN};
 use zeroize::Zeroize;
 
 use crate::frame::PAGE_SIZE;

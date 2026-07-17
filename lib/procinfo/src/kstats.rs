@@ -14,11 +14,11 @@
 //! render the refusal and continue (the queries are observability, never
 //! load-bearing for a session).
 
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuLoadRequest, MemoryPressureStats, RamzipStats, ReclaimClassRecord,
     ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::list::{walk_pages, ListError};
 use crate::request::{call, CallError};
@@ -161,11 +161,11 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::sysinfo::{
+    use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, MemoryPressureStats, RamzipStats, ReclaimClassRecord,
         ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, RECLAIM_CLASS_COUNT,
     };
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory `sysinfod` stand-in answering the four kernel-stats
     /// queries from fixed data, decoding each request exactly as the real

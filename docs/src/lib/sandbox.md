@@ -1,6 +1,6 @@
-# `rustos-sandbox` — the parser-sandbox seam
+# `tairix-sandbox` — the parser-sandbox seam
 
-`rustos_sandbox` (`lib/sandbox`) is RustOS's one user-space seam over the
+`tairix_sandbox` (`lib/sandbox`) is TAIRiX's one user-space seam over the
 kernel's parser-sandbox spawn mode
 ([the parser sandbox](../security/sandbox.md)): the typed request/reply
 path every program runs a parser of untrusted input through. The kernel
@@ -38,8 +38,8 @@ Stability tier: **experimental**.
   parent-side path (framing, containment, typed decode) under plain
   `cargo test`, exactly as the `Fs`/`Tty` seams take fakes.
 - **`decode`** — the first consumers behind the seam: executable-container
-  summaries through [`rustos-binfmt`](./binfmt.md) and per-window
-  instruction disassembly through [`rustos-disasm`](./disasm.md). The
+  summaries through [`tairix-binfmt`](./binfmt.md) and per-window
+  instruction disassembly through [`tairix-disasm`](./disasm.md). The
   `DecodeService` runs inside the worker; the client helpers
   (`container_summary`, `manifest_summary`, `disassemble`) marshal typed
   requests and validate every reply field **fail-closed** — a worker that
@@ -49,14 +49,14 @@ Stability tier: **experimental**.
   `regions_truncated`/`symbols_truncated`, never silently.
 - **`helpdoc`** — the sandboxed help-document render: the `HelpService`
   worker parses and renders a foreign bundle's document through
-  [`rustos-help`](./help.md), and the client `render_help` re-parses the
-  reply through the `rustos-vt` streaming parser, admitting only the
+  [`tairix-help`](./help.md), and the client `render_help` re-parses the
+  reply through the `tairix-vt` streaming parser, admitting only the
   closed op set a help render can contain (printable text, line feeds,
   the bold/underline SGR pairs) and re-encoding it canonically — a
   forbidden escape or a truncated trailing sequence refuses the whole
   reply, and a document-parse error round-trips typed (`HelpError`, code
   for code). `man` is the consumer: it reads the document with its own
-  file authority (`rustos_help::load_raw`) and never parses it
+  file authority (`tairix_help::load_raw`) and never parses it
   in-process.
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**

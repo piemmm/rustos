@@ -14,8 +14,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_curses::Event;
+use tairix_abi::Errno;
+use tairix_curses::Event;
 
 use crate::buffer::{width_of_prefix, DecodeError, TextBuffer};
 

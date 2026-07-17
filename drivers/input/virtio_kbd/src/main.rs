@@ -15,15 +15,15 @@
 //! — the device's register window and a DMA constraint, and no more — and this program reaches them through the
 //! rt-backed `RtDriverHost`. It names no board, bus, or transport detail: it maps a register window by address, carves a DMA
 //! region, and speaks the bus-agnostic virtio split-virtqueue protocol via the
-//! arch-neutral `rustos_virtio_input` composition over the `rustos_virtio`
+//! arch-neutral `tairix_virtio_input` composition over the `tairix_virtio`
 //! MMIO transport.
 //!
-//! It is a **pure-Rust** program: RustOS is Rust-only, so it
-//! links the Rust userland runtime `rustos-rt`, never the C ABI (which exists
-//! solely for non-Rust programs). `rustos-rt` provides
+//! It is a **pure-Rust** program: TAIRiX is Rust-only, so it
+//! links the Rust userland runtime `tairix-rt`, never the C ABI (which exists
+//! solely for non-Rust programs). `tairix-rt` provides
 //! `_start`, the per-process stack canary, the panic
-//! handler, and the syscall wrappers; `rustos_rt::entry!` names this program's
-//! `main`. It is a separate crate from the `rustos-drv-input-virtio-input`
+//! handler, and the syscall wrappers; `tairix_rt::entry!` names this program's
+//! `main`. It is a separate crate from the `tairix-drv-input-virtio-input`
 //! driver shell (which the kernel still links for the transitional in-kernel
 //! `-M virt` verticals) so the userland runtime never enters the kernel's
 //! dependency graph.
@@ -79,15 +79,15 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
-    use rustos_abi::driver::sole_register_window;
-    use rustos_abi::driver::virtio::VirtioHost;
-    use rustos_abi::input::PointerInput;
-    use rustos_abi::{CapabilityId, MmioMapper};
-    use rustos_caps::CapabilitySet;
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_virtio::MmioTransport;
-    use rustos_virtio_input::{VirtioInput, VirtioKeyboardConsole};
+    use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+    use tairix_abi::driver::sole_register_window;
+    use tairix_abi::driver::virtio::VirtioHost;
+    use tairix_abi::input::PointerInput;
+    use tairix_abi::{CapabilityId, MmioMapper};
+    use tairix_caps::CapabilitySet;
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_virtio::MmioTransport;
+    use tairix_virtio_input::{VirtioInput, VirtioKeyboardConsole};
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
@@ -143,7 +143,7 @@ mod program {
         caps
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// On success this never returns: the report pump runs for the life of the
@@ -205,9 +205,9 @@ mod program {
                         // construction, so no event is ever double-injected.
                         if let Some(record) = PointerInput::from_device_event(event) {
                             let _ =
-                                rustos_rt::pointer_inject(rustos_abi::seat::SEAT_PRIMARY, &record);
+                                tairix_rt::pointer_inject(tairix_abi::seat::SEAT_PRIMARY, &record);
                         } else if let Some(record) = console.feed(*event) {
-                            let _ = rustos_rt::key_inject(rustos_abi::seat::SEAT_PRIMARY, &record);
+                            let _ = tairix_rt::key_inject(tairix_abi::seat::SEAT_PRIMARY, &record);
                         }
                     }
                 }
@@ -216,13 +216,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

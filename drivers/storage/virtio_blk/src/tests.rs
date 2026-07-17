@@ -6,7 +6,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_virtio::{ChainView, DmaHost, MockHost, MockTransport};
+use tairix_virtio::{ChainView, DmaHost, MockHost, MockTransport};
 
 const SECTOR_SIZE: usize = 512;
 const SECTORS: u64 = 16;
@@ -145,12 +145,12 @@ impl AutoDrainHost {
 }
 
 impl DmaHost for AutoDrainHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_virtio::DmaSlab, DriverError> {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
 }
 
-impl rustos_virtio::VirtioHost for AutoDrainHost {
+impl tairix_virtio::VirtioHost for AutoDrainHost {
     fn notify_wait(&self, queue_index: u16) {
         self.inner.notify_wait(queue_index);
         // A leading spurious/early wake returns without draining, so the
@@ -508,8 +508,8 @@ fn register_requires_drv_load() {
         fn has_capability(&self, cap: CapabilityId) -> bool {
             cap == CapabilityId::DRV_LOAD && self.grant
         }
-        fn kind(&self) -> rustos_abi::driver::DriverKind {
-            rustos_abi::driver::DriverKind::UserSpace
+        fn kind(&self) -> tairix_abi::driver::DriverKind {
+            tairix_abi::driver::DriverKind::UserSpace
         }
     }
     assert_eq!(
@@ -521,7 +521,7 @@ fn register_requires_drv_load() {
 
 #[test]
 fn bind_table_matches_a_virtio_block_node() {
-    use rustos_abi::HwMatchKey;
+    use tairix_abi::HwMatchKey;
 
     // One entry at the declared exact-match priority, matching a
     // discovered virtio node whose probed device id is `virtio-blk`.

@@ -22,11 +22,11 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ptr::NonNull;
 
-use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::{
+use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, RegisterWindow,
 };
-use rustos_fdt::Fdt;
+use tairix_fdt::Fdt;
 
 use crate::enumerate::{Mmio, VIRTIO_MMIO_DEFAULT_VENDOR, VIRTIO_MMIO_MAGIC};
 use crate::transport::MmioRead;

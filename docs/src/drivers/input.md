@@ -2,7 +2,7 @@
 
 Input drivers report user-generated events — keyboard, pointer, and
 scroll — to the focused session. They implement
-[`rustos_abi::driver::input::Input`](../abi/driver_traits.md#input) and
+[`tairix_abi::driver::input::Input`](../abi/driver_traits.md#input) and
 run as user-space drivers. For the **desktop** path, key repeat,
 modifier/lock state, keymap translation, and routing to a surface live
 above this trait in `userland/gui/wm` and the session layer. For a
@@ -28,12 +28,12 @@ maps to `DriverError::BufferTooSmall`.
 
 | Driver        | Crate                            | Hardware                         | Status                          |
 |---------------|----------------------------------|----------------------------------|---------------------------------|
-| ps2           | `rustos-drv-input-ps2`           | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
-| usb_kbd       | `rustos-drv-input-usb-kbd`       | USB HID boot keyboard (URB transport class driver) | host-side tests; live path is Pi 4 metal acceptance |
-| usb_mouse     | `rustos-drv-input-usb-mouse`     | USB HID boot mouse (URB transport class driver)    | host-side tests; live path is Pi 4 metal acceptance |
-| virtio_input  | `rustos-drv-input-virtio-input`  | virtio-input (keyboard / pointer) | host-side tests + QEMU vertical |
+| ps2           | `tairix-drv-input-ps2`           | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
+| usb_kbd       | `tairix-drv-input-usb-kbd`       | USB HID boot keyboard (URB transport class driver) | host-side tests; live path is Pi 4 metal acceptance |
+| usb_mouse     | `tairix-drv-input-usb-mouse`     | USB HID boot mouse (URB transport class driver)    | host-side tests; live path is Pi 4 metal acceptance |
+| virtio_input  | `tairix-drv-input-virtio-input`  | virtio-input (keyboard / pointer) | host-side tests + QEMU vertical |
 
-### `rustos-drv-input-ps2`
+### `tairix-drv-input-ps2`
 
 The PS/2 keyboard driver reads the Intel 8042 keyboard controller that
 every x86 PC and QEMU's default `q35`/`i440fx` machines expose: a
@@ -65,17 +65,17 @@ instance reloads. The driver issues the controller no commands, so
 unload leaves no state to quiesce.
 
 QEMU integration on a live controller is exercised by
-`tests/integration/ps2_input_qemu_x86_64` (`rustos-test-ps2-qemu-x86-64`,
+`tests/integration/ps2_input_qemu_x86_64` (`tairix-test-ps2-qemu-x86-64`,
 enrolled in `cargo xtask test --qemu`). It boots the production kernel,
-loads this driver's signed `.rxe` through `rustos_drvhost::Host`, and
+loads this driver's signed `.rxe` through `tairix_drvhost::Host`, and
 drives it through load → use → unload → reload. The boot hand-off it
 needed is the x86_64 8-bit port seam
-`rustos_arch_x86_64::pio::X86PortIo8` — the byte-wide sibling of the PCI
+`tairix_arch_x86_64::pio::X86PortIo8` — the byte-wide sibling of the PCI
 bus driver's 32-bit `X86PortIo`, supplying the only in-tree
 `PortIo8` implementation (`AGENTS.md` §17.2 / §17.4).
 
 "Use" is **interrupt-driven**. The vertical binds the keyboard line
-(ISA IRQ-1 → GSI 1) in the production `rustos_kernel_irq::IrqTable`,
+(ISA IRQ-1 → GSI 1) in the production `tairix_kernel_irq::IrqTable`,
 sets the i8042 keyboard-interrupt config bit, masks the legacy 8259
 PIC, and unmasks GSI 1 through the published `IoApicController`. It then
 makes a keypress deterministic without physical hardware via the i8042
@@ -90,14 +90,14 @@ interrupt only signals *when* a byte is waiting. This shares the
 external-IRQ trap glue that `tests/integration/irq_qemu_x86_64`
 validates against the PIT.
 
-### `rustos-drv-input-virtio-input`
+### `tairix-drv-input-virtio-input`
 
-`rustos-drv-input-virtio-input` is the §8 driver identity — the `register`
+`tairix-drv-input-virtio-input` is the §8 driver identity — the `register`
 entry and the §18.3 `BIND_KEYS` bind table. The reusable open/poll/decode
 device logic and the keyboard console producer described below live in the
-[`rustos-virtio-input`](../lib/virtio_input.md) library (`lib/virtio_input`),
+[`tairix-virtio-input`](../lib/virtio_input.md) library (`lib/virtio_input`),
 shared by the in-kernel `-M virt` verticals and the user-space input-driver
-process (`rustos-drv-input-virtio-kbd`, below) without a
+process (`tairix-drv-input-virtio-kbd`, below) without a
 `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 / §2.2 — the virtio analogue of
 `lib/hid` ↔ `drivers/input/usb_kbd`).
 
@@ -142,11 +142,11 @@ virtio-MMIO or PCI (`AGENTS.md` §2.2 / §17.4).
 
 QEMU integration on a live device is exercised by
 `tests/integration/input_virtio_mmio_qemu_aarch64`
-(`rustos-test-input-virtio-mmio-qemu-aarch64`, enrolled in `cargo xtask
+(`tairix-test-input-virtio-mmio-qemu-aarch64`, enrolled in `cargo xtask
 test --qemu`). It boots the aarch64 `virt` board, builds the
 virtio-MMIO transport from the embedded device tree, arms the GICv2 SPI
 + EL1 IRQ path, mints a `KernelVirtioHost`, loads this driver's signed
-`.rxe` through `rustos_drvhost::Host`, and drives it through
+`.rxe` through `tairix_drvhost::Host`, and drives it through
 load → use → unload → reload. "Use" is a **real injected key**: once the
 guest logs its event-queue-armed readiness marker, the QEMU runner
 (`tools/qemu`) attaches a `virtio-keyboard-device` and sends a key
@@ -157,7 +157,7 @@ event originating device-side rather than guest-side.
 
 The riscv64 `virt`-board sibling
 `tests/integration/input_virtio_mmio_qemu_riscv64`
-(`rustos-test-input-virtio-mmio-qemu-riscv64`, also enrolled in `cargo
+(`tairix-test-input-virtio-mmio-qemu-riscv64`, also enrolled in `cargo
 xtask test --qemu`) drives the same driver and the same shared
 `virtio_input_keypress` key-decode tail over the riscv64 MMIO bring-up
 (PLIC source + S-mode trap path), so a single driver source covers the
@@ -168,30 +168,30 @@ xtask test --qemu`) drives the same driver and the same shared
 
 `lib/virtio_input`'s `VirtioKeyboardConsole` is the keyboard producer half: it
 turns the `Key` `InputEvent` edges `poll` decodes (whose `code` is the raw
-`evdev` keycode) into the `rustos_abi::input::KeyInput` records a driver injects
+`evdev` keycode) into the `tairix_abi::input::KeyInput` records a driver injects
 through the `key_inject` syscall. It tracks the held modifiers (each of the
 eight modifier keys independently, collapsing the left/right pairs) and the
 caps-/num-lock toggles, resolves each printable or named key edge into the
 `Key` a US keyboard layout produces, and builds the record through the shared
-`rustos_keymap::key_input` map — the **one** `Key`→record definition the
+`tairix_keymap::key_input` map — the **one** `Key`→record definition the
 `lib/hid` USB console producer reaches too (`AGENTS.md` §2.2). The
 `evdev`-keycode→`Key` table is `evdev`-specific (a USB HID keyboard decodes HID
 usages into the same `Key` vocabulary), so it lives here; everything is
 allocation-free and fail-closed — an unknown keycode or a non-key event
 produces no record rather than guessing (`AGENTS.md` §2.9).
 
-#### The autoloaded driver binary (`rustos-drv-input-virtio-kbd`)
+#### The autoloaded driver binary (`tairix-drv-input-virtio-kbd`)
 
-`drivers/input/virtio_kbd` (`rustos-drv-input-virtio-kbd`, `src/main.rs`) is the
+`drivers/input/virtio_kbd` (`tairix-drv-input-virtio-kbd`, `src/main.rs`) is the
 autoloaded **user-space** virtio-input keyboard driver process — the "drivers in
 user space" steady state (`AGENTS.md` §4) on the hardware QEMU `-M virt`
-presents (the metal Pi 4 keyboard is the USB `rustos-drv-input-usb-kbd`). It is
-a freestanding pure-Rust `rustos-rt` program depending only on `lib/*`
+presents (the metal Pi 4 keyboard is the USB `tairix-drv-input-usb-kbd`). It is
+a freestanding pure-Rust `tairix-rt` program depending only on `lib/*`
 (`lib/virtio`, `lib/virtio_input`, `lib/drvrt`, `lib/rt`, `lib/caps`, `lib/abi`)
 so the §17.4 layering holds. `main` builds `RtDriverHost::from_grants_query`
 over its kernel-issued grants (coherency `None` — coherent DMA, platform-neutral
 §2.20), resolves its single granted register window with
-`rustos_abi::driver::sole_register_window` over `RtDriverHost::resources()` (the
+`tairix_abi::driver::sole_register_window` over `RtDriverHost::resources()` (the
 one definition shared with the USB keyboard driver, §2.2 / §2.16), maps it
 through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device up
 with `VirtioInput::open_armed`, and pumps `poll`, offering each decoded event to
@@ -214,14 +214,14 @@ capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); a bring-up
 failure exits with a reserved fail-closed code (`80`/`81`/`82`) and a hard
 device fault exits `83` rather than spinning on a broken device. It is a
 separate crate from the §8
-`rustos-drv-input-virtio-input` identity so it can link `rustos-rt` without
+`tairix-drv-input-virtio-input` identity so it can link `tairix-rt` without
 pulling it into the kernel-linked driver shell (`AGENTS.md` §2.2 — the `usb_kbd`
 analogue).
 
-### The autoloaded driver binary (`rustos-drv-input-usb-kbd`)
+### The autoloaded driver binary (`tairix-drv-input-usb-kbd`)
 
 The keyboard driver *process* is a **separate crate**,
-`drivers/input/usb_kbd` (`rustos-drv-input-usb-kbd`, `src/main.rs`): the
+`drivers/input/usb_kbd` (`tairix-drv-input-usb-kbd`, `src/main.rs`): the
 `devmgr`-autoloaded **user-space** keyboard **class driver**, installed as a
 signed `/System/Drivers/` bundle (`AGENTS.md` §18, `plans/USB.md` §1.2) — the
 "drivers in user space" steady state (`AGENTS.md` §4). It binds the
@@ -230,16 +230,16 @@ publishes for a HID boot-keyboard interface — never the controller node — an
 holds **no** controller register grant and **no** DMA grant: its matched
 node's only resources are the per-interface URB call endpoint and the shared
 report buffer (`AGENTS.md` §5.4 — least privilege). It is a pure-Rust
-`rustos-rt` program (`AGENTS.md` §1 / §16.4) whose HID boot-report decode
+`tairix-rt` program (`AGENTS.md` §1 / §16.4) whose HID boot-report decode
 lives in the shared [`lib/hid`](../lib/hid.md) crate, so the userland runtime
 never enters the kernel's dependency graph, and depends only on `lib/*`
 crates so the §17.4 layering holds. `main` builds
-`rustos_drvrt::RtDriverHost::from_grants_query` over its kernel-issued grants,
+`tairix_drvrt::RtDriverHost::from_grants_query` over its kernel-issued grants,
 takes the endpoint id and maps the shared buffer from them, wraps the
 `lib/usb` transport client in a `ReportSource` (`UrbReportSource`: each
 `next_report` submits an interrupt-IN URB and reads the completed report out
 of the shared buffer), and then pumps the keyboard forever with
-`rustos_hid::pump_once`, injecting each produced key record into the seat's
+`tairix_hid::pump_once`, injecting each produced key record into the seat's
 input routing through the `key_inject` syscall. Each pump is a blocking URB `ipc_call` the
 host-controller driver answers only when the controller's completion
 interrupt delivers a report, so the driver parks in the kernel between
@@ -252,9 +252,9 @@ image `/System/Drivers/` store and autoloaded by `devmgr` against the
 discovered HID interface node; QEMU models no Pi USB, so the live autoload +
 keystroke is the metal acceptance item (`plans/PI.md` §0.4).
 
-### The autoloaded driver binary (`rustos-drv-input-usb-mouse`)
+### The autoloaded driver binary (`tairix-drv-input-usb-mouse`)
 
-`drivers/input/usb_mouse` (`rustos-drv-input-usb-mouse`, `src/main.rs`) is the
+`drivers/input/usb_mouse` (`tairix-drv-input-usb-mouse`, `src/main.rs`) is the
 USB HID boot-**mouse** sibling of the keyboard class driver: the same signed
 `/System/Drivers/` bundle shape, the same least-privilege capability set
 (`CAP_INPUT_INJECT`, `CAP_SHM`, `CAP_IPC_ENDPOINT`, `CAP_LOG_EMIT` — no MMIO,
@@ -265,7 +265,7 @@ emits — a keyboard and a mouse plugged in together are each served by their
 own class driver over their own per-interface transport (the engine's
 concurrent-device table; see the `lib/usb`
 `bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together` regression).
-Each report is decoded through `rustos_hid::BootMouse` (button edges diffed
+Each report is decoded through `tairix_hid::BootMouse` (button edges diffed
 against the previous report, X/Y/wheel deltas), and every decoded event is
 translated by the one shared device→seat mapping
 `PointerInput::from_device_event` — the same mapping the virtio pointer path

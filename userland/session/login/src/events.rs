@@ -1,11 +1,11 @@
-//! Stable [`rustos_log::EventId`] constants emitted by `login`.
+//! Stable [`tairix_log::EventId`] constants emitted by `login`.
 //!
 //! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. Login occupies `10000..11000` (adjacent to
 //! PID 1's `9000..10000`). Once shipped the numeric values must never be
 //! re-used or re-numbered — external audit-log consumers rely on them.
 
-use rustos_log::EventId;
+use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `login` event identifiers.
 ///

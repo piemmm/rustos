@@ -7,14 +7,14 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::users_admin::{
+use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, gid_list_into, grant_list_into, AccountStateCode,
     CreateUser, ModifyUser, UsersAdminRequest,
 };
-use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_sync::SpinLock;
-use rustos_users::{
+use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_sync::SpinLock;
+use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, PasswordRecord, Salt, Uid, UserRecord,
     UsersDb, MIN_ITERATIONS, SALT_LEN,
 };
@@ -31,7 +31,7 @@ struct AdminCaller;
 
 impl CapabilityQuery for AdminCaller {
     fn holds(&self, cap: CapabilityId) -> bool {
-        rustos_users::administrator_ceiling().contains(cap)
+        tairix_users::administrator_ceiling().contains(cap)
     }
 }
 
@@ -40,7 +40,7 @@ struct BaselineCaller;
 
 impl CapabilityQuery for BaselineCaller {
     fn holds(&self, cap: CapabilityId) -> bool {
-        rustos_users::SESSION_BASELINE.contains(&cap)
+        tairix_users::SESSION_BASELINE.contains(&cap)
     }
 }
 
@@ -111,9 +111,9 @@ struct Fixture {
 /// databases installed into leaked live cells exactly as the boot path
 /// does.
 fn fixture() -> Fixture {
-    let admin_grants = rustos_users::administrator_ceiling();
+    let admin_grants = tairix_users::administrator_ceiling();
     let mut baseline = CapabilitySet::empty();
-    for cap in rustos_users::SESSION_BASELINE {
+    for cap in tairix_users::SESSION_BASELINE {
         baseline.insert(*cap);
     }
     let users = UsersDb::new(alloc::vec![

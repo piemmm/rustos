@@ -11,11 +11,11 @@
 //! is the *server* of a claimed reserved endpoint and the stack is the
 //! *client* — so any NIC driver serves any stack build (`AGENTS.md` §17.4).
 //!
-//! It is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt`, never the C ABI (which exists solely for
-//! non-Rust programs). `rustos-rt` provides `_start`, the per-process stack
+//! It is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt`, never the C ABI (which exists solely for
+//! non-Rust programs). `tairix-rt` provides `_start`, the per-process stack
 //! canary, the panic handler, the allocator, and the syscall wrappers;
-//! `rustos_rt::entry!` names this program's `main`. It links no `drivers/*`
+//! `tairix_rt::entry!` names this program's `main`. It links no `drivers/*`
 //! crate — the virtio-MMIO transport and the virtio-net device engine are
 //! `lib/*` crates — so the layering holds and the kernel never pulls the
 //! userland runtime into its graph.
@@ -57,25 +57,25 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::driver::net::Net;
-    use rustos_abi::driver::net_channel::{
+    use tairix_abi::driver::net::Net;
+    use tairix_abi::driver::net_channel::{
         is_net_channel_endpoint, NetChannelNotify, NetChannelRequest, NET_CHANNEL_ENDPOINT_BASE,
         NET_CHANNEL_MAX_REPLY, NET_CHANNEL_MAX_REQUEST,
     };
-    use rustos_abi::driver::sole_register_window;
-    use rustos_abi::driver::virtio::VirtioHost;
-    use rustos_abi::hwtree::HW_NODE_ROOT;
-    use rustos_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-    use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use rustos_abi::{
+    use tairix_abi::driver::sole_register_window;
+    use tairix_abi::driver::virtio::VirtioHost;
+    use tairix_abi::hwtree::HW_NODE_ROOT;
+    use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::{
         CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, MmioMapper,
     };
-    use rustos_caps::CapabilitySet;
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_log::{log, Event, EventId, Level};
-    use rustos_rt::LogSink;
-    use rustos_virtio::MmioTransport;
-    use rustos_virtio_net::{NetChannelServer, VirtioNet};
+    use tairix_caps::CapabilitySet;
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_log::{log, Event, EventId, Level};
+    use tairix_rt::LogSink;
+    use tairix_virtio::MmioTransport;
+    use tairix_virtio_net::{NetChannelServer, VirtioNet};
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
@@ -168,7 +168,7 @@ mod program {
         let recv_caps = CapabilitySet::empty();
         let mut id = NET_CHANNEL_ENDPOINT_BASE;
         while is_net_channel_endpoint(id) {
-            let bound = rustos_rt::call_create(
+            let bound = tairix_rt::call_create(
                 id,
                 &send_caps,
                 &recv_caps,
@@ -191,10 +191,10 @@ mod program {
     /// kernel-assigned node id, or [`None`] on any refusal.
     fn emit_netchan_node(endpoint: u64) -> Option<u32> {
         let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Network);
-        let key = HwMatchKey::compatible(b"rustos,netchan").ok()?;
+        let key = HwMatchKey::compatible(b"tairix,netchan").ok()?;
         node.push_match_key(key).ok()?;
         node.push_resource(HwResource::endpoint(endpoint)).ok()?;
-        let emit = rustos_rt::hw_emit_node(&node);
+        let emit = tairix_rt::hw_emit_node(&node);
         if emit < 0 {
             return None;
         }
@@ -205,7 +205,7 @@ mod program {
     /// This driver's mapping of one shared frame region granted by the stack
     /// in `Attach`.
     struct Region {
-        /// Base virtual address of the [`shm_map`](rustos_rt::shm_map)ping.
+        /// Base virtual address of the [`shm_map`](tairix_rt::shm_map)ping.
         base: u64,
         /// Full mapped byte length — page-rounded by the kernel, so possibly
         /// larger than the ring geometry — released verbatim by the matching
@@ -217,7 +217,7 @@ mod program {
         bytes: &'static mut [u8],
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// On success this never returns: the device-channel serve loop runs for
@@ -250,7 +250,7 @@ mod program {
         // audited readiness witness, issued once the device is live: a driver
         // that cannot bind it must exit rather than degrade into a busy
         // re-poll.
-        let irq_ret = rustos_rt::irq_bind(irq_line);
+        let irq_ret = tairix_rt::irq_bind(irq_line);
         if irq_ret <= 0 {
             return EXIT_BRINGUP_FAILED;
         }
@@ -264,20 +264,20 @@ mod program {
             return EXIT_NO_SERVICE;
         }
 
-        let set = rustos_rt::waitset_create();
+        let set = tairix_rt::waitset_create();
         if set < 0 {
             return EXIT_NO_SERVICE;
         }
         #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
         let set = set as u64;
-        if rustos_rt::waitset_ctl(
+        if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Endpoint,
             endpoint,
             CALL_TOKEN,
         ) != 0
-            || rustos_rt::waitset_ctl(
+            || tairix_rt::waitset_ctl(
                 set,
                 WaitSetOp::Add,
                 WaitSourceKind::Irq,
@@ -309,7 +309,7 @@ mod program {
         let mut request = [0u8; NET_CHANNEL_MAX_REQUEST];
         loop {
             let mut token = 0u64;
-            let woke = rustos_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+            let woke = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
             if woke < 0 {
                 return EXIT_NO_SERVICE;
             }
@@ -333,7 +333,7 @@ mod program {
     fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>) {
         server.net_mut().ack_interrupt();
         if let Some(notify_endpoint) = server.notify_endpoint() {
-            let _ = rustos_rt::ipc_send(notify_endpoint, &NetChannelNotify::encode());
+            let _ = tairix_rt::ipc_send(notify_endpoint, &NetChannelNotify::encode());
         }
     }
 
@@ -349,17 +349,17 @@ mod program {
         region: &mut Option<Region>,
     ) {
         let mut ticket = 0u64;
-        let Ok(request_len) = rustos_rt::call_recv(endpoint, request, &mut ticket) else {
+        let Ok(request_len) = tairix_rt::call_recv(endpoint, request, &mut ticket) else {
             return;
         };
         match NetChannelRequest::decode(&request[..request_len]) {
             Ok(NetChannelRequest::Facts) => {
                 let reply = server.facts_reply();
-                let _ = rustos_rt::call_reply(endpoint, ticket, &reply);
+                let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
             }
             Ok(NetChannelRequest::Attach(params)) => {
                 let status = attach(server, params, region);
-                let _ = rustos_rt::call_reply(endpoint, ticket, &status);
+                let _ = tairix_rt::call_reply(endpoint, ticket, &status);
             }
             Ok(NetChannelRequest::Service) => {
                 let reply = match region.as_mut() {
@@ -368,17 +368,17 @@ mod program {
                     // `NotConnected` before it ever touches the slice.
                     None => server.service_reply(&mut []),
                 };
-                let _ = rustos_rt::call_reply(endpoint, ticket, &reply);
+                let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
             }
             Ok(NetChannelRequest::Detach) => {
                 let reply = server.detach();
                 if let Some(region) = region.take() {
-                    let _ = rustos_rt::shm_unmap(region.base, region.len);
+                    let _ = tairix_rt::shm_unmap(region.base, region.len);
                 }
-                let _ = rustos_rt::call_reply(endpoint, ticket, &reply);
+                let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
             }
             Err(err) => {
-                let _ = rustos_rt::call_reply(endpoint, ticket, &encode_status_reply(Err(err)));
+                let _ = tairix_rt::call_reply(endpoint, ticket, &encode_status_reply(Err(err)));
             }
         }
     }
@@ -389,15 +389,15 @@ mod program {
     /// attach never half-binds).
     fn attach<N: Net>(
         server: &mut NetChannelServer<N>,
-        params: rustos_abi::driver::net_channel::AttachParams,
+        params: tairix_abi::driver::net_channel::AttachParams,
         region: &mut Option<Region>,
     ) -> [u8; STATUS_REPLY_LEN] {
         // A re-attach without a prior detach releases the old mapping first.
         if let Some(previous) = region.take() {
-            let _ = rustos_rt::shm_unmap(previous.base, previous.len);
+            let _ = tairix_rt::shm_unmap(previous.base, previous.len);
         }
         let mut len_out = 0u64;
-        let mapped = rustos_rt::shm_map(params.region_grant, &mut len_out);
+        let mapped = tairix_rt::shm_map(params.region_grant, &mut len_out);
         if mapped < 0 {
             return encode_status_reply(Err(errno_from(mapped)));
         }
@@ -416,7 +416,7 @@ mod program {
         };
         let expected = params.geometry.region_len();
         if map_len < expected {
-            let _ = rustos_rt::shm_unmap(base, map_len);
+            let _ = tairix_rt::shm_unmap(base, map_len);
             return encode_status_reply(Err(Errno::BufferTooSmall));
         }
         // SAFETY: `shm_map` mapped `map_len` bytes (>= `expected`, verified
@@ -441,18 +441,18 @@ mod program {
         } else {
             // The server refused (geometry too small for the device); drop the
             // mapping it will never use.
-            let _ = rustos_rt::shm_unmap(base, map_len);
+            let _ = tairix_rt::shm_unmap(base, map_len);
         }
         status
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

@@ -52,7 +52,7 @@ pub const PART_TYPE_UNUSED: u8 = 0x00;
 pub const MBR_SECTOR_LEN: usize = 512;
 
 /// Byte offset of the first 16-byte primary-partition entry in the MBR
-/// sector. The 446 bytes before it hold the (unused, on RustOS) bootstrap
+/// sector. The 446 bytes before it hold the (unused, on TAIRiX) bootstrap
 /// code area.
 pub const PARTITION_TABLE_OFFSET: usize = 446;
 
@@ -191,7 +191,7 @@ fn raw_from_partition(part: &Partition) -> Result<RawExtent, MbrError> {
 ///
 /// The legacy CHS fields are set to the `0xFF` "CHS invalid, use LBA"
 /// convention modern firmware and kernels expect; the bootable flag is
-/// left clear (nothing in RustOS consumes it). Extents are validated by
+/// left clear (nothing in TAIRiX consumes it). Extents are validated by
 /// `validate_extents` first.
 ///
 /// # Errors
@@ -216,7 +216,7 @@ pub fn encode(parts: &[Partition]) -> Result<[u8; MBR_SECTOR_LEN], MbrError> {
     for (i, p) in raw.iter().enumerate() {
         let base = PARTITION_TABLE_OFFSET + i * PARTITION_ENTRY_LEN;
         let entry = &mut sector[base..base + PARTITION_ENTRY_LEN];
-        // Status byte: 0x00 (inactive); RustOS firmware ignores it.
+        // Status byte: 0x00 (inactive); TAIRiX firmware ignores it.
         entry[0] = 0x00;
         // Starting CHS (bytes 1..=3): the all-ones "use LBA" convention.
         entry[1] = 0xff;

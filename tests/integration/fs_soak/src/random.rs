@@ -25,8 +25,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rustos_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
-use rustos_abi::DriverError;
+use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
+use tairix_abi::DriverError;
 
 use crate::{RamBlock, SoakFs};
 

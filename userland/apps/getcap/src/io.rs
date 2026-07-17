@@ -8,7 +8,7 @@
 //! and `mv`'s `FileSystem`, `chmod`'s and `chown`'s `FileSystem`).
 
 use alloc::string::String;
-use rustos_abi::{CapabilityId, Errno};
+use tairix_abi::{CapabilityId, Errno};
 
 /// What kind of object a path or directory entry is, as far as `getcap`
 /// cares.

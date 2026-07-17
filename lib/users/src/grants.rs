@@ -34,8 +34,8 @@
 //! administrator administers the system; they do not impersonate its
 //! services.
 
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
 
 /// The session baseline: the class capabilities every interactive
 /// account's ceiling must include for an ordinary session to work.

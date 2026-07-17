@@ -5,7 +5,7 @@
 # standard streams (the tool writes formatted data and diagnostics and
 # never prompts); CAP_FS_ACCESS covers reading its own bundle's Help/
 # documents through the secured VFS.
-id = "os.rustos.printf"
+id = "os.tairix.printf"
 name = "printf"
 version = "0.1.0"
 kind = "command"

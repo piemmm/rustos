@@ -33,8 +33,8 @@ fn user_rw() -> MapFlags {
 /// the audit module).
 struct NullSink;
 
-impl rustos_log::Sink for NullSink {
-    fn write_event(&self, _event: &rustos_log::Event<'_>) {}
+impl tairix_log::Sink for NullSink {
+    fn write_event(&self, _event: &tairix_log::Event<'_>) {}
 }
 
 static NULL_SINK: NullSink = NullSink;

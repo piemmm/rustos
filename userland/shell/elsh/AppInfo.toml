@@ -6,7 +6,7 @@
 # REPL, spawn for launching commands, and filesystem access for the
 # working-directory and redirection seams — not the wider account
 # baseline, whose graphical-session class the shell never exercises.
-id = "os.rustos.elsh"
+id = "os.tairix.elsh"
 name = "elsh"
 version = "0.1.0"
 kind = "command"

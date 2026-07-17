@@ -1,5 +1,5 @@
 //! `plans/STRESSTEST.md` ST5 QEMU integration test: boot the *production*
-//! aarch64 `rustos-kernel` pipeline on the `virt` board with the planted
+//! aarch64 `tairix-kernel` pipeline on the `virt` board with the planted
 //! whole-disk encrypted-root image, log in as the seeded `root` account,
 //! run the reported oversubscribed detached **`stress`** command under its full
 //! 120-second timeout, and prove the shell and `sysmon` remain interactive
@@ -62,10 +62,10 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_log::{Event, EventId, FieldValue, Sink};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::boot as boot_aarch64;
+    use tairix_log::{Event, EventId, FieldValue, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -161,12 +161,12 @@ mod kernel {
     /// finisher parks the CPU, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_stress_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_stress_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt`
     /// blob's address is forwarded to the production boot pipeline with the
@@ -181,8 +181,8 @@ mod kernel {
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; this observer counts it, so boot
             // with the filter lowered.
-            rustos_log::Level::Debug,
-            &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
+            tairix_log::Level::Debug,
+            &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }
 }

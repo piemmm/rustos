@@ -1,9 +1,9 @@
-# `rustos-sysconfig` — the boot-time system-configuration store engine
+# `tairix-sysconfig` — the boot-time system-configuration store engine
 
-`lib/sysconfig` is the single definition of RustOS's administrator-settable
+`lib/sysconfig` is the single definition of TAIRiX's administrator-settable
 boot-time configuration store: the document at
 `/System/Settings/Configuration/system.conf`
-(`rustos_sysconfig::CONFIG_PATH`). It owns the line grammar, the **closed**
+(`tairix_sysconfig::CONFIG_PATH`). It owns the line grammar, the **closed**
 key registry, each key's typed value set, the bounded fail-closed parser,
 and the canonical render. The `configure` command app
 (`userland/apps/configure`) writes the store through this engine and every

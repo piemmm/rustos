@@ -20,21 +20,21 @@
 //!
 //! A plain `cargo test` runs the [`ITERATIONS`] sweep once from a fresh, logged
 //! seed. When
-//! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
+//! `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing fresh `(syscall, RawArgs)` pairs from the *same continuing*
 //! PRNG stream until the budget elapses — the "run each harness for its
 //! wall-clock budget" contract — while the logged seed keeps any crash reproducible.
 
 use core::cell::RefCell;
-use rustos_abi::{
+use tairix_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, RandomFlags,
     SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
     FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
 };
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
-use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
-use rustos_log::{set_max_level, Event, Level, Sink};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
+use tairix_log::{set_max_level, Event, Level, Sink};
 
 /// Iteration count of one sweep. Pinned at 100 000 to match the
 /// abi-decode fuzz harness in `lib/abi/tests/fuzz_decode.rs` (Stage 1).
@@ -211,7 +211,7 @@ impl SyscallHandlers for AcceptingHandlers {
         &self,
         _c: &CallerContext<'_>,
         _pid: i32,
-        _signal: rustos_abi::Signal,
+        _signal: tairix_abi::Signal,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -219,7 +219,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn signal_intake(
         &self,
         _c: &CallerContext<'_>,
-        _op: rustos_abi::SignalIntakeOp,
+        _op: tairix_abi::SignalIntakeOp,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -395,7 +395,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _buf: u64,
         _buf_cap: usize,
         _ticket_out: u64,
-        _flags: rustos_abi::CallRecvFlags,
+        _flags: tairix_abi::CallRecvFlags,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -776,7 +776,7 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     // `CallRecvFlags::from_bits`, which rejects any reserved bit (the only
     // defined bit today is `NON_BLOCKING`). Mirror that here.
     if spec.number == SyscallNumber::CALL_RECV {
-        let allowed = u64::from(rustos_abi::CallRecvFlags::NON_BLOCKING.bits());
+        let allowed = u64::from(tairix_abi::CallRecvFlags::NON_BLOCKING.bits());
         if args[4] & !allowed != 0 {
             return false;
         }
@@ -807,7 +807,7 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     // closed signal set (including the reserved 0). Mirror that here.
     if spec.number == SyscallNumber::SIGNAL {
         let raw = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if rustos_abi::Signal::from_u32(raw).is_err() {
+        if tairix_abi::Signal::from_u32(raw).is_err() {
             return false;
         }
     }
@@ -817,7 +817,7 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
     // closed op set. Mirror that here.
     if spec.number == SyscallNumber::SIGNAL_INTAKE {
         let raw = u32::try_from(args[0] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if rustos_abi::SignalIntakeOp::from_u32(raw).is_err() {
+        if tairix_abi::SignalIntakeOp::from_u32(raw).is_err() {
             return false;
         }
     }
@@ -911,7 +911,7 @@ fn arg_is_well_typed(ty: AbiType, raw: u64) -> bool {
         // value verbatim on a 64-bit host — the dispatcher's
         // `usize::try_from` for Len is infallible there.
         AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint | AbiType::Len => true,
-        AbiType::Cap => raw >> 16 == 0 && raw <= u64::from(rustos_abi::CAPABILITY_ID_MAX),
+        AbiType::Cap => raw >> 16 == 0 && raw <= u64::from(tairix_abi::CAPABILITY_ID_MAX),
         AbiType::UserPtr => raw != 0,
         AbiType::Errno => false,
     }
@@ -942,13 +942,13 @@ fn fuzz_dispatcher_matches_mirror() {
         caps: &caps,
     };
 
-    let mut rng = Rng::new(rustos_fuzzseed::start(
+    let mut rng = Rng::new(tairix_fuzzseed::start(
         "fuzz_dispatcher_matches_mirror",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut accepted = 0u64;
     let mut rejected = 0u64;
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..ITERATIONS {
             // Bias the syscall number towards the populated range so the
@@ -1025,7 +1025,7 @@ fn fuzz_dispatcher_matches_mirror() {
                 ));
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }
@@ -1054,7 +1054,7 @@ fn benign_non_ptr_value() -> u64 {
 ///
 /// The architecture-neutral dispatcher cannot itself reject a kernel-
 /// range or non-canonical user pointer (canonicality is an x86_64
-/// property; that check is `rustos_arch_x86_64::syscall_entry::
+/// property; that check is `tairix_arch_x86_64::syscall_entry::
 /// validate_user_buffer`, exercised at the `copy_from_user` boundary in
 /// Stage 6). What it *must* uphold today is the null rejection
 /// (`Errno::BadAlignment`) and the no-panic / no-spurious-success

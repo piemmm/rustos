@@ -6,13 +6,13 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::stdinfo::{Human, StdInfoKind, StdInfoRecord};
-use rustos_abi::{Errno, BUNDLE_SUFFIX};
-use rustos_cmdres::{bundle_candidates, search_roots};
-use rustos_help::{load_raw, DocumentName, Fallback, LoadError, Locale, RawLoaded};
-use rustos_log::Sink;
-use rustos_sandbox::helpdoc::{render_help, HelpRefusal, HelpRenderFailure, RenderMode};
-use rustos_sandbox::host::{Launcher, ParserSandbox};
+use tairix_abi::stdinfo::{Human, StdInfoKind, StdInfoRecord};
+use tairix_abi::{Errno, BUNDLE_SUFFIX};
+use tairix_cmdres::{bundle_candidates, search_roots};
+use tairix_help::{load_raw, DocumentName, Fallback, LoadError, Locale, RawLoaded};
+use tairix_log::Sink;
+use tairix_sandbox::helpdoc::{render_help, HelpRefusal, HelpRenderFailure, RenderMode};
+use tairix_sandbox::host::{Launcher, ParserSandbox};
 
 use crate::command::Command;
 use crate::error::ManError;
@@ -70,7 +70,7 @@ pub struct Request<'a> {
 ///
 /// The help document is untrusted foreign-bundle input, so it is never
 /// parsed in this process: the raw bytes go to the sandboxed worker
-/// (`rustos_sandbox::helpdoc`) and only the whitelist-validated render
+/// (`tairix_sandbox::helpdoc`) and only the whitelist-validated render
 /// comes back. The `Run` binary passes the production `RtLauncher`
 /// sandbox; host tests pass an in-process loopback one.
 ///
@@ -295,7 +295,7 @@ fn emit_fallback_record(console: &dyn Console, requested: &Locale, raw: &RawLoad
         "man",
         StdInfoKind::Context,
         "help.locale_fallback",
-        rustos_abi::stdinfo::Severity::Info,
+        tairix_abi::stdinfo::Severity::Info,
         Human::message(&message),
     )
     .with_ai(&ai);

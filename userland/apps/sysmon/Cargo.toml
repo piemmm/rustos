@@ -1,6 +1,6 @@
 [package]
-name = "rustos-sysmon"
-description = "RustOS `sysmon`: a live, fullscreen kernel-memory and load monitor over the System Information API, drawn with the OS curses library (§3 `userland/apps/` — `plans/STRESSTEST.md` ST4)."
+name = "tairix-sysmon"
+description = "TAIRiX `sysmon`: a live, fullscreen kernel-memory and load monitor over the System Information API, drawn with the OS curses library (§3 `userland/apps/` — `plans/STRESSTEST.md` ST4)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,67 +11,67 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-top`. `cargo build
-# -p rustos-sysmon` builds the tool program with it; host tooling builds only
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-top`. `cargo build
+# -p tairix-sysmon` builds the tool program with it; host tooling builds only
 # the request/render *library*, so the host test build never pulls the
 # userland runtime's `_start` / `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-sysmon` monitor library (below) and the
+# The package is both the `tairix-sysmon` monitor library (below) and the
 # `Run` entry-point binary of the `sysmon` tool. The binary is a freestanding
 # pure-Rust program on the native Tier-1 targets and an inert host stub
 # elsewhere (see `src/run.rs`).
 [[bin]]
-name = "rustos-sysmon-run"
+name = "tairix-sysmon-run"
 path = "src/run.rs"
 
 [dependencies]
 # The frozen `Errno` plus the `sysinfo-v1` statistics records the monitor
 # renders; `sysmon` invents no parallel error set (§2.2) and never links a
 # kernel or driver crate (§17.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the request/response
 # seams, the capability-aware call mapping, the process/CPU-time paging
 # walks, and the shared kernel-statistics fetches (`kstats`) this monitor
 # consumes rather than duplicating (§2.2, §16.6).
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The OS-provided Terminal/TUI library (§16.4): the curses screen model,
 # minimal-diff renderer, and typed input. `sysmon` draws through it instead
 # of emitting escape sequences by hand (§2.2).
-rustos-curses = { path = "../../../lib/curses", version = "=0.0.0" }
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 # The closed `TermType` set the screen driver is configured with (the honest
 # terminal the session advertises).
-rustos-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
+tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
 # The shared escape/attribute vocabulary: `sysmon` styles cells with
-# `rustos_vt::Attributes`/`Color`, the one vocabulary the renderer emits
+# `tairix_vt::Attributes`/`Color`, the one vocabulary the renderer emits
 # (§2.2).
-rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md §4, §6).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, syscall/`ipc_call`
 # wrappers, `terminal_size`, `mem_pin`, and the input-mode control) and the
 # production `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`),
-# enabled through `rustos-procinfo`'s own `program` feature. Both are pulled
+# enabled through `tairix-procinfo`'s own `program` feature. Both are pulled
 # in only for the bare-metal targets the program is actually built for; on
 # the host neither is linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }
 # The freestanding `Run` binary also enables the curses library's shared
 # standard-streams `Tty` (`StreamTty`), the one channel definition every
 # full-screen tool links instead of a per-app copy.
-rustos-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
     "program",
 ] }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
 # own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

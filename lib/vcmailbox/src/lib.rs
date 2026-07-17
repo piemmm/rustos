@@ -1,4 +1,4 @@
-//! RustOS BCM2711 `VideoCore` firmware mailbox property-channel client.
+//! TAIRiX BCM2711 `VideoCore` firmware mailbox property-channel client.
 //!
 //! The Raspberry Pi's GPU firmware owns the display pipeline until the
 //! ARM side asks for a framebuffer over the **mailbox property
@@ -37,9 +37,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::display::DisplayFormat;
-use rustos_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS;
-use rustos_abi::{DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
+use tairix_abi::driver::display::DisplayFormat;
+use tairix_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS;
+use tairix_abi::{DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
 
 #[cfg(test)]
 mod tests;
@@ -120,7 +120,7 @@ impl MailboxError {
 /// six tags, end tag, padded to a 16-byte multiple).
 ///
 /// This is the same `VideoCore` property-channel width the host↔driver
-/// [`MailboxChannel`](rustos_abi::driver::mailbox::MailboxChannel) seam
+/// [`MailboxChannel`](tairix_abi::driver::mailbox::MailboxChannel) seam
 /// transports, so it is defined once in `lib/abi` and re-used here rather
 /// than duplicated.
 pub const PROPERTY_WORDS: usize = MAILBOX_PROPERTY_WORDS;
@@ -737,7 +737,7 @@ pub fn query_firmware_revision(transport: &mut dyn MailboxTransport) -> Result<u
 ///
 /// Public so the VL805 device driver (`drivers/bus/usb/vl805`) can build
 /// the firmware-reload message and run it over the board-neutral
-/// [`MailboxChannel`](rustos_abi::driver::mailbox::MailboxChannel) seam
+/// [`MailboxChannel`](tairix_abi::driver::mailbox::MailboxChannel) seam
 /// without re-deriving the property layout (one
 /// definition, shared by [`notify_xhci_reset`] and the driver).
 #[must_use]

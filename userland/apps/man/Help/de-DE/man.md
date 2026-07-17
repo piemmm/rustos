@@ -11,7 +11,7 @@ man — das Hilfedokument eines Befehls anzeigen
 Zeigt das Hilfedokument an, das das Anwendungspaket eines Befehls
 mitliefert — in Ihrer Sprache, sofern eine Übersetzung existiert.
 
-Jedes RustOS-Programm ist ein Anwendungspaket mit einem `Help/`-Baum: ein
+Jedes TAIRiX-Programm ist ein Anwendungspaket mit einem `Help/`-Baum: ein
 strukturiertes Dokument je Befehl oder Thema, je Sprache. `man` löst
 `<command>` genau wie die Shell auf — zuerst der System-App-Store, dann
 die Verzeichnisse in `PATH` — die angezeigte Seite dokumentiert also immer

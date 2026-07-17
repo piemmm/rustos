@@ -132,7 +132,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // (modern, virtio-1.0+) device: it reports PCI device id 0x1042
     // (`0x1040 + virtio-blk`) and exposes its registers exclusively
     // through the virtio-1.x PCI capability layout the boot walk decodes
-    // (`rustos_kernel::provision_virtio_pci`). Without it QEMU's default
+    // (`tairix_kernel::provision_virtio_pci`). Without it QEMU's default
     // `pc`/`q35` machine presents a *transitional* device (id 0x1001) on
     // the legacy PCI bus, which the modern-only walk would not match.
     for (i, dev) in spec.block_devices.iter().enumerate() {

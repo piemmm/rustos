@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::Path;
 
-use rustos_crypto::{sha256, SHA256_OUTPUT_LEN};
+use tairix_crypto::{sha256, SHA256_OUTPUT_LEN};
 
 use crate::MkimageError;
 
@@ -262,7 +262,7 @@ mod tests {
     /// Write `blobs` into a fresh unique temp dir and return its path.
     fn stage(blobs: &[(&str, &[u8])], tag: &str) -> std::path::PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("rustos-mkimage-fw-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tairix-mkimage-fw-{tag}-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp firmware dir");
         for (name, bytes) in blobs {
             let path = dir.join(name);

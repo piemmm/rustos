@@ -7,9 +7,9 @@
 //! module only places that image on screen and samples it during
 //! recomposition.
 //!
-//! [`CursorImage`]: rustos_cursor::CursorImage
+//! [`CursorImage`]: tairix_cursor::CursorImage
 
-use rustos_cursor::CursorImage;
+use tairix_cursor::CursorImage;
 
 use crate::color::Pixel;
 use crate::geometry::{Point, Rect};

@@ -1,6 +1,6 @@
 # USB.md — Modular USB stack and device hot-removal
 
-This is the staged build plan for RustOS's **modular USB stack**: a clean
+This is the staged build plan for TAIRiX's **modular USB stack**: a clean
 split between the host-controller driver, the per-device class drivers, and
 the device manager's hot-removal reaction. It is the continuation of the
 Design-D device-manager work in `plans/PI.md` (the user-space autoload chain
@@ -46,7 +46,7 @@ process means:
   xHCI controller. A class driver must not know *which* controller (or bus —
   the same device class can appear behind a different host controller, or on a
   non-PCIe transport), and a controller driver must not know *which* class
-  drivers exist. RustOS may carry several controller drivers and several class
+  drivers exist. TAIRiX may carry several controller drivers and several class
   drivers; none may be wired to a specific sibling.
 
 `drivers/bus/usb/xhci` already exists as the intended HCD crate, but it is
@@ -135,7 +135,7 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 - It owns **no** controller register and carves **no** controller DMA. It
   submits interrupt-IN transfers (URBs) for its interface and reaps completions
   over the URB transport IPC (§1.3), decoding each HID boot report through the
-  arch-neutral `rustos_hid` composition and injecting keystrokes through the
+  arch-neutral `tairix_hid` composition and injecting keystrokes through the
   existing `key_inject` syscall.
 - It knows neither the controller type nor the bus: the same binary would work
   unchanged behind a different host controller, because it speaks only the
@@ -277,7 +277,7 @@ the live controller behaviour is host- and CI-proven first.
     + `HwResource::endpoint(id)` is the per-endpoint grant (its `base` is the
     call-endpoint id, `covers` is exact-id containment like an IRQ line, its
     required capability is `IPC_ENDPOINT`). The C header regenerated
-    (`ROS_CAP_IPC_ENDPOINT`).
+    (`TAIRIX_CAP_IPC_ENDPOINT`).
   - A *grant-restricted* endpoint is one whose required send caps include
     `CAP_IPC_ENDPOINT`. `call_create` mints the creator the matching
     `HwResource::endpoint(id)` grant when it binds such an endpoint, so the
@@ -292,7 +292,7 @@ the live controller behaviour is host- and CI-proven first.
     denied-without-grant, and round-trips-with-grant).
 - **U3a2 — cross-process shared-memory primitive `[x]` (DONE).** The URB data
   path needs a shared-memory buffer the class driver owns and the HCD maps
-  (§1.3); RustOS had only per-process `mem_map`. The kernel now provides a
+  (§1.3); TAIRiX had only per-process `mem_map`. The kernel now provides a
   generic, capability- and grant-scoped shared-memory primitive (Option B:
   the buffer is plain cacheable RAM with **no** DMA properties, so a class
   driver holds zero DMA authority and the HCD will bounce-copy into its own
@@ -301,7 +301,7 @@ the live controller behaviour is host- and CI-proven first.
     (6) + `HwResource::shared(id)` is the per-region grant (exact-id `covers`
     like the endpoint grant, required capability `SHM`). Three syscalls
     `shm_create` (40) / `shm_map` (41) / `shm_unmap` (42); C header
-    regenerated (`ROS_CAP_SHM`, `ros_sys_shm_*`).
+    regenerated (`TAIRIX_CAP_SHM`, `tairix_sys_shm_*`).
   - `shm_create` allocates a physically-contiguous, **zeroed** kernel-owned
     region, maps it cacheable `RW`/non-exec/guard-bracketed into the caller's
     own live space (a fourth per-task window beside MMIO/anon/DMA, reusing the
@@ -326,7 +326,7 @@ the live controller behaviour is host- and CI-proven first.
 - **U3a3 — wait-set multi-event wait primitive `[x]` (DONE).** The HCD is a
   single async event loop (§1.1) that must wake on *either* an incoming URB
   IPC call *or* its controller interrupt, for arbitrarily many interfaces.
-  RustOS had no multi-source wait (`call_recv` parks on one endpoint,
+  TAIRiX had no multi-source wait (`call_recv` parks on one endpoint,
   `irq_wait` on one line), and after the split the class driver holds no
   controller IRQ to park on — so without this it could only busy-poll
   (forbidden, §2.23) or block one interface behind another. The kernel now
@@ -361,7 +361,7 @@ the live controller behaviour is host- and CI-proven first.
     `lib/rt`/`lib/drvrt` wrappers + a QEMU vertical land with U3b (the first
     consumer); not added speculatively (§2.4).
 - **U3b — xHCI HCD process `[x]` (DONE, live path metal-only).**
-  `drivers/bus/usb/xhci` (`rustos-drv-bus-usb`) is now a `lib`+`Run`-binary
+  `drivers/bus/usb/xhci` (`tairix-drv-bus-usb`) is now a `lib`+`Run`-binary
   crate: it binds `usb,xhci` (`BIND_KEYS = compatible(XHCI_COMPATIBLE)`, the
   role `lib/hid::KEYBOARD_BIND_KEYS` held), owns the controller, enumerates,
   emits one per-interface node, and serves the URB transport. The host-testable
@@ -852,7 +852,7 @@ the live controller behaviour is host- and CI-proven first.
   sibling of `usb_kbd`: a `lib`+`Run` crate binding the boot-mouse interface
   key (`HwMatchKey::usb(0,0,0x03_01_02)`), same least-privilege caps
   (`CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/`CAP_LOG_EMIT`), pumping
-  blocking interrupt-IN URBs through `rustos_hid::BootMouse` and injecting
+  blocking interrupt-IN URBs through `tairix_hid::BootMouse` and injecting
   each decoded event through the one shared `PointerInput::from_device_event`
   mapping → `pointer_inject` (scroll ticks decode but are not injected — no
   pointer-record scroll consumer exists yet). `NotFound` exits for reload;

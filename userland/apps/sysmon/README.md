@@ -11,7 +11,7 @@ is quiescent between refreshes at idle.
 
 ## Shape
 
-The crate is both the `rustos-sysmon` monitor library and the `Run`
+The crate is both the `tairix-sysmon` monitor library and the `Run`
 entry-point binary of the `sysmon.app` bundle:
 
 - `src/command.rs` — the GNU `-d`/`--delay` grammar (via the shared

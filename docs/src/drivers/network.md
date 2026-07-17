@@ -2,7 +2,7 @@
 
 Link-layer drivers move raw Ethernet (or equivalent) frames and report
 device facts. They implement
-[`rustos_abi::driver::net::Net`](../abi/driver_traits.md). Higher
+[`tairix_abi::driver::net::Net`](../abi/driver_traits.md). Higher
 layers (ARP, IP, ICMP, …) live in the user-space `netstack` service
 above this trait (`plans/NETWORK.md`) and are out of scope for the
 driver class.
@@ -26,7 +26,7 @@ allocation.
 ## The frame-ring transport
 
 Frame I/O is the shared-memory frame-ring transport
-(`rustos_abi::driver::net_ring`): the stack owns a `FrameRings` pair —
+(`tairix_abi::driver::net_ring`): the stack owns a `FrameRings` pair —
 queued transmits in `tx`, delivered frames in `rx` — and hands it to
 `service`, the single doorbell that moves frames both ways. The rings
 are mutated only *inside* the `service` call, so the call boundary is
@@ -57,7 +57,7 @@ cannot wedge the queue behind it.
 When the driver and the stack are separate processes — the true
 microkernel shape — the `service` doorbell and the `FrameRings` region
 are bridged by the versioned IPC control-plane contract
-`rustos_abi::driver::net_channel` (`netchan-v1`). The driver owns the
+`tairix_abi::driver::net_channel` (`netchan-v1`). The driver owns the
 device and serves a call endpoint; the stack is the client that owns the
 region. This is the display service's `shm_grant` handoff with the roles
 inverted and frames flowing both ways:
@@ -96,7 +96,7 @@ region itself; that remains the stack's responsibility.
 
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
-| [virtio-net](./virtio.md) | `rustos-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; no offloads negotiated yet |
+| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; no offloads negotiated yet |
 
 The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
 so a user-space **driver process** can link it without depending on a
@@ -109,7 +109,7 @@ discovered `netchan` node to `netstack` (`plans/NETWORK.md` N4d).
 
 The netstack QEMU verticals (`tests/integration/netstack_*`) drive a
 live emulated device end to end through the ring transport — the
-`rustos-netstack` engine answers the harness peer's ARP/NS resolution
+`tairix-netstack` engine answers the harness peer's ARP/NS resolution
 and v4+v6 echo campaign, then resolves and pings the peer over both
 families. The single-process `netstack_mmio_*` / `netstack_pci_*`
 verticals run the in-kernel scaffold; the **two-process** form is live

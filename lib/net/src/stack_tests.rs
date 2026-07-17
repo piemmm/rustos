@@ -22,7 +22,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
         mac,
         mtu: 1500,
         link: LinkState::Up,
-        offloads: rustos_abi::driver::net::NetOffloads::empty(),
+        offloads: tairix_abi::driver::net::NetOffloads::empty(),
         rx_queues: 1,
     }
 }
@@ -115,7 +115,7 @@ fn ipv4_ping_resolves_arp_and_round_trips() {
     // The echo request parks on ARP resolution and the request goes
     // out after the exchange settles.
     let out = a
-        .send_echo_request(IpAddr::V4(V4_B), 0x77, 1, b"rustos-stack", t(2))
+        .send_echo_request(IpAddr::V4(V4_B), 0x77, 1, b"tairix-stack", t(2))
         .expect("send");
     assert!(out.events.is_empty());
     let mut frames: VecDeque<Vec<u8>> = out.frames.into();
@@ -137,7 +137,7 @@ fn ipv4_ping_resolves_arp_and_round_trips() {
             source: IpAddr::V4(V4_B),
             identifier: 0x77,
             sequence: 1,
-            payload: b"rustos-stack".to_vec(),
+            payload: b"tairix-stack".to_vec(),
         }]
     );
     // The responder observed the inbound request it answered.

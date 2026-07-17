@@ -16,8 +16,8 @@
 //! commit record), then publish the superblock slot pointing at it — each
 //! step flushed before the next.
 
-use rustos_abi::DriverError;
-use rustos_crypto::MacKey;
+use tairix_abi::DriverError;
+use tairix_crypto::MacKey;
 
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 

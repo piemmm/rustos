@@ -1,6 +1,6 @@
 //! x86_64 per-CPU storage ("per-CPU storage").
 //!
-//! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
+//! Implements the Arch HAL [`PerCpu`](tairix_arch_api::PerCpu) surface
 //! for x86_64 over the **GS base** — the `IA32_GS_BASE` MSR
 //! (`0xC000_0101`). While running in the kernel the active GS base is the
 //! per-CPU anchor (the syscall stub's `swapgs` makes the kernel's per-CPU
@@ -16,13 +16,13 @@
 //! the base register itself.
 //!
 //! The stored word is opaque to this surface (see the
-//! [`PerCpu`](rustos_arch_api::PerCpu) trait docs). On the host build
+//! [`PerCpu`](tairix_arch_api::PerCpu) trait docs). On the host build
 //! there is no GS base, so the handle backs the word with an in-handle
 //! cell solely for the unit tests; it is never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
 
-use rustos_arch_api::PerCpu;
+use tairix_arch_api::PerCpu;
 
 /// The `IA32_GS_BASE` MSR (Intel SDM Vol 4 §2.1): the base address the
 /// `gs:` segment prefix adds while in kernel mode.
@@ -115,7 +115,7 @@ impl PerCpu for PerCpuStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::percpu::conformance;
+    use tairix_arch_api::percpu::conformance;
 
     #[test]
     fn passes_per_cpu_conformance() {

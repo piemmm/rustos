@@ -28,7 +28,7 @@ Un chemin illisible est signalé sur la sortie d'erreur standard et le
 parcours continue avec le reste ; un répertoire illisible ne
 contribue rien plutôt qu'une somme partielle devinée.
 
-RustOS n'a pas encore de liens physiques, donc aucune entrée ne peut
+TAIRiX n'a pas encore de liens physiques, donc aucune entrée ne peut
 être comptée deux fois et les options GNU de déduplication de liens
 n'existent pas ; `-x` (un seul système de fichiers) n'est pas encore
 disponible ; les variables d'environnement de la famille

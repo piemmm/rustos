@@ -8,7 +8,7 @@
 //! riscv64 sibling of `spawn_session_qemu_aarch64` / `_x86_64`):
 //!
 //! * the **parent** issues a real `CAP_PROC_SPAWN`-gated `spawn` syscall
-//!   (`rustos_rt::spawn`) for the embedded session program, checks the
+//!   (`tairix_rt::spawn`) for the embedded session program, checks the
 //!   returned PID is non-negative (a negative return is `-errno`), yields the
 //!   CPU a build-pinned number of times so the freshly admitted child
 //!   interleaves with it under the cooperative scheduler, then returns 0 — the
@@ -18,14 +18,14 @@
 //!   times — every `yield` is a real `ecall` the kernel turns into a context
 //!   switch back to the dispatcher — then returns 0.
 //!
-//! `rustos-rt` routes each role's `main` return value through the `exit`
+//! `tairix-rt` routes each role's `main` return value through the `exit`
 //! syscall. The vertical asserts the parent's `spawn` built the child a fresh
 //! isolated address space and that both the parent and the child ran to `exit`,
 //! proving the riscv64 runtime `spawn` concurrent producer end to end (the
 //! RV-X3 "done when").
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt` (which provides `_start`, the stack canary, the panic
+//! runtime `tairix-rt` (which provides `_start`, the stack canary, the panic
 //! handler, and the `spawn`/`yield`/`exit` syscall wrappers), never the C ABI
 //! (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
 //! `rxe` blob by the consuming test's build script. On
@@ -45,24 +45,24 @@ mod program {
     const SESSION_PATH: &[u8] = b"/Apps/Session.app/Run";
 
     /// Yield count when the consuming build did not pin one via
-    /// `RUSTOS_SPAWN_YIELDS`. Large enough that a single accidental run cannot
+    /// `TAIRIX_SPAWN_YIELDS`. Large enough that a single accidental run cannot
     /// satisfy the vertical's PASS check, small enough to drain well within the
     /// harness budget.
     const DEFAULT_YIELDS: u32 = 8;
 
-    /// The yield count, read from `RUSTOS_SPAWN_YIELDS` (the value the consuming
+    /// The yield count, read from `TAIRIX_SPAWN_YIELDS` (the value the consuming
     /// vertical's build script pins when it compiles both roles), falling back
     /// to [`DEFAULT_YIELDS`]. The vertical is the single source of truth for the
     /// count.
-    const YIELDS: u32 = match option_env!("RUSTOS_SPAWN_YIELDS") {
+    const YIELDS: u32 = match option_env!("TAIRIX_SPAWN_YIELDS") {
         Some(s) => parse_u32(s.as_bytes()),
         None => DEFAULT_YIELDS,
     };
 
     /// `true` when this build is the parent role, selected by
-    /// `RUSTOS_SPAWN_ROLE == "parent"`; any other value (including the child
+    /// `TAIRIX_SPAWN_ROLE == "parent"`; any other value (including the child
     /// role and an absent variable) builds the child (session).
-    const IS_PARENT: bool = match option_env!("RUSTOS_SPAWN_ROLE") {
+    const IS_PARENT: bool = match option_env!("TAIRIX_SPAWN_ROLE") {
         Some(s) => bytes_eq(s.as_bytes(), b"parent"),
         None => false,
     };
@@ -120,12 +120,12 @@ mod program {
     fn yield_loop() {
         let mut remaining = YIELDS;
         while remaining > 0 {
-            rustos_rt::yield_now();
+            tairix_rt::yield_now();
             remaining -= 1;
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     ///
     /// The child simply yields then returns 0. The parent spawns the session,
@@ -142,7 +142,7 @@ mod program {
         // Parent: spawn the session concurrently. A negative return is
         // `-errno`; surface a distinct diagnostic so the vertical fails loudly
         // rather than silently passing on a failed spawn.
-        let pid = rustos_rt::spawn(SESSION_PATH);
+        let pid = tairix_rt::spawn(SESSION_PATH);
         if pid < 0 {
             return 12;
         }
@@ -152,13 +152,13 @@ mod program {
         0
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the crate
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

@@ -19,8 +19,8 @@
 //! encoded or does not fit an empty segment is rejected, never partially
 //! written.
 
-use rustos_abi::{BootId, Duration64, Errno, FieldName, FieldValue, Origin, WallClockReading};
-use rustos_crypto::Sha256Digest;
+use tairix_abi::{BootId, Duration64, Errno, FieldName, FieldValue, Origin, WallClockReading};
+use tairix_crypto::Sha256Digest;
 
 use crate::attest::{stream_genesis, LogAttestationKey};
 use crate::authority::{derive_source, resolve_stream, SourceName};
@@ -823,7 +823,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilitySummary, ProcId, Time64, TrustDomain, WallTimeState, BOOT_ID_LEN,
         ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
     };

@@ -2,8 +2,8 @@
 //! conformance suite (`PLAN.md` Stage 5).
 //!
 //! The suite drives the **real** `arxfs` driver
-//! ([`rustos_drv_fs_arxfs::ARXFS`]) through the **real**
-//! [`rustos_kernel_core::fs::Vfs`] policy layer and asserts the
+//! ([`tairix_drv_fs_arxfs::ARXFS`]) through the **real**
+//! [`tairix_kernel_core::fs::Vfs`] policy layer and asserts the
 //! POSIX-visible semantics of every filesystem operation the system
 //! exposes: directory and file creation, unlink/rmdir, truncate,
 //! readdir/stat, the permission model (mode bits, ACLs, and the
@@ -26,11 +26,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::filesystem::MountFlags;
-use rustos_abi::driver::DriverHandle;
-use rustos_abi::DriverError;
-use rustos_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::filesystem::MountFlags;
+use tairix_abi::driver::DriverHandle;
+use tairix_abi::DriverError;
+use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 
 /// Volume key the suite formats its arxfs test volume with. `ARXFS` is
 /// encrypted-by-default (`docs/src/filesystem/arxfs-spec.md` §5).
@@ -53,15 +53,15 @@ impl EntropySource for SuiteEntropy {
     }
 }
 
-pub use rustos_abi::driver::filesystem::{
+pub use tairix_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
     SecurityAcl, SecuritySubject,
 };
-pub use rustos_abi::CapabilityId;
-pub use rustos_abi::Errno;
-pub use rustos_caps::CapabilitySet;
-pub use rustos_kernel_core::fs::{Credentials, Mode, Path, Vfs, VfsError};
-pub use rustos_kernel_sec::{GroupId, UserId};
+pub use tairix_abi::CapabilityId;
+pub use tairix_abi::Errno;
+pub use tairix_caps::CapabilitySet;
+pub use tairix_kernel_core::fs::{Credentials, Mode, Path, Vfs, VfsError};
+pub use tairix_kernel_sec::{GroupId, UserId};
 
 /// Logical block (sector) size of the in-memory device, in bytes. The
 /// `arxfs` minimum block size, matching the verticals' 512-byte sectors.

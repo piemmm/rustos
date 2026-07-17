@@ -3,7 +3,7 @@
 The filesystem soak stress-tests the three first-party filesystems —
 `arxfs`, `ext4`, and `fat32` — entirely in RAM, with no real disk and
 no `mkfs` shell-out (`AGENTS.md` §12 / §2.12). It lives in the
-`rustos-test-fs-soak` crate (`tests/integration/fs_soak`) and is driven
+`tairix-test-fs-soak` crate (`tests/integration/fs_soak`) and is driven
 by `cargo xtask fssoak`.
 
 ## What it exercises
@@ -61,7 +61,7 @@ launch**:
 
 The target's **start** seed is drawn from platform entropy (wall-clock
 time mixed with the process id), so each launch takes a new path. Set
-`RUSTOS_FSSOAK_SEED` to pin the start seed and replay a failure exactly;
+`TAIRIX_FSSOAK_SEED` to pin the start seed and replay a failure exactly;
 the start seed is printed at launch and every error is tagged with the
 reproducing seed.
 
@@ -83,9 +83,9 @@ cargo xtask fssoak --target ext4 --secs 30
 ```
 
 `cargo xtask fssoak` exports two env seams the integration tests read:
-`RUSTOS_FSSOAK_BUDGET_SECS` (loop each filesystem until the budget
-elapses) and `RUSTOS_FSSOAK_BYTES` (the device size, ≥ 1 GiB for the
-soak). A plain `cargo test -p rustos-test-fs-soak` leaves both unset and
+`TAIRIX_FSSOAK_BUDGET_SECS` (loop each filesystem until the budget
+elapses) and `TAIRIX_FSSOAK_BYTES` (the device size, ≥ 1 GiB for the
+soak). A plain `cargo test -p tairix-test-fs-soak` leaves both unset and
 runs a single smoke iteration on a 320 MiB device (above FAT32's
 ~256 MiB floor; ext4 still gets two block groups).
 

@@ -1,6 +1,6 @@
-# `rustos-net`
+# `tairix-net`
 
-`lib/net` is the RustOS network protocol engine: the single, pure,
+`lib/net` is the TAIRiX network protocol engine: the single, pure,
 host-testable definition of the wire protocols the user-space network
 stack speaks. The staged build plan is `plans/NETWORK.md`; this page
 describes what exists today (increments N1–N3a: the link and network

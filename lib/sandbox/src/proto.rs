@@ -11,12 +11,12 @@
 //! so both sides refuse an oversize declared length *before* allocating or
 //! reading a payload byte (fail closed).
 //!
-//! The transport is any [`Channel`]: the production pipes on a RustOS
+//! The transport is any [`Channel`]: the production pipes on a TAIRiX
 //! target, an in-memory fake in host tests.
 
 use alloc::vec;
 use alloc::vec::Vec;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Largest payload a single frame may carry, in bytes.
 ///
@@ -172,7 +172,7 @@ mod tests {
     use super::{recv_frame, send_frame, Channel, ProtoError, MAX_FRAME};
     use alloc::vec;
     use alloc::vec::Vec;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// In-memory loopback: reads consume `input`, writes append to
     /// `output`, one byte at a time to exercise the short-read/short-write

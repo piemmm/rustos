@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rustos_abi::{Errno, LimitKind, ResourceLimit};
+use tairix_abi::{Errno, LimitKind, ResourceLimit};
 
 use crate::builtin::{dispatch, BuiltinContext};
 use crate::env::Environment;

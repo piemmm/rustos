@@ -25,7 +25,7 @@ numero di tali dispositivi è annotato sul flusso informativo standard
 l'elenco degrada agli identificatori numerici con la ragione
 sull'errore standard — l'inventario stesso viene comunque elencato.
 
-RustOS non registra un indirizzo PCI `bus:device.function`:
+TAIRiX non registra un indirizzo PCI `bus:device.function`:
 l'indirizzo stabile di una funzione è l'identificatore del suo nodo
 dell'albero hardware, mostrato come `#<node>`, e `-s` seleziona quel
 nodo (una divergenza deliberata e documentata rispetto a `lspci` di

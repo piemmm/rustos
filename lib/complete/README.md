@@ -1,6 +1,6 @@
-# rustos-complete
+# tairix-complete
 
-Shared filename-completion engine for RustOS (`lib/complete`).
+Shared filename-completion engine for TAIRiX (`lib/complete`).
 
 Stability tier: `experimental`.
 

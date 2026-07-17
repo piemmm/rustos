@@ -1,4 +1,4 @@
-//! RustOS Arch HAL — the architecture hardware-abstraction layer.
+//! TAIRiX Arch HAL — the architecture hardware-abstraction layer.
 //!
 //! `kernel/arch/api` is the closed set of traits that every
 //! architecture port (`kernel/arch/<target>`) implements and the rest
@@ -23,7 +23,7 @@
 //! `eret` on aarch64, `iretq` on x86_64) — and the **early-boot
 //! platform-discovery** slice: the
 //! [`PlatformDiscovery`] trait that normalises a target's native
-//! hardware source into the [`rustos_abi::hwtree`] hardware tree, plus
+//! hardware source into the [`tairix_abi::hwtree`] hardware tree, plus
 //! its [`platform::conformance`] vertical — and the **per-CPU storage**
 //! slice: the [`PerCpu`] trait that reads and writes
 //! the calling CPU's per-CPU base word (GS base on x86_64, `TPIDR_EL1`
@@ -86,7 +86,7 @@
 //! # Why `no_std` and dependency-light
 //!
 //! the charter permits `kernel/arch/api` to depend on `lib/*` only. The crate
-//! is `no_std` and names a single `lib/*` dependency — `rustos_abi`,
+//! is `no_std` and names a single `lib/*` dependency — `tairix_abi`,
 //! itself `no_std`, dependency-free, and allocator-free — so the
 //! [`PlatformDiscovery`] slice can speak in the one hardware-tree ABI
 //! rather than re-defining it. An architecture port
@@ -297,7 +297,7 @@ pub trait SchedulerArch: Send + Sync {
     /// running task is bounded to one scheduling quantum; `armed = false`
     /// when the CPU has nothing to preempt to (it is idle or runs a single
     /// runnable task), so the timer is stopped and the core takes **no**
-    /// timer interrupts at all. This is what makes RustOS tickless
+    /// timer interrupts at all. This is what makes TAIRiX tickless
     /// (`NO_HZ`): the timer is armed one-shot only when a
     /// CPU is contended, never at a fixed frequency.
     ///

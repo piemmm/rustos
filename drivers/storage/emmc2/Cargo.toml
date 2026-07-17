@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-storage-emmc2"
-description = "RustOS Raspberry Pi 4 (BCM2711) EMMC2 SD-host block driver."
+name = "tairix-drv-storage-emmc2"
+description = "TAIRiX Raspberry Pi 4 (BCM2711) EMMC2 SD-host block driver."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
 
 [lints]
 workspace = true

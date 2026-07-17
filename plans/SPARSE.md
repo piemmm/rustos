@@ -297,9 +297,9 @@ clone/reflink sparse file -> preserve ZERO extents exactly
 snapshot sparse file -> preserve ZERO extents exactly
 ```
 
-If RustOS exposes `SEEK_DATA` / `SEEK_HOLE`-style behaviour, ARXFS must report ZERO extents and implicit holes as holes, not as data.
+If TAIRiX exposes `SEEK_DATA` / `SEEK_HOLE`-style behaviour, ARXFS must report ZERO extents and implicit holes as holes, not as data.
 
-If RustOS exposes an explicit punch-hole or zero-range API, ARXFS must implement it by creating ZERO extents and releasing replaced Data extents through the normal COW/refcount/free path.
+If TAIRiX exposes an explicit punch-hole or zero-range API, ARXFS must implement it by creating ZERO extents and releasing replaced Data extents through the normal COW/refcount/free path.
 
 ## 16. Performance Requirements
 

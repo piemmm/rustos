@@ -22,7 +22,7 @@
 //! *which* window has the keyboard ([`InputRouter::focused`]) and routes a
 //! [`InputEvent::KeyPressed`] / [`InputEvent::KeyReleased`] to it as an
 //! [`InputResponse::Key`], leaving the bytes-on-the-wire encoding to
-//! `rustos_abi`'s `KeyInput`. A key with no focused window
+//! `tairix_abi`'s `KeyInput`. A key with no focused window
 //! (focus on the desktop, or the focused window since gone) is ignored
 //! rather than misdelivered.
 
@@ -34,8 +34,8 @@ use crate::Compositor;
 // taskbar, which routes the same events but may not depend on the window
 // manager. It therefore lives in `lib/input`; the
 // compositor re-exports it so callers keep referring to
-// `rustos_wm::{InputEvent, PointerButton}` (one definition).
-pub use rustos_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+// `tairix_wm::{InputEvent, PointerButton}` (one definition).
+pub use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

@@ -17,7 +17,7 @@ posizione in cui GNU `false` considera `--help`); in qualunque posizione
 successiva quelle parole vengono ignorate come tutto il resto. A
 differenza di GNU `false --help`, che termina comunque con `1`, qui una
 guida breve servita termina con `0` — la convenzione della guida breve
-di RustOS.
+di TAIRiX.
 
 ## OPTIONS
 

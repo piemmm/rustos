@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use rustos_curses::CursesError;
+use tairix_curses::CursesError;
 
 /// Why a `sysmon` session ended other than by the user quitting.
 ///

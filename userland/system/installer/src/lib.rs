@@ -1,4 +1,4 @@
-//! RustOS placeholder crate: first-boot installer.
+//! TAIRiX placeholder crate: first-boot installer.
 //!
 //! Stage 0 reserves this crate so the workspace builds end-to-end. The real
 //! implementation is delivered by **Stage 8** of `PLAN.md`; until then the

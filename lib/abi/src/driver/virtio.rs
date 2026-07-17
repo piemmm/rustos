@@ -8,10 +8,10 @@
 //!
 //! The virtio bus crate provides:
 //!
-//! * `rustos_drv_bus_virtio::MockHost` — an always-available
+//! * `tairix_drv_bus_virtio::MockHost` — an always-available
 //!   in-process implementation used by every virtio driver's unit
 //!   tests.
-//! * `rustos_drv_bus_virtio::KernelVirtioHost` (gated behind the
+//! * `tairix_drv_bus_virtio::KernelVirtioHost` (gated behind the
 //!   `kernel-host` feature) — the real, capability-checked
 //!   implementation backed by a per-process `DmaPool`. The userland
 //!   driver host (`userland/system/drvhost`) mints one per loaded

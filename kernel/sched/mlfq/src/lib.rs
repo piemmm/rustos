@@ -1,4 +1,4 @@
-//! RustOS MLFQ scheduler policy.
+//! TAIRiX MLFQ scheduler policy.
 //!
 //! This `kernel/sched/mlfq` crate is one concrete implementation of the
 //! [`SchedulerPolicy`] contract defined in `kernel/sched/api`. It is a sibling of any other policy crate (e.g. a
@@ -18,7 +18,7 @@
 //!   anti-starvation global priority boost every `boost_interval_ticks`.
 //!   The policy is the classical MLFQ as described in Arpaci-Dusseau,
 //!   *Operating Systems: Three Easy Pieces*, ch. 8.
-//! * **Tickless boost cadence (carve-out).** RustOS is tickless: there is no global fixed-frequency timer. The
+//! * **Tickless boost cadence (carve-out).** TAIRiX is tickless: there is no global fixed-frequency timer. The
 //!   boost interval is far longer than one scheduling quantum and there is
 //!   only one per-CPU timer, so the boost rides the **on-demand preemption
 //!   one-shots** the kernel already arms whenever a CPU is *contended*
@@ -71,14 +71,14 @@ pub mod runqueue;
 mod runqueue;
 
 // Re-export the contract vocabulary so existing call sites
-// (`rustos_kernel_sched_mlfq::{Scheduler, Priority, …}`) keep resolving to
+// (`tairix_kernel_sched_mlfq::{Scheduler, Priority, …}`) keep resolving to
 // the single canonical definitions in `kernel/sched/api` (no duplication).
-pub use rustos_kernel_sched_api::{
+pub use tairix_kernel_sched_api::{
     CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
     SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
 };
 
 #[cfg(any(test, feature = "test-arch"))]
-pub use rustos_kernel_sched_api::TestArch;
+pub use tairix_kernel_sched_api::TestArch;
 
 pub use scheduler::Scheduler;

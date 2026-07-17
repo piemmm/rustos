@@ -1,6 +1,6 @@
 # DISPLAY.md — Seat ownership: the display/console locking model
 
-This is a staged build plan for RustOS's **seat** subsystem: the exclusive,
+This is a staged build plan for TAIRiX's **seat** subsystem: the exclusive,
 owner-tracked, revocable ownership of a physical display + keyboard + pointer,
 and the controlling-terminal / foreground arbitration for the text consoles
 that share one. It is **binding under `AGENTS.md`** — read `AGENTS.md`,
@@ -29,7 +29,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
   §5.4, §23.1).
 
 - **We evolve `CAP_DISPLAY` in place; we do not add a `v2` syscall pair.**
-  RustOS has not shipped, so `abi-v1` is still mutable (`AGENTS.md` §9,
+  TAIRiX has not shipped, so `abi-v1` is still mutable (`AGENTS.md` §9,
   §2.13). `display_acquire` / `display_release` (`abi-v1` numbers 23 / 24)
   gain owner semantics in place, and every caller is updated in the same
   change. No shim, no `display_acquire2`, no compatibility flag.
@@ -68,7 +68,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 
 ## 1. The gap this plan closes (against Linux)
 
-| Concern | Linux | RustOS today | This plan |
+| Concern | Linux | TAIRiX today | This plan |
 | --- | --- | --- | --- |
 | Exclusive display owner | DRM master per-`fd`, revocable | kernel-tracked owner task id (D2) | + revocable lease enforcement end-to-end |
 | Steal-focus protection | master check in ioctl | owner-checked acquire/release/read (D2) | + owner-checked present |
@@ -79,10 +79,10 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 
 ## 2. Design — "better than Linux"
 
-RustOS improves on Linux on the axes the charter already privileges:
+TAIRiX improves on Linux on the axes the charter already privileges:
 
 1. **The owner is an unforgeable kernel fact, not a coarse capability grant.**
-   Linux's master is a per-`fd` flag; RustOS records the *owning task id* on
+   Linux's master is a per-`fd` flag; TAIRiX records the *owning task id* on
    the seat and checks it on every ownership-changing call, so the "cannot
    steal focus" guarantee holds even if two principals legitimately hold
    `CAP_DISPLAY` (two graphical sessions). No ambient authority (§4).
@@ -103,11 +103,11 @@ RustOS improves on Linux on the axes the charter already privileges:
    This plan makes scanout/flip the driver performs on behalf of a client
    gate on the client's *current* seat lease: a client whose lease was revoked
    cannot present even though its framebuffer mapping still exists. Linux
-   relies on the compositor cooperating; RustOS enforces it.
+   relies on the compositor cooperating; TAIRiX enforces it.
 
 4. **Controlling-terminal arbitration without signal races.** Linux uses
    `SIGTTIN`/`SIGTTOU` and a foreground process group, historically racy and
-   spoofable. RustOS makes the *controlling owner* of a text console a
+   spoofable. TAIRiX makes the *controlling owner* of a text console a
    kernel-tracked task id: only the console's foreground owner drains its
    input queue; a background reader is denied (fail closed) rather than
    stopped by an async signal. Foreground handoff is an explicit,
@@ -191,7 +191,7 @@ prompts. Plan files state current state, not history (`AGENTS.md` §13).
 
 ### Stage D1 — `lib/seat`: the arch-neutral seat model `[x]`
 
-**Done.** The dependency-free `no_std` crate `lib/seat` (`rustos-seat`,
+**Done.** The dependency-free `no_std` crate `lib/seat` (`tairix-seat`,
 registered in `AGENTS.md` §3 and the workspace) is the one seat state
 machine:
 
@@ -221,7 +221,7 @@ directions, generation monotonicity, and foreground retargeting.
 
 **Done.** The kernel seat registry (`kernel/core/src/seat.rs`,
 `SeatRegistry`) replaced the owner-less `InputFocus` arbiter: it hosts
-`rustos_seat::SeatState` under its own lock next to the text sink and the
+`tairix_seat::SeatState` under its own lock next to the text sink and the
 bounded, zeroing desktop keyboard channel — one routing definition, driven
 by `SeatState::route` (§2.2). `display_acquire` binds `caller.task_id` as
 the owner and `display_release` is owner-checked; the typed refusals are
@@ -249,12 +249,12 @@ its two enforcement points and its sole holder in one change (§5.2 rule 2):
   text foreground, and the evicted owner's next owner-gated call fails
   closed with `SeatRevoked`. Both are `CAP_SEAT_ADMIN`-gated at dispatch
   and audit-logged (`SEAT_SWITCHED` 4051; `SEAT_LEASE_REVOKED` 4052, with
-  the evicted task id). Wrappers in `lib/rt`; `ros_sys_seat_*` stubs in
+  the evicted task id). Wrappers in `lib/rt`; `tairix_sys_seat_*` stubs in
   `lib/abi-sys`; C headers regenerated.
 - `userland/system/seatmgr` (installed at
   `/System/Services/seatmgr.app/Run`, launched by PID 1, headless-safe) is
   the sole manifest holder. It binds the reserved `SEATMGR_ENDPOINT`
-  (`rustos_abi::seat`, squat-protected) and serves the fixed-width
+  (`tairix_abi::seat`, squat-protected) and serves the fixed-width
   `SeatAdminRequest` (`Switch`/`Revoke`), requiring each requester's
   attested origin to itself carry `CAP_SEAT_ADMIN` before forwarding — the
   kernel re-checks the capability and every index on each syscall. Own
@@ -279,9 +279,9 @@ kernel/sysinfod pages state the enforced behaviour.
 the framebuffer mapping:
 
 - `display_acquire` returns the minted lease's generation (`>= 1`), so the
-  client holds the `lib/abi` handle (`rustos_abi::seat::SeatLease`:
+  client holds the `lib/abi` handle (`tairix_abi::seat::SeatLease`:
   seat id + owner task + generation; `SEAT_PRIMARY` names the boot seat).
-- The check has one definition, `rustos_seat::SeatState::verify` (exact
+- The check has one definition, `tairix_seat::SeatState::verify` (exact
   live owner-and-generation; the evicted owner's handle sees the distinct
   `SeatRevoked`, every other dead handle `NotOwner`), hosted kernel-side
   as `SeatRegistry::present_gate` — a `PresentGate` bound to one client's
@@ -348,7 +348,7 @@ them. Docs: `docs/src/desktop/seat.md` (D5 section),
 ### Stage D6 — multi-seat / hotplug `[x]`
 
 **Done.** The kernel seat registry hosts every seat on the machine, each
-an independent `rustos_seat::SeatState` with its own lock, text sink, and
+an independent `tairix_seat::SeatState` with its own lock, text sink, and
 zeroing keyboard channel:
 
 - The boot seat (`SEAT_PRIMARY`, id 0) always exists — text-only on a
@@ -454,7 +454,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
 
 - **D7a — kernel surfaces `[x]` — done.** All three surfaces are live with
   kernel host tests (grant/deny/revoked-window/readiness), `lib/rt`
-  wrappers + marshal tests, `ros_sys_*` stubs, regenerated C headers, and
+  wrappers + marshal tests, `tairix_sys_*` stubs, regenerated C headers, and
   the `docs/src/architecture/syscalls.md` / `docs/src/desktop/seat.md`
   pages updated in the same change.
   - `WaitSourceKind::SeatInput` (wire value 3, `id` = seat id):
@@ -535,7 +535,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   `ipc_call` (query → checked frame arithmetic → `shm_create` double
   buffer → `shm_grant` to the display endpoint's serving task →
   configure) → `RemoteDisplay` over the session's own mapping → the live
-  `SeatEventReader`s over `rustos_rt::pointer_read`/`keyboard_read`
+  `SeatEventReader`s over `tairix_rt::pointer_read`/`keyboard_read`
   drained after each `SeatInput` wake → `DesktopShell` pump → composite →
   present with damage. `DeviceInputSource` receives the screen `Rect`
   from the queried mode; the compositor's background is the active
@@ -569,7 +569,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     starts the account's shell unless `os.loginType graphical` is
     configured (`lib/sysconfig`) *and* the per-round probe holds — a
     read-only `fs_open` of `DESKTOP_SESSION_PATH`
-    (`rustos_login::session`, the one spelling of
+    (`tairix_login::session`, the one spelling of
     `/System/Apps/desktop.app/Run`) plus one `Query` `ipc_call` to the
     reserved `DISPLAY_ENDPOINT` (any well-formed reply proves a
     privileged-bound service; `NotFound` proves none); a configured
@@ -597,7 +597,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     injection on the `FIRST_PRESENT` marker, ordered present → fully
     parsed dump → pointer → `kind=pointer` witness → PASS, then asserts
     the dump's dominant colour is the shared theme's desktop colour
-    (`rustos_theme`, never a literal) at ≥ 50% share — the host-side
+    (`tairix_theme`, never a literal) at ≥ 50% share — the host-side
     proof the composited frame reached scan-out (`tools/qemu` grew the
     typed-keys script, the verified `Screendump` step, and the
     fail-closed PPM decoder `screendump::parse_ppm`; an unverified

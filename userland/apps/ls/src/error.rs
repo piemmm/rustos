@@ -1,7 +1,7 @@
 //! The outcomes of running an `ls` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why an `ls` invocation did not complete.
 ///

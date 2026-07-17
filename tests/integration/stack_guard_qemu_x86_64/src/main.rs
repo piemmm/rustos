@@ -42,7 +42,7 @@
 //!    code / stack live at higher-half virtual addresses (a different
 //!    region) and stay mapped.
 //! 6. Read the guard page's low-identity alias: the MMU raises a
-//!    not-present page fault; the `rustos_arch_x86_64::fault` observer
+//!    not-present page fault; the `tairix_arch_x86_64::fault` observer
 //!    confirms it is a supervisor not-present fault on exactly that page
 //!    and reports PASS. A regression that left the page mapped reads it
 //!    without faulting and reports FAILURE explicitly.
@@ -53,7 +53,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-stack-guard-qemu-x86_64: the `test-hooks` Cargo feature is a \
+    "tairix-test-stack-guard-qemu-x86_64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

@@ -6,8 +6,8 @@
 //! addresses [`SECTOR_BYTES`]-byte sectors, the logical sector size both the
 //! Pi's SD host and the in-tree filesystem drivers use.
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::DriverError;
 
 /// Logical sector size of every authored image, in bytes.
 pub const SECTOR_BYTES: usize = 512;

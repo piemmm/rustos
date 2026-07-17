@@ -3,18 +3,18 @@
 //! `kernel/mem` is architecture-neutral. The actual page-table format
 //! (4-level x86_64, 4-level aarch64, Sv39 riscv64, WASM linear memory)
 //! is implemented in `kernel/arch/*` and plugged in through the Arch HAL
-//! page-table surface — [`rustos_arch_api::mmu::AddressSpace`] for the
-//! map / translate / unmap walk and [`rustos_arch_api::tlb::TlbShootdown`]
+//! page-table surface — [`tairix_arch_api::mmu::AddressSpace`] for the
+//! map / translate / unmap walk and [`tairix_arch_api::tlb::TlbShootdown`]
 //! for the per-page TLB invalidation. `kernel/mem` names **only** those
 //! HAL traits; it no longer defines its own page-table trait
 //! (one vocabulary; `plans/WIRING.md` Stage W5b-2).
 //!
 //! [`AddressSpace`] is a *thin* generic façade over a port's HAL
-//! [`rustos_arch_api::mmu::AddressSpace`] (`+ TlbShootdown`)
+//! [`tairix_arch_api::mmu::AddressSpace`] (`+ TlbShootdown`)
 //! implementation. It owns the page-table object, exposes
 //! capability-checked map / unmap / translate operations in
 //! `kernel/mem`'s own [`Page`] / [`Frame`] / [`MapFlags`] currency
-//! (bridged to the HAL's `u64` / [`rustos_arch_api::mmu::PageFlags`]
+//! (bridged to the HAL's `u64` / [`tairix_arch_api::mmu::PageFlags`]
 //! vocabulary at the boundary), and tracks the high-level mapping ranges
 //! (so leak-checking and double-mapping detection can be done
 //! independently of the arch).
@@ -29,8 +29,8 @@
 use alloc::collections::BTreeMap;
 use core::fmt;
 
-use rustos_arch_api::mmu::{AddressSpace as HalAddressSpace, MapError, PageFlags};
-use rustos_arch_api::tlb::TlbShootdown;
+use tairix_arch_api::mmu::{AddressSpace as HalAddressSpace, MapError, PageFlags};
+use tairix_arch_api::tlb::TlbShootdown;
 
 use crate::error::AllocError;
 use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
@@ -211,8 +211,8 @@ pub enum PageTableError {
     /// The underlying allocator failed.
     AllocFailed(AllocError),
     /// The backend does not implement the requested page-table operation
-    /// (the fail-closed [`rustos_arch_api::mmu::MapError::Unsupported`]
-    /// from a port whose [`rustos_arch_api::mmu::AddressSpace::split_block`]
+    /// (the fail-closed [`tairix_arch_api::mmu::MapError::Unsupported`]
+    /// from a port whose [`tairix_arch_api::mmu::AddressSpace::split_block`]
     /// is not implemented). The map/unmap façade never drives such an
     /// operation, so this surfaces only if a future caller routes one
     /// through this layer — fail closed, never a silent success.
@@ -228,7 +228,7 @@ impl From<AllocError> for PageTableError {
 /// The page-table backend a [`AddressSpace`] drives.
 ///
 /// `kernel/mem` no longer defines its own page-table trait: the backend
-/// is exactly the Arch HAL [`rustos_arch_api::mmu::AddressSpace`] (the
+/// is exactly the Arch HAL [`tairix_arch_api::mmu::AddressSpace`] (the
 /// map / translate / unmap walk) plus [`TlbShootdown`] (the per-page
 /// invalidation the map/unmap path issues), held together by this alias
 /// so the bound is written once. Every
@@ -320,7 +320,7 @@ fn from_map_error(err: MapError) -> PageTableError {
 /// Per-process virtual address space.
 ///
 /// `AddressSpace` is generic over `P: PageTable` — the Arch HAL
-/// page-table backend (a port's [`rustos_arch_api::mmu::AddressSpace`]
+/// page-table backend (a port's [`tairix_arch_api::mmu::AddressSpace`]
 /// `+ TlbShootdown`). The arch crates provide one (their `paging`
 /// `AddressSpace`); this crate's tests use `HostPageTable`.
 pub struct AddressSpace<P: PageTable> {
@@ -354,7 +354,7 @@ impl<P: PageTable> AddressSpace<P> {
     ///
     /// [`PageTableError::AlreadyMapped`] if this layer already records a
     /// mapping for `page`; otherwise propagates the bridged HAL
-    /// [`MapError`] from [`rustos_arch_api::mmu::AddressSpace::map_page`].
+    /// [`MapError`] from [`tairix_arch_api::mmu::AddressSpace::map_page`].
     pub fn map(&mut self, page: Page, frame: Frame, flags: MapFlags) -> Result<(), PageTableError> {
         if self.live.contains_key(&page) {
             return Err(PageTableError::AlreadyMapped);
@@ -483,7 +483,7 @@ impl<P: PageTable> AddressSpace<P> {
 
     /// Return every allocator-drawn page-table frame of the backend to its
     /// frame source, leaving this space unusable — the forwarding view of
-    /// [`rustos_arch_api::mmu::AddressSpace::reclaim_table_frames`], called
+    /// [`tairix_arch_api::mmu::AddressSpace::reclaim_table_frames`], called
     /// by a task's live-space teardown after the last mapping is released.
     ///
     /// # Safety
@@ -646,7 +646,7 @@ impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
 ///
 /// It tracks `vaddr → (paddr, `[`PageFlags`]`)` entries in a
 /// [`BTreeMap`], implementing the Arch HAL
-/// [`rustos_arch_api::mmu::AddressSpace`] + [`TlbShootdown`] surface in
+/// [`tairix_arch_api::mmu::AddressSpace`] + [`TlbShootdown`] surface in
 /// pure software. No CPU page-table writes happen. The point is to
 /// exercise every code path in [`AddressSpace`] on host hardware
 /// (all algorithms that do not need hardware must be
@@ -681,7 +681,7 @@ impl HalAddressSpace for HostPageTable {
         if vaddr & (PAGE_SIZE as u64 - 1) != 0 || paddr & (PAGE_SIZE as u64 - 1) != 0 {
             return Err(MapError::Misaligned);
         }
-        // RustOS's default leaf policy is W^X: a
+        // TAIRiX's default leaf policy is W^X: a
         // simultaneous write+exec leaf is refused, mirroring what a real
         // port does at the HAL boundary.
         if flags.is_write_exec() {
@@ -712,11 +712,11 @@ impl HalAddressSpace for HostPageTable {
         PAGE_SIZE as u64
     }
 
-    fn block_split_support(&self) -> rustos_arch_api::mmu::BlockSplit {
+    fn block_split_support(&self) -> tairix_arch_api::mmu::BlockSplit {
         // The double tracks single 4 KiB entries in a map; it has no
         // coarse block descriptors to re-express, so the split is
         // honestly unsupported.
-        rustos_arch_api::mmu::BlockSplit::Unsupported(
+        tairix_arch_api::mmu::BlockSplit::Unsupported(
             "host page-table double tracks single 4 KiB entries; no coarse blocks",
         )
     }

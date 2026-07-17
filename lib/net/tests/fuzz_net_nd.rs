@@ -9,14 +9,14 @@
 //!    never grows the table beyond its capacity.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing
-//! from the same seeded stream until `RUSTOS_FUZZ_BUDGET_SECS` elapses
+//! from the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses
 //! under `cargo xtask fuzz`.
 
-use rustos_abi::driver::net::MacAddress;
-use rustos_abi::time::Duration64;
-use rustos_net::nd::{self, NdMessage};
-use rustos_net::neigh::{NeighborConfig, NeighborTable};
-use rustos_net::Ipv6Addr;
+use tairix_abi::driver::net::MacAddress;
+use tairix_abi::time::Duration64;
+use tairix_net::nd::{self, NdMessage};
+use tairix_net::neigh::{NeighborConfig, NeighborTable};
+use tairix_net::Ipv6Addr;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -94,13 +94,13 @@ impl Lcg {
 
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut table = NeighborTable::new(TABLE_CAPACITY, NeighborConfig::default());
     let mut buf = [0u8; 256];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for step in 0..SMOKE_ITERATIONS {
             let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
@@ -136,7 +136,7 @@ fn random_inputs_never_panic() {
                 now,
             );
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

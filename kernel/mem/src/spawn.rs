@@ -8,7 +8,7 @@
 //! 1. maps every segment page (R/RX/RW + USER) **and** fills it with the
 //!    segment's file content, zeroing the BSS tail beyond `file_size`;
 //! 2. allocates and maps a zeroed user stack (U|R|W);
-//! 3. serialises the [`rustos_abi::process`] startup-vector block (arguments,
+//! 3. serialises the [`tairix_abi::process`] startup-vector block (arguments,
 //!    environment, and the stack-canary seed) and writes it into the
 //!    new address space (U|R|W).
 //!
@@ -44,9 +44,9 @@
 //! the builder, then reads the user pages back through [`crate::uaccess`] and
 //! re-parses the startup block.
 
-use rustos_abi::process;
-use rustos_abi::rxe::{LoadImage, RxeError};
-use rustos_abi::Errno;
+use tairix_abi::process;
+use tairix_abi::rxe::{LoadImage, RxeError};
+use tairix_abi::Errno;
 
 use crate::frame::{Frame, PAGE_SIZE};
 use crate::loader::{map_flags_for, map_region, LoadError};
@@ -174,7 +174,7 @@ pub enum SpawnError {
     /// The stack base or startup-block base was not page-aligned.
     Misaligned,
     /// Serialising the startup-vector block failed against the frozen
-    /// `abi-v1` limits (see [`rustos_abi::process::write_into`]).
+    /// `abi-v1` limits (see [`tairix_abi::process::write_into`]).
     StartBlock(Errno),
 }
 
@@ -273,7 +273,7 @@ where
 ///
 /// Maps and fills every segment of `image` (relocated by `bias`), maps a
 /// zeroed user stack described by `stack`, and writes the
-/// [`rustos_abi::process`] startup-vector block for `args` / `env` (carrying
+/// [`tairix_abi::process`] startup-vector block for `args` / `env` (carrying
 /// the `canary` seed) at `start_block_base`. `image_bytes` is the whole `rxe`
 /// file the segments' `file_offset`s index into; `physmap` is the kernel's
 /// direct physical map (so the builder can reach freshly allocated frames);
@@ -395,9 +395,9 @@ mod tests {
     use crate::uaccess::copy_in;
     use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
 
-    use rustos_abi::process;
-    use rustos_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
-    use rustos_abi::{
+    use tairix_abi::process;
+    use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
+    use tairix_abi::{
         LoadImage, ProcessStart, ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN,
     };
 

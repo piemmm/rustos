@@ -6,7 +6,7 @@
 //! narrowing, and the "no deadline" sentinel live here so no two engines
 //! carry their own copy of the same three-line conversion.
 
-use rustos_abi::time::{Duration64, NANOS_PER_SEC};
+use tairix_abi::time::{Duration64, NANOS_PER_SEC};
 
 /// Deadline value meaning "no timed transition is pending".
 pub(crate) const NEVER: u128 = u128::MAX;

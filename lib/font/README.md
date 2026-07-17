@@ -1,6 +1,6 @@
-# rustos-font
+# tairix-font
 
-The single shared **text rasterisation** primitives for RustOS (`AGENTS.md`
+The single shared **text rasterisation** primitives for TAIRiX (`AGENTS.md`
 §6, §16.4, §17.4 — `PLAN.md` Stage 7).
 
 Font rendering is one of the curated OS shared-library classes (`AGENTS.md`
@@ -78,7 +78,7 @@ the payload exceeds the pre-Korean size ceiling.
 
 The cell model is **one scalar per grid entry** — the deliberate simplification
 `lib/vt` and `lib/curses` document. A zero-advance combining mark renders in
-its own cell. `rustos_vt::char_width` remains the one layout rule: a wide glyph
+its own cell. `tairix_vt::char_width` remains the one layout rule: a wide glyph
 is stored as a lead plus continuation cell, while its atlas bitmap may paint
 across both cells.
 
@@ -88,7 +88,7 @@ memory itself) depends with `default-features = false`; the
 `lib/raster`-backed blitter rides the default-on `render` cargo feature — one
 font definition either way (§2.2).
 
-There is no installed-font machinery yet: a `rustos-theme` font role selects a
+There is no installed-font machinery yet: a `tairix-theme` font role selects a
 font by family name under `/System/Fonts`, but no faces are installed, so
 everything draws with the built-in `BitmapFont::inconsolata` face. When
 installed faces arrive they extend this crate; consumers keep calling

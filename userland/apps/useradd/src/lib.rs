@@ -1,4 +1,4 @@
-//! RustOS `useradd` — create a user account (Stage 6
+//! TAIRiX `useradd` — create a user account (Stage 6
 //! `userland/apps/`).
 //!
 //! `useradd` adds a single account to the user database that persists under
@@ -7,7 +7,7 @@
 //! by the database when omitted), a **required** primary group id, an optional
 //! supplementary-group set, and the textual comment and home directory — and
 //! hands that record to the database through an injected seam. Group and user
-//! references are **decimal** ids: RustOS has no name-to-id seam in this tool,
+//! references are **decimal** ids: TAIRiX has no name-to-id seam in this tool,
 //! so a name would be interface creep, the same choice
 //! `chown` makes.
 //!
@@ -22,7 +22,7 @@
 //!   account record. The production implementation is [`db::UsersAdminDb`],
 //!   the `users_admin` client over its own injected [`db::AdminChannel`] and
 //!   [`db::Entropy`] seams.
-//! * [`rustos_help::HelpSource`] — the tool's own bundled `Help/` tree, read
+//! * [`tairix_help::HelpSource`] — the tool's own bundled `Help/` tree, read
 //!   by the `-h`/`-?` short-help switches through the shared engine.
 //! * [`Output`] — write the short help to the terminal.
 //!
@@ -50,7 +50,7 @@
 //! [`UseraddError::BadName`]; a `-u`/`-g`/`-G` value that is not a decimal id
 //! is a [`UseraddError::BadId`]; a name already present is a
 //! [`UseraddError::Exists`]. A database that cannot be consulted surfaces the
-//! underlying [`Errno`](rustos_abi::Errno) as [`UseraddError::Lookup`], and a
+//! underlying [`Errno`](tairix_abi::Errno) as [`UseraddError::Lookup`], and a
 //! refused or failed creation as [`UseraddError::Create`]. There is no panic.
 //!
 //! # Module map

@@ -8,8 +8,8 @@ use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_abi::Errno;
-use rustos_help::{HelpSource, SourceError};
+use tairix_abi::Errno;
+use tairix_help::{HelpSource, SourceError};
 
 /// A prompt no non-interactive run may ever reach.
 struct NeverAsked;

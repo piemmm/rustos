@@ -19,7 +19,7 @@
 //! across multiple timer ticks for the preemption to be observable.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt` (which provides `_start`, the stack canary, the panic
+//! runtime `tairix-rt` (which provides `_start`, the stack canary, the panic
 //! handler, and the `exit` syscall wrapper that routes `main`'s return), never
 //! the C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
 //! `rxe` blob by the consuming test's build script. On
@@ -34,18 +34,18 @@
 #[cfg(freestanding)]
 mod program {
     /// Busy-loop iteration count when the consuming build did not pin one via
-    /// the `RUSTOS_EL0_SPINS` environment variable. Large enough that, even on
+    /// the `TAIRIX_EL0_SPINS` environment variable. Large enough that, even on
     /// fast QEMU TCG, the loop spans many generic-timer ticks (so at least one
     /// involuntary preemption is guaranteed), yet small enough to drain well
     /// within the vertical's wall-clock budget.
     const DEFAULT_SPINS: u64 = 200_000_000;
 
-    /// The spin count, read from the `RUSTOS_EL0_SPINS` environment variable
+    /// The spin count, read from the `TAIRIX_EL0_SPINS` environment variable
     /// the consuming vertical's build script sets when it compiles this
     /// program, falling back to [`DEFAULT_SPINS`]. The build script is the
     /// single source of truth for the count.
     const fn spin_count() -> u64 {
-        match option_env!("RUSTOS_EL0_SPINS") {
+        match option_env!("TAIRIX_EL0_SPINS") {
             Some(s) => parse_u64(s.as_bytes()),
             None => DEFAULT_SPINS,
         }
@@ -83,7 +83,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     ///
     /// Busy-spins [`spin_count`] iterations issuing **no** syscall, then
@@ -98,13 +98,13 @@ mod program {
         0
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the crate
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

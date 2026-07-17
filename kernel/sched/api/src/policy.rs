@@ -26,7 +26,7 @@ use crate::error::SchedResult;
 use crate::outcome::StepOutcome;
 use crate::task::{Priority, TaskAction, TaskContext, TaskId, TaskState};
 
-/// The architecture-neutral contract every RustOS scheduler implements.
+/// The architecture-neutral contract every TAIRiX scheduler implements.
 ///
 /// `A` is the [`SchedulerArch`] surface the policy drives for current-CPU,
 /// tick, and IPI access; it is a type parameter so a host test can plug in

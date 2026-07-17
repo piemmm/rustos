@@ -7,8 +7,8 @@
 //! and installs a syscall-dispatch callback. It builds **two** hardware-isolated
 //! EL0 address spaces — a `child` and a `parent`, each its own stage-1 page-table
 //! hierarchy — from the two `rxe` fixture builds through the production
-//! capability-checked, audited `rustos_kernel_core::spawn_image` caller, records
-//! the parent/child link with a `rustos_kernel_core::KernelProcessWait` producer,
+//! capability-checked, audited `tairix_kernel_core::spawn_image` caller, records
+//! the parent/child link with a `tairix_kernel_core::KernelProcessWait` producer,
 //! and admits each as a resumable user kthread (`spawn_user_kthread`,
 //! `plans/SPAWN.md` SP2).
 //!
@@ -29,7 +29,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-wait-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-wait-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

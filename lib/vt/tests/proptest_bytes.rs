@@ -6,15 +6,15 @@
 //! arbitrary input:
 //!
 //! * feeding any byte stream never panics or reads out of bounds;
-//! * feeding the stream byte-by-byte yields exactly the same [`rustos_vt::Op`]
+//! * feeding the stream byte-by-byte yields exactly the same [`tairix_vt::Op`]
 //!   sequence as feeding it all at once (the parser is a true stream — chunk
 //!   boundaries never change the result);
-//! * whatever the emitter produces for an arbitrary [`rustos_vt::Op`] parses
+//! * whatever the emitter produces for an arbitrary [`tairix_vt::Op`] parses
 //!   back to that identical operation (the "one vocabulary" guarantee).
 
 use proptest::prelude::*;
 
-use rustos_vt::{encode_into, BasicColor, Color, EraseMode, Op, Parser, Sgr};
+use tairix_vt::{encode_into, BasicColor, Color, EraseMode, Op, Parser, Sgr};
 
 /// Encode one operation into a fresh `Vec` over the allocation-free
 /// [`encode_into`] sink API.

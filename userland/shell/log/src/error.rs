@@ -2,8 +2,8 @@
 
 use core::fmt;
 
-use rustos_abi::Errno;
-use rustos_log::SegmentError;
+use tairix_abi::Errno;
+use tairix_log::SegmentError;
 
 /// Why a `log` invocation did not complete.
 ///

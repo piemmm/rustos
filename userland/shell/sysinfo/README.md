@@ -1,8 +1,8 @@
-# `rustos-sysinfo` — the System Information CLI
+# `tairix-sysinfo` — the System Information CLI
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/shell/`, §16.6). `sysinfo`
 is the single command-line tool that exposes the System Information API
-to the terminal. RustOS has no `/proc` and no `/sys`; every piece of
+to the terminal. TAIRiX has no `/proc` and no `/sys`; every piece of
 live system information is served by `/System/Services/sysinfod.app/Run` over the
 typed, versioned, capability-checked `sysinfo-v1` API. `sysinfo` is a
 *client* of that API — it does **not** read a virtual filesystem, and it
@@ -11,9 +11,9 @@ has no privileged path that bypasses the capability check (`AGENTS.md`
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` crate and the shared
-`rustos-procinfo` client helpers (and, for the `Run` binary only, the
-`rustos-rt` userland runtime), so it never links a kernel or driver crate
+dependencies are the audited `tairix-abi` crate and the shared
+`tairix-procinfo` client helpers (and, for the `Run` binary only, the
+`tairix-rt` userland runtime), so it never links a kernel or driver crate
 (`AGENTS.md` §17.4).
 
 ## Usage
@@ -57,8 +57,8 @@ without a kernel.
 ## The `Run` binary
 
 The crate is both this request/render library and the `Run` entry-point
-binary (`rustos-sysinfo-run`, `src/run.rs`) a shell spawns. Built for a
-Tier-1 target it is a freestanding pure-Rust program: it links `rustos-rt`,
+binary (`tairix-sysinfo-run`, `src/run.rs`) a shell spawns. Built for a
+Tier-1 target it is a freestanding pure-Rust program: it links `tairix-rt`,
 collects its inherited arguments, parses them, and runs the query against the
 production seams shared through `lib/procinfo` (`IpcTransport` over the
 `sysinfo` IPC endpoint, `RtOutput` over fd 1). It is registered at
@@ -78,13 +78,13 @@ process page whose length is not a whole number of records — is a hard
 error, never a partially-rendered guess.
 
 `sysinfo hardware` pages the tree in whole through the shared
-`rustos_procinfo::hwtree::fetch_tree` walk (the same fetch `lspci` and
+`tairix_procinfo::hwtree::fetch_tree` walk (the same fetch `lspci` and
 `lsusb` render from, `AGENTS.md` §2.2) and summarises it as a node
 count; the per-device inventory renderings are those tools' job.
 
 ## Tests
 
-`cargo test -p rustos-sysinfo` drives the parser and the request/render
+`cargo test -p tairix-sysinfo` drives the parser and the request/render
 engine against an in-memory `sysinfod` stand-in and a recording output:
 the command grammar (every subcommand, alias, and the usage-error
 paths), every query's rendering, process-list paging across a page

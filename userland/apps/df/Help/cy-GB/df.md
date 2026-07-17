@@ -46,7 +46,7 @@ gael eto.
 - `-P, --portability` — fformat cludadwy POSIX (penawdau
   `1024-blocks` a `Capacity`).
 - `-l, --local` — cyfyngu'r adroddiad i systemau ffeiliau lleol (pob
-  gosodiad RustOS heddiw: ni hidlir dim).
+  gosodiad TAIRiX heddiw: ni hidlir dim).
 - `--total` — atodi rhes wedi'i labelu `total` sy'n adio'r ffigurau a
   ddangosir.
 - `-k` — blociau 1024-beit (y rhagosodiad).

@@ -24,9 +24,9 @@
 //! disappeared from the compositor (an embedder removed it), the next present
 //! re-creates it rather than silently doing nothing.
 
-use rustos_taskbar::{Taskbar, TaskbarRenderer};
-use rustos_theme::Theme;
-use rustos_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
+use tairix_taskbar::{Taskbar, TaskbarRenderer};
+use tairix_theme::Theme;
+use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
 /// Presents a taskbar and its start-menu popup as window-manager windows.
 ///
@@ -77,10 +77,10 @@ impl TaskbarPresenter {
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     ///
-    /// [`BarLayout::bar`]: rustos_taskbar::BarLayout::bar
-    /// [`BarLayout::corner_radius`]: rustos_taskbar::BarLayout::corner_radius
-    /// [`MenuLayout::panel`]: rustos_taskbar::MenuLayout::panel
-    /// [`MenuLayout::corner_radius`]: rustos_taskbar::MenuLayout::corner_radius
+    /// [`BarLayout::bar`]: tairix_taskbar::BarLayout::bar
+    /// [`BarLayout::corner_radius`]: tairix_taskbar::BarLayout::corner_radius
+    /// [`MenuLayout::panel`]: tairix_taskbar::MenuLayout::panel
+    /// [`MenuLayout::corner_radius`]: tairix_taskbar::MenuLayout::corner_radius
     pub fn present(
         &mut self,
         compositor: &mut Compositor,

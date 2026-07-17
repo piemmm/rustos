@@ -9,7 +9,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::sysinfo::LoadAverage;
+use tairix_abi::sysinfo::LoadAverage;
 
 /// Render a tenths-of-a-percent figure as `W.T`, saturating at `999.9` so
 /// a column never widens.
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn load_renders_two_centis() {
-        use rustos_abi::sysinfo::LOAD_FIXED_SHIFT;
+        use tairix_abi::sysinfo::LOAD_FIXED_SHIFT;
         assert_eq!(format_load(0), "0.00");
         assert_eq!(format_load(1 << LOAD_FIXED_SHIFT), "1.00");
     }

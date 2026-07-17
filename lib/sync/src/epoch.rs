@@ -1,6 +1,6 @@
 //! Epoch-based reclamation (RCU-equivalent).
 //!
-//! This module supplies the minimum primitive set every other RustOS
+//! This module supplies the minimum primitive set every other TAIRiX
 //! component needs to publish a new version of a data structure while
 //! safely deferring destruction of the old version until no thread can
 //! observe it.

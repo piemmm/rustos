@@ -1,12 +1,12 @@
 //! Datagram-socket client wrappers over the `netsock-v1` contract
-//! (`plans/NETWORK.md` N4, `rustos_abi::net`).
+//! (`plans/NETWORK.md` N4, `tairix_abi::net`).
 //!
 //! These are the pure-Rust client half of the socket ABI: thin marshalling
 //! over the kernel-brokered [`crate::ipc_call`] to the reserved
 //! [`NETSTACK_SOCKET_ENDPOINT`] (control plane) and [`crate::ipc_recv`] on
 //! the client's own delivery port (receive plane). They add **no**
 //! authority — every capability and input check stays kernel- and
-//! stack-side ([`CAP_NET`](rustos_abi::CapabilityId::NET) is enforced by
+//! stack-side ([`CAP_NET`](tairix_abi::CapabilityId::NET) is enforced by
 //! the `netstack` dispatcher). A non-Rust program reaches the same
 //! contract through the generated C ABI; this is the first-party path.
 //!
@@ -21,13 +21,13 @@
 //! reject a forged sender (fail closed — the delivery port is otherwise an
 //! unauthenticated inbox).
 
-use rustos_abi::net::{
+use tairix_abi::net::{
     decode_bind_reply, decode_socket_reply, SocketAddr, SocketDatagram, SocketId, SocketRequest,
     SocketType, NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY,
 };
-use rustos_abi::net_ipc::NetAddrFamily;
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::{Errno, Origin};
+use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::{Errno, Origin};
 
 use crate::{ipc_call, ipc_recv};
 
@@ -145,7 +145,7 @@ pub fn leave_multicast(socket: SocketId, group: SocketAddr) -> Result<(), Errno>
 ///   is not a well-formed [`SocketDatagram`], or the sender origin is
 ///   malformed.
 pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<(SocketDatagram<'_>, Origin), Errno> {
-    let mut sender = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
+    let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
     let len = ipc_recv(deliver_port, buf, &mut sender).map_err(Errno::from_syscall)?;
     let origin = Origin::from_bytes(&sender)?;
     let datagram = SocketDatagram::parse(&buf[..len])?;

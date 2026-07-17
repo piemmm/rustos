@@ -3,7 +3,7 @@
 //!
 //! ## What this test asserts
 //!
-//! The `rustos_arch_api::CrossCpuTlbShootdown` HAL slice requires that a
+//! The `tairix_arch_api::CrossCpuTlbShootdown` HAL slice requires that a
 //! page-table edit on one CPU can be made visible on the others. On
 //! aarch64 this needs no IPI: `Aarch64Arch::shootdown_page` issues the
 //! *inner-shareable broadcast* `tlbi vaae1is` + `dsb ish`/`isb`, which the
@@ -35,7 +35,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port and supplies its own
+//! It links only the `tairix-arch-aarch64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
 //! never behind a Cargo feature on the arch crate (fail closed).
 
@@ -50,12 +50,12 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_arch_aarch64::kernel_arch::read_cntfrq;
-    use rustos_arch_aarch64::{
+    use tairix_arch_aarch64::kernel_arch::read_cntfrq;
+    use tairix_arch_aarch64::{
         fdt, handle_panic_via_serial, qemu_exit, smp, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
     };
-    use rustos_arch_api::{CpuId, CrossCpuTlbShootdown};
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_arch_api::{CpuId, CrossCpuTlbShootdown};
+    use tairix_log::{log, Event, EventId, Level};
 
     /// Dense id of the boot core (the `virt` board enters on affinity 0).
     const BOOT_CPU: CpuId = 0;
@@ -108,12 +108,12 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the core; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_xtlb_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_xtlb_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         log(

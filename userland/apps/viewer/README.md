@@ -1,4 +1,4 @@
-# `rustos-viewer` — read-only file viewer
+# `tairix-viewer` — read-only file viewer
 
 Stage 7 deliverable (`PLAN.md` Stage 7, `plans/APPWIN.md` AW5). The
 windowed read-only text viewer — and the first consumer of the desktop
@@ -45,6 +45,6 @@ window frame region) — and deliberately nothing else. See
 
 ## Test surface
 
-`cargo test -p rustos-viewer`: the line model's row/column bounds and
+`cargo test -p tairix-viewer`: the line model's row/column bounds and
 line-feed splitting, the non-printable sanitiser, the window-sized
 status/content renders, and the non-degenerate view geometry.

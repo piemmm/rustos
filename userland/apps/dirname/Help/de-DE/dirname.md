@@ -16,7 +16,7 @@ verbleibenden Schrägstrich hat den Elternteil `.`; ein Elternteil, der
 sich leert, ist die Wurzel.
 
 In eine Wurzel wird nie hineingeschnitten: `dirname /tools` ist `/`,
-und — das Gegenstück im RustOS-Speicherwald — `dirname Home:/tools` ist
+und — das Gegenstück im TAIRiX-Speicherwald — `dirname Home:/tools` ist
 `Home:/`. Eine Alias-Wurzel (`Home:/`, `System:/`, …) spielt genau die
 Rolle, die `/` auf POSIX-Systemen spielt.
 

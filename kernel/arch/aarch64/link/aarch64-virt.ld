@@ -1,4 +1,4 @@
-/* Linker script for RustOS aarch64 kernels on the QEMU `virt` board.
+/* Linker script for TAIRiX aarch64 kernels on the QEMU `virt` board.
  *
  * QEMU `-M virt` places guest RAM at 0x4000_0000. With `-kernel <elf>`
  * QEMU's ARM boot loader loads the ELF at its own physical addresses

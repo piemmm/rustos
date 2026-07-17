@@ -31,10 +31,10 @@
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::{Errno, Signal, WaitFlags, WaitStatus, WAIT_PID_ANY};
-use rustos_kernel_sched_api::SchedulerArch;
-use rustos_kernel_sec::TaskId;
-use rustos_sync::SpinLock;
+use tairix_abi::{Errno, Signal, WaitFlags, WaitStatus, WAIT_PID_ANY};
+use tairix_kernel_sched_api::SchedulerArch;
+use tairix_kernel_sec::TaskId;
+use tairix_sync::SpinLock;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -71,7 +71,7 @@ pub trait ProcessWait: Sync {
     /// Block `parent` until the child selected by `pid` exits, reap it, and
     /// return the reaped child's PID and exit code.
     ///
-    /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`]
+    /// `pid` is either a specific child's PID or [`tairix_abi::WAIT_PID_ANY`]
     /// to wait for whichever of `parent`'s children exits next. With
     /// [`WaitFlags::STOPPED`] set in `flags` the wait also completes for a
     /// child freshly stopped by [`Signal::Stop`] — reported without being
@@ -84,7 +84,7 @@ pub trait ProcessWait: Sync {
     /// # Errors
     ///
     /// Returns [`Errno::NotFound`] when `pid` does not name a child of
-    /// `parent` (and `parent` has no children, for [`rustos_abi::WAIT_PID_ANY`]).
+    /// `parent` (and `parent` has no children, for [`tairix_abi::WAIT_PID_ANY`]).
     /// The default producer ([`NullProcessWait`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn wait(&self, parent: TaskId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno>;
@@ -265,7 +265,7 @@ pub enum ChildPeek {
     /// A matching child exists but has not exited yet.
     Running,
     /// `pid` names no child of the calling parent (and the parent has no
-    /// children at all, for [`rustos_abi::WAIT_PID_ANY`]).
+    /// children at all, for [`tairix_abi::WAIT_PID_ANY`]).
     NoChild,
 }
 
@@ -280,7 +280,7 @@ pub enum Reap {
     /// block and retry.
     Blocked,
     /// `pid` names no child of the calling parent (and the parent has no
-    /// children at all, for [`rustos_abi::WAIT_PID_ANY`]).
+    /// children at all, for [`tairix_abi::WAIT_PID_ANY`]).
     NoChild,
 }
 
@@ -363,7 +363,7 @@ impl ProcessTable {
 
     /// Try to report a child of `parent` selected by `pid`.
     ///
-    /// `pid` is [`rustos_abi::WAIT_PID_ANY`] for any child or a specific child's
+    /// `pid` is [`tairix_abi::WAIT_PID_ANY`] for any child or a specific child's
     /// id. Among the matching children: the first (lowest-id, for
     /// determinism) that has already exited is removed
     /// and returned as [`Reap::Ready`]; otherwise, with `report_stopped`
@@ -372,7 +372,7 @@ impl ProcessTable {
     /// its pending stop consumed so it is reported exactly once; if matching
     /// children exist but none has anything to report the result is
     /// [`Reap::Blocked`]; if no child matches it is
-    /// [`Reap::NoChild`]. A negative `pid` other than [`rustos_abi::WAIT_PID_ANY`]
+    /// [`Reap::NoChild`]. A negative `pid` other than [`tairix_abi::WAIT_PID_ANY`]
     /// names no child and fails closed with [`Reap::NoChild`].
     #[must_use]
     pub fn reap(&mut self, parent: TaskId, pid: i32, report_stopped: bool) -> Reap {
@@ -420,13 +420,13 @@ impl ProcessTable {
 
     /// The one matching scan behind [`Self::reap`] and [`Self::peek`]:
     /// resolve the `pid` selector (a specific child id, or
-    /// [`rustos_abi::WAIT_PID_ANY`]) and report whether any child of `parent`
+    /// [`tairix_abi::WAIT_PID_ANY`]) and report whether any child of `parent`
     /// matches, the first (lowest-id, for determinism) matching reapable
     /// zombie's `(task id, exit code)`, and — when `report_stopped` — the
     /// first matching child with an unreported stop. A reapable zombie wins
     /// over a pending stop: termination is the stronger, terminal report.
     ///
-    /// A negative selector other than [`rustos_abi::WAIT_PID_ANY`] names no
+    /// A negative selector other than [`tairix_abi::WAIT_PID_ANY`] names no
     /// child and fails closed as no match.
     #[allow(clippy::type_complexity)] // Three named findings of one scan; a struct would restate them.
     fn find(
@@ -716,7 +716,7 @@ mod tests {
         // A WAIT_PID_ANY request announces the inert interface too, rather than
         // pretending a child was reaped.
         assert_eq!(
-            NullProcessWait.wait(TaskId(1), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            NullProcessWait.wait(TaskId(1), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::NotImplemented)
         );
         // The bookkeeping hooks are inert no-ops on the null producer.

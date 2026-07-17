@@ -1,6 +1,6 @@
-//! RustOS i8042 PS/2 keyboard input driver (x86_64).
+//! TAIRiX i8042 PS/2 keyboard input driver (x86_64).
 //!
-//! Implements [`rustos_abi::driver::input::Input`] for a keyboard attached
+//! Implements [`tairix_abi::driver::input::Input`] for a keyboard attached
 //! to the Intel 8042 keyboard controller — the legacy "PS/2" controller every
 //! x86 PC and QEMU's default `q35`/`i440fx` machines expose. The controller is
 //! a two-port byte-addressed register file: the status/command register at
@@ -44,8 +44,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, PortIo8};
+use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, PortIo8};
 
 #[cfg(test)]
 mod tests;

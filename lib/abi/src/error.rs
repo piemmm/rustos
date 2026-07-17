@@ -11,7 +11,7 @@ use core::fmt;
 /// Numeric values are part of the frozen ABI: kernel and user space agree
 /// on the exact integer for each variant. The discriminants are deliberately
 /// disjoint from POSIX `errno` so a mis-routed POSIX value cannot be confused
-/// for a RustOS [`Errno`].
+/// for a TAIRiX [`Errno`].
 #[repr(i32)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
@@ -104,7 +104,7 @@ pub enum Errno {
     /// A user-space pointer handed to a syscall does not name memory the
     /// caller may access in the direction the call requires.
     ///
-    /// The RustOS equivalent of POSIX `EFAULT`. Emitted by any syscall
+    /// The TAIRiX equivalent of POSIX `EFAULT`. Emitted by any syscall
     /// that copies through the kernel's `copy_from_user` / `copy_to_user`
     /// boundary when the user buffer is null, runs off
     /// the end of the address space, is unmapped, is not a user page, or
@@ -119,7 +119,7 @@ pub enum Errno {
     /// A non-blocking operation has nothing to return right now and
     /// would have to block to make progress.
     ///
-    /// The RustOS equivalent of POSIX `EAGAIN` / `EWOULDBLOCK`. Emitted
+    /// The TAIRiX equivalent of POSIX `EAGAIN` / `EWOULDBLOCK`. Emitted
     /// by the non-blocking `ipc_recv` syscall when the addressed port's
     /// mailbox is momentarily empty: the endpoint is live and bound, the
     /// caller may simply retry. It is deliberately distinct from
@@ -130,7 +130,7 @@ pub enum Errno {
     /// A request to allocate or grow memory cannot be satisfied because
     /// no backing physical frame (or page-table frame) is available.
     ///
-    /// The RustOS equivalent of POSIX `ENOMEM`. Emitted by the anonymous
+    /// The TAIRiX equivalent of POSIX `ENOMEM`. Emitted by the anonymous
     /// `mem_map` syscall (`plans/SPAWN.md` SP5) when the kernel cannot map
     /// a fresh region into the caller's address space because physical
     /// frames are exhausted. It is the deterministic, fail-closed result
@@ -141,7 +141,7 @@ pub enum Errno {
     OutOfMemory = 20,
     /// A rename names a source and destination on different mounted volumes.
     ///
-    /// The RustOS equivalent of POSIX `EXDEV`. Emitted by the `fs_rename`
+    /// The TAIRiX equivalent of POSIX `EXDEV`. Emitted by the `fs_rename`
     /// syscall when the two paths do not resolve under the same mounted
     /// volume: a rename preserves the node's identity, which cannot span two
     /// independent backings. It is deliberately distinct from the generic
@@ -150,7 +150,7 @@ pub enum Errno {
     CrossVolume = 21,
     /// A path names a non-directory where a directory is required.
     ///
-    /// The RustOS equivalent of POSIX `ENOTDIR`. Emitted by the filesystem
+    /// The TAIRiX equivalent of POSIX `ENOTDIR`. Emitted by the filesystem
     /// syscalls when an operation that only applies to a directory reaches a
     /// file — a directory-only `fs_unlink`
     /// ([`UnlinkFlags::DIRECTORY`](crate::UnlinkFlags::DIRECTORY), the
@@ -161,7 +161,7 @@ pub enum Errno {
     NotADirectory = 22,
     /// A directory cannot be removed because it still has entries.
     ///
-    /// The RustOS equivalent of POSIX `ENOTEMPTY`. Emitted by `fs_unlink`
+    /// The TAIRiX equivalent of POSIX `ENOTEMPTY`. Emitted by `fs_unlink`
     /// when the named directory is not empty: removal never recurses
     /// implicitly, so a populated directory fails closed with this code. It
     /// is deliberately distinct from the generic path-validation errnos so
@@ -210,7 +210,7 @@ pub enum Errno {
     NotForeground = 27,
     /// A write was issued to a pipe whose every read end is closed.
     ///
-    /// The RustOS equivalent of POSIX `EPIPE`. Emitted by a write to a
+    /// The TAIRiX equivalent of POSIX `EPIPE`. Emitted by a write to a
     /// pipe end (`plans/SPAWN.md` SP10) when no reader remains: the bytes
     /// can never be consumed, so the writer learns to stop — this is how a
     /// `yes | head` pipeline terminates its producer. Deliberately distinct
@@ -269,7 +269,7 @@ pub enum Errno {
     /// A blocking wait was cut short because the calling task has a
     /// pending termination.
     ///
-    /// The RustOS analogue of POSIX `EINTR`, deliberately narrower: it is
+    /// The TAIRiX analogue of POSIX `EINTR`, deliberately narrower: it is
     /// emitted only by the kernel's in-kernel park loops (a pipe or
     /// console read, `waitset_wait`, `irq_wait`, a blocking `wait`, …)
     /// when a `Terminate`/`Kill` was deferred against the parked caller,
@@ -281,27 +281,27 @@ pub enum Errno {
     Interrupted = 33,
     /// A local address or port is already in use by another socket.
     ///
-    /// The RustOS equivalent of POSIX `EADDRINUSE`. Emitted by the socket
+    /// The TAIRiX equivalent of POSIX `EADDRINUSE`. Emitted by the socket
     /// service when a `bind` names a local port already held by another
     /// socket of the same principal, or an ephemeral-port draw cannot find a
     /// free port. Fail-closed: the existing binding is never displaced.
     AddressInUse = 34,
     /// A requested local address is not held by any interface.
     ///
-    /// The RustOS equivalent of POSIX `EADDRNOTAVAIL`. Emitted by the socket
+    /// The TAIRiX equivalent of POSIX `EADDRNOTAVAIL`. Emitted by the socket
     /// service when a `bind` names a specific local address that no managed
     /// interface owns, so no source address could ever be chosen for it.
     AddressUnavailable = 35,
     /// No route exists to the requested destination.
     ///
-    /// The RustOS equivalent of POSIX `ENETUNREACH`. Emitted by the socket
+    /// The TAIRiX equivalent of POSIX `ENETUNREACH`. Emitted by the socket
     /// service when a datagram's destination has no matching route (no
     /// on-link prefix and no default router), or no usable source address of
     /// the destination's family is configured.
     NetworkUnreachable = 36,
     /// A send omitted a destination on a socket with no connected peer.
     ///
-    /// The RustOS equivalent of POSIX `EDESTADDRREQ`/`ENOTCONN`. Emitted by
+    /// The TAIRiX equivalent of POSIX `EDESTADDRREQ`/`ENOTCONN`. Emitted by
     /// the socket service when a `send` supplies no destination and the
     /// socket has never been `connect`ed to a default peer.
     NotConnected = 37,

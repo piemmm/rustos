@@ -17,8 +17,8 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use rustos_abi::Errno;
-use rustos_log::{
+use tairix_abi::Errno;
+use tairix_log::{
     decode_record, render_json, render_line, render_markdown, render_table_header,
     render_table_row, verify_segment, DictionaryView, LogAttestationKey, RecordBlockRef,
     RecordFrame, SegmentHeader, SegmentReader, Stream,
@@ -212,11 +212,11 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::{
+    use tairix_abi::{
         BootId, CapabilitySummary, Duration64, Origin, ProcId, Time64, TrustDomain,
         WallClockReading, WallTimeState, BOOT_ID_LEN,
     };
-    use rustos_log::{
+    use tairix_log::{
         machine_id_hash, stream_genesis, CallerContent, DictionaryBuilder, Level,
         LogAttestationKey, LogRecord, SegmentHeader, SegmentWriter, Stream,
     };
@@ -244,7 +244,7 @@ mod tests {
             42,
             ProcId::from_raw([7u8; 16]),
             CapabilitySummary::from_raw([0u8; 32]),
-            rustos_abi::ORIGIN_CONSOLE_NONE,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
         )
     }
 
@@ -331,7 +331,7 @@ mod tests {
     }
 
     impl SegmentSource for Store {
-        fn read(&self, stream: Stream, index: usize) -> Result<Option<Vec<u8>>, rustos_abi::Errno> {
+        fn read(&self, stream: Stream, index: usize) -> Result<Option<Vec<u8>>, tairix_abi::Errno> {
             Ok(self
                 .segments
                 .iter()
@@ -359,7 +359,7 @@ mod tests {
     }
 
     impl Output for Capture {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), rustos_abi::Errno> {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), tairix_abi::Errno> {
             self.bytes.borrow_mut().extend_from_slice(bytes);
             Ok(())
         }

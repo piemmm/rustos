@@ -1,6 +1,6 @@
-# rustos-netstack
+# tairix-netstack
 
-The RustOS network-stack service (`plans/NETWORK.md` §2.2, N3b): the
+The TAIRiX network-stack service (`plans/NETWORK.md` §2.2, N3b): the
 user-space process that owns every managed network interface and is the
 thin, audited glue around the pure `lib/net` protocol engine.
 
@@ -9,7 +9,7 @@ engine API evolve in place while `abi-v1` is unfrozen.
 
 ## What lives here
 
-* `src/iface.rs` — the interface table: one `rustos_net::stack::Stack`
+* `src/iface.rs` — the interface table: one `tairix_net::stack::Stack`
   per managed interface, named by its admin-chosen alias; address/route
   mutation, counters, the typed facts/state records, the frame-ring pump
   (`service_interface`) between the engine and a `Net` driver, and the
@@ -48,4 +48,4 @@ and `CAP_NET` (socket surface) against its callers; it holds neither.
 Host tests drive the engine end-to-end over a loopback fake whose
 "device" is a full peer `Stack` (v4 ARP + echo and v6 DAD + ND + echo
 round-trips through the real ring pump) and exercise the dispatcher's
-capability-refusal/audit matrix. `cargo test -p rustos-netstack`.
+capability-refusal/audit matrix. `cargo test -p tairix-netstack`.

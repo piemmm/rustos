@@ -7,14 +7,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats, LoadAverage, ProcessListRequest,
     ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader, Uptime,
 };
-use rustos_abi::{Duration64, Errno, ProcId};
-use rustos_curses::{Event, Screen, Size, Tty};
-use rustos_procinfo::Transport;
-use rustos_termcap::TermType;
+use tairix_abi::{Duration64, Errno, ProcId};
+use tairix_curses::{Event, Screen, Size, Tty};
+use tairix_procinfo::Transport;
+use tairix_termcap::TermType;
 
 use crate::app::{list_capacity, render, run};
 use crate::error::TopError;
@@ -157,12 +157,12 @@ impl FakeTty {
 }
 
 impl Tty for FakeTty {
-    fn write(&mut self, bytes: &[u8]) -> rustos_curses::Result<()> {
+    fn write(&mut self, bytes: &[u8]) -> tairix_curses::Result<()> {
         self.output.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn read(&mut self) -> rustos_curses::Result<Vec<u8>> {
+    fn read(&mut self) -> tairix_curses::Result<Vec<u8>> {
         Ok(self.chunks.pop().unwrap_or_default())
     }
 }

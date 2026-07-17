@@ -37,7 +37,7 @@
 //! in-bounds and fall back to a safe default on the (then impossible)
 //! error rather than panicking.
 
-use rustos_abi::RegisterWindow;
+use tairix_abi::RegisterWindow;
 
 use crate::{Status, Transport, VirtioError};
 

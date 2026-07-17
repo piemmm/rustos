@@ -1,7 +1,7 @@
 //! Legacy 8259A PIC quiesce: remap away from the exception vectors and
 //! mask every line.
 //!
-//! RustOS drives interrupts exclusively through the LAPIC/IO-APIC
+//! TAIRiX drives interrupts exclusively through the LAPIC/IO-APIC
 //! (`apic`, `irq`), so the two legacy 8259A controllers must never
 //! deliver anything. Firmware cannot be relied on to leave them quiet:
 //! `SeaBIOS` — the BIOS in front of QEMU's PVH `-kernel` direct boot, and
@@ -21,7 +21,7 @@
 //! were ever unmasked by mistake it would land on an ordinary, unclaimed
 //! vector rather than being decoded as an exception.
 
-use rustos_abi::driver::port_io::PortIo8;
+use tairix_abi::driver::port_io::PortIo8;
 
 /// Master 8259A command port.
 const MASTER_CMD: u16 = 0x20;

@@ -1,7 +1,7 @@
 //! The on-disk log segment: an append-only, hash-chained, self-verifying
 //! container for one stream's records.
 //!
-//! A segment is the unit RustOS writes, seals, rotates, and verifies. It is
+//! A segment is the unit TAIRiX writes, seals, rotates, and verifies. It is
 //! **payload-agnostic**: the record bytes are opaque here, so the same
 //! container serves every record shape. Integrity comes from three layers:
 //!
@@ -26,8 +26,8 @@
 //! Every multi-byte scalar is little-endian. All hashing is over *contiguous*
 //! byte ranges of the encoded segment, so no streaming hash is needed.
 
-use rustos_abi::{BootId, Duration64, WallClockReading, BOOT_ID_LEN};
-use rustos_crypto::{sha256, MacTag, Sha256Digest, MAC_TAG_LEN, SHA256_OUTPUT_LEN};
+use tairix_abi::{BootId, Duration64, WallClockReading, BOOT_ID_LEN};
+use tairix_crypto::{sha256, MacTag, Sha256Digest, MAC_TAG_LEN, SHA256_OUTPUT_LEN};
 
 use crate::attest::LogAttestationKey;
 use crate::chain::{ChainedEntry, LogChain};
@@ -858,7 +858,7 @@ mod tests {
     use super::*;
     use crate::attest::{machine_id_hash, stream_genesis, LogAttestationKey};
     use alloc::vec::Vec;
-    use rustos_abi::{BootId, Duration64, Time64, WallClockReading, WallTimeState, BOOT_ID_LEN};
+    use tairix_abi::{BootId, Duration64, Time64, WallClockReading, WallTimeState, BOOT_ID_LEN};
 
     const MID: [u8; 16] = [0x11; 16];
 

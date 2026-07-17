@@ -18,7 +18,7 @@
 //!   --PBKDF2-HMAC-SHA256--> VolumeKey  --ARXFS::open--> mounted root
 //! ```
 //!
-//! The KDF is [`rustos_crypto::pbkdf2_sha256`] — the same audited
+//! The KDF is [`tairix_crypto::pbkdf2_sha256`] — the same audited
 //! primitive that protects `/System/Security/Users` records (never a hand-rolled KDF). Its 256-bit output is exactly a
 //! [`VolumeKey`], so no truncation or expansion is involved.
 //!
@@ -50,8 +50,8 @@
 
 use core::num::NonZeroU32;
 
-use rustos_abi::driver::DriverError;
-use rustos_crypto::pbkdf2_sha256;
+use tairix_abi::driver::DriverError;
+use tairix_crypto::pbkdf2_sha256;
 
 use crate::crypto::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
 
@@ -84,7 +84,7 @@ pub const UNLOCK_MAX_ITERATIONS: u32 = 10_000_000;
 /// the same hardware.
 pub const UNLOCK_DEFAULT_ITERATIONS: u32 = 600_000;
 
-/// Magic identifying the unlock descriptor on disk (`"RUKx"`, *RustOS
+/// Magic identifying the unlock descriptor on disk (`"RUKx"`, *TAIRiX
 /// Unlock*). A blob not beginning with it is not a descriptor and is
 /// refused rather than misinterpreted.
 const UNLOCK_MAGIC: [u8; 4] = *b"RUK1";
@@ -127,7 +127,7 @@ pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
 /// secrecy. It must **never** be used for a volume
 /// that carries secrets — those use a passphrase-derived
 /// [`UnlockDescriptor::derive_volume_key`] key.
-pub const SYSTEM_VOLUME_KEY: VolumeKey = *b"RustOS-/System-RO-public-key:001";
+pub const SYSTEM_VOLUME_KEY: VolumeKey = *b"TAIRiX-/System-RO-public-key:001";
 
 /// The plaintext key-derivation descriptor stored beside an encrypted
 /// volume (on a Pi SD image, in a file on the FAT boot partition).

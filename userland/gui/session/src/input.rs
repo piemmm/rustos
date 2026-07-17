@@ -4,7 +4,7 @@
 //! [`InputRouter`] (focus, click-to-activate, interactive move-grabs) and the
 //! taskbar's [`TaskbarInput`] (start-menu toggle, task activate/minimise,
 //! notification/clock presses) — and both consume the **same** shared
-//! `rustos_input` (`lib/input`) event vocabulary. A
+//! `tairix_input` (`lib/input`) event vocabulary. A
 //! real input source produces one stream of events, so something must decide
 //! which router each event belongs to. Neither GUI crate may depend on the
 //! other, so that decision is session glue, and [`SessionInputRouter`]
@@ -34,8 +34,8 @@
 //! this glue. It never panics: every routed sub-call is itself total
 //! and fails closed.
 
-use rustos_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
-use rustos_wm::{
+use tairix_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
+use tairix_wm::{
     Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, Scale, WindowId,
 };
 
@@ -97,7 +97,7 @@ impl SessionInputRouter {
     ///
     /// The desktop's pointer-cursor controller reads its interaction state —
     /// the tracked pointer and the in-flight move-grab — to choose the
-    /// on-screen cursor shape ([`desired_cursor`](rustos_wm::desired_cursor)).
+    /// on-screen cursor shape ([`desired_cursor`](tairix_wm::desired_cursor)).
     /// It is the window manager's router that owns that state (motion is
     /// fanned to both inner routers, so its pointer is always in step), so the
     /// controller reads it here rather than the session router keeping a

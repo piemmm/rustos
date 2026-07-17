@@ -1,4 +1,4 @@
-//! RustOS **terminal emulator** — the default graphical terminal
+//! TAIRiX **terminal emulator** — the default graphical terminal
 //! (`userland/apps/`, `PLAN.md` Stage 7).
 //!
 //! The terminal runs the default shell and shows its output on a
@@ -15,7 +15,7 @@
 //! * [`Grid`] is the character-cell screen: a rectangle of [`Cell`]s and a
 //!   cursor. It interprets the control behaviour of a byte stream through the
 //!   [`Parser`], which is a *consumer* of the shared
-//!   [`lib/vt`](rustos_vt) ANSI/VT/xterm vocabulary — there is no second
+//!   [`lib/vt`](tairix_vt) ANSI/VT/xterm vocabulary — there is no second
 //!   escape-sequence definition in this app. The emulator
 //!   is xterm-class: printable text and Unicode, the C0 controls, SGR
 //!   rendition with the 16/256/truecolour models, cursor movement and
@@ -30,7 +30,7 @@
 //!   on the terminal's behalf — echo is the shell's job, exactly as on a real
 //!   tty.
 //! * [`render()`] paints the grid into a `lib/raster`
-//!   [`Surface`](rustos_raster::Surface) using the active theme's palette and
+//!   [`Surface`](tairix_raster::Surface) using the active theme's palette and
 //!   the shared `lib/font` monospace face — the same surface the compositor
 //!   places and rounds.
 //!
@@ -92,7 +92,7 @@ pub use spawned::{shell_wires, PipeShellSource};
 pub use terminal::Terminal;
 // The cell and rendition vocabulary the emulator consumes is `lib/vt`'s, not a
 // second definition; re-export it so callers name one type.
-pub use rustos_vt::{Attributes, Cell, Color};
+pub use tairix_vt::{Attributes, Cell, Color};
 
 /// The terminal type this emulator honestly advertises for itself.
 ///
@@ -116,10 +116,10 @@ pub const ROWS: u16 = 24;
 /// metrics the renderer draws with, so the window and the paint can never
 /// disagree; the QEMU vertical's runner imports it for its click
 /// coordinates exactly as it imports the file browser's.
-pub const WIN_WIDTH: u32 = rustos_font::BitmapFont::inconsolata().advance() * COLS as u32;
+pub const WIN_WIDTH: u32 = tairix_font::BitmapFont::inconsolata().advance() * COLS as u32;
 
 /// Height in pixels of the terminal's window: one line height per row.
-pub const WIN_HEIGHT: u32 = rustos_font::BitmapFont::inconsolata().line_height() * ROWS as u32;
+pub const WIN_HEIGHT: u32 = tairix_font::BitmapFont::inconsolata().line_height() * ROWS as u32;
 
 #[cfg(test)]
 mod tests;

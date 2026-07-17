@@ -12,7 +12,7 @@
 //! This module layers that *on top of* the closure contract without
 //! changing it (the modularity guarantee): a **kthread** is a
 //! resumable kernel thread driven through the Arch HAL context-switch
-//! slice ([`rustos_arch_api::ContextSwitch`]). The body the
+//! slice ([`tairix_arch_api::ContextSwitch`]). The body the
 //! scheduler sees is a thin **shim** owned here; the task's real work runs
 //! as a stackful coroutine on its own kernel stack.
 //!
@@ -22,7 +22,7 @@
 //! stable address) holding two [`TaskContext`] save areas — the task's and
 //! the dispatcher's — its requested [`TaskAction`], a run-state, the work
 //! closure, and its kernel stack. The shim closure handed to
-//! [`rustos_kernel_sched_api::SchedulerPolicy::spawn`] does, on each
+//! [`tairix_kernel_sched_api::SchedulerPolicy::spawn`] does, on each
 //! dispatch step:
 //!
 //! 1. on the **first** step, [`ContextSwitch::prepare`] the task's first
@@ -55,18 +55,18 @@
 //! coroutine round-trip is proven by the per-arch QEMU verticals. The host
 //! tests here cover the host-observable contract — the shim's state
 //! machine, the fail-closed `prepare` rejection, and the stack-reclaim /
-//! use-after-free discipline against the `kernel/mem` slab tag check — exactly as [`rustos_arch_api::context::conformance`]
+//! use-after-free discipline against the `kernel/mem` slab tag check — exactly as [`tairix_arch_api::context::conformance`]
 //! tests only the host-testable `prepare`.
 
 use alloc::boxed::Box;
 use core::ptr::addr_of_mut;
 
-use rustos_arch_api::{ContextSwitch, TaskContext};
-use rustos_kernel_mem::LiveUserSpace;
-use rustos_kernel_sched_api::{
+use tairix_arch_api::{ContextSwitch, TaskContext};
+use tairix_kernel_mem::LiveUserSpace;
+use tairix_kernel_sched_api::{
     CpuId, Priority, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
 };
-use rustos_sync::once::OnceCell;
+use tairix_sync::once::OnceCell;
 
 use crate::cpu_state::{self, LiveSpacePtr, ResumeHandle as UserResumeHandle};
 use crate::dispatch_slot::RescheduleAction;
@@ -79,7 +79,7 @@ use crate::dispatch_slot::RescheduleAction;
 /// stack* (the EL1 trap runs on the kthread's kernel stack). The deepest such
 /// path is a full syscall dispatch — the arch trap prologue, the
 /// `KernelDispatchHook` layers, a handler, and the validated user-memory copy
-/// boundary ([`rustos_kernel_mem::uaccess`]) with its staging.
+/// boundary ([`tairix_kernel_mem::uaccess`]) with its staging.
 ///
 /// The working set of that path depends sharply on the optimisation level:
 /// an unoptimised **debug** build spills generously at every frame, so its
@@ -716,7 +716,7 @@ where
 /// # Errors
 ///
 /// Propagates [`SchedulerPolicy::spawn`]'s error (e.g.
-/// [`rustos_kernel_sched_api::SchedError::NoSuchCpu`] for an out-of-range
+/// [`tairix_kernel_sched_api::SchedError::NoSuchCpu`] for an out-of-range
 /// `home_cpu`).
 pub fn spawn_kthread<C, A, P, W>(
     scheduler: &P,
@@ -940,7 +940,7 @@ where
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     if !cpu_state::ensure(scheduler.cpu_count(), home_cpu) {
-        return Err(rustos_kernel_sched_api::SchedError::NoSuchCpu);
+        return Err(tairix_kernel_sched_api::SchedError::NoSuchCpu);
     }
     let mut control: Box<ThreadControl<C, S>> = Box::new(ThreadControl {
         cs,
@@ -958,7 +958,7 @@ where
     // stays stable for the raw-pointer protocol; `&mut control` derefs to
     // the `&mut ThreadControl` the shim step takes. `step.cpu` keys the
     // per-CPU resume table for a user kthread.
-    let body = move |step: &mut rustos_kernel_sched_api::TaskContext| {
+    let body = move |step: &mut tairix_kernel_sched_api::TaskContext| {
         // A task stopped by `Signal::Stop` is re-parked instead of run: the
         // scheduler's park state is shared with every blocking wait, so a
         // broadcast wake (a console byte waking all parked readers) can make
@@ -1271,9 +1271,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use rustos_arch_api::{PrepareError, TaskEntry};
-    use rustos_kernel_mem::{Slab, SlabError, SlabHandle};
-    use rustos_kernel_sched_api::{SchedulerConfig, TaskState};
+    use tairix_arch_api::{PrepareError, TaskEntry};
+    use tairix_kernel_mem::{Slab, SlabError, SlabHandle};
+    use tairix_kernel_sched_api::{SchedulerConfig, TaskState};
 
     use crate::sched::Scheduler;
     use crate::test_arch::TestArch;

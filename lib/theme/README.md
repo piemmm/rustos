@@ -1,6 +1,6 @@
-# rustos-theme
+# tairix-theme
 
-The single shared desktop **theme definition** for RustOS (`AGENTS.md` §6,
+The single shared desktop **theme definition** for TAIRiX (`AGENTS.md` §6,
 §10 — `PLAN.md` Stage 7). One theme drives the colours, corner radii, fonts,
 and cursors of the window manager, the taskbar, and the default apps, with a
 default dark theme and a light theme switchable at runtime.
@@ -22,7 +22,7 @@ This crate is pure theme *data*. A `Theme` is a table of:
 The crate owns no rendering or compositing arithmetic — that lives in the
 shared rasteriser `lib/raster`. A consumer converts a theme `Rgba` into the
 shared render colour at the edge (`lib/raster` provides `From<Rgba> for
-rustos_raster::Color`), so the colour algebra is never duplicated
+tairix_raster::Color`), so the colour algebra is never duplicated
 (`AGENTS.md` §2.2).
 
 `ThemeRegistry` owns the available themes and the active selection. It always

@@ -6,14 +6,14 @@
 //! and installs a syscall-dispatch callback. It then builds **two**
 //! hardware-isolated EL0 address spaces — each its own stage-1 page-table
 //! hierarchy — from the same `rxe` fixture program through the production
-//! capability-checked, audited `rustos_kernel_core::spawn_image` caller, and
+//! capability-checked, audited `tairix_kernel_core::spawn_image` caller, and
 //! admits each as a resumable user kthread (`spawn_user_kthread`, `plans/SPAWN.md`
 //! SP2) whose `pre_resume` hook reactivates that task's page-table root before
 //! every switch-in, so the two tasks stay isolated.
 //!
 //! Driving the cooperative `step` loop interleaves the two runnable tasks. Each
 //! task's `yield`/`exit` `svc` traps back to the dispatch callback, which maps
-//! it to `rustos_kernel_core::reschedule_current` — suspending the running task
+//! it to `tairix_kernel_core::reschedule_current` — suspending the running task
 //! back to the dispatcher exactly as the production bin-crate callback does. The
 //! test PASSes once both tasks have yielded their full count and exited (no task
 //! left live), proving a real EL0→EL0 context switch under the live scheduler.
@@ -27,7 +27,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-spawn-el0-timeshare-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-spawn-el0-timeshare-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

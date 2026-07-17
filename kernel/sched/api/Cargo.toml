@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kernel-sched-api"
-description = "RustOS scheduler contract (AGENTS.md §17.1): the SchedulerPolicy trait, the lifecycle vocabulary every policy shares, and the conformance suite every concrete scheduler must pass."
+name = "tairix-kernel-sched-api"
+description = "TAIRiX scheduler contract (AGENTS.md §17.1): the SchedulerPolicy trait, the lifecycle vocabulary every policy shares, and the conformance suite every concrete scheduler must pass."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,8 +29,8 @@ conformance = ["test-arch"]
 # `SchedulerPolicy` to drive. Dev-dependency cycles are permitted by
 # Cargo and are excluded from the §17.4 build graph (`deps-check`).
 [dev-dependencies]
-rustos-kernel-sched-api = { path = ".", version = "=0.0.0", features = ["conformance"] }
-rustos-kernel-sched-mlfq = { path = "../mlfq", version = "=0.0.0" }
+tairix-kernel-sched-api = { path = ".", version = "=0.0.0", features = ["conformance"] }
+tairix-kernel-sched-mlfq = { path = "../mlfq", version = "=0.0.0" }
 
 [dependencies]
 # The scheduler-facing Arch HAL surface (`CpuId`, `SchedulerArch`) is the
@@ -39,4 +39,4 @@ rustos-kernel-sched-mlfq = { path = "../mlfq", version = "=0.0.0" }
 # the implementations, and `kernel/core` all name one type (`AGENTS.md`
 # §2.2). `kernel/sched/api` is a §17.4 `SchedApi` crate and so may name
 # `kernel/arch/api` and `lib/*` only.
-rustos-arch-api = { path = "../../arch/api", version = "=0.0.0" }
+tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }

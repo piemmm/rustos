@@ -1,4 +1,4 @@
-# `rustos-chown` — change file owner and group
+# `tairix-chown` — change file owner and group
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `chown` applies an
 ownership change to each of its file operands. The owner operand is
@@ -10,7 +10,7 @@ recursively. This is the POSIX model, restricted to numeric ids.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ## Usage
@@ -37,7 +37,7 @@ recursive `-R`; a bare `-r` is not an option.
 - `OWNER:GROUP` — change both.
 - `:GROUP` — change only the owning group.
 
-A name (rather than a numeric id) is not accepted: RustOS has no
+A name (rather than a numeric id) is not accepted: TAIRiX has no
 name-to-id seam in this tool, so resolving names would be interface creep
 (`AGENTS.md` §2.4). An empty spec, a bare `:`, and a trailing-colon
 `OWNER:` (which on POSIX systems means "the user's login group", and has
@@ -77,7 +77,7 @@ before any later operand, and there is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-chown` drives the parser and the engine against an
+`cargo test -p tairix-chown` drives the parser and the engine against an
 in-memory tree and a recording output: the command grammar (every owner
 form, the recursive flag, the `-r`-is-not-recursive and unknown-option
 refusals, `--`, the too-few-operands and bad-owner paths), the owner-spec

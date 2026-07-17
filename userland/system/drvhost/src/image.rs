@@ -11,11 +11,11 @@
 //! ```
 //!
 //! The header layout and signed range are pinned by
-//! [`rustos_abi::DriverManifest`]. The body that follows the header is a
-//! little-endian array of [`rustos_abi::CapabilityId`] u16 values whose
+//! [`tairix_abi::DriverManifest`]. The body that follows the header is a
+//! little-endian array of [`tairix_abi::CapabilityId`] u16 values whose
 //! length is the manifest's `capability_count` field, followed by the
 //! driver's bind table: `bind_key_count` consecutive
-//! [`rustos_abi::DriverBindKey`] records. Everything
+//! [`tairix_abi::DriverBindKey`] records. Everything
 //! beyond that is opaque payload (in production the program half of the
 //! binary the [`crate::DriverSpawner`] spawns; in tests, an arbitrary
 //! `&[u8]`).
@@ -24,7 +24,7 @@
 //! bytes, so the caller controls the lifetime (and the wipe) of the
 //! sensitive buffer that backs it.
 
-use rustos_abi::{
+use tairix_abi::{
     decode_bind_keys, CapabilityId, DriverBindKey, DriverError, DriverManifest, Errno,
     DRIVER_SIGNATURE_LEN,
 };
@@ -116,13 +116,13 @@ impl<'a> ParsedImage<'a> {
     /// # Errors
     ///
     /// * [`HostError::CapabilityOutOfRange`] if any identifier exceeds
-    ///   [`CAPABILITY_ID_MAX`](rustos_abi::CAPABILITY_ID_MAX).
+    ///   [`CAPABILITY_ID_MAX`](tairix_abi::CAPABILITY_ID_MAX).
     /// * [`HostError::ImageTruncated`] if `out` cannot hold
     ///   `capability_count` identifiers (the caller sized the buffer
     ///   too small).
     pub fn decode_capabilities(&self, out: &mut [CapabilityId]) -> Result<usize, HostError> {
         let count = usize::from(self.manifest.capability_count);
-        rustos_abi::decode_capability_ids(self.capability_body, count, out).map_err(|e| match e {
+        tairix_abi::decode_capability_ids(self.capability_body, count, out).map_err(|e| match e {
             Errno::OutOfRange => HostError::CapabilityOutOfRange,
             _ => HostError::ImageTruncated,
         })
@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use rustos_abi::{DriverKind, CAPABILITY_ID_MAX, DRIVER_MANIFEST_MAGIC};
+    use tairix_abi::{DriverKind, CAPABILITY_ID_MAX, DRIVER_MANIFEST_MAGIC};
 
     extern crate alloc;
 
@@ -178,7 +178,7 @@ mod tests {
         let bind_key_count = u8::try_from(bind_keys.len()).expect("test bind keys fit in u8");
         let m = DriverManifest {
             magic: DRIVER_MANIFEST_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
             kind: DriverKind::UserSpace,
             bind_key_count,
             capability_count: count,
@@ -199,12 +199,12 @@ mod tests {
     }
 
     fn sample_bind_keys() -> [DriverBindKey; 2] {
-        let Ok(key) = rustos_abi::HwMatchKey::compatible(b"brcm,bcm2711-emmc2") else {
+        let Ok(key) = tairix_abi::HwMatchKey::compatible(b"brcm,bcm2711-emmc2") else {
             unreachable!("compatible string fits HW_COMPATIBLE_MAX")
         };
         [
             DriverBindKey::new(10, key),
-            DriverBindKey::new(0, rustos_abi::HwMatchKey::virtio(2)),
+            DriverBindKey::new(0, tairix_abi::HwMatchKey::virtio(2)),
         ]
     }
 
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(parsed.manifest.bind_key_count, 2);
         assert_eq!(parsed.bind_table.len(), 2 * DriverBindKey::WIRE_LEN);
         assert_eq!(parsed.payload, b"\x01\x02");
-        let mut out = [DriverBindKey::new(0, rustos_abi::HwMatchKey::virtio(0)); 4];
+        let mut out = [DriverBindKey::new(0, tairix_abi::HwMatchKey::virtio(0)); 4];
         let n = parsed.decode_bind_table(&mut out).expect("decode");
         assert_eq!(n, 2);
         assert_eq!(&out[..2], &keys);
@@ -302,7 +302,7 @@ mod tests {
         let bind_start = ParsedImage::HEADER_LEN + 2;
         img[bind_start + 2] = 1;
         let parsed = ParsedImage::parse(&img).expect("structurally valid");
-        let mut out = [DriverBindKey::new(0, rustos_abi::HwMatchKey::virtio(0)); 4];
+        let mut out = [DriverBindKey::new(0, tairix_abi::HwMatchKey::virtio(0)); 4];
         assert_eq!(
             parsed.decode_bind_table(&mut out),
             Err(HostError::BindKeyInvalid(DriverError::BadMagic))
@@ -314,7 +314,7 @@ mod tests {
         let keys = sample_bind_keys();
         let img = build_image_with_bind_keys(&[], &keys, b"");
         let parsed = ParsedImage::parse(&img).expect("valid");
-        let mut out = [DriverBindKey::new(0, rustos_abi::HwMatchKey::virtio(0)); 1];
+        let mut out = [DriverBindKey::new(0, tairix_abi::HwMatchKey::virtio(0)); 1];
         assert_eq!(
             parsed.decode_bind_table(&mut out),
             Err(HostError::ImageTruncated)

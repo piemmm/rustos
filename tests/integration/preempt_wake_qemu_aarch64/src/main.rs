@@ -14,7 +14,7 @@
 //! device tree, brings up the EL1 vectors + GICv2, installs a syscall-dispatch
 //! callback, and builds one hardware-isolated EL0 address space from the
 //! `el0_spinner` `rxe` fixture through the production capability-checked,
-//! audited `rustos_kernel_core::spawn_image` caller. It then wires the
+//! audited `tairix_kernel_core::spawn_image` caller. It then wires the
 //! **production** preemption surface: the per-CPU `PreemptStorage`, the
 //! latch-gated EL0-preemption callback (reschedules only when
 //! `take_preempt_pending` is set — the production `production_preempt_dispatch`
@@ -41,7 +41,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-preempt-wake-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-preempt-wake-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kernel-mem"
-description = "RustOS kernel memory subsystem: frame allocator, per-process virtual memory, slab allocator with guard pages, zero-on-free sensitive regions."
+name = "tairix-kernel-mem"
+description = "TAIRiX kernel memory subsystem: frame allocator, per-process virtual memory, slab allocator with guard pages, zero-on-free sensitive regions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,39 +22,39 @@ host-tests = []
 
 [dependencies]
 # Stage 2.1 — the only kernel/* crate `kernel/mem` is permitted to depend on.
-rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
+tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 
 # The Arch HAL surface. §17.4 permits `kernel/mem` to name `kernel/arch/api`.
 # The slab allocator's software use-after-free tag check (`AGENTS.md` §19.10)
 # shares the architecture-neutral `MemTag` / `next_free_tag` rotation defined
 # there, so a tagged hardware port (Arm MTE) and the software check agree on
 # the tag space — no duplicated tag algebra (`AGENTS.md` §2.2).
-rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
+tairix-arch-api = { path = "../arch/api", version = "=0.0.0" }
 
 # The stable ABI types: `kernel/mem` consumes the `rxe` load-image format
 # (`AGENTS.md` §9 / §19.2) so the loader can map a validated image into an
 # `AddressSpace`. §17.4 permits a kernel subsystem to depend on `lib/*`.
-rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 
 # Structured logging for the reclaimable-cache audit events
 # (`plans/SMARTRAM.md` SMART9): a cache classification refusal or a
 # detected ledger defect emits a stable `EventId` record in the
 # `kernel/mem` range (`2_000..3_000`). §17.4 permits a kernel subsystem
 # to depend on `lib/*`.
-rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 
 # First-party LZ codec for the `ramzip` compressed anonymous-memory tier
 # (`plans/SWAPSWAPSWAP.md` §8): pages are compressed *before* they are
 # sealed, through the one shared codec — never a second compressor and
 # never an external dependency.
-rustos-compress = { path = "../../lib/compress", version = "=0.0.0" }
+tairix-compress = { path = "../../lib/compress", version = "=0.0.0" }
 
 # Audited AEAD for the encrypted-swap layer (`AGENTS.md` §4): pages the
 # kernel writes to a swap device are sealed with `lib/crypto`'s
 # ChaCha20-Poly1305 wrapper so a swap device never holds plaintext secrets.
 # §17.4 permits a kernel subsystem to depend on `lib/*`; §1/§2.12 require
 # the cipher come from `lib/crypto`, never hand-rolled here.
-rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 
 # Sensitive-region zero-on-free is delegated to the audited `zeroize` crate
 # per AGENTS.md §1 ("no hand-rolled crypto", §6 "audited crypto"). The
@@ -73,10 +73,10 @@ loom = "0.7"
 # `host-tests` doubles (`HostPageTable`, `SimPhysMap`) and the test-only
 # tamper hooks; a self-referencing dev-dependency enables the feature for
 # tests only, mirroring `lib/fdt` and `kernel/sched/*`.
-rustos-kernel-mem = { path = ".", version = "=0.0.0", features = ["host-tests"] }
+tairix-kernel-mem = { path = ".", version = "=0.0.0", features = ["host-tests"] }
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget
-# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# §2.2). Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

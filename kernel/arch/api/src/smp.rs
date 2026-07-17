@@ -23,7 +23,7 @@
 //! deliberately **not** part of this trait. On the bare-metal ports it is
 //! an `extern "C" fn(CpuId) -> !` function pointer the port installs once
 //! at boot; on wasm32 a secondary is a *fresh module instance* whose
-//! entry is the fixed `rustos_arch_wasm32_main` export, not a runtime
+//! entry is the fixed `tairix_arch_wasm32_main` export, not a runtime
 //! pointer one instance can hand another. Forcing a settable-entry method
 //! onto the HAL would make wasm32 fake one it could never honour
 //! (no fakes), so entry installation stays the

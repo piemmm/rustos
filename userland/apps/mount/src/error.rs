@@ -1,8 +1,8 @@
 //! The outcomes of running a `mount` command.
 
 use core::fmt;
-use rustos_abi::Errno;
-use rustos_procinfo::{CallError, ListError};
+use tairix_abi::Errno;
+use tairix_procinfo::{CallError, ListError};
 
 /// Why a `mount` invocation did not complete.
 ///

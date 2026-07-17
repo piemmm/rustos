@@ -10,7 +10,7 @@
 # create and grant the zero-copy window frame region the desktop session
 # maps. The launched process receives this set intersected with the
 # launching user's grants, never more.
-id = "os.rustos.terminal"
+id = "os.tairix.terminal"
 name = "terminal"
 version = "0.1.0"
 kind = "command"

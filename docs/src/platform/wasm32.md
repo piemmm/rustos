@@ -1,6 +1,6 @@
 # wasm32
 
-RustOS targets `wasm32-unknown-unknown` as a Tier-1 platform: RustOS in
+TAIRiX targets `wasm32-unknown-unknown` as a Tier-1 platform: TAIRiX in
 a browser. Stage 3d brings `kernel/arch/wasm32` from a placeholder to a
 full Arch HAL implementation. It is the structural counterpart of the
 bare-metal ports (`x86_64`, `aarch64`, `riscv64`), but the "hardware" is
@@ -20,7 +20,7 @@ differ:
 
 Like the bare-metal ports, `kernel/arch/wasm32` is a pure Arch HAL
 implementation (`AGENTS.md` §17.2 / §17.4): `WasmArch` implements
-`rustos_arch_api::SchedulerArch` and names only `kernel/arch/api` and
+`tairix_arch_api::SchedulerArch` and names only `kernel/arch/api` and
 `lib/*`, never a concrete kernel subsystem. Where a bare-metal port
 gates its CSR/assembly to `cfg(all(target_arch = "...", target_os =
 "none"))`, the wasm32 port gates its browser-host bindings (the imported
@@ -43,24 +43,24 @@ wasm target.
 | `isolation`     | WASM-linear-memory isolation model (the "MMU" analogue).          |
 | `syscall_entry` | Host-call argument marshalling + dispatch callback.               |
 | `bindings`      | Hand-rolled JS host imports (freestanding wasm only).             |
-| `console`       | `console.log`-backed `rustos_log::Sink` (freestanding wasm only). |
-| `entry`         | `rustos_arch_wasm32_main` export trampoline (freestanding wasm only). |
+| `console`       | `console.log`-backed `tairix_log::Sink` (freestanding wasm only). |
+| `entry`         | `tairix_arch_wasm32_main` export trampoline (freestanding wasm only). |
 | `panic`         | Shared `#[panic_handler]` bridge (freestanding wasm only).        |
 
 ### Cooperative scheduling
 
 A WebAssembly module runs to completion on the host's JavaScript turn;
-it cannot be pre-empted by a hardware timer. RustOS therefore yields
+it cannot be pre-empted by a hardware timer. TAIRiX therefore yields
 *cooperatively*. `preempt::init_local_preempt` asks the host for an
 animation frame; the host's `requestAnimationFrame` callback re-enters
-the exported `rustos_arch_wasm32_on_frame`, which drives one scheduler
+the exported `tairix_arch_wasm32_on_frame`, which drives one scheduler
 tick (`kernel/sched::Scheduler::on_timer_tick`) and requests the next
 frame. A directed reschedule to another worker arrives over a
 `MessageChannel` post (`WasmArch::send_ipi`) and re-enters the exported
-`rustos_arch_wasm32_on_message`.
+`tairix_arch_wasm32_on_message`.
 
 The tick and IPI callbacks drive a *live* `kernel/sched` scheduler — the
-same `rustos-kernel-sched-mlfq::Scheduler` the bare-metal ports run
+same `tairix-kernel-sched-mlfq::Scheduler` the bare-metal ports run
 (`plans/WIRING.md` Stage W8). On the main thread the
 `requestAnimationFrame` loop drives `Scheduler::on_timer_tick` and
 dispatches a ready task with `Scheduler::step` each frame; a delivered
@@ -85,7 +85,7 @@ inter-context IPI is the only path between them; the main thread is the
 routing hub for worker→worker posts.
 
 Bring-up is now reached through the Arch HAL `SecondaryBringup` slice
-(`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14):
+(`tairix_arch_api::smp`, `plans/WIRING.md` Stage W14):
 `WasmArch::start_secondary(cpu)` resolves the dense `CpuId` to its worker
 index through the handle's map (failing closed with `SmpError::InvalidCpu`
 for the boot context or an unmapped id) and delegates to
@@ -194,30 +194,30 @@ bare-metal ports carry a `cross_cpu_tlb_shootdown_qemu_*` vertical.
 
 The host imports in `bindings` are a plain `extern "C"` block resolved
 against the WebAssembly `env` import module; the companion glue in
-`kernel/arch/wasm32/web/rustos.js` supplies them. RustOS takes no
+`kernel/arch/wasm32/web/tairix.js` supplies them. TAIRiX takes no
 `wasm-bindgen` / `web-sys` dependency (`AGENTS.md` §2.12): the import set
 is tiny, fixed, and audited in one place.
 
 ## Host loader
 
-`kernel/arch/wasm32/web/rustos.js` is the JavaScript counterpart of the
-bare-metal ports' firmware hand-off. It instantiates a RustOS wasm32
+`kernel/arch/wasm32/web/tairix.js` is the JavaScript counterpart of the
+bare-metal ports' firmware hand-off. It instantiates a TAIRiX wasm32
 module, supplies the `env` host imports (`performance.now()`, the worker
 index, `requestAnimationFrame`, the `MessageChannel` post, the Web Worker
 spawn, a `console.log` writer that decodes UTF-8 from the module's linear
 memory, and a framebuffer-present writer that paints the module's
 RGBA8888 surface onto a canvas and reads it back), and calls the exported
-`rustos_arch_wasm32_main` once. It
+`tairix_arch_wasm32_main` once. It
 is hand-written and dependency-free, mirroring the no-`wasm-bindgen`
 policy of the Rust side.
 
 The loader also owns the multi-worker SMP plumbing. `boot` runs the
 module on the main thread as CPU 0; when the kernel calls
-`rustos_host_start_worker(n)`, the main thread spawns a real module Web
+`tairix_host_start_worker(n)`, the main thread spawns a real module Web
 Worker (`kernel/arch/wasm32/web/worker.js`, which re-uses the shared
 `instantiate`/`runWorker` logic) joined to the main thread by a
-`MessageChannel`. An inter-context IPI (`rustos_host_post_ipi`) is a post
-on that channel that re-enters the target's `rustos_arch_wasm32_on_message`;
+`MessageChannel`. An inter-context IPI (`tairix_host_post_ipi`) is a post
+on that channel that re-enters the target's `tairix_arch_wasm32_on_message`;
 the main thread routes worker→worker posts.
 
 ## Browser-headless harness
@@ -252,7 +252,7 @@ second browser vertical, the wasm32 analogue of
 
 - `tests/integration/framebuffer_display_wasm32` is a kernel `cdylib`
   that, on the boot context, loads the build-time signed framebuffer
-  display `.rxe` through `rustos_drvhost::Host` (the §8 load gate) and
+  display `.rxe` through `tairix_drvhost::Host` (the §8 load gate) and
   drives `load → use → unload → reload`. "Use" maps a static RGBA8888
   surface through a capability-checked `WasmMmioMapper` — the MMU-less
   analogue of the kernel MMIO mapper: there is no page table, so a
@@ -260,7 +260,7 @@ second browser vertical, the wasm32 analogue of
   surface this instance owns — and `present`s a frame. Each presented
   frame is confirmed **twice**: through a second, independently-mapped
   window (the bytes reached linear memory) and through the new
-  `rustos_host_present_framebuffer` host import, which paints the surface
+  `tairix_host_present_framebuffer` host import, which paints the surface
   onto a canvas and returns the count of pixels that survived the canvas
   round-trip (it must equal `WIDTH × HEIGHT`). It prints `BOOT_OK` then
   `DISPLAY_OK`; any failure traps the instance (`AGENTS.md` §2.9).
@@ -286,15 +286,15 @@ cargo xtask test --wasm
 
 # wasm32 arch-crate host tests only (clock / worker map / cooperative
 # scheduler / isolation / syscall marshalling):
-cargo test -p rustos-arch-wasm32
+cargo test -p tairix-arch-wasm32
 
 # Build the kernel module by hand:
-cargo build -p rustos-test-kernel-arch-boot-wasm32 \
+cargo build -p tairix-test-kernel-arch-boot-wasm32 \
     --target wasm32-unknown-unknown
 
 # Run the harness standalone (Chrome path overridable):
 node tests/integration/kernel_arch_boot_wasm32/web/harness.mjs \
-    --wasm target/wasm32-unknown-unknown/debug/rustos_test_kernel_arch_boot_wasm32.wasm \
+    --wasm target/wasm32-unknown-unknown/debug/tairix_test_kernel_arch_boot_wasm32.wasm \
     --chrome /usr/bin/google-chrome --timeout-secs 30
 ```
 

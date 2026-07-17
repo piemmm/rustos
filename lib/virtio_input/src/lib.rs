@@ -1,7 +1,7 @@
-//! RustOS virtio-input device logic (keyboard / pointer).
+//! TAIRiX virtio-input device logic (keyboard / pointer).
 //!
 //! The arch-neutral, transport-agnostic open/poll/decode engine for a
-//! virtio-input device, implementing [`rustos_abi::driver::input::Input`]
+//! virtio-input device, implementing [`tairix_abi::driver::input::Input`]
 //! on top of the cross-arch virtio transport from `lib/virtio`. As with
 //! `virtio_blk` / `virtio_net`, the logic is bus-agnostic: the same
 //! source drives the PCI and MMIO transports (the
@@ -45,10 +45,10 @@ pub mod console;
 
 pub use console::VirtioKeyboardConsole;
 
-use rustos_abi::driver::input::{Input, InputEvent, InputEventKind, AXIS_X, AXIS_Y};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::DriverError;
-use rustos_virtio::{
+use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, AXIS_X, AXIS_Y};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::DriverError;
+use tairix_virtio::{
     BounceBuffer, ChainSegment, Direction, SplitQueue, Status, Transport, VirtioError, VirtioHost,
 };
 
@@ -161,7 +161,7 @@ fn decode_event(etype: u16, code: u16, value: i32) -> Option<InputEvent> {
 /// its DMA regions through; the host is minted per driver load and
 /// lives only for the duration of that load, so the driver borrows it
 /// for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads). This
-/// mirrors [`VirtioNet`](../rustos_drv_network_virtio_net/struct.VirtioNet.html).
+/// mirrors [`VirtioNet`](../tairix_drv_network_virtio_net/struct.VirtioNet.html).
 pub struct VirtioInput<'h, T: Transport> {
     transport: T,
     eventq: SplitQueue,

@@ -16,8 +16,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_raster::Color;
-use rustos_theme::CursorKind;
+use tairix_raster::Color;
+use tairix_theme::CursorKind;
 
 use crate::vector::{Shape, VectorCursor, Vertex};
 

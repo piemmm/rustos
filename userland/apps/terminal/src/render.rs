@@ -2,7 +2,7 @@
 //!
 //! [`render`] turns a [`Terminal`]'s [`Grid`] into a premultiplied-alpha
 //! [`Surface`] sized to the app's content viewport. Each
-//! [`Cell`](rustos_vt::Cell) is drawn with its own rendition: the
+//! [`Cell`](tairix_vt::Cell) is drawn with its own rendition: the
 //! [`Attributes`] the shared `lib/vt` parser folded onto
 //! it select the foreground and background, which are resolved against the
 //! active theme's [`Palette`] and the standard ANSI
@@ -11,7 +11,7 @@
 //! radius through its single anti-aliased rounded-corner path. There is no rounding here.
 //!
 //! Colour is resolved one way: a cell's
-//! [`Color::Default`](rustos_vt::Color) foreground and background take the
+//! [`Color::Default`](tairix_vt::Color) foreground and background take the
 //! theme's `on_surface` / `surface` roles, the 16 [`BasicColor`]s and the
 //! 256-colour palette map through the standard ANSI tables, and truecolour is
 //! used directly; [`Attributes::reverse`] swaps the pair and
@@ -28,11 +28,11 @@
 
 use alloc::string::String;
 
-use rustos_font::BitmapFont;
-use rustos_geometry::Rect;
-use rustos_raster::{Color, Surface};
-use rustos_theme::{Palette, Theme};
-use rustos_vt::{char_width, Attributes, BasicColor, Color as VtColor, CONTINUATION};
+use tairix_font::BitmapFont;
+use tairix_geometry::Rect;
+use tairix_raster::{Color, Surface};
+use tairix_theme::{Palette, Theme};
+use tairix_vt::{char_width, Attributes, BasicColor, Color as VtColor, CONTINUATION};
 
 use crate::grid::Grid;
 use crate::shell::ShellSource;

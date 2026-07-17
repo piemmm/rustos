@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use rustos_curses::CursesError;
+use tairix_curses::CursesError;
 
 /// Why an `edit` session ended other than by the user leaving the editor.
 ///

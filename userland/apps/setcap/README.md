@@ -1,4 +1,4 @@
-# `rustos-setcap` — set or clear a file's capability gate
+# `tairix-setcap` — set or clear a file's capability gate
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `setcap` changes
 the **optional capability requirement** of each of its file operands: a
@@ -7,7 +7,7 @@ mode/ACL checks (`AGENTS.md` §5.3). The capability operand is either a
 canonical `CAP_*` name (e.g. `CAP_AUDIT_READ`), which installs that gate,
 or the literal `-`, which clears the gate so the node has none. With `-R`
 a directory operand is changed and then its contents recursively. It is
-the policy-*writing* companion of `rustos-getcap`.
+the policy-*writing* companion of `tairix-getcap`.
 
 `setcap` stores the gate but makes no permission decision itself
 (`AGENTS.md` §5.4 — the VFS is the policy point). Setting a gate is itself
@@ -16,7 +16,7 @@ is not authorised to make (it surfaces as `SetcapError::Apply`).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `rustos-abi` crate, so it never links a
+only dependency is the audited `tairix-abi` crate, so it never links a
 kernel or driver crate (`AGENTS.md` §17.4).
 
 ## Usage
@@ -38,7 +38,7 @@ The capability spec is one of:
 
 - a canonical `CAP_*` name (`CAP_FS_MOUNT`, `CAP_AUDIT_READ`, …) — install
   that gate; the name is resolved through
-  `rustos_abi::CapabilityId::from_name`, the same frozen `abi-v1` table
+  `tairix_abi::CapabilityId::from_name`, the same frozen `abi-v1` table
   `getcap` renders with (`AGENTS.md` §2.2);
 - the literal `-` — clear the gate.
 
@@ -77,7 +77,7 @@ panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-setcap` drives the parser and the engine against an
+`cargo test -p tairix-setcap` drives the parser and the engine against an
 in-memory tree and a recording output: the command grammar, the cap-spec
 parser (the named and `-` forms, and the unknown / mis-cased / numeric
 refusals), a named-capability install, a `-` clear, several files, the

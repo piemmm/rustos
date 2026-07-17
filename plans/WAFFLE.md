@@ -105,7 +105,7 @@ rules apply.
 ### Stage W2 — `kernel/*` — Status: planned
 
 All kernel crates (`core`, `mem`, `sched/*`, `ipc`, `irq`, `sec`, `syscall`,
-`virtio`, `arch/api`, `arch/<target>`, `rustos-kernel`). Heaviest `// SAFETY:`
+`virtio`, `arch/api`, `arch/<target>`, `tairix-kernel`). Heaviest `// SAFETY:`
 and `// SAFETY-INVARIANT:` density (allocator, paging, arch ports, context
 switch); these are kept verbatim unless inaccurate. The capability-critical
 crates (`kernel/sec`, `kernel/mem`, `kernel/ipc`) also carry `// SPEC-DRAFT:`

@@ -1,7 +1,7 @@
-// RustOS aarch64 EL1 exception vector table for the QEMU `virt` board.
+// TAIRiX aarch64 EL1 exception vector table for the QEMU `virt` board.
 //
 // `VBAR_EL1` (set by `exceptions::init_vectors`) points at
-// `rustos_aarch64_vectors`, which must be 2 KiB aligned (the low 11 bits
+// `tairix_aarch64_vectors`, which must be 2 KiB aligned (the low 11 bits
 // of VBAR are RES0). The table has the architecture-mandated 16 entries
 // of 0x80 bytes each (ARM ARM D1.10.2), grouped by the source:
 //
@@ -12,7 +12,7 @@
 //
 // Each entry tags the exception with a numeric *kind* and branches to a
 // common trampoline that saves the interrupted GP and FP/SIMD registers, calls the
-// Rust handler `rustos_aarch64_trap_handler(kind)`, restores, and
+// Rust handler `tairix_aarch64_trap_handler(kind)`, restores, and
 // `eret`s. The original x0/x1 are spilled *before* the kind is loaded so
 // an IRQ returns with the interrupted context intact.
 //
@@ -39,113 +39,113 @@
 
 .section .text
 .balign 0x800
-.global rustos_aarch64_vectors
-rustos_aarch64_vectors:
+.global tairix_aarch64_vectors
+tairix_aarch64_vectors:
 
     // --- Current EL with SP0 (unused: the kernel runs on SP_EL1) ---
     .balign 0x80                 // 0x000 Synchronous
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #0
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x080 IRQ
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #1
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x100 FIQ
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #2
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x180 SError
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #3
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     // --- Current EL with SPx (the kernel's own exceptions) ---
     .balign 0x80                 // 0x200 Synchronous (fault)
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #4
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x280 IRQ (timer / SGI)
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #5
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x300 FIQ
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #6
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x380 SError
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #7
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     // --- Lower EL using AArch64 (EL0 syscalls / user faults) ---
     .balign 0x80                 // 0x400 Synchronous (svc / user fault)
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #8
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x480 IRQ
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #9
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x500 FIQ
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #10
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x580 SError
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #11
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     // --- Lower EL using AArch32 (unsupported on this port) ---
     .balign 0x80                 // 0x600 Synchronous
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #12
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x680 IRQ
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #13
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x700 FIQ
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #14
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
     .balign 0x80                 // 0x780 SError
     sub     sp, sp, #816
     stp     x0, x1, [sp]
     mov     x0, #15
-    b       rustos_aarch64_trap_common
+    b       tairix_aarch64_trap_common
 
 // Common trampoline. On entry: 816-byte frame reserved, x0/x1 already
 // spilled at [sp,#0], x0 = exception kind.
 .balign 4
-rustos_aarch64_trap_common:
+tairix_aarch64_trap_common:
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
     stp     x6, x7, [sp, #48]
@@ -202,7 +202,7 @@ rustos_aarch64_trap_common:
     // [sp,#0..#64]) and write the syscall result back into the x0 slot
     // before the symmetric restore + `eret`.
     mov     x1, sp
-    bl      rustos_aarch64_trap_handler
+    bl      tairix_aarch64_trap_handler
 
     // Restore the per-exception return state (using x2/x3 as scratch before
     // they are reloaded from their GP slots below) so `eret` returns to the

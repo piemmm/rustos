@@ -1,6 +1,6 @@
 # The `fstree` file manager
 
-`fstree` (`userland/apps/fstree`, crate `rustos-fstree`) is the full-screen,
+`fstree` (`userland/apps/fstree`, crate `tairix-fstree`) is the full-screen,
 keyboard-driven **tree file manager** for the terminal: a persistent
 directory-tree pane beside a file pane over the storage forest, drawn with
 the OS curses library (`lib/curses`). It is a command app in the system app
@@ -28,7 +28,7 @@ is built.
   panes; `.` toggles them, with cursors clamped to the shrunken lists.
 - **Status and message lines.** The listed path, visible entry count, sort
   order, the backing volume's free/total bytes (the System Information
-  API's `MOUNT_LIST` query through the shared `rustos_procinfo` mount walk,
+  API's `MOUNT_LIST` query through the shared `tairix_procinfo` mount walk,
   best-effort — an unreachable service simply omits the figure), and either
   an error, the sort prompt, or the key hints.
 - **The attributes editor.** `a` opens the focused selection's
@@ -137,7 +137,7 @@ is built.
   view.
 - **The file viewers (Enter on a file).** A regular file opens read-only
   in a full-screen viewer: the **disassembly viewer** when
-  `rustos_binfmt::detect` (or the `RXM1` manifest magic) recognises the
+  `tairix_binfmt::detect` (or the `RXM1` manifest magic) recognises the
   head sample, the streaming **text pager** when the head sample (the
   first 4 KiB) is NUL-free, valid UTF-8, the **hex dump** otherwise; `o`
   asks instead of auto-picking. `x`/`t`/`d` switch the open viewer at
@@ -233,7 +233,7 @@ grammar (`src/app.rs`) mutates, over two injected seams —
   through one bounded window read — no line index is built, so memory
   never follows the file.
 - `Tty` — the terminal byte channel over the inherited fd 0/1: the `Run`
-  binary links the one shared `rustos_curses::StreamTty` (`lib/curses`,
+  binary links the one shared `tairix_curses::StreamTty` (`lib/curses`,
   feature `program`); the program names only its standard descriptors,
   never a console device.
 
@@ -323,7 +323,7 @@ and the framed render of both pages.
 Every container and instruction decode runs inside the parser sandbox
 (the kernel sandbox spawn mode plus the `lib/sandbox` seam —
 [the parser sandbox](../security/sandbox.md),
-[`rustos-sandbox`](../lib/sandbox.md)): the production `Run` binary
+[`tairix-sandbox`](../lib/sandbox.md)): the production `Run` binary
 re-spawns **itself** in the worker role over the kernel's reserved
 self-token and serves the `lib/binfmt`/`lib/disasm` decode service over
 its wired standard streams, so in-process decode of an untrusted
@@ -342,14 +342,14 @@ host-tested end to end.
   storage roots (`VolumeInfo`: mount target, filesystem type, optional
   free/total bytes); the production seam walks the same System
   Information API `MOUNT_LIST` pages the status line's free-space figure
-  uses (`rustos_procinfo::for_each_mount`). The overlay lists one row
+  uses (`tairix_procinfo::for_each_mount`). The overlay lists one row
   per volume (an unreported size renders `-`, never a zero-byte disk),
   Enter re-roots the whole session at the chosen target, and a refused
   root listing keeps the session and the list with the errno on the
   message line. An empty report is a message, never an empty screen.
 - **Destination completion (Tab).** The copy/move/batch-destination
   prompts complete the typed path through the shared `lib/complete`
-  engine ([`rustos-complete`](../lib/complete.md)) — the same
+  engine ([`tairix-complete`](../lib/complete.md)) — the same
   directory-part/leaf, dotfile, and common-prefix policy the shell's Tab
   uses — over a read-only adapter on the `Fs` seam that resolves
   relative spellings against the same base the submit resolves onto. A

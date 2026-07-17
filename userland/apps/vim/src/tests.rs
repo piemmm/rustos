@@ -16,8 +16,8 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_curses::Event;
+use tairix_abi::Errno;
+use tairix_curses::Event;
 
 use crate::buffer::{Buffer, Position};
 use crate::command::{parse, Command, Start};
@@ -857,7 +857,7 @@ fn half_page_scrolling_moves_view_and_cursor_together() {
 
 // ---- Renderer ---------------------------------------------------------------
 
-use rustos_curses::{Pos, Size, Window};
+use tairix_curses::{Pos, Size, Window};
 
 /// Render `editor` into a fresh window of the given grid.
 fn rendered(editor: &mut Editor, rows: u16, cols: u16) -> Window {

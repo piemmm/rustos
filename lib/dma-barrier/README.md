@@ -1,4 +1,4 @@
-# rustos-dma-barrier
+# tairix-dma-barrier
 
 DMA memory-ordering barriers for user-space drivers.
 
@@ -8,7 +8,7 @@ standing example). That shared memory is mapped Normal **Non-Cacheable**
 (`PageFlags::DMA_COHERENT`), which removes the cache-coherency problem but does
 **not** order the CPU's accesses with respect to the device. This crate is the
 single home (`AGENTS.md` §2.2) of the architecture-specific barrier the silicon
-requires for that ordering — the user-space analogue of `rustos-abi-trap`'s
+requires for that ordering — the user-space analogue of `tairix-abi-trap`'s
 syscall-trap carve-out and part of the §1 assembly carve-out.
 
 - `dma_wmb()` — write barrier: after writing device-visible data, before the

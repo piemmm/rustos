@@ -27,20 +27,20 @@
 use alloc::string::{String, ToString};
 
 use alloc::vec::Vec;
-use rustos_abi::origin::{Origin, TrustDomain};
+use tairix_abi::origin::{Origin, TrustDomain};
 
-use rustos_abi::net_ipc::{
+use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceFactsRecord,
     NetInterfaceStateRecord, IF_NAME_LEN,
 };
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuLoadRecord, KernelMemoryStats, MemoryPressureStats,
     NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId,
     SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
 };
-use rustos_abi::time::Time64;
-use rustos_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
-use rustos_resref::{KnownNamespace, ResourceRef};
+use tairix_abi::time::Time64;
+use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
+use tairix_resref::{KnownNamespace, ResourceRef};
 
 use crate::cputime::for_each_cpu_time;
 use crate::kstats;
@@ -1110,20 +1110,20 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::net_ipc::{
+    use tairix_abi::net_ipc::{
         NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceFactsRecord,
         NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
     };
-    use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
-    use rustos_abi::sysinfo::{
+    use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
+    use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats,
         NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
         ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         RECLAIM_CLASS_COUNT,
     };
-    use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
-    use rustos_resref::parse;
+    use tairix_abi::time::{Duration64, Time64};
+    use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
+    use tairix_resref::parse;
 
     /// An in-memory `sysinfod` stand-in that answers the singleton queries
     /// this resolver uses, decoding the request exactly as the real service
@@ -1137,7 +1137,7 @@ mod tests {
         pressure: MemoryPressureStats,
         reclaim: Vec<ReclaimClassRecord>,
         ramzip: RamzipStats,
-        cpu_times: Vec<rustos_abi::sysinfo::CpuTimeRecord>,
+        cpu_times: Vec<tairix_abi::sysinfo::CpuTimeRecord>,
         cpu_loads: Vec<CpuLoadRecord>,
         deny: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
@@ -1186,15 +1186,15 @@ mod tests {
     }
 
     /// Two CPUs' cumulative busy/idle accounting (50% busy overall).
-    fn fixture_cpu_times() -> Vec<rustos_abi::sysinfo::CpuTimeRecord> {
+    fn fixture_cpu_times() -> Vec<tairix_abi::sysinfo::CpuTimeRecord> {
         alloc::vec![
-            rustos_abi::sysinfo::CpuTimeRecord {
+            tairix_abi::sysinfo::CpuTimeRecord {
                 cpu: 0,
                 reserved: 0,
                 busy_ns: 750,
                 idle_ns: 250,
             },
-            rustos_abi::sysinfo::CpuTimeRecord {
+            tairix_abi::sysinfo::CpuTimeRecord {
                 cpu: 1,
                 reserved: 0,
                 busy_ns: 250,
@@ -1246,7 +1246,7 @@ mod tests {
                     42,
                     ProcId::from_raw([0xCD; 16]),
                     CapabilitySummary::EMPTY,
-                    rustos_abi::ORIGIN_CONSOLE_NONE,
+                    tairix_abi::ORIGIN_CONSOLE_NONE,
                 ),
                 // One record per `LimitKind`, in discriminant order. `Processes`
                 // is left unlimited so the `unlimited` rendering is exercised.
@@ -1317,7 +1317,7 @@ mod tests {
             if self.deny == Some(header.query) {
                 return Err(Errno::PermissionDenied);
             }
-            let payload = &request[rustos_abi::sysinfo::SysinfoRequestHeader::WIRE_LEN..];
+            let payload = &request[tairix_abi::sysinfo::SysinfoRequestHeader::WIRE_LEN..];
             match header.query {
                 SysinfoQueryId::SYSTEM_IDENTITY => Ok(self.identity.to_le_bytes().to_vec()),
                 SysinfoQueryId::UPTIME => Ok(self.uptime.to_le_bytes().to_vec()),
@@ -1345,7 +1345,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::CPU_TIME_STATS => {
-                    let req = rustos_abi::sysinfo::CpuTimeListRequest::from_bytes(payload)?;
+                    let req = tairix_abi::sysinfo::CpuTimeListRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .cpu_times
                         .iter()
@@ -1491,7 +1491,7 @@ mod tests {
             42,
             ProcId::from_raw([0xCD; 16]),
             caps,
-            rustos_abi::ORIGIN_CONSOLE_NONE,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
         );
         let r = resolve_str("info:process/caps", &fixture).expect("ok");
         match r.payload {

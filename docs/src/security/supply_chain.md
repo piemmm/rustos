@@ -1,6 +1,6 @@
 # Supply-chain integrity: the SBOM
 
-Every external crate is code RustOS neither wrote nor fully controls; it
+Every external crate is code TAIRiX neither wrote nor fully controls; it
 widens the trusted computing base and the audit burden (`AGENTS.md`
 §2.12). `AGENTS.md` §19.3 requires that every image embed a CycloneDX
 Software Bill of Materials (SBOM) listing **every workspace and external
@@ -39,7 +39,7 @@ Each resolved package becomes one `library` component carrying:
   pins one;
 * a `distribution` external reference holding the source URL (Cargo's
   `registry+` / `git+` scheme prefix stripped);
-* a `rustos:source-class` property marking the crate `workspace`,
+* a `tairix:source-class` property marking the crate `workspace`,
   `registry`, `git`, or `other`, so first-party code is distinguishable
   from the external attack surface at a glance.
 
@@ -105,7 +105,7 @@ The ledger is empty today — no advisory affects a workspace dependency.
 
 `AGENTS.md` §19.3 also requires the SBOM to be **signed by the
 per-installation key** (§11). That step is deliberately deferred: no
-private-key signing API exists yet (`rustos-crypto` is verify-only, and
+private-key signing API exists yet (`tairix-crypto` is verify-only, and
 the local capability authority is a later stage). This command emits the
 unsigned document the signer will later wrap. The remaining §19.3
 items — the `build --reproducible` verification and the

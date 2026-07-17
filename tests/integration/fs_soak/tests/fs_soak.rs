@@ -2,17 +2,17 @@
 //!
 //! Each `#[test]` runs the shared exerciser for one filesystem. A plain
 //! `cargo test` runs a single smoke iteration on a modest device; the
-//! nightly soak (`cargo xtask fssoak`) sets `RUSTOS_FSSOAK_BUDGET_SECS`
-//! and `RUSTOS_FSSOAK_BYTES` (≥ 1 GiB) to loop under a wall-clock budget
+//! nightly soak (`cargo xtask fssoak`) sets `TAIRIX_FSSOAK_BUDGET_SECS`
+//! and `TAIRIX_FSSOAK_BYTES` (≥ 1 GiB) to loop under a wall-clock budget
 //! on a full-size RAM volume, mirroring the proptest harness's env seam.
 
 use std::env;
 
-use rustos_test_fs_soak::{run_target, TARGETS};
+use tairix_test_fs_soak::{run_target, TARGETS};
 
 /// Wall-clock budget per target; zero (the default) runs one iteration.
 fn budget_secs() -> u64 {
-    env::var("RUSTOS_FSSOAK_BUDGET_SECS")
+    env::var("TAIRIX_FSSOAK_BUDGET_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
@@ -23,7 +23,7 @@ fn budget_secs() -> u64 {
 /// 4096-byte sector) while still giving ext4 two block groups. The soak
 /// orchestrator overrides it with ≥ 1 GiB.
 fn device_bytes() -> u64 {
-    env::var("RUSTOS_FSSOAK_BYTES")
+    env::var("TAIRIX_FSSOAK_BYTES")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(320 * 1024 * 1024)

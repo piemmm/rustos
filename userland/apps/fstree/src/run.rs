@@ -1,19 +1,19 @@
 //! The `Run` entry-point binary of the `fstree` tool — the full-screen
 //! tree file manager a shell spawns.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the
-//! Rust userland runtime `rustos-rt` — never the C ABI, which exists solely
-//! for programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the
+//! Rust userland runtime `tairix-rt` — never the C ABI, which exists solely
+//! for programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` parses the inherited argument vector (the reserved `-h`/`-?`
 //! short-help switches render the tool's own Help document through the
 //! shared engine and exit; at most one operand names the starting
 //! directory), sizes the screen from the console the kernel gave it, puts
-//! the terminal into raw (no-echo) input, and runs the [`rustos_fstree`]
-//! session against two seams: the shared `rustos_curses::StreamTty`, the
+//! the terminal into raw (no-echo) input, and runs the [`tairix_fstree`]
+//! session against two seams: the shared `tairix_curses::StreamTty`, the
 //! curses byte channel over the
 //! inherited standard input/output (fd 0/1), and `RtFs`, which lists
 //! directories through the kernel-authorised `fs_*` syscalls (every
@@ -42,22 +42,22 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK};
-    use rustos_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
-    use rustos_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
-    use rustos_fstree::{
+    use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK};
+    use tairix_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
+    use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
+    use tairix_fstree::{
         run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, VolumeSpace,
     };
-    use rustos_help::{own_short_help, BundleHelp};
-    use rustos_procinfo::{for_each_mount, IpcTransport};
-    use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
-    use rustos_rt::File;
-    use rustos_sandbox::decode::DecodeService;
-    use rustos_sandbox::host::ParserSandbox;
-    use rustos_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use rustos_sandbox::worker::ServeEnd;
-    use rustos_termcap::from_term;
-    use rustos_vt::{Op, Parser};
+    use tairix_help::{own_short_help, BundleHelp};
+    use tairix_procinfo::{for_each_mount, IpcTransport};
+    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_rt::File;
+    use tairix_sandbox::decode::DecodeService;
+    use tairix_sandbox::host::ParserSandbox;
+    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::worker::ServeEnd;
+    use tairix_termcap::from_term;
+    use tairix_vt::{Op, Parser};
 
     /// The conventional fallback terminal grid — 80 columns by 24 rows —
     /// applied when the kernel cannot attest the console's size (a serial
@@ -119,7 +119,7 @@ mod program {
             if size == 0 {
                 return None;
             }
-            let ret = rustos_rt::file_map(file.fd(), 0, size);
+            let ret = tairix_rt::file_map(file.fd(), 0, size);
             // The mapping carries its own authority snapshot, so the
             // descriptor closes here (on drop) without affecting it.
             let base = u64::try_from(ret).ok()?;
@@ -159,7 +159,7 @@ mod program {
         fn drop(&mut self) {
             // Best-effort release; the kernel reclaims the region at exit
             // regardless, and a refusal here has nothing to act on.
-            let _ = rustos_rt::file_unmap(self.base, self.len);
+            let _ = tairix_rt::file_unmap(self.base, self.len);
         }
     }
 
@@ -195,7 +195,7 @@ mod program {
 
     impl Fs for RtFs {
         fn list_dir(&mut self, path: &str) -> Result<Vec<FsEntry>, Errno> {
-            let dir = rustos_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
             let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
             let used = loop {
                 match dir.read(&mut buf) {
@@ -242,7 +242,7 @@ mod program {
             // The kernel authorises the change (owner-only, mount-flag,
             // per-inode checks); the prompt's four-octal-digit bound keeps
             // `mode` within the permission mask already.
-            let ret = rustos_rt::fs_set_mode(path.as_bytes(), mode);
+            let ret = tairix_rt::fs_set_mode(path.as_bytes(), mode);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -255,9 +255,9 @@ mod program {
             // value the frozen errno. The kernel filters unreadable
             // namespaces out, so the loop sees only what it may show.
             let mut keys = Vec::new();
-            let mut buf = [0u8; rustos_abi::FS_ATTR_KEY_MAX];
+            let mut buf = [0u8; tairix_abi::FS_ATTR_KEY_MAX];
             for index in 0.. {
-                let ret = rustos_rt::fs_attr_list(path.as_bytes(), index, &mut buf);
+                let ret = tairix_rt::fs_attr_list(path.as_bytes(), index, &mut buf);
                 if ret < 0 {
                     return Err(Errno::from_syscall(ret));
                 }
@@ -280,8 +280,8 @@ mod program {
         fn attr_get(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
             // A stored value never exceeds the fixed bound, so one
             // fixed-size read always fits and nothing is ever truncated.
-            let mut buf = alloc::vec![0u8; rustos_abi::FS_ATTR_VALUE_MAX];
-            let ret = rustos_rt::fs_attr_get(path.as_bytes(), key.as_bytes(), &mut buf);
+            let mut buf = alloc::vec![0u8; tairix_abi::FS_ATTR_VALUE_MAX];
+            let ret = tairix_rt::fs_attr_get(path.as_bytes(), key.as_bytes(), &mut buf);
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -299,7 +299,7 @@ mod program {
             // The kernel authorises the write (permission, mount flags,
             // key grammar, size bounds) and applies it as one
             // copy-on-write transaction.
-            let ret = rustos_rt::fs_attr_set(path.as_bytes(), key.as_bytes(), value);
+            let ret = tairix_rt::fs_attr_set(path.as_bytes(), key.as_bytes(), value);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -307,7 +307,7 @@ mod program {
         }
 
         fn attr_remove(&mut self, path: &str, key: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_attr_remove(path.as_bytes(), key.as_bytes());
+            let ret = tairix_rt::fs_attr_remove(path.as_bytes(), key.as_bytes());
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -355,7 +355,7 @@ mod program {
         fn create(&mut self, path: &str) -> Result<(), Errno> {
             // Create-or-truncate, then close: the engine writes through
             // `write`, which re-opens the destination for the stream.
-            let file = rustos_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
             drop(file);
             self.forget(path);
             Ok(())
@@ -393,7 +393,7 @@ mod program {
         }
 
         fn mkdir(&mut self, path: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_mkdir(path.as_bytes());
+            let ret = tairix_rt::fs_mkdir(path.as_bytes());
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -401,7 +401,7 @@ mod program {
         }
 
         fn remove_file(&mut self, path: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_unlink(path.as_bytes(), UnlinkFlags::empty());
+            let ret = tairix_rt::fs_unlink(path.as_bytes(), UnlinkFlags::empty());
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -410,7 +410,7 @@ mod program {
         }
 
         fn remove_dir(&mut self, path: &str) -> Result<(), Errno> {
-            let ret = rustos_rt::fs_unlink(path.as_bytes(), UnlinkFlags::DIRECTORY);
+            let ret = tairix_rt::fs_unlink(path.as_bytes(), UnlinkFlags::DIRECTORY);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -418,7 +418,7 @@ mod program {
         }
 
         fn rename(&mut self, src: &str, dst: &str) -> Result<RenameOutcome, Errno> {
-            let ret = rustos_rt::fs_rename(src.as_bytes(), dst.as_bytes());
+            let ret = tairix_rt::fs_rename(src.as_bytes(), dst.as_bytes());
             if ret == 0 {
                 self.forget(src);
                 self.forget(dst);
@@ -536,7 +536,7 @@ mod program {
     /// Print the tool's own short help (`-h` / `-?`) through the shared
     /// engine; the usage banner is the fallback when no document serves.
     fn short_help() -> i32 {
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         match own_short_help(&BundleHelp::new("fstree"), locale, "fstree") {
             Some(bytes) => {
                 let _ = Stdout.write_all(&bytes);
@@ -565,7 +565,7 @@ mod program {
 
         // A malformed (non-UTF-8) argument vector is a usage error,
         // reported rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -588,7 +588,7 @@ mod program {
         // The `?` overlay's text: the bundle's own Help document rendered
         // by the shared engine, decoded to plain text. A bundle whose help
         // cannot be served shows the key line alone — never embedded text.
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let help_text = own_short_help(&BundleHelp::new("fstree"), locale, "fstree")
             .map(|bytes| plain_help_text(&bytes))
             .unwrap_or_else(|| String::from(USAGE));
@@ -596,7 +596,7 @@ mod program {
         // Size the screen from the console the kernel gave us, falling
         // back to the conventional 80×24 when the kernel cannot attest
         // the size.
-        let size = match rustos_rt::terminal_size(STDOUT) {
+        let size = match tairix_rt::terminal_size(STDOUT) {
             Ok(grid) => Size::new(grid.rows(), grid.cols()),
             Err(_) => Size::new(FALLBACK_ROWS, FALLBACK_COLS),
         };
@@ -608,7 +608,7 @@ mod program {
         // reserved self token (the kernel substitutes the path it admitted
         // this process from — argv is data, not authority), containment
         // events routed to the system log.
-        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), rustos_rt::LogSink);
+        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
         // The starting listing is read before the terminal is switched, so
         // a refused root fails loudly on a normal screen.
         let mut model = match Model::new(&mut fs, &root, help_text) {
@@ -620,7 +620,7 @@ mod program {
         };
         // The persisted preferences live in the user's own settings tree;
         // no home (or no file) is the ordinary default state.
-        let home = rustos_rt::env_var(b"HOME")
+        let home = tairix_rt::env_var(b"HOME")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .map(String::from);
         if let Some(home) = &home {
@@ -631,14 +631,14 @@ mod program {
         // The raw input discipline: keystrokes reach the session verbatim
         // with no local echo. Restored to the cooked default on exit so
         // the next program on this console sees normal interactive echo.
-        let _ = rustos_rt::set_input_mode(InputMode::Raw);
+        let _ = tairix_rt::set_input_mode(InputMode::Raw);
 
         // The terminal's capabilities come from the inherited `TERM`
         // (fail-closed: unknown or absent degrades to the dumb baseline
         // inside `from_term`), never a hard-coded terminal model.
-        let term = rustos_rt::env_var(b"TERM")
+        let term = tairix_rt::env_var(b"TERM")
             .and_then(|raw| core::str::from_utf8(raw).ok())
-            .map_or(rustos_termcap::TermType::Dumb, from_term);
+            .map_or(tairix_termcap::TermType::Dumb, from_term);
         let mut screen = Screen::new(StreamTty, term, size);
         // The session blocks on each keystroke; the kernel parks the read.
         screen.set_input_mode(CursesInputMode::Blocking);
@@ -649,7 +649,7 @@ mod program {
         let result = run(&mut model, &mut fs, &mut sandbox, &mut screen, &mut info);
         let left = screen.leave_full_screen();
 
-        let _ = rustos_rt::set_input_mode(InputMode::Cooked);
+        let _ = tairix_rt::set_input_mode(InputMode::Cooked);
 
         // A session that ends for any reason other than the user quitting
         // states that reason on stderr — after the terminal is restored,
@@ -666,13 +666,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

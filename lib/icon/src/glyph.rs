@@ -9,7 +9,7 @@
 
 use alloc::vec;
 
-use rustos_raster::Color;
+use tairix_raster::Color;
 
 use crate::vector::{IconLayer, VectorIcon};
 

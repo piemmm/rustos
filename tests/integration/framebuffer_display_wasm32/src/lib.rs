@@ -9,10 +9,10 @@
 //! WASM linear memory and presents the result to a **real HTML canvas**
 //! (logical CPU 0, the main browser thread):
 //!
-//! * **Boots.** The port's `rustos_arch_wasm32_main` export forwards to
+//! * **Boots.** The port's `tairix_arch_wasm32_main` export forwards to
 //!   the `kernel_main` here, which prints `BOOT_OK`.
 //! * **Signed `.rxe` load gate.** The build-time signed framebuffer
-//!   display `.rxe` is loaded through `rustos_drvhost::Host` (the
+//!   display `.rxe` is loaded through `tairix_drvhost::Host` (the
 //!   gate) and driven through `load -> use -> unload -> reload`.
 //! * **Capability-gated surface map.** "use" maps the surface through a
 //!   capability-checked `WasmMmioMapper` (the wasm32 analogue of the
@@ -21,7 +21,7 @@
 //! * **Two independent read-backs.** Each presented frame is confirmed
 //!   twice: once through a *second, independently-mapped* window over the
 //!   surface (the bytes reached linear memory) and once through the host
-//!   `rustos_host_present_framebuffer` import, which paints the surface
+//!   `tairix_host_present_framebuffer` import, which paints the surface
 //!   onto a canvas and returns the count of pixels that survived the
 //!   canvas round-trip — proving the pixels reach a genuine display
 //!   surface. On success it prints `DISPLAY_OK`.
@@ -53,19 +53,19 @@ mod kernel {
 
     use alloc::vec::Vec;
 
-    use rustos_abi::driver::display::{Display, DisplayFormat};
-    use rustos_abi::driver::{MmioMapError, MmioMapper, RegisterWindow};
-    use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno};
-    use rustos_arch_wasm32::bindings::{host_has_display, host_present_framebuffer};
-    use rustos_arch_wasm32::console::write_line;
-    use rustos_arch_wasm32::handle_panic_via_console;
-    use rustos_caps::CapabilitySet;
-    use rustos_crypto::Ed25519PublicKey;
-    use rustos_display::{Framebuffer, FramebufferConfig};
-    use rustos_drvhost::{
+    use tairix_abi::driver::display::{Display, DisplayFormat};
+    use tairix_abi::driver::{MmioMapError, MmioMapper, RegisterWindow};
+    use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno};
+    use tairix_arch_wasm32::bindings::{host_has_display, host_present_framebuffer};
+    use tairix_arch_wasm32::console::write_line;
+    use tairix_arch_wasm32::handle_panic_via_console;
+    use tairix_caps::CapabilitySet;
+    use tairix_crypto::Ed25519PublicKey;
+    use tairix_display::{Framebuffer, FramebufferConfig};
+    use tairix_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 
     use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -230,11 +230,11 @@ mod kernel {
         fn spawn_and_register(
             &self,
             ctx: &SpawnContext<'_>,
-        ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
+        ) -> Result<tairix_abi::DriverHandle, SpawnRegisterError> {
             if !ctx.host.has_capability(CapabilityId::DRV_LOAD) {
                 return Err(SpawnRegisterError::Register(DriverError::PermissionDenied));
             }
-            rustos_abi::DriverHandle::from_raw(FB_HANDLE_MARKER)
+            tairix_abi::DriverHandle::from_raw(FB_HANDLE_MARKER)
                 .map_err(SpawnRegisterError::Register)
         }
     }
@@ -381,10 +381,10 @@ mod kernel {
         let mut host = Host::new(HostConfig {
             trusted_signers: &trusted,
             syscall_table_hash: SYSCALL_TABLE_HASH,
-            accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
             source: &source,
             spawner: &spawner,
-            sink: &rustos_arch_wasm32::CONSOLE_SINK,
+            sink: &tairix_arch_wasm32::CONSOLE_SINK,
             virtio_host_factory: None,
             mmio_mapper: None,
         });
@@ -431,7 +431,7 @@ mod kernel {
         write_line("DISPLAY_OK");
     }
 
-    /// Boot body the port's `rustos_arch_wasm32_main` export forwards to
+    /// Boot body the port's `tairix_arch_wasm32_main` export forwards to
     /// once the host has instantiated the module. The display vertical
     /// runs entirely on the boot context and then returns to the host
     /// event loop.

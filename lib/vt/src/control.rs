@@ -129,7 +129,7 @@ pub const PASTE_END: u16 = 201;
 ///
 /// Both are accepted because terminals disagree: a serial terminal commonly
 /// sends `BS` for its Backspace key while xterm-class terminals (and the
-/// RustOS keymap, which maps `Backspace` to `DEL`) send `DEL`. This is the
+/// TAIRiX keymap, which maps `Backspace` to `DEL`) send `DEL`. This is the
 /// single definition of "which byte erases", shared by the
 /// kernel console echo and a reader's line buffer so the two never disagree.
 #[must_use]

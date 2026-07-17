@@ -3,7 +3,7 @@
 //!
 //! # Why this module contains assembly (justification)
 //!
-//! RustOS is Rust-only; assembly is permitted only where the architecture
+//! TAIRiX is Rust-only; assembly is permitted only where the architecture
 //! *strictly* requires it. A program's entry point is exactly such a case:
 //! when the kernel transfers control to `_start` there is no C runtime yet —
 //! the stack-pointer alignment the platform C ABI demands at a `call`
@@ -22,14 +22,14 @@
 //!
 //! The kernel transfers control to the program's `_start` with the C
 //! integer-argument-0 register holding the base address of the
-//! position-independent startup-vector block ([`rustos_abi::process`]) and a
+//! position-independent startup-vector block ([`tairix_abi::process`]) and a
 //! valid, writable stack (the register is `rdi` on x86_64, `x0` on aarch64,
 //! `a0` on riscv64 — the first integer argument on each platform's C ABI).
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int};
 
-use rustos_abi::process::ProcessStartHeader;
+use tairix_abi::process::ProcessStartHeader;
 
 use crate::{build_c_runtime, read_total_len};
 
@@ -38,7 +38,7 @@ use crate::{build_c_runtime, read_total_len};
 ///
 /// Bounded and fixed: a hostile or buggy spawner cannot make crt0 reserve an
 /// unbounded amount of stack, and a startup vector that does not fit fails
-/// closed (`build_c_runtime` returns [`rustos_abi::Errno::BufferTooSmall`],
+/// closed (`build_c_runtime` returns [`tairix_abi::Errno::BufferTooSmall`],
 /// which [`rust_crt0_start`] turns into a non-zero exit). 1 MiB comfortably
 /// holds any realistic command line while staying far below the smallest
 /// program stack the loader provisions.
@@ -101,7 +101,7 @@ fn install_stack_canary(canary: u64) {
 /// than returning to corrupted state (fail closed).
 #[no_mangle]
 extern "C" fn __stack_chk_fail() -> ! {
-    rustos_abi_sys::sys_exit(EXIT_BAD_STARTUP)
+    tairix_abi_sys::sys_exit(EXIT_BAD_STARTUP)
 }
 
 /// The Rust half of crt0, called by `_start` once the stack is aligned and a
@@ -129,7 +129,7 @@ unsafe extern "C" fn rust_crt0_start(
     // header; we read the declared length before forming the full slice.
     let header = unsafe { core::slice::from_raw_parts(block_ptr, ProcessStartHeader::WIRE_LEN) };
     let Ok(total_len) = read_total_len(header) else {
-        rustos_abi_sys::sys_exit(EXIT_BAD_STARTUP);
+        tairix_abi_sys::sys_exit(EXIT_BAD_STARTUP);
     };
 
     // SAFETY: `read_total_len` validated the header; the contract guarantees
@@ -139,7 +139,7 @@ unsafe extern "C" fn rust_crt0_start(
     let scratch = unsafe { core::slice::from_raw_parts_mut(scratch, scratch_len) };
 
     let Ok(runtime) = build_c_runtime(block, scratch) else {
-        rustos_abi_sys::sys_exit(EXIT_BAD_STARTUP);
+        tairix_abi_sys::sys_exit(EXIT_BAD_STARTUP);
     };
 
     install_stack_canary(runtime.canary);
@@ -148,7 +148,7 @@ unsafe extern "C" fn rust_crt0_start(
     // laid out in `scratch`, which outlives this call; `main` is the hosted
     // program's entry point resolved at link time.
     let code = unsafe { main(runtime.argc, runtime.argv, runtime.envp) };
-    rustos_abi_sys::sys_exit(code)
+    tairix_abi_sys::sys_exit(code)
 }
 
 #[cfg(crt0_native_x86_64)]

@@ -1,6 +1,6 @@
 //! `cargo xtask fuzz` — drive the in-tree fuzz harnesses.
 //!
-//! RustOS does not pull in an external fuzz runner: the
+//! TAIRiX does not pull in an external fuzz runner: the
 //! per-crate harnesses are seeded, allocation-free Rust tests that
 //! explicitly sanctions as the "equivalent in-tree harness". This
 //! orchestrator is the single place that runs every such harness for a
@@ -8,7 +8,7 @@
 //! target set.
 //!
 //! Each [`Target`] names an existing `cargo test` integration harness. The
-//! orchestrator exports `RUSTOS_FUZZ_BUDGET_SECS`, which the harness reads to
+//! orchestrator exports `TAIRIX_FUZZ_BUDGET_SECS`, which the harness reads to
 //! keep drawing fresh inputs from its continuing PRNG stream until the budget
 //! elapses (a plain `cargo test` leaves the variable unset and runs the fast,
 //! fixed-iteration smoke sweep instead). It also exports a per-harness PRNG
@@ -49,283 +49,283 @@ pub struct Target {
 /// protocol parsers, and the capability-checked IPC port endpoint.
 pub const TARGETS: &[Target] = &[
     Target {
-        package: "rustos-abi",
+        package: "tairix-abi",
         test: "fuzz_decode",
         description: "lib/abi wire decoders (IPC + manifest headers)",
     },
     Target {
-        package: "rustos-kernel-syscall",
+        package: "tairix-kernel-syscall",
         test: "fuzz_args",
         description: "syscall dispatcher argument validation",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_eth",
         description: "lib/net Ethernet/ARP/IPv4/ICMP wire codecs",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_addr",
         description: "lib/net address scope/zone rules + Internet-checksum properties",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_ipv4",
         description: "lib/net IPv4 codec, emit fragmentation, fragment reassembly budgets",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_ipv6",
         description: "lib/net IPv6 codec + extension-header chain walk",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_icmp",
         description: "lib/net ICMP/ICMPv6 echo + error codecs, error rate limiter",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_nd",
         description: "lib/net Neighbour Discovery codecs + neighbour-table glue",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_stack",
         description: "lib/net dual-stack host engine frame entry point",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_udp",
         description: "lib/net dual-stack UDP codec (pseudo-header checksum, length bounds)",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_igmp",
         description: "lib/net IGMPv2 multicast-membership codec (checksum, type, length bounds)",
     },
     Target {
-        package: "rustos-net",
+        package: "tairix-net",
         test: "fuzz_net_mld",
         description: "lib/net MLDv2 query decode + report encode (floating max-response, bounds)",
     },
     Target {
-        package: "rustos-netstack",
+        package: "tairix-netstack",
         test: "fuzz_net_sockabi",
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",
     },
     Target {
-        package: "rustos-kernel-ipc",
+        package: "tairix-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
     },
     Target {
-        package: "rustos-kernel-mem",
+        package: "tairix-kernel-mem",
         test: "fuzz_swap",
         description: "encrypted-swap restore path (untrusted swap-device bytes)",
     },
     Target {
-        package: "rustos-kernel-mem",
+        package: "tairix-kernel-mem",
         test: "fuzz_ramzip",
         description: "ramzip compressed-entry restore (tampered/truncated sealed entries)",
     },
     Target {
-        package: "rustos-drv-fs-arxfs",
+        package: "tairix-drv-fs-arxfs",
         test: "fuzz_mount",
         description:
             "arxfs mount / metadata + directory decode (superblock ring, root, trees, dirents)",
     },
     Target {
-        package: "rustos-drv-fs-adfs",
+        package: "tairix-drv-fs-adfs",
         test: "fuzz_adfs_mount",
         description:
             "ADFS mount / decode (maps, disc records, boot block, fixed + big directories)",
     },
     Target {
-        package: "rustos-compress",
+        package: "tairix-compress",
         test: "fuzz_compress",
         description: "first-party LZ decode (untrusted compressed-record bytes)",
     },
     Target {
-        package: "rustos-svg",
+        package: "tairix-svg",
         test: "fuzz_svg",
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",
     },
     Target {
-        package: "rustos-virtio",
+        package: "tairix-virtio",
         test: "fuzz_virtqueue",
         description:
             "split-virtqueue completion path (hostile device-written used ring / descriptors)",
     },
     Target {
-        package: "rustos-vt",
+        package: "tairix-vt",
         test: "fuzz_vt",
         description: "lib/vt escape-sequence parser (untrusted terminal / remote-host bytes)",
     },
     Target {
-        package: "rustos-fdt",
+        package: "tairix-fdt",
         test: "fuzz_fdt",
         description: "lib/fdt device-tree reader (untrusted firmware/bootloader DTB bytes)",
     },
     Target {
-        package: "rustos-partition",
+        package: "tairix-partition",
         test: "fuzz_partition",
         description: "lib/partition MBR + GPT table parsers (untrusted on-disk partition bytes)",
     },
     Target {
-        package: "rustos-fsprobe",
+        package: "tairix-fsprobe",
         test: "fuzz_fsprobe",
         description: "lib/fsprobe filesystem-signature probe (untrusted removable-media bytes)",
     },
     Target {
-        package: "rustos-fsmeta",
+        package: "tairix-fsmeta",
         test: "fuzz_fsmeta",
         description:
             "lib/fsmeta key-grammar parser + attribute-set decoder (untrusted stored/foreign bytes)",
     },
     Target {
-        package: "rustos-curses",
+        package: "tairix-curses",
         test: "fuzz_curses_input",
         description: "lib/curses input decoder (untrusted key/mouse/paste bytes)",
     },
     Target {
-        package: "rustos-users",
+        package: "tairix-users",
         test: "fuzz_users",
         description: "lib/users database parser (untrusted /System/Security/Users bytes)",
     },
     Target {
-        package: "rustos-users",
+        package: "tairix-users",
         test: "fuzz_groups",
         description: "lib/users group-database parser (untrusted /System/Security/Groups bytes)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_field",
         description: "lib/log typed-field value decoder (untrusted log-record field bytes)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_segment",
         description: "lib/log segment decoder (untrusted /System/Logs segment bytes)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_record",
         description: "lib/log logical-record decoder (untrusted /System/Logs record bytes)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_dict",
         description:
             "lib/log segment string-dictionary codec (untrusted /System/Logs dictionary bytes)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_bootring",
         description:
             "lib/log early-boot ring FIFO (push/pop/evict ordering + loss-range accounting)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_ingress",
         description:
             "lib/log record-ingress admission (attested-origin vs caller stream/source spoof + append sequencing)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_journal",
         description:
             "lib/log journal engine (admit/commit/import_boot: rotation, chaining, sealing; every persisted segment must verify)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_ratelimit",
         description:
             "lib/log ingress rate limiter (token-bucket admit/drop + coalesced loss reporting: every drop is accounted, never panics)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_render",
         description:
             "lib/log boot-console renderer (hostile caller text/fields: rendered line is always control-byte-free, never panics)",
     },
     Target {
-        package: "rustos-log",
+        package: "tairix-log",
         test: "fuzz_report",
         description:
             "lib/log rich renderers (JSON/Markdown/table over hostile records: output is always control-byte-free, JSON is valid, never panics)",
     },
     Target {
-        package: "rustos-glob",
+        package: "tairix-glob",
         test: "fuzz_glob",
         description: "lib/glob pattern compiler + match loop (untrusted glob-pattern bytes)",
     },
     Target {
-        package: "rustos-help",
+        package: "tairix-help",
         test: "fuzz_help",
         description:
             "lib/help document parser + short/full renderers (untrusted help-document bytes: never panics, fails closed, printed output is control-free)",
     },
     Target {
-        package: "rustos-path",
+        package: "tairix-path",
         test: "fuzz_path",
         description: "lib/path path-string parser + canonical-spelling round-trip (untrusted path bytes)",
     },
     Target {
-        package: "rustos-resref",
+        package: "tairix-resref",
         test: "fuzz_resref",
         description:
             "lib/resref resource-reference parser + canonical-spelling round-trip (untrusted reference bytes)",
     },
     Target {
-        package: "rustos-procinfo",
+        package: "tairix-procinfo",
         test: "fuzz_resinfo",
         description:
             "lib/procinfo info:/stats: resolver (untrusted reference bytes + hostile sysinfod replies: never panics, fails closed, envelope invariants hold)",
     },
     Target {
-        package: "rustos-devids",
+        package: "tairix-devids",
         test: "fuzz_devids",
         description:
             "lib/devids pci.ids/usb.ids vetting parser + compact-table decoder (untrusted upstream-download and table bytes)",
     },
     Target {
-        package: "rustos-binfmt",
+        package: "tairix-binfmt",
         test: "fuzz_rxe",
         description:
             "lib/binfmt rxe inspection view + manifest summary (untrusted executable-file bytes)",
     },
     Target {
-        package: "rustos-binfmt",
+        package: "tairix-binfmt",
         test: "fuzz_elf",
         description: "lib/binfmt ELF64 view (untrusted executable-file bytes)",
     },
     Target {
-        package: "rustos-binfmt",
+        package: "tairix-binfmt",
         test: "fuzz_wasm",
         description: "lib/binfmt wasm module-structure view (untrusted executable-file bytes)",
     },
     Target {
-        package: "rustos-disasm",
+        package: "tairix-disasm",
         test: "fuzz_riscv64",
         description: "lib/disasm RV64GC decoder (untrusted executable-file bytes: never panics, always makes forward progress)",
     },
     Target {
-        package: "rustos-disasm",
+        package: "tairix-disasm",
         test: "fuzz_aarch64",
         description: "lib/disasm A64 decoder (untrusted executable-file bytes: never panics, always makes forward progress)",
     },
     Target {
-        package: "rustos-disasm",
+        package: "tairix-disasm",
         test: "fuzz_wasm_isa",
         description: "lib/disasm wasm code-body decoder (untrusted executable-file bytes: never panics, always makes forward progress)",
     },
     Target {
-        package: "rustos-disasm",
+        package: "tairix-disasm",
         test: "fuzz_x86_64",
         description: "lib/disasm x86_64 decoder (untrusted executable-file bytes: never panics, always makes forward progress, 15-byte cap)",
     },
     Target {
-        package: "rustos-sandbox",
+        package: "tairix-sandbox",
         test: "fuzz_sandbox",
         description: "lib/sandbox decode seam (hostile input files through the sandboxed decode service, and hostile worker replies into the fail-closed client decoders)",
     },
@@ -554,7 +554,7 @@ pub(crate) fn job_for(
     // runs its single smoke iteration.
     if let Some(budget) = budget {
         cmd.env(
-            rustos_fuzzseed::FUZZ_BUDGET_ENV,
+            tairix_fuzzseed::FUZZ_BUDGET_ENV,
             budget.as_secs().to_string(),
         );
     }
@@ -697,7 +697,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_net_stack"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-net");
+        assert_eq!(chosen[0].package, "tairix-net");
     }
 
     #[test]
@@ -705,7 +705,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_mount"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-drv-fs-arxfs");
+        assert_eq!(chosen[0].package, "tairix-drv-fs-arxfs");
     }
 
     #[test]
@@ -713,7 +713,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_compress"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-compress");
+        assert_eq!(chosen[0].package, "tairix-compress");
     }
 
     #[test]
@@ -721,7 +721,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_svg"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-svg");
+        assert_eq!(chosen[0].package, "tairix-svg");
     }
 
     #[test]
@@ -729,7 +729,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_virtqueue"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-virtio");
+        assert_eq!(chosen[0].package, "tairix-virtio");
     }
 
     #[test]
@@ -737,7 +737,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_vt"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-vt");
+        assert_eq!(chosen[0].package, "tairix-vt");
     }
 
     #[test]
@@ -745,7 +745,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_fdt"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-fdt");
+        assert_eq!(chosen[0].package, "tairix-fdt");
     }
 
     #[test]
@@ -753,7 +753,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_curses_input"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-curses");
+        assert_eq!(chosen[0].package, "tairix-curses");
     }
 
     #[test]
@@ -761,7 +761,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_glob"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-glob");
+        assert_eq!(chosen[0].package, "tairix-glob");
     }
 
     #[test]
@@ -769,7 +769,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_path"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-path");
+        assert_eq!(chosen[0].package, "tairix-path");
     }
 
     #[test]
@@ -777,7 +777,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_devids"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-devids");
+        assert_eq!(chosen[0].package, "tairix-devids");
     }
 
     #[test]
@@ -786,7 +786,7 @@ mod tests {
             let opts = parse(&argv(&["--target", name])).expect("flag parses");
             let chosen = selected(&opts).expect("known target");
             assert_eq!(chosen.len(), 1);
-            assert_eq!(chosen[0].package, "rustos-binfmt");
+            assert_eq!(chosen[0].package, "tairix-binfmt");
         }
     }
 
@@ -795,7 +795,7 @@ mod tests {
         let opts = parse(&argv(&["--target", "fuzz_port"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-kernel-ipc");
+        assert_eq!(chosen[0].package, "tairix-kernel-ipc");
     }
 
     #[test]

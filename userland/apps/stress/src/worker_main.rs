@@ -13,9 +13,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, OpenFlags};
-use rustos_rt::io::write_stderr_line;
-use rustos_stress::{
+use tairix_abi::{Errno, OpenFlags};
+use tairix_rt::io::write_stderr_line;
+use tairix_stress::{
     cache_unit, cpu_unit, hdd_unit, io_unit, scratch_file, vm_unit, Scratch, ScratchError,
     UnitOutcome, WorkerKind, WorkerSpec, REFUSED_EXIT,
 };
@@ -109,9 +109,9 @@ impl RtScratch {
                 return Ok(*fd);
             }
             let (_, stale) = self.open.take().unwrap_or((String::new(), 0));
-            let _ = rustos_rt::fs_close(stale);
+            let _ = tairix_rt::fs_close(stale);
         }
-        let ret = rustos_rt::fs_open(path.as_bytes(), flags);
+        let ret = tairix_rt::fs_open(path.as_bytes(), flags);
         if ret < 0 {
             return Err(classify(ret));
         }
@@ -128,7 +128,7 @@ impl RtScratch {
             if cached == path {
                 let fd = *fd;
                 self.open = None;
-                let _ = rustos_rt::fs_close(fd);
+                let _ = tairix_rt::fs_close(fd);
             }
         }
     }
@@ -148,7 +148,7 @@ impl Scratch for RtScratch {
         let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
         let mut written = 0;
         while written < data.len() {
-            match rustos_rt::fs_write(fd, offset + written as u64, &data[written..]) {
+            match tairix_rt::fs_write(fd, offset + written as u64, &data[written..]) {
                 Ok(0) => return Err(ScratchError::Failed("write made no progress")),
                 Ok(n) => written += n,
                 Err(ret) => return Err(classify(ret)),
@@ -161,7 +161,7 @@ impl Scratch for RtScratch {
         let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
         let mut done = 0;
         while done < buf.len() {
-            match rustos_rt::fs_read(fd, offset + done as u64, &mut buf[done..]) {
+            match tairix_rt::fs_read(fd, offset + done as u64, &mut buf[done..]) {
                 Ok(0) => return Err(ScratchError::Failed("short read")),
                 Ok(n) => done += n,
                 Err(ret) => return Err(classify(ret)),
@@ -172,7 +172,7 @@ impl Scratch for RtScratch {
 
     fn sync(&mut self, path: &str) -> Result<(), ScratchError> {
         let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
-        let ret = rustos_rt::fs_sync(fd);
+        let ret = tairix_rt::fs_sync(fd);
         if ret < 0 {
             return Err(classify(ret));
         }
@@ -181,7 +181,7 @@ impl Scratch for RtScratch {
 
     fn remove(&mut self, path: &str) -> Result<(), ScratchError> {
         self.close_cached(path);
-        let ret = rustos_rt::fs_unlink(path.as_bytes(), rustos_abi::UnlinkFlags::empty());
+        let ret = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
         if ret < 0 {
             return Err(classify(ret));
         }

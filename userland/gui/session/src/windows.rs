@@ -4,8 +4,8 @@
 //! [`SessionWindows`] owns the session's window bookkeeping — the map
 //! between the window channel's session-minted ids and the compositor's
 //! [`WindowId`]s, plus each window's persistent content surface — and
-//! [`ShellWindowHost`] is the [`WindowHost`](rustos_window::WindowHost) bridge the
-//! `rustos_window::WindowServer` drives: an accepted `Create` opens a
+//! [`ShellWindowHost`] is the [`WindowHost`](tairix_window::WindowHost) bridge the
+//! `tairix_window::WindowServer` drives: an accepted `Create` opens a
 //! desktop window (cascaded, focused, listed on the taskbar), a
 //! validated `Present` converts exactly the damaged pixels of the app's
 //! shared frame into the window's surface, and a `Close` (or a dead
@@ -18,9 +18,9 @@
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-use rustos_abi::Errno;
-use rustos_wm::{Color, Compositor, Point, Surface, WindowId};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::Errno;
+use tairix_wm::{Color, Compositor, Point, Surface, WindowId};
 
 use crate::picker::PickerSlot;
 use crate::shell::DesktopShell;
@@ -118,7 +118,7 @@ pub fn cascade_origin_for(opened: u64) -> Point {
 /// the compositor, the session's window table, and the trusted picker
 /// slot a validated `PickFile` opens.
 ///
-/// [`WindowHost`]: rustos_window::WindowHost
+/// [`WindowHost`]: tairix_window::WindowHost
 pub struct ShellWindowHost<'a> {
     /// The desktop shell (taskbar, focus, window list).
     pub shell: &'a mut DesktopShell,
@@ -133,7 +133,7 @@ pub struct ShellWindowHost<'a> {
     pub picker: &'a mut dyn PickerSlot,
 }
 
-impl rustos_window::WindowHost for ShellWindowHost<'_> {
+impl tairix_window::WindowHost for ShellWindowHost<'_> {
     fn window_opened(
         &mut self,
         window_id: u64,
@@ -267,9 +267,9 @@ fn convert_damage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use rustos_taskbar::TaskbarConfig;
-    use rustos_window::WindowHost;
+    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_taskbar::TaskbarConfig;
+    use tairix_window::WindowHost;
 
     fn mode(width: u32, height: u32, format: DisplayFormat) -> DisplayMode {
         DisplayMode {

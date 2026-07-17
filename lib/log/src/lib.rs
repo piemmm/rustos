@@ -1,4 +1,4 @@
-//! Structured, level-filtered logging for RustOS.
+//! Structured, level-filtered logging for TAIRiX.
 //!
 //! Design goals:
 //!
@@ -11,7 +11,7 @@
 //! * **No-alloc.** No `format!`, no `String`, no `Box`. Sinks are expected
 //!   to write into static buffers, ring buffers, or device registers.
 //! * **Stable event IDs.** Event identifiers are assigned by their callers
-//!   and treated as part of the ABI between RustOS and external log
+//!   and treated as part of the ABI between TAIRiX and external log
 //!   consumers; they may not be re-used or re-numbered.
 //!
 //! Sink installation is intentionally not a global registration table.
@@ -39,9 +39,9 @@ pub mod report;
 pub mod segment;
 pub mod stream;
 
-/// The typed field-value model. Re-exported from `rustos_abi` (its ABI-schema
-/// home) so `rustos_log::field::*` keeps resolving; there is one definition.
-pub use rustos_abi::field;
+/// The typed field-value model. Re-exported from `tairix_abi` (its ABI-schema
+/// home) so `tairix_log::field::*` keeps resolving; there is one definition.
+pub use tairix_abi::field;
 
 pub use attest::{
     machine_id_hash, stream_genesis, LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN,
@@ -71,16 +71,16 @@ pub use render::render_line;
 pub use report::{
     render_json, render_markdown, render_table_header, render_table_row, RecordFrame,
 };
-pub use rustos_abi::field::{
-    reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
-    ToFieldValue, Uuid, RESERVED_PREFIXES,
-};
 pub use segment::{
     verify_segment, RecordBlockRef, ScanEnd, SegmentError, SegmentHeader, SegmentReader,
     SegmentSummary, SegmentWriter, MAX_RECORD_PAYLOAD, SEGMENT_FOOTER_LEN, SEGMENT_FORMAT_VERSION,
     SEGMENT_HEADER_LEN,
 };
 pub use stream::Stream;
+pub use tairix_abi::field::{
+    reserved_prefix, Decimal, FieldList, FieldName, FieldValue, IpAddr, MacAddr, ScalarType,
+    ToFieldValue, Uuid, RESERVED_PREFIXES,
+};
 
 use core::sync::atomic::{AtomicU8, Ordering};
 

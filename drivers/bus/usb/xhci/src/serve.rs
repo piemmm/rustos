@@ -20,9 +20,9 @@
 //! [`UrbEngine`]; the live wait-set loop that drives it is in `main.rs` and is
 //! the on-metal acceptance item (QEMU models no Pi USB).
 
-use rustos_abi::usb_urb::{URB_COMPLETION_LEN, URB_REQUEST_LEN};
-use rustos_abi::{DriverError, Errno, HwNode, HwResource};
-use rustos_usb::transport::{drive_urb, frame_completion, UrbEngine};
+use tairix_abi::usb_urb::{URB_COMPLETION_LEN, URB_REQUEST_LEN};
+use tairix_abi::{DriverError, Errno, HwNode, HwResource};
+use tairix_usb::transport::{drive_urb, frame_completion, UrbEngine};
 
 /// A framed URB completion ready for `call_reply`: the in-band completion
 /// bytes and their length, paired with the ticket the reply answers.
@@ -177,7 +177,7 @@ impl UrbService {
 }
 
 /// Extend the enumerated device's interface [`HwNode`] (from
-/// [`describe_device`](rustos_usb::device::UsbDevice::describe_device)) with
+/// [`describe_device`](tairix_usb::device::UsbDevice::describe_device)) with
 /// the URB-transport grants the autoloaded class driver inherits: the
 /// per-endpoint call grant for `endpoint_id` and the per-region shared-memory
 /// grant for `shm_id`.

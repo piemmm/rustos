@@ -1,4 +1,4 @@
-//! RustOS shared pointer input-event vocabulary (`lib/input`).
+//! TAIRiX shared pointer input-event vocabulary (`lib/input`).
 //!
 //! This crate owns the device-level pointer event types the desktop routes:
 //! the [`PointerButton`]s it distinguishes and the [`InputEvent`]s a pointing
@@ -12,8 +12,8 @@
 //! `userland/gui/*` crate may not depend on the window manager nor on a
 //! sibling userland crate. Per the shared
 //! vocabulary therefore lives in `lib/*` — exactly the reasoning that placed
-//! `Point`/`Rect` in [`rustos_geometry`] and the colour algebra in
-//! `rustos_raster`. The window manager re-exports these types, so both the
+//! `Point`/`Rect` in [`tairix_geometry`] and the colour algebra in
+//! `tairix_raster`. The window manager re-exports these types, so both the
 //! compositor's [`InputRouter`] and the taskbar's input router consume one
 //! definition.
 //!
@@ -22,17 +22,17 @@
 //! the [`InputEvent::KeyPressed`] / [`InputEvent::KeyReleased`] variants the
 //! window manager delivers to the focused surface. This is the in-process
 //! routing vocabulary; the bytes that cross the kernel boundary are
-//! `rustos_abi`'s `KeyInput`, the same producer/consumer split as the pointer
-//! ([`PointerButton`] vs `rustos_abi`'s `PointerButtonCode`).
+//! `tairix_abi`'s `KeyInput`, the same producer/consumer split as the pointer
+//! ([`PointerButton`] vs `tairix_abi`'s `PointerButtonCode`).
 //!
-//! [`InputRouter`]: https://docs.rs/rustos-wm
-//! [`rustos_geometry`]: rustos_geometry
+//! [`InputRouter`]: https://docs.rs/tairix-wm
+//! [`tairix_geometry`]: tairix_geometry
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_geometry::Point;
+use tairix_geometry::Point;
 
 /// The pointer buttons the desktop distinguishes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -67,7 +67,7 @@ pub struct Modifiers {
 ///
 /// Character-producing keys are not listed here: they arrive as a
 /// [`Key::Char`]. This is the closed set of keys that produce no character,
-/// matching `rustos_abi`'s wire `NamedKeyCode`.
+/// matching `tairix_abi`'s wire `NamedKeyCode`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NamedKey {
     /// The Enter / Return key.

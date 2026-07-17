@@ -7,7 +7,7 @@
 # loading and saving the edited file — and the short-help switches' read
 # of the bundle's own Help/ tree — go through the secured VFS, which still
 # authorises every path per-inode under the caller's attested identity.
-id = "os.rustos.edit"
+id = "os.tairix.edit"
 name = "edit"
 version = "0.1.0"
 kind = "command"

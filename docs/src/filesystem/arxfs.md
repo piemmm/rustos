@@ -1,13 +1,13 @@
 # arxfs driver
 
-`arxfs` (`drivers/filesystem/arxfs`, crate `rustos-drv-fs-arxfs`) is the
-**native RustOS filesystem**: a block-backed, copy-on-write filesystem that
+`arxfs` (`drivers/filesystem/arxfs`, crate `tairix-drv-fs-arxfs`) is the
+**native TAIRiX filesystem**: a block-backed, copy-on-write filesystem that
 stores full POSIX metadata plus an inline access-control list and an
 optional capability gate **per inode** (`AGENTS.md` §5.3). There is exactly
 one on-disk version — `arxfs` is built up internally in the stages of
 its [specification](./arxfs-spec.md), but the driver and its format are a
 single shipping thing, not a `v1`/`v2` pair. It
-sits behind any `rustos_abi::driver::block::Block` device and is exposed
+sits behind any `tairix_abi::driver::block::Block` device and is exposed
 through the versioned `FilesystemRead` and `FilesystemWrite` traits — never
 by widening the frozen mount/unmount `Filesystem` trait (`AGENTS.md` §2.4 /
 §9).
@@ -709,7 +709,7 @@ shared volume key), verifies the
 planted file reads back its known contents, and creates + writes + reads
 back a fresh file before signalling success.
 
-The on-disk image is built by the shared `rustos-test-arxfs-image`
+The on-disk image is built by the shared `tairix-test-arxfs-image`
 fixture (a 1 MiB, 512-byte-block, 64-inode volume). Unlike the
 hand-encoded FAT32 fixture, the arxfs image is authored by the **real
 arxfs driver itself** — the fixture formats an in-memory volume through
@@ -730,7 +730,7 @@ and the VFS only delegates a write to a non-`READ_ONLY` mount.
 
 ## Test surface
 
-`cargo test -p rustos-drv-fs-arxfs` formats an in-memory volume and
+`cargo test -p tairix-drv-fs-arxfs` formats an in-memory volume and
 exercises: the self-identifying block header rejecting a wrong magic,
 wrong type, wrong expected address, foreign UUID, a flipped payload byte,
 and a wrong authenticator key; a metadata bit-flip being **detected and
@@ -857,7 +857,7 @@ fully re-checks an encrypted volume — far heavier than a byte decoder — a
 plain `cargo test` (a developer machine and the per-PR `ci` gate, no budget)
 runs a single quick smoke pass: a small, seed-driven sample of the byte sweep
 plus a bounded PRNG batch, from a fresh, logged seed; the time-limited GitHub
-soak (`cargo xtask fuzz`, `RUSTOS_FUZZ_BUDGET_SECS`) switches to exhaustive
+soak (`cargo xtask fuzz`, `TAIRIX_FUZZ_BUDGET_SECS`) switches to exhaustive
 coverage — every byte flipped in turn and the PRNG loop run to the wall-clock
 budget. Since Stage 7 the fuzz image is
 populated with duplicate-content files and a reflink, so the sweep also drives
@@ -881,7 +881,7 @@ first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
 the spec's required "compression decode" target (`arxfs-spec.md` §10,
 `AGENTS.md` §19.6), it round-trips structured inputs and feeds corrupted
-frames and pure noise to `rustos_compress::decompress`, asserting it never
+frames and pure noise to `tairix_compress::decompress`, asserting it never
 panics and fails closed.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in

@@ -37,7 +37,7 @@ use super::{DriverError, MmioMapper};
 ///
 /// The bus driver treats both fields as opaque and copies them
 /// verbatim into the MSI-X table entry; only the architecture layer
-/// (for example `rustos_arch_x86_64::irq::msi_message`) knows how to
+/// (for example `tairix_arch_x86_64::irq::msi_message`) knows how to
 /// encode a vector and destination into them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MsiMessage {

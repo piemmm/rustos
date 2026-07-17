@@ -1,4 +1,4 @@
-# `rustos-reset` — restore the terminal to a sane state
+# `tairix-reset` — restore the terminal to a sane state
 
 A `plans/APPS.md` command app registered at `/System/Apps/reset.app/Run`
 so the shell resolves the bare word `reset` to it. `reset` undoes the
@@ -18,8 +18,8 @@ the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `rustos-termcap`, `rustos-vt`, and `rustos-help` crates (plus the
-`rustos-abi` input-mode vocabulary in the freestanding binary), so it
+shared `tairix-termcap`, `tairix-vt`, and `tairix-help` crates (plus the
+`tairix-abi` input-mode vocabulary in the freestanding binary), so it
 never links a kernel or driver crate. Its manifest (`AppInfo.toml`)
 requests `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` —
 within the session baseline — and the secured VFS still authorises every

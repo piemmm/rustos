@@ -143,7 +143,7 @@ fn host_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
         // opt-level=3`, mirroring `ci`'s crypto-constant-time gate.
         FlakeUnit::new("crypto constant-time (release)", budget, move |_| {
             let mut cmd = ctx.cargo();
-            cmd.args(["test", "--release", "--locked", "-p", "rustos-crypto"]);
+            cmd.args(["test", "--release", "--locked", "-p", "tairix-crypto"]);
             Job::new("crypto constant-time (release)", cmd)
         }),
     ]

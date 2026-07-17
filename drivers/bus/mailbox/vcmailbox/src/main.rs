@@ -9,18 +9,18 @@
 //! BCM2711 `VideoCore` transport (`lib/vcmailbox::MmioMailbox`), and answers
 //! *synchronous* property exchanges from other user-space drivers — the VL805
 //! USB firmware reload (`drivers/bus/usb/vl805`) — over the well-known
-//! `rustos_abi::mailbox_ipc::MAILBOX_ENDPOINT` call endpoint.
+//! `tairix_abi::mailbox_ipc::MAILBOX_ENDPOINT` call endpoint.
 //!
 //! The hardware mechanism (doorbell registers, DMA buffer, bus-address
 //! translation, cache coherency) lives entirely behind the transport; the
 //! service keeps no protocol logic of its own — it decodes each request,
 //! runs the exchange, and frames the reply through
-//! `rustos_abi::mailbox_ipc::serve_request`. A caller's
+//! `tairix_abi::mailbox_ipc::serve_request`. A caller's
 //! authority is enforced kernel-side by the endpoint's `CAP_MAILBOX` send gate: the service serves whoever the kernel admitted
 //! and validates nothing about the caller itself.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt` (`_start`, the stack canary, the panic handler,
+//! runtime `tairix-rt` (`_start`, the stack canary, the panic handler,
 //! and the `call_create` / `call_recv` / `call_reply` / `yield` syscall
 //! wrappers), never the C ABI. `main` wires the real seams:
 //!
@@ -56,14 +56,14 @@ mod program {
     use core::cell::RefCell;
     use core::ptr::NonNull;
 
-    use rustos_abi::driver::dma::DmaHost;
-    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
-    use rustos_abi::driver::sole_register_window;
-    use rustos_abi::mailbox_ipc::{self, MAILBOX_ENDPOINT};
-    use rustos_abi::{CapabilityId, DriverError, MmioMapper, RegisterWindow};
-    use rustos_caps::CapabilitySet;
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_vcmailbox::{
+    use tairix_abi::driver::dma::DmaHost;
+    use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+    use tairix_abi::driver::sole_register_window;
+    use tairix_abi::mailbox_ipc::{self, MAILBOX_ENDPOINT};
+    use tairix_abi::{CapabilityId, DriverError, MmioMapper, RegisterWindow};
+    use tairix_caps::CapabilitySet;
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_vcmailbox::{
         MailboxError, MailboxTransport, MmioMailbox, DEFAULT_POLL_BUDGET, PROPERTY_LEN_BYTES,
     };
 
@@ -144,7 +144,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// On success this never returns: the serve loop runs for the life of the
@@ -198,7 +198,7 @@ mod program {
         // is already bound, or the bind privilege is missing).
         let send_caps = endpoint_send_caps();
         let recv_caps = CapabilitySet::empty();
-        if rustos_rt::call_create(
+        if tairix_rt::call_create(
             MAILBOX_ENDPOINT,
             &send_caps,
             &recv_caps,
@@ -232,24 +232,24 @@ mod program {
         let mut reply = [0u8; mailbox_ipc::REPLY_LEN];
         loop {
             let mut ticket = 0u64;
-            match rustos_rt::call_recv(MAILBOX_ENDPOINT, &mut request, &mut ticket) {
+            match tairix_rt::call_recv(MAILBOX_ENDPOINT, &mut request, &mut ticket) {
                 Ok(n) => {
                     let len =
                         mailbox_ipc::serve_request(channel, &request[..n], &mut reply).unwrap_or(0);
-                    let _ = rustos_rt::call_reply(MAILBOX_ENDPOINT, ticket, &reply[..len]);
+                    let _ = tairix_rt::call_reply(MAILBOX_ENDPOINT, ticket, &reply[..len]);
                 }
                 Err(_) => return EXIT_SERVE_FAILED,
             }
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

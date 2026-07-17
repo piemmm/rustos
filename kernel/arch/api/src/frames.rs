@@ -26,7 +26,7 @@
 
 /// Number of `u64` entries in one 4 KiB page table.
 ///
-/// Every architecture RustOS targets uses a 512-entry (`4096 / 8`)
+/// Every architecture TAIRiX targets uses a 512-entry (`4096 / 8`)
 /// table at each level (x86_64 PML4/PDPT/PD/PT, aarch64 stage-1
 /// L1/L2/L3, riscv64 Sv39 levels). The constant lives here so the HAL
 /// frame currency speaks one width.
@@ -131,7 +131,7 @@ pub trait PageTableFrames: Sync {
 ///   post-order, the root included.
 ///
 /// Recursion depth is bounded by the architecture's table depth (at most
-/// four levels on every RustOS target).
+/// four levels on every TAIRiX target).
 ///
 /// # Safety
 ///
@@ -172,7 +172,7 @@ unsafe fn reclaim_at<C, E, F>(
     E: Fn(u64) -> *const [u64; PAGE_TABLE_ENTRIES],
     F: FnMut(u64),
 {
-    // Four levels is the deepest hierarchy any RustOS target walks
+    // Four levels is the deepest hierarchy any TAIRiX target walks
     // (x86_64 PML4→PT); a `child_of` that classifies a leaf-level entry
     // as a table would otherwise walk leaf frame contents as
     // descriptors, so the depth is bounded here as well (fail closed).

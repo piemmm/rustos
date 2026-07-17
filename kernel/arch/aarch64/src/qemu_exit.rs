@@ -1,6 +1,6 @@
 //! ARM semihosting (`SYS_EXIT`) test-finisher helper.
 //!
-//! The QEMU `virt` board has no `SiFive` Test device; instead RustOS'
+//! The QEMU `virt` board has no `SiFive` Test device; instead TAIRiX'
 //! aarch64 QEMU verticals report their result through **ARM
 //! semihosting** (Semihosting for AArch64, ARM DUI 0203). With QEMU run
 //! under `-semihosting-config enable=on,target=native`, the guest
@@ -34,7 +34,7 @@ pub const ADP_STOPPED_APPLICATION_EXIT: u64 = 0x2_0026;
 /// QEMU host-process exit status produced by `exit_success`. Unlike
 /// x86_64's `isa-debug-exit`, the semihosting finisher reports success
 /// as a plain zero exit status. Must match
-/// `rustos_qemu::aarch64::SUCCESS_EXIT_STATUS`.
+/// `tairix_qemu::aarch64::SUCCESS_EXIT_STATUS`.
 pub const SUCCESS_EXIT_STATUS: i32 = 0;
 
 /// Tell QEMU the test passed and **never return**.

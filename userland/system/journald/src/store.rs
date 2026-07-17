@@ -1,19 +1,19 @@
 //! Filesystem placement for persisted segments.
 //!
-//! The journal hands each closed segment to a [`SegmentStore`](rustos_log::SegmentStore).
+//! The journal hands each closed segment to a [`SegmentStore`](tairix_log::SegmentStore).
 //! The production sink writes every segment as its own file under
 //! `/System/Logs/<stream>/`, named by the segment's own id, so segments are
 //! immutable append-only files that rotation never rewrites (SYSLOG §6, §10).
 //!
 //! The path derivation is pure and lives here so it is host-tested independent
 //! of any syscall; the sink that actually opens and writes the file over the
-//! `rustos-rt` filesystem wrappers is the service binary's concern (the staged
+//! `tairix-rt` filesystem wrappers is the service binary's concern (the staged
 //! follow-on that binds the ingress endpoint and drives the dispatch core over
 //! real syscalls — SYSLOG §15).
 
 use alloc::string::String;
 
-use rustos_log::{SegmentError, SegmentReader, Stream};
+use tairix_log::{SegmentError, SegmentReader, Stream};
 
 /// The machine-wide log root. `/System/Logs` is one of the only writable paths
 /// beneath the read-only `/System`, mounted `nosuid,nodev,noexec`.
@@ -28,7 +28,7 @@ pub const LOG_ATTESTATION_KEY_PATH: &str = "/System/Security/Keys/LogAttestation
 /// Absolute path of the per-installation **machine-id** the journal reads at
 /// startup to bind each stream's hash-chain genesis to this installation
 /// (`AGENTS.md` §16.2; SYSLOG §7.1). Non-secret, world-readable public
-/// identity (the RustOS equivalent of `/etc/machine-id`); the installer/image
+/// identity (the TAIRiX equivalent of `/etc/machine-id`); the installer/image
 /// provisions it, so a missing file means an unprovisioned system.
 pub const MACHINE_ID_PATH: &str = "/System/Security/MachineId";
 
@@ -83,9 +83,9 @@ pub fn stream_directory(stream: Stream) -> String {
 #[cfg(test)]
 mod tests {
     use super::{segment_path, segment_placement_for, stream_dir, stream_directory};
-    use rustos_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
-    use rustos_abi::{BootId, BOOT_ID_LEN};
-    use rustos_log::{machine_id_hash, SegmentHeader, SegmentWriter, Stream};
+    use tairix_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
+    use tairix_abi::{BootId, BOOT_ID_LEN};
+    use tairix_log::{machine_id_hash, SegmentHeader, SegmentWriter, Stream};
 
     /// Build a minimal (record-free) closed segment image for `stream`/`id`,
     /// so the placement derivation can be exercised on a real header.

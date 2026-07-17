@@ -15,8 +15,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::MountFlags;
-use rustos_abi::driver::DriverHandle;
+use tairix_abi::driver::filesystem::MountFlags;
+use tairix_abi::driver::DriverHandle;
 
 use super::path::Path;
 use super::perm::Metadata;
@@ -36,7 +36,7 @@ pub struct MountPoint {
     /// point whose path differs from the subtree's path on the volume. The
     /// delegated walk prepends these components to the path remainder below
     /// the mount point, so the driver still resolves from its own
-    /// [`root`](rustos_abi::driver::filesystem::FilesystemRead::root): e.g.
+    /// [`root`](tairix_abi::driver::filesystem::FilesystemRead::root): e.g.
     /// `/System/Logs` backed by the encrypted root volume's own
     /// `/System/Logs` directory carries `["System", "Logs"]` here.
     backing_subtree: Vec<String>,
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn a_runtime_mount_carries_its_own_template() {
         use super::super::perm::{Metadata, Mode};
-        use rustos_kernel_sec::{GroupId, UserId};
+        use tairix_kernel_sec::{GroupId, UserId};
 
         let mut table = MountTable::new(MountFlags::default());
         let handle = DriverHandle::from_raw(0x564F).expect("non-zero handle");

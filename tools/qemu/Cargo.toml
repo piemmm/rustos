@@ -1,6 +1,6 @@
 [package]
-name = "rustos-qemu"
-description = "QEMU runner library + binary for RustOS integration tests."
+name = "tairix-qemu"
+description = "QEMU runner library + binary for TAIRiX integration tests."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustos-qemu-run"
+name = "tairix-qemu-run"
 path = "src/bin/run.rs"
 
 # The library is host-only (`std`). It is invoked by `cargo xtask test --qemu`

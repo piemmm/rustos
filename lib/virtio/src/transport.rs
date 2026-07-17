@@ -23,7 +23,7 @@ use crate::queue::ring_view::RingView;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_abi::{DriverError, RegisterWindow};
+use tairix_abi::{DriverError, RegisterWindow};
 
 /// Virtio device-status bits.
 ///

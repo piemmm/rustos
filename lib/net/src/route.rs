@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::time::{Duration64, NANOS_PER_SEC};
+use tairix_abi::time::{Duration64, NANOS_PER_SEC};
 
 use crate::addr::{Ipv4Addr, Ipv6Addr, Ipv6Scope};
 use crate::ipv6::IPV6_MIN_MTU;

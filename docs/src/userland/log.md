@@ -1,12 +1,12 @@
 # System-log tool (`log`)
 
-`log` (`userland/shell/log`, crate `rustos-logtool`) is the terminal reader,
-renderer, and verifier of the RustOS system log. The system log is a set of
+`log` (`userland/shell/log`, crate `tairix-logtool`) is the terminal reader,
+renderer, and verifier of the TAIRiX system log. The system log is a set of
 immutable, append-only, hash-chained segment files under
 `/System/Logs/<stream>/`, one directory per stream (`boot`, `runtime`,
 `debug`, `security`, `audit`, `journal`). `log` reads those files and turns
 them into readable output, or checks their integrity. There is no `/proc` or
-`/sys`: the authoritative data is the segment files and the RustOS APIs.
+`/sys`: the authoritative data is the segment files and the TAIRiX APIs.
 
 ## Commands
 
@@ -26,7 +26,7 @@ only to its inherited standard streams, never a device.
 ## What it reuses
 
 The tool is a read/render/verify state machine over the one system-log model
-in [`rustos-log`](../lib/log.md): the segment reader, the record decoder and
+in [`tairix-log`](../lib/log.md): the segment reader, the record decoder and
 its per-segment dictionary view, the boot line renderer, the JSON/Markdown/
 table renderers, and the segment verifier. It re-implements none of the
 on-disk format. The two operations that touch the outside world — reading a
@@ -53,5 +53,5 @@ with in-memory fixtures and no kernel.
 
 The host-testable render/verify library lands first, following the `cat` / `ls`
 precedent. The freestanding `Run` binary — wiring the real `/System/Logs`
-reader over the `rustos-rt` filesystem syscalls and the standard streams — and
+reader over the `tairix-rt` filesystem syscalls and the standard streams — and
 its QEMU integration vertical are the next sub-increment.

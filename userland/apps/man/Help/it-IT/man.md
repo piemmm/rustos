@@ -11,7 +11,7 @@ man — mostrare il documento di aiuto di un comando
 Mostra il documento di aiuto fornito dal pacchetto applicativo di un
 comando, nella tua lingua quando esiste una traduzione.
 
-Ogni programma RustOS è un pacchetto applicativo con un albero `Help/`: un
+Ogni programma TAIRiX è un pacchetto applicativo con un albero `Help/`: un
 documento strutturato per comando o argomento, per lingua. `man` risolve
 `<command>` esattamente come la shell — prima il negozio di applicazioni
 di sistema, poi le directory di `PATH` — così la pagina mostrata descrive

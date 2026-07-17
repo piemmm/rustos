@@ -1,6 +1,6 @@
 # NETWORK.md — Full IPv4 + IPv6 networking: the user-space network stack
 
-This is the staged build plan for RustOS's complete dual-stack network
+This is the staged build plan for TAIRiX's complete dual-stack network
 implementation: IPv4 and IPv6 as equals, TCP, UDP, ICMP/ICMPv6, IGMP/MLD,
 Neighbour Discovery, multicast, a versioned socket ABI, and negotiated
 hardware offloads — all built as a microkernel-style user-space stack above
@@ -96,7 +96,7 @@ in-place evolutions it makes are ordinary pre-release changes (§2.13).
 
 ## 1. The gap this plan closes (and the bar it is held to)
 
-Today RustOS has a link-layer `Net` trait, one virtio-net driver with no
+Today TAIRiX has a link-layer `Net` trait, one virtio-net driver with no
 offloads, and a stateless ARP/IPv4/ICMP-echo responder. There is no IP
 forwarding table, no transport layer, no IPv6, no socket ABI, and no way
 for a program to open a connection. This plan delivers the whole stack —
@@ -262,7 +262,7 @@ gate, and each leaves the tree fully working. Status marks: `[ ]`
 planned, `[~]` in progress, `[x]` done.
 
 ### N1 — `lib/net` foundation: addresses, checksum, Ethernet, ARP/ND-ready neighbour contract `[x]`
-- `rustos-net` exists (`no_std`, `#![forbid(unsafe_code)]`, §6 README,
+- `tairix-net` exists (`no_std`, `#![forbid(unsafe_code)]`, §6 README,
   tier experimental): the dual-stack address vocabulary re-exports the
   `core::net` types and adds RFC 4007 `Ipv6Scope` (fail-closed on
   reserved multicast scopes) + `ScopedIpv6Addr` (zone required exactly
@@ -382,7 +382,7 @@ docs, and the full gate) because the whole was too large for one change:
   namespace; RFC 5952 v6 rendering).
 - Landed: the driver seam's transport half — `Net` frame I/O evolved
   in place into the shared-memory frame-ring transport
-  (`rustos_abi::driver::net_ring`: validated `RingGeometry`,
+  (`tairix_abi::driver::net_ring`: validated `RingGeometry`,
   fail-closed `FrameRing` push/pop/skip, `FrameRings` + `ServiceReport`;
   rings mutated only inside the blocking `service` call, so the call
   boundary is the synchronisation — safe Rust, no shared-memory
@@ -443,7 +443,7 @@ docs, and the full gate) because the whole was too large for one change:
     `AddressPreferred`, left on invalidation) and the all-systems group
     is auto-joined on v4 configuration.
 - **N4a — socket ABI wire contract + network errnos `[x]` (landed).**
-  `lib/abi/src/net.rs` (`rustos_abi::net`) is the pure, versioned,
+  `lib/abi/src/net.rs` (`tairix_abi::net`) is the pure, versioned,
   fail-closed wire contract: `SocketRequest`
   (`socket`/`bind`/`connect`/`send`/`close` + multicast `join`/`leave`,
   dgram v4/v6, `SocketType::Datagram` with stream/raw reserved), the
@@ -461,7 +461,7 @@ docs, and the full gate) because the whole was too large for one change:
 - **N4b — the socket service + client + multicast transmit `[x]`.**
   - `CAP_NET` (`CapabilityId::NET` = 36) in `SESSION_BASELINE`, enforced
     in the `netstack` socket dispatcher before any state is touched;
-  - `rustos_netstack::SocketService`: the origin (`ProcId`)-keyed socket
+  - `tairix_netstack::SocketService`: the origin (`ProcId`)-keyed socket
     table, CSPRNG-drawn ephemeral ports (kernel `random_get`, injected as
     an entropy closure so the engine stays pure), globally-unique port
     binding, per-principal + global bounded accounting failing closed with
@@ -474,7 +474,7 @@ docs, and the full gate) because the whole was too large for one change:
     egress per link;
   - the `Run` binary binds the second endpoint (`NETSTACK_SOCKET_ENDPOINT`)
     and serves it in the same event-driven wait-set loop;
-  - `rustos_rt::net` client wrappers (`socket`/`bind`/`connect`/`send`/
+  - `tairix_rt::net` client wrappers (`socket`/`bind`/`connect`/`send`/
     `recv`/`close`/`join`/`leave`), `recv` returning the sender `Origin`
     for fail-closed authentication; and the `random_get` rt wrapper.
   - Tests: the `SocketService` host suite (cap gate, origin scoping,
@@ -493,7 +493,7 @@ docs, and the full gate) because the whole was too large for one change:
 
 The stack and a NIC driver run as **separate processes** (the true
 microkernel shape, §2/§4). `lib/abi::driver::net_channel`
-(`rustos_abi::driver::net_channel`, `netchan-v1`) is the versioned,
+(`tairix_abi::driver::net_channel`, `netchan-v1`) is the versioned,
 pure, fail-closed IPC control-plane contract that establishes and drives
 the [`net_ring`] frame region across that boundary:
 
@@ -563,11 +563,11 @@ reach the running `netstack` process. Done:
   `Netstack::service_interface<F: FrameService>` — one definition for both
   the in-process `LocalFrameService` and the remote `NetChannelClient`.
 - **`devmgr` autobind** (`netbind` module, host-tested): recognises the
-  emitted `netchan` node (`compatible = "rustos,netchan"`), reads its endpoint
+  emitted `netchan` node (`compatible = "tairix,netchan"`), reads its endpoint
   resource, and hands it to `netstack` `BindDriver` under a derived `netN`
   alias — each endpoint bound exactly once across generation bumps, fail-soft
   retry if the stack is not yet up.
-- **The driver's §18.3 bind table** `rustos_drv_network_virtio_net::BIND_KEYS`
+- **The driver's §18.3 bind table** `tairix_drv_network_virtio_net::BIND_KEYS`
   (`HwMatchKey::virtio(1)`, exact-match `BIND_PRIORITY`): the discovery
   identity `devmgr`/the signed-manifest bind table is authored from, so a
   discovered virtio-net node resolves to this driver. Without it the driver
@@ -646,7 +646,7 @@ improvement, not test scaffolding):
   (`EventId(16_012)`), emitted from `run.rs::deliver` on the engine's
   `EchoRequestServed` event. `netpeer` gained a `PeerCampaign::V6LinkLocalOnly`
   mode targeting the guest's EUI-64 link-local from the pinned
-  `rustos_test_netstack_wire::GUEST_MAC`; the QEMU `NetDevice` gained a
+  `tairix_test_netstack_wire::GUEST_MAC`; the QEMU `NetDevice` gained a
   `mac` field threaded through the shared `net_device_arg` on all three arches.
 
 **Follow-up increments (not this change).**
@@ -659,13 +659,13 @@ improvement, not test scaffolding):
   `plans/WIRING.md` / `plans/ARCHSUPPORT.md` parity port, not a small
   extension. Foundation in place: the synthetic node-id bases the probes emit
   from now live in one shared, disjoint-by-construction, compile-time-guarded
-  map (`kernel/rustos-kernel/src/hwtree_node_ids.rs`) — a new arch's NIC-probe
+  map (`kernel/tairix-kernel/src/hwtree_node_ids.rs`) — a new arch's NIC-probe
   region is claimed as the next index there, never a fresh literal, so the
   base-collision class that bit N4e-β cannot recur. Second foundation in
   place: the pure virtio-MMIO discovery observers
   (`observe_virtio_mmio_{block,input,network}_devices` + the shared
   interrupt-class core) now live in the arch-neutral
-  `kernel/rustos-kernel/src/hwdiscovery` module, split out of `root_storage`
+  `kernel/tairix-kernel/src/hwdiscovery` module, split out of `root_storage`
   (which retains only the drvhost-linked root-block *catalogue resolution*).
   Because `hwdiscovery` injects the enumerated bus through the frozen
   `lib/abi` seams and links no `driver_catalog` / `drvhost`, a riscv64 /
@@ -675,7 +675,7 @@ improvement, not test scaffolding):
   resolver), not a copy of the walk (§2.2 / §2.21).
   Third foundation in place: the riscv64 boot path now **seeds the hardware
   tree**. `boot_riscv64::try_boot` runs the port's `FdtDiscovery` into the
-  shared `kernel/rustos-kernel/src/boot_hwtree.rs` `CollectingHwNodeSink`
+  shared `kernel/tairix-kernel/src/boot_hwtree.rs` `CollectingHwNodeSink`
   (the one growable boot-tree sink, extracted from the aarch64 boot path so
   neither copies it, §2.2) and publishes it to `HW_TREE`, so the
   `hw_tree_read` / `hw_tree_wait` syscalls expose the riscv64 platform
@@ -684,13 +684,13 @@ improvement, not test scaffolding):
   bring-up. Fourth foundation in place: **the riscv64 bootstrap-floor
   virtio-MMIO `DeviceID` probe is now wired.** `boot_riscv64::seed_hardware_tree`
   builds the MMIO bus from the discovered device tree
-  (`rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb`, mapped by the Sv39 identity
+  (`tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb`, mapped by the Sv39 identity
   window `boot` enables) and calls the *same* arch-neutral
   `hwdiscovery::observe_virtio_mmio_{block,input,network}_devices` observers
   aarch64 uses (§2.2 / §2.21), so the served tree now carries the probed,
   autoloadable Block/Input/Network nodes. The interrupt-driven input/network
   nodes carry their discovered PLIC line, resolved by the arch port's pure
-  `rustos_arch_riscv64::fdt::plic_device_source` (reads a `virtio,mmio` node's
+  `tairix_arch_riscv64::fdt::plic_device_source` (reads a `virtio,mmio` node's
   single `interrupts` cell — the QEMU `virt` PLIC is `#interrupt-cells = <1>`
   — and bounds it against the discovered `riscv,ndev`; a discovered value,
   never a board constant, host-tested). Fifth foundation in place: **the
@@ -698,7 +698,7 @@ improvement, not test scaffolding):
   `driver_catalog::IN_KERNEL_DRIVERS`/`IN_KERNEL_DRIVER_COUNT`/`EMMC2_PATH`
   and `build.rs`'s signed-manifest set are gated on `kernel_isa`: the floor is
   virtio-blk on every target, and the BCM2711 EMMC2 SD-host driver is floor
-  **only on aarch64** (`rustos-drv-storage-emmc2` is now an aarch64-only
+  **only on aarch64** (`tairix-drv-storage-emmc2` is now an aarch64-only
   runtime dependency). This fixed a live §2.20 defect — the Pi-only EMMC2
   driver was compiled into the x86_64 image (and would have been in riscv64's)
   — and lets the riscv64 autoload tranche join the drvhost-gated catalogue
@@ -717,7 +717,7 @@ improvement, not test scaffolding):
   bring-up over the PLIC path → `finish_unlock`, SBI console fail-closed on
   input), and the `try_boot` BootInfo hooks + init-spawn call. Seventh
   foundation in place: the image pipeline is now **per-arch**
-  (`rustos_itest_harness::pie::PieArch` threaded through `image_apps` +
+  (`tairix_itest_harness::pie::PieArch` threaded through `image_apps` +
   `image_drivers`, per-arch memoised; `qemu_tests::stores_for` composes only
   the `/System` stores an enrolment plants, for its own target arch), so a
   non-aarch64 autoload vertical plants that arch's rxe. **The first riscv64
@@ -753,7 +753,7 @@ improvement, not test scaffolding):
   driver still autoloads). It boots the production `boot_riscv64::boot`
   pipeline against the shared per-arch `AutoloadRootDisk` (carrying the
   riscv64-cross-compiled signed virtio-net bundle) with a virtio-net-device-mmio
-  attached (MAC pinned to `rustos_test_netstack_wire::GUEST_MAC`) and the
+  attached (MAC pinned to `tairix_test_netstack_wire::GUEST_MAC`) and the
   `netpeer` host peer in its v6-link-local-only campaign; `devmgr` autoloads the
   driver into its own process, netstack binds the `netchan` channel and
   auto-configures the EUI-64 link-local, and answers the peer's echo. PASS keys
@@ -1001,7 +1001,7 @@ changes (§17.4 — the seam is the contract).
 - No DNS resolver, DHCP client/server, NTP, or HTTP library — future
   consumers of the socket ABI, each its own plan.
 - No firewall/NAT/forwarding policy engine (the routing table forwards
-  nothing between interfaces in this plan; RustOS is a host, not a
+  nothing between interfaces in this plan; TAIRiX is a host, not a
   router, until a dedicated plan says otherwise).
 - No TLS (already curated under `lib/crypto`/§16.4; it fronts sockets,
   it is not part of the stack).

@@ -3,7 +3,7 @@
 //!
 //! Unlike the hand-built FAT32 fixture, this image is laid down by the
 //! **real** arxfs driver: [`build_image`] formats an in-memory volume
-//! through [`ARXFS::format`](rustos_drv_fs_arxfs::ARXFS::format), plants
+//! through [`ARXFS::format`](tairix_drv_fs_arxfs::ARXFS::format), plants
 //! [`PLANTED_FILE_NAME`] / [`PLANTED_FILE_CONTENT`] through the driver's
 //! own write path, and returns the resulting bytes. The on-disk layout
 //! therefore has exactly one author — the driver — so the fixture and the
@@ -32,11 +32,11 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use rustos_abi::DriverError;
-use rustos_drv_fs_arxfs::{EntropySource, Security, VolumeKey, ARXFS, VOLUME_KEY_LEN};
-use rustos_users::{
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::DriverError;
+use tairix_drv_fs_arxfs::{EntropySource, Security, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Salt, Uid, UserRecord, UsersDb,
 };
 
@@ -89,7 +89,7 @@ pub const PLANTED_FILE_CONTENT: &[u8] = b"Hello from a planted arxfs volume on v
 pub const NEW_FILE_NAME: &[u8] = b"written.txt";
 
 /// Contents the guest tail writes to [`NEW_FILE_NAME`] and reads back.
-pub const NEW_FILE_CONTENT: &[u8] = b"RustOS wrote this file to arxfs over virtio-blk.\n";
+pub const NEW_FILE_CONTENT: &[u8] = b"TAIRiX wrote this file to arxfs over virtio-blk.\n";
 
 /// Username of the interactive account planted on the users-root volume
 /// ([`build_users_root_image`]) on top of the canonical default
@@ -102,23 +102,23 @@ pub const USERS_FIXTURE_PASSWORD: &str = "root";
 /// PBKDF2 cost of the planted account's password record: the format's
 /// floor, so the guest-side authentication proof stays fast under QEMU
 /// TCG. Fixture scaffolding only — a real database uses
-/// [`rustos_users::DEFAULT_ITERATIONS`].
-pub const USERS_FIXTURE_ITERATIONS: u32 = rustos_users::MIN_ITERATIONS;
+/// [`tairix_users::DEFAULT_ITERATIONS`].
+pub const USERS_FIXTURE_ITERATIONS: u32 = tairix_users::MIN_ITERATIONS;
 
 /// Fixed salt of the planted account's password record, keeping the
 /// built image reproducible.
-const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
+const USERS_FIXTURE_SALT: Salt = [0xa5; tairix_users::SALT_LEN];
 
 /// Serialise the users-root volume's `/System/Security/Users` database:
 /// the active [`USERS_FIXTURE_USERNAME`] account (uid
-/// [`rustos_users::FIRST_USER_UID`]) granted the shared administrator
-/// capability ceiling (`rustos_users::administrator_ceiling` — the session
+/// [`tairix_users::FIRST_USER_UID`]) granted the shared administrator
+/// capability ceiling (`tairix_users::administrator_ceiling` — the session
 /// baseline plus the administrative set), exactly as the real debug
 /// image's `tools/mkimage` seeding lays it down, so the end-to-end session
 /// vertical exercises the same grant the shipped debug profile carries
 /// (`plans/CAPABILITY_USE.md` CU3). The on-disk database holds **human**
 /// accounts only: the system/service identity is compiled into the kernel
-/// (`rustos_users::system_accounts`, `plans/USERS.md`) and the kernel's
+/// (`tairix_users::system_accounts`, `plans/USERS.md`) and the kernel's
 /// identity merge refuses any on-disk record colliding with it.
 ///
 /// # Errors
@@ -130,13 +130,13 @@ pub fn users_db_text() -> Result<String, ParseError> {
     let records = vec![UserRecord::with_password(
         Identity {
             username: USERS_FIXTURE_USERNAME,
-            uid: Uid(rustos_users::FIRST_USER_UID),
-            primary_gid: Gid(rustos_users::FIRST_USER_GID),
-            supplementary_gids: &[rustos_users::STORAGE_GID],
+            uid: Uid(tairix_users::FIRST_USER_UID),
+            primary_gid: Gid(tairix_users::FIRST_USER_GID),
+            supplementary_gids: &[tairix_users::STORAGE_GID],
             display_name: "System Administrator",
             home: Some("/Users/root"),
             shell: Some("/System/Apps/elsh.app/Run"),
-            capabilities: rustos_users::administrator_ceiling(),
+            capabilities: tairix_users::administrator_ceiling(),
             state: AccountState::Active,
         },
         USERS_FIXTURE_PASSWORD.as_bytes(),
@@ -149,9 +149,9 @@ pub fn users_db_text() -> Result<String, ParseError> {
 /// Serialise the users-root volume's `/System/Security/Groups` registry:
 /// the well-known removable-storage group (whose by-name resolution arms
 /// the hotplug-volume identity map, `plans/DEVICES.md` D3d) plus the
-/// `wheel` group (gid [`rustos_users::FIRST_USER_GID`]) the planted
+/// `wheel` group (gid [`tairix_users::FIRST_USER_GID`]) the planted
 /// [`USERS_FIXTURE_USERNAME`] account names as its primary group — so the
-/// kernel's identity merge (`rustos_kernel_core::build_identity_table`)
+/// kernel's identity merge (`tairix_kernel_core::build_identity_table`)
 /// resolves every on-disk account's gid against a real registry rather
 /// than failing closed on a dangling reference — exactly as
 /// `tools/mkimage` seeds the shipped debug profile. The `system` and
@@ -165,8 +165,8 @@ pub fn users_db_text() -> Result<String, ParseError> {
 /// rather than panicked.
 pub fn groups_db_text() -> Result<String, ParseError> {
     let records = vec![
-        GroupRecord::new(rustos_users::STORAGE_GROUP, rustos_users::STORAGE_GID)?,
-        GroupRecord::new("wheel", Gid(rustos_users::FIRST_USER_GID))?,
+        GroupRecord::new(tairix_users::STORAGE_GROUP, tairix_users::STORAGE_GID)?,
+        GroupRecord::new("wheel", Gid(tairix_users::FIRST_USER_GID))?,
     ];
     Ok(GroupsDb::new(records)?.serialise())
 }
@@ -270,7 +270,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// Build the users-root volume: a arxfs image carrying the top-level directories with `/System/Security/Users` holding the
 /// [`users_db_text`] database — the on-disk shape the production root
 /// volume gives the kernel's boot-time users-database load
-/// (`rustos_kernel_core::users`, `plans/PI.md` P11).
+/// (`tairix_kernel_core::users`, `plans/PI.md` P11).
 ///
 /// The volume is keyed by the same [`FIXTURE_VOLUME_KEY`] and geometry as
 /// [`build_image`]; only the planted tree differs.
@@ -288,7 +288,7 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
 /// Build the users-root volume under an arbitrary `volume_key` — the same
 /// layout as [`build_users_root_image`] but keyed by the caller's key, so
 /// a consumer can exercise the production passphrase-derived-key mount
-/// path (`plans/PI.md` P11 root-mount; `kernel/rustos-kernel::root_mount`)
+/// path (`plans/PI.md` P11 root-mount; `kernel/tairix-kernel::root_mount`)
 /// against a real on-disk volume. [`build_users_root_image`] delegates
 /// here with [`FIXTURE_VOLUME_KEY`] (one authoring
 /// path).
@@ -322,8 +322,8 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
                 home,
                 Security::new(
                     0o700,
-                    rustos_users::FIRST_USER_UID,
-                    rustos_users::FIRST_USER_GID,
+                    tairix_users::FIRST_USER_UID,
+                    tairix_users::FIRST_USER_GID,
                 ),
             )?;
         }
@@ -349,10 +349,10 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
 }
 
 /// Re-export of the single store-planting helper. The
-/// definition lives in the arxfs driver (`rustos_drv_fs_arxfs`) so the
+/// definition lives in the arxfs driver (`tairix_drv_fs_arxfs`) so the
 /// image builder (`tools/mkimage`) and these fixtures share one routine that
 /// gives the autoload scan an identical on-disk shape.
-pub use rustos_drv_fs_arxfs::plant_nested_file;
+pub use tairix_drv_fs_arxfs::plant_nested_file;
 
 impl VecBlock {
     /// Consume the device, yielding its raw image bytes.
@@ -416,13 +416,13 @@ mod tests {
     /// are covered by kernel/core's own loader tests).
     struct DiscardSink;
 
-    impl rustos_log::Sink for DiscardSink {
-        fn write_event(&self, _event: &rustos_log::Event<'_>) {}
+    impl tairix_log::Sink for DiscardSink {
+        fn write_event(&self, _event: &tairix_log::Event<'_>) {}
     }
 
     #[test]
     fn users_root_image_mounts_and_the_kernel_loader_reads_the_database() {
-        use rustos_abi::driver::filesystem::FilesystemSecurity;
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
 
         let bytes = build_users_root_image().expect("users-root image builds");
         let dev = VecBlock { store: bytes };
@@ -430,14 +430,14 @@ mod tests {
             ARXFS::open(dev, &FIXTURE_VOLUME_KEY).expect("users-root image is a valid volume");
 
         let sink = DiscardSink;
-        let db = rustos_kernel_core::load_users_db(&mut fs, &sink)
+        let db = tairix_kernel_core::load_users_db(&mut fs, &sink)
             .expect("the kernel loader reads /System/Security/Users");
         // The one interactive human account and nothing else: the
         // system/service identity is compiled into the kernel
-        // (`rustos_users::system_accounts`), never seeded to disk, and the
+        // (`tairix_users::system_accounts`), never seeded to disk, and the
         // identity merge would refuse any colliding record here.
         assert_eq!(db.records().len(), 1);
-        for account in rustos_users::system_accounts().expect("valid compiled identity") {
+        for account in tairix_users::system_accounts().expect("valid compiled identity") {
             assert!(db.lookup(account.username()).is_none());
         }
 
@@ -445,11 +445,11 @@ mod tests {
             .authenticate(USERS_FIXTURE_USERNAME, USERS_FIXTURE_PASSWORD.as_bytes())
             .expect("the planted account authenticates");
         assert_eq!(record.username(), USERS_FIXTURE_USERNAME);
-        assert_eq!(record.uid(), Uid(rustos_users::FIRST_USER_UID));
+        assert_eq!(record.uid(), Uid(tairix_users::FIRST_USER_UID));
         // The planted grant round-trips as exactly the shared administrator
         // ceiling — the same set the debug image seeds — so the end-to-end
         // session vertical exercises the real CU3 grant.
-        assert_eq!(record.capabilities(), rustos_users::administrator_ceiling());
+        assert_eq!(record.capabilities(), tairix_users::administrator_ceiling());
 
         db.authenticate(USERS_FIXTURE_USERNAME, b"wrong password")
             .expect_err("a wrong password is refused");
@@ -460,8 +460,8 @@ mod tests {
         let home = fs.lookup(users, b"root").expect("/Users/root present");
         let sec = fs.security(home).expect("home security present");
         assert_eq!(sec.mode, 0o700);
-        assert_eq!(sec.uid, rustos_users::FIRST_USER_UID);
-        assert_eq!(sec.gid, rustos_users::FIRST_USER_GID);
+        assert_eq!(sec.uid, tairix_users::FIRST_USER_UID);
+        assert_eq!(sec.gid, tairix_users::FIRST_USER_GID);
     }
 
     #[test]

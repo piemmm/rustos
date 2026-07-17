@@ -16,8 +16,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, LimitKind, ResourceLimit};
-use rustos_resref::{ResourceRef, TargetClass};
+use tairix_abi::{Errno, LimitKind, ResourceLimit};
+use tairix_resref::{ResourceRef, TargetClass};
 
 use crate::error::ParseError;
 use crate::job::{Pid, Signal, WaitOutcome};
@@ -72,7 +72,7 @@ pub enum RedirAction {
 /// A redirection's fully-expanded target, classified into the two worlds a
 /// `:`-bearing string can name.
 ///
-/// RustOS has no `/dev`: the byte sinks and sources a redirection can name
+/// TAIRiX has no `/dev`: the byte sinks and sources a redirection can name
 /// (`sys:null`, `sys:zero`, …) are resource references, not device files. The
 /// shell decides which world a target belongs to *before* any filesystem
 /// lookup, so a real on-disk file whose name happens to contain `:` (legal on
@@ -92,7 +92,7 @@ pub enum RedirTarget {
 
 /// Classify a fully-expanded redirection `target` into a [`RedirTarget`],
 /// through the one shared target-resolution rule
-/// ([`rustos_resref::classify_target`]) — the shell holds no second copy of
+/// ([`tairix_resref::classify_target`]) — the shell holds no second copy of
 /// the path-versus-reference spelling decision.
 ///
 /// A target the rule classifies as a resource reference but that is not a
@@ -104,7 +104,7 @@ pub enum RedirTarget {
 /// [`ParseError::InvalidResourceTarget`] for a registered-namespace target
 /// that is not a valid resource reference.
 pub(crate) fn classify_redirect_target(target: String) -> Result<RedirTarget, ParseError> {
-    match rustos_resref::classify_target(&target) {
+    match tairix_resref::classify_target(&target) {
         Ok(TargetClass::Resource(reference)) => Ok(RedirTarget::Resource(reference)),
         Ok(TargetClass::Path) => Ok(RedirTarget::Path(target)),
         Err(_) => Err(ParseError::InvalidResourceTarget),
@@ -205,10 +205,10 @@ pub trait Console {
 /// Reads and imposes the calling process's resource limits, the seam the `ulimit` builtin drives.
 ///
 /// On a running kernel this is backed by the `rlimit_get` / `rlimit_set`
-/// syscalls ([`rustos_abi::SyscallNumber::RLIMIT_GET`] /
-/// [`rustos_abi::SyscallNumber::RLIMIT_SET`]); in tests it is an in-memory
+/// syscalls ([`tairix_abi::SyscallNumber::RLIMIT_GET`] /
+/// [`tairix_abi::SyscallNumber::RLIMIT_SET`]); in tests it is an in-memory
 /// fixture. The shell holds no ambient authority of its own: reading a limit needs no capability, but *raising* a hard bound is
-/// gated kernel-side on [`rustos_abi::CapabilityId::RLIMIT_RAISE`],
+/// gated kernel-side on [`tairix_abi::CapabilityId::RLIMIT_RAISE`],
 /// which surfaces here as an [`Errno`] the builtin reports rather than
 /// hides.
 pub trait LimitStore {
@@ -226,7 +226,7 @@ pub trait LimitStore {
     ///
     /// Returns the host's [`Errno`] if the limit cannot be set —
     /// [`Errno::PermissionDenied`] when raising a hard bound without
-    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`], or
+    /// [`tairix_abi::CapabilityId::RLIMIT_RAISE`], or
     /// [`Errno::OutOfRange`] for a malformed pair.
     fn set(&self, kind: LimitKind, value: ResourceLimit) -> Result<(), Errno>;
 }
@@ -317,7 +317,7 @@ mod tests {
     use crate::parser::OpenMode;
     use alloc::string::ToString;
     use alloc::vec;
-    use rustos_resref::KnownNamespace;
+    use tairix_resref::KnownNamespace;
 
     #[test]
     fn launch_spec_borrows_resolved_commands() {

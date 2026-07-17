@@ -25,7 +25,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 use crate::header::{BlockType, HEADER_LEN};
 use crate::{rd_u64, wr_u64, Block, ARXFS, MAX_BLOCK_SIZE};

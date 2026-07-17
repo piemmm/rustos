@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-arxfs-image"
+name = "tairix-test-arxfs-image"
 description = "Shared arxfs disk-image fixture for the end-to-end QEMU arxfs-over-virtio_blk vertical. The image is laid down by the real arxfs driver itself (format + plant), so the on-disk layout has exactly one source of truth (AGENTS.md §2.2). The host harness (xtask) plants the bytes returned by `build_image` on the backing disk; the freestanding guest tail mounts the same volume through the real arxfs driver and round-trips the planted file plus a fresh write."
 version.workspace = true
 edition.workspace = true
@@ -23,14 +23,14 @@ path = "src/lib.rs"
 # (`AGENTS.md` §2.2). The round-trip unit tests re-mount the built image
 # through the driver on the host.
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
-rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 
 # The users-root round-trip test drives the kernel's boot-time
-# users-database load (`rustos_kernel_core::users`) against the built
+# users-database load (`tairix_kernel_core::users`) against the built
 # image through the real driver, host-side.
 [dev-dependencies]
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

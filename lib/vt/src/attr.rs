@@ -225,7 +225,7 @@ fn decode_extended_color(rest: &[u16]) -> Option<(Color, usize)> {
 // The seven booleans are independent SGR rendition states, not a state
 // machine: any combination is legal (bold+underline+reverse, none, …), so a
 // flat record models them more clearly than an enum, exactly as
-// `rustos_abi::input::Modifiers` models its independent modifier keys.
+// `tairix_abi::input::Modifiers` models its independent modifier keys.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Attributes {

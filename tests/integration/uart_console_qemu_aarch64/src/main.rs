@@ -5,7 +5,7 @@
 //!
 //! `plans/PI.md` P2 makes the aarch64 console MMIO base *discovered* from
 //! the firmware device tree
-//! (`rustos_arch_aarch64::console::configure_from_fdt`) rather than a
+//! (`tairix_arch_aarch64::console::configure_from_fdt`) rather than a
 //! compile-time constant, so the same kernel boots on boards whose console
 //! lives at different addresses (the QEMU `virt` PL011 vs the Raspberry
 //! Pi's). This binary proves the runtime path end to end on the `virt`
@@ -38,14 +38,14 @@
 //! does pass its generated tree, so it is the board on which the runtime
 //! discovery path is CI-provable. Discovery of the Pi's specific console
 //! base (BCM2835 PL011 / AUX mini-UART register layouts) is covered by the
-//! `rustos-arch-aarch64` host unit tests against the `raspi_like_arm`
+//! `tairix-arch-aarch64` host unit tests against the `raspi_like_arm`
 //! device-tree fixture, and is an on-metal acceptance item for the later
 //! Pi peripheral stages (`plans/PI.md` Arc C — honest emulation gap, never
 //! a faked vertical).
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port and the shared FDT reader
+//! It links only the `tairix-arch-aarch64` port and the shared FDT reader
 //! and supplies its own `kernel_main`. The QEMU-exit shortcut lives in
 //! this dedicated bin, never behind a Cargo feature on the arch crate
 //! (fail closed).
@@ -60,10 +60,10 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_aarch64::console::{self, ConsoleModel, DEFAULT_CONSOLE_BASE};
-    use rustos_arch_aarch64::{enable_fp_el1, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-    use rustos_fdt::Fdt;
-    use rustos_log::{log, Event, EventId, Field, Level};
+    use tairix_arch_aarch64::console::{self, ConsoleModel, DEFAULT_CONSOLE_BASE};
+    use tairix_arch_aarch64::{enable_fp_el1, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_fdt::Fdt;
+    use tairix_log::{log, Event, EventId, Field, Level};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`): QEMU's aarch64 `-kernel <ELF>` path passes no DTB
@@ -88,12 +88,12 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_uart_console_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_uart_console_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s`
-    /// trampoline calls (via `rustos_arch_aarch64_main`).
+    /// trampoline calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         // Enable FP/SIMD before the log formatter (which the compiler may
@@ -140,7 +140,7 @@ mod kernel {
                 fields: &[
                     Field {
                         key: "discovered_pl011",
-                        value: rustos_log::FieldValue::Str(if model == ConsoleModel::Pl011 {
+                        value: tairix_log::FieldValue::Str(if model == ConsoleModel::Pl011 {
                             "true"
                         } else {
                             "false"
@@ -148,7 +148,7 @@ mod kernel {
                     },
                     Field {
                         key: "base_is_default",
-                        value: rustos_log::FieldValue::Str(if base == DEFAULT_CONSOLE_BASE {
+                        value: tairix_log::FieldValue::Str(if base == DEFAULT_CONSOLE_BASE {
                             "true"
                         } else {
                             "false"

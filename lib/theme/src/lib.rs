@@ -1,4 +1,4 @@
-//! RustOS shared desktop theme definition (`lib/theme` — `PLAN.md` Stage 7).
+//! TAIRiX shared desktop theme definition (`lib/theme` — `PLAN.md` Stage 7).
 //!
 //! The charter requires "one shared theme definition" that drives the
 //! colours, corner radii, fonts, and cursors of the window manager, the
@@ -13,7 +13,7 @@
 //! here — that is the shared rasteriser's job (`lib/raster`) — so nothing
 //! is duplicated. A consumer converts a theme [`Rgba`]
 //! into the shared render colour at the edge (`From<Rgba> for
-//! rustos_raster::Color`).
+//! tairix_raster::Color`).
 //!
 //! # Where it sits
 //!
@@ -32,7 +32,7 @@
 //! [`register`](ThemeRegistry::register). Both mutators fail closed.
 //!
 //! ```
-//! use rustos_theme::{Appearance, ThemeId, ThemeRegistry};
+//! use tairix_theme::{Appearance, ThemeId, ThemeRegistry};
 //!
 //! let mut themes = ThemeRegistry::with_builtins();
 //! assert_eq!(themes.active().appearance(), Appearance::Dark);

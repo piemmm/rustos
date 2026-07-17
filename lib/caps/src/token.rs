@@ -12,8 +12,8 @@
 //! `ed25519-dalek` so the production audit surface remains a single
 //! signature verifier.
 
-use rustos_abi::{Errno, ABI_VERSION_CURRENT};
-use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
+use tairix_abi::{Errno, ABI_VERSION_CURRENT};
+use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
 use crate::set::CapabilitySet;
 
@@ -50,7 +50,7 @@ pub const TOKEN_WIRE_LEN: usize = TOKEN_BODY_LEN + 64;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityToken {
     /// ABI version of the encoded token. Must match
-    /// [`rustos_abi::ABI_VERSION_CURRENT`] when verifying.
+    /// [`tairix_abi::ABI_VERSION_CURRENT`] when verifying.
     pub abi_version: u32,
     /// Identifier of the task the token is being delegated to.
     pub subject: u64,
@@ -137,7 +137,7 @@ impl CapabilityToken {
     /// translate this into a single audit-log event, never into a
     /// distinguishable user-visible status):
     ///
-    /// * ABI version matches [`rustos_abi::ABI_VERSION_CURRENT`]
+    /// * ABI version matches [`tairix_abi::ABI_VERSION_CURRENT`]
     ///   ⇒ [`Errno::AbiVersionUnsupported`].
     /// * Epoch matches the verifier's current epoch ⇒ [`Errno::NotFound`].
     /// * Token's `subject` equals `subject` ⇒ [`Errno::NotFound`] (a token
@@ -185,8 +185,8 @@ mod tests {
     use super::{CapabilityToken, RevocationEpoch, TOKEN_BODY_LEN, TOKEN_WIRE_LEN};
     use crate::set::CapabilitySet;
     use ed25519_dalek::{Signer, SigningKey};
-    use rustos_abi::{CapabilityId, Errno, ABI_VERSION_CURRENT};
-    use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
+    use tairix_abi::{CapabilityId, Errno, ABI_VERSION_CURRENT};
+    use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
     fn signing_key() -> SigningKey {
         // Deterministic 32-byte seed. Tests must not depend on RNG.

@@ -17,12 +17,12 @@
 //! were presented), the bookkeeping that keeps a double-buffered frame
 //! current without ever copying the whole surface.
 
-use rustos_abi::display_ipc::{
+use tairix_abi::display_ipc::{
     decode_mode_reply, DisplayRequest, DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN,
 };
-use rustos_abi::driver::display::{DamageRect, Display, DisplayMode};
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::driver::display::{DamageRect, Display, DisplayMode};
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::{DriverError, Errno};
 
 use crate::driver_error_from_errno;
 

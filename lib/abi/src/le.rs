@@ -1,6 +1,6 @@
 //! Little-endian scalar read/write helpers shared across the ABI surface.
 //!
-//! All RustOS wire formats are little-endian (every Tier-1 target is
+//! All TAIRiX wire formats are little-endian (every Tier-1 target is
 //! little-endian, and the explicit encoding lets a future big-endian port
 //! participate without breaking the ABI). The same per-field index
 //! arithmetic was previously open-coded in more than one module; it lives

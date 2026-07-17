@@ -1,4 +1,4 @@
-//! RustOS `chown` — change file owner and group (Stage 6
+//! TAIRiX `chown` — change file owner and group (Stage 6
 //! `userland/apps/`).
 //!
 //! `chown` applies an ownership change to each of its file operands. The owner
@@ -6,7 +6,7 @@
 //! are **decimal** user/group ids: `OWNER` changes only the owning user,
 //! `:GROUP` only the owning group, and `OWNER:GROUP` both. With `-R` a
 //! directory operand is changed and then its contents are changed recursively.
-//! This is the POSIX model, restricted to numeric ids (RustOS has no
+//! This is the POSIX model, restricted to numeric ids (TAIRiX has no
 //! name-to-id seam in this tool, so a name would be interface creep) and a building block of the filesystem permission
 //! model.
 //!
@@ -35,7 +35,7 @@
 //! changes nothing; an owner operand that is not a valid
 //! `OWNER`/`OWNER:GROUP`/`:GROUP` spec is a [`ChownError::BadOwner`]; an
 //! operand that cannot be inspected surfaces the underlying
-//! [`Errno`](rustos_abi::Errno) as [`ChownError::Stat`]; an owner that cannot
+//! [`Errno`](tairix_abi::Errno) as [`ChownError::Stat`]; an owner that cannot
 //! be applied is [`ChownError::Apply`]; a directory whose entries cannot be
 //! read during a recursive descent is [`ChownError::Read`]. The first failure
 //! stops the run before any later operand, and there is no panic.

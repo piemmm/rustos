@@ -6,9 +6,9 @@
 //! [`FilesystemSecurity`] driver of the mounted root volume (arxfs on a
 //! real installation), it resolves [`USERS_DB_PATH`] through the VFS's
 //! -checked per-inode delegation ([`crate::fs::Vfs::read_via_secured`]), bounds
-//! the file against [`rustos_users::MAX_DB_LEN`] *before* reading it,
+//! the file against [`tairix_users::MAX_DB_LEN`] *before* reading it,
 //! and parses the bytes through the fail-closed
-//! [`rustos_users::UsersDb`] parser. The parsed database is what the
+//! [`tairix_users::UsersDb`] parser. The parsed database is what the
 //! login path holds to authenticate sessions.
 //!
 //! Every outcome is audited with a stable event id
@@ -31,12 +31,12 @@ use alloc::vec::Vec;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
-use rustos_abi::Errno;
-use rustos_log::{Field, Level, Sink};
-use rustos_sync::RwLock;
-use rustos_users::{ParseError, UsersDb, MAX_DB_LEN};
-use rustos_util::fmt::format_usize;
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
+use tairix_abi::Errno;
+use tairix_log::{Field, Level, Sink};
+use tairix_sync::RwLock;
+use tairix_users::{ParseError, UsersDb, MAX_DB_LEN};
+use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
 use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
@@ -51,7 +51,7 @@ pub const USERS_DB_PATH: &str = "/System/Security/Users";
 /// installs an implementation holding the validated `users-v1` text;
 /// the syscall handler copies that exact text out to the (capability-
 /// gated, `CAP_USERS_READ`) caller, which re-parses it with the same
-/// fail-closed `rustos-users` parser. Serving the *text* rather than a
+/// fail-closed `tairix-users` parser. Serving the *text* rather than a
 /// re-serialisation keeps one canonical byte representation end to end.
 ///
 /// `Sync` because the single installed source is shared by the per-CPU
@@ -602,11 +602,11 @@ fn audit_load(audit: &dyn Sink, records: Option<usize>, err: Option<UsersLoadErr
             &[
                 Field {
                     key: "path",
-                    value: rustos_log::FieldValue::Str(USERS_DB_PATH),
+                    value: tairix_log::FieldValue::Str(USERS_DB_PATH),
                 },
                 Field {
                     key: "records",
-                    value: rustos_log::FieldValue::Str(records),
+                    value: tairix_log::FieldValue::Str(records),
                 },
             ],
         );
@@ -618,11 +618,11 @@ fn audit_load(audit: &dyn Sink, records: Option<usize>, err: Option<UsersLoadErr
             &[
                 Field {
                     key: "path",
-                    value: rustos_log::FieldValue::Str(USERS_DB_PATH),
+                    value: tairix_log::FieldValue::Str(USERS_DB_PATH),
                 },
                 Field {
                     key: "cause",
-                    value: rustos_log::FieldValue::Str(err.cause()),
+                    value: tairix_log::FieldValue::Str(err.cause()),
                 },
             ],
         );

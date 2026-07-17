@@ -5,7 +5,7 @@
 //! [`RegisterWindow`] — the device's register block, mapped into the
 //! driver's address space by the kernel's MMIO-map facility
 //! (`kernel/sec::map_mmio`, reached through
-//! [`MmioMapper`](rustos_abi::MmioMapper)). Before Stage 4.D Item 3
+//! [`MmioMapper`](tairix_abi::MmioMapper)). Before Stage 4.D Item 3
 //! these shells carried a *bare identification tuple* (a PCI
 //! bus/device/function triple, or an MMIO window length) and the
 //! driver was expected to synthesise register accesses itself; that
@@ -22,13 +22,13 @@
 //! accessors on [`RegisterWindow`]; neither performs raw pointer
 //! arithmetic.
 
-use rustos_abi::{RegisterWindow, WindowError};
+use tairix_abi::{RegisterWindow, WindowError};
 
 /// PCI-bus backend adapter.
 ///
 /// Owns the [`RegisterWindow`] mapped over the virtio device's modern
 /// PCI capability register block (the BAR the bus driver resolved and
-/// handed to [`MmioMapper::map_window`](rustos_abi::MmioMapper::map_window)).
+/// handed to [`MmioMapper::map_window`](tairix_abi::MmioMapper::map_window)).
 pub struct PciBackend {
     window: RegisterWindow,
 }
@@ -77,7 +77,7 @@ impl PciBackend {
 ///
 /// Owns the [`RegisterWindow`] mapped over the virtio-MMIO transport
 /// slot the MMIO bus driver discovered in the device tree and handed
-/// to [`MmioMapper::map_window`](rustos_abi::MmioMapper::map_window).
+/// to [`MmioMapper::map_window`](tairix_abi::MmioMapper::map_window).
 pub struct MmioBackend {
     window: RegisterWindow,
 }

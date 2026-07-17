@@ -1,4 +1,4 @@
-//! RustOS kernel syscall dispatch (Stage 2.7 of `PLAN.md`).
+//! TAIRiX kernel syscall dispatch (Stage 2.7 of `PLAN.md`).
 //!
 //! This crate owns the *generated dispatch table* the kernel hands every
 //! syscall to. It is the **only** place the kernel performs the five
@@ -7,9 +7,9 @@
 //! 1. Identify the caller (the per-CPU current task; supplied via the
 //!    [`CallerContext`] handed in by the architecture entry stub).
 //! 2. Check the syscall's `required_capability` against the caller's
-//!    effective set (via [`rustos_kernel_sec::TaskCapabilities`]).
+//!    effective set (via [`tairix_kernel_sec::TaskCapabilities`]).
 //! 3. Validate every register-passed argument against the
-//!    [`rustos_abi::AbiType`] declared in the `abi-v1` table.
+//!    [`tairix_abi::AbiType`] declared in the `abi-v1` table.
 //! 4. Dispatch to the owning subsystem through the [`SyscallHandlers`]
 //!    trait. Concrete wiring lives in `kernel/core` so this crate stays
 //!    decoupled from `kernel/ipc`, `kernel/sched`, …
@@ -18,7 +18,7 @@
 //! # ABI cross-check
 //!
 //! [`SYSCALL_TABLE_HASH`] holds the SHA-256 fingerprint of
-//! [`rustos_abi::ENCODED_TABLE`]. [`verify_table_hash`] re-computes it
+//! [`tairix_abi::ENCODED_TABLE`]. [`verify_table_hash`] re-computes it
 //! and returns `Err(Errno::AbiVersionUnsupported)` if the two diverge —
 //! a build-time `cargo xtask abi-check` runs the same comparison, so the
 //! kernel never boots against a stale ABI mirror.

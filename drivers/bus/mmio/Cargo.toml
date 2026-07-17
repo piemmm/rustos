@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-bus-mmio"
-description = "RustOS memory-mapped-IO bus driver (DTB-driven enumeration for aarch64/riscv64 `virt`-style platforms)."
+name = "tairix-drv-bus-mmio"
+description = "TAIRiX memory-mapped-IO bus driver (DTB-driven enumeration for aarch64/riscv64 `virt`-style platforms)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 
 [lints]
 workspace = true

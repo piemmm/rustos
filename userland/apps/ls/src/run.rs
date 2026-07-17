@@ -1,11 +1,11 @@
 //! The `Run` entry-point binary of the `ls` tool — the program a shell
 //! spawns to list directory contents.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
@@ -14,7 +14,7 @@
 //! command against the production seams: `RtListing`, which stats paths and
 //! reads directories through the kernel-authorised `fs_*` syscalls (every
 //! per-inode and mount check stays kernel-side), the shared
-//! `rustos_help::BundleHelp`, which reads the tool's own bundle's `Help/`
+//! `tairix_help::BundleHelp`, which reads the tool's own bundle's `Help/`
 //! tree for the short-help switches, and
 //! `RtOutput`, which writes the listing to the inherited standard output and
 //! the hidden-entries advisory to fd 3, best-effort. The tool binds only to
@@ -37,12 +37,12 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::fs::{DirEntries, OpenFlags};
-    use rustos_abi::Errno;
-    use rustos_help::BundleHelp;
-    use rustos_ls::{parse, run, Entry, Listing, Metadata, Output, USAGE};
-    use rustos_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
-    use rustos_rt::File;
+    use tairix_abi::fs::{DirEntries, OpenFlags};
+    use tairix_abi::Errno;
+    use tairix_help::BundleHelp;
+    use tairix_ls::{parse, run, Entry, Listing, Metadata, Output, USAGE};
+    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_rt::File;
 
     /// The production [`Listing`]: the kernel-authorised `fs_*` view of the
     /// filesystem. It adds no authority — every path resolution, per-inode
@@ -73,7 +73,7 @@ mod program {
             // grow-to-`FS_IO_MAX` read, `lib/abi`'s `DirEntries`), so the
             // transfer policy and the record bookkeeping are never
             // re-derived here.
-            let stream = rustos_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let stream = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
             for item in DirEntries::new(&stream) {
                 let entry = item?;
@@ -113,7 +113,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a filesystem or output failure,
@@ -122,7 +122,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -133,7 +133,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(
@@ -151,13 +151,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-vt"
-description = "RustOS shared ANSI/VT/xterm escape + attribute vocabulary (CURSES.md Stage C1): one canonical definition of the control set, SGR attributes, colour models, and screen-control operations, with an emitter (vocabulary -> bytes) and a streaming parser (bytes -> typed events) over the same tables so they provably agree (AGENTS.md §2.2). Shared by the terminal emulator (consumer) and the curses renderer (emitter); no_std + alloc, fail-closed, never panics (§2.9)."
+name = "tairix-vt"
+description = "TAIRiX shared ANSI/VT/xterm escape + attribute vocabulary (CURSES.md Stage C1): one canonical definition of the control set, SGR attributes, colour models, and screen-control operations, with an emitter (vocabulary -> bytes) and a streaming parser (bytes -> typed events) over the same tables so they provably agree (AGENTS.md §2.2). Shared by the terminal emulator (consumer) and the curses renderer (emitter); no_std + alloc, fail-closed, never panics (§2.9)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,10 @@ workspace = true
 
 [dev-dependencies]
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget
-# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# §2.2). Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The §19.6 byte-stream property test (`tests/proptest_bytes.rs`) asserts the
 # streaming parser consumes any input without panic or out-of-bounds access.
 # Same pinned, already-audited version `lib/caps` uses; dev-only, so it never

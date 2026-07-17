@@ -20,20 +20,20 @@
 //! # Capabilities
 //!
 //! Mapping the surface requires
-//! [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP): the
+//! [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP): the
 //! framebuffer is device-visible memory and is reached only through the
 //! capability-gated [`MmioMapper`], never through a pointer the engine
 //! synthesises itself (no ambient authority).
 
-use rustos_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
-use rustos_abi::driver::mmio::{MmioMapError, WindowError};
-use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, RegisterWindow};
+use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
+use tairix_abi::driver::mmio::{MmioMapError, WindowError};
+use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, RegisterWindow};
 
 /// Discovered description of a linear framebuffer.
 ///
 /// The hosting process fills this in from the platform's framebuffer
 /// hand-off (the kernel-granted
-/// [`Framebuffer`](rustos_abi::hwtree::HwResourceKind::Framebuffer)
+/// [`Framebuffer`](tairix_abi::hwtree::HwResourceKind::Framebuffer)
 /// resource, UEFI GOP, the Pi mailbox, `ramfb`) and passes it to
 /// [`Framebuffer::open`]. The engine never invents these values; it only
 /// validates them and maps the region they describe.

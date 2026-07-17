@@ -13,11 +13,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
-use rustos_abi::{
+use tairix_abi::{
     decode_capability_ids, CapabilityId, Errno, ManifestHeader, MANIFEST_MAX_CAPABILITIES,
 };
-use rustos_caps::CapabilitySet;
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_caps::CapabilitySet;
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::error::{InitError, StartFailure};
 use crate::events;
@@ -364,11 +364,11 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "service",
-                    value: rustos_log::FieldValue::Str(name),
+                    value: tairix_log::FieldValue::Str(name),
                 },
                 Field {
                     key: "reason",
-                    value: rustos_log::FieldValue::Str(reason),
+                    value: tairix_log::FieldValue::Str(reason),
                 },
             ],
         );
@@ -383,15 +383,15 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "service",
-                    value: rustos_log::FieldValue::Str(name),
+                    value: tairix_log::FieldValue::Str(name),
                 },
                 Field {
                     key: "pid",
-                    value: rustos_log::FieldValue::Str(pid_buf.format(i128::from(pid.as_u64()))),
+                    value: tairix_log::FieldValue::Str(pid_buf.format(i128::from(pid.as_u64()))),
                 },
                 Field {
                     key: "granted_caps",
-                    value: rustos_log::FieldValue::Str(cap_buf.format(i128::from(granted.len()))),
+                    value: tairix_log::FieldValue::Str(cap_buf.format(i128::from(granted.len()))),
                 },
             ],
         );
@@ -406,17 +406,17 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "service",
-                    value: rustos_log::FieldValue::Str(name),
+                    value: tairix_log::FieldValue::Str(name),
                 },
                 Field {
                     key: "pid",
-                    value: rustos_log::FieldValue::Str(
+                    value: tairix_log::FieldValue::Str(
                         pid_buf.format(i128::from(child.pid.as_u64())),
                     ),
                 },
                 Field {
                     key: "exit_code",
-                    value: rustos_log::FieldValue::Str(
+                    value: tairix_log::FieldValue::Str(
                         code_buf.format(i128::from(child.exit_code)),
                     ),
                 },
@@ -433,13 +433,13 @@ impl<'a> Init<'a> {
             &[
                 Field {
                     key: "pid",
-                    value: rustos_log::FieldValue::Str(
+                    value: tairix_log::FieldValue::Str(
                         pid_buf.format(i128::from(child.pid.as_u64())),
                     ),
                 },
                 Field {
                     key: "exit_code",
-                    value: rustos_log::FieldValue::Str(
+                    value: tairix_log::FieldValue::Str(
                         code_buf.format(i128::from(child.exit_code)),
                     ),
                 },
@@ -458,7 +458,7 @@ impl<'a> Init<'a> {
             events::GRAPH_REJECTED,
             &[Field {
                 key: "reason",
-                value: rustos_log::FieldValue::Str(reason),
+                value: tairix_log::FieldValue::Str(reason),
             }],
         );
     }
@@ -526,12 +526,12 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilityId, Errno, ManifestHeader, ABI_VERSION_CURRENT, MANIFEST_MAGIC,
         SYSCALL_TABLE_HASH_LEN,
     };
-    use rustos_caps::CapabilitySet;
-    use rustos_log::{Event, EventId, Level, Sink};
+    use tairix_caps::CapabilitySet;
+    use tairix_log::{Event, EventId, Level, Sink};
 
     /// Build a syntactically valid manifest requesting `requested`.
     fn manifest(requested: &[CapabilityId]) -> Vec<u8> {

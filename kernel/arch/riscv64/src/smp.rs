@@ -35,7 +35,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::CpuId;
+use tairix_arch_api::CpuId;
 
 /// Base-2 logarithm of the per-secondary-hart kernel stack size, so the
 /// `smp.s` trampoline can index a hart's slice with a left shift rather
@@ -354,7 +354,7 @@ fn secondary_trampoline_addr() -> usize {
 /// instructions, fail closed).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[no_mangle]
-extern "C" fn rustos_arch_riscv64_secondary_main(hartid: CpuId) -> ! {
+extern "C" fn tairix_arch_riscv64_secondary_main(hartid: CpuId) -> ! {
     let raw = SECONDARY_ENTRY_FN.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: every store into the slot round-trips a valid

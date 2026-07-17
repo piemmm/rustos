@@ -5,7 +5,7 @@
 //! implementation at build time via a `scheduler-*` Cargo feature and
 //! re-exports it as [`Scheduler`]; the rest of `kernel/core` — and every
 //! other kernel crate — works in terms of this alias and the
-//! [`rustos_kernel_sched_api`] contract, never a concrete policy crate.
+//! [`tairix_kernel_sched_api`] contract, never a concrete policy crate.
 //!
 //! Adding a policy means adding a sibling `kernel/sched/<impl>` crate and
 //! a `scheduler-<impl>` feature here; the `compile_error!` guards below
@@ -13,7 +13,7 @@
 
 // Re-export the policy-neutral vocabulary so the rest of `kernel/core`
 // names one canonical definition.
-pub(crate) use rustos_kernel_sched_api::{CpuId, SchedError, SchedulerArch, SchedulerConfig};
+pub(crate) use tairix_kernel_sched_api::{CpuId, SchedError, SchedulerArch, SchedulerConfig};
 
 /// The concrete scheduler policy selected for this image.
 ///
@@ -23,17 +23,17 @@ pub(crate) use rustos_kernel_sched_api::{CpuId, SchedError, SchedulerArch, Sched
 /// tickless carve-out). The tickless EEVDF (`kernel/sched/eevdf`) and MLFQ
 /// (`kernel/sched/mlfq`) siblings are selectable with `--no-default-features
 /// --features scheduler-eevdf` (or `scheduler-mlfq`). All implement the
-/// same [`rustos_kernel_sched_api::SchedulerPolicy`] contract, so the rest
+/// same [`tairix_kernel_sched_api::SchedulerPolicy`] contract, so the rest
 /// of `kernel/core` is agnostic to which one this alias resolves to.
 #[cfg(feature = "scheduler-cfq")]
-pub(crate) use rustos_kernel_sched_cfq::Scheduler;
+pub(crate) use tairix_kernel_sched_cfq::Scheduler;
 #[cfg(all(feature = "scheduler-eevdf", not(feature = "scheduler-cfq")))]
-pub(crate) use rustos_kernel_sched_eevdf::Scheduler;
+pub(crate) use tairix_kernel_sched_eevdf::Scheduler;
 #[cfg(all(
     feature = "scheduler-mlfq",
     not(any(feature = "scheduler-cfq", feature = "scheduler-eevdf"))
 ))]
-pub(crate) use rustos_kernel_sched_mlfq::Scheduler;
+pub(crate) use tairix_kernel_sched_mlfq::Scheduler;
 
 // Exactly one `scheduler-*` feature must be active. The two guards below
 // reject the "none selected" and "more than one selected" configurations

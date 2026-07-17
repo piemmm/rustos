@@ -1,4 +1,4 @@
-# rustos-sysconfig
+# tairix-sysconfig
 
 Stability tier: **experimental**.
 

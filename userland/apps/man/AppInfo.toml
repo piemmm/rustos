@@ -7,7 +7,7 @@
 # re-spawns this same binary as the parser-sandbox render worker
 # (docs/src/security/sandbox.md): the untrusted help document is parsed
 # there, never in this process.
-id = "os.rustos.man"
+id = "os.tairix.man"
 name = "man"
 version = "0.1.0"
 kind = "command"

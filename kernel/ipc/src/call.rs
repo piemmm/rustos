@@ -44,12 +44,12 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use rustos_abi::{Errno, Origin};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_log::{Field, Sink};
-use rustos_util::fmt::{format_hex_u64, format_usize};
+use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
+use tairix_abi::{Errno, Origin};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_log::{Field, Sink};
+use tairix_util::fmt::{format_hex_u64, format_usize};
 
 use crate::audit::{record, AuditEvent};
 use crate::loom_compat::{AtomicU32, AtomicU64, Ordering};
@@ -195,7 +195,7 @@ impl Inner {
 /// [`recv_call`](Self::recv_call) and answers with [`reply`](Self::reply);
 /// callers claim answers with [`take_reply`](Self::take_reply).
 ///
-/// `CallEndpoint` is [`Sync`]: the [`SpinLock`](rustos_sync::SpinLock) makes
+/// `CallEndpoint` is [`Sync`]: the [`SpinLock`](tairix_sync::SpinLock) makes
 /// interior access exclusive and the state word is atomic, so it may be
 /// shared by `&` across CPUs exactly like a [`Port`](crate::port::Port).
 pub struct CallEndpoint {
@@ -218,7 +218,7 @@ pub struct CallEndpoint {
     server_task: AtomicU64,
     /// Liveness read on the post fast path before taking the lock.
     state: AtomicU32,
-    inner: rustos_sync::SpinLock<Inner>,
+    inner: tairix_sync::SpinLock<Inner>,
 }
 
 impl CallEndpoint {
@@ -227,10 +227,10 @@ impl CallEndpoint {
     /// The authority model is identical to [`Port::create`](crate::port::Port::create):
     /// `creator` must already hold every capability in `required_recv_caps`
     /// (no ambient authority), and must additionally hold
-    /// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
+    /// [`tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
     /// `required_send_caps` is non-empty (a restricted-sender endpoint is by
     /// definition privileged) **or** when `id` is a reserved well-known
-    /// service rendezvous ([`rustos_abi::ipc::is_reserved_endpoint`]): even
+    /// service rendezvous ([`tairix_abi::ipc::is_reserved_endpoint`]): even
     /// an open bind on a reserved id would let an unprivileged squatter
     /// claim the rendezvous and receive traffic meant for the service (an
     /// elevation request carries an offered password), so it fails closed.
@@ -272,7 +272,7 @@ impl CallEndpoint {
     /// a fact the *syscall handler* kernel-attested instead of
     /// `CAP_IPC_BIND_PRIVILEGED` — today exactly one such fact exists: the
     /// creator holds a live seat lease, which entitles it to the
-    /// seat-scoped window rendezvous (`rustos_abi::window_ipc`,
+    /// seat-scoped window rendezvous (`tairix_abi::window_ipc`,
     /// `plans/APPWIN.md` AW3). The attestation must come from kernel
     /// state the handler resolved itself (the seat registry), never from
     /// anything the caller supplied.
@@ -327,7 +327,7 @@ impl CallEndpoint {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "endpoint",
-            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
 
         if max_request > IPC_MESSAGE_MAX_PAYLOAD_LEN
@@ -347,9 +347,9 @@ impl CallEndpoint {
         // reserved id is privileged unless the handler kernel-attested the
         // alternative bind authority (the live seat lease).
         let reserved_unauthorized =
-            rustos_abi::ipc::is_reserved_endpoint(id.0) && !reserved_bind_attested;
+            tairix_abi::ipc::is_reserved_endpoint(id.0) && !reserved_bind_attested;
         if (!required_send_caps.is_empty() || reserved_unauthorized)
-            && !creator.has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
+            && !creator.has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
         {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
@@ -365,7 +365,7 @@ impl CallEndpoint {
                     id_field,
                     Field {
                         key: "bind",
-                        value: rustos_log::FieldValue::Str("seat-lease"),
+                        value: tairix_log::FieldValue::Str("seat-lease"),
                     },
                 ],
             );
@@ -383,7 +383,7 @@ impl CallEndpoint {
             owner: creator.task().0,
             server_task: AtomicU64::new(0),
             state: AtomicU32::new(state::OPEN),
-            inner: rustos_sync::SpinLock::new(Inner {
+            inner: tairix_sync::SpinLock::new(Inner {
                 next_ticket: 0,
                 pending: VecDeque::new(),
                 in_service: BTreeMap::new(),
@@ -508,11 +508,11 @@ impl CallEndpoint {
             &[
                 Field {
                     key: "endpoint",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
                 },
                 Field {
                     key: "cancelled",
-                    value: rustos_log::FieldValue::Str(format_usize(cancelled, &mut n_buf)),
+                    value: tairix_log::FieldValue::Str(format_usize(cancelled, &mut n_buf)),
                 },
             ],
         );
@@ -549,15 +549,15 @@ impl CallEndpoint {
                 &[
                     Field {
                         key: "endpoint",
-                        value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
                     },
                     Field {
                         key: "sender",
-                        value: rustos_log::FieldValue::Str(format_hex_u64(sender, &mut sender_buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(sender, &mut sender_buf)),
                     },
                     Field {
                         key: "cancelled",
-                        value: rustos_log::FieldValue::Str(format_usize(cancelled, &mut n_buf)),
+                        value: tairix_log::FieldValue::Str(format_usize(cancelled, &mut n_buf)),
                     },
                 ],
             );
@@ -608,15 +608,15 @@ impl CallEndpoint {
         let mut len_buf = [0u8; 12];
         let id_field = Field {
             key: "endpoint",
-            value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
         };
         let sender_field = Field {
             key: "sender",
-            value: rustos_log::FieldValue::Str(format_hex_u64(caller.task().0, &mut sender_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(caller.task().0, &mut sender_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: rustos_log::FieldValue::Str(format_usize(request.len(), &mut len_buf)),
+            value: tairix_log::FieldValue::Str(format_usize(request.len(), &mut len_buf)),
         };
 
         // 1. Fast path: reject posts to a closed endpoint without locking.
@@ -774,15 +774,15 @@ impl CallEndpoint {
         let mut len_buf = [0u8; 12];
         let id_field = Field {
             key: "endpoint",
-            value: rustos_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
         };
         let ticket_field = Field {
             key: "ticket",
-            value: rustos_log::FieldValue::Str(format_hex_u64(ticket.0, &mut ticket_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(ticket.0, &mut ticket_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: rustos_log::FieldValue::Str(format_usize(reply.len(), &mut len_buf)),
+            value: tairix_log::FieldValue::Str(format_usize(reply.len(), &mut len_buf)),
         };
 
         let effective_max = u64::from(self.max_reply).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN));
@@ -864,9 +864,9 @@ impl CallEndpoint {
 mod tests {
     use super::*;
     use crate::audit::RecordingSink;
-    use rustos_abi::CapabilityId;
-    use rustos_kernel_sec::captable::TaskId;
-    use rustos_kernel_sec::identity::UserId;
+    use tairix_abi::CapabilityId;
+    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::identity::UserId;
 
     /// The scheduler id the tests post under — arbitrary but non-zero, so
     /// `reply` hands it back verbatim.
@@ -986,11 +986,11 @@ mod tests {
         let sink = RecordingSink::new();
         let squatter = task_with(1, &[]);
         for id in [
-            rustos_abi::sysinfo::SYSINFO_ENDPOINT,
-            rustos_abi::log_ingress::LOG_INGRESS_ENDPOINT,
-            rustos_abi::elevate::ELEVATE_ENDPOINT_BASE,
-            rustos_abi::elevate::ELEVATE_ENDPOINT_BASE
-                + u64::from(rustos_abi::process::CONSOLE_INDEX_MAX),
+            tairix_abi::sysinfo::SYSINFO_ENDPOINT,
+            tairix_abi::log_ingress::LOG_INGRESS_ENDPOINT,
+            tairix_abi::elevate::ELEVATE_ENDPOINT_BASE,
+            tairix_abi::elevate::ELEVATE_ENDPOINT_BASE
+                + u64::from(tairix_abi::process::CONSOLE_INDEX_MAX),
         ] {
             let err = CallEndpoint::create(
                 EndpointId(id),
@@ -1018,7 +1018,7 @@ mod tests {
         let sink = RecordingSink::new();
         let service = task_with(1, &[CapabilityId::IPC_BIND_PRIVILEGED]);
         let ep = CallEndpoint::create(
-            EndpointId(rustos_abi::sysinfo::SYSINFO_ENDPOINT),
+            EndpointId(tairix_abi::sysinfo::SYSINFO_ENDPOINT),
             &service,
             CapabilitySet::empty(),
             CapabilitySet::empty(),
@@ -1030,7 +1030,7 @@ mod tests {
             &sink,
         )
         .expect("privileged service binds its reserved rendezvous");
-        assert_eq!(ep.id(), EndpointId(rustos_abi::sysinfo::SYSINFO_ENDPOINT));
+        assert_eq!(ep.id(), EndpointId(tairix_abi::sysinfo::SYSINFO_ENDPOINT));
         assert!(sink.ids().contains(&AuditEvent::CallEndpointCreated.id().0));
     }
 
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn peer_origin_reflects_the_in_service_caller_and_fails_closed() {
-        use rustos_abi::{ProcId, TrustDomain};
+        use tairix_abi::{ProcId, TrustDomain};
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         // A caller with a minted process instance and a real capability.

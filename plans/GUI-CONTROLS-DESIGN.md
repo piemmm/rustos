@@ -1,9 +1,9 @@
 # GUI Controls Design Specification: Reactive Alloy
 
 Status: Design specification  
-Audience: RustOS desktop, window manager, taskbar, application, and shared GUI crate contributors  
-Primary product context: RustOS graphical session  
-Scope: General GUI controls across RustOS, including but not limited to Switchboard  
+Audience: TAIRiX desktop, window manager, taskbar, application, and shared GUI crate contributors  
+Primary product context: TAIRiX graphical session  
+Scope: General GUI controls across TAIRiX, including but not limited to Switchboard  
 Design language name: Reactive Alloy  
 Tagline: Stable surfaces. Live edges. Clear intent. Confident actions.
 
@@ -11,8 +11,8 @@ Tagline: Stable surfaces. Live edges. Clear intent. Confident actions.
 
 ## Assumptions
 
-- This document specifies RustOS graphical controls, not kernel behavior and not a new system-call surface.
-- The implementation belongs in the RustOS graphical userland and shared Rust crates already described by the charter: `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/window`, `lib/theme`, `lib/geometry`, `lib/raster`, `lib/icon`, `lib/input`, and application crates that render their own GUI controls.
+- This document specifies TAIRiX graphical controls, not kernel behavior and not a new system-call surface.
+- The implementation belongs in the TAIRiX graphical userland and shared Rust crates already described by the charter: `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/window`, `lib/theme`, `lib/geometry`, `lib/raster`, `lib/icon`, `lib/input`, and application crates that render their own GUI controls.
 - Theme values, metrics, motion timings, and semantic colors are shared data. They are not duplicated per application.
 - Controls render state and suggest actions, but authority remains enforced by the existing capability-checked syscall and IPC paths.
 - Exact public Rust item names are established during implementation review. The Rust identifiers used here are specification vocabulary and must not be treated as committed API names until they are added to the tree with tests and documentation.
@@ -23,7 +23,7 @@ Tagline: Stable surfaces. Live edges. Clear intent. Confident actions.
 
 ## 1. Purpose
 
-Reactive Alloy is the RustOS GUI control design language for systems where the state around a control changes continuously: tasks appear and exit, background jobs progress, resource pressure rises, devices arrive, permissions differ, panels resize, and recovery actions become available.
+Reactive Alloy is the TAIRiX GUI control design language for systems where the state around a control changes continuously: tasks appear and exit, background jobs progress, resource pressure rises, devices arrive, permissions differ, panels resize, and recovery actions become available.
 
 The goal is to make controls feel alive without making them feel unstable.
 
@@ -57,13 +57,13 @@ Those signals must remain small, typed, and intentional. A control becomes moder
 
 ---
 
-## 3. RustOS Charter Alignment
+## 3. TAIRiX Charter Alignment
 
-Reactive Alloy must preserve the existing RustOS architecture.
+Reactive Alloy must preserve the existing TAIRiX architecture.
 
 ### Rust-only implementation
 
-All implementation is Rust. UI control logic is expressed as typed Rust state, Rust enums, Rust structs, Rust traits where justified, and Rust drawing code using RustOS crates. No design requirement in this document requires non-Rust source.
+All implementation is Rust. UI control logic is expressed as typed Rust state, Rust enums, Rust structs, Rust traits where justified, and Rust drawing code using TAIRiX crates. No design requirement in this document requires non-Rust source.
 
 ### Optional desktop
 
@@ -71,7 +71,7 @@ The graphical desktop remains optional. Controls live in userland GUI code and s
 
 ### One drawing path
 
-Controls are drawn through the existing compositor and raster path. Rounded corners, alpha blending, vector glyph rasterisation, icon drawing, and cached assets must use the shared RustOS drawing stack rather than per-control copies.
+Controls are drawn through the existing compositor and raster path. Rounded corners, alpha blending, vector glyph rasterisation, icon drawing, and cached assets must use the shared TAIRiX drawing stack rather than per-control copies.
 
 ### Theme data, not code forks
 
@@ -79,7 +79,7 @@ Dark, light, high-contrast, reduced-motion, and density variants are theme data.
 
 ### DPI and scale
 
-All lengths are authored in logical pixels and converted through `rustos_geometry::Scale`. A control must never carry a private scale conversion or assume a fixed physical pixel density.
+All lengths are authored in logical pixels and converted through `tairix_geometry::Scale`. A control must never carry a private scale conversion or assume a fixed physical pixel density.
 
 ### No ambient authority
 
@@ -87,7 +87,7 @@ A button can render `ActionDenied`, `ActionUnavailable`, or `NeedsCapability`, b
 
 ### No pseudo-files for live system state
 
-Controls that display tasks, resources, device state, or limits consume typed RustOS state from the appropriate model or System Information API client. They must not scrape a fabricated process or device tree.
+Controls that display tasks, resources, device state, or limits consume typed TAIRiX state from the appropriate model or System Information API client. They must not scrape a fabricated process or device tree.
 
 ---
 
@@ -95,7 +95,7 @@ Controls that display tasks, resources, device state, or limits consume typed Ru
 
 Reactive Alloy should be implemented as shared control behavior and theme data, not duplicated visual recipes.
 
-| Concern | RustOS owner |
+| Concern | TAIRiX owner |
 |---|---|
 | Active theme, palette, metrics, motion timings, cursor selection | `lib/theme` and `userland/gui/session` |
 | Logical geometry, rectangles, points, scaling | `lib/geometry` |
@@ -275,7 +275,7 @@ A theme may place the window-control group on the leading or trailing side and m
 
 ### Theme variants
 
-RustOS must ship dark and light variants. Additional variants are data over the same typed model. A variant may alter color, radius, density, and motion, but must not change the meaning of state.
+TAIRiX must ship dark and light variants. Additional variants are data over the same typed model. A variant may alter color, radius, density, and motion, but must not change the meaning of state.
 
 For example, `PressureKind::Memory` remains the same state in every theme. One theme may render it purple, another may render it with a patterned rail. The semantic value stays typed.
 
@@ -967,11 +967,11 @@ Close is cooperative and application-directed. Minimize, put-to-back, activation
 
 ### Application bundles
 
-Applications may ship resources in their own bundle. Control visuals that are part of the shared RustOS design language belong in the OS-provided shared crates or curated assets, not copied into every application bundle.
+Applications may ship resources in their own bundle. Control visuals that are part of the shared TAIRiX design language belong in the OS-provided shared crates or curated assets, not copied into every application bundle.
 
 ### System state models
 
-Controls that render live CPU, memory, disk, network, task, device, or limit information consume typed RustOS data. A control should receive a view model such as `TaskSummary`, `JobProgress`, `PressureSample`, `AuthorityStatus`, or `RecoveryRecommendation`, rather than opening devices or probing system state itself.
+Controls that render live CPU, memory, disk, network, task, device, or limit information consume typed TAIRiX data. A control should receive a view model such as `TaskSummary`, `JobProgress`, `PressureSample`, `AuthorityStatus`, or `RecoveryRecommendation`, rather than opening devices or probing system state itself.
 
 ### Actions
 
@@ -981,12 +981,12 @@ Controls emit typed userland actions. The receiving service performs the operati
 
 ## 17. Switchboard as a Reference Composition
 
-Switchboard should use the same general controls as every other RustOS surface.
+Switchboard should use the same general controls as every other TAIRiX surface.
 
 ### Window frame and viewport
 
 - The top-level Switchboard window uses the standard `WindowFrame` and `TitleBar`; it does not ship custom application-painted chrome.
-- Close, minimize, put-to-back, and size toggle are the standard window-manager controls with the same glyph, focus, tooltip, and keyboard semantics as every other RustOS window.
+- Close, minimize, put-to-back, and size toggle are the standard window-manager controls with the same glyph, focus, tooltip, and keyboard semantics as every other TAIRiX window.
 - When content exceeds the client viewport, the standard vertical or horizontal scrollbar appears according to the root viewport model.
 - A resizable window exposes the standard ResizeGrabber at the frame corner or scrollbar junction.
 - Minimize keeps background jobs active and visible through the taskbar item; close remains a cooperative application request.
@@ -1157,5 +1157,5 @@ Reactive Alloy succeeds when a user can answer these questions without reading a
 - Where am I in vertically or horizontally scrolled content, and how much remains?
 - Will the size toggle return me to the window's previous usable rectangle?
 
-The design is allowed to be rich. It is not allowed to be noisy. RustOS controls should feel grounded, typed, secure, and alive at the edges.
+The design is allowed to be rich. It is not allowed to be noisy. TAIRiX controls should feel grounded, typed, secure, and alive at the edges.
 

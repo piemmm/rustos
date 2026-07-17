@@ -1,4 +1,4 @@
-//! RustOS PID 1 — the service manager (`init`), Stage 6.
+//! TAIRiX PID 1 — the service manager (`init`), Stage 6.
 //!
 //! `init` is the first user-space process the kernel starts. It owns the
 //! lifecycle of every long-running system service (
@@ -41,7 +41,7 @@
 //!
 //! # Module map
 //!
-//! * [`events`] — stable [`rustos_log::EventId`] constants (`9000` range).
+//! * [`events`] — stable [`tairix_log::EventId`] constants (`9000` range).
 //! * [`error`] — [`InitError`] (graph-level, fail-closed) and the
 //!   per-service [`StartFailure`] recorded in a [`StartReport`].
 //! * [`service`] — [`ServiceSpec`], the [`Pid`] newtype, and the
@@ -51,8 +51,8 @@
 //!
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
 //! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
-//! program linking only the pure-Rust userland runtime `rustos-rt`
-//! (RustOS code never uses the C ABI), **not** this
+//! program linking only the pure-Rust userland runtime `tairix-rt`
+//! (TAIRiX code never uses the C ABI), **not** this
 //! orchestrator library, so its tiny startup-config parser lives alongside it
 //! (`src/startup.rs`) rather than here — pulling this crate's `alloc` + crypto
 //! dependency chain into a banner-printing program would be the bloat
@@ -61,7 +61,7 @@
 //! # Layering
 //!
 //! The crate is `no_std` (with `alloc`) and depends only on
-//! the audited `lib/*` crates `rustos-abi`, `rustos-caps`, and `rustos-log`,
+//! the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
 //! so a userland service never links a kernel or driver crate.
 
 #![no_std]

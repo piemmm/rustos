@@ -14,14 +14,14 @@ if absent and overwritten unless `-a` appends. A file that cannot be
 opened or written is reported and the run continues with the remaining
 outputs, per the selected `--output-error` mode.
 
-RustOS has no `SIGPIPE`: a consumer going away surfaces as a write
+TAIRiX has no `SIGPIPE`: a consumer going away surfaces as a write
 error on standard output — the one output of this command that can be a
 pipe — so the "pipe" of the GNU modes means exactly that output here.
 Without `--output-error`, a failed standard output stops the run (the
 equivalent of the GNU tool dying of `SIGPIPE`, with the reason stated on
 standard error); with a `-nopipe` mode it is tolerated silently.
 
-GNU `tee -i` (ignore interrupts) is not available: RustOS has no
+GNU `tee -i` (ignore interrupts) is not available: TAIRiX has no
 per-process signal disposition to set. The switch arrives with that
 kernel work rather than being accepted and ignored.
 

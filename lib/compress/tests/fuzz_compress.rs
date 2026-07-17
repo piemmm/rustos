@@ -2,7 +2,7 @@
 //! (`docs/src/filesystem/arxfs-spec.md` §10 — the
 //! required "compression decode" fuzz target).
 //!
-//! [`rustos_compress::decompress`] parses a byte stream that, on a real
+//! [`tairix_compress::decompress`] parses a byte stream that, on a real
 //! system, may have been written or corrupted by anything: it is the
 //! untrusted-input parser `ARXFS` runs over every compressed data record. Per
 //! that decode path is driven by a fuzz harness whose invariants are:
@@ -13,13 +13,13 @@
 //!   `x` (a malformed frame can only ever come from corruption, never from the
 //!   encoder).
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random inputs and corrupts real frames. A plain `cargo
 //! test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed;
 //! `cargo xtask fuzz --soak` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
-use rustos_compress::{compress, decompress, max_compressed_len};
+use tairix_compress::{compress, decompress, max_compressed_len};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -59,13 +59,13 @@ fn round_trips(input: &[u8]) {
 
 #[test]
 fn decompress_never_panics_and_codec_round_trips() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
-    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "decompress_never_panics_and_codec_round_trips",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -112,7 +112,7 @@ fn decompress_never_panics_and_codec_round_trips() {
         decode_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

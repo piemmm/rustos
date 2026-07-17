@@ -1,8 +1,8 @@
-# `rustos-drv-fs-ext4` — ext4 filesystem driver (read/write)
+# `tairix-drv-fs-ext4` — ext4 filesystem driver (read/write)
 
 Stage 5 deliverable. Attaches an ext2/ext3/ext4 volume behind any
-`rustos_abi::driver::block::Block` device and exposes it through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead` and
+`tairix_abi::driver::block::Block` device and exposes it through the
+versioned `tairix_abi::driver::filesystem::FilesystemRead` and
 `FilesystemWrite` traits, and surfaces each inode's §5.3 owner/mode
 through the versioned `FilesystemSecurity` trait.
 
@@ -195,7 +195,7 @@ bits still apply — §5.4, fail closed).
 
 ## Test surface
 
-`cargo test -p rustos-drv-fs-ext4` builds a specification-shaped,
+`cargo test -p tairix-drv-fs-ext4` builds a specification-shaped,
 allocation-free in-memory ext4 image (block size 1024, one block group,
 128-byte inodes, `filetype` on) and exercises:
 

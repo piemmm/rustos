@@ -1,10 +1,10 @@
 # System Information API (`sysinfo`, `sysinfo-v1`)
 
-RustOS has no `/proc` and no `/sys` (`AGENTS.md` §16.1). Every piece of
+TAIRiX has no `/proc` and no `/sys` (`AGENTS.md` §16.1). Every piece of
 live system information that would have lived under those trees is exposed
 through one versioned, capability-checked API: the **System Information
 API**, whose wire types live in `lib/abi/src/sysinfo.rs`
-(`rustos_abi::sysinfo`). The user-space service that answers the queries is
+(`tairix_abi::sysinfo`). The user-space service that answers the queries is
 `/System/Services/sysinfod.app/Run` (`userland/system/sysinfod`); the command-line
 `sysinfo` tool and the `ps`/`mount` utilities are clients of this API and
 never scrape a virtual filesystem.
@@ -75,7 +75,7 @@ carries one CPU's cumulative busy nanoseconds (accounted on the
 scheduler's dispatch bracket) and the idle remainder of the same
 monotonic sample — the `top`-class busy/idle utilisation figure, which
 exposes strictly less than the load-average census. A consumer derives
-a utilisation percentage from the deltas of two samples; RustOS
+a utilisation percentage from the deltas of two samples; TAIRiX
 accounts busy and idle time only, never a fabricated
 user/system/nice/iowait split. The list is paged by a
 `CpuTimeListRequest` exactly like the mount list. `SEAT_LIST` is gated
@@ -153,7 +153,7 @@ a defined code. The reply frame is untrusted server output, so its decoder
 [`SYSINFO_ENDPOINT`]; any process may post a request, and per-query scope is
 enforced by the service against the caller's kernel-attested origin, not by
 the transport. The id itself is a **reserved rendezvous**
-(`rustos_abi::ipc::is_reserved_endpoint`): binding it requires
+(`tairix_abi::ipc::is_reserved_endpoint`): binding it requires
 `CAP_IPC_BIND_PRIVILEGED` (carried by `sysinfod`'s manifest), so an
 unprivileged squatter can never claim the endpoint and serve forged system
 state. The endpoint's message sizes are one shared contract:
@@ -225,46 +225,46 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 `to_le_bytes`/`from_bytes` pair; every `from_bytes` is exercised by the
 `lib/abi` fuzz harness (`AGENTS.md` §19.6).
 
-[`SYSINFO_VERSION_V1`]: ../../rustos_abi/sysinfo/constant.SYSINFO_VERSION_V1.html
-[`SysinfoQueryId`]: ../../rustos_abi/sysinfo/struct.SysinfoQueryId.html
-[`SysinfoQuerySpec`]: ../../rustos_abi/sysinfo/struct.SysinfoQuerySpec.html
-[`ENCODED_QUERY_TABLE`]: ../../rustos_abi/sysinfo/constant.ENCODED_QUERY_TABLE.html
-[`encoded_query_table`]: ../../rustos_abi/sysinfo/fn.encoded_query_table.html
-[`SysinfoRequestHeader`]: ../../rustos_abi/sysinfo/struct.SysinfoRequestHeader.html
-[`ProcessListRequest`]: ../../rustos_abi/sysinfo/struct.ProcessListRequest.html
-[`ProcessRecord`]: ../../rustos_abi/sysinfo/struct.ProcessRecord.html
-[`ProcessState`]: ../../rustos_abi/sysinfo/enum.ProcessState.html
-[`PROCESS_NAME_MAX`]: ../../rustos_abi/sysinfo/constant.PROCESS_NAME_MAX.html
-[`PROCESS_CPU_NONE`]: ../../rustos_abi/sysinfo/constant.PROCESS_CPU_NONE.html
-[`ProcId`]: ../../rustos_abi/origin/struct.ProcId.html
-[`KernelMemoryStats`]: ../../rustos_abi/sysinfo/struct.KernelMemoryStats.html
-[`Uptime`]: ../../rustos_abi/sysinfo/struct.Uptime.html
-[`Time64`]: ../../rustos_abi/time/struct.Time64.html
-[`Duration64`]: ../../rustos_abi/time/struct.Duration64.html
-[`SystemIdentity`]: ../../rustos_abi/sysinfo/struct.SystemIdentity.html
-[`MACHINE_ID_LEN`]: ../../rustos_abi/sysinfo/constant.MACHINE_ID_LEN.html
-[`HOSTNAME_MAX`]: ../../rustos_abi/sysinfo/constant.HOSTNAME_MAX.html
-[`MountListRequest`]: ../../rustos_abi/sysinfo/struct.MountListRequest.html
-[`MountRecord`]: ../../rustos_abi/sysinfo/struct.MountRecord.html
-[`MOUNT_SOURCE_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_SOURCE_MAX.html
-[`MOUNT_TARGET_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_TARGET_MAX.html
-[`MOUNT_FSTYPE_MAX`]: ../../rustos_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html
-[`MountFlags`]: ../../rustos_abi/driver/filesystem/struct.MountFlags.html
-[`ResourceLimitRecord`]: ../../rustos_abi/sysinfo/struct.ResourceLimitRecord.html
-[`RESOURCE_LIMITS_REPORT_LEN`]: ../../rustos_abi/sysinfo/constant.RESOURCE_LIMITS_REPORT_LEN.html
-[`LimitKind`]: ../../rustos_abi/rlimit/enum.LimitKind.html
-[`ResourceLimit`]: ../../rustos_abi/rlimit/struct.ResourceLimit.html
-[`CapabilityId`]: ../../rustos_abi/capability/struct.CapabilityId.html
-[`Errno::BadMagic`]: ../../rustos_abi/error/enum.Errno.html
-[`Errno::AbiVersionUnsupported`]: ../../rustos_abi/error/enum.Errno.html
-[`Errno::OutOfRange`]: ../../rustos_abi/error/enum.Errno.html
-[`Errno::LengthOutOfRange`]: ../../rustos_abi/error/enum.Errno.html
-[`Errno`]: ../../rustos_abi/error/enum.Errno.html
-[`SYSINFO_ENDPOINT`]: ../../rustos_abi/sysinfo/constant.SYSINFO_ENDPOINT.html
-[`SYSINFO_MAX_REQUEST`]: ../../rustos_abi/sysinfo/constant.SYSINFO_MAX_REQUEST.html
-[`SYSINFO_MAX_REPLY`]: ../../rustos_abi/sysinfo/constant.SYSINFO_MAX_REPLY.html
-[`SYSINFO_REPLY_STATUS_LEN`]: ../../rustos_abi/sysinfo/constant.SYSINFO_REPLY_STATUS_LEN.html
-[`encode_reply_ok`]: ../../rustos_abi/sysinfo/fn.encode_reply_ok.html
-[`encode_reply_err`]: ../../rustos_abi/sysinfo/fn.encode_reply_err.html
-[`decode_reply`]: ../../rustos_abi/sysinfo/fn.decode_reply.html
-[`IntrospectDomain`]: ../../rustos_abi/sysinfo/enum.IntrospectDomain.html
+[`SYSINFO_VERSION_V1`]: ../../tairix_abi/sysinfo/constant.SYSINFO_VERSION_V1.html
+[`SysinfoQueryId`]: ../../tairix_abi/sysinfo/struct.SysinfoQueryId.html
+[`SysinfoQuerySpec`]: ../../tairix_abi/sysinfo/struct.SysinfoQuerySpec.html
+[`ENCODED_QUERY_TABLE`]: ../../tairix_abi/sysinfo/constant.ENCODED_QUERY_TABLE.html
+[`encoded_query_table`]: ../../tairix_abi/sysinfo/fn.encoded_query_table.html
+[`SysinfoRequestHeader`]: ../../tairix_abi/sysinfo/struct.SysinfoRequestHeader.html
+[`ProcessListRequest`]: ../../tairix_abi/sysinfo/struct.ProcessListRequest.html
+[`ProcessRecord`]: ../../tairix_abi/sysinfo/struct.ProcessRecord.html
+[`ProcessState`]: ../../tairix_abi/sysinfo/enum.ProcessState.html
+[`PROCESS_NAME_MAX`]: ../../tairix_abi/sysinfo/constant.PROCESS_NAME_MAX.html
+[`PROCESS_CPU_NONE`]: ../../tairix_abi/sysinfo/constant.PROCESS_CPU_NONE.html
+[`ProcId`]: ../../tairix_abi/origin/struct.ProcId.html
+[`KernelMemoryStats`]: ../../tairix_abi/sysinfo/struct.KernelMemoryStats.html
+[`Uptime`]: ../../tairix_abi/sysinfo/struct.Uptime.html
+[`Time64`]: ../../tairix_abi/time/struct.Time64.html
+[`Duration64`]: ../../tairix_abi/time/struct.Duration64.html
+[`SystemIdentity`]: ../../tairix_abi/sysinfo/struct.SystemIdentity.html
+[`MACHINE_ID_LEN`]: ../../tairix_abi/sysinfo/constant.MACHINE_ID_LEN.html
+[`HOSTNAME_MAX`]: ../../tairix_abi/sysinfo/constant.HOSTNAME_MAX.html
+[`MountListRequest`]: ../../tairix_abi/sysinfo/struct.MountListRequest.html
+[`MountRecord`]: ../../tairix_abi/sysinfo/struct.MountRecord.html
+[`MOUNT_SOURCE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_SOURCE_MAX.html
+[`MOUNT_TARGET_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_TARGET_MAX.html
+[`MOUNT_FSTYPE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html
+[`MountFlags`]: ../../tairix_abi/driver/filesystem/struct.MountFlags.html
+[`ResourceLimitRecord`]: ../../tairix_abi/sysinfo/struct.ResourceLimitRecord.html
+[`RESOURCE_LIMITS_REPORT_LEN`]: ../../tairix_abi/sysinfo/constant.RESOURCE_LIMITS_REPORT_LEN.html
+[`LimitKind`]: ../../tairix_abi/rlimit/enum.LimitKind.html
+[`ResourceLimit`]: ../../tairix_abi/rlimit/struct.ResourceLimit.html
+[`CapabilityId`]: ../../tairix_abi/capability/struct.CapabilityId.html
+[`Errno::BadMagic`]: ../../tairix_abi/error/enum.Errno.html
+[`Errno::AbiVersionUnsupported`]: ../../tairix_abi/error/enum.Errno.html
+[`Errno::OutOfRange`]: ../../tairix_abi/error/enum.Errno.html
+[`Errno::LengthOutOfRange`]: ../../tairix_abi/error/enum.Errno.html
+[`Errno`]: ../../tairix_abi/error/enum.Errno.html
+[`SYSINFO_ENDPOINT`]: ../../tairix_abi/sysinfo/constant.SYSINFO_ENDPOINT.html
+[`SYSINFO_MAX_REQUEST`]: ../../tairix_abi/sysinfo/constant.SYSINFO_MAX_REQUEST.html
+[`SYSINFO_MAX_REPLY`]: ../../tairix_abi/sysinfo/constant.SYSINFO_MAX_REPLY.html
+[`SYSINFO_REPLY_STATUS_LEN`]: ../../tairix_abi/sysinfo/constant.SYSINFO_REPLY_STATUS_LEN.html
+[`encode_reply_ok`]: ../../tairix_abi/sysinfo/fn.encode_reply_ok.html
+[`encode_reply_err`]: ../../tairix_abi/sysinfo/fn.encode_reply_err.html
+[`decode_reply`]: ../../tairix_abi/sysinfo/fn.decode_reply.html
+[`IntrospectDomain`]: ../../tairix_abi/sysinfo/enum.IntrospectDomain.html

@@ -1,5 +1,5 @@
 //! x86_64 I/O-port transport for the shared `fw_cfg` DMA client
-//! ([`rustos_fwcfg`]).
+//! ([`tairix_fwcfg`]).
 //!
 //! The `fw_cfg` DMA protocol itself lives in the shared crate; this
 //! module supplies only the x86_64 half of the [`DmaAddressRegister`]
@@ -20,9 +20,9 @@
 //! [`DmaAddressRegister::to_physical`] override below maps both back to
 //! the physical address QEMU's DMA engine reads/writes.
 
-use rustos_abi::PortIo;
-use rustos_arch_x86_64::pio::x86_port_io;
-use rustos_fwcfg::DmaAddressRegister;
+use tairix_abi::PortIo;
+use tairix_arch_x86_64::pio::x86_port_io;
+use tairix_fwcfg::DmaAddressRegister;
 
 /// I/O port holding the most-significant half of the `fw_cfg` DMA address
 /// register.
@@ -41,7 +41,7 @@ impl DmaAddressRegister for IoPortDma {
         // subtract the base; low pointers (the boot stack) are identity-
         // mapped and pass through unchanged (linker.ld / boot.s
         // SAFETY-INVARIANT 9).
-        let base = rustos_arch_x86_64::paging::KERNEL_VMA_BASE;
+        let base = tairix_arch_x86_64::paging::KERNEL_VMA_BASE;
         if virt >= base {
             virt - base
         } else {

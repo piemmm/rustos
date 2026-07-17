@@ -15,14 +15,14 @@
 //! [`FieldValue`]/[`FieldName`] for `data.*`, [`Origin`] for the attested
 //! principal, [`WallClockReading`] for wall time, [`Stream`]/[`Level`] for the
 //! closed enums, and the shared named-field codec
-//! ([`rustos_abi::encode_named_field`]) for the `data.*` pairs.
+//! ([`tairix_abi::encode_named_field`]) for the `data.*` pairs.
 //!
 //! Every multi-byte scalar is little-endian. Decoding is fail-closed: every
 //! length, discriminant, and UTF-8 constraint is checked, and any deviation is
 //! rejected whole rather than guessed at.
 
-use rustos_abi::field::{decode_named_field, encode_named_field};
-use rustos_abi::{Errno, FieldName, FieldValue, Origin, WallClockReading, ORIGIN_WIRE_LEN};
+use tairix_abi::field::{decode_named_field, encode_named_field};
+use tairix_abi::{Errno, FieldName, FieldValue, Origin, WallClockReading, ORIGIN_WIRE_LEN};
 
 use crate::cursor::{put_bytes, put_u16, put_u64, put_u8, read_u16, read_u64, read_u8, take};
 use crate::dict::{DictionaryBuilder, DictionaryView};
@@ -40,30 +40,30 @@ pub const SOURCE_NAME_MAX: usize = 128;
 
 /// Maximum length, in bytes, of `caller.component`. One shared definition
 /// with the ingress wire ABI, so a request that validates always persists.
-pub const CALLER_COMPONENT_MAX: usize = rustos_abi::LOG_INGRESS_COMPONENT_MAX;
+pub const CALLER_COMPONENT_MAX: usize = tairix_abi::LOG_INGRESS_COMPONENT_MAX;
 
 /// Maximum length, in bytes, of `caller.tag`. Shared with the ingress ABI.
-pub const CALLER_TAG_MAX: usize = rustos_abi::LOG_INGRESS_TAG_MAX;
+pub const CALLER_TAG_MAX: usize = tairix_abi::LOG_INGRESS_TAG_MAX;
 
 /// Maximum length, in bytes, of `caller.event_id` (a source-local identifier).
 /// Shared with the ingress ABI.
-pub const CALLER_EVENT_ID_MAX: usize = rustos_abi::LOG_INGRESS_EVENT_ID_MAX;
+pub const CALLER_EVENT_ID_MAX: usize = tairix_abi::LOG_INGRESS_EVENT_ID_MAX;
 
 /// Maximum length, in bytes, of `caller.requested_source`. Shared with the
 /// ingress ABI.
-pub const CALLER_REQUESTED_SOURCE_MAX: usize = rustos_abi::LOG_INGRESS_REQUESTED_SOURCE_MAX;
+pub const CALLER_REQUESTED_SOURCE_MAX: usize = tairix_abi::LOG_INGRESS_REQUESTED_SOURCE_MAX;
 
 /// Maximum length, in bytes, of `caller.message`. Shared with the diagnostic
 /// record model and the ingress ABI so a message that fits one channel fits
 /// the others.
-pub const CALLER_MESSAGE_MAX: usize = rustos_abi::LOG_MESSAGE_MAX;
+pub const CALLER_MESSAGE_MAX: usize = tairix_abi::LOG_MESSAGE_MAX;
 
 /// Maximum number of `data.*` fields a record may carry. Shared with the
 /// ingress ABI.
-pub const MAX_DATA_FIELDS: usize = rustos_abi::LOG_INGRESS_MAX_DATA_FIELDS;
+pub const MAX_DATA_FIELDS: usize = tairix_abi::LOG_INGRESS_MAX_DATA_FIELDS;
 
 /// Maximum length, in bytes, of a single `data.*` field's encoded value.
-pub const DATA_FIELD_VALUE_MAX: usize = rustos_abi::LOG_FIELD_VALUE_MAX;
+pub const DATA_FIELD_VALUE_MAX: usize = tairix_abi::LOG_FIELD_VALUE_MAX;
 
 // Caller-optional presence flags, packed into one byte.
 const FLAG_LEVEL: u8 = 1 << 0;
@@ -185,7 +185,7 @@ impl LogRecord<'_> {
                 out.get_mut(pos..).ok_or(Errno::BufferTooSmall)?,
                 name.as_str(),
                 value,
-                rustos_abi::FIELD_NAME_MAX,
+                tairix_abi::FIELD_NAME_MAX,
                 DATA_FIELD_VALUE_MAX,
             )?;
             pos += written;
@@ -301,7 +301,7 @@ impl<'a> Iterator for DataFieldIter<'a> {
         // name re-validation cannot fail; stop defensively rather than panic.
         let ((key, value), consumed) = decode_named_field(
             self.bytes.get(self.offset..)?,
-            rustos_abi::FIELD_NAME_MAX,
+            tairix_abi::FIELD_NAME_MAX,
             DATA_FIELD_VALUE_MAX,
         )
         .ok()?;
@@ -391,7 +391,7 @@ pub fn decode<'a>(
     for _ in 0..data_count {
         let ((key, _), consumed) = decode_named_field(
             data_bytes.get(off..).ok_or(Errno::LengthOutOfRange)?,
-            rustos_abi::FIELD_NAME_MAX,
+            tairix_abi::FIELD_NAME_MAX,
             DATA_FIELD_VALUE_MAX,
         )?;
         // A `data.*` key must obey the caller field-name grammar.
@@ -440,7 +440,7 @@ mod tests {
     use crate::dict::{DictionaryBuilder, DictionaryView};
     use crate::stream::Stream;
     use crate::Level;
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilitySummary, Errno, FieldName, FieldValue, Origin, ProcId, TrustDomain,
         WallClockReading, WallTimeState, ORIGIN_CONSOLE_NONE,
     };
@@ -472,7 +472,7 @@ mod tests {
 
     fn sample_wall() -> WallClockReading {
         WallClockReading::new(
-            rustos_abi::Time64::new(1_700_000_000, 250).expect("valid time"),
+            tairix_abi::Time64::new(1_700_000_000, 250).expect("valid time"),
             WallTimeState::Trusted,
         )
     }
@@ -483,7 +483,7 @@ mod tests {
             (FieldName::new("iface").unwrap(), FieldValue::Str("net0")),
             (
                 FieldName::new("elapsed").unwrap(),
-                FieldValue::Duration(rustos_abi::Duration64::from_secs(10)),
+                FieldValue::Duration(tairix_abi::Duration64::from_secs(10)),
             ),
             (
                 FieldName::new("attempt").unwrap(),
@@ -646,7 +646,7 @@ mod tests {
             + 1
             + 8
             + WallClockReading::WIRE_LEN
-            + rustos_abi::ORIGIN_WIRE_LEN
+            + tairix_abi::ORIGIN_WIRE_LEN
             + 1
             + 2
             + "kernel.core".len();

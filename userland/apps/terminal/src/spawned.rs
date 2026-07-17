@@ -26,7 +26,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, FdWire, SpawnAttach, STD_STREAM_COUNT};
+use tairix_abi::{Errno, FdWire, SpawnAttach, STD_STREAM_COUNT};
 
 use crate::shell::ShellSource;
 

@@ -1,4 +1,4 @@
-//! RustOS kernel IRQ table and per-handle wait queue.
+//! TAIRiX kernel IRQ table and per-handle wait queue.
 //!
 //! Stage 4.D Item 2-tail. The kernel-side implementation of the
 //! `irq_bind` / `irq_wait` `abi-v1` syscall pair gated by

@@ -6,8 +6,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use rustos_help::{own_short_help, HelpSource};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Format, Hidden, Indicator, Options, Sort};
 use crate::error::LsError;
@@ -35,11 +35,11 @@ const OWN_WORD: &str = "ls";
 ///
 /// * [`LsError::Stat`] — an operand (or, under `-l`, a directory entry)
 ///   could not be inspected; carries the underlying
-///   [`Errno`](rustos_abi::Errno) (e.g. [`Errno::NotFound`]).
+///   [`Errno`](tairix_abi::Errno) (e.g. [`Errno::NotFound`]).
 /// * [`LsError::Read`] — a directory could not be read.
 /// * [`LsError::Output`] — writing the terminal failed.
 ///
-/// [`Errno::NotFound`]: rustos_abi::Errno::NotFound
+/// [`Errno::NotFound`]: tairix_abi::Errno::NotFound
 pub fn run(
     command: Command,
     locale: Option<&str>,
@@ -503,9 +503,9 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::fs::FileKind;
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::fs::FileKind;
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     /// An in-memory tree: a stat table keyed by path plus, for directories,
     /// the entries that path's `read_dir` returns.

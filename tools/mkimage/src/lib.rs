@@ -1,12 +1,12 @@
-//! Platform image builders for RustOS.
+//! Platform image builders for TAIRiX.
 //!
-//! `rustos-mkimage` authors flashable images in pure Rust: the partition
+//! `tairix-mkimage` authors flashable images in pure Rust: the partition
 //! contents are laid down by the **real** in-tree filesystem drivers — the
 //! same code the booted system mounts the volumes with — so the image
 //! author and its consumer can never drift. There is no
 //! shelling out to `parted`/`mkfs`/`xorriso`.
 //!
-//! ## `images/rustos-aarch64-rpi.img` (`plans/PI.md` P9)
+//! ## `images/tairix-aarch64-rpi.img` (`plans/PI.md` P9)
 //!
 //! [`build_rpi_image`] assembles the flashable Raspberry Pi 4 SD image:
 //!
@@ -14,7 +14,7 @@
 //! - **Boot partition** ([`fatboot`], FAT32, [`BOOT_PART_SECTORS`]): the
 //!   pinned third-party firmware blobs ([`firmware`]),
 //!   the generated `config.txt`, and `kernel8.img` — the freestanding
-//!   aarch64 `rustos-kernel` ELF flattened by [`elfflat`].
+//!   aarch64 `tairix-kernel` ELF flattened by [`elfflat`].
 //! - **Root partition** ([`rootfs`], `ARXFS`, [`ROOT_PART_SECTORS`]): an
 //!   encrypted volume carrying the directory skeleton. Its
 //!   volume key is **derived from a passphrase**: the
@@ -29,7 +29,7 @@
 //!
 //! Two [`ImageProfile`]s exist, and both seed **human accounts only**: the
 //! system/service identity is compiled into the kernel
-//! (`rustos_users::system_accounts` / `system_groups`, `plans/USERS.md`)
+//! (`tairix_users::system_accounts` / `system_groups`, `plans/USERS.md`)
 //! and never written to disk. **Installer** is the shippable form: it
 //! seeds an *empty* users database (the installer authors the first human
 //! user on first boot), and its encrypted root is unlocked by a **blank**
@@ -43,13 +43,13 @@
 //! without running the installer. A debug image must never ship.
 //!
 //! The builder is driven by `cargo xtask image --target aarch64-rpi` (or
-//! `cargo xtask build --target aarch64-rpi`) and by the `rustos-mkimage`
+//! `cargo xtask build --target aarch64-rpi`) and by the `tairix-mkimage`
 //! binary directly; see `docs/src/install/raspberry_pi.md`.
 
 use std::fmt;
 use std::io::Read;
 
-use rustos_arch_aarch64::uart_init::CONSOLE_BAUD;
+use tairix_arch_aarch64::uart_init::CONSOLE_BAUD;
 
 pub mod device;
 pub mod elfflat;
@@ -57,17 +57,17 @@ pub mod fatboot;
 pub mod firmware;
 pub mod rootfs;
 
-pub use rustos_drv_fs_arxfs::{
+pub use tairix_drv_fs_arxfs::{
     EntropySource, UnlockDescriptor, VolumeKey, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
     VOLUME_KEY_LEN,
 };
 
 use device::SECTOR_BYTES;
 use firmware::FirmwareFile;
-use rustos_abi::{DriverError, MACHINE_ID_LEN};
-use rustos_partition::mbr::{self, MbrError};
-use rustos_partition::{Partition, PartitionType};
-use rustos_users::{
+use tairix_abi::{DriverError, MACHINE_ID_LEN};
+use tairix_partition::mbr::{self, MbrError};
+use tairix_partition::{Partition, PartitionType};
+use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb, STORAGE_GID,
 };
 
@@ -201,17 +201,17 @@ pub const DEBUG_USERNAME: &str = "root";
 pub const DEBUG_PASSWORD: &str = "root";
 
 /// Uid of the debug-profile test account: the first interactive-user id
-/// ([`rustos_users::FIRST_USER_UID`]). Uid 0 belongs to the no-login
+/// ([`tairix_users::FIRST_USER_UID`]). Uid 0 belongs to the no-login
 /// `system` record — powers come from the account's capability ceiling,
 /// never from its uid, so the debug administrator is an ordinary
 /// user-band principal.
-pub const DEBUG_UID: Uid = Uid(rustos_users::FIRST_USER_UID);
+pub const DEBUG_UID: Uid = Uid(tairix_users::FIRST_USER_UID);
 
 /// Primary group id of the debug-profile test account: the first
-/// interactive-user gid ([`rustos_users::FIRST_USER_GID`]). Defined once so
+/// interactive-user gid ([`tairix_users::FIRST_USER_GID`]). Defined once so
 /// the seeded user's `primary_gid` and the group registry it must resolve
 /// against cannot disagree about which gid exists.
-pub const DEBUG_PRIMARY_GID: Gid = Gid(rustos_users::FIRST_USER_GID);
+pub const DEBUG_PRIMARY_GID: Gid = Gid(tairix_users::FIRST_USER_GID);
 
 /// Name of the debug-profile primary group (gid [`DEBUG_PRIMARY_GID`]). The
 /// conventional administrative group; the seeded `root` account's powers come
@@ -263,7 +263,7 @@ pub const fn passphrase_for(profile: ImageProfile) -> &'static [u8] {
 /// Build the profile's `/System/Security/Users` text.
 ///
 /// The on-disk database holds **human** accounts only: the system/service
-/// identity is compiled into the kernel (`rustos_users::system_accounts`,
+/// identity is compiled into the kernel (`tairix_users::system_accounts`,
 /// `plans/USERS.md`) and the kernel's identity merge refuses any on-disk
 /// record colliding with it, so neither profile writes those records to
 /// disk. The installer profile therefore seeds an *empty* database (its
@@ -272,7 +272,7 @@ pub const fn passphrase_for(profile: ImageProfile) -> &'static [u8] {
 /// [`DEBUG_USERNAME`] administrator (uid [`DEBUG_UID`], its password
 /// salted from `entropy` and hashed at the default PBKDF2 cost) granted
 /// the administrator capability ceiling
-/// (`rustos_users::administrator_ceiling`) a bring-up session needs.
+/// (`tairix_users::administrator_ceiling`) a bring-up session needs.
 /// Powers come from capabilities, not from a uid: the account is an
 /// administrator only because its ceiling says so.
 fn users_db(
@@ -281,7 +281,7 @@ fn users_db(
 ) -> Result<String, MkimageError> {
     let mut records = Vec::new();
     if profile == ImageProfile::Debug {
-        let mut salt: Salt = [0u8; rustos_users::SALT_LEN];
+        let mut salt: Salt = [0u8; tairix_users::SALT_LEN];
         entropy
             .fill(&mut salt)
             .map_err(|e| MkimageError::Entropy(format!("users salt: {e:?}")))?;
@@ -293,14 +293,14 @@ fn users_db(
                 primary_gid: DEBUG_PRIMARY_GID,
                 supplementary_gids: &[STORAGE_GID],
                 display_name: "System Administrator",
-                home: Some(&rustos_users::default_home(DEBUG_USERNAME)),
-                shell: Some(rustos_users::DEFAULT_SHELL),
-                capabilities: rustos_users::administrator_ceiling(),
+                home: Some(&tairix_users::default_home(DEBUG_USERNAME)),
+                shell: Some(tairix_users::DEFAULT_SHELL),
+                capabilities: tairix_users::administrator_ceiling(),
                 state: AccountState::Active,
             },
             DEBUG_PASSWORD.as_bytes(),
             salt,
-            rustos_users::DEFAULT_ITERATIONS,
+            tairix_users::DEFAULT_ITERATIONS,
         )
         .map_err(|e| MkimageError::UsersDb(format!("debug root record: {e}")))?;
         records.push(record);
@@ -313,7 +313,7 @@ fn users_db(
 /// Build the profile's `/System/Security/Groups` text.
 ///
 /// Both profiles seed the well-known removable-storage group
-/// ([`rustos_users::STORAGE_GROUP`]) the unlock resolves by name to arm
+/// ([`tairix_users::STORAGE_GROUP`]) the unlock resolves by name to arm
 /// the hotplug-volume identity map (`plans/DEVICES.md` D3d) — storage
 /// membership is admin-managed data about human accounts, so it lives on
 /// disk beside them. The `system` and `services` groups are compiled into
@@ -325,7 +325,7 @@ fn users_db(
 /// group. Membership is not stored here — it lives in the user records;
 /// this is only the authoritative name↔gid set.
 fn groups_db(profile: ImageProfile) -> Result<String, MkimageError> {
-    let mut records = vec![GroupRecord::new(rustos_users::STORAGE_GROUP, STORAGE_GID)
+    let mut records = vec![GroupRecord::new(tairix_users::STORAGE_GROUP, STORAGE_GID)
         .map_err(|e| MkimageError::GroupsDb(format!("storage group record: {e}")))?];
     if profile == ImageProfile::Debug {
         records.push(
@@ -339,25 +339,25 @@ fn groups_db(profile: ImageProfile) -> Result<String, MkimageError> {
 }
 
 /// Build the debug-profile log-attestation key file image
-/// (`PREREQUISITES.md` P-E): a fresh random [`rustos_log::LogAttestationKey`]
+/// (`PREREQUISITES.md` P-E): a fresh random [`tairix_log::LogAttestationKey`]
 /// drawn from `entropy`, serialised to its on-disk form. Only a debug image
 /// bakes a key; an installer image's per-installation key is generated at
 /// first boot (baking one common key into every installer image would be a
 /// shared secret, a security hole).
 /// Fails closed if the host entropy source cannot supply the key bytes.
 fn debug_log_attestation_key(entropy: &mut dyn EntropySource) -> Result<Vec<u8>, MkimageError> {
-    let mut key = [0u8; rustos_log::LOG_ATTESTATION_KEY_LEN];
+    let mut key = [0u8; tairix_log::LOG_ATTESTATION_KEY_LEN];
     entropy
         .fill(&mut key)
         .map_err(|e| MkimageError::Entropy(format!("log-attestation key: {e:?}")))?;
-    Ok(rustos_log::LogAttestationKey::from_key(key)
+    Ok(tairix_log::LogAttestationKey::from_key(key)
         .to_file_bytes()
         .to_vec())
 }
 
 /// Build the debug-profile per-installation machine-id: [`MACHINE_ID_LEN`]
 /// fresh random bytes drawn from `entropy`. The machine-id is **non-secret**
-/// per-installation identity (the RustOS equivalent of `/etc/machine-id`) that
+/// per-installation identity (the TAIRiX equivalent of `/etc/machine-id`) that
 /// the system log binds each stream's hash-chain genesis to
 /// (`plans/SYSLOG.md` §7.1); giving each debug image its own random id keeps
 /// two images' logs from sharing a genesis. Only a debug image bakes one; an
@@ -391,7 +391,7 @@ pub struct RpiImage {
 
 /// Build the flashable Raspberry Pi 4 SD image.
 ///
-/// `kernel_elf` is the freestanding aarch64 `rustos-kernel` ELF;
+/// `kernel_elf` is the freestanding aarch64 `tairix-kernel` ELF;
 /// `firmware` is the verified blob set from
 /// [`firmware::FirmwareManifest::load_dir`]; `entropy` draws the unlock
 /// descriptor's salt, the root volume's internal key hierarchy, and, on a
@@ -455,7 +455,7 @@ pub fn build_rpi_image(
     // Only a debug image bakes a log-attestation key; an installer image's
     // per-installation key is generated at first boot (a common baked key
     // would be a shared secret, a security hole). When present the bytes are
-    // the `rustos_log::LogAttestationKey` on-disk image.
+    // the `tairix_log::LogAttestationKey` on-disk image.
     let log_key_file = match profile {
         ImageProfile::Debug => Some(debug_log_attestation_key(entropy)?),
         ImageProfile::Installer => None,
@@ -570,11 +570,11 @@ pub fn volume_key_to_hex(key: &VolumeKey) -> String {
 mod tests {
     use super::*;
     use device::MemBlock;
-    use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-    use rustos_abi::CapabilityId;
-    use rustos_drv_fs_arxfs::ARXFS;
-    use rustos_drv_fs_fat32::Fat32;
-    use rustos_users::STORAGE_GROUP;
+    use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+    use tairix_abi::CapabilityId;
+    use tairix_drv_fs_arxfs::ARXFS;
+    use tairix_drv_fs_fat32::Fat32;
+    use tairix_users::STORAGE_GROUP;
 
     const TEST_KEY: VolumeKey = [0x42; VOLUME_KEY_LEN];
 
@@ -703,8 +703,8 @@ mod tests {
 
     #[test]
     fn the_system_partition_mounts_read_only_and_carries_the_skeleton() {
-        use rustos_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
-        use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
+        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
+        use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         let built = build_rpi_image(
             &test_kernel_elf(),
@@ -751,8 +751,8 @@ mod tests {
 
     #[test]
     fn an_installed_driver_bundle_reads_back_from_the_readonly_system_store() {
-        use rustos_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
-        use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
+        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
+        use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // A synthetic bundle blob: this test proves the *planting* (path +
         // bytes + intermediate-directory creation), not signature validity —
@@ -794,8 +794,8 @@ mod tests {
 
     #[test]
     fn an_installed_app_bundle_reads_back_beside_its_help_tree() {
-        use rustos_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
-        use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
+        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
+        use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // Synthetic bundle files: this test proves the *planting* of a
         // complete self-contained bundle (`AppInfo` + `Run` beside the
@@ -905,7 +905,7 @@ mod tests {
         let users = rfs
             .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
             .expect("Users database exists");
-        let mut buf = vec![0u8; rustos_users::MAX_DB_LEN];
+        let mut buf = vec![0u8; tairix_users::MAX_DB_LEN];
         let read = rfs
             .read_at(users, 0, &mut buf)
             .expect("Users database reads");
@@ -925,7 +925,7 @@ mod tests {
         // (`plans/CAPABILITY_USE.md` CU3): a root account without
         // `CAP_FS_ACCESS` cannot use the filesystem even once the
         // intersection is wired.
-        assert_eq!(record.capabilities(), rustos_users::administrator_ceiling());
+        assert_eq!(record.capabilities(), tairix_users::administrator_ceiling());
         assert!(record.capabilities().contains(CapabilityId::FS_ACCESS));
         assert!(db.authenticate(DEBUG_USERNAME, b"wrong").is_err());
 
@@ -935,7 +935,7 @@ mod tests {
         // merge would refuse any on-disk record colliding with it
         // (`plans/USERS.md`).
         assert_eq!(db.records().len(), 1);
-        for account in rustos_users::system_accounts().expect("compiled accounts build") {
+        for account in tairix_users::system_accounts().expect("compiled accounts build") {
             assert!(
                 db.lookup(account.username()).is_none(),
                 "compiled account {} must never be seeded on disk",
@@ -972,7 +972,7 @@ mod tests {
         let users = rfs
             .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
             .expect("Users database exists");
-        let mut buf = vec![0u8; rustos_users::MAX_DB_LEN];
+        let mut buf = vec![0u8; tairix_users::MAX_DB_LEN];
         let read = rfs
             .read_at(users, 0, &mut buf)
             .expect("Users database reads");
@@ -992,17 +992,17 @@ mod tests {
         let groups = rfs
             .lookup(security, rootfs::GROUPS_DB_NAME.as_bytes())
             .expect("Groups registry exists");
-        let mut buf = vec![0u8; rustos_users::MAX_GROUPS_DB_LEN];
+        let mut buf = vec![0u8; tairix_users::MAX_GROUPS_DB_LEN];
         let read = rfs
             .read_at(groups, 0, &mut buf)
             .expect("Groups registry reads");
         let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
-        let registry = rustos_users::GroupsDb::parse(text).expect("seeded registry parses");
+        let registry = tairix_users::GroupsDb::parse(text).expect("seeded registry parses");
         assert_eq!(registry.records().len(), 1);
         assert!(registry.lookup(DEBUG_GROUP).is_none());
         assert_eq!(
             registry
-                .lookup(rustos_users::STORAGE_GROUP)
+                .lookup(tairix_users::STORAGE_GROUP)
                 .map(GroupRecord::gid),
             Some(STORAGE_GID)
         );
@@ -1010,7 +1010,7 @@ mod tests {
 
     #[test]
     fn a_debug_image_seeds_a_group_registry_the_root_account_resolves_against() {
-        use rustos_users::GroupsDb;
+        use tairix_users::GroupsDb;
 
         let built = build_rpi_image(
             &test_kernel_elf(),
@@ -1037,7 +1037,7 @@ mod tests {
         let groups = rfs
             .lookup(security, rootfs::GROUPS_DB_NAME.as_bytes())
             .expect("Groups registry exists");
-        let mut buf = vec![0u8; rustos_users::MAX_GROUPS_DB_LEN];
+        let mut buf = vec![0u8; tairix_users::MAX_GROUPS_DB_LEN];
         let read = rfs
             .read_at(groups, 0, &mut buf)
             .expect("Groups registry reads");
@@ -1059,8 +1059,8 @@ mod tests {
         // The `system` and `services` groups are compiled into the kernel
         // with the system accounts, never seeded to disk — a reserved
         // record here would be refused by the kernel's identity merge.
-        assert!(db.lookup(rustos_users::SYSTEM_GROUP).is_none());
-        assert!(db.lookup(rustos_users::SERVICES_GROUP).is_none());
+        assert!(db.lookup(tairix_users::SYSTEM_GROUP).is_none());
+        assert!(db.lookup(tairix_users::SERVICES_GROUP).is_none());
     }
 
     #[test]

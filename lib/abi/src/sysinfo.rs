@@ -1,6 +1,6 @@
 //! System Information API (`sysinfo`) — the ABI surface.
 //!
-//! RustOS has no `/proc` and no `/sys`. Every piece of live system
+//! TAIRiX has no `/proc` and no `/sys`. Every piece of live system
 //! information that would have lived under those trees is exposed through
 //! this single, versioned, capability-checked API. Each query is a *typed*
 //! request returning a *typed* response — there is no free-form text
@@ -1421,7 +1421,7 @@ impl CpuTimeListRequest {
 /// is the remainder of the same monotonic sample instant, so
 /// `busy_ns + idle_ns` is that CPU's share of uptime at the sample. A
 /// consumer derives a utilisation percentage from the *deltas* of two
-/// samples, exactly as `top` reads `/proc/stat` on Linux; RustOS does not
+/// samples, exactly as `top` reads `/proc/stat` on Linux; TAIRiX does not
 /// account a user/system/nice/iowait split, so the honest vocabulary is
 /// busy and idle only.
 #[repr(C)]
@@ -3515,14 +3515,14 @@ mod tests {
     #[test]
     fn system_identity_round_trips() {
         let machine_id = [7u8; MACHINE_ID_LEN];
-        let id = SystemIdentity::new(machine_id, 1, 2, 3, b"rustos-box").unwrap();
-        assert_eq!(id.hostname_bytes(), b"rustos-box");
+        let id = SystemIdentity::new(machine_id, 1, 2, 3, b"tairix-box").unwrap();
+        assert_eq!(id.hostname_bytes(), b"tairix-box");
         // Decode tolerates a buffer longer than WIRE_LEN.
         let mut bytes = [0xAAu8; SystemIdentity::WIRE_LEN + 9];
         bytes[..SystemIdentity::WIRE_LEN].copy_from_slice(&id.to_le_bytes());
         let decoded = SystemIdentity::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, id);
-        assert_eq!(decoded.hostname_bytes(), b"rustos-box");
+        assert_eq!(decoded.hostname_bytes(), b"tairix-box");
     }
 
     #[test]

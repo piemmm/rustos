@@ -1,5 +1,5 @@
 //! `plans/NETWORK.md` N4e-riscv64 (first stage) QEMU integration test: boot
-//! the production riscv64 (QEMU `virt` / SiFive) `rustos-kernel` pipeline with
+//! the production riscv64 (QEMU `virt` / SiFive) `tairix-kernel` pipeline with
 //! a planted whole-disk encrypted-root image that carries the **kernel-signed
 //! virtio-input keyboard driver bundle** in its always-readable `/System`
 //! store, plus an attached `virtio-keyboard-device`, and prove the full
@@ -14,7 +14,7 @@
 //!   reaches an *in-kernel* scaffold decode path (load → use → unload).
 //!
 //! This vertical composes autoload on the production boot path: it attaches
-//! the shared `rustos_test_encrypted_root_image` whole-disk image, planted by
+//! the shared `tairix_test_encrypted_root_image` whole-disk image, planted by
 //! the `image_drivers` pipeline with the signed `virtio_kbd` bundle at the
 //! `/System`-volume-relative `Drivers/input/virtio_kbd/Run` (cross-compiled
 //! for riscv64), as a virtio-blk-mmio device **plus** a `virtio-keyboard-
@@ -88,11 +88,11 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::riscv64::boot as boot_riscv64;
-    use rustos_kernel_core::AuditEvent;
-    use rustos_log::{Event, FieldValue, Sink};
+    use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::riscv64::boot as boot_riscv64;
+    use tairix_kernel_core::AuditEvent;
+    use tairix_log::{Event, FieldValue, Sink};
 
     /// Static boot heap.
     ///
@@ -145,12 +145,12 @@ mod kernel {
     /// finisher parks the hart, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_autoload_input_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_autoload_input_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_riscv64_main`).
+    /// calls (via `tairix_arch_riscv64_main`).
     ///
     /// Forwards the SBI hand-off values (`a0` = hartid, `a1` = DTB) to the
     /// production boot pipeline with the audit-observer sink in place.
@@ -165,7 +165,7 @@ mod kernel {
             dtb,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Debug,
+            tairix_log::Level::Debug,
         )
     }
 }

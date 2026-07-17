@@ -11,7 +11,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_util::cfloat::{FloatConversion, FloatDirective};
+use tairix_util::cfloat::{FloatConversion, FloatDirective};
 
 use crate::error::PrintfError;
 use crate::number::{to_float, to_signed, to_unsigned, Note};

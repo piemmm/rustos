@@ -50,7 +50,7 @@ continue avec le reste. Les options GNU `--output`, `--sync` et
 - `-P, --portability` — le format portable POSIX (en-têtes
   `1024-blocks` et `Capacity`).
 - `-l, --local` — restreindre le rapport aux systèmes de fichiers
-  locaux (tous les montages RustOS aujourd'hui : rien n'est filtré).
+  locaux (tous les montages TAIRiX aujourd'hui : rien n'est filtré).
 - `--total` — ajouter une ligne étiquetée `total` sommant les
   chiffres affichés.
 - `-k` — blocs de 1024 octets (la valeur par défaut).

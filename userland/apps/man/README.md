@@ -1,6 +1,6 @@
-# `rustos-man` — show a command's help document
+# `tairix-man` — show a command's help document
 
-`plans/APPS.md` §7 deliverable (`AGENTS.md` §3 `userland/apps/`). RustOS
+`plans/APPS.md` §7 deliverable (`AGENTS.md` §3 `userland/apps/`). TAIRiX
 ships no troff/roff man pages: every program is a `<Name>.app` bundle whose
 single internationalised `Help/` tree holds one structured-Markdown document
 per command or topic (`AGENTS.md` §16.5). `man <cmd>` resolves `<cmd>`
@@ -9,7 +9,7 @@ through the **same** store-then-`PATH` policy the shell launches by
 would run; when no ordered candidate matches a bare word it falls back to
 the bounded, breadth-first **recursive bundle search** of the app stores —
 the machine-wide `/Apps`, then the user's own `<HOME>/Apps`
-(`rustos_cmdres::search_roots`) — finding a bundle's help however deeply
+(`tairix_cmdres::search_roots`) — finding a bundle's help however deeply
 it was filed (never descending into another `.app`; an exhausted directory
 budget is reported, never silently "not found"). It then renders that
 bundle's document in the active locale through
@@ -17,9 +17,9 @@ the one shared help engine (`lib/help`).
 
 The document itself is **never parsed in `man`'s own process**: it is
 foreign bundle content, so `man` locates and reads it with its own file
-authority (`rustos_help::load_raw`, the same one locale walk `load`
+authority (`tairix_help::load_raw`, the same one locale walk `load`
 wraps) and hands the raw bytes to a minimum-capability parser-sandbox
-worker (`rustos_sandbox::helpdoc` — `man`'s own binary re-spawned,
+worker (`tairix_sandbox::helpdoc` — `man`'s own binary re-spawned,
 `CAP_PROC_SPAWN` in its manifest). Only the whitelist-validated render
 comes back (printable text, line feeds, the bold/underline SGR pairs);
 a crashed or hostile worker costs the page — the typed
@@ -28,8 +28,8 @@ usage banner (`docs/src/security/sandbox.md`).
 
 The crate is `no_std` + `alloc`, forbids `unsafe`, and has no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` crate and the shared
-`rustos-cmdres` / `rustos-help` / `rustos-sandbox` / `rustos-log`
+dependencies are the audited `tairix-abi` crate and the shared
+`tairix-cmdres` / `tairix-help` / `tairix-sandbox` / `tairix-log`
 engines, so it never links a kernel or driver crate (`AGENTS.md` §17.4)
 and defines no second resolution policy, locale walker, or escape
 vocabulary (`AGENTS.md` §2.2).

@@ -1,17 +1,17 @@
 //! Shared, scheme-neutral partition-table model and a partition-window
 //! [`Block`] adapter.
 //!
-//! A flashed RustOS disk (an SD card, a USB stick, a UEFI hard disk, a
+//! A flashed TAIRiX disk (an SD card, a USB stick, a UEFI hard disk, a
 //! `virt` virtio-blk image) carries a partition table that names a FAT
 //! boot partition the firmware reads and the encrypted `ARXFS` root
 //! partition the kernel mounts (`tools/mkimage`).
 //! The table is **not** one scheme on one board: a Raspberry Pi image is
-//! an MBR disk, a UEFI x86_64 disk is GPT, and RustOS must read either on
+//! an MBR disk, a UEFI x86_64 disk is GPT, and TAIRiX must read either on
 //! any architecture (nothing here is board-specific).
 //!
 //! Two places must agree, byte for byte, on the on-disk layout — the
 //! image author (`tools/mkimage`) that *writes* it and the boot path
-//! (`kernel/rustos-kernel`) that *reads* it back to find the partitions.
+//! (`kernel/tairix-kernel`) that *reads* it back to find the partitions.
 //! This crate is that one definition, so the author and the reader can
 //! never drift:
 //!
@@ -37,24 +37,24 @@ extern crate alloc;
 pub mod gpt;
 pub mod mbr;
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::DriverError;
 
 /// Largest number of present partitions [`parse_partition_table`] retains
 /// from one disk.
 ///
 /// This is GPT's standard default entry count, and serves here as a
-/// fail-closed bound on an untrusted on-disk table (a defensive parse bound, not a scalable capacity). Real RustOS
+/// fail-closed bound on an untrusted on-disk table (a defensive parse bound, not a scalable capacity). Real TAIRiX
 /// disks carry a handful of partitions; a table declaring more present
 /// partitions than this is rejected rather than truncated, so the root
 /// partition is never silently dropped.
 pub const MAX_PARTITIONS: usize = 128;
 
-/// The role RustOS assigns a partition, derived from the scheme-specific
+/// The role TAIRiX assigns a partition, derived from the scheme-specific
 /// type identifier (an MBR type byte or a GPT type GUID).
 ///
-/// RustOS's boot path only needs to *find* two roles; every other
+/// TAIRiX's boot path only needs to *find* two roles; every other
 /// partition is [`PartitionType::Other`] and carried for completeness but
 /// not consumed. The type is a routing hint, never a trusted identity:
 /// the filesystem a partition is handed to still validates its own
@@ -81,7 +81,7 @@ pub enum PartitionType {
     /// the operator unlocks it; carries `/Users`, `/Apps`, `/Storage`, and
     /// `/System/Security`.
     ARXFSRoot,
-    /// Any other partition; RustOS's boot path does not consume it.
+    /// Any other partition; TAIRiX's boot path does not consume it.
     Other,
 }
 
@@ -92,7 +92,7 @@ pub enum PartitionType {
 /// it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Partition {
-    /// The role this partition plays for RustOS.
+    /// The role this partition plays for TAIRiX.
     pub ty: PartitionType,
     /// First logical block (LBA) of the partition.
     pub start_lba: u64,

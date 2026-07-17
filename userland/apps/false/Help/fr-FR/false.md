@@ -16,7 +16,7 @@ Seul un **premier** argument `-h`, `-?` ou `--help` est pris en compte
 (la position dans laquelle GNU `false` honore `--help`) ; à toute autre
 position, ces mots sont ignorés comme le reste. Contrairement à GNU
 `false --help`, qui se termine quand même avec `1`, une aide courte
-servie se termine ici avec `0` — la convention d'aide courte de RustOS.
+servie se termine ici avec `0` — la convention d'aide courte de TAIRiX.
 
 ## OPTIONS
 

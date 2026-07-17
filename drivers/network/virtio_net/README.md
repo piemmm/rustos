@@ -1,7 +1,7 @@
-# `rustos-drv-network-virtio-net` — virtio-net link-layer driver
+# `tairix-drv-network-virtio-net` — virtio-net link-layer driver
 
 Stage 4 deliverable. The bus-agnostic device engine (bring-up +
-frame-ring `rustos_abi::driver::net::Net` service) lives in the
+frame-ring `tairix_abi::driver::net::Net` service) lives in the
 `lib/virtio_net` crate and is **re-exported** here as `VirtioNet`; this
 crate is the driver-host registration shell (`register`) over it. The
 engine is hoisted into `lib/*` (not kept in this `drivers/*` crate) so a
@@ -54,12 +54,12 @@ remains the caller's responsibility.
 
 ## Test surface
 
-`cargo test -p rustos-drv-network-virtio-net` exercises the driver-host
+`cargo test -p tairix-drv-network-virtio-net` exercises the driver-host
 `register` capability gate. The device-engine host tests (`open` reads
 the MAC, TX/RX frame-ring round-trips, runt/oversize/corrupt-slot
 handling, `BufferClass::Sensitive` scrubbing, and the no-per-packet-DMA
 steady-state invariant) live with the engine in `lib/virtio_net`
-(`cargo test -p rustos-virtio-net`).
+(`cargo test -p tairix-virtio-net`).
 
 ## Public surface
 

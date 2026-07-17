@@ -14,16 +14,16 @@
 //! password record on creation, so this client submits one derived from a
 //! throwaway random secret it immediately discards: no password matches
 //! it (recovering one is a PBKDF2 preimage search), which is the honest
-//! RustOS equivalent of the `!` field. The administrator then sets a real
+//! TAIRiX equivalent of the `!` field. The administrator then sets a real
 //! password with the `users` tool's `passwd` command.
 //!
 //! # Defaults are the shared account policy
 //!
-//! The auto-allocated uid ([`rustos_users::next_id`], interactive-user
+//! The auto-allocated uid ([`tairix_users::next_id`], interactive-user
 //! range), the home layout
-//! ([`rustos_users::default_home`]), the login shell
-//! ([`rustos_users::DEFAULT_SHELL`]), and the created ceiling
-//! ([`rustos_users::SESSION_BASELINE`] — an administrator widens it
+//! ([`tairix_users::default_home`]), the login shell
+//! ([`tairix_users::DEFAULT_SHELL`]), and the created ceiling
+//! ([`tairix_users::SESSION_BASELINE`] — an administrator widens it
 //! afterwards with the `users` tool's `grant`, bounded by their own
 //! effective set) all come from the one `lib/users` policy definition,
 //! never a private copy.
@@ -31,12 +31,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::users_admin::{
+use tairix_abi::users_admin::{
     decode_user_list, gid_list_into, grant_list_into, CreateUser, UsersAdminRequest,
     USERS_ADMIN_MAX_REQUEST,
 };
-use rustos_abi::Errno;
-use rustos_users::{
+use tairix_abi::Errno;
+use tairix_users::{
     default_home, next_id, IdRange, PasswordRecord, Salt, DEFAULT_SHELL, MAX_DB_LEN,
     MIN_ITERATIONS, SALT_LEN, SESSION_BASELINE,
 };
@@ -173,11 +173,11 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::users_admin::{
+    use tairix_abi::users_admin::{
         ListResponseBuilder, UserEntry, UsersAdminRequest, USERS_ADMIN_VERSION,
     };
-    use rustos_abi::Errno;
-    use rustos_users::{PasswordRecord, DEFAULT_SHELL, SESSION_BASELINE};
+    use tairix_abi::Errno;
+    use tairix_users::{PasswordRecord, DEFAULT_SHELL, SESSION_BASELINE};
 
     /// An in-memory `users_admin` endpoint: serves `ListUsers` from a
     /// `(name, uid)` table and records every decoded `CreateUser`.
@@ -235,15 +235,15 @@ mod tests {
                             username: name,
                             uid: *uid,
                             primary_gid: 100,
-                            supplementary_gids: rustos_abi::users_admin::gid_list_into(
+                            supplementary_gids: tairix_abi::users_admin::gid_list_into(
                                 &[],
                                 &mut [],
                             )?,
                             display_name: "",
                             home: "/Users/x",
                             shell: DEFAULT_SHELL,
-                            grants: rustos_abi::users_admin::grant_list_into(&[], &mut [])?,
-                            state: rustos_abi::users_admin::AccountStateCode::Active,
+                            grants: tairix_abi::users_admin::grant_list_into(&[], &mut [])?,
+                            state: tairix_abi::users_admin::AccountStateCode::Active,
                         })?;
                     }
                     Ok(builder.finish())

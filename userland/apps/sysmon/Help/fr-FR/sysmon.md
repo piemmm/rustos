@@ -59,7 +59,7 @@ consommateurs par `%CPU` et par mémoire.
   chiffre décimal, les dixièmes, est conservé) : `sysmon -d 1.5`
   rafraîchit toutes les 1,5 secondes. Par défaut 3,0. GNU `top`
   accepte un intervalle nul et rafraîchit aussi vite que possible ;
-  RustOS ne boucle jamais à vide, un zéro est donc relevé au minimum
+  TAIRiX ne boucle jamais à vide, un zéro est donc relevé au minimum
   de 0,1 s.
 - `-h, -?` — afficher l'aide courte de cette commande et quitter. Dans
   une session en cours, les mêmes touches basculent l'aide-mémoire.

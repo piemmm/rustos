@@ -3,8 +3,8 @@
 //!
 //! ## What this test asserts
 //!
-//! The production `rustos-kernel` boot pipeline runs through
-//! `rustos_kernel::boot` until `AuditEvent::BootCompleted`
+//! The production `tairix-kernel` boot pipeline runs through
+//! `tairix_kernel::boot` until `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) fires. By that point the boot pipeline has already
 //! installed the production syscall dispatch callback and enabled the
 //! `syscall` instruction on the BSP (`init_local_syscalls`). The audit
@@ -13,8 +13,8 @@
 //! 1. **Overrides** the dispatch callback with `record_and_exit` via
 //!    `syscall_entry::set_dispatch_callback` (the production callback
 //!    fail-closes without a user caller context — this test has none).
-//! 2. Calls the `lib/abi-sys` stub `rustos_abi_sys::sys_cap_query`
-//!    (exported to C as `ros_sys_cap_query`) with a known capability id.
+//! 2. Calls the `lib/abi-sys` stub `tairix_abi_sys::sys_cap_query`
+//!    (exported to C as `tairix_sys_cap_query`) with a known capability id.
 //!    That stub marshals the syscall number and arguments into the
 //!    `rax`/`rdi`/… registers and executes the real `syscall`
 //!    instruction (`lib/abi-sys/src/trap.rs`).
@@ -41,7 +41,7 @@
 //! instruction masks `RFLAGS.IF` via `IA32_FMASK`, so the callback runs
 //! with interrupts disabled — no timer tick can perturb the assertion.
 //!
-//! ## How it differs from `rustos-test-syscall-dispatch-qemu`
+//! ## How it differs from `tairix-test-syscall-dispatch-qemu`
 //!
 //! That test drives `Dispatcher::dispatch` directly and never executes a
 //! trap instruction. This test issues the `abi-sys` stub, so the
@@ -54,7 +54,7 @@
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
 //! (no hacks; — fail closed), mirroring
-//! `rustos-test-syscall-dispatch-qemu`.
+//! `tairix-test-syscall-dispatch-qemu`.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -63,10 +63,10 @@
 // — test affordances must never reach a release binary.
 // `test-hooks` is on by default for this crate; a release build that
 // re-enables it is a configuration error, so we fail the build outright,
-// exactly as `rustos-test-syscall-dispatch-qemu` does.
+// exactly as `tairix-test-syscall-dispatch-qemu` does.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-abi-sys-syscall-qemu: the `test-hooks` Cargo feature is a \
+    "tairix-test-abi-sys-syscall-qemu: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
@@ -78,19 +78,19 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
-    use rustos_arch_x86_64::qemu_exit;
-    use rustos_arch_x86_64::syscall_entry;
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
+    use tairix_arch_x86_64::qemu_exit;
+    use tairix_arch_x86_64::syscall_entry;
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
     //
-    // Mirrors the production `rustos-kernel` bin and the
-    // `rustos-test-syscall-dispatch-qemu` test bin: `#[global_allocator]`
+    // Mirrors the production `tairix-kernel` bin and the
+    // `tairix-test-syscall-dispatch-qemu` test bin: `#[global_allocator]`
     // is a per-binary attribute, so each freestanding bin declares its
     // own over the shared `kalloc` heap.
 
@@ -117,7 +117,7 @@ mod kernel {
     /// test in `kernel/core/src/audit.rs`.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
-    /// The capability id [`run_round_trip`] passes to `ros_sys_cap_query`
+    /// The capability id [`run_round_trip`] passes to `tairix_sys_cap_query`
     /// and [`record_and_exit`] expects to see marshalled into argument 0.
     /// Any well-known [`CapabilityId`] works — the test asserts the
     /// stub's *marshalling*, not the kernel's grant decision (the dispatch
@@ -136,7 +136,7 @@ mod kernel {
     ///
     /// Reached from the kernel's `IA32_LSTAR` entry stub after the
     /// `abi-sys` stub executed `syscall`. It asserts the marshalled
-    /// `(number, args)` match what `ros_sys_cap_query(EXPECTED_CAP)`
+    /// `(number, args)` match what `tairix_sys_cap_query(EXPECTED_CAP)`
     /// should have placed in the registers, then exits QEMU. It never
     /// returns to the caller (see the module docs): a `sysretq` here would
     /// drop the CPU to ring 3 with no user context.
@@ -160,7 +160,7 @@ mod kernel {
 
     // --- Audit observer Sink -------------------------------------
 
-    /// Outer audit sink installed via [`rustos_kernel::boot`].
+    /// Outer audit sink installed via [`tairix_kernel::boot`].
     ///
     /// Replays every event through the serial sink (so the QEMU serial
     /// transcript captures the boot timeline) and, on observing
@@ -191,15 +191,15 @@ mod kernel {
     /// trap was not delivered — which is itself a failure.
     fn run_round_trip() -> ! {
         syscall_entry::set_dispatch_callback(record_and_exit);
-        let _ = rustos_abi_sys::sys_cap_query(EXPECTED_CAP.as_u16());
+        let _ = tairix_abi_sys::sys_cap_query(EXPECTED_CAP.as_u16());
         qemu_exit::exit_failure();
     }
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
+    /// Forward to the shared bridge in `tairix_kernel::x86_64::panic_ctx`.
     #[panic_handler]
-    fn rustos_test_abi_sys_syscall_qemu_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_test_abi_sys_syscall_qemu_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
@@ -212,7 +212,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }
@@ -221,7 +221,7 @@ mod kernel {
 //
 // The test body only compiles when `feature = "test-hooks"` is on.
 // Disabling it leaves the bin as a no-op so a layout sanity check
-// (`cargo build --no-default-features -p rustos-test-abi-sys-syscall-qemu`)
+// (`cargo build --no-default-features -p tairix-test-abi-sys-syscall-qemu`)
 // still builds (a disabled test must compile cleanly).
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[no_mangle]
@@ -238,7 +238,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[panic_handler]
-fn rustos_test_abi_sys_syscall_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
+fn tairix_test_abi_sys_syscall_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
         // SAFETY: same as above.
         unsafe {

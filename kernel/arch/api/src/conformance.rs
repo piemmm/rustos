@@ -164,7 +164,7 @@ mod tests {
     use crate::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
     use crate::{CoreClass, PerCpu};
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
+    use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 
     /// A faithful host stub of a [`SchedulerArch`] port: a fixed CPU id,
     /// a monotonic tick counter, and a best-effort `send_ipi`.

@@ -1,10 +1,10 @@
-# `rustos-termcap`
+# `tairix-termcap`
 
-The first-party, **compiled-in** terminal capability database for RustOS's
+The first-party, **compiled-in** terminal capability database for TAIRiX's
 text stack, and the third stage of the `plans/CURSES.md` build plan. It answers
 one question — "given this `TERM`, what can the terminal do?" — without the
 terminfo / termcap files a POSIX system reads from `/usr/share` or `/etc`.
-RustOS has no such paths (`AGENTS.md` §16.1), so the database is compiled in: a
+TAIRiX has no such paths (`AGENTS.md` §16.1), so the database is compiled in: a
 closed, versioned `TermType` set (`AGENTS.md` §2.4) and a `const`
 `Capabilities` record per terminal.
 
@@ -13,7 +13,7 @@ Stability tier: **experimental** (the surface grows stage by stage under
 
 ## The recognised terminals
 
-`TermType` is the frozen set of `TERM` values RustOS recognises:
+`TermType` is the frozen set of `TERM` values TAIRiX recognises:
 
 | `TermType` | `TERM` | Colour | Notes |
 |------------|--------|--------|-------|
@@ -38,11 +38,11 @@ and the keys it sends (`KeyInput`, including the arrow keys as `ArrowKeys`).
 
 ## One vocabulary
 
-Every escape sequence a record references is a `rustos_vt::Op` — the one shared
+Every escape sequence a record references is a `tairix_vt::Op` — the one shared
 vocabulary (`AGENTS.md` §2.2). The crate defines no second escape-sequence
 table: output capabilities are the `Op`s the terminal accepts, the renderable
-colours are `rustos_vt::Color` models, and an arrow key is the `Op` its bytes
-parse back to through `rustos_vt::Parser`. `Capabilities::referenced_ops`
+colours are `tairix_vt::Color` models, and an arrow key is the `Op` its bytes
+parse back to through `tairix_vt::Parser`. `Capabilities::referenced_ops`
 returns that exact set, and the `no_record_emits_a_sequence_absent_from_vt`
 test round-trips each one through `lib/vt`, proving the database invents
 nothing.
@@ -58,7 +58,7 @@ to emit and parse them (`AGENTS.md` §2.2).
 `from_term` parses an untrusted `TERM` value:
 
 ```rust
-use rustos_termcap::{from_term, ColorDepth, TermType};
+use tairix_termcap::{from_term, ColorDepth, TermType};
 
 fn main() {
     assert_eq!(from_term("xterm-256color"), TermType::Xterm256Color);
@@ -76,7 +76,7 @@ fn main() {
 
 ## Layering and testing
 
-`lib/termcap` depends on `rustos-vt` and `lib/*` only — never on `kernel/*`,
+`lib/termcap` depends on `tairix-vt` and `lib/*` only — never on `kernel/*`,
 `drivers/*`, or `userland/*` (`AGENTS.md` §17.4) — and is text-only
 infrastructure outside `userland/gui/*`, so a headless image links it freely
 (§17.3). It is `no_std` + `alloc`, never panics (§2.9), and never touches fd 3

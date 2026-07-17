@@ -1,4 +1,4 @@
-//! RustOS **shared directory-browser engine** (`plans/APPWIN.md` AW5).
+//! TAIRiX **shared directory-browser engine** (`plans/APPWIN.md` AW5).
 //!
 //! The one navigation **model** plus themed **renderer** every directory
 //! browser in the system composes: the `files.app` bundle's windowed file
@@ -13,13 +13,13 @@
 //!   *before* any state changes, so a refused or failing read leaves the
 //!   browser exactly where it was.
 //! * [`render()`] paints the path bar and the (scrolling) entry list into
-//!   a `lib/raster` [`Surface`](rustos_raster::Surface) using the active
+//!   a `lib/raster` [`Surface`](tairix_raster::Surface) using the active
 //!   theme's palette and the shared `lib/font` face — the same surface the
 //!   compositor places and rounds.
 //!
 //! # No `/proc`, no fabrication
 //!
-//! RustOS has no `/proc` and no `/sys`. The browser shows exactly the
+//! TAIRiX has no `/proc` and no `/sys`. The browser shows exactly the
 //! entries its [`DirectorySource`] returns — it never injects a synthetic
 //! entry — and it makes no permission decision of its own: the check and
 //! the path policy live in the VFS behind the source, under the identity

@@ -8,7 +8,7 @@
 //! notification icon or the clock.
 //!
 //! It is the taskbar counterpart of the window manager's input router, and it
-//! consumes the **same** shared [`rustos_input`] event vocabulary, so the
+//! consumes the **same** shared [`tairix_input`] event vocabulary, so the
 //! desktop routes one event type to both. Like that
 //! router it holds no pixels, tracks the pointer position from motion events,
 //! applies presses at that position, and never panics: a press that misses
@@ -20,8 +20,8 @@
 //! anywhere else dismisses the menu (the standard click-away behaviour)
 //! without also acting on what it landed on — one click does one thing.
 
-use rustos_geometry::{Point, Scale};
-use rustos_input::{InputEvent, PointerButton};
+use tairix_geometry::{Point, Scale};
+use tairix_input::{InputEvent, PointerButton};
 
 use crate::layout::Hit;
 use crate::menu::{MenuAction, MenuEntryId};

@@ -1,4 +1,4 @@
-//! Freeing kernel heap allocator for freestanding RustOS images.
+//! Freeing kernel heap allocator for freestanding TAIRiX images.
 //!
 //! # Why a freeing allocator
 //!

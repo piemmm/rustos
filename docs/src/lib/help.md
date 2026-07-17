@@ -1,6 +1,6 @@
-# `rustos-help` — shared command-help engine
+# `tairix-help` — shared command-help engine
 
-`rustos_help` (`lib/help`) is RustOS's one implementation of command help
+`tairix_help` (`lib/help`) is TAIRiX's one implementation of command help
 (`plans/APPS.md`). Every application bundle may ship a `Help/` tree — the
 internationalised, structured-Markdown command reference that replaced the
 old `Documentation/` entry (`BundleEntry::Help`, [appinfo](../abi/appinfo.md))
@@ -29,7 +29,7 @@ fixed, deterministic chain:
 `load_raw` is the same single walk without the parse: it returns the
 size-bounded raw bytes plus the selection, for a caller that must run the
 parse elsewhere — `man` hands them to the sandboxed
-[`rustos-sandbox`](./sandbox.md) `helpdoc` worker so a foreign bundle's
+[`tairix-sandbox`](./sandbox.md) `helpdoc` worker so a foreign bundle's
 document is never parsed in its own process. `load` is `load_raw` plus
 `HelpDoc::parse`; the walk has one definition.
 
@@ -75,7 +75,7 @@ parser is fuzzed (`fuzz_help`, run by `cargo xtask fuzz`).
   headings, bold code/strong, underlined emphasis, verbatim indented code
   blocks, and width-padded tables honouring the declared column alignment.
 
-Both emit `rustos_vt::Op` sequences (widths from `rustos_curses`), so the
+Both emit `tairix_vt::Op` sequences (widths from `tairix_curses`), so the
 escape vocabulary stays the one `lib/vt` definition and the output prints no
 control bytes. Paging and terminal probing belong to the `man` app; the
 active locale is resolved once by the session/shell and passed in.
@@ -92,7 +92,7 @@ that sequence lives here once rather than per tool:
   served — the caller then prints its own usage banner, so `-h` never fails.
 - `BundleHelp` (the `rt` cargo feature) — the production `HelpSource`: the
   running command app's own `/System/Apps/<word>.app/Help/` tree, read
-  through the `rustos-rt` file wrappers. It adds no authority (every
+  through the `tairix-rt` file wrappers. It adds no authority (every
   per-inode and mount check stays kernel-side) and spells the bundle path
   from the shared `lib/abi` store/suffix constants, so it cannot drift from
   where the image builder plants the documents. Only a freestanding `Run`
@@ -120,6 +120,6 @@ and checks:
   (Chinese and Japanese prose carries no word boundaries a word split can
   find).
 
-The feature is host-only tooling; a RustOS program never links it. The
+The feature is host-only tooling; a TAIRiX program never links it. The
 `help-lint` gate additionally verifies coverage: every command app the
 `AppInfo.toml` discovery walk finds ships an `en-US/<command>.md` document.

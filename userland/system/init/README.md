@@ -1,4 +1,4 @@
-# `rustos-init` — PID 1 service manager
+# `tairix-init` — PID 1 service manager
 
 Stage 6 deliverable (`AGENTS.md` §5.2, §16.2). The first user-space
 process the kernel starts. It owns the lifecycle of every long-running
@@ -37,7 +37,7 @@ aborting independent services. The outcome is a `StartReport`
 
 A service's grant is the intersection of its manifest's requested
 capability set with the authority init itself holds. The request is
-decoded with the single shared decoder `rustos_abi::decode_capability_ids`
+decoded with the single shared decoder `tairix_abi::decode_capability_ids`
 (the same decoder `drvhost` uses — one implementation of the manifest-body
 format, `AGENTS.md` §2.2). A service whose request is not a subset of the
 authority is refused (`CapabilityEscalation`), never silently narrowed.
@@ -81,14 +81,14 @@ Reserved `EventId` range `9000..10000`:
 The package also builds the `init` application bundle's `Run` entry-point
 binary (`src/run.rs`, `AGENTS.md` §16.5) — the program the kernel spawns
 as PID 1 when it reaches user mode (`plans/PI.md` P6c). It is a **pure-Rust**
-program: RustOS is Rust-only (`AGENTS.md` §1), so it links the pure-Rust
-userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`), which
+program: TAIRiX is Rust-only (`AGENTS.md` §1), so it links the pure-Rust
+userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which
 exists solely for programs **not** written in Rust (`AGENTS.md` §16.4).
-`rustos-rt` provides `_start`, the §19.2 stack canary, the panic handler, and
-the syscall wrappers; `rustos_rt::entry!` names the program's `main`. `main`
+`tairix-rt` provides `_start`, the §19.2 stack canary, the panic handler, and
+the syscall wrappers; `tairix_rt::entry!` names the program's `main`. `main`
 parses a compiled-in **startup config** (`src/startup.rs`) and writes its
 first banner line through the `abi-v1` `console_write` syscall
-(`rustos_rt::console_write`, the P6a syscall).
+(`tairix_rt::console_write`, the P6a syscall).
 
 It links **only** the runtime and its own startup-config parser — never the
 orchestrator library above, whose `alloc` + crypto dependency chain has no
@@ -119,15 +119,15 @@ returning a `ConfigError` and starting nothing (`AGENTS.md` §2.9, §5.4.5).
 ## Layering & safety
 
 The orchestrator library is `no_std` (with `alloc`) and depends only on
-`rustos-abi`, `rustos-caps`, and `rustos-log` (all `lib/*`), so a userland
+`tairix-abi`, `tairix-caps`, and `tairix-log` (all `lib/*`), so a userland
 service never links a kernel or driver crate (`AGENTS.md` §17.4). No
 `unsafe`, no `unwrap`/`expect`/`panic!` in production paths
 (`AGENTS.md` §2.9). The `Run` binary is pure safe Rust — it contains **no**
-`unsafe`; the `_start`/trap plumbing lives behind `rustos-rt`'s safe API.
+`unsafe`; the `_start`/trap plumbing lives behind `tairix-rt`'s safe API.
 
 ## Test surface
 
-`cargo test -p rustos-init` (27 unit tests): the 17 orchestrator tests —
+`cargo test -p tairix-init` (27 unit tests): the 17 orchestrator tests —
 dependency-ordered start; fail-closed missing-dependency and cycle paths;
 duplicate registration; the grant as `request ∩ authority`; an escalation
 denial; a spawn failure cascading to transitive dependents; an invalid

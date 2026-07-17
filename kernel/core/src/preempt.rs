@@ -45,8 +45,8 @@
 
 use core::sync::atomic::Ordering;
 
-use rustos_kernel_sched_api::CpuId;
-use rustos_sync::once::OnceCell;
+use tairix_kernel_sched_api::CpuId;
+use tairix_sync::once::OnceCell;
 
 use crate::cpu_state;
 use crate::dispatch_slot::RescheduleAction;
@@ -204,7 +204,7 @@ pub fn preempt_current(cpu: CpuId) -> bool {
     // runs: a runnable competitor to switch to, or interrupt-context work
     // (a device-IRQ deferred wake, a queued foreground signal) waiting for
     // the dispatch loop to drain it. A lone runnable task with nothing
-    // pending is left running — the periodic tick still fired (RustOS
+    // pending is left running — the periodic tick still fired (TAIRiX
     // stays non-tickless under the CFQ policy), but rescheduling to the
     // *same* sole task every quantum has no scheduling effect and only
     // churns the per-dispatch user-address-space switch (and, on an

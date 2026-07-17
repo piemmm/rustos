@@ -1,4 +1,4 @@
-# `rustos-true` — do nothing, successfully
+# `tairix-true` — do nothing, successfully
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/true.app/` so the shell resolves the bare word
@@ -11,7 +11,7 @@ names, falling back to the usage banner when the tree is unavailable.
 
 The crate is `no_std` (no `alloc` in the library), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its only dependency is the
-shared `rustos-help` crate, so it never links a kernel or driver crate.
+shared `tairix-help` crate, so it never links a kernel or driver crate.
 Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
 authorises every path per-inode under the caller's attested identity.

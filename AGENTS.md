@@ -1,7 +1,7 @@
-# AGENTS.md — RustOS Engineering Charter
+# AGENTS.md — TAIRiX Engineering Charter
 
 This document is the **binding contract** for every AI agent (and human contributor)
-who works on RustOS. It is **not advisory**. Any pull request, commit, or generated
+who works on TAIRiX. It is **not advisory**. Any pull request, commit, or generated
 file that violates these rules is to be rejected and reworked.
 
 If a rule is ambiguous, stop and ask. **Do not guess. Do not invent shortcuts.
@@ -11,13 +11,13 @@ Do not "just make it work".**
 
 ## 1. Project Identity
 
-- **Name:** RustOS
-- **Language:** Rust only. **Every line of RustOS is Rust**, and this binds
+- **Name:** TAIRiX
+- **Language:** Rust only. **Every line of TAIRiX is Rust**, and this binds
   every contributor, human or AI. The *only* exception is small, individually
   justified, header-documented and reviewed assembly fragments where the
   architecture *strictly* requires it (CPU bring-up, MMU/TLB/context-switch
   primitives the silicon cannot express in Rust). There are no others.
-  - **Do not write C or C++ as part of RustOS** — no `.c`/`.h`/`.cc`/`.cpp`
+  - **Do not write C or C++ as part of TAIRiX** — no `.c`/`.h`/`.cc`/`.cpp`
     source, header, or build glue is a legitimate deliverable. The C-language
     surface (§9, §16.4) is an outward-facing contract for **third-party**
     developers to call `abi-v1` from *their own* projects, not a licence to
@@ -37,7 +37,7 @@ Do not "just make it work".**
   optional RISC OS-style desktop with a compositing window manager.
   The desktop is a session frontend, not a kernel requirement: a
   headless build must remain a first-class configuration (§17).
-  RustOS must be **secure *and* fast**: security and correctness are the
+  TAIRiX must be **secure *and* fast**: security and correctness are the
   floor (§2.1, §2.5–§2.7), and within that floor execution speed is a
   first-class goal, not an afterthought (§2.16).
 
@@ -141,9 +141,9 @@ These are absolute. They override any local convenience.
       (senior-developer quality). Reinventing a wheel badly is worse than a
       well-chosen, audited dependency.
 13. **No pre-release backwards-compatibility code. Evolve in place.**
-    RustOS has **not shipped a release**, so nothing in this workspace has
+    TAIRiX has **not shipped a release**, so nothing in this workspace has
     anything to be backwards-compatible *with*. There is no prior version,
-    no installed base, and no foreign consumer of a RustOS-native interface.
+    no installed base, and no foreign consumer of a TAIRiX-native interface.
     Therefore:
     - When an interface, type, on-disk format, or protocol is wrong or can
       be made better, **change it in place** and update every caller in the
@@ -159,7 +159,7 @@ These are absolute. They override any local convenience.
     - This does **not** touch reading *foreign* systems' data. Reading an
       ext4 / FAT32 volume (§21) or speaking an existing network protocol
       created elsewhere is interoperability with the outside world, not
-      RustOS self-compatibility, and is governed by its own sections. The
+      TAIRiX self-compatibility, and is governed by its own sections. The
       ban is on carrying *our own* history we do not yet have.
     - If you believe a compatibility seam is genuinely required, you have
       found a design flaw — stop and ask (§15.7), do not paper over it.
@@ -459,7 +459,7 @@ These are absolute. They override any local convenience.
 ## 3. Repository Layout (authoritative)
 
 ```
-rustos/
+tairix/
 ├── AGENTS.md            # This file. Binding.
 ├── PLAN.md              # Staged build plan.
 ├── README.md            # Short orientation only. No tutorials here.
@@ -496,7 +496,7 @@ rustos/
 │   │   ├── aarch64/
 │   │   ├── riscv64/
 │   │   └── wasm32/
-│   └── rustos-kernel/   # The microkernel binary: wires a concrete arch port
+│   └── tairix-kernel/   # The microkernel binary: wires a concrete arch port
 │                        #   to kernel/core (the single §17 selection point).
 │
 ├── drivers/             # Loadable modules. One folder per device class.
@@ -537,7 +537,7 @@ rustos/
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
 │   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime: the
-│   │                    #   export-name-pinned ros_sys_<name> stubs over
+│   │                    #   export-name-pinned tairix_sys_<name> stubs over
 │   │                    #   lib/abi-trap, for NON-Rust programs (§9, §16.4).
 │   ├── abi-trap/        # The single per-arch user->kernel syscall trap
 │   │                    #   carve-out (§1), shared by abi-sys and lib/rt (§2.2).
@@ -643,7 +643,7 @@ rustos/
 │   │                    #   screen — CSI ? 1049 h/l — that restores the primary
 │   │                    #   screen a full-screen program like top covered)
 │   │                    #   rendering the shared lib/vt Op stream onto a 32-bit
-│   │                    #   surface over a retained rustos_vt::Cell grid, so
+│   │                    #   surface over a retained tairix_vt::Cell grid, so
 │   │                    #   every arch port drives its display console through
 │   │                    #   one definition instead of re-deriving it. The two
 │   │                    #   cell grids (primary+alternate) are borrowed &mut
@@ -722,7 +722,7 @@ rustos/
 │   │                    #   root-mount reader share across MBR/GPT on every
 │   │                    #   arch (§2.2, §5.4, §24.4).
 │   ├── path/            # Shared filesystem path-spelling parser: the one
-│   │                    #   definition of how a RustOS path string (a
+│   │                    #   definition of how a TAIRiX path string (a
 │   │                    #   synthetic-view `/path`, an alias shorthand
 │   │                    #   `Alias:/path`, the expanded `alias::Name/path` form,
 │   │                    #   or a relative `path`) is lexed and normalised into a
@@ -751,7 +751,7 @@ rustos/
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
 │   │                    #   Surface (fill_rect, fill_polygon, blit) (§2.2, §17.4).
 │   ├── resref/          # Shared resource-reference parser: the one definition
-│   │                    #   of how a RustOS resource reference
+│   │                    #   of how a TAIRiX resource reference
 │   │                    #   (namespace:selector[@guard][::facet][?params], e.g.
 │   │                    #   sys:random, disk:backup@7K2M, stats:net/wan/rx.pps?
 │   │                    #   window=1s) is lexed and validated into a typed
@@ -876,7 +876,7 @@ rustos/
 │   └── book.toml
 │
 ├── include/             # Generated C development headers for the ABI, so a
-│   └── rustos/          #   non-Rust program (C, …) can call abi-v1. Emitted
+│   └── tairix/          #   non-Rust program (C, …) can call abi-v1. Emitted
 │                        #   from the lib/abi source of truth by
 │                        #   `cargo xtask c-header --write`; verified by
 │                        #   `cargo xtask c-header` in CI. Do not hand-edit.
@@ -909,7 +909,7 @@ rustos/
 │   ├── cc/              # Audited, version-pinned, checksummed C toolchain
 │   │                    #   wrapper (clang + ld.lld) for the CCOMPAT C-ABI
 │   │                    #   end-to-end test. Host-only build glue (§12);
-│   │                    #   RustOS itself stays Rust-only (§1).
+│   │                    #   TAIRiX itself stays Rust-only (§1).
 │   ├── qemu/            # QEMU run scripts.
 │   └── ci/              # CI/build-host orchestration: thin wrappers around
 │                        #   cargo xtask (scheduling, logging, parallel soaks).
@@ -1196,7 +1196,7 @@ an update to this section.
   - Target ABI version (`abi-vN`).
   - Linked syscall interface hashes (refuse to load on mismatch).
 - The ABI is versioned. `abi-v1` becomes immutable **once shipped**; new
-  behaviour then ships as `abi-v2`. **RustOS has not shipped a release, so
+  behaviour then ships as `abi-v2`. **TAIRiX has not shipped a release, so
   `abi-v1` is not frozen yet** — it is still mutable, and changing a `lib/abi`
   type today is allowed (it merely requires regenerating the generated views
   below, which the drift guards enforce). The immutability rule binds from the
@@ -1208,13 +1208,13 @@ an update to this section.
 - **The ABI is callable from non-Rust programs (C, …), and all of `lib/abi`
   is part of that surface** — every type a program exchanges with the kernel
   and system services, not just the syscalls. This is a one-way, outward-facing
-  contract for **third-party** developers, not a reason to write C inside RustOS
+  contract for **third-party** developers, not a reason to write C inside TAIRiX
   (§1). The C view — every public `#[repr(C)]` type, constant, enum
   discriminant, syscall number, error code, capability id, and a prototype per
   syscall — is **generated** from `lib/abi` into `include/` (§3), never
   hand-maintained (§2.2); `cargo xtask c-header --write` regenerates it and
   `cargo xtask c-header` (in `ci`) fails closed on drift. Each syscall is
-  exported as the stable symbol `ros_sys_<name>`, pinned with
+  exported as the stable symbol `tairix_sys_<name>`, pinned with
   `#[export_name = …]` / `#[unsafe(no_mangle)]` (so it is not mangled — `extern
   "C"` fixes only the calling convention). The stub runtime and program startup
   object (crt0) are an OS-provided shared library (§16.4) that only marshals to
@@ -1222,10 +1222,10 @@ an update to this section.
   stays kernel-side (§5.4), and non-Rust binaries obey the `rxe`/`abi-v1`
   hardening invariants (PIE, W^X, CFI tag, §19.2) identically. Staged plan:
   `plans/CCOMPAT.md`.
-- **C-ABI naming prefix (`ros_` / `ROS_`).** The C-visible surface is
-  namespaced: exported symbols are `ros_sys_<name>`, public macros are `ROS_*`
-  (`ROS_E_*` errors, `ROS_CAP_*` capability ids, `ROS_SYS_*` syscall numbers),
-  and `#[repr(C)]` type names are `ros_<snake_case>_t`. This defends C's single
+- **C-ABI naming prefix (`tairix_` / `TAIRIX_`).** The C-visible surface is
+  namespaced: exported symbols are `tairix_sys_<name>`, public macros are `TAIRIX_*`
+  (`TAIRIX_E_*` errors, `TAIRIX_CAP_*` capability ids, `TAIRIX_SYS_*` syscall numbers),
+  and `#[repr(C)]` type names are `tairix_<snake_case>_t`. This defends C's single
   flat symbol namespace against hostile/sloppy third-party code (§16.5), and
   the names freeze on the first release. **The prefix belongs only on the
   C-visible boundary** — exported symbols, public macros, and `#[repr(C)]` type
@@ -1257,7 +1257,7 @@ an update to this section.
   format for every WM/desktop asset (cursors, icons, notification glyphs,
   window chrome, theme decorations), so one asset stays crisp at any DPI/UI
   scale. SVG is never parsed or drawn on the hot compositing path: each asset
-  is rasterised/converted **once** at the active `rustos_geometry::Scale` into
+  is rasterised/converted **once** at the active `tairix_geometry::Scale` into
   the fast-draw form the compositor blits, cached, and re-rendered only when
   the scale or theme changes. There is exactly one rasterisation/blend path
   (`lib/raster`); a second is forbidden (§2.2). SVG is untrusted input: it is
@@ -1269,8 +1269,8 @@ an update to this section.
 - Variable DPI is a first-class, **settable** desktop property. Every desktop
   length — corner radii, border thicknesses, font sizes, taskbar extents,
   window chrome — is authored in *logical* pixels at a fixed reference density
-  (`rustos_geometry::REFERENCE_DPI`) and converted to *physical* pixels through
-  one shared scale factor (`rustos_geometry::Scale`). There is exactly one
+  (`tairix_geometry::REFERENCE_DPI`) and converted to *physical* pixels through
+  one shared scale factor (`tairix_geometry::Scale`). There is exactly one
   logical→physical conversion (`Scale::scale_length`), consumed by the WM,
   taskbar, cursors, and apps, so the arithmetic is never duplicated (§2.2). The
   scale is changeable at runtime; an out-of-range scale is rejected at
@@ -1318,13 +1318,13 @@ an update to this section.
 ## 12. Build and Images
 
 - `cargo xtask build --target <platform>` produces:
-  - `images/rustos-x86_64.iso` (hybrid BIOS/UEFI, USB-writable)
-  - `images/rustos-aarch64-rpi-<profile>.img` (SD-card writable; the
+  - `images/tairix-x86_64.iso` (hybrid BIOS/UEFI, USB-writable)
+  - `images/tairix-aarch64-rpi-<profile>.img` (SD-card writable; the
     `--profile` flag selects `installer` — the shippable form, no user
     accounts — or `debug`, the development form seeded with the
     `root`/`root` test account, which must never ship)
-  - `images/rustos-riscv64.img`
-  - `images/rustos-web/` (static tree for Apache/Nginx, contains `.wasm`,
+  - `images/tairix-riscv64.img`
+  - `images/tairix-web/` (static tree for Apache/Nginx, contains `.wasm`,
     `.html`, `.js` glue, and a service worker)
 - Image builders live in `tools/mkimage`. They are pure Rust; no shelling out
   to `mkfs`, `parted`, `xorriso`, etc., except via `tools/mkimage`'s
@@ -1458,7 +1458,7 @@ You are not exempt from any rule above. In addition:
 10. If you are about to write `// HACK`, `// FIXME later`, `// works for now`,
     or `#[allow(...)]` without a justification comment — **stop**. Rework
     the change.
-11. **Write Rust, never C.** All code you produce for RustOS is Rust (§1).
+11. **Write Rust, never C.** All code you produce for TAIRiX is Rust (§1).
     You **MUST NOT** author C or C++ — no `.c`, `.h`, `.cc`, `.cpp`, or
     other non-Rust source, no hand-written C headers, no C build glue. The
     C-callable ABI (§9, §16.4) is published **for third-party developers**
@@ -1578,7 +1578,7 @@ source repository (the source layout is §3). It is binding.
 
 ### 16.1 Top-level directories
 
-RustOS exposes **exactly four** entries in the default session root
+TAIRiX exposes **exactly four** entries in the default session root
 view. Anything else in that view is a defect.
 
 ```
@@ -1595,7 +1595,7 @@ identity of storage. The canonical identity of a storage root is its root
 ID (`id::<volume-id>/…`) or its alias path (`Alias:/…`), never the `/`
 view path: a process holding the authority to open `Backup:/file` can do
 so even when the `/` view or the `Storage:` catalog is absent, corrupt,
-or deliberately hidden. RustOS storage is a forest of independently
+or deliberately hidden. TAIRiX storage is a forest of independently
 addressable named roots projected into `/` for POSIX-ish convenience —
 `/` is a generated view, not the root of storage. The full model
 (grammar, resolver table, alias policy, capabilities, and lifecycle) is
@@ -1679,7 +1679,7 @@ this section and `PLAN.md`. Subdirectories outside this list are a
 defect.
 
 `/System/Security/MachineId` is the per-installation **machine-id**: the
-RustOS equivalent of `/etc/machine-id`, a stable public per-installation
+TAIRiX equivalent of `/etc/machine-id`, a stable public per-installation
 identifier. It is **not a secret** — unlike the material under `Keys/` it is
 world-readable (owner-writable), so any principal may read it while only the
 system user may rewrite it. It is the single on-disk source of truth for the
@@ -1751,7 +1751,7 @@ The permitted classes are:
   It is part of the OS, so apps dynamically link it like any other
   `/System/Libraries/` library (§10 — text-mode infrastructure).
 - System runtime / C ABI: the minimal libc-equivalent that lets a **non**-Rust
-  program call `abi-v1` (§9) — the `ros_sys_<name>` syscall stubs and the
+  program call `abi-v1` (§9) — the `tairix_sys_<name>` syscall stubs and the
   startup object (crt0). It only marshals to the kernel and starts/stops the
   program; it is **not** a privileged path (every check stays kernel-side,
   §5.4) and third-party native code is treated as hostile (§5, §19). Staged
@@ -1916,7 +1916,7 @@ The OS-provided command apps in the system app store (§16.2) — `ls`, `cat`,
 `cp`, `mv`, `rm`, `ps`, `top`, and the rest of the familiar command set — are
 written to match **GNU coreutils** (and, for the process/system tools, the
 established `procps`/coreutils command surface) as closely as possible. A user
-or script that knows the GNU tool must find the RustOS tool's options and
+or script that knows the GNU tool must find the TAIRiX tool's options and
 output already familiar; the burden of proof is on any *deviation*, not on the
 compatibility.
 
@@ -1932,27 +1932,27 @@ compatibility.
   ordering, quoting, sizes/units, and stderr diagnostic wording track the GNU
   tool closely enough that existing scripts parsing the output keep working.
   Gratuitous cosmetic divergence is a defect.
-- **Where RustOS genuinely differs, it diverges deliberately — and only
-  there.** RustOS is not Linux, so a tool cannot always be byte-identical:
-  it exposes RustOS concepts (the capability set of §5.2, the storage-forest
+- **Where TAIRiX genuinely differs, it diverges deliberately — and only
+  there.** TAIRiX is not Linux, so a tool cannot always be byte-identical:
+  it exposes TAIRiX concepts (the capability set of §5.2, the storage-forest
   path model of §16.1, `Time64` of §21, the System Information API of §16.6
   instead of `/proc`) rather than fabricating a Linux-shaped view (§16.6
   forbids a fake `/proc`). Such a divergence is confined to the concept that
   actually differs; it never becomes an excuse to reshape an option or output
   that *could* have matched coreutils.
-- **RustOS-native surfaces are additive, never a reshaping.** The Standard
+- **TAIRiX-native surfaces are additive, never a reshaping.** The Standard
   Information Stream (`stdinfo`, fd 3, §20) is a first-class part of every
   command app: a tool emits the structured advisory records §20.1 defines on
   fd 3 *in addition to* its coreutils-compatible stdout/stderr, never by
   altering stdout. `stdinfo` is optional and ignorable and must never change
   the primary output, exit status, or pipeline semantics a coreutils user
-  expects (§20.1). New RustOS-only flags a tool needs for a RustOS concept are
+  expects (§20.1). New TAIRiX-only flags a tool needs for a TAIRiX concept are
   added alongside the coreutils set, spelled so they cannot collide with it.
 - **Security and correctness still win.** Coreutils compatibility never
   overrides the charter: a command still capability-checks and fails closed
   (§5.4), never grants ambient authority (§4), and never adds a `setuid`-style
   escalation (§16.3) merely to reproduce a legacy behaviour. Where a genuine
-  conflict exists between bug-for-bug coreutils fidelity and a RustOS security
+  conflict exists between bug-for-bug coreutils fidelity and a TAIRiX security
   or correctness rule, the charter wins and the divergence is documented in
   the tool's `Help/` and its `docs/src/` page (§13); a mere formatting or
   option-naming difference is not such a conflict.
@@ -1966,7 +1966,7 @@ regardless of whether it compiles and its tests pass.
 
 ## 17. Modularity Contracts
 
-RustOS is built so that the scheduler, the architecture backend, and
+TAIRiX is built so that the scheduler, the architecture backend, and
 the desktop can each be replaced or omitted without rewriting the rest
 of the system. This section makes those guarantees binding. They are
 as non-negotiable as §2.
@@ -1996,7 +1996,7 @@ as non-negotiable as §2.
   emulated cores). A scheduler that does not pass the suite cannot
   ship.
 - **Preemption is mandatory on every Tier-1 architecture (§1) — not a
-  per-target option.** RustOS is a preemptive multitasking system on
+  per-target option.** TAIRiX is a preemptive multitasking system on
   `x86_64`, `aarch64`, `riscv64`, and `wasm32` alike: a runnable task
   must never be able to monopolise a CPU by refusing to yield. A
   cooperative-only build, or one where preemption works on some arches
@@ -2048,7 +2048,7 @@ as non-negotiable as §2.
   configuration (§2.1, §2.16, §2.17) — see `PLAN.md` (immediate work).
 - **Tickless (NO_HZ) is mandatory for every policy but the one sanctioned
   exception (CFQ) — no other may use a fixed-frequency periodic timer
-  interrupt.** RustOS is a tickless kernel. Except for the CFQ carve-out
+  interrupt.** TAIRiX is a tickless kernel. Except for the CFQ carve-out
   below, no CPU may be driven by a fixed-frequency periodic timer interrupt
   (a "scheduler tick" / `HZ`): scheduler accounting, preemption (above), and
   timekeeping must none of them depend on a periodic tick. The timer the
@@ -2145,7 +2145,7 @@ as non-negotiable as §2.
 ### 17.3 Optional desktop
 
 - The graphical desktop (`userland/gui/*`) is **always optional**.
-  RustOS must build and run as a fully usable headless system —
+  TAIRiX must build and run as a fully usable headless system —
   text login (§10), shell, networking, services — with every
   `userland/gui/*` crate excluded from the image.
 - **One-way dependency edge.** No crate under `kernel/`, `drivers/`,
@@ -2204,7 +2204,7 @@ kernel internals; they consume `lib/abi` only.
 
 ## 18. Hardware Detection and Driver Autoload
 
-RustOS detects the hardware actually present at boot and autoloads the
+TAIRiX detects the hardware actually present at boot and autoloads the
 matching drivers; it does not ship a hand-maintained, per-image static
 device list. **Neither does it ship a compiled-in list of which drivers
 exist** — the *set* of loadable drivers is discovered at runtime from the
@@ -2314,7 +2314,7 @@ HAL (§17.2), and the headless guarantee (§17.3).
 
 ### 18.6 Bootstrap floor vs. the discovered driver store
 
-The set of drivers RustOS can load is split into exactly two tiers. The
+The set of drivers TAIRiX can load is split into exactly two tiers. The
 boundary between them is a stated invariant, not an accident of what is
 currently compiled in.
 
@@ -2360,7 +2360,7 @@ currently compiled in.
 
 ## 19. Threat Model and Hardening
 
-RustOS's design (§4, §5, §8, §9, §16, §17, §18) already forecloses
+TAIRiX's design (§4, §5, §8, §9, §16, §17, §18) already forecloses
 most of the structural attack classes that have driven CVEs in Linux
 and Windows: ambient root, setuid escalation, kernel-mode driver
 compromise, unsigned-code execution, `/proc`/`/sys`/`/etc` info
@@ -2543,7 +2543,7 @@ prevents false claims:
   pointer with a stale tag.
 - Only the architecture port can drive the silicon (Arm MTE, SPARC ADI, RISC-V
   proposals), so this is a **closed Arch HAL trait set**
-  (`rustos_arch_api::memtag`, alongside §19.1): the `MemoryTagging` per-port
+  (`tairix_arch_api::memtag`, alongside §19.1): the `MemoryTagging` per-port
   handle, the honest `TaggingProfile` (`tag_storage` / `tag_check_faults`, each
   `Supported` / `Unsupported(reason)` / `Pending(note)`), the
   architecture-neutral `MemTag` / `next_free_tag` rotation, and the
@@ -2562,7 +2562,7 @@ prevents false claims:
 
 ## 20. Standard Streams (fd 0/1/2/3)
 
-RustOS programs perform **all** of their text input and output over the
+TAIRiX programs perform **all** of their text input and output over the
 four inherited standard streams, never over a kernel-discovered device.
 The process ABI reserves exactly four standard file descriptors, and they
 are the only text-I/O surface a program is given:
@@ -2611,7 +2611,7 @@ interface and no program links them directly.
 
 ### 20.1 The Standard Information Stream (`stdinfo`, fd 3)
 
-RustOS reserves file descriptor 3 as `stdinfo`: an optional, structured
+TAIRiX reserves file descriptor 3 as `stdinfo`: an optional, structured
 advisory stream for concise human context and AI/tool metadata.
 
 - FD 3 is reserved by the process ABI. No component may repurpose it.
@@ -2686,13 +2686,13 @@ Example: `ls` omits hidden dotfiles from stdout.
 
 ## 21. 64-bit Time and Filesystem Timestamps
 
-RustOS is 64-bit-time-native. No kernel ABI, userland ABI, IPC type,
+TAIRiX is 64-bit-time-native. No kernel ABI, userland ABI, IPC type,
 log format, native filesystem, archive index, or persistent OS metadata
 may store absolute time as 32-bit seconds.
 
 - The canonical time ABI lives in `lib/abi/src/time.rs` as `Time64`
   and `Duration64`: signed 64-bit seconds plus nanoseconds.
-- `Time64` is RustOS's equivalent of Linux's `timespec64`, not
+- `Time64` is TAIRiX's equivalent of Linux's `timespec64`, not
   seconds-only `time64_t`. Seconds-only values may exist internally,
   but not as ABI or persistent absolute-time storage.
 - Do not expose `time_t`, `usize`, `isize`, `u32`, or `i32` as ABI or
@@ -2700,16 +2700,16 @@ may store absolute time as 32-bit seconds.
 - All syscalls, IPC, `sysinfo`, `stdinfo`, logs, scheduler metadata,
   file metadata, and native on-disk formats use `Time64`.
 - ARXFS stores `created`, `modified`, `accessed`, and `changed`
-  timestamps as true `Time64`. Every new RustOS-native filesystem must
+  timestamps as true `Time64`. Every new TAIRiX-native filesystem must
   do the same.
 - Filesystem drivers must preserve the widest timestamp range and
   precision supported by the mounted on-disk format.
-- New ext-family compatibility filesystems created by RustOS must enable
+- New ext-family compatibility filesystems created by TAIRiX must enable
   the widest timestamp encoding supported by that exact format and inode
-  layout. RustOS must not pretend that legacy ext2/ext3 or restricted
+  layout. TAIRiX must not pretend that legacy ext2/ext3 or restricted
   ext4 layouts provide full native `Time64` storage.
 - Older ext2/ext3/ext4 volumes remain supported, but their timestamp
-  limits are compatibility constraints, not RustOS ABI precedent.
+  limits are compatibility constraints, not TAIRiX ABI precedent.
 - Legacy or foreign filesystems such as FAT32 may retain their real
   on-disk timestamp limits. Their drivers must declare range, precision,
   timezone, and representability limits through the filesystem capability
@@ -2727,7 +2727,7 @@ may store absolute time as 32-bit seconds.
 
 ## 22. Kernel Randomness and Random Output Reserve
 
-RustOS has one kernel cryptographic random subsystem. Randomness is
+TAIRiX has one kernel cryptographic random subsystem. Randomness is
 security-critical and lives behind `lib/crypto`; no component may invent
 its own entropy collector, PRNG, UUID generator, nonce generator, or
 random seeding path.
@@ -2867,7 +2867,7 @@ Trace, do not assume. For every entry point the change adds or touches
 
 - **No self-compat (§2.13).** The change has no `v2`-beside-`v1`, no shim, no
   migration path, no "old data" fallback, no compatibility feature flag for a
-  RustOS-native interface. Improvements are made in place, with every caller
+  TAIRiX-native interface. Improvements are made in place, with every caller
   updated in the same change.
 - **No dead code left (§2.14).** Nothing the change supersedes is commented
   out, `_old`-renamed, `#[allow(dead_code)]`-ed, or orphaned. Obsolete files,
@@ -2913,7 +2913,7 @@ change.
 
 ## 24. Resource Limits and Scalability
 
-RustOS must scale with the hardware it runs on. A resource *capacity* — how
+TAIRiX must scale with the hardware it runs on. A resource *capacity* — how
 many tasks, threads, CPUs, open handles, memory regions, or stacks the system
 or a process can use — must never be a hard-wired compile-time constant that
 silently caps a large machine or a busy workload. This section is binding and
@@ -2967,7 +2967,7 @@ constant is a §2.16 defect, not an acceptable default.
 
 - Administrators and users can **impose** limits below the system default,
   per process and per user, through a first-class resource-limit facility — the
-  RustOS equivalent of POSIX `ulimit`/`rlimit`. The shell command is named
+  TAIRiX equivalent of POSIX `ulimit`/`rlimit`. The shell command is named
   `ulimit` (`userland/shell/`), backed by a versioned, capability-checked ABI.
 - The limit ABI lives in `lib/abi` under the same discipline as the syscall
   table (§9) and the System Information API (§16.6): versioned, hashed, and
@@ -3020,7 +3020,7 @@ growable capacity, or a capacity into a frozen ceiling, are both defects.
 
 ## 25. Userland Heap (`lib/rt` global allocator)
 
-First-party Rust userland programs have a heap. `rustos-rt` registers the
+First-party Rust userland programs have a heap. `tairix-rt` registers the
 process `#[global_allocator]` (`lib/rt/src/heap.rs`), so a program that links
 the runtime (§1, §16.4) can use `alloc` — `Box`, `Vec`, `String`, … — with no
 extra setup. This section is binding and documents the one userland heap so no
@@ -3065,7 +3065,7 @@ one writes a second.
 
 ## 26. Operating-Conditions Design Assumptions
 
-RustOS is designed for **real, contended, imperfect hardware under sustained
+TAIRiX is designed for **real, contended, imperfect hardware under sustained
 multi-user load**, never for the quiet single-user laptop a developer happens
 to test on. Every part of the system — kernel subsystem, driver, `lib/*`
 crate, userland service, and every spec/plan — MUST be designed, written, and
@@ -3075,7 +3075,7 @@ non-negotiable as §2: a design that only behaves under ideal conditions
 even when it compiles and its tests pass (§23). This section names the
 conditions; it does not relax any existing rule — it focuses §2.16
 (performance), §4 (memory/OOM), §5.4 (fail closed), §17.1 (scheduling),
-§19 (threat model), and §24 (scalability) onto the workloads RustOS must
+§19 (threat model), and §24 (scalability) onto the workloads TAIRiX must
 actually survive.
 
 These are *design assumptions*, not optional tuning. When the clean design and
@@ -3220,14 +3220,14 @@ rule, stop and ask (§15.7) — never resolve it with a "for now" shortcut
 - **Foreign-format limits are declared, not papered over (§21).** Where an
   ext4 / FAT32 / other foreign volume imposes its own maximum volume, file, or
   offset size, the driver declares those limits through the filesystem
-  capability API and fails closed when a RustOS request exceeds them (§21) —
+  capability API and fails closed when a TAIRiX request exceeds them (§21) —
   it never silently wraps, truncates, or saturates a large size into a foreign
   format's narrower field.
 
 ### 26.7 Many huge drives on a tiny machine — the combined minimum floor
 
 The conditions above are not independent dials a design may satisfy one at a
-time; RustOS MUST satisfy them **simultaneously**. The binding worst-case
+time; TAIRiX MUST satisfy them **simultaneously**. The binding worst-case
 floor every storage and memory design is held to:
 
 - **A machine with as little as 1 GiB of RAM MUST mount and serve *several*

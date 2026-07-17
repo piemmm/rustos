@@ -2,18 +2,18 @@
 //! (`plans/PI.md` P6b).
 //!
 //! This is the program the kernel spawns as PID 1 once it reaches user mode
-//! (`plans/PI.md` P6c). It is a **pure-Rust** program: RustOS is Rust-only, so `init` links the Rust userland runtime
-//! `rustos-rt` — never the C ABI (`crt0` + `abi-sys`), which exists solely
-//! for programs **not** written in Rust. `rustos-rt`
+//! (`plans/PI.md` P6c). It is a **pure-Rust** program: TAIRiX is Rust-only, so `init` links the Rust userland runtime
+//! `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which exists solely
+//! for programs **not** written in Rust. `tairix-rt`
 //! provides `_start`, the per-process stack canary, the
-//! panic handler, and the syscall wrappers; `rustos_rt::entry!` names this
+//! panic handler, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` parses the compiled-in `startup::DEFAULT_CONFIG`, renders the
 //! startup banner from the kernel-attested `boot_facts_get` machine
 //! summary (version, installed memory, architecture, core count), writes
 //! it to its inherited standard output (fd 1) through the shared
-//! `rustos_rt::io` layer over the `abi-v1` `stream_write` syscall
+//! `tairix_rt::io` layer over the `abi-v1` `stream_write` syscall
 //! (`init` binds to the stream, never a device), then **supervises** the
 //! user's sessions: one session program per installed text console
 //! (`console_count` / `spawn_at` — the video console when a display is
@@ -22,7 +22,7 @@
 //! `main`'s return value through the `exit` syscall.
 //!
 //! It links **only** the runtime and its own startup-config parser, never the
-//! sibling `rustos-init` orchestrator library, whose `alloc`-and-crypto
+//! sibling `tairix-init` orchestrator library, whose `alloc`-and-crypto
 //! dependency chain has no place in a banner-printing program. That parser therefore lives alongside it in [`startup`] and is
 //! host-tested there. The binary is built position-independent and converted
 //! to an `rxe` blob by the consuming boot path (`plans/PI.md` P6c). On the
@@ -39,7 +39,7 @@ mod supervisor;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_rt::io::{Stderr, Stdout, Write};
+    use tairix_rt::io::{Stderr, Stdout, Write};
 
     use crate::startup::{render_banner, StartupConfig, BANNER_MAX, DEFAULT_CONFIG, MAX_SERVICES};
     use crate::supervisor::{supervise, Launch, Outcome, Sessions};
@@ -67,7 +67,7 @@ mod program {
     /// streams to, so PID 1 reports the system unusable fail-closed rather than spawning stream-less sessions.
     const EXIT_NO_CONSOLES: i32 = 74;
 
-    /// The production [`Sessions`] backing: the real `rustos-rt` syscall
+    /// The production [`Sessions`] backing: the real `tairix-rt` syscall
     /// wrappers (`console_count`, the console-selecting `spawn_at`, and
     /// wait-any). Zero-sized — PID 1's supervision state lives on `main`'s
     /// stack inside [`supervise`].
@@ -75,7 +75,7 @@ mod program {
 
     impl Sessions for RtSessions {
         fn console_count(&mut self) -> i64 {
-            rustos_rt::console_count()
+            tairix_rt::console_count()
         }
         fn spawn_at(&mut self, path: &[u8], console: u32, uid: u32) -> i64 {
             // Switch the child onto its own service account at creation
@@ -83,10 +83,10 @@ mod program {
             // init's `CAP_SPAWN_AS_USER` and resolves the account's group
             // set and capability ceiling from the boot-installed identity
             // table, failing closed on an unknown uid.
-            rustos_rt::spawn_as(path, u64::from(console), uid)
+            tairix_rt::spawn_as(path, u64::from(console), uid)
         }
         fn wait_any(&mut self, status: &mut i32) -> i64 {
-            rustos_rt::wait_exit(rustos_abi::WAIT_PID_ANY, status)
+            tairix_rt::wait_exit(tairix_abi::WAIT_PID_ANY, status)
         }
         fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64) {
             // One terse line on the inherited diagnostic stream, so a
@@ -101,7 +101,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the startup banner to
@@ -114,7 +114,7 @@ mod program {
     /// `CAP_CONSOLE_WRITE`, an unresolved address space, an unestablished
     /// descriptor, or a closed-fail kernel path). PID 1 cannot usefully proceed
     /// without the console it was spawned to drive, so it parks fail-closed
-    /// off the run queue (`rustos_rt::park_forever`) rather than supervising
+    /// off the run queue (`tairix_rt::park_forever`) rather than supervising
     /// sessions on a console it never reached — a terminal park consuming no
     /// CPU, not a retry loop. Only when even that park is refused does it
     /// fall to the last-resort halt spin: with no console and no wait-set
@@ -129,7 +129,7 @@ mod program {
         // version line (never a fabricated machine shape) and states its
         // reason on the diagnostic stream — fail loud, degrade gracefully;
         // PID 1 boots on either way.
-        let facts = match rustos_rt::boot_facts() {
+        let facts = match tairix_rt::boot_facts() {
             Ok(facts) => Some(facts),
             Err(err) => {
                 let _ = Stderr.write_fmt(format_args!(
@@ -140,14 +140,14 @@ mod program {
         };
         let mut banner_buf = [0u8; BANNER_MAX];
         let banner = render_banner(facts, &mut banner_buf);
-        // The shared `rustos_rt::io` short-write loop, never an init-private
+        // The shared `tairix_rt::io` short-write loop, never an init-private
         // copy (the charter forbids that duplication).
         if Stdout.write_all(banner.as_bytes()).is_err() {
             // Terminal park off the run queue — a spinning halt would peg a
             // core for the life of the system. The spin below runs only when
             // even the park is refused (a doubly-failed boot: no console, no
             // wait-set), where nothing better remains.
-            let _ = rustos_rt::park_forever();
+            let _ = tairix_rt::park_forever();
             loop {
                 core::hint::spin_loop();
             }
@@ -196,13 +196,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // parses the compiled-in default config (and touches the parser's accessors)
 // so a malformed `DEFAULT_CONFIG` is caught by an ordinary `cargo build`,

@@ -2,14 +2,14 @@
 //! integration test.
 //!
 //! The device-agnostic bring-up *and* the netstack ring-pump ping tail
-//! both live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
+//! both live in the shared `tairix-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the bare virtio-net MMIO device id, the spawner registering the
 //! loaded image through the virtio-net `register`, and the boot harness. The
 //! device tail ([`netstack_ping`]) is the same code the riscv64 MMIO and
 //! x86_64 PCI verticals run.
 
-use rustos_drv_network_virtio_net::register as virtio_net_register;
-use rustos_test_virtio_qemu_support::{
+use tairix_drv_network_virtio_net::register as virtio_net_register;
+use tairix_test_virtio_qemu_support::{
     define_mmio_boot_harness_aarch64, netstack_ping, run_virtio_mmio_scenario, FixedSpawner,
     ScenarioConfig, ScenarioTransport,
 };

@@ -9,15 +9,15 @@
 //!
 //! 1. Read the counter frequency from `CNTFRQ_EL0`.
 //! 2. Install a tick callback through the Arch HAL
-//!    `rustos_arch_aarch64::timer_hal::TimerHal` (`rustos_arch_api::Timer`)
+//!    `tairix_arch_aarch64::timer_hal::TimerHal` (`tairix_arch_api::Timer`)
 //!    that counts each generic-timer interrupt; the IRQ path dispatches
 //!    back through the same HAL handle.
 //! 3. Install the EL1 exception vector table
-//!    (`rustos_arch_aarch64::exceptions::init_vectors`) and initialise the
-//!    GICv2 (`rustos_arch_aarch64::gic::init`).
+//!    (`tairix_arch_aarch64::exceptions::init_vectors`) and initialise the
+//!    GICv2 (`tairix_arch_aarch64::gic::init`).
 //! 4. Record the per-quantum interval and enable the GIC PPI
-//!    (`rustos_arch_aarch64::preempt::init_local_preempt` leaves the timer
-//!    **disarmed** — RustOS is tickless), then arm the
+//!    (`tairix_arch_aarch64::preempt::init_local_preempt` leaves the timer
+//!    **disarmed** — TAIRiX is tickless), then arm the
 //!    first **one-shot** (`preempt::arm_oneshot`) and unmask IRQs at the
 //!    PE (`exceptions::enable_irq`).
 //! 5. Spin on `wfi`; the tick callback re-arms the next one-shot
@@ -34,7 +34,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port (the timer path needs no
+//! It links only the `tairix-arch-aarch64` port (the timer path needs no
 //! `kernel/*` subsystem) and supplies its own `kernel_main`. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
 //! feature on the arch crate (fail closed).
@@ -50,13 +50,13 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    use rustos_arch_aarch64::kernel_arch::read_cntfrq;
-    use rustos_arch_aarch64::timer_hal::TimerHal;
-    use rustos_arch_aarch64::{
+    use tairix_arch_aarch64::kernel_arch::read_cntfrq;
+    use tairix_arch_aarch64::timer_hal::TimerHal;
+    use tairix_arch_aarch64::{
         exceptions, gic, handle_panic_via_serial, preempt, qemu_exit, SERIAL_SINK,
     };
-    use rustos_arch_api::{CpuId, Timer};
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_arch_api::{CpuId, Timer};
+    use tairix_log::{log, Event, EventId, Level};
 
     /// Scheduler-tick frequency to drive the timer at.
     const TICK_HZ: u64 = 100;
@@ -77,7 +77,7 @@ mod kernel {
     /// published before IRQs are unmasked so the callback can read it.
     static INTERVAL: AtomicU64 = AtomicU64::new(0);
 
-    /// The scheduler-tick callback the timer IRQ path invokes. RustOS is
+    /// The scheduler-tick callback the timer IRQ path invokes. TAIRiX is
     /// tickless: the one-shot does not auto-reload, so
     /// the callback re-arms the next one-shot itself — standing in for the
     /// scheduler's `set_preemption` on a contended CPU. A real scheduler
@@ -95,12 +95,12 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_timer_preempt_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_timer_preempt_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s`
-    /// trampoline calls (via `rustos_arch_aarch64_main`).
+    /// trampoline calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         log(

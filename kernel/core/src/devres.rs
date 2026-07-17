@@ -35,8 +35,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
-use rustos_abi::{Errno, MsiAllocation};
+use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
+use tairix_abi::{Errno, MsiAllocation};
 
 /// The memory type a mapped device window is given.
 ///
@@ -417,8 +417,8 @@ impl SharedMemFacility for NullSharedMemFacility {
 /// hold — reach the same allocator/direct-map mechanism the `shm_*`
 /// syscalls use. First-wins: the boot path's instances are
 /// interchangeable (they borrow the same shared allocator and direct map).
-static INSTALLED_SHARED_MEM: rustos_sync::OnceCell<&'static (dyn SharedMemFacility + 'static)> =
-    rustos_sync::OnceCell::new();
+static INSTALLED_SHARED_MEM: tairix_sync::OnceCell<&'static (dyn SharedMemFacility + 'static)> =
+    tairix_sync::OnceCell::new();
 
 /// Record the boot-built production shared-memory facility. Idempotent
 /// (first-wins); never called with the inert null.
@@ -642,16 +642,16 @@ mod tests {
         // A linear scan-out surface maps exactly like a plain window (the
         // display service's grant, `plans/DISPLAY.md` D7b): whole window
         // in, escape refused.
-        let mode = rustos_abi::driver::display::DisplayMode {
+        let mode = tairix_abi::driver::display::DisplayMode {
             width_px: 1280,
             height_px: 720,
             stride_bytes: 5120,
-            format: rustos_abi::driver::display::DisplayFormat::Bgra8888,
+            format: tairix_abi::driver::display::DisplayFormat::Bgra8888,
         };
         let fb = HwResource::framebuffer(
             0x4000_0000,
             &mode,
-            rustos_abi::hwtree::FramebufferMemory::WriteCombine,
+            tairix_abi::hwtree::FramebufferMemory::WriteCombine,
         )
         .expect("valid mode");
         assert_eq!(

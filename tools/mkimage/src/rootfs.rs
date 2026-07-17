@@ -1,7 +1,7 @@
 //! `ARXFS` root-partition authoring.
 //!
 //! The root partition is a genuine encrypted `ARXFS` volume laid down by
-//! the real driver (`rustos-drv-fs-arxfs`) and pre-populated with the
+//! the real driver (`tairix-drv-fs-arxfs`) and pre-populated with the
 //! authoritative top-level layout: exactly `/System`, `/Users`, `/Apps`,
 //! and `/Storage`. It is the **writable** volume mounted as `/`, so under
 //! `/System` it carries **only** the writable-state subtree
@@ -25,8 +25,8 @@
 //! the operator (`crate::build_rpi_image`); it is never stored inside the
 //! image.
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
-use rustos_drv_fs_arxfs::{
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use tairix_drv_fs_arxfs::{
     plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
 };
 
@@ -34,7 +34,7 @@ use crate::device::MemBlock;
 use crate::MkimageError;
 
 /// The top-level directories. Exactly these four; any
-/// other top-level name on a RustOS volume is a defect.
+/// other top-level name on a TAIRiX volume is a defect.
 pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 
 /// The full `/System` subtree the **read-only** `ARXFSSystem` volume ships
@@ -45,7 +45,7 @@ pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 /// self-contained bundles — each bundle's signed `AppInfo` + `Run` (composed
 /// by the image pipeline's caller) planted beside its internationalised
 /// `Help/` tree, discovered from the bundle's own on-disk source and planted
-/// from `rustos_syshelp::HELP_FILES`.
+/// from `tairix_syshelp::HELP_FILES`.
 pub const SYSTEM_SUBDIRS: [&str; 13] = [
     "Kernel",
     "Apps",
@@ -85,8 +85,8 @@ pub const USERS_DB_NAME: &str = "Users";
 pub const GROUPS_DB_NAME: &str = "Groups";
 
 /// Name of the per-installation machine-id file under `/System/Security`
-/// (`AGENTS.md` §16.2). Its bytes are the raw [`rustos_abi::MACHINE_ID_LEN`]
-/// machine-id — non-secret per-installation identity (the RustOS equivalent
+/// (`AGENTS.md` §16.2). Its bytes are the raw [`tairix_abi::MACHINE_ID_LEN`]
+/// machine-id — non-secret per-installation identity (the TAIRiX equivalent
 /// of `/etc/machine-id`) that the system log binds its stream-genesis to
 /// (`plans/SYSLOG.md` §7.1). The journal service reads it at startup.
 pub const MACHINE_ID_NAME: &str = "MachineId";
@@ -99,7 +99,7 @@ const MACHINE_ID_MODE: u32 = 0o644;
 
 /// Name of the per-installation log-attestation key file under
 /// `/System/Security/Keys` (`PREREQUISITES.md` P-E). Its bytes are the
-/// [`rustos_log::LogAttestationKey`] on-disk image.
+/// [`tairix_log::LogAttestationKey`] on-disk image.
 pub const LOG_ATTESTATION_KEY_NAME: &str = "LogAttestation";
 
 /// Restrictive mode for the log-attestation key file: owner read/write only
@@ -237,10 +237,10 @@ pub fn build_system_partition(
     // The system app store's bundle data ships on every image through the
     // same planter: each command app's internationalised `Help/` tree,
     // discovered from the bundle's own on-disk `Help/` source
-    // (`rustos_syshelp`) — never a hand-maintained per-bundle list here, so a
+    // (`tairix_syshelp`) — never a hand-maintained per-bundle list here, so a
     // new command app's help ships without editing this file, and image and
     // source cannot drift.
-    for doc in rustos_syshelp::HELP_FILES {
+    for doc in tairix_syshelp::HELP_FILES {
         let components: [&[u8]; 5] = [
             b"Apps",
             doc.bundle.as_bytes(),
@@ -256,7 +256,7 @@ pub fn build_system_partition(
     // its `Help/` tree: read from the bundle's own on-disk `Resources/`
     // source, never a per-bundle list here. The signed `AppInfo` content
     // hash covers them, so a tampered resource fails the load gate closed.
-    for res in rustos_syshelp::RESOURCE_FILES {
+    for res in tairix_syshelp::RESOURCE_FILES {
         let components: [&[u8]; 4] = [
             b"Apps",
             res.bundle.as_bytes(),
@@ -338,7 +338,7 @@ fn write_machine_id_file(
         .map_err(MkimageError::RootPartition)?;
     if written != bytes.len() {
         return Err(MkimageError::RootPartition(
-            rustos_abi::DriverError::DeviceFault,
+            tairix_abi::DriverError::DeviceFault,
         ));
     }
     fs.set_security(file, Security::new(MACHINE_ID_MODE, 0, 0))
@@ -353,7 +353,7 @@ fn write_machine_id_file(
 fn create_system_subdirs(
     fs: &mut ARXFS<MemBlock>,
     system: NodeId,
-    wrap: fn(rustos_abi::DriverError) -> MkimageError,
+    wrap: fn(tairix_abi::DriverError) -> MkimageError,
 ) -> Result<(), MkimageError> {
     for sub in SYSTEM_SUBDIRS {
         let sub_node = fs
@@ -374,7 +374,7 @@ fn create_system_subdirs(
 fn create_security_subdirs(
     fs: &mut ARXFS<MemBlock>,
     security: NodeId,
-    wrap: fn(rustos_abi::DriverError) -> MkimageError,
+    wrap: fn(tairix_abi::DriverError) -> MkimageError,
 ) -> Result<(), MkimageError> {
     for sec in ["Keys", "Policy"] {
         fs.create(security, sec.as_bytes(), NodeKind::Directory)
@@ -389,7 +389,7 @@ fn create_security_subdirs(
 /// two cannot drift in how a security file is laid down.
 fn write_security_file(
     fs: &mut ARXFS<MemBlock>,
-    security: rustos_abi::driver::filesystem::NodeId,
+    security: tairix_abi::driver::filesystem::NodeId,
     name: &str,
     text: &str,
 ) -> Result<(), MkimageError> {
@@ -400,7 +400,7 @@ fn write_security_file(
         .map_err(MkimageError::RootPartition)?;
     if written != text.len() {
         return Err(MkimageError::RootPartition(
-            rustos_abi::DriverError::DeviceFault,
+            tairix_abi::DriverError::DeviceFault,
         ));
     }
     Ok(())
@@ -426,7 +426,7 @@ fn write_key_file(
         .map_err(MkimageError::RootPartition)?;
     if written != bytes.len() {
         return Err(MkimageError::RootPartition(
-            rustos_abi::DriverError::DeviceFault,
+            tairix_abi::DriverError::DeviceFault,
         ));
     }
     // System-user-owned, owner-read/write-only: an ordinary principal cannot
@@ -442,17 +442,17 @@ fn write_key_file(
 mod tests {
     use super::*;
     use crate::device::SECTOR_BYTES;
-    use rustos_abi::DriverError;
+    use tairix_abi::DriverError;
 
     const TEST_SECTORS: u64 = 131_072; // 64 MiB, the production root size.
-    const TEST_KEY: VolumeKey = [0x42; rustos_drv_fs_arxfs::VOLUME_KEY_LEN];
+    const TEST_KEY: VolumeKey = [0x42; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
 
     /// Stand-in database texts: the seeding contract is "the given text is
     /// written verbatim", so the tests only need recognisable bytes (the
-    /// real default set is pinned by `rustos_users::provision`'s own tests
+    /// real default set is pinned by `tairix_users::provision`'s own tests
     /// and by the callers in `crate::lib`).
-    const TEST_USERS: &str = "rustos-users-v1\n# seeded for the test\n";
-    const TEST_GROUPS: &str = "rustos-groups-v1\nwheel:1000\n";
+    const TEST_USERS: &str = "tairix-users-v1\n# seeded for the test\n";
+    const TEST_GROUPS: &str = "tairix-groups-v1\nwheel:1000\n";
 
     /// A debug-shaped home-directory spec: the seeded interactive account's
     /// `/Users/root`, owned by the first user-band uid/gid.
@@ -529,7 +529,7 @@ mod tests {
     fn the_wrong_key_is_refused() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let wrong: VolumeKey = [0x43; rustos_drv_fs_arxfs::VOLUME_KEY_LEN];
+        let wrong: VolumeKey = [0x43; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
         assert_eq!(
             ARXFS::open(dev, &wrong).err(),
             Some(DriverError::PermissionDenied)
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn a_seeded_home_directory_is_account_owned_and_owner_only() {
-        use rustos_abi::driver::filesystem::FilesystemSecurity;
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
 
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
@@ -626,11 +626,11 @@ mod tests {
 
     #[test]
     fn a_seeded_log_attestation_key_is_written_locked_down_and_parses() {
-        use rustos_abi::driver::filesystem::FilesystemSecurity;
-        use rustos_log::{LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN};
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
+        use tairix_log::{LogAttestationKey, LOG_ATTESTATION_KEY_FILE_LEN};
 
         // A debug-shaped key image: a real `LogAttestationKey` on-disk blob.
-        let key_file = LogAttestationKey::from_key([0x5A; rustos_log::LOG_ATTESTATION_KEY_LEN])
+        let key_file = LogAttestationKey::from_key([0x5A; tairix_log::LOG_ATTESTATION_KEY_LEN])
             .to_file_bytes()
             .to_vec();
         let bytes = build_root_partition(
@@ -667,8 +667,8 @@ mod tests {
 
     #[test]
     fn a_seeded_machine_id_is_written_world_readable_and_reads_back() {
-        use rustos_abi::driver::filesystem::FilesystemSecurity;
-        use rustos_abi::MACHINE_ID_LEN;
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
+        use tairix_abi::MACHINE_ID_LEN;
 
         let id = [0xA7u8; MACHINE_ID_LEN];
         let bytes = build_root_partition(

@@ -22,8 +22,8 @@
 //!    proving processor continuation state follows the task rather than
 //!    leaking between task and dispatcher.
 //! 2. **Live scheduler + two kthreads.** It builds a real
-//!    `rustos_kernel_sched_eevdf::Scheduler` over `Aarch64Arch` and spawns
-//!    two kthreads through `rustos_kernel_core::spawn_kthread`. Each
+//!    `tairix_kernel_sched_eevdf::Scheduler` over `Aarch64Arch` and spawns
+//!    two kthreads through `tairix_kernel_core::spawn_kthread`. Each
 //!    kthread body runs on its own kernel stack and calls
 //!    `Yielder::yield_now` `PING_PONGS` times — each yield is a real
 //!    `ContextSwitch::switch` back to the dispatcher — then returns
@@ -41,8 +41,8 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links the `rustos-kernel-core` kthread runtime, the
-//! `rustos-arch-aarch64` port, and the default `rustos-kernel-sched-eevdf`
+//! It links the `tairix-kernel-core` kthread runtime, the
+//! `tairix-arch-aarch64` port, and the default `tairix-kernel-sched-eevdf`
 //! policy directly and supplies its own `kernel_main`, so the runtime is
 //! exercised without the full `kernel_core::kernel_main` init pipeline.
 //! The QEMU-exit shortcut lives in this dedicated bin, never behind a
@@ -64,17 +64,17 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use rustos_arch_aarch64::context_hal::ContextSwitchHal;
-    use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
-    use rustos_arch_aarch64::{
+    use tairix_arch_aarch64::context_hal::ContextSwitchHal;
+    use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
+    use tairix_arch_aarch64::{
         exceptions, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
-    use rustos_arch_api::CpuId;
-    use rustos_fdt::Fdt;
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel_core::spawn_kthread;
-    use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_arch_api::CpuId;
+    use tairix_fdt::Fdt;
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel_core::spawn_kthread;
+    use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+    use tairix_log::{log, Event, EventId, Level};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`): the GICv2 base and the timer frequency are read
@@ -144,7 +144,7 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the core; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_kthread_switch_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_kthread_switch_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -176,7 +176,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         note(TEST_START, "aarch64 kthread-switch test: starting");
@@ -207,8 +207,8 @@ mod kernel {
 
         // Build the live scheduler over the arch port.
         // Per-CPU bookkeeping backing for this single-CPU vertical.
-        static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
-            rustos_arch_aarch64::Aarch64ArchStorage::new();
+        static ARCH_STORAGE: tairix_arch_aarch64::Aarch64ArchStorage<1> =
+            tairix_arch_aarch64::Aarch64ArchStorage::new();
         let arch = Arc::new(Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz));
         let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
             qemu_exit::exit_failure(FAIL_SCHED_NEW);

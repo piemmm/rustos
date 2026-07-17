@@ -1,6 +1,6 @@
 //! C-locale `strtod(3)` scanning.
 //!
-//! RustOS is Rust-only, so the coreutils-compatible tools that promise C
+//! TAIRiX is Rust-only, so the coreutils-compatible tools that promise C
 //! number parsing (`seq`'s operand scan, `printf`'s numeric arguments)
 //! cannot call a C library — they scan through this one engine instead,
 //! so C's grammar (optional whitespace and sign, decimal floats,

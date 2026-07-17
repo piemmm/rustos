@@ -1,6 +1,6 @@
 [package]
-name = "rustos-getcap"
-description = "RustOS `getcap` CLI: report a file's required-capability gate (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+name = "tairix-getcap"
+description = "TAIRiX `getcap` CLI: report a file's required-capability gate (§3 `userland/apps/` — `PLAN.md` Stage 6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,4 +16,4 @@ workspace = true
 # filesystem seam that speaks the frozen `Errno` and `CapabilityId`, so it
 # invents no parallel error set (§2.2) and never links a kernel or driver
 # crate (§17.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

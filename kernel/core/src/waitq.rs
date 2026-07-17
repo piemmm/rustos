@@ -35,9 +35,9 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_kernel_sched_api::{CpuId, TaskId};
-use rustos_sync::once::OnceCell;
-use rustos_sync::SpinLock;
+use tairix_kernel_sched_api::{CpuId, TaskId};
+use tairix_sync::once::OnceCell;
+use tairix_sync::SpinLock;
 
 /// Sentinel deadline meaning "no timeout": a waiter registered with this
 /// value is only ever released by an explicit [`WaitQueue::wake_all`], never
@@ -62,7 +62,7 @@ pub trait WaitQueueArch: Sync {
     fn now_ns(&self) -> u64;
 
     /// Arm (or clear, with `None`) the calling CPU's timed-wake one-shot to
-    /// the nearest pending deadline (`rustos_arch_api::SchedulerArch::set_wakeup`).
+    /// the nearest pending deadline (`tairix_arch_api::SchedulerArch::set_wakeup`).
     fn set_wakeup(&self, deadline_ns: Option<u64>);
 
     /// The scheduler task currently switched in on `cpu`, or [`None`] if no
@@ -115,7 +115,7 @@ pub struct WaitQueue {
     /// preemptive kernel runs in-kernel tasks with device IRQs enabled, so an ISR can fire while a task is inside
     /// [`Self::register`]. [`Self::request_wake`] therefore only sets
     /// this single atomic (it takes no lock and never blocks, exactly
-    /// like `rustos_kernel_irq::IrqTable::fire`); the real
+    /// like `tairix_kernel_irq::IrqTable::fire`); the real
     /// [`Self::wake_all`] — which collects waiter ids under the lock and
     /// then calls the scheduler's `unpark` — runs later at a safe
     /// dispatcher-context point via [`drain_pending_wakes`]. A woken
@@ -459,10 +459,10 @@ pub fn signal_intake_wake(task: TaskId) {
 /// The wait-queue holding `irq_wait` callers (Design D — the user-space
 /// device-driver IRQ path). A task that bound an IRQ line with `irq_bind`
 /// and called `irq_wait` parks here off the run queue (no busy yield) and is woken by [`irq_wake`] the instant the device-IRQ
-/// dispatch path runs [`rustos_kernel_irq::IrqTable::fire`] for *any* line,
+/// dispatch path runs [`tairix_kernel_irq::IrqTable::fire`] for *any* line,
 /// or, with a finite timeout, by the timed [`WaitQueue::sweep`] below. Each
 /// woken waiter re-checks its own bound line's ready flag through
-/// [`rustos_kernel_irq::IrqTable::try_wait_step`] and either returns or
+/// [`tairix_kernel_irq::IrqTable::try_wait_step`] and either returns or
 /// parks again, so a fire for a different line is a harmless spurious wake and the check-then-park race is closed by the
 /// scheduler's wake-pending token (the same interlock `hw_tree_wait` uses).
 pub static IRQ_WAITQ: WaitQueue = WaitQueue::new();
@@ -473,7 +473,7 @@ pub static IRQ_WAITQ: WaitQueue = WaitQueue::new();
 /// spurious wake.
 ///
 /// Called from the production device-IRQ dispatch path immediately after
-/// [`rustos_kernel_irq::IrqTable::fire`] sets the per-line ready flag, so
+/// [`tairix_kernel_irq::IrqTable::fire`] sets the per-line ready flag, so
 /// it is **lock-free**: it only flags the queue
 /// ([`WaitQueue::request_wake`]) and is safe to call from the device-IRQ
 /// dispatcher while a task it interrupted holds the wait-queue or
@@ -482,7 +482,7 @@ pub static IRQ_WAITQ: WaitQueue = WaitQueue::new();
 /// because `fire` masked the line and set `ready` *before* this flag, and
 /// the drain's `unpark` re-readies the waiter that then consumes `ready`.
 ///
-/// [`Ready`]: rustos_kernel_irq::WaitOutcome::Ready
+/// [`Ready`]: tairix_kernel_irq::WaitOutcome::Ready
 pub fn irq_wake() {
     IRQ_WAITQ.request_wake();
 }
@@ -577,7 +577,7 @@ pub fn seat_input_wake() {
 }
 
 /// The wait-queue holding `ipc_call` callers (Design D D2b). A caller parks
-/// here after posting its request to a [`rustos_kernel_ipc::call::CallEndpoint`]
+/// here after posting its request to a [`tairix_kernel_ipc::call::CallEndpoint`]
 /// and is woken by [`call_wake`] when the bound server replies (no busy yield). `ipc_call` carries no timeout, so every waiter
 /// registers with [`NO_DEADLINE`] and is only ever released by an explicit
 /// wake, never the timed [`WaitQueue::sweep`].
@@ -594,7 +594,7 @@ pub static CALL_WAITQ: WaitQueue = WaitQueue::new();
 /// post time, so unrelated parked callers stay parked (wake-one, not a
 /// thundering herd).
 ///
-/// [`CallEndpoint`]: rustos_kernel_ipc::call::CallEndpoint
+/// [`CallEndpoint`]: tairix_kernel_ipc::call::CallEndpoint
 pub fn call_wake() {
     if let Some(arch) = wait_arch() {
         CALL_WAITQ.wake_all(arch);

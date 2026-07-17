@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kernel-core"
-description = "RustOS microkernel core: architecture-neutral entry point, init sequencing, and panic policy."
+name = "tairix-kernel-core"
+description = "TAIRiX microkernel core: architecture-neutral entry point, init sequencing, and panic policy."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,97 +25,97 @@ default = ["scheduler-cfq"]
 # image, pulling in that one concrete `kernel/sched/<impl>` crate. The
 # `compile_error!` guards in `src/sched.rs` enforce the "exactly one"
 # rule. Adding a policy adds a sibling crate and a feature here.
-scheduler-cfq = ["dep:rustos-kernel-sched-cfq"]
-scheduler-eevdf = ["dep:rustos-kernel-sched-eevdf"]
-scheduler-mlfq = ["dep:rustos-kernel-sched-mlfq"]
+scheduler-cfq = ["dep:tairix-kernel-sched-cfq"]
+scheduler-eevdf = ["dep:tairix-kernel-sched-eevdf"]
+scheduler-mlfq = ["dep:tairix-kernel-sched-mlfq"]
 
 # `test-arch` exposes the host-only `TestArch` mock used by the
 # host-side init-order and panic-behaviour tests. It is intentionally
 # not in the default feature set so production (`no_std`) builds never
 # link the mock (`AGENTS.md` §1 — no hacks).
-test-arch = ["rustos-kernel-sched-api/test-arch"]
+test-arch = ["tairix-kernel-sched-api/test-arch"]
 
 [dependencies]
 # Stage 2.6 dependency rules (issue brief): kernel/core may depend on
 # every kernel/* crate that has landed (Stages 2.1–2.5) and on the
 # shared lib/* crates `abi`, `caps`, `crypto`, `log`, `rng`, and `util`
 # (`AGENTS.md` §17.4 — kernel/* may depend on lib/*). Nothing else.
-rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-rustos-log = { path = "../../lib/log", version = "=0.0.0" }
-rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+tairix-log = { path = "../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
 # The shared kernel heap allocator (`AGENTS.md` §2.2): kernel/core hosts the
 # growable-heap wiring (`src/kheap.rs`) that lets the bin's
-# `#[global_allocator]` (a `rustos_kalloc::FreeListAllocator`) draw fresh
+# `#[global_allocator]` (a `tairix_kalloc::FreeListAllocator`) draw fresh
 # physical frames on demand, so the heap is not capped at its bootstrap
 # `.bss` region.
-rustos-kalloc = { path = "../../lib/kalloc", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
+tairix-kalloc = { path = "../../lib/kalloc", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 # The Arch HAL "enter user mode" primitive (`EnterUser`, §17.2) the
 # capability-checked spawn caller (`src/spawn.rs`) reaches through. As the
 # single selection point, kernel/core may depend on the arch surface
 # (`AGENTS.md` §17.4).
-rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
+tairix-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # The scheduler contract (`SchedulerPolicy` + vocabulary) is always
 # present; the concrete policy is feature-selected above (§17.1).
-rustos-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../sched/cfq", version = "=0.0.0", optional = true }
-rustos-kernel-sched-eevdf = { path = "../sched/eevdf", version = "=0.0.0", optional = true }
-rustos-kernel-sched-mlfq = { path = "../sched/mlfq", version = "=0.0.0", optional = true }
-rustos-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
-rustos-util = { path = "../../lib/util", version = "=0.0.0" }
+tairix-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../sched/cfq", version = "=0.0.0", optional = true }
+tairix-kernel-sched-eevdf = { path = "../sched/eevdf", version = "=0.0.0", optional = true }
+tairix-kernel-sched-mlfq = { path = "../sched/mlfq", version = "=0.0.0", optional = true }
+tairix-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../irq", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # The single shared path-spelling parser (`AGENTS.md` §2.2): the `fs_chdir` /
 # `copy_path_in` cwd-relative resolver normalises a caller's path string
 # (relative → absolute, `.`/`..` collapsed, escape blocked) through
-# `rustos_path` rather than a second path normaliser.
-rustos-path = { path = "../../lib/path", version = "=0.0.0" }
+# `tairix_path` rather than a second path normaliser.
+tairix-path = { path = "../../lib/path", version = "=0.0.0" }
 # The single extended-attribute key grammar (`AGENTS.md` §2.2): the secured
 # VFS attribute operations (`src/fs/delegate.rs`) validate every key and
-# resolve its namespace's access class through `rustos_fsmeta` rather than a
+# resolve its namespace's access class through `tairix_fsmeta` rather than a
 # second key parser.
-rustos-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
+tairix-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
 # The single shared resource-reference parser (`AGENTS.md` §2.2): the
 # `resource_open` resolver (`src/resource.rs`) lexes a caller's reference
-# string (`sys:random`, …) through `rustos_resref` rather than a second
+# string (`sys:random`, …) through `tairix_resref` rather than a second
 # reference parser, then resolves the typed value to a resource backing.
-rustos-resref = { path = "../../lib/resref", version = "=0.0.0" }
+tairix-resref = { path = "../../lib/resref", version = "=0.0.0" }
 # The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
 # console read line discipline (`src/console.rs`) echoes line terminators and
-# the erase (rub-out) control through `rustos_vt::control` rather than a second
+# the erase (rub-out) control through `tairix_vt::control` rather than a second
 # definition of those bytes.
-rustos-vt = { path = "../../lib/vt", version = "=0.0.0" }
+tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
 # The single terminal key map (`AGENTS.md` §2.2): the seat registry's text
 # sink (`src/seat.rs`) encodes a decoded `KeyInput` record to the console
-# (tty) bytes a terminal sends through `rustos_keymap::encode_key_input`
+# (tty) bytes a terminal sends through `tairix_keymap::encode_key_input`
 # rather than a second copy of the layout-to-tty mapping (`plans/PI.md` P11).
-rustos-keymap = { path = "../../lib/keymap", version = "=0.0.0" }
+tairix-keymap = { path = "../../lib/keymap", version = "=0.0.0" }
 # The one seat owner/lease/routing state machine (`AGENTS.md` §2.2,
 # `plans/DISPLAY.md`): the kernel seat registry (`src/seat.rs`) hosts
-# `rustos_seat::SeatState` for the owner-checked `display_acquire` /
+# `tairix_seat::SeatState` for the owner-checked `display_acquire` /
 # `display_release` and the owner-gated desktop keyboard drain, never a
 # second definition of the lease rules.
-rustos-seat = { path = "../../lib/seat", version = "=0.0.0" }
-rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
+tairix-seat = { path = "../../lib/seat", version = "=0.0.0" }
+tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # The one shared application-bundle load gate (`AGENTS.md` §16.5): the
 # `spawn` syscall's store-bundle path judges an on-disk `.app` through the
-# same `rustos_appload` pipeline the user-space `appmgr` re-exports, never a
+# same `tairix_appload` pipeline the user-space `appmgr` re-exports, never a
 # second verifier (`AGENTS.md` §2.2).
-rustos-appload = { path = "../../lib/appload", version = "=0.0.0" }
+tairix-appload = { path = "../../lib/appload", version = "=0.0.0" }
 # The audited crypto wrappers (`AGENTS.md` §2.12): the store-bundle spawn
 # path verifies the `AppInfo` Ed25519 signature against the build's embedded
 # app trust anchor and streams the bundle content SHA-256 through
 # `Sha256Stream`.
-rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # The `/System/Security/Users` database format the boot-time root-volume
 # read path (`src/users.rs`) parses and the login path authenticates
 # against (`AGENTS.md` §5.1, `plans/PI.md` P11).
-rustos-users = { path = "../../lib/users", version = "=0.0.0" }
+tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 # The kernel's single cryptographic random subsystem (`AGENTS.md` §22):
-# `KernelState` composes a `rustos_rng::OutputReserve` and the `random_get`
+# `KernelState` composes a `tairix_rng::OutputReserve` and the `random_get`
 # syscall serves bytes from it.
-rustos-rng = { path = "../../lib/rng", version = "=0.0.0" }
+tairix-rng = { path = "../../lib/rng", version = "=0.0.0" }
 # Audited volatile-wipe for the kernel staging buffer `random_get` copies
 # CSPRNG output through on its way to user memory (`AGENTS.md` §22 — zeroed
 # on consumption; §2.12 — never hand-roll the wipe).
@@ -131,16 +131,16 @@ zeroize = { version = "1.8.1", default-features = false }
 # into a forbidden two-policy image by the test scaffolding (`AGENTS.md`
 # §17.1). The normal `cargo test` run still gets `scheduler-cfq` from the
 # package's own default feature set.
-rustos-kernel-core = { path = ".", version = "=0.0.0", default-features = false, features = ["test-arch"] }
+tairix-kernel-core = { path = ".", version = "=0.0.0", default-features = false, features = ["test-arch"] }
 # The per-task address-space registry's host tests (`src/aspace.rs`)
 # exercise `AddressSpaceRegistry` end-to-end through `kernel/mem`'s
 # `HostPageTable` + `SimPhysMap` test doubles, gated behind the
 # `host-tests` feature so production builds never link them
 # (`AGENTS.md` §2.3). The normal `[dependencies]` entry above stays
 # feature-free; dev-dependency features apply only to test builds.
-rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
+tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
 # The host-only signed-bundle composer (`compose_signed_appinfo`): the
 # store-bundle spawn tests sign their fixtures through the same one
 # definition the image build uses, so the kernel verifier and the composer
 # can never drift (`AGENTS.md` §2.2).
-rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = ["app-image"] }
+tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = ["app-image"] }

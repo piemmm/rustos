@@ -51,7 +51,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use core::cell::UnsafeCell;
 
-use rustos_arch_api::CpuId;
+use tairix_arch_api::CpuId;
 
 use crate::apic::{DeliveryMode, Lapic, LapicMmio};
 
@@ -67,7 +67,7 @@ use crate::apic::{DeliveryMode, Lapic, LapicMmio};
 /// 0x8000 sits in the "conventional memory" window QEMU/SeaBIOS/OVMF
 /// leave free for the OS; the multiboot2 memory map (parsed by
 /// [`crate::multiboot2`]) marks it as `Available` on every QEMU
-/// configuration RustOS targets.
+/// configuration TAIRiX targets.
 pub const AP_TRAMPOLINE_PHYS: u64 = 0x8000;
 
 /// Length of the trampoline payload (`_ap_trampoline_end -

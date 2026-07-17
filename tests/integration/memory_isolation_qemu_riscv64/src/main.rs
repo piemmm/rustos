@@ -15,7 +15,7 @@
 //! ## How it asserts it
 //!
 //! Two distinct `AddressSpace`s are constructed from
-//! `rustos_arch_riscv64::paging` (the Stage-3 Sv39 primitives). Each
+//! `tairix_arch_riscv64::paging` (the Stage-3 Sv39 primitives). Each
 //! identity-maps the low 4 GiB with 1 GiB leaves so the kernel's own
 //! code/stack/data and the board's MMIO stay reachable whichever space
 //! is active:
@@ -54,11 +54,11 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use rustos_arch_api::mmu::{AddressSpace as _, PageFlags};
-    use rustos_arch_riscv64::{
+    use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
+    use tairix_arch_riscv64::{
         fault, handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK,
     };
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_log::{log, Event, EventId, Level};
 
     /// Virtual address only the *victim* space maps. Chosen at 64 GiB —
     /// far above the 4 GiB identity window both spaces share — so the
@@ -122,7 +122,7 @@ mod kernel {
     /// Forward to the shared riscv64 panic bridge (parks the hart; the
     /// run then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_memory_isolation_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_memory_isolation_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -161,7 +161,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s`
-    /// trampoline calls (via `rustos_arch_riscv64_main`).
+    /// trampoline calls (via `tairix_arch_riscv64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
         note(
@@ -191,7 +191,7 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_POOL);
         };
         // Install the secret mapping through the Arch HAL MMU surface
-        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the path
+        // (`tairix_arch_api::mmu::AddressSpace::map_page`), the path
         // the architecture-neutral kernel uses, rather than the port's
         // inherent `map_4k` (`plans/WIRING.md` W5b).
         if victim

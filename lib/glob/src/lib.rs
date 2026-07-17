@@ -1,6 +1,6 @@
-//! RustOS shared filename-glob matcher (`lib/glob`).
+//! TAIRiX shared filename-glob matcher (`lib/glob`).
 //!
-//! Several RustOS components need to match a name against a shell-style
+//! Several TAIRiX components need to match a name against a shell-style
 //! wildcard pattern: the shell's filename generation and its interactive
 //! completion first, and later the file browser, `find`-class tooling, and any
 //! other place that resolves a wildcard. That matching is *identical* wherever
@@ -57,7 +57,7 @@
 //! # Example
 //!
 //! ```
-//! use rustos_glob::Pattern;
+//! use tairix_glob::Pattern;
 //!
 //! let pat = Pattern::new("*.rs").expect("valid pattern");
 //! assert!(pat.matches("lib.rs"));

@@ -11,7 +11,7 @@ slice, so a port acquires no new dependency to implement it.
 
 ## The surface
 
-`rustos_arch_api::sidechannel` defines:
+`tairix_arch_api::sidechannel` defines:
 
 - `SideChannelMitigation` — the per-port handle the kernel reaches
   through. It exposes the three per-transition barrier primitives
@@ -40,7 +40,7 @@ and is satisfied at release time, after the burn-down closes the gaps.
 
 ## The conformance vertical
 
-`rustos_arch_api::sidechannel::conformance::run_all` is the §17.2 / §19.1
+`tairix_arch_api::sidechannel::conformance::run_all` is the §17.2 / §19.1
 side-channel acceptance suite. It is portable — it names only the trait —
 and every port runs it against its handle from a host unit test, exactly
 like the `kernel/sched` policy conformance suite. It asserts the profile
@@ -74,7 +74,7 @@ build checks the instructions.
   flush is a justified no-op (those are Intel-specific buffer-sampling
   flaws); KPTI and the MIDR-specific Spectre-v2 sequence are `Pending`.
 - **riscv64** emits a conservative `fence` on each boundary. The in-order
-  cores RustOS targets (QEMU `virt`, SiFive U54/U74) do not speculate
+  cores TAIRiX targets (QEMU `virt`, SiFive U54/U74) do not speculate
   past a fault or a mispredict, so the Meltdown-, MDS-, and Spectre-v2-
   class controls are justified no-ops; the port is release-ready.
 - **wasm32** delegates every microarchitectural defence to the
@@ -105,7 +105,7 @@ sound *cross-CPU* time base on a part that advertises an **Invariant
 TSC** (constant rate across P-/C-/T-states, synchronised across cores);
 without it a scheduler-migrated task could observe time moving
 backwards. The boot path therefore does not silently trust the contract:
-`rustos_arch_x86_64::tsc::detect_invariant_tsc` reads the CPUID
+`tairix_arch_x86_64::tsc::detect_invariant_tsc` reads the CPUID
 Invariant-TSC flag (leaf `0x8000_0007` EDX bit 8) inside the arch crate
 (§17.2), the result is logged on every boot
 (`KERNEL_BOOT_TSC_INVARIANCE`), and the kernel **fails closed**
@@ -122,11 +122,11 @@ Stage 6 process model (the user/kernel boundary and the `CPUID`/MIDR
 feature probes).
 
 The §19.1 constant-time requirement for `lib/crypto`'s secret-handling
-code is **landed**: `rustos_crypto::ct_eq` compares secret byte strings
+code is **landed**: `tairix_crypto::ct_eq` compares secret byte strings
 in content-independent time, and its tests prove the no-early-exit
 property without the wall-clock timing `AGENTS.md` §7 forbids — an
 instrumented iterator asserts that equal, first-byte-differing,
 last-byte-differing, and all-differing inputs all traverse the full
-length. `cargo xtask ci` re-runs the `rustos-crypto` tests under the
+length. `cargo xtask ci` re-runs the `tairix-crypto` tests under the
 release profile (`-C opt-level=3`) so an optimiser-introduced branch
-would fail the gate. See [`rustos-crypto`](../lib/crypto.md).
+would fail the gate. See [`tairix-crypto`](../lib/crypto.md).

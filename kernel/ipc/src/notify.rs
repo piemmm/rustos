@@ -14,11 +14,11 @@
 //! since the previous send). Refused operations fail closed with
 //! [`Errno::PermissionDenied`] + [`AuditEvent::NotifySignalDenied`].
 
-use rustos_abi::Errno;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_log::{Field, Sink};
-use rustos_util::fmt::format_hex_u64;
+use tairix_abi::Errno;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_log::{Field, Sink};
+use tairix_util::fmt::format_hex_u64;
 
 use crate::audit::{record, AuditEvent};
 use crate::loom_compat::{AtomicU32, Ordering};
@@ -73,7 +73,7 @@ impl NotificationChannel {
     /// that property at bind time (so a future task that takes over
     /// the binder role is not retroactively granted authority).
     /// Channels that restrict who may *signal* are privileged and
-    /// require [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] at
+    /// require [`tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED`] at
     /// creation, mirroring [`crate::Port::create`].
     ///
     /// # Errors
@@ -90,14 +90,14 @@ impl NotificationChannel {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "channel",
-            value: rustos_log::FieldValue::Str(format_hex_u64(id, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(id, &mut id_buf)),
         };
         if !required_bind_caps.is_subset_of(creator.effective()) {
             record(audit, AuditEvent::NotifySignalDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
         }
         if !required_send_caps.is_empty()
-            && !creator.has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
+            && !creator.has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
         {
             record(audit, AuditEvent::NotifySignalDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
@@ -133,11 +133,11 @@ impl NotificationChannel {
         let mut recv_buf = [0u8; 16];
         let id_field = Field {
             key: "channel",
-            value: rustos_log::FieldValue::Str(format_hex_u64(self.id, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(self.id, &mut id_buf)),
         };
         let recv_field = Field {
             key: "receiver",
-            value: rustos_log::FieldValue::Str(format_hex_u64(receiver.task().0, &mut recv_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(receiver.task().0, &mut recv_buf)),
         };
         if !self.required_bind_caps.is_subset_of(receiver.effective()) {
             record(
@@ -175,11 +175,11 @@ impl NotificationChannel {
         let mut sender_buf = [0u8; 16];
         let id_field = Field {
             key: "channel",
-            value: rustos_log::FieldValue::Str(format_hex_u64(self.id, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(self.id, &mut id_buf)),
         };
         let sender_field = Field {
             key: "sender",
-            value: rustos_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
         };
         if !self.required_send_caps.is_subset_of(sender.effective()) {
             record(
@@ -231,9 +231,9 @@ impl NotificationChannel {
 mod tests {
     use super::*;
     use crate::audit::RecordingSink;
-    use rustos_abi::CapabilityId;
-    use rustos_kernel_sec::captable::TaskId;
-    use rustos_kernel_sec::identity::UserId;
+    use tairix_abi::CapabilityId;
+    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
         let mut s = CapabilitySet::empty();

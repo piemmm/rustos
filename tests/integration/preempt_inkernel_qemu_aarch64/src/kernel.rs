@@ -7,18 +7,18 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::sync::Arc;
 
-use rustos_arch_aarch64::context_hal::ContextSwitchHal;
-use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
-use rustos_arch_aarch64::preempt::{self, PreemptStorage};
-use rustos_arch_aarch64::{
+use tairix_arch_aarch64::context_hal::ContextSwitchHal;
+use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
+use tairix_arch_aarch64::preempt::{self, PreemptStorage};
+use tairix_arch_aarch64::{
     exceptions, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage,
     SERIAL_SINK,
 };
-use rustos_arch_api::CpuId;
-use rustos_fdt::Fdt;
-use rustos_kernel_core::{reschedule_current, spawn_kthread, RescheduleAction, Yielder};
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-use rustos_log::{log, Event, EventId, Level};
+use tairix_arch_api::CpuId;
+use tairix_fdt::Fdt;
+use tairix_kernel_core::{reschedule_current, spawn_kthread, RescheduleAction, Yielder};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use tairix_log::{log, Event, EventId, Level};
 
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
@@ -27,10 +27,10 @@ include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 const BOOT_CPU: CpuId = 0;
 
 /// Preemption quantum rate (slices/second) — the shared production rate
-/// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ),
+/// [`DEFAULT_PREEMPT_QUANTUM_HZ`](tairix_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ),
 /// a ~10 ms one-shot. The kthread arms one quantum and busy-loops; the tick
 /// fires well within the loop's span on QEMU TCG.
-const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
+const PREEMPT_TICK_HZ: u64 = tairix_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 
 /// Timer ticks the kthread waits to observe before declaring the in-kernel
 /// IRQ-delivery property proven and exiting. One is enough: it proves the
@@ -72,8 +72,8 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: rustos_kalloc::FreeListAllocator = unsafe {
-    rustos_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
+static ALLOCATOR: tairix_kalloc::FreeListAllocator = unsafe {
+    tairix_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
 };
 
 /// Per-CPU preemption backing for the single boot CPU (`PreemptStorage<1>` covers a single-core slice).
@@ -155,7 +155,7 @@ extern "C" fn preempt_dispatch(cpu: CpuId) {
 }
 
 /// Boot entry point — the symbol the arch crate's `boot.s` trampoline calls
-/// (via `rustos_arch_aarch64_main`).
+/// (via `tairix_arch_aarch64_main`).
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if TEST_DRIVEN

@@ -1,13 +1,13 @@
-//! `rustos-abi-sys` — the C-callable `abi-v1` syscall stub runtime.
+//! `tairix-abi-sys` — the C-callable `abi-v1` syscall stub runtime.
 //!
 //! This crate is the implementation behind the generated C header
-//! (`include/rustos/rustos_syscall.h`, produced by `cargo xtask c-header`).
+//! (`include/tairix/tairix_syscall.h`, produced by `cargo xtask c-header`).
 //! It exports one `extern "C"` function per `abi-v1` syscall, named
-//! `ros_sys_<name>` (for example `ros_sys_ipc_send`), each of which marshals
+//! `tairix_sys_<name>` (for example `tairix_sys_ipc_send`), each of which marshals
 //! its arguments into the per-architecture syscall registers, issues the
 //! trap, and returns the kernel's result. A program **not** written in Rust
 //! (C first, then any language with a C FFI) links this runtime to reach the
-//! RustOS kernel.
+//! TAIRiX kernel.
 //!
 //! It is the curated `/System/Libraries/` class *System runtime / C ABI*: deliberately minimal — it marshals to the kernel and
 //! nothing more — and dynamically linked, so one security update covers every
@@ -20,12 +20,12 @@
 //! on the far side of the trap, exactly as for a Rust caller; a C program
 //! reaches no syscall it could not reach in Rust and gains nothing by being C.
 //! Because the kernel re-validates every argument and fails closed, no
-//! argument value passed to a `ros_sys_*` function can cause undefined
+//! argument value passed to a `tairix_sys_*` function can cause undefined
 //! behaviour, so the stubs are safe `extern "C"` functions.
 //!
 //! # Symbol naming
 //!
-//! Each entry point is pinned to the stable symbol `ros_sys_<name>` with
+//! Each entry point is pinned to the stable symbol `tairix_sys_<name>` with
 //! `#[export_name = …]` so the Rust compiler does not mangle it (`extern "C"`
 //! alone fixes only the calling convention, not the symbol name). The Rust
 //! item names are free to be idiomatic; only the exported symbol is frozen.
@@ -35,13 +35,13 @@
 //! An unwind across an `extern "C"` boundary is undefined behaviour, so every
 //! entry point is panic-free: each performs only constant-index array writes
 //! and infallible integer casts before issuing the trap. Errors are reported
-//! as the kernel's `int32_t` `ROS_E_*` codes in the return value, never as a
+//! as the kernel's `int32_t` `TAIRIX_E_*` codes in the return value, never as a
 //! panic.
 //!
 //! # Targets
 //!
-//! The user→kernel trap itself lives once, in `rustos-abi-trap`: this crate only marshals each call into register form
-//! and hands it to [`rustos_abi_trap::raw_syscall`]. The trap instruction is
+//! The user→kernel trap itself lives once, in `tairix-abi-trap`: this crate only marshals each call into register form
+//! and hands it to [`tairix_abi_trap::raw_syscall`]. The trap instruction is
 //! compiled in only for the three native Tier-1 targets (`x86_64`, `aarch64`,
 //! `riscv64`); `wasm32` has no trap instruction and is out of scope for this
 //! runtime (`plans/CCOMPAT.md` §1). On the host the entry points still build
@@ -54,9 +54,9 @@
 
 use core::ffi::c_void;
 
-use rustos_abi::{SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_abi::{SyscallNumber, SYSCALL_MAX_ARGS};
 
-use rustos_abi_trap::raw_syscall;
+use tairix_abi_trap::raw_syscall;
 
 // Syscall numbers, read from the `abi-v1` source of truth so this crate can
 // never disagree with the frozen table.
@@ -182,7 +182,7 @@ const fn i32_arg(value: i32) -> u64 {
     value as i64 as u64
 }
 
-/// Decode the kernel's raw result register as an `Errno`/`int32_t` (`ROS_E_*`)
+/// Decode the kernel's raw result register as an `Errno`/`int32_t` (`TAIRIX_E_*`)
 /// return value: the low 32 bits reinterpreted as a signed 32-bit code.
 #[inline]
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // The low 32 bits ARE the int32_t result; taking them is the documented convention.
@@ -199,7 +199,7 @@ const fn ret_u32(raw: u64) -> u32 {
 }
 
 /// `yield`: yield the calling thread (`SyscallNumber::YIELD`).
-#[export_name = "ros_sys_yield"]
+#[export_name = "tairix_sys_yield"]
 pub extern "C" fn sys_yield() {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
     // the call on the far side of the trap; `yield` takes no arguments and
@@ -215,7 +215,7 @@ pub extern "C" fn sys_yield() {
 /// `exit`; should it nonetheless do so, the stub must not return to its C
 /// caller (which has no continuation), so it re-issues `exit`. This is a
 /// fail-closed loop over the terminating syscall, not a busy-wait.
-#[export_name = "ros_sys_exit"]
+#[export_name = "tairix_sys_exit"]
 pub extern "C" fn sys_exit(code: i32) -> ! {
     loop {
         // SAFETY: see `sys_yield`. `exit` consumes the exit code in arg 0.
@@ -226,9 +226,9 @@ pub extern "C" fn sys_exit(code: i32) -> ! {
 }
 
 /// `ipc_send`: send `len` bytes at `buf` to endpoint `endpoint`
-/// (`SyscallNumber::IPC_SEND`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::IPC_SEND`). Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_ipc_send"]
+#[export_name = "tairix_sys_ipc_send"]
 pub extern "C" fn sys_ipc_send(endpoint: u64, buf: *mut c_void, len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates `(buf, len)` against the
     // caller's address space before touching it.
@@ -243,14 +243,14 @@ pub extern "C" fn sys_ipc_send(endpoint: u64, buf: *mut c_void, len: usize) -> i
 /// `ipc_recv`: receive the oldest delivered message from the port
 /// `endpoint` this task bound (`SyscallNumber::IPC_RECV`): up to `len`
 /// payload bytes are copied into `buf` and the sender's kernel-attested
-/// origin record (exactly `ROS_ORIGIN_WIRE_LEN` bytes, snapshotted at
+/// origin record (exactly `TAIRIX_ORIGIN_WIRE_LEN` bytes, snapshotted at
 /// send time — never the sender's claim) into `sender_out`, so the
 /// receiver authenticates each message's principal. Returns the payload
-/// length, or a negative `ROS_E_*` code reinterpreted into the result
-/// (the `ros_sys_stream_read` convention). Only the port's owner may
-/// receive; an empty mailbox is the retryable `ROS_E_WOULD_BLOCK`.
+/// length, or a negative `TAIRIX_E_*` code reinterpreted into the result
+/// (the `tairix_sys_stream_read` convention). Only the port's owner may
+/// receive; an empty mailbox is the retryable `TAIRIX_E_WOULD_BLOCK`.
 #[must_use]
-#[export_name = "ros_sys_ipc_recv"]
+#[export_name = "tairix_sys_ipc_recv"]
 pub extern "C" fn sys_ipc_recv(
     endpoint: u64,
     buf: *mut c_void,
@@ -277,13 +277,13 @@ pub extern "C" fn sys_ipc_recv(
 
 /// `port_bind`: bind an asynchronous IPC message port owned by the
 /// calling task (`SyscallNumber::PORT_BIND`) — the receive half of
-/// `ros_sys_ipc_send`/`ros_sys_ipc_recv`. `max_payload` and `capacity`
+/// `tairix_sys_ipc_send`/`tairix_sys_ipc_recv`. `max_payload` and `capacity`
 /// are fail-closed bounds the kernel re-checks; a reserved well-known id
-/// requires `ROS_CAP_IPC_BIND_PRIVILEGED`, and an id already bound is
+/// requires `TAIRIX_CAP_IPC_BIND_PRIVILEGED`, and an id already bound is
 /// refused. The port is torn down when its owner exits. Returns a
-/// `ROS_E_*` code.
+/// `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_port_bind"]
+#[export_name = "tairix_sys_port_bind"]
 pub extern "C" fn sys_port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; every
     // argument is a plain scalar the kernel validates.
@@ -298,7 +298,7 @@ pub extern "C" fn sys_port_bind(endpoint: u64, max_payload: usize, capacity: usi
 /// `cap_query`: report whether the caller holds capability `cap`
 /// (`SyscallNumber::CAP_QUERY`). Returns `1` if held, `0` otherwise.
 #[must_use]
-#[export_name = "ros_sys_cap_query"]
+#[export_name = "tairix_sys_cap_query"]
 pub extern "C" fn sys_cap_query(cap: u16) -> u32 {
     // SAFETY: see `sys_yield`.
     unsafe { ret_u32(raw_syscall(NUM_CAP_QUERY, [u64::from(cap), 0, 0, 0, 0, 0])) }
@@ -306,9 +306,9 @@ pub extern "C" fn sys_cap_query(cap: u16) -> u32 {
 
 /// `cap_delegate`: delegate a (necessarily narrower) capability set described
 /// at `request` to the task named by `handle` (`SyscallNumber::CAP_DELEGATE`).
-/// Returns a `ROS_E_*` code.
+/// Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_cap_delegate"]
+#[export_name = "tairix_sys_cap_delegate"]
 pub extern "C" fn sys_cap_delegate(handle: u64, request: *mut c_void) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `request`.
     unsafe {
@@ -320,9 +320,9 @@ pub extern "C" fn sys_cap_delegate(handle: u64, request: *mut c_void) -> i32 {
 }
 
 /// `cap_revoke`: revoke capability `cap` previously delegated via `handle`
-/// (`SyscallNumber::CAP_REVOKE`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::CAP_REVOKE`). Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_cap_revoke"]
+#[export_name = "tairix_sys_cap_revoke"]
 pub extern "C" fn sys_cap_revoke(handle: u64, cap: u16) -> i32 {
     // SAFETY: see `sys_yield`.
     unsafe {
@@ -336,7 +336,7 @@ pub extern "C" fn sys_cap_revoke(handle: u64, cap: u16) -> i32 {
 /// `clock_get`: read the monotonic clock (`SyscallNumber::CLOCK_GET`).
 /// Returns the raw 64-bit clock value.
 #[must_use]
-#[export_name = "ros_sys_clock_get"]
+#[export_name = "tairix_sys_clock_get"]
 pub extern "C" fn sys_clock_get() -> u64 {
     // SAFETY: see `sys_yield`.
     unsafe { raw_syscall(NUM_CLOCK_GET, NO_ARGS) }
@@ -345,16 +345,16 @@ pub extern "C" fn sys_clock_get() -> u64 {
 /// `irq_bind`: bind the calling task to hardware interrupt `line`
 /// (`SyscallNumber::IRQ_BIND`). Returns the opaque 64-bit `IrqHandle`.
 #[must_use]
-#[export_name = "ros_sys_irq_bind"]
+#[export_name = "tairix_sys_irq_bind"]
 pub extern "C" fn sys_irq_bind(line: u32) -> u64 {
     // SAFETY: see `sys_yield`.
     unsafe { raw_syscall(NUM_IRQ_BIND, [u64::from(line), 0, 0, 0, 0, 0]) }
 }
 
 /// `irq_wait`: wait up to `timeout_ns` nanoseconds for the interrupt bound to
-/// `handle` (`SyscallNumber::IRQ_WAIT`). Returns a `ROS_E_*` code.
+/// `handle` (`SyscallNumber::IRQ_WAIT`). Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_irq_wait"]
+#[export_name = "tairix_sys_irq_wait"]
 pub extern "C" fn sys_irq_wait(handle: u64, timeout_ns: u64) -> i32 {
     // SAFETY: see `sys_yield`.
     unsafe { ret_i32(raw_syscall(NUM_IRQ_WAIT, [handle, timeout_ns, 0, 0, 0, 0])) }
@@ -363,7 +363,7 @@ pub extern "C" fn sys_irq_wait(handle: u64, timeout_ns: u64) -> i32 {
 /// `random_get`: fill `len` bytes at `buf` with random bytes, honouring
 /// `flags` (`SyscallNumber::RANDOM_GET`). Returns the number of bytes written.
 #[must_use]
-#[export_name = "ros_sys_random_get"]
+#[export_name = "tairix_sys_random_get"]
 pub extern "C" fn sys_random_get(buf: *mut c_void, len: usize, flags: u32) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
     unsafe {
@@ -383,7 +383,7 @@ pub extern "C" fn sys_random_get(buf: *mut c_void, len: usize, flags: u32) -> u6
 /// address space before touching it. A short write (fewer
 /// than `len`) is valid, so the caller loops.
 #[must_use]
-#[export_name = "ros_sys_stream_write"]
+#[export_name = "tairix_sys_stream_write"]
 pub extern "C" fn sys_stream_write(fd: u32, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
     unsafe {
@@ -404,9 +404,9 @@ pub extern "C" fn sys_stream_write(fd: u32, buf: *mut c_void, len: usize) -> u64
 /// zero when no input is pending) is valid, so the caller loops.
 /// `timeout_ns` bounds how long a read with no pending input may wait:
 /// `0` waits indefinitely, and a non-zero bound fails with
-/// `ROS_E_TIMED_OUT` once it elapses with no input.
+/// `TAIRIX_E_TIMED_OUT` once it elapses with no input.
 #[must_use]
-#[export_name = "ros_sys_stream_read"]
+#[export_name = "tairix_sys_stream_read"]
 pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize, timeout_ns: u64) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
     unsafe {
@@ -419,7 +419,7 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize, timeout
 
 /// `spawn`: spawn a new process from the embedded program named by the
 /// absolute path `(path, path_len)` (`SyscallNumber::SPAWN`). Returns the
-/// new process's PID, or a `ROS_E_*` code reinterpreted into the result.
+/// new process's PID, or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// Requires `CAP_PROC_SPAWN`; the kernel validates the capability and the
 /// `(path, path_len)` pair against the caller's address space before
@@ -429,18 +429,18 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize, timeout
 ///
 /// `(attach, attach_len)` optionally carry the child's *attach block*: a
 /// non-null `attach` names an encoded `SpawnAttach` block (`plans/SPAWN.md`
-/// SP10) selecting the child's credential (`ROS_SPAWN_UID_INHERIT` keeps
-/// the caller's own; a concrete uid requires `ROS_CAP_SPAWN_AS_USER` —
+/// SP10) selecting the child's credential (`TAIRIX_SPAWN_UID_INHERIT` keeps
+/// the caller's own; a concrete uid requires `TAIRIX_CAP_SPAWN_AS_USER` —
 /// there is no setuid-self), the console its base descriptor table comes
-/// from (`ROS_CONSOLE_INHERIT` keeps the caller's own table; any other
-/// value names an installed console index, see `ros_sys_console_count`),
+/// from (`TAIRIX_CONSOLE_INHERIT` keeps the caller's own table; any other
+/// value names an installed console index, see `tairix_sys_console_count`),
 /// and one wire per standard descriptor — wiring the child's fd 0/1/2/3
 /// onto pre-opened files, resources, or pipe ends of the caller's own open
 /// table, each owner-checked fail-closed. Pass NULL and `0` for "no
 /// block": full inherit (the caller's own credential and table).
 ///
 /// `(strings, strings_len)` optionally carry the child's startup strings: a
-/// non-null `strings` names an encoded `ros_process_start_*` startup-vector
+/// non-null `strings` names an encoded `tairix_process_start_*` startup-vector
 /// block (the `PSV1` format) holding the argument vector and environment the
 /// caller chose for the child. The kernel bounds, stages, and parses the
 /// block fail-closed; the strings are data and grant nothing, and the kernel
@@ -448,7 +448,7 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize, timeout
 /// and `0` for "no block": the child then receives the program's registered
 /// default arguments and an empty environment.
 #[must_use]
-#[export_name = "ros_sys_spawn"]
+#[export_name = "tairix_sys_spawn"]
 pub extern "C" fn sys_spawn(
     path: *mut c_void,
     path_len: usize,
@@ -480,19 +480,19 @@ pub extern "C" fn sys_spawn(
 /// byte stream — and write its two new descriptors through `out` (the read
 /// end first, then the write end, two `uint32_t`s)
 /// (`SyscallNumber::PIPE_CREATE`, `plans/SPAWN.md` SP10). Returns a
-/// `ROS_E_*` code.
+/// `TAIRIX_E_*` code.
 ///
 /// Unprivileged: both descriptors land in the caller's own open table (the
-/// same number space `ros_sys_fs_open` allocates from) and are read,
-/// written, and closed through `ros_sys_fs_read` / `ros_sys_fs_write` /
-/// `ros_sys_fs_close` (a pipe ignores the file offset). A read on an empty
+/// same number space `tairix_sys_fs_open` allocates from) and are read,
+/// written, and closed through `tairix_sys_fs_read` / `tairix_sys_fs_write` /
+/// `tairix_sys_fs_close` (a pipe ignores the file offset). A read on an empty
 /// pipe blocks until bytes arrive or every write end is closed (then
 /// end-of-stream, `0`); a write to a full pipe blocks until space frees,
-/// and a write with no reader left fails closed with `ROS_E_BROKEN_PIPE`.
+/// and a write with no reader left fails closed with `TAIRIX_E_BROKEN_PIPE`.
 /// An end is handed to a child by naming its descriptor in the spawn
-/// attach block (`ros_sys_spawn`).
+/// attach block (`tairix_sys_spawn`).
 #[must_use]
-#[export_name = "ros_sys_pipe_create"]
+#[export_name = "tairix_sys_pipe_create"]
 pub extern "C" fn sys_pipe_create(out: *mut c_void) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `out` against the
     // caller's address space before writing the two descriptors.
@@ -501,14 +501,14 @@ pub extern "C" fn sys_pipe_create(out: *mut c_void) -> i32 {
 
 /// `console_count`: report how many system text consoles are installed
 /// (`SyscallNumber::CONSOLE_COUNT`). Returns the count,
-/// or a `ROS_E_*` code reinterpreted into the result.
+/// or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
-/// Gated kernel-side on `ROS_CAP_CONSOLE_WRITE`. The count is the index
-/// space `ros_sys_spawn`'s `console` argument selects from — each entry
+/// Gated kernel-side on `TAIRIX_CAP_CONSOLE_WRITE`. The count is the index
+/// space `tairix_sys_spawn`'s `console` argument selects from — each entry
 /// is an independent text console with its own session context
 /// (`plans/PI.md` P11).
 #[must_use]
-#[export_name = "ros_sys_console_count"]
+#[export_name = "tairix_sys_console_count"]
 pub extern "C" fn sys_console_count() -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here.
     unsafe { raw_syscall(NUM_CONSOLE_COUNT, [0, 0, 0, 0, 0, 0]) }
@@ -516,19 +516,19 @@ pub extern "C" fn sys_console_count() -> u64 {
 
 /// `stream_input_mode`: set the console read line discipline of the input
 /// stream `fd` (`SyscallNumber::STREAM_INPUT_MODE`). `mode` is a
-/// `ros_input_mode_t` discriminant: `1` (cooked — echo on, the interactive
+/// `tairix_input_mode_t` discriminant: `1` (cooked — echo on, the interactive
 /// default), `2` (secret — echo off, the activity indicator shown instead),
 /// or `3` (raw — echo off, nothing drawn; a full-screen program paints its
 /// own display). The reserved `0` and every unknown value fail closed.
-/// Returns a `ROS_E_*` code.
+/// Returns a `TAIRIX_E_*` code.
 ///
-/// Gated kernel-side on `ROS_CAP_CONSOLE_READ`; the kernel performs the
+/// Gated kernel-side on `TAIRIX_CAP_CONSOLE_READ`; the kernel performs the
 /// echo/indicator itself as part of the read line discipline, so no
-/// `ROS_CAP_CONSOLE_WRITE` is needed. A program that changes the mode
+/// `TAIRIX_CAP_CONSOLE_WRITE` is needed. A program that changes the mode
 /// restores cooked before it exits, so the next program on the console sees
 /// the interactive default.
 #[must_use]
-#[export_name = "ros_sys_stream_input_mode"]
+#[export_name = "tairix_sys_stream_input_mode"]
 pub extern "C" fn sys_stream_input_mode(fd: u32, mode: u32) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here.
     unsafe {
@@ -540,21 +540,21 @@ pub extern "C" fn sys_stream_input_mode(fd: u32, mode: u32) -> i32 {
 }
 
 /// `key_inject`: inject one decoded keyboard key edge at `buf` (a
-/// `ros_key_input_t` record of `len` bytes) for seat `seat` into the kernel
+/// `tairix_key_input_t` record of `len` bytes) for seat `seat` into the kernel
 /// input-focus arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md`
 /// P11 — input follows the surface owner). Returns the number of bytes
-/// consumed, or a `ROS_E_*` code reinterpreted into the result.
+/// consumed, or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// The producer-side call a keyboard-input driver issues after decoding a
 /// directly attached keyboard into a key edge; `seat` names the seat the
 /// keyboard belongs to (`0` for the boot seat) and an unknown id is
-/// refused with `ROS_E_NOT_FOUND`. Gated kernel-side on
-/// `ROS_CAP_INPUT_INJECT`; the kernel validates the capability and the
+/// refused with `TAIRIX_E_NOT_FOUND`. Gated kernel-side on
+/// `TAIRIX_CAP_INPUT_INJECT`; the kernel validates the capability and the
 /// `(buf, len)` pair against the caller's address space before reading it, decodes the record fail-closed, and routes it by who
 /// currently holds that seat — the driver no longer chooses the encoding
 /// or the destination.
 #[must_use]
-#[export_name = "ros_sys_key_inject"]
+#[export_name = "tairix_sys_key_inject"]
 pub extern "C" fn sys_key_inject(seat: u64, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`,
     // the seat id, and the `(buf, len)` pair against the caller's address
@@ -566,7 +566,7 @@ pub extern "C" fn sys_key_inject(seat: u64, buf: *mut c_void, len: usize) -> u64
 /// its keyboard — as an exclusive, owner-tracked lease
 /// (`SyscallNumber::DISPLAY_ACQUIRE`, `plans/DISPLAY.md`). Returns the
 /// minted lease's generation (`>= 1`) when non-negative, else a negative
-/// `ROS_E_*` code.
+/// `TAIRIX_E_*` code.
 ///
 /// The compositing window manager calls this when it takes over a screen
 /// (`0` for the boot seat; further seats are minted per discovered display
@@ -576,13 +576,13 @@ pub extern "C" fn sys_key_inject(seat: u64, buf: *mut c_void, len: usize) -> u64
 /// lease handle — the present right is derived from it, so a stale
 /// pre-revoke handle can never be mistaken for the live grant
 /// (`plans/DISPLAY.md` D4). An unknown seat id is refused with
-/// `ROS_E_NOT_FOUND`, a seat held by another task refuses the claim
-/// (`ROS_E_SEAT_BUSY` — ownership is never displaced), and a repeat acquire
-/// by the holder is refused (`ROS_E_ALREADY_EXISTS`). Gated kernel-side on
-/// `ROS_CAP_DISPLAY` (owning a seat is privileged).
+/// `TAIRIX_E_NOT_FOUND`, a seat held by another task refuses the claim
+/// (`TAIRIX_E_SEAT_BUSY` — ownership is never displaced), and a repeat acquire
+/// by the holder is refused (`TAIRIX_E_ALREADY_EXISTS`). Gated kernel-side on
+/// `TAIRIX_CAP_DISPLAY` (owning a seat is privileged).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 generation-or-errno encoding (generation >= 1, else -errno).
-#[export_name = "ros_sys_display_acquire"]
+#[export_name = "tairix_sys_display_acquire"]
 pub extern "C" fn sys_display_acquire(seat: u64) -> i64 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_DISPLAY` before touching any state.
@@ -591,17 +591,17 @@ pub extern "C" fn sys_display_acquire(seat: u64) -> i64 {
 }
 
 /// `display_release`: release seat `seat` and return its keyboard input to
-/// the text console (`SyscallNumber::DISPLAY_RELEASE`, `plans/DISPLAY.md`). Returns a `ROS_E_*` code (`0` on
+/// the text console (`SyscallNumber::DISPLAY_RELEASE`, `plans/DISPLAY.md`). Returns a `TAIRIX_E_*` code (`0` on
 /// success).
 ///
 /// The inverse of [`sys_display_acquire`]; gated kernel-side on
-/// `ROS_CAP_DISPLAY` and owner-checked: an unknown seat id is refused with
-/// `ROS_E_NOT_FOUND` and a caller that does not hold the seat is refused
-/// (`ROS_E_SEAT_NOT_OWNER`; `ROS_E_SEAT_REVOKED` once, after an
+/// `TAIRIX_CAP_DISPLAY` and owner-checked: an unknown seat id is refused with
+/// `TAIRIX_E_NOT_FOUND` and a caller that does not hold the seat is refused
+/// (`TAIRIX_E_SEAT_NOT_OWNER`; `TAIRIX_E_SEAT_REVOKED` once, after an
 /// administrative eviction) rather than flipping the seat out from under
 /// its owner.
 #[must_use]
-#[export_name = "ros_sys_display_release"]
+#[export_name = "tairix_sys_display_release"]
 pub extern "C" fn sys_display_release(seat: u64) -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_DISPLAY` before touching any state.
@@ -611,15 +611,15 @@ pub extern "C" fn sys_display_release(seat: u64) -> i32 {
 /// `seat_switch`: switch a seat's foreground session — retarget which
 /// installed text console an unowned seat's input drains to
 /// (`SyscallNumber::SEAT_SWITCH`, `plans/DISPLAY.md` D3). Returns a
-/// `ROS_E_*` code (`0` on success).
+/// `TAIRIX_E_*` code (`0` on success).
 ///
 /// The seat manager calls this to move the foreground across sessions —
-/// the `chvt` analogue. Gated kernel-side on `ROS_CAP_SEAT_ADMIN` (the
+/// the `chvt` analogue. Gated kernel-side on `TAIRIX_CAP_SEAT_ADMIN` (the
 /// seat-multiplexing authority); an unknown seat id or console index is
-/// refused with `ROS_E_NOT_FOUND` before any state changes, and every
+/// refused with `TAIRIX_E_NOT_FOUND` before any state changes, and every
 /// switch is audit-logged.
 #[must_use]
-#[export_name = "ros_sys_seat_switch"]
+#[export_name = "tairix_sys_seat_switch"]
 pub extern "C" fn sys_seat_switch(seat_id: u64, console: u32) -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_SEAT_ADMIN` and both indices before touching state.
@@ -633,15 +633,15 @@ pub extern "C" fn sys_seat_switch(seat_id: u64, console: u32) -> i32 {
 
 /// `seat_revoke`: forcibly revoke a seat's current lease — evict a wedged
 /// or switched-away owner (`SyscallNumber::SEAT_REVOKE`,
-/// `plans/DISPLAY.md` D3). Returns a `ROS_E_*` code (`0` on success).
+/// `plans/DISPLAY.md` D3). Returns a `TAIRIX_E_*` code (`0` on success).
 ///
-/// Gated kernel-side on `ROS_CAP_SEAT_ADMIN`. An unknown seat is refused
-/// with `ROS_E_NOT_FOUND`, an unowned seat with `ROS_E_SEAT_NOT_OWNER`
+/// Gated kernel-side on `TAIRIX_CAP_SEAT_ADMIN`. An unknown seat is refused
+/// with `TAIRIX_E_NOT_FOUND`, an unowned seat with `TAIRIX_E_SEAT_NOT_OWNER`
 /// (there is no lease to revoke), and every eviction is audit-logged with
 /// the evicted owner's task id. The evicted owner's next owner-gated call
-/// fails closed with the distinct `ROS_E_SEAT_REVOKED`.
+/// fails closed with the distinct `TAIRIX_E_SEAT_REVOKED`.
 #[must_use]
-#[export_name = "ros_sys_seat_revoke"]
+#[export_name = "tairix_sys_seat_revoke"]
 pub extern "C" fn sys_seat_revoke(seat_id: u64) -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
     // validates `CAP_SEAT_ADMIN` and the seat id before touching state.
@@ -650,19 +650,19 @@ pub extern "C" fn sys_seat_revoke(seat_id: u64) -> i32 {
 
 /// `keyboard_read`: read one decoded keyboard event from seat `seat`'s
 /// keyboard channel into `buf` (a buffer of `len` bytes, at least one
-/// `ros_key_input_t` record) (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md` P11). Returns the number of bytes written — one
-/// record, or `0` when the channel is momentarily drained — or a `ROS_E_*`
+/// `tairix_key_input_t` record) (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md` P11). Returns the number of bytes written — one
+/// record, or `0` when the channel is momentarily drained — or a `TAIRIX_E_*`
 /// code reinterpreted into the result.
 ///
 /// The task that owns the seat (the window manager) drains the
 /// records the kernel routed to it while it held the seat. An unknown seat
-/// id is refused with `ROS_E_NOT_FOUND`. Gated
-/// kernel-side on `ROS_CAP_INPUT_READ` **and** owner-gated against that
-/// seat's live lease (a non-owner is refused with `ROS_E_SEAT_NOT_OWNER`
-/// / `ROS_E_SEAT_REVOKED`); the kernel validates the capability and the
+/// id is refused with `TAIRIX_E_NOT_FOUND`. Gated
+/// kernel-side on `TAIRIX_CAP_INPUT_READ` **and** owner-gated against that
+/// seat's live lease (a non-owner is refused with `TAIRIX_E_SEAT_NOT_OWNER`
+/// / `TAIRIX_E_SEAT_REVOKED`); the kernel validates the capability and the
 /// `(buf, len)` pair against the caller's address space before writing it, and a buffer too small to hold a record fails closed.
 #[must_use]
-#[export_name = "ros_sys_keyboard_read"]
+#[export_name = "tairix_sys_keyboard_read"]
 pub extern "C" fn sys_keyboard_read(seat: u64, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_READ`,
     // the seat id, and the `(buf, len)` pair against the caller's address
@@ -671,15 +671,15 @@ pub extern "C" fn sys_keyboard_read(seat: u64, buf: *mut c_void, len: usize) -> 
 }
 
 /// `pointer_inject`: inject one decoded pointer event at `buf` (a
-/// `ros_pointer_input_t` record of `len` bytes) for seat `seat` into the
+/// `tairix_pointer_input_t` record of `len` bytes) for seat `seat` into the
 /// kernel seat registry (`SyscallNumber::POINTER_INJECT`, `plans/PI.md`
 /// P11 — the pointer analogue of [`sys_key_inject`]). Returns the number
-/// of bytes consumed, or a `ROS_E_*` code reinterpreted into the result.
+/// of bytes consumed, or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// The producer-side call a pointer-input driver issues after decoding a
 /// discovered pointing device into an event; `seat` names the seat the
 /// device belongs to (`0` for the boot seat) and an unknown id is refused
-/// with `ROS_E_NOT_FOUND`. Gated kernel-side on `ROS_CAP_INPUT_INJECT`;
+/// with `TAIRIX_E_NOT_FOUND`. Gated kernel-side on `TAIRIX_CAP_INPUT_INJECT`;
 /// the kernel validates the capability and the `(buf, len)` pair against
 /// the caller's address space before reading it, decodes the record
 /// fail-closed, and routes it by who currently holds that seat — a held
@@ -687,7 +687,7 @@ pub extern "C" fn sys_keyboard_read(seat: u64, buf: *mut c_void, len: usize) -> 
 /// text console has no pointer consumer). The driver never chooses the
 /// destination.
 #[must_use]
-#[export_name = "ros_sys_pointer_inject"]
+#[export_name = "tairix_sys_pointer_inject"]
 pub extern "C" fn sys_pointer_inject(seat: u64, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`,
     // the seat id, and the `(buf, len)` pair against the caller's address
@@ -702,22 +702,22 @@ pub extern "C" fn sys_pointer_inject(seat: u64, buf: *mut c_void, len: usize) ->
 
 /// `pointer_read`: read one decoded pointer event from seat `seat`'s
 /// pointer channel into `buf` (a buffer of `len` bytes, at least one
-/// `ros_pointer_input_t` record) (`SyscallNumber::POINTER_READ`,
+/// `tairix_pointer_input_t` record) (`SyscallNumber::POINTER_READ`,
 /// `plans/PI.md` P11 — the pointer analogue of [`sys_keyboard_read`]).
 /// Returns the number of bytes written — one record, or `0` when the
-/// channel is momentarily drained — or a `ROS_E_*` code reinterpreted into
+/// channel is momentarily drained — or a `TAIRIX_E_*` code reinterpreted into
 /// the result.
 ///
 /// The task that owns the seat (the window manager) drains the records the
 /// kernel routed to it while it held the seat. An unknown seat id is
-/// refused with `ROS_E_NOT_FOUND`. Gated kernel-side on
-/// `ROS_CAP_INPUT_READ` **and** owner-gated against that seat's live lease
-/// (a non-owner is refused with `ROS_E_SEAT_NOT_OWNER` /
-/// `ROS_E_SEAT_REVOKED`); the kernel validates the capability and the
+/// refused with `TAIRIX_E_NOT_FOUND`. Gated kernel-side on
+/// `TAIRIX_CAP_INPUT_READ` **and** owner-gated against that seat's live lease
+/// (a non-owner is refused with `TAIRIX_E_SEAT_NOT_OWNER` /
+/// `TAIRIX_E_SEAT_REVOKED`); the kernel validates the capability and the
 /// `(buf, len)` pair against the caller's address space before writing it,
 /// and a buffer too small to hold a record fails closed.
 #[must_use]
-#[export_name = "ros_sys_pointer_read"]
+#[export_name = "tairix_sys_pointer_read"]
 pub extern "C" fn sys_pointer_read(seat: u64, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_READ`,
     // the seat id, and the `(buf, len)` pair against the caller's address
@@ -729,7 +729,7 @@ pub extern "C" fn sys_pointer_read(seat: u64, buf: *mut c_void, len: usize) -> u
 /// for the calling driver task into `buf` (a buffer of `len` bytes)
 /// (`SyscallNumber::RESOURCE_GRANTS`,
 /// `plans/PI.md` P10 chunk 5d-2). Returns the total number of bytes written
-/// — consecutive `ros_granted_resource` records — or a `ROS_E_*` code
+/// — consecutive `tairix_granted_resource` records — or a `TAIRIX_E_*` code
 /// reinterpreted into the result.
 ///
 /// A driver process calls this once at start-up to learn the unforgeable
@@ -738,7 +738,7 @@ pub extern "C" fn sys_pointer_read(seat: u64, buf: *mut c_void, len: usize) -> u
 /// `(buf, len)` pair against the caller's address space before writing it, and a buffer too small for the whole grant set fails
 /// closed.
 #[must_use]
-#[export_name = "ros_sys_resource_grants"]
+#[export_name = "tairix_sys_resource_grants"]
 pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates the `(buf, len)` pair
     // against the caller's address space before writing it.
@@ -749,7 +749,7 @@ pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
 /// device MMIO register window into the calling driver's own address space
 /// (`SyscallNumber::MMIO_MAP`, `plans/PI.md` P10
 /// chunk 5d-0). Returns the base virtual address of the mapped sub-region,
-/// or a `ROS_E_*` code reinterpreted into the result.
+/// or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// `handle` is an unforgeable, kernel-issued device-resource grant the driver
 /// received for the hardware-tree node it binds — never a raw physical
@@ -761,9 +761,9 @@ pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
 /// facility wired fails closed. Mapping a bounded
 /// sub-region lets a driver granted a large outbound bus aperture map just
 /// the single BAR it enumerated, not the whole window.
-/// Gated kernel-side on `ROS_CAP_MMIO_MAP`.
+/// Gated kernel-side on `TAIRIX_CAP_MMIO_MAP`.
 #[must_use]
-#[export_name = "ros_sys_mmio_map"]
+#[export_name = "tairix_sys_mmio_map"]
 pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel resolves the grant handle against the caller and returns the
@@ -774,7 +774,7 @@ pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
 /// `dma_alloc`: carve a coherent DMA buffer for the calling driver, bounded
 /// by a granted device DMA constraint (`SyscallNumber::DMA_ALLOC`, `plans/PI.md` P10 chunk 5d-0). Writes the
 /// buffer's device-visible base address to `device_out` and returns the base
-/// virtual address of the mapping, or a `ROS_E_*` code reinterpreted into the
+/// virtual address of the mapping, or a `TAIRIX_E_*` code reinterpreted into the
 /// result.
 ///
 /// `handle` is an unforgeable, kernel-issued device-resource grant the driver
@@ -784,9 +784,9 @@ pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
 /// region of `len` bytes whose physical extent lies within the grant's
 /// addressing limit, and maps it `RW`, non-executable, into the caller's own
 /// address space; a forged/non-owned handle, a wrong-kind grant, an
-/// over-limit request, or a build with no DMA facility wired fails closed. Gated kernel-side on `ROS_CAP_MEM_DMA`.
+/// over-limit request, or a build with no DMA facility wired fails closed. Gated kernel-side on `TAIRIX_CAP_MEM_DMA`.
 #[must_use]
-#[export_name = "ros_sys_dma_alloc"]
+#[export_name = "tairix_sys_dma_alloc"]
 pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `device_out`
     // pointer against the caller's address space before writing the
@@ -802,7 +802,7 @@ pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void
 /// `dma_free`: release a coherent DMA buffer previously carved by
 /// [`sys_dma_alloc`] (`SyscallNumber::DMA_FREE`) — the symmetric free a
 /// long-running driver calls so each transfer's bounce buffers are reclaimed
-/// rather than leaked until the process exits. Returns a `ROS_E_*` code.
+/// rather than leaked until the process exits. Returns a `TAIRIX_E_*` code.
 ///
 /// `handle` is the same unforgeable, kernel-issued DMA-constraint grant the
 /// matching [`sys_dma_alloc`] used, and `cpu_va` is the base virtual address
@@ -811,9 +811,9 @@ pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void
 /// based at `cpu_va` from the caller's own address space, zeroing every
 /// backing byte before the frames return to the allocator; a forged/non-owned
 /// handle, a `cpu_va` that is not the base of a live carve, or a build with no
-/// DMA facility wired fails closed. Gated kernel-side on `ROS_CAP_MEM_DMA`.
+/// DMA facility wired fails closed. Gated kernel-side on `TAIRIX_CAP_MEM_DMA`.
 #[must_use]
-#[export_name = "ros_sys_dma_free"]
+#[export_name = "tairix_sys_dma_free"]
 pub extern "C" fn sys_dma_free(handle: u64, cpu_va: u64) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; `cpu_va`
     // is an opaque lookup key the kernel resolves against the caller's own
@@ -823,14 +823,14 @@ pub extern "C" fn sys_dma_free(handle: u64, cpu_va: u64) -> i32 {
 
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
 /// calling process's own address space, honouring `flags`
-/// ([`rustos_abi::MapFlags`]) and the placement hint `addr_hint`
+/// ([`tairix_abi::MapFlags`]) and the placement hint `addr_hint`
 /// (`SyscallNumber::MEM_MAP`). Returns the base address of the new region.
 ///
 /// The kernel validates every argument and fails closed;
 /// the region is zeroed before it is visible and is never executable. An out-of-memory condition is reported as a
-/// `ROS_E_*` code reinterpreted into the result (`plans/SPAWN.md` SP5).
+/// `TAIRIX_E_*` code reinterpreted into the result (`plans/SPAWN.md` SP5).
 #[must_use]
-#[export_name = "ros_sys_mem_map"]
+#[export_name = "tairix_sys_mem_map"]
 pub extern "C" fn sys_mem_map(len: usize, flags: u32, addr_hint: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel maps the region and returns its base.
@@ -844,9 +844,9 @@ pub extern "C" fn sys_mem_map(len: usize, flags: u32, addr_hint: u64) -> u64 {
 
 /// `mem_unmap`: release the region of `len` bytes based at `base` previously
 /// returned by [`sys_mem_map`] from the calling process's own address space
-/// (`SyscallNumber::MEM_UNMAP`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::MEM_UNMAP`). Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_mem_unmap"]
+#[export_name = "tairix_sys_mem_unmap"]
 pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` range
     // against the caller's address space before unmapping it.
@@ -856,14 +856,14 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
 /// `mem_pin`: mark the calling process's entire anonymous memory — current
 /// and future — as pinned, ineligible for the compressed `ramzip` tier and
 /// any future lower swap tier (`SyscallNumber::MEM_PIN`,
-/// `plans/STRESSTEST.md` ST2). Returns a `ROS_E_*` code.
+/// `plans/STRESSTEST.md` ST2). Returns a `TAIRIX_E_*` code.
 ///
-/// Gated kernel-side on `ROS_CAP_MEM_PIN` and bounded by the caller's
+/// Gated kernel-side on `TAIRIX_CAP_MEM_PIN` and bounded by the caller's
 /// effective pinned-memory limit; both refusals fail closed. Already
 /// pinned is success. The pin is not inherited across spawn and is
 /// cleared on exit.
 #[must_use]
-#[export_name = "ros_sys_mem_pin"]
+#[export_name = "tairix_sys_mem_pin"]
 pub extern "C" fn sys_mem_pin() -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel checks the capability and the bound on the far side.
@@ -872,12 +872,12 @@ pub extern "C" fn sys_mem_pin() -> i32 {
 
 /// `mem_unpin`: clear the calling process's [`sys_mem_pin`] mark,
 /// restoring its anonymous memory's eligibility for the swap tiers
-/// (`SyscallNumber::MEM_UNPIN`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::MEM_UNPIN`). Returns a `TAIRIX_E_*` code.
 ///
 /// Unprivileged — releasing the caller's own exemption grants nothing —
 /// and idempotent: already unpinned is success.
 #[must_use]
-#[export_name = "ros_sys_mem_unpin"]
+#[export_name = "tairix_sys_mem_unpin"]
 pub extern "C" fn sys_mem_unpin() -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel only clears the caller's own pin mark.
@@ -886,24 +886,24 @@ pub extern "C" fn sys_mem_unpin() -> i32 {
 
 /// `signal_intake`: operate on the calling process's own signal intake —
 /// the fail-closed signal-observation opt-in (`SyscallNumber::SIGNAL_INTAKE`,
-/// `plans/STRESSTEST.md` ST3). `op` is a `ROS_SIGNAL_INTAKE_OP_*`
+/// `plans/STRESSTEST.md` ST3). `op` is a `TAIRIX_SIGNAL_INTAKE_OP_*`
 /// discriminant: enable (0) opts `Interrupt`/`Terminate` into observable
 /// delivery, disable (1) restores the default terminate disposition, and
 /// take (2) drains the one pending observed signal. Returns the
-/// non-negative op result (`0`, or take's drained `ROS_SIGNAL_*`
-/// discriminant); an error is reported as a `ROS_E_*` code reinterpreted
-/// into the result (`ROS_E_WOULD_BLOCK` for a take with nothing pending or
+/// non-negative op result (`0`, or take's drained `TAIRIX_SIGNAL_*`
+/// discriminant); an error is reported as a `TAIRIX_E_*` code reinterpreted
+/// into the result (`TAIRIX_E_WOULD_BLOCK` for a take with nothing pending or
 /// a disable with an undrained observation — a recorded termination
-/// request is never silently discarded — and `ROS_E_NOT_FOUND` for a take
+/// request is never silently discarded — and `TAIRIX_E_NOT_FOUND` for a take
 /// without the opt-in).
 ///
 /// Kernel-side the pending event is waitable through a wait-set member of
-/// kind signal (id `0`); `ROS_SIGNAL_KILL` is never observable or
+/// kind signal (id `0`); `TAIRIX_SIGNAL_KILL` is never observable or
 /// maskable, and a second termination request while one is pending
 /// undrained escalates to the default terminate path, so an opted-in
 /// process that stops draining stays killable.
 #[must_use]
-#[export_name = "ros_sys_signal_intake"]
+#[export_name = "tairix_sys_signal_intake"]
 pub extern "C" fn sys_signal_intake(op: u32) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel validates the op and acts only on the caller's own intake.
@@ -921,9 +921,9 @@ pub extern "C" fn sys_signal_intake(op: u32) -> u64 {
 /// orders of magnitude. Touching a page wholly at/past end-of-file
 /// terminates the process (the `SIGBUS` analogue); bound accesses by the
 /// file size. The mapping is never writable and never executable. An
-/// error is reported as a `ROS_E_*` code reinterpreted into the result.
+/// error is reported as a `TAIRIX_E_*` code reinterpreted into the result.
 #[must_use]
-#[export_name = "ros_sys_file_map"]
+#[export_name = "tairix_sys_file_map"]
 pub extern "C" fn sys_file_map(fd: u32, offset: u64, len: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel reserves the region and returns its base.
@@ -933,9 +933,9 @@ pub extern "C" fn sys_file_map(fd: u32, offset: u64, len: u64) -> u64 {
 /// `file_unmap`: release the whole file mapping of `len` bytes based at
 /// `base` previously returned by [`sys_file_map`] from the calling
 /// process's own address space (`SyscallNumber::FILE_UNMAP`). Returns a
-/// `ROS_E_*` code.
+/// `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_file_unmap"]
+#[export_name = "tairix_sys_file_unmap"]
 pub extern "C" fn sys_file_unmap(base: u64, len: u64) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` pair
     // against the caller's own recorded mappings before any teardown.
@@ -945,9 +945,9 @@ pub extern "C" fn sys_file_unmap(base: u64, len: u64) -> i32 {
 /// `volume_attach`: attach a filesystem driver to a runtime block source
 /// and publish the volume's root (`SyscallNumber::VOLUME_ATTACH`).
 /// `request`/`request_len` name an encoded volume-attach request frame;
-/// requires `CAP_FS_MOUNT`. Returns a `ROS_E_*` code.
+/// requires `CAP_FS_MOUNT`. Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_volume_attach"]
+#[export_name = "tairix_sys_volume_attach"]
 pub extern "C" fn sys_volume_attach(request: *const u8, request_len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(request,
     // request_len)` pair against the caller's address space before reading
@@ -963,9 +963,9 @@ pub extern "C" fn sys_volume_attach(request: *const u8, request_len: usize) -> i
 /// `volume_detach`: flush, unmount, and unpublish a runtime-attached
 /// volume (`SyscallNumber::VOLUME_DETACH`). `request`/`request_len` name
 /// an encoded volume-detach request frame (the volume's stable 16-byte
-/// identity); requires `CAP_FS_MOUNT`. Returns a `ROS_E_*` code.
+/// identity); requires `CAP_FS_MOUNT`. Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_volume_detach"]
+#[export_name = "tairix_sys_volume_detach"]
 pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(request,
     // request_len)` pair against the caller's address space before reading
@@ -979,21 +979,21 @@ pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i
 }
 
 /// `wait`: wait for a child-process event, writing the typed
-/// `ros_wait_status_t` record to `status` (`SyscallNumber::WAIT`). Returns
-/// the reported child's PID, or a `ROS_E_*` code reinterpreted into the
+/// `tairix_wait_status_t` record to `status` (`SyscallNumber::WAIT`). Returns
+/// the reported child's PID, or a `TAIRIX_E_*` code reinterpreted into the
 /// result.
 ///
-/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`] to
-/// wait for any child. `flags` is a [`rustos_abi::WaitFlags`] bit set:
-/// `ROS_WAIT_FLAG_NONBLOCK` (bit 0) polls instead of blocking, returning
-/// `ROS_E_WOULD_BLOCK` when a matching child has nothing to report;
-/// `ROS_WAIT_FLAG_STOPPED` (bit 1) also reports a child freshly stopped by
-/// `ROS_SIGNAL_STOP` — without reaping it. A process may
+/// `pid` is either a specific child's PID or [`tairix_abi::WAIT_PID_ANY`] to
+/// wait for any child. `flags` is a [`tairix_abi::WaitFlags`] bit set:
+/// `TAIRIX_WAIT_FLAG_NONBLOCK` (bit 0) polls instead of blocking, returning
+/// `TAIRIX_E_WOULD_BLOCK` when a matching child has nothing to report;
+/// `TAIRIX_WAIT_FLAG_STOPPED` (bit 1) also reports a child freshly stopped by
+/// `TAIRIX_SIGNAL_STOP` — without reaping it. A process may
 /// only wait on its **own** children; the kernel validates the parent/child
 /// relationship and the `status` pointer before writing to it, and fails
 /// closed (`plans/SPAWN.md` SP6/SP9).
 #[must_use]
-#[export_name = "ros_sys_wait"]
+#[export_name = "tairix_sys_wait"]
 pub extern "C" fn sys_wait(pid: i32, status: *mut c_void, flags: u32) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `status` pointer
     // against the caller's address space before writing the exit code to it.
@@ -1006,10 +1006,10 @@ pub extern "C" fn sys_wait(pid: i32, status: *mut c_void, flags: u32) -> u64 {
 }
 
 /// `rlimit_get`: read the calling process's effective limit for resource
-/// `kind`, writing the encoded `ros_resource_limit_t` to `out`
-/// (`SyscallNumber::RLIMIT_GET`). Returns a `ROS_E_*` code.
+/// `kind`, writing the encoded `tairix_resource_limit_t` to `out`
+/// (`SyscallNumber::RLIMIT_GET`). Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_rlimit_get"]
+#[export_name = "tairix_sys_rlimit_get"]
 pub extern "C" fn sys_rlimit_get(kind: u32, out: *mut c_void) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `out` pointer
     // against the caller's address space before writing the limit to it.
@@ -1022,11 +1022,11 @@ pub extern "C" fn sys_rlimit_get(kind: u32, out: *mut c_void) -> i32 {
 }
 
 /// `rlimit_set`: install the calling process's limit for resource `kind`
-/// from the encoded `ros_resource_limit_t` at `value`
-/// (`SyscallNumber::RLIMIT_SET`). Returns a `ROS_E_*` code; raising a hard
+/// from the encoded `tairix_resource_limit_t` at `value`
+/// (`SyscallNumber::RLIMIT_SET`). Returns a `TAIRIX_E_*` code; raising a hard
 /// bound requires `CAP_RLIMIT_RAISE`.
 #[must_use]
-#[export_name = "ros_sys_rlimit_set"]
+#[export_name = "tairix_sys_rlimit_set"]
 pub extern "C" fn sys_rlimit_set(kind: u32, value: *mut c_void) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `value` pointer
     // against the caller's address space before reading the limit from it.
@@ -1041,15 +1041,15 @@ pub extern "C" fn sys_rlimit_set(kind: u32, value: *mut c_void) -> i32 {
 /// `users_db_read`: copy the system user database the kernel loaded at boot
 /// (`/System/Security/Users`, exact `users-v1` text) into the caller's
 /// `(buf, len)` buffer (`SyscallNumber::USERS_DB_READ`). Returns the byte
-/// count, or a `ROS_E_*` code reinterpreted into the result.
+/// count, or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
-/// Gated kernel-side on `ROS_CAP_USERS_READ` — only the authentication
+/// Gated kernel-side on `TAIRIX_CAP_USERS_READ` — only the authentication
 /// principal (login) holds it. A buffer smaller
-/// than the database is refused whole (`ROS_E_BUFFER_TOO_SMALL`) — a
+/// than the database is refused whole (`TAIRIX_E_BUFFER_TOO_SMALL`) — a
 /// credential database is never truncated; sizing the
 /// buffer at the format's 64 KiB maximum always suffices.
 #[must_use]
-#[export_name = "ros_sys_users_db_read"]
+#[export_name = "tairix_sys_users_db_read"]
 pub extern "C" fn sys_users_db_read(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `(buf, len)` pair
     // against the caller's address space before writing the text to it.
@@ -1061,16 +1061,16 @@ pub extern "C" fn sys_users_db_read(buf: *mut c_void, len: usize) -> u64 {
 /// `users_admin` request record; `out`/`out_cap` receive a list
 /// operation's response (mutating operations write nothing). Returns
 /// the response byte count (`0` for a mutating operation), or a
-/// `ROS_E_*` code reinterpreted into the result.
+/// `TAIRIX_E_*` code reinterpreted into the result.
 ///
-/// Gated kernel-side on `ROS_CAP_USER_ADMIN` — the account-
+/// Gated kernel-side on `TAIRIX_CAP_USER_ADMIN` — the account-
 /// administration authority — with the finer never-widen /
 /// last-administrator / format rules enforced in the kernel engine; the
 /// stub adds no authority. Password material crosses only as a ready
 /// salted PBKDF2 record built by the caller, and no operation ever
 /// returns stored password material.
 #[must_use]
-#[export_name = "ros_sys_users_admin"]
+#[export_name = "tairix_sys_users_admin"]
 pub extern "C" fn sys_users_admin(
     req: *mut c_void,
     req_len: usize,
@@ -1097,19 +1097,19 @@ pub extern "C" fn sys_users_admin(
 /// `hw_tree_read`: copy the discovered hardware tree the kernel built at
 /// boot into the caller's `(buf, len)` buffer
 /// (`SyscallNumber::HW_TREE_READ`).
-/// Returns the byte count, or a `ROS_E_*` code reinterpreted into the
+/// Returns the byte count, or a `TAIRIX_E_*` code reinterpreted into the
 /// result.
 ///
-/// The bytes are a `ros_hw_tree_header_t` (the store's current generation
-/// and node count) followed by that many `ros_hw_node_t` records. The
-/// generation in the header is the value to pass to `ros_sys_hw_tree_wait`
+/// The bytes are a `tairix_hw_tree_header_t` (the store's current generation
+/// and node count) followed by that many `tairix_hw_node_t` records. The
+/// generation in the header is the value to pass to `tairix_sys_hw_tree_wait`
 /// to block until the tree next changes. Gated kernel-side on
-/// `ROS_CAP_SYSINFO_HW` — the privileged global hardware view. The whole inventory is copied or none: a
-/// buffer smaller than the snapshot is refused with `ROS_E_BUFFER_TOO_SMALL`
+/// `TAIRIX_CAP_SYSINFO_HW` — the privileged global hardware view. The whole inventory is copied or none: a
+/// buffer smaller than the snapshot is refused with `TAIRIX_E_BUFFER_TOO_SMALL`
 /// rather than truncated, so the caller grows `buf` and
 /// retries.
 #[must_use]
-#[export_name = "ros_sys_hw_tree_read"]
+#[export_name = "tairix_sys_hw_tree_read"]
 pub extern "C" fn sys_hw_tree_read(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `(buf, len)` pair
     // against the caller's address space before writing the tree to it.
@@ -1117,17 +1117,17 @@ pub extern "C" fn sys_hw_tree_read(buf: *mut c_void, len: usize) -> u64 {
 }
 
 /// `users_db_wait`: block until the system user database leaves its pending
-/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`) — the blocking companion to `ros_sys_users_db_read`.
-/// Returns a `ROS_E_*` code.
+/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`) — the blocking companion to `tairix_sys_users_db_read`.
+/// Returns a `TAIRIX_E_*` code.
 ///
 /// `timeout_ns` bounds the wait (`UINT64_MAX` for an effectively unbounded
 /// block). Returns `0` once the database is no longer pending (the caller
-/// re-reads it with `ros_sys_users_db_read`), or `ROS_E_TIMED_OUT` if the
-/// deadline elapses first. Gated kernel-side on `ROS_CAP_USERS_READ`, the
+/// re-reads it with `tairix_sys_users_db_read`), or `TAIRIX_E_TIMED_OUT` if the
+/// deadline elapses first. Gated kernel-side on `TAIRIX_CAP_USERS_READ`, the
 /// same privilege as reading the database; a build with no users-database
 /// service wired is never pending, so the wait returns `0` immediately.
 #[must_use]
-#[export_name = "ros_sys_users_db_wait"]
+#[export_name = "tairix_sys_users_db_wait"]
 pub extern "C" fn sys_users_db_wait(timeout_ns: u64) -> i32 {
     // SAFETY: see `sys_yield`. The single argument is a scalar; the call
     // reads no caller memory.
@@ -1136,17 +1136,17 @@ pub extern "C" fn sys_users_db_wait(timeout_ns: u64) -> i32 {
 
 /// `hw_tree_wait`: block until the discovered hardware tree changes past
 /// `last_generation` (`SyscallNumber::HW_TREE_WAIT` —
-/// reactive re-match and hotplug). Returns a `ROS_E_*` code.
+/// reactive re-match and hotplug). Returns a `TAIRIX_E_*` code.
 ///
 /// `last_generation` is the generation last observed through
-/// `ros_sys_hw_tree_read`'s header; `timeout_ns` bounds the wait
+/// `tairix_sys_hw_tree_read`'s header; `timeout_ns` bounds the wait
 /// (`UINT64_MAX` for an effectively unbounded block). Returns `0` once the
-/// tree has changed, `ROS_E_TIMED_OUT` if the deadline elapses first, or
-/// `ROS_E_NOT_IMPLEMENTED` if no hardware-tree store is wired. Gated
-/// kernel-side on `ROS_CAP_SYSINFO_HW`, the same privilege as reading the
+/// tree has changed, `TAIRIX_E_TIMED_OUT` if the deadline elapses first, or
+/// `TAIRIX_E_NOT_IMPLEMENTED` if no hardware-tree store is wired. Gated
+/// kernel-side on `TAIRIX_CAP_SYSINFO_HW`, the same privilege as reading the
 /// tree.
 #[must_use]
-#[export_name = "ros_sys_hw_tree_wait"]
+#[export_name = "tairix_sys_hw_tree_wait"]
 pub extern "C" fn sys_hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i32 {
     // SAFETY: see `sys_yield`. Both arguments are scalars; the call reads no
     // caller memory.
@@ -1162,18 +1162,18 @@ pub extern "C" fn sys_hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i32
 /// IPC call endpoint `endpoint` — post `request_len` bytes at `request`,
 /// block until the reply arrives, and copy it into the `reply_cap`-byte
 /// buffer at `reply` (`SyscallNumber::IPC_CALL`).
-/// Returns the number of reply bytes written, or a `ROS_E_*` code
+/// Returns the number of reply bytes written, or a `TAIRIX_E_*` code
 /// reinterpreted into the result.
 ///
 /// The kernel enforces the endpoint's required send capability against the
 /// caller before posting (no ambient authority), copies
 /// both buffers through the validated boundary, and blocks the caller
 /// cooperatively until the reply arrives, never busy-spinning. A reply larger
-/// than `reply_cap` fails closed with `ROS_E_BUFFER_TOO_SMALL`; a missing
+/// than `reply_cap` fails closed with `TAIRIX_E_BUFFER_TOO_SMALL`; a missing
 /// send capability, an unknown or destroyed endpoint, or no call-endpoint
 /// registry wired each fail closed.
 #[must_use]
-#[export_name = "ros_sys_ipc_call"]
+#[export_name = "tairix_sys_ipc_call"]
 pub extern "C" fn sys_ipc_call(
     endpoint: u64,
     request: *mut c_void,
@@ -1199,15 +1199,15 @@ pub extern "C" fn sys_ipc_call(
 }
 
 /// `call_create`: create and register a kernel-owned synchronous call
-/// endpoint the calling task then serves (`SyscallNumber::CALL_CREATE`; the server half of `ros_sys_ipc_call`).
+/// endpoint the calling task then serves (`SyscallNumber::CALL_CREATE`; the server half of `tairix_sys_ipc_call`).
 ///
-/// `send_caps` and `recv_caps` each point at a 32-byte `ros_capability_set_t`
+/// `send_caps` and `recv_caps` each point at a 32-byte `tairix_capability_set_t`
 /// wire image (the capability a caller must hold to post, and the capability
 /// this task must hold to receive/reply). Binding a restricted-sender
-/// endpoint requires `ROS_CAP_IPC_BIND_PRIVILEGED`. Returns a `ROS_E_*` code
+/// endpoint requires `TAIRIX_CAP_IPC_BIND_PRIVILEGED`. Returns a `TAIRIX_E_*` code
 /// (`0` on success).
 #[must_use]
-#[export_name = "ros_sys_call_create"]
+#[export_name = "tairix_sys_call_create"]
 pub extern "C" fn sys_call_create(
     endpoint: u64,
     send_caps: *mut c_void,
@@ -1237,12 +1237,12 @@ pub extern "C" fn sys_call_create(
 /// blocking until one arrives (`SyscallNumber::CALL_RECV`). The request is
 /// copied into the `buf_cap`-byte buffer at `buf`, the per-call ticket is
 /// written to `*ticket_out`, and the request byte count is returned (or a
-/// `ROS_E_*` code reinterpreted into the result). `flags` carries the
+/// `TAIRIX_E_*` code reinterpreted into the result). `flags` carries the
 /// `CallRecvFlags` bits: `0` blocks until a request arrives; the
-/// non-blocking bit makes an empty queue return `ROS_E_WOULD_BLOCK`
+/// non-blocking bit makes an empty queue return `TAIRIX_E_WOULD_BLOCK`
 /// instead of parking (reserved bits are rejected fail-closed).
 #[must_use]
-#[export_name = "ros_sys_call_recv"]
+#[export_name = "tairix_sys_call_recv"]
 pub extern "C" fn sys_call_recv(
     endpoint: u64,
     buf: *mut c_void,
@@ -1269,10 +1269,10 @@ pub extern "C" fn sys_call_recv(
 
 /// `call_reply`: answer one received call on an endpoint this task owns,
 /// releasing the blocked caller (`SyscallNumber::CALL_REPLY`). `ticket` is the
-/// value `ros_sys_call_recv` wrote; `reply_len` bytes at `reply` are the reply
-/// payload. Returns a `ROS_E_*` code (`0` on success).
+/// value `tairix_sys_call_recv` wrote; `reply_len` bytes at `reply` are the reply
+/// payload. Returns a `TAIRIX_E_*` code (`0` on success).
 #[must_use]
-#[export_name = "ros_sys_call_reply"]
+#[export_name = "tairix_sys_call_reply"]
 pub extern "C" fn sys_call_reply(
     endpoint: u64,
     ticket: u64,
@@ -1289,16 +1289,16 @@ pub extern "C" fn sys_call_reply(
     }
 }
 
-/// `call_peer_origin`: read the kernel-attested `rustos_abi::Origin` of the
+/// `call_peer_origin`: read the kernel-attested `tairix_abi::Origin` of the
 /// caller whose in-service call this server is handling
 /// (`SyscallNumber::CALL_PEER_ORIGIN`). `ticket` is the value
-/// `ros_sys_call_recv` wrote; the caller's attested origin wire image is
+/// `tairix_sys_call_recv` wrote; the caller's attested origin wire image is
 /// written to the `origin_cap`-byte buffer at `origin` and its byte count
-/// returned (or a `ROS_E_*` code reinterpreted into the result). The origin is
+/// returned (or a `TAIRIX_E_*` code reinterpreted into the result). The origin is
 /// filled by the kernel from the posting task's own state and cannot be
 /// forged.
 #[must_use]
-#[export_name = "ros_sys_call_peer_origin"]
+#[export_name = "tairix_sys_call_peer_origin"]
 pub extern "C" fn sys_call_peer_origin(
     endpoint: u64,
     ticket: u64,
@@ -1316,14 +1316,14 @@ pub extern "C" fn sys_call_peer_origin(
 }
 
 /// `wall_time_get`: read the kernel wall-clock time and its provenance state
-/// (`SyscallNumber::WALL_TIME_GET`). The current `rustos_abi::WallClockReading`
-/// wire image (a `ros_time64_t` instant plus a one-byte `WallTimeState`) is
+/// (`SyscallNumber::WALL_TIME_GET`). The current `tairix_abi::WallClockReading`
+/// wire image (a `tairix_time64_t` instant plus a one-byte `WallTimeState`) is
 /// written to the `out_cap`-byte buffer at `out` and its byte count returned
-/// (or a `ROS_E_*` code reinterpreted into the result). Unprivileged, like
-/// `ros_sys_clock_get`; before a trusted source sets it the reading is the
+/// (or a `TAIRIX_E_*` code reinterpreted into the result). Unprivileged, like
+/// `tairix_sys_clock_get`; before a trusted source sets it the reading is the
 /// Unix epoch tagged `Unset`.
 #[must_use]
-#[export_name = "ros_sys_wall_time_get"]
+#[export_name = "tairix_sys_wall_time_get"]
 pub extern "C" fn sys_wall_time_get(out: *mut c_void, out_cap: usize) -> u64 {
     // SAFETY: see `sys_call_peer_origin`; the kernel validates the `(ptr, len)`
     // pair against the caller's address space before writing it.
@@ -1337,12 +1337,12 @@ pub extern "C" fn sys_wall_time_get(out: *mut c_void, out_cap: usize) -> u64 {
 
 /// `wall_time_set`: set the kernel wall-clock time from a trusted source
 /// (`SyscallNumber::WALL_TIME_SET`). `time` points at a little-endian
-/// `ros_time64_t` of `time_len` bytes; `state` is the `WallTimeState`
+/// `tairix_time64_t` of `time_len` bytes; `state` is the `WallTimeState`
 /// discriminant to record (`Firmware`/`Trusted`/`Adjusted` — `Unset` is
-/// rejected). Requires `ROS_CAP_TIME_SET`; the monotonic clock is unaffected.
-/// Returns a `ROS_E_*` code (`0` on success).
+/// rejected). Requires `TAIRIX_CAP_TIME_SET`; the monotonic clock is unaffected.
+/// Returns a `TAIRIX_E_*` code (`0` on success).
 #[must_use]
-#[export_name = "ros_sys_wall_time_set"]
+#[export_name = "tairix_sys_wall_time_set"]
 pub extern "C" fn sys_wall_time_set(time: *mut c_void, time_len: usize, state: u32) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `(ptr, len)` pair
     // against the caller's address space before reading it.
@@ -1355,15 +1355,15 @@ pub extern "C" fn sys_wall_time_set(time: *mut c_void, time_len: usize, state: u
 }
 
 /// `boot_id_get`: read the kernel's per-boot identifier
-/// (`SyscallNumber::BOOT_ID_GET`). The 16-byte `rustos_abi::BootId` minted
+/// (`SyscallNumber::BOOT_ID_GET`). The 16-byte `tairix_abi::BootId` minted
 /// for this boot is written to the `out_cap`-byte buffer at `out` and its
-/// byte count returned (or a `ROS_E_*` code reinterpreted into the result).
-/// Unprivileged, like `ros_sys_clock_get` — the boot id is a public per-boot
+/// byte count returned (or a `TAIRIX_E_*` code reinterpreted into the result).
+/// Unprivileged, like `tairix_sys_clock_get` — the boot id is a public per-boot
 /// nonce, not a secret; if the kernel's random subsystem was not seeded in
-/// time the call fails closed with `ROS_E_ENTROPY_NOT_READY` rather than
+/// time the call fails closed with `TAIRIX_E_ENTROPY_NOT_READY` rather than
 /// return the all-zero sentinel.
 #[must_use]
-#[export_name = "ros_sys_boot_id_get"]
+#[export_name = "tairix_sys_boot_id_get"]
 pub extern "C" fn sys_boot_id_get(out: *mut c_void, out_cap: usize) -> u64 {
     // SAFETY: see `sys_wall_time_get`; the kernel validates the `(ptr, len)`
     // pair against the caller's address space before writing it.
@@ -1371,18 +1371,18 @@ pub extern "C" fn sys_boot_id_get(out: *mut c_void, out_cap: usize) -> u64 {
 }
 
 /// `boot_facts_get`: read the kernel's boot-static machine summary
-/// (`SyscallNumber::BOOT_FACTS_GET`). The 64-byte `rustos_abi::BootFacts`
+/// (`SyscallNumber::BOOT_FACTS_GET`). The 64-byte `tairix_abi::BootFacts`
 /// wire image — CPU architecture, the boot CPU's discovered model name,
 /// processor-core count, and installed physical memory, minted once at
 /// boot from kernel-attested state — is
 /// written to the `out_cap`-byte buffer at `out` and its byte count returned
-/// (or a `ROS_E_*` code reinterpreted into the result). Unprivileged, like
-/// `ros_sys_boot_id_get` — the facts are the machine's public shape, never
+/// (or a `TAIRIX_E_*` code reinterpreted into the result). Unprivileged, like
+/// `tairix_sys_boot_id_get` — the facts are the machine's public shape, never
 /// live state or a secret. An undersized buffer fails closed with
-/// `ROS_E_BUFFER_TOO_SMALL`; a boot path that never installed the facts
-/// fails closed with `ROS_E_NOT_IMPLEMENTED`.
+/// `TAIRIX_E_BUFFER_TOO_SMALL`; a boot path that never installed the facts
+/// fails closed with `TAIRIX_E_NOT_IMPLEMENTED`.
 #[must_use]
-#[export_name = "ros_sys_boot_facts_get"]
+#[export_name = "tairix_sys_boot_facts_get"]
 pub extern "C" fn sys_boot_facts_get(out: *mut c_void, out_cap: usize) -> u64 {
     // SAFETY: see `sys_boot_id_get`; the kernel validates the `(out, out_cap)`
     // pair against the caller's address space before writing it.
@@ -1395,14 +1395,14 @@ pub extern "C" fn sys_boot_facts_get(out: *mut c_void, out_cap: usize) -> u64 {
 }
 
 /// `self_origin`: read the calling task's own kernel-attested
-/// `rustos_abi::Origin` (`SyscallNumber::SELF_ORIGIN`). The wire image is
+/// `tairix_abi::Origin` (`SyscallNumber::SELF_ORIGIN`). The wire image is
 /// written to the `out_cap`-byte buffer at `out` and its byte count returned
-/// (or a `ROS_E_*` code reinterpreted into the result). Unprivileged, like
-/// `ros_sys_boot_id_get` — a task may always learn its own identity, and the
+/// (or a `TAIRIX_E_*` code reinterpreted into the result). Unprivileged, like
+/// `tairix_sys_boot_id_get` — a task may always learn its own identity, and the
 /// origin is built from the caller's own kernel-held task record so it cannot
-/// be forged. An undersized buffer fails closed with `ROS_E_BUFFER_TOO_SMALL`.
+/// be forged. An undersized buffer fails closed with `TAIRIX_E_BUFFER_TOO_SMALL`.
 #[must_use]
-#[export_name = "ros_sys_self_origin"]
+#[export_name = "tairix_sys_self_origin"]
 pub extern "C" fn sys_self_origin(out: *mut c_void, out_cap: usize) -> u64 {
     // SAFETY: see `sys_boot_id_get`; the kernel validates the `(out, out_cap)`
     // pair against the caller's address space before writing it.
@@ -1411,19 +1411,19 @@ pub extern "C" fn sys_self_origin(out: *mut c_void, out_cap: usize) -> u64 {
 
 /// `sysinfo_introspect`: read the unfiltered, global kernel introspection
 /// view (`SyscallNumber::SYSINFO_INTROSPECT`). `domain` is a
-/// `rustos_abi::IntrospectDomain` discriminant, `arg` is the domain-specific
+/// `tairix_abi::IntrospectDomain` discriminant, `arg` is the domain-specific
 /// selector (a record offset for the paged domains), and the encoded records
 /// are written to the `out_cap`-byte buffer at `out`, whose byte count is
-/// returned (or a `ROS_E_*` code reinterpreted into the result). For the
-/// per-task-limits domain the 16-byte target `rustos_abi::ProcId` is supplied
+/// returned (or a `TAIRIX_E_*` code reinterpreted into the result). For the
+/// per-task-limits domain the 16-byte target `tairix_abi::ProcId` is supplied
 /// in `out` on entry.
 ///
-/// Requires `ROS_CAP_SYSINFO_INTROSPECT`, held only by the `sysinfod` broker:
+/// Requires `TAIRIX_CAP_SYSINFO_INTROSPECT`, held only by the `sysinfod` broker:
 /// the kernel returns the whole system's state and never narrows by principal.
 /// The whole answer or none — an undersized buffer fails closed with
-/// `ROS_E_BUFFER_TOO_SMALL`.
+/// `TAIRIX_E_BUFFER_TOO_SMALL`.
 #[must_use]
-#[export_name = "ros_sys_sysinfo_introspect"]
+#[export_name = "tairix_sys_sysinfo_introspect"]
 pub extern "C" fn sys_sysinfo_introspect(
     domain: u32,
     arg: u64,
@@ -1443,18 +1443,18 @@ pub extern "C" fn sys_sysinfo_introspect(
 
 /// `terminal_size`: read the character-cell geometry of the text console
 /// backing standard stream `fd` (`SyscallNumber::TERMINAL_SIZE`). The encoded
-/// `rustos_abi::TerminalSize` (two little-endian `u16`s: rows, then columns)
+/// `tairix_abi::TerminalSize` (two little-endian `u16`s: rows, then columns)
 /// is written to the `out_cap`-byte buffer at `out` and its byte count
-/// returned (or a `ROS_E_*` code reinterpreted into the result).
+/// returned (or a `TAIRIX_E_*` code reinterpreted into the result).
 ///
-/// Unprivileged, like `ros_sys_clock_get` — a program may always ask how big
+/// Unprivileged, like `tairix_sys_clock_get` — a program may always ask how big
 /// its own terminal is. The kernel reports a size only for a console whose
 /// grid it actually knows (a framebuffer text console); for a byte-stream
 /// console (a UART), whose remote-terminal size the kernel cannot attest, the
-/// call fails closed with `ROS_E_NOT_IMPLEMENTED` and the caller applies the
+/// call fails closed with `TAIRIX_E_NOT_IMPLEMENTED` and the caller applies the
 /// conventional fallback — the kernel never fabricates a size.
 #[must_use]
-#[export_name = "ros_sys_terminal_size"]
+#[export_name = "tairix_sys_terminal_size"]
 pub extern "C" fn sys_terminal_size(fd: u32, out: *mut c_void, out_cap: usize) -> u64 {
     // SAFETY: see `sys_boot_id_get`; the kernel validates the `(out, out_cap)`
     // pair against the caller's address space before writing it.
@@ -1466,13 +1466,13 @@ pub extern "C" fn sys_terminal_size(fd: u32, out: *mut c_void, out_cap: usize) -
     }
 }
 
-/// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
+/// `log_emit`: emit one encoded diagnostic record (a `tairix_abi::log`
 /// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
 /// diagnostic log sink (`SyscallNumber::LOG_EMIT`).
-/// Requires `ROS_CAP_LOG_EMIT`; the kernel validates and attributes the
-/// record to the calling task. Returns a `ROS_E_*` code (`0` on success).
+/// Requires `TAIRIX_CAP_LOG_EMIT`; the kernel validates and attributes the
+/// record to the calling task. Returns a `TAIRIX_E_*` code (`0` on success).
 #[must_use]
-#[export_name = "ros_sys_log_emit"]
+#[export_name = "tairix_sys_log_emit"]
 pub extern "C" fn sys_log_emit(record: *mut c_void, len: usize) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the record `(ptr, len)`
     // pair against the caller's address space before reading it.
@@ -1484,14 +1484,14 @@ pub extern "C" fn sys_log_emit(record: *mut c_void, len: usize) -> i32 {
     }
 }
 
-/// `hw_emit_node`: publish one wire-encoded `rustos_abi::HwNode` (`len` bytes
+/// `hw_emit_node`: publish one wire-encoded `tairix_abi::HwNode` (`len` bytes
 /// at `node`) into the live hardware tree (`SyscallNumber::HW_EMIT_NODE`). A user-space bus driver calls this for each
 /// device it enumerates so the device manager autoloads the matching driver.
-/// Requires `ROS_CAP_HW_EMIT`; the kernel decodes and validates the node and
+/// Requires `TAIRIX_CAP_HW_EMIT`; the kernel decodes and validates the node and
 /// admits it only when every resource it requests is covered by one of the
-/// calling driver's own grants. Returns a `ROS_E_*` code (`0` on success).
+/// calling driver's own grants. Returns a `TAIRIX_E_*` code (`0` on success).
 #[must_use]
-#[export_name = "ros_sys_hw_emit_node"]
+#[export_name = "tairix_sys_hw_emit_node"]
 pub extern "C" fn sys_hw_emit_node(node: *mut c_void, len: usize) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the node `(ptr, len)`
     // pair against the caller's address space before reading it.
@@ -1506,14 +1506,14 @@ pub extern "C" fn sys_hw_emit_node(node: *mut c_void, len: usize) -> i32 {
 /// `hw_remove_node`: remove the previously-published child node `node_id` —
 /// and its whole subtree — from the live hardware tree
 /// (`SyscallNumber::HW_REMOVE_NODE`). The symmetric
-/// counterpart of `ros_sys_hw_emit_node`: a user-space bus driver calls it
+/// counterpart of `tairix_sys_hw_emit_node`: a user-space bus driver calls it
 /// when a device it published goes away, so the device manager unloads the
-/// driver bound to the vanished node. Requires `ROS_CAP_HW_EMIT`; the kernel
+/// driver bound to the vanished node. Requires `TAIRIX_CAP_HW_EMIT`; the kernel
 /// retires the node only when it is a child the caller itself published
-/// (no ambient authority). Returns a `ROS_E_*` code (`0` on
+/// (no ambient authority). Returns a `TAIRIX_E_*` code (`0` on
 /// success).
 #[must_use]
-#[export_name = "ros_sys_hw_remove_node"]
+#[export_name = "tairix_sys_hw_remove_node"]
 pub extern "C" fn sys_hw_remove_node(node_id: u64) -> i32 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_HW_EMIT` and resolves `node_id` against the live tree on the far
@@ -1522,20 +1522,20 @@ pub extern "C" fn sys_hw_remove_node(node_id: u64) -> i32 {
 }
 
 /// `msi_alloc`: allocate a message-signalled interrupt (MSI) vector for a PCI
-/// function and write the encoded `rustos_abi::MsiAllocation` (the virtual
+/// function and write the encoded `tairix_abi::MsiAllocation` (the virtual
 /// interrupt line plus the doorbell address/data to program into the
 /// function's MSI capability) into `out` (a buffer of `len` bytes)
 /// (`SyscallNumber::MSI_ALLOC`). Returns the number of bytes written, or a
-/// `ROS_E_*` code reinterpreted into the result.
+/// `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// A user-space bus driver wiring a PCI function for MSI calls this; it is
-/// gated kernel-side on `ROS_CAP_IRQ_BIND` (the same privilege the driver
+/// gated kernel-side on `TAIRIX_CAP_IRQ_BIND` (the same privilege the driver
 /// needs to `irq_bind` the returned line). The kernel grants the caller a
 /// device resource for the line, so it may both bind it and forward it as an
 /// IRQ resource onto a child node it publishes (no ambient authority); a
 /// platform with no MSI controller fails closed.
 #[must_use]
-#[export_name = "ros_sys_msi_alloc"]
+#[export_name = "tairix_sys_msi_alloc"]
 pub extern "C" fn sys_msi_alloc(out: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_resource_grants`. The kernel validates the `(out, len)`
     // pair against the caller's address space before writing the encoded
@@ -1548,17 +1548,17 @@ pub extern "C" fn sys_msi_alloc(out: *mut c_void, len: usize) -> u64 {
 /// address space, and write the new region's kernel-allocated, unforgeable
 /// id to `id_out` (`SyscallNumber::SHM_CREATE`). Returns the base **user
 /// virtual address** the region is mapped at (`RW`, non-executable,
-/// cacheable, guard-bracketed), or a `ROS_E_*` code reinterpreted into the
+/// cacheable, guard-bracketed), or a `TAIRIX_E_*` code reinterpreted into the
 /// result.
 ///
 /// The kernel zeroes the region before it is visible (no cross-process
 /// leak), records the caller as its owner, and grants the caller the matching
 /// per-region device resource so it may forward the region onto a child node
-/// it publishes — never ambient authority. Gated kernel-side on `ROS_CAP_SHM`;
+/// it publishes — never ambient authority. Gated kernel-side on `TAIRIX_CAP_SHM`;
 /// a zero length, frame exhaustion, or a build with no shared-memory facility
 /// fails closed.
 #[must_use]
-#[export_name = "ros_sys_shm_create"]
+#[export_name = "tairix_sys_shm_create"]
 pub extern "C" fn sys_shm_create(len: usize, id_out: *mut c_void) -> u64 {
     // SAFETY: see `sys_dma_alloc`; the kernel validates the `id_out` pointer
     // against the caller's address space before writing the region id to it.
@@ -1568,7 +1568,7 @@ pub extern "C" fn sys_shm_create(len: usize, id_out: *mut c_void) -> u64 {
 /// `shm_map`: map a shared-memory region the kernel has **granted** the
 /// calling task into its own address space (`SyscallNumber::SHM_MAP`).
 /// Returns the base **user virtual address** the region is mapped at, or a
-/// `ROS_E_*` code reinterpreted into the result. On success the region's
+/// `TAIRIX_E_*` code reinterpreted into the result. On success the region's
 /// byte length — the kernel's own record, never the granting task's claim —
 /// is written to `len_out`; it is left untouched on failure.
 ///
@@ -1578,9 +1578,9 @@ pub extern "C" fn sys_shm_create(len: usize, id_out: *mut c_void) -> u64 {
 /// that region's existing frames into the caller's own address space; a
 /// forged/non-owned handle, a wrong-kind grant, a torn-down region, or a build
 /// with no shared-memory facility fails closed. Gated kernel-side on
-/// `ROS_CAP_SHM`.
+/// `TAIRIX_CAP_SHM`.
 #[must_use]
-#[export_name = "ros_sys_shm_map"]
+#[export_name = "tairix_sys_shm_map"]
 pub extern "C" fn sys_shm_map(handle: u64, len_out: *mut c_void) -> u64 {
     // SAFETY: see `sys_dma_alloc`; the kernel validates the `len_out` pointer
     // against the caller's address space before writing the region's byte
@@ -1590,7 +1590,7 @@ pub extern "C" fn sys_shm_map(handle: u64, len_out: *mut c_void) -> u64 {
 
 /// `shm_unmap`: release the shared-memory mapping of `len` bytes based at
 /// `base` the calling task established with [`sys_shm_create`] or
-/// [`sys_shm_map`] (`SyscallNumber::SHM_UNMAP`). Returns a `ROS_E_*` code.
+/// [`sys_shm_map`] (`SyscallNumber::SHM_UNMAP`). Returns a `TAIRIX_E_*` code.
 ///
 /// The kernel validates the `(base, len)` names a shared mapping of the
 /// calling task, tears down only that mapping's page-table entries, and drops
@@ -1599,7 +1599,7 @@ pub extern "C" fn sys_shm_map(handle: u64, len_out: *mut c_void) -> u64 {
 /// capability (the `mem_unmap` posture). A `(base, len)` that does not name a
 /// live shared mapping of the caller fails closed.
 #[must_use]
-#[export_name = "ros_sys_shm_unmap"]
+#[export_name = "tairix_sys_shm_unmap"]
 pub extern "C" fn sys_shm_unmap(base: u64, len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` range
     // against the caller's address space before unmapping it.
@@ -1609,16 +1609,16 @@ pub extern "C" fn sys_shm_unmap(base: u64, len: usize) -> i32 {
 /// `shm_grant`: grant the serving task of call endpoint `endpoint` the right
 /// to map the shared-memory region `region` the caller owns
 /// (`SyscallNumber::SHM_GRANT`). Returns the minted, unforgeable grant
-/// handle (>= 1), or a `ROS_E_*` code reinterpreted into the result.
+/// handle (>= 1), or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
-/// The kernel requires `ROS_CAP_SHM`, confirms the caller itself holds a
+/// The kernel requires `TAIRIX_CAP_SHM`, confirms the caller itself holds a
 /// grant covering the region (delegation never widens authority), and
 /// resolves the recipient as the endpoint's live serving task at grant
 /// time — never a caller-supplied PID. The caller forwards the handle
 /// in-band; it resolves only through the recipient's own
 /// [`sys_shm_map`], so the number is useless to a bystander. Audited.
 #[must_use]
-#[export_name = "ros_sys_shm_grant"]
+#[export_name = "tairix_sys_shm_grant"]
 pub extern "C" fn sys_shm_grant(region: u64, endpoint: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // validates the capability, the caller's own region grant, and the
@@ -1627,21 +1627,21 @@ pub extern "C" fn sys_shm_grant(region: u64, endpoint: u64) -> u64 {
 }
 
 /// `call_peer_seat`: ask whether the in-flight caller of served call
-/// endpoint `endpoint` (ticket `ticket`, the value `ros_sys_call_recv`
+/// endpoint `endpoint` (ticket `ticket`, the value `tairix_sys_call_recv`
 /// wrote) holds seat `seat`'s live lease
 /// (`SyscallNumber::CALL_PEER_SEAT`). Returns the live lease generation
-/// (>= 1), or a `ROS_E_*` code reinterpreted into the result
-/// (`ROS_E_SEAT_NOT_OWNER`, `ROS_E_SEAT_REVOKED`, `ROS_E_NOT_FOUND`,
-/// `ROS_E_PERMISSION_DENIED`).
+/// (>= 1), or a `TAIRIX_E_*` code reinterpreted into the result
+/// (`TAIRIX_E_SEAT_NOT_OWNER`, `TAIRIX_E_SEAT_REVOKED`, `TAIRIX_E_NOT_FOUND`,
+/// `TAIRIX_E_PERMISSION_DENIED`).
 ///
-/// Valid only between `ros_sys_call_recv` and `ros_sys_call_reply` on an
+/// Valid only between `tairix_sys_call_recv` and `tairix_sys_call_reply` on an
 /// endpoint the caller owns and may receive from — the
-/// `ros_sys_call_peer_origin` window — so a server learns seat facts only
+/// `tairix_sys_call_peer_origin` window — so a server learns seat facts only
 /// about a task it is actively servicing. The kernel reads the seat's
 /// live lease at check time; a revocation between two frames refuses the
 /// very next present.
 #[must_use]
-#[export_name = "ros_sys_call_peer_seat"]
+#[export_name = "tairix_sys_call_peer_seat"]
 pub extern "C" fn sys_call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // gates the call on endpoint ownership + receive capability before
@@ -1651,14 +1651,14 @@ pub extern "C" fn sys_call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> u
 
 /// `waitset_create`: create a caller-owned wait-set that multiplexes the
 /// readiness of several event sources (`SyscallNumber::WAITSET_CREATE`).
-/// Returns the kernel-minted, opaque wait-set handle, or a `ROS_E_*` code
+/// Returns the kernel-minted, opaque wait-set handle, or a `TAIRIX_E_*` code
 /// reinterpreted into the result.
 ///
 /// Takes no arguments and needs no capability: the set observes only resources
 /// the caller already holds, each owner-checked when added. Members are
 /// registered with [`sys_waitset_ctl`] and waited on with [`sys_waitset_wait`].
 #[must_use]
-#[export_name = "ros_sys_waitset_create"]
+#[export_name = "tairix_sys_waitset_create"]
 pub extern "C" fn sys_waitset_create() -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is involved; the kernel mints a
     // handle for the calling task and returns it.
@@ -1666,10 +1666,10 @@ pub extern "C" fn sys_waitset_create() -> u64 {
 }
 
 /// `waitset_ctl`: add or remove a member of wait-set `set`
-/// (`SyscallNumber::WAITSET_CTL`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::WAITSET_CTL`). Returns a `TAIRIX_E_*` code.
 ///
-/// `op` is a `ROS_WAITSET_OP_*` value (`Add` / `Del`); `kind` is a
-/// `ROS_WAIT_SOURCE_*` value (`Endpoint` / `Irq` / `Child` / `SeatInput`);
+/// `op` is a `TAIRIX_WAITSET_OP_*` value (`Add` / `Del`); `kind` is a
+/// `TAIRIX_WAIT_SOURCE_*` value (`Endpoint` / `Irq` / `Child` / `SeatInput`);
 /// `id` names the resource (an IPC call-endpoint id the caller serves, an
 /// `IrqHandle` the caller bound, a child PID or the any-child sentinel, or a
 /// seat id whose live lease the caller holds via `display_acquire` — the
@@ -1681,7 +1681,7 @@ pub extern "C" fn sys_waitset_create() -> u64 {
 /// caller does not own, a handle that is not the caller's own wait-set, an
 /// unknown `op`/`kind`, or a duplicate/absent member fails closed.
 #[must_use]
-#[export_name = "ros_sys_waitset_ctl"]
+#[export_name = "tairix_sys_waitset_ctl"]
 pub extern "C" fn sys_waitset_ctl(set: u64, op: u32, kind: u32, id: u64, token: u64) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // validates the set handle and the named resource against the caller.
@@ -1695,15 +1695,15 @@ pub extern "C" fn sys_waitset_ctl(set: u64, op: u32, kind: u32, id: u64, token: 
 
 /// `waitset_wait`: block until any one member of wait-set `set` is ready,
 /// writing the ready member's caller-chosen token to `token_out`
-/// (`SyscallNumber::WAITSET_WAIT`). Returns a `ROS_E_*` code (`0` on a ready
-/// member, `ROS_E_TIMED_OUT` when `timeout_ns` elapses first).
+/// (`SyscallNumber::WAITSET_WAIT`). Returns a `TAIRIX_E_*` code (`0` on a ready
+/// member, `TAIRIX_E_TIMED_OUT` when `timeout_ns` elapses first).
 ///
 /// `timeout_ns` is a relative timeout, or `UINT64_MAX` for "no timeout". The
 /// caller parks off the run queue between readiness checks — woken by an IPC
 /// post to a member endpoint, a member IRQ firing, or the timeout — so an idle
 /// service burns no CPU. Needs no capability.
 #[must_use]
-#[export_name = "ros_sys_waitset_wait"]
+#[export_name = "tairix_sys_waitset_wait"]
 pub extern "C" fn sys_waitset_wait(set: u64, timeout_ns: u64, token_out: *mut c_void) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates `token_out` against the
     // caller's address space before writing the ready member's token to it.
@@ -1717,16 +1717,16 @@ pub extern "C" fn sys_waitset_wait(set: u64, timeout_ns: u64, token_out: *mut c_
 
 /// `fs_open`: open the file or directory at the absolute path
 /// `(path, path_len)` (`SyscallNumber::FS_OPEN`). Returns a new per-process
-/// file descriptor (at or above `ROS_STD_STREAM_COUNT`), or a `ROS_E_*` code
+/// file descriptor (at or above `TAIRIX_STD_STREAM_COUNT`), or a `TAIRIX_E_*` code
 /// reinterpreted into the result.
 ///
-/// `flags` is the `ROS_OPEN_*` bit set ([`rustos_abi::OpenFlags`]). Requires
-/// `ROS_CAP_FS_ACCESS`; the kernel validates the capability and the
+/// `flags` is the `TAIRIX_OPEN_*` bit set ([`tairix_abi::OpenFlags`]). Requires
+/// `TAIRIX_CAP_FS_ACCESS`; the kernel validates the capability and the
 /// `(path, path_len)` pair against the caller's address space, then resolves
 /// the path under the caller's real credentials so every per-inode and
 /// mount-flag check stays kernel-side.
 #[must_use]
-#[export_name = "ros_sys_fs_open"]
+#[export_name = "tairix_sys_fs_open"]
 pub extern "C" fn sys_fs_open(path: *mut c_void, path_len: usize, flags: u32) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
     unsafe {
@@ -1738,9 +1738,9 @@ pub extern "C" fn sys_fs_open(path: *mut c_void, path_len: usize, flags: u32) ->
 }
 
 /// `fs_close`: release the open descriptor `fd` (`SyscallNumber::FS_CLOSE`).
-/// Returns a `ROS_E_*` code.
+/// Returns a `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_fs_close"]
+#[export_name = "tairix_sys_fs_close"]
 pub extern "C" fn sys_fs_close(fd: u32) -> i32 {
     // SAFETY: see `sys_yield`. The kernel resolves `fd` against the caller's
     // descriptor table.
@@ -1749,13 +1749,13 @@ pub extern "C" fn sys_fs_close(fd: u32) -> i32 {
 
 /// `fs_read`: read up to `len` bytes from open file `fd` at byte `offset`
 /// into `buf` (`SyscallNumber::FS_READ`). Returns the number of bytes read
-/// (`0` at end of file), or a `ROS_E_*` code reinterpreted into the result.
+/// (`0` at end of file), or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// The kernel resolves `fd`, re-authorises the read through the secured VFS,
 /// and validates `(buf, len)` against the caller's address space before
 /// writing it.
 #[must_use]
-#[export_name = "ros_sys_fs_read"]
+#[export_name = "tairix_sys_fs_read"]
 pub extern "C" fn sys_fs_read(fd: u32, offset: u64, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
     unsafe {
@@ -1768,13 +1768,13 @@ pub extern "C" fn sys_fs_read(fd: u32, offset: u64, buf: *mut c_void, len: usize
 
 /// `fs_write`: write up to `len` bytes at `buf` to open file `fd` at byte
 /// `offset` (`SyscallNumber::FS_WRITE`). Returns the number of bytes written,
-/// or a `ROS_E_*` code reinterpreted into the result.
+/// or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
-/// When the handle was opened `ROS_OPEN_APPEND` the kernel ignores `offset`
+/// When the handle was opened `TAIRIX_OPEN_APPEND` the kernel ignores `offset`
 /// and writes at the current end of file. The kernel validates `(buf, len)`
 /// and re-authorises the write through the secured VFS.
 #[must_use]
-#[export_name = "ros_sys_fs_write"]
+#[export_name = "tairix_sys_fs_write"]
 pub extern "C" fn sys_fs_write(fd: u32, offset: u64, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
     unsafe {
@@ -1786,15 +1786,15 @@ pub extern "C" fn sys_fs_write(fd: u32, offset: u64, buf: *mut c_void, len: usiz
 }
 
 /// `fs_readdir`: list the entries of open directory `fd` into `buf` as a
-/// packed stream of [`rustos_abi::DirEntry`] records
+/// packed stream of [`tairix_abi::DirEntry`] records
 /// (`SyscallNumber::FS_READDIR`). Returns the number of bytes written, or a
-/// `ROS_E_*` code reinterpreted into the result.
+/// `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// A buffer too small to hold the whole listing fails closed with
-/// `ROS_E_BUFFER_TOO_SMALL` (the listing is never truncated); the caller
+/// `TAIRIX_E_BUFFER_TOO_SMALL` (the listing is never truncated); the caller
 /// grows `buf` and retries.
 #[must_use]
-#[export_name = "ros_sys_fs_readdir"]
+#[export_name = "tairix_sys_fs_readdir"]
 pub extern "C" fn sys_fs_readdir(fd: u32, buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
     unsafe {
@@ -1806,13 +1806,13 @@ pub extern "C" fn sys_fs_readdir(fd: u32, buf: *mut c_void, len: usize) -> u64 {
 }
 
 /// `fs_stat`: report the structural metadata of open handle `fd` as one
-/// [`rustos_abi::FileStat`] record at `out` (`SyscallNumber::FS_STAT`).
-/// Returns the number of bytes written, or a `ROS_E_*` code reinterpreted
+/// [`tairix_abi::FileStat`] record at `out` (`SyscallNumber::FS_STAT`).
+/// Returns the number of bytes written, or a `TAIRIX_E_*` code reinterpreted
 /// into the result.
 ///
-/// A buffer too small fails closed with `ROS_E_BUFFER_TOO_SMALL`.
+/// A buffer too small fails closed with `TAIRIX_E_BUFFER_TOO_SMALL`.
 #[must_use]
-#[export_name = "ros_sys_fs_stat"]
+#[export_name = "tairix_sys_fs_stat"]
 pub extern "C" fn sys_fs_stat(fd: u32, out: *mut c_void, out_len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(out, out_len)`.
     unsafe {
@@ -1824,13 +1824,13 @@ pub extern "C" fn sys_fs_stat(fd: u32, out: *mut c_void, out_len: usize) -> u64 
 }
 
 /// `fs_truncate`: set the length of open file `fd` to `size` bytes
-/// (`SyscallNumber::FS_TRUNCATE`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::FS_TRUNCATE`). Returns a `TAIRIX_E_*` code.
 ///
 /// The kernel re-authorises the operation through the secured VFS; a
 /// read-only mount, a directory handle, or a handle without write access
 /// fails closed.
 #[must_use]
-#[export_name = "ros_sys_fs_truncate"]
+#[export_name = "tairix_sys_fs_truncate"]
 pub extern "C" fn sys_fs_truncate(fd: u32, size: u64) -> i32 {
     // SAFETY: see `sys_yield`.
     unsafe {
@@ -1843,22 +1843,22 @@ pub extern "C" fn sys_fs_truncate(fd: u32, size: u64) -> i32 {
 
 /// `fs_sync`: flush the filesystem backing open handle `fd` to its backing
 /// store so prior writes are durable (`SyscallNumber::FS_SYNC`). Returns a
-/// `ROS_E_*` code.
+/// `TAIRIX_E_*` code.
 #[must_use]
-#[export_name = "ros_sys_fs_sync"]
+#[export_name = "tairix_sys_fs_sync"]
 pub extern "C" fn sys_fs_sync(fd: u32) -> i32 {
     // SAFETY: see `sys_yield`.
     unsafe { ret_i32(raw_syscall(NUM_FS_SYNC, [u64::from(fd), 0, 0, 0, 0, 0])) }
 }
 
 /// `fs_mkdir`: create a directory at the absolute path `(path, path_len)`
-/// (`SyscallNumber::FS_MKDIR`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::FS_MKDIR`). Returns a `TAIRIX_E_*` code.
 ///
-/// Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/mount-flag
-/// model match `ros_sys_fs_open`. The kernel validates `(path, path_len)`
+/// Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/mount-flag
+/// model match `tairix_sys_fs_open`. The kernel validates `(path, path_len)`
 /// against the caller's address space before reading it.
 #[must_use]
-#[export_name = "ros_sys_fs_mkdir"]
+#[export_name = "tairix_sys_fs_mkdir"]
 pub extern "C" fn sys_fs_mkdir(path: *mut c_void, path_len: usize) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
     unsafe {
@@ -1870,20 +1870,20 @@ pub extern "C" fn sys_fs_mkdir(path: *mut c_void, path_len: usize) -> i32 {
 }
 
 /// `fs_unlink`: remove the file or empty directory at the absolute path
-/// `(path, path_len)` (`SyscallNumber::FS_UNLINK`). Returns a `ROS_E_*` code.
+/// `(path, path_len)` (`SyscallNumber::FS_UNLINK`). Returns a `TAIRIX_E_*` code.
 ///
-/// `flags` is the validated `ROS_UNLINK_FLAG_*` word: `0` removes the named
-/// file or (empty) directory; `ROS_UNLINK_FLAG_DIRECTORY` restricts the
+/// `flags` is the validated `TAIRIX_UNLINK_FLAG_*` word: `0` removes the named
+/// file or (empty) directory; `TAIRIX_UNLINK_FLAG_DIRECTORY` restricts the
 /// removal to an (empty) directory (the atomic `rmdir` posture — a
-/// non-directory is refused with `ROS_E_NOT_A_DIRECTORY`). A reserved bit
+/// non-directory is refused with `TAIRIX_E_NOT_A_DIRECTORY`). A reserved bit
 /// fails closed.
 ///
-/// Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/mount-flag
-/// model match `ros_sys_fs_open`. A non-empty directory fails closed. The
+/// Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/mount-flag
+/// model match `tairix_sys_fs_open`. A non-empty directory fails closed. The
 /// kernel validates `(path, path_len)` against the caller's address space
 /// before reading it.
 #[must_use]
-#[export_name = "ros_sys_fs_unlink"]
+#[export_name = "tairix_sys_fs_unlink"]
 pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize, flags: u32) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
     // and rejects any reserved `flags` bit.
@@ -1897,16 +1897,16 @@ pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize, flags: u32) 
 
 /// `fs_rename`: move the file or directory at the absolute path
 /// `(src, src_len)` to the absolute path `(dst, dst_len)`
-/// (`SyscallNumber::FS_RENAME`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::FS_RENAME`). Returns a `TAIRIX_E_*` code.
 ///
-/// Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/mount-flag
-/// model match `ros_sys_fs_open`. Both paths must resolve under the same
+/// Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/mount-flag
+/// model match `tairix_sys_fs_open`. Both paths must resolve under the same
 /// mounted volume; a non-empty directory destination, a
 /// directory-into-its-own-subtree move, or a cross-mount move fails closed.
 /// The kernel validates both `(ptr, len)` pairs against the caller's
 /// address space before reading them.
 #[must_use]
-#[export_name = "ros_sys_fs_rename"]
+#[export_name = "tairix_sys_fs_rename"]
 pub extern "C" fn sys_fs_rename(
     src: *mut c_void,
     src_len: usize,
@@ -1931,17 +1931,17 @@ pub extern "C" fn sys_fs_rename(
 
 /// `fs_set_mode`: set the permission bits of the file or directory at the
 /// absolute path `(path, path_len)` to `mode` (`SyscallNumber::FS_SET_MODE`,
-/// the `chmod(2)` shape). Returns a `ROS_E_*` code.
+/// the `chmod(2)` shape). Returns a `TAIRIX_E_*` code.
 ///
-/// `mode` carries at most `ROS_FS_MODE_MASK` (the `rwx` triads plus the
+/// `mode` carries at most `TAIRIX_FS_MODE_MASK` (the `rwx` triads plus the
 /// setuid/setgid/sticky bits); any higher bit fails closed with
-/// `ROS_E_OUT_OF_RANGE` — never masked to a mode the caller did not ask
-/// for. Requires `ROS_CAP_FS_ACCESS`; resolution and the permission/
-/// mount-flag model match `ros_sys_fs_open`, and only the inode's owner may
+/// `TAIRIX_E_OUT_OF_RANGE` — never masked to a mode the caller did not ask
+/// for. Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/
+/// mount-flag model match `tairix_sys_fs_open`, and only the inode's owner may
 /// change its mode. The kernel validates `(path, path_len)` against the
 /// caller's address space before reading it.
 #[must_use]
-#[export_name = "ros_sys_fs_set_mode"]
+#[export_name = "tairix_sys_fs_set_mode"]
 pub extern "C" fn sys_fs_set_mode(path: *mut c_void, path_len: usize, mode: u32) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
     // and rejects any `mode` bit above the permission mask.
@@ -1957,15 +1957,15 @@ pub extern "C" fn sys_fs_set_mode(path: *mut c_void, path_len: usize, mode: u32)
 /// or directory at the absolute path `(path, path_len)` into
 /// `(value_out, value_out_len)` (`SyscallNumber::FS_ATTR_GET`, the
 /// `getxattr(2)` shape). Returns the value's byte count, or a negative
-/// `ROS_E_*` code encoded in the `u64` (the `ros_sys_spawn` convention):
-/// `ROS_E_NO_DATA` when no such attribute is stored, `ROS_E_BUFFER_TOO_SMALL`
-/// when the value does not fit (never truncated), `ROS_E_NOT_SUPPORTED` on a
-/// mount whose format stores no attributes. Requires `ROS_CAP_FS_ACCESS`;
-/// the key is a `namespace.rest` key of at most `ROS_FS_ATTR_KEY_MAX` bytes,
+/// `TAIRIX_E_*` code encoded in the `u64` (the `tairix_sys_spawn` convention):
+/// `TAIRIX_E_NO_DATA` when no such attribute is stored, `TAIRIX_E_BUFFER_TOO_SMALL`
+/// when the value does not fit (never truncated), `TAIRIX_E_NOT_SUPPORTED` on a
+/// mount whose format stores no attributes. Requires `TAIRIX_CAP_FS_ACCESS`;
+/// the key is a `namespace.rest` key of at most `TAIRIX_FS_ATTR_KEY_MAX` bytes,
 /// the privileged namespaces are refused, and the caller needs read
 /// permission on the node.
 #[must_use]
-#[export_name = "ros_sys_fs_attr_get"]
+#[export_name = "tairix_sys_fs_attr_get"]
 pub extern "C" fn sys_fs_attr_get(
     path: *mut c_void,
     path_len: usize,
@@ -1994,14 +1994,14 @@ pub extern "C" fn sys_fs_attr_get(
 /// `fs_attr_set`: set the extended attribute `(key, key_len)` of the file
 /// or directory at the absolute path `(path, path_len)` to the opaque
 /// bytes `(value, value_len)` (`SyscallNumber::FS_ATTR_SET`, the
-/// `setxattr(2)` shape). Returns a `ROS_E_*` code.
+/// `setxattr(2)` shape). Returns a `TAIRIX_E_*` code.
 ///
-/// The value carries at most `ROS_FS_ATTR_VALUE_MAX` bytes; a larger
-/// payload fails closed with `ROS_E_LENGTH_OUT_OF_RANGE`. Requires
-/// `ROS_CAP_FS_ACCESS`, write permission on the node, and a writable
+/// The value carries at most `TAIRIX_FS_ATTR_VALUE_MAX` bytes; a larger
+/// payload fails closed with `TAIRIX_E_LENGTH_OUT_OF_RANGE`. Requires
+/// `TAIRIX_CAP_FS_ACCESS`, write permission on the node, and a writable
 /// mount; the privileged namespaces are refused.
 #[must_use]
-#[export_name = "ros_sys_fs_attr_set"]
+#[export_name = "tairix_sys_fs_attr_set"]
 pub extern "C" fn sys_fs_attr_set(
     path: *mut c_void,
     path_len: usize,
@@ -2031,11 +2031,11 @@ pub extern "C" fn sys_fs_attr_set(
 /// the file or directory at the absolute path `(path, path_len)` into
 /// `(key_out, key_out_len)` (`SyscallNumber::FS_ATTR_LIST`). Returns the
 /// key's byte count, `0` once `index` is past the last visible attribute,
-/// or a negative `ROS_E_*` code encoded in the `u64`. Keys the caller may
-/// not read are omitted, never revealed. Requires `ROS_CAP_FS_ACCESS` and
+/// or a negative `TAIRIX_E_*` code encoded in the `u64`. Keys the caller may
+/// not read are omitted, never revealed. Requires `TAIRIX_CAP_FS_ACCESS` and
 /// read permission on the node.
 #[must_use]
-#[export_name = "ros_sys_fs_attr_list"]
+#[export_name = "tairix_sys_fs_attr_list"]
 pub extern "C" fn sys_fs_attr_list(
     path: *mut c_void,
     path_len: usize,
@@ -2063,12 +2063,12 @@ pub extern "C" fn sys_fs_attr_list(
 /// `fs_attr_remove`: remove the extended attribute `(key, key_len)` from
 /// the file or directory at the absolute path `(path, path_len)`
 /// (`SyscallNumber::FS_ATTR_REMOVE`, the `removexattr(2)` shape). Returns
-/// a `ROS_E_*` code: `ROS_E_NO_DATA` when no such attribute is stored,
-/// `ROS_E_NOT_SUPPORTED` on a mount whose format stores no attributes.
-/// Requires `ROS_CAP_FS_ACCESS`, write permission on the node, and a
+/// a `TAIRIX_E_*` code: `TAIRIX_E_NO_DATA` when no such attribute is stored,
+/// `TAIRIX_E_NOT_SUPPORTED` on a mount whose format stores no attributes.
+/// Requires `TAIRIX_CAP_FS_ACCESS`, write permission on the node, and a
 /// writable mount; the privileged namespaces are refused.
 #[must_use]
-#[export_name = "ros_sys_fs_attr_remove"]
+#[export_name = "tairix_sys_fs_attr_remove"]
 pub extern "C" fn sys_fs_attr_remove(
     path: *mut c_void,
     path_len: usize,
@@ -2094,11 +2094,11 @@ pub extern "C" fn sys_fs_attr_remove(
 
 /// `port_resolve`: resolve the published port name at `(name, name_len)` to
 /// its live IPC endpoint id (`SyscallNumber::PORT_RESOLVE`). Returns the
-/// endpoint id, or a negative `ROS_E_*` code encoded in the `u64` (the
-/// `ros_sys_spawn` convention). Resolution grants nothing: every send to
+/// endpoint id, or a negative `TAIRIX_E_*` code encoded in the `u64` (the
+/// `tairix_sys_spawn` convention). Resolution grants nothing: every send to
 /// the returned endpoint is still capability-checked kernel-side.
 #[must_use]
-#[export_name = "ros_sys_port_resolve"]
+#[export_name = "tairix_sys_port_resolve"]
 pub extern "C" fn sys_port_resolve(name: *mut c_void, name_len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(name, name_len)`
     // against the caller's address space and the port-name grammar.
@@ -2110,8 +2110,8 @@ pub extern "C" fn sys_port_resolve(name: *mut c_void, name_len: usize) -> u64 {
     }
 }
 
-/// `signal`: deliver control signal `signal` (a `ros_signal_t` discriminant)
-/// to child process `pid` (`SyscallNumber::SIGNAL`). Returns a `ROS_E_*`
+/// `signal`: deliver control signal `signal` (a `tairix_signal_t` discriminant)
+/// to child process `pid` (`SyscallNumber::SIGNAL`). Returns a `TAIRIX_E_*`
 /// code.
 ///
 /// A process may signal only its **own** children; the kernel identifies the
@@ -2119,7 +2119,7 @@ pub extern "C" fn sys_port_resolve(name: *mut c_void, name_len: usize) -> u64 {
 /// relationship and the signal value, and fails closed (`plans/SPAWN.md`
 /// SP7). No capability is required.
 #[must_use]
-#[export_name = "ros_sys_signal"]
+#[export_name = "tairix_sys_signal"]
 pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // validates the target child and the signal value on the far side of the
@@ -2137,18 +2137,18 @@ pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
 /// exclusive drain right on its input queue and the child the cooked-mode
 /// line discipline delivers `^C`/`^Z` to
 /// (`SyscallNumber::CONSOLE_FOREGROUND`, the `tcsetpgrp` analogue,
-/// `plans/DISPLAY.md` D5). Returns a `ROS_E_*` code.
+/// `plans/DISPLAY.md` D5). Returns a `TAIRIX_E_*` code.
 ///
 /// `pid` is a live child of the caller, or `0` to release. While an owner
 /// is recorded, only it may `stream_read` or `stream_input_mode` that
-/// console — every other task sees `ROS_E_NOT_FOREGROUND`. Requires
-/// `ROS_CAP_CONSOLE_READ` (the same fd-scoped terminal-control gate
+/// console — every other task sees `TAIRIX_E_NOT_FOREGROUND`. Requires
+/// `TAIRIX_CAP_CONSOLE_READ` (the same fd-scoped terminal-control gate
 /// `stream_input_mode` carries); the kernel authorises the child through
 /// the same parent/child bookkeeping `wait`/`signal` use,
 /// owner/granter-checks the transition (a bystander can neither take nor
 /// clear the ownership), and fails closed (`plans/SPAWN.md` SP9).
 #[must_use]
-#[export_name = "ros_sys_console_foreground"]
+#[export_name = "tairix_sys_console_foreground"]
 pub extern "C" fn sys_console_foreground(fd: u32, pid: i32) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // resolves `fd` against the caller's own descriptor table and
@@ -2163,16 +2163,16 @@ pub extern "C" fn sys_console_foreground(fd: u32, pid: i32) -> i32 {
 
 /// `fs_chdir`: change the calling process's working directory to the
 /// (absolute or cwd-relative) path `(path, path_len)`
-/// (`SyscallNumber::FS_CHDIR`). Returns a `ROS_E_*` code.
+/// (`SyscallNumber::FS_CHDIR`). Returns a `TAIRIX_E_*` code.
 ///
-/// Requires `ROS_CAP_FS_ACCESS`; the kernel validates `(path, path_len)`
+/// Requires `TAIRIX_CAP_FS_ACCESS`; the kernel validates `(path, path_len)`
 /// against the caller's address space, resolves it (relative to the caller's
 /// current working directory when it is not absolute), and re-authorises it
 /// as a searchable directory under the caller's real credentials before it
 /// becomes the new working directory. A path that is not a searchable
 /// directory fails closed and leaves the working directory unchanged.
 #[must_use]
-#[export_name = "ros_sys_fs_chdir"]
+#[export_name = "tairix_sys_fs_chdir"]
 pub extern "C" fn sys_fs_chdir(path: *mut c_void, path_len: usize) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
     unsafe {
@@ -2185,14 +2185,14 @@ pub extern "C" fn sys_fs_chdir(path: *mut c_void, path_len: usize) -> i32 {
 
 /// `fs_getcwd`: write the calling process's working directory — a normalised
 /// absolute path — into `buf` (`SyscallNumber::FS_GETCWD`). Returns the
-/// number of bytes written, or a `ROS_E_*` code reinterpreted into the
+/// number of bytes written, or a `TAIRIX_E_*` code reinterpreted into the
 /// result.
 ///
 /// A buffer too small to hold the whole path fails closed with
-/// `ROS_E_BUFFER_TOO_SMALL` (the path is never truncated); the caller grows
+/// `TAIRIX_E_BUFFER_TOO_SMALL` (the path is never truncated); the caller grows
 /// `buf` and retries. Needs no capability.
 #[must_use]
-#[export_name = "ros_sys_fs_getcwd"]
+#[export_name = "tairix_sys_fs_getcwd"]
 pub extern "C" fn sys_fs_getcwd(buf: *mut c_void, buf_len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, buf_len)`.
     unsafe { raw_syscall(NUM_FS_GETCWD, [ptr_arg(buf), buf_len as u64, 0, 0, 0, 0]) }
@@ -2201,19 +2201,19 @@ pub extern "C" fn sys_fs_getcwd(buf: *mut c_void, buf_len: usize) -> u64 {
 /// `resource_open`: resolve the resource reference `(reference,
 /// reference_len)` and open it to a new descriptor
 /// (`SyscallNumber::RESOURCE_OPEN`). Returns a new per-process descriptor (at
-/// or above `ROS_STD_STREAM_COUNT`), or a `ROS_E_*` code reinterpreted into
+/// or above `TAIRIX_STD_STREAM_COUNT`), or a `TAIRIX_E_*` code reinterpreted into
 /// the result.
 ///
 /// A resource reference (e.g. `"sys:random"`) names a typed non-filesystem
 /// resource; there is no `/dev`, `/proc`, or `/sys`. `flags` is the
-/// `ROS_OPEN_*` bit set ([`rustos_abi::OpenFlags`]). Authorisation is per
+/// `TAIRIX_OPEN_*` bit set ([`tairix_abi::OpenFlags`]). Authorisation is per
 /// namespace inside the kernel resolver (an unprivileged resource needs no
 /// capability); the kernel validates the `(reference, reference_len)` pair
 /// against the caller's address space. The returned descriptor is read and
-/// written with `ros_sys_fs_read` / `ros_sys_fs_write` and released with
-/// `ros_sys_fs_close`, exactly as a file descriptor is.
+/// written with `tairix_sys_fs_read` / `tairix_sys_fs_write` and released with
+/// `tairix_sys_fs_close`, exactly as a file descriptor is.
 #[must_use]
-#[export_name = "ros_sys_resource_open"]
+#[export_name = "tairix_sys_resource_open"]
 pub extern "C" fn sys_resource_open(
     reference: *mut c_void,
     reference_len: usize,
@@ -2239,9 +2239,9 @@ pub extern "C" fn sys_resource_open(
 /// `fd_grant`: delegate the caller's own read-only filesystem descriptor
 /// `fd` to the live task `pid` as a one-shot grant
 /// (`SyscallNumber::FD_GRANT`). Returns the minted, unforgeable grant
-/// handle (>= 1), or a `ROS_E_*` code reinterpreted into the result.
+/// handle (>= 1), or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
-/// The kernel requires `ROS_CAP_FS_ACCESS`, confirms the caller itself
+/// The kernel requires `TAIRIX_CAP_FS_ACCESS`, confirms the caller itself
 /// holds `fd` as a plain read-only, non-directory filesystem descriptor
 /// (a pipe, resource, writable, or already-delegated descriptor is
 /// refused — delegation never widens and never chains), captures the
@@ -2252,7 +2252,7 @@ pub extern "C" fn sys_resource_open(
 /// resolves only through the recipient's own [`sys_fd_redeem`], so the
 /// number is useless to a bystander. Audited.
 #[must_use]
-#[export_name = "ros_sys_fd_grant"]
+#[export_name = "tairix_sys_fd_grant"]
 pub extern "C" fn sys_fd_grant(fd: u32, pid: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // validates the capability, the caller's own descriptor, and the
@@ -2263,7 +2263,7 @@ pub extern "C" fn sys_fd_grant(fd: u32, pid: u64) -> u64 {
 /// `fd_redeem`: redeem an `fd_grant` handle minted to the calling task,
 /// installing the delegated file into the caller's own open table
 /// (`SyscallNumber::FD_REDEEM`). Returns the fresh per-process descriptor
-/// (at or above `ROS_STD_STREAM_COUNT`), or a `ROS_E_*` code
+/// (at or above `TAIRIX_STD_STREAM_COUNT`), or a `TAIRIX_E_*` code
 /// reinterpreted into the result.
 ///
 /// Needs no capability: receiving user-mediated, already-checked
@@ -2272,11 +2272,11 @@ pub extern "C" fn sys_fd_grant(fd: u32, pid: u64) -> u64 {
 /// captured identity. One-shot: the grant is consumed only when the
 /// descriptor allocation succeeds, so a refused redemption leaves it
 /// intact and a redeemed handle can never be redeemed twice. A handle
-/// minted to another task fails closed with `ROS_E_NOT_FOUND`,
+/// minted to another task fails closed with `TAIRIX_E_NOT_FOUND`,
 /// indistinguishable from one that never existed. The descriptor is read
-/// with `ros_sys_fs_read` and released with `ros_sys_fs_close`. Audited.
+/// with `tairix_sys_fs_read` and released with `tairix_sys_fs_close`. Audited.
 #[must_use]
-#[export_name = "ros_sys_fd_redeem"]
+#[export_name = "tairix_sys_fd_redeem"]
 pub extern "C" fn sys_fd_redeem(handle: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // resolves the handle owner-bound before installing anything.
@@ -2286,10 +2286,10 @@ pub extern "C" fn sys_fd_redeem(handle: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The trap seam lives in `rustos-abi-trap` (the single trap home) and is reached here through the `host-seam`
+    // The trap seam lives in `tairix-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
-    use rustos_abi::SYSCALLS;
-    use rustos_abi_trap::seam;
+    use tairix_abi::SYSCALLS;
+    use tairix_abi_trap::seam;
 
     /// The complete set of stubs this crate implements, paired with the
     /// `abi-v1` number and argument count each one marshals. The drift tests
@@ -2399,7 +2399,7 @@ mod tests {
         assert_eq!(
             IMPLEMENTED.len(),
             SYSCALLS.len(),
-            "every abi-v1 syscall must have exactly one ros_sys_* stub"
+            "every abi-v1 syscall must have exactly one tairix_sys_* stub"
         );
         for spec in SYSCALLS {
             let number = u64::from(spec.number.as_u16());
@@ -2450,7 +2450,7 @@ mod tests {
     #[test]
     fn ipc_recv_marshals_endpoint_pointer_len_and_sender_out() {
         let mut buffer = [0u8; 16];
-        let mut sender = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
+        let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
         let ptr = buffer.as_mut_ptr().cast::<c_void>();
         let sender_ptr = sender.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
@@ -2701,7 +2701,7 @@ mod tests {
     fn spawn_marshals_the_attach_and_startup_strings_blocks() {
         let mut path = *b"/Apps/Child.app/Run";
         let ptr = path.as_mut_ptr().cast::<c_void>();
-        let mut attach = rustos_abi::SpawnAttach::INHERIT.to_le_bytes();
+        let mut attach = tairix_abi::SpawnAttach::INHERIT.to_le_bytes();
         let attach_ptr = attach.as_mut_ptr().cast::<c_void>();
         let mut block = *b"opaque-encoded-psv1-bytes";
         let block_ptr = block.as_mut_ptr().cast::<c_void>();
@@ -2922,7 +2922,7 @@ mod tests {
         let (number, args) = capture(12, || {
             assert_eq!(
                 sys_ipc_call(
-                    rustos_abi::driver_store::DRIVER_STORE_ENDPOINT,
+                    tairix_abi::driver_store::DRIVER_STORE_ENDPOINT,
                     req_ptr,
                     request.len(),
                     reply_ptr,
@@ -2932,7 +2932,7 @@ mod tests {
             );
         });
         assert_eq!(number, NUM_IPC_CALL);
-        assert_eq!(args[0], rustos_abi::driver_store::DRIVER_STORE_ENDPOINT);
+        assert_eq!(args[0], tairix_abi::driver_store::DRIVER_STORE_ENDPOINT);
         assert_eq!(args[1], req_ptr as usize as u64);
         assert_eq!(args[2], request.len() as u64);
         assert_eq!(args[3], reply_ptr as usize as u64);
@@ -3101,7 +3101,7 @@ mod tests {
     fn wait_marshals_the_nonblock_flag() {
         let mut status = 0i32;
         let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
-        let flags = rustos_abi::WaitFlags::NONBLOCK.bits();
+        let flags = tairix_abi::WaitFlags::NONBLOCK.bits();
         let (number, args) = capture(0, || {
             let _ = sys_wait(9, ptr, flags);
         });
@@ -3114,7 +3114,7 @@ mod tests {
         let mut status = 0i32;
         let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
         let (number, args) = capture(3, || {
-            let _ = sys_wait(rustos_abi::WAIT_PID_ANY, ptr, 0);
+            let _ = sys_wait(tairix_abi::WAIT_PID_ANY, ptr, 0);
         });
         assert_eq!(number, NUM_WAIT);
         // `WAIT_PID_ANY` (-1) sign-extends to all-ones in the argument register.
@@ -3124,11 +3124,11 @@ mod tests {
     #[test]
     fn signal_marshals_pid_and_signal() {
         let (number, args) = capture(0, || {
-            assert_eq!(sys_signal(9, rustos_abi::Signal::Terminate.as_u32()), 0);
+            assert_eq!(sys_signal(9, tairix_abi::Signal::Terminate.as_u32()), 0);
         });
         assert_eq!(number, NUM_SIGNAL);
         assert_eq!(args[0], 9);
-        assert_eq!(args[1], u64::from(rustos_abi::Signal::Terminate.as_u32()));
+        assert_eq!(args[1], u64::from(tairix_abi::Signal::Terminate.as_u32()));
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
@@ -3138,7 +3138,7 @@ mod tests {
         // convention; the kernel rejects it (no child), but the marshalling
         // must be faithful.
         let (number, args) = capture(0, || {
-            let _ = sys_signal(-1, rustos_abi::Signal::Kill.as_u32());
+            let _ = sys_signal(-1, tairix_abi::Signal::Kill.as_u32());
         });
         assert_eq!(number, NUM_SIGNAL);
         assert_eq!(args[0], u64::MAX);
@@ -3172,7 +3172,7 @@ mod tests {
 
     #[test]
     fn errno_returns_are_truncated_to_int32() {
-        // A kernel result whose low 32 bits encode a negative `ROS_E_*` code
+        // A kernel result whose low 32 bits encode a negative `TAIRIX_E_*` code
         // must reach the C caller as that `int32_t`, regardless of the upper
         // bits the result register happens to carry.
         let raw = 0xFFFF_FFFF_8000_0001u64;
@@ -3337,10 +3337,10 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
         // The directory-only bit travels in the flags register.
-        let dir_bit = u64::from(rustos_abi::UnlinkFlags::DIRECTORY.bits());
+        let dir_bit = u64::from(tairix_abi::UnlinkFlags::DIRECTORY.bits());
         let (number, args) = capture(0, || {
             assert_eq!(
-                sys_fs_unlink(ptr, path.len(), rustos_abi::UnlinkFlags::DIRECTORY.bits()),
+                sys_fs_unlink(ptr, path.len(), tairix_abi::UnlinkFlags::DIRECTORY.bits()),
                 0
             );
         });

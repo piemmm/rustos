@@ -2,12 +2,12 @@
 //!
 //! GNU `top`'s `-d, --delay secs.tenths` spelling — seconds with an optional
 //! fraction, of which only the first fractional digit (tenths) is kept — is
-//! implemented by every RustOS full-screen monitor (`top`, `sysmon`), and
+//! implemented by every TAIRiX full-screen monitor (`top`, `sysmon`), and
 //! its parsed value directly parameterises the viewer's
 //! [`Screen`](crate::Screen) input timeout. The grammar therefore lives here
 //! once; each tool keeps its own usage banner and error enum.
 //!
-//! GNU `top` accepts a zero delay and spins as fast as it can; RustOS never
+//! GNU `top` accepts a zero delay and spins as fast as it can; TAIRiX never
 //! busy-loops, so a parsed zero is clamped up to [`MIN_DELAY_TENTHS`] — a
 //! deliberate, documented divergence in each tool's Help.
 

@@ -7,13 +7,13 @@ use alloc::vec::Vec;
 
 use crate::fs::{Mode, Path, Vfs, VfsError};
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, MountFlags, NodeId, NodeInfo, NodeKind,
 };
-use rustos_abi::driver::{DriverError, DriverHandle};
-use rustos_abi::time::Time64;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{GroupId, UserId};
+use tairix_abi::driver::{DriverError, DriverHandle};
+use tairix_abi::time::Time64;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{GroupId, UserId};
 
 use crate::fs::perm::Credentials;
 
@@ -447,8 +447,8 @@ fn non_utf8_directory_name_surfaces_as_io() {
 // mounted-service tests (kernel/core may not depend on `drivers/*`).
 // ---------------------------------------------------------------------
 
-use rustos_abi::driver::filesystem::{FilesystemSecurity, NodeSecurity};
-use rustos_abi::CapabilityId;
+use tairix_abi::driver::filesystem::{FilesystemSecurity, NodeSecurity};
+use tairix_abi::CapabilityId;
 
 /// A default-layout VFS with `/Storage/usb0` mounted writable (no
 /// `READ_ONLY` flag), owner `admin`, mode `mount_mode`.

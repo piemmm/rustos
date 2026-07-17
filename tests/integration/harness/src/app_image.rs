@@ -9,9 +9,9 @@
 //! ([`crate::app_image::discover_app_manifests`]) — never a hand-maintained
 //! per-bundle list — and compose each bundle's signed wire `AppInfo`
 //! ([`crate::app_image::compose_signed_appinfo`]): the
-//! [`rustos_abi::AppInfoHeader`] plus its
+//! [`tairix_abi::AppInfoHeader`] plus its
 //! capability body, content-hashed over the canonical
-//! [`rustos_abi::digest_bundle_contents`] framing and Ed25519-signed over
+//! [`tairix_abi::digest_bundle_contents`] framing and Ed25519-signed over
 //! the header prefix concatenated with the body — exactly the message the
 //! bundle verifier reconstructs.
 //!
@@ -26,12 +26,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer, SigningKey};
-use rustos_abi::{
+use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, ABI_VERSION_CURRENT,
     APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX,
     BUNDLE_VERSION_MAX,
 };
-use rustos_crypto::sha256;
+use tairix_crypto::sha256;
 
 /// File name of a program crate's manifest source, beside its `Cargo.toml`.
 pub const APP_MANIFEST_SOURCE: &str = "AppInfo.toml";
@@ -82,7 +82,7 @@ impl std::error::Error for AppImageError {}
 /// One program's parsed, validated `AppInfo.toml` manifest source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppManifestSource {
-    /// Bundle identifier (e.g. `os.rustos.ls`).
+    /// Bundle identifier (e.g. `os.tairix.ls`).
     pub id: String,
     /// The program's name — also its bundle directory stem and, for a
     /// command app, the command word the shell resolves.
@@ -461,11 +461,11 @@ fn inline_buf<const N: usize>(value: &str) -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_abi::decode_capability_ids;
-    use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
+    use tairix_abi::decode_capability_ids;
+    use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
     const GOOD: &str = "# a comment\n\
-        id = \"os.rustos.example\"\n\
+        id = \"os.tairix.example\"\n\
         name = \"example\"\n\
         version = \"1.2.3\"\n\
         kind = \"command\"\n\
@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn parses_a_valid_manifest() {
         let manifest = AppManifestSource::parse(GOOD).expect("valid");
-        assert_eq!(manifest.id, "os.rustos.example");
+        assert_eq!(manifest.id, "os.tairix.example");
         assert_eq!(manifest.name, "example");
         assert_eq!(manifest.version, "1.2.3");
         assert_eq!(manifest.kind, AppKind::Command);
@@ -501,7 +501,7 @@ mod tests {
             (GOOD.replace("id =", "identifier ="), "unknown key"),
             (format!("{GOOD}id = \"twice\"\n"), "duplicate key"),
             (
-                GOOD.replace("id = \"os.rustos.example\"\n", ""),
+                GOOD.replace("id = \"os.tairix.example\"\n", ""),
                 "missing key",
             ),
             (GOOD.replace("\"command\"", "\"daemon\""), "unknown kind"),
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn discovery_rejects_two_crates_claiming_one_bundle_name() {
         let root =
-            std::env::temp_dir().join(format!("rustos-app-image-dup-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tairix-app-image-dup-{}", std::process::id()));
         let make = |class: &str, krate: &str| {
             let dir = root.join(class).join(krate);
             std::fs::create_dir_all(&dir).expect("mkdir");
@@ -651,7 +651,7 @@ mod tests {
 
         // The wire manifest decodes and carries the source's identity.
         let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
-        assert_eq!(header.bundle_id(), "os.rustos.example");
+        assert_eq!(header.bundle_id(), "os.tairix.example");
         assert_eq!(header.bundle_name(), "example");
         assert_eq!(header.bundle_version(), "1.2.3");
         assert_eq!(header.syscall_table_hash, syscall_hash);

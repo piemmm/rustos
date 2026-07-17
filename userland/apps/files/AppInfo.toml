@@ -10,7 +10,7 @@
 # zero-copy window frame region the desktop session maps. The launched
 # process receives this set intersected with the launching user's
 # grants, never more.
-id = "os.rustos.files"
+id = "os.tairix.files"
 name = "files"
 version = "0.1.0"
 kind = "command"

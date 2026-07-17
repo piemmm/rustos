@@ -1,6 +1,6 @@
 [package]
-name = "rustos-curses"
-description = "RustOS first-party curses / TUI screen-model library (CURSES.md Stage C4): a no_std + alloc, I/O-injected client screen model (windows, sub-windows, pads), a minimal-diff renderer that emits the smallest `lib/vt` sequence set the active `rustos_termcap::TermType` supports (degrading truecolour -> 256 -> 16 -> mono by colour depth), and an input decoder that turns `lib/vt`-parsed escape sequences into typed key/mouse/paste events. One shared vocabulary (AGENTS.md §2.2); statically linked by apps (§16.4); fail-closed, never panics (§2.9)."
+name = "tairix-curses"
+description = "TAIRiX first-party curses / TUI screen-model library (CURSES.md Stage C4): a no_std + alloc, I/O-injected client screen model (windows, sub-windows, pads), a minimal-diff renderer that emits the smallest `lib/vt` sequence set the active `tairix_termcap::TermType` supports (degrading truecolour -> 256 -> 16 -> mono by colour depth), and an input decoder that turns `lib/vt`-parsed escape sequences into typed key/mouse/paste events. One shared vocabulary (AGENTS.md §2.2); statically linked by apps (§16.4); fail-closed, never panics (§2.9)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,15 @@ publish.workspace = true
 # The `program` feature adds the production standard-streams [`Tty`]
 # (`StreamTty`) that a full-screen tool's `Run` binary links: writes to
 # standard output and blocking/timed reads from standard input through the
-# freestanding userland runtime `rustos-rt`. It is enabled only when a
+# freestanding userland runtime `tairix-rt`. It is enabled only when a
 # bare-metal program binary is built — the pure screen-model library and the
-# host tests never pull the runtime. Mirrors `rustos-procinfo`'s split.
+# host tests never pull the runtime. Mirrors `tairix-procinfo`'s split.
 [features]
-program = ["dep:rustos-rt", "dep:rustos-abi"]
+program = ["dep:tairix-rt", "dep:tairix-abi"]
 
 [dependencies]
-rustos-vt = { path = "../vt", version = "=0.0.0" }
-rustos-termcap = { path = "../termcap", version = "=0.0.0" }
+tairix-vt = { path = "../vt", version = "=0.0.0" }
+tairix-termcap = { path = "../termcap", version = "=0.0.0" }
 
 # The `program`-feature `StreamTty` links the freestanding userland runtime
 # for the standard-stream reads/writes, and the frozen `Errno` set to tell a
@@ -27,15 +27,15 @@ rustos-termcap = { path = "../termcap", version = "=0.0.0" }
 # only for the bare-metal targets a `Run` binary is actually built for; on
 # the host neither is compiled.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../rt", version = "=0.0.0", optional = true }
-rustos-abi = { path = "../abi", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget
-# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# §2.2). Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

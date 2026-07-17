@@ -1,4 +1,4 @@
-# `rustos-drv-input-virtio-input` — virtio-input keyboard / pointer driver shell
+# `tairix-drv-input-virtio-input` — virtio-input keyboard / pointer driver shell
 
 The thin §8 driver shell for a virtio-input device (virtio 1.1 §5.8) — the
 paravirtualised input device QEMU exposes as `virtio-keyboard-device` /
@@ -8,7 +8,7 @@ input class real virtio hardware presents. Per `AGENTS.md` §8 the only public
 
 The arch-neutral, transport-agnostic open/poll/decode device logic (the
 `VirtioInput` engine and the `evdev`→`InputEvent` decode) lives in
-`lib/virtio_input` (`rustos_virtio_input`), so both this driver and the
+`lib/virtio_input` (`tairix_virtio_input`), so both this driver and the
 user-space input-driver process compose it without a `drivers/*`→`drivers/*`
 dependency (`AGENTS.md` §17.4 / §2.2 — the virtio analogue of `lib/hid` ↔
 `drivers/input/usb_kbd`). See that crate's README and
@@ -44,7 +44,7 @@ device is reached only through the `Transport` seam (`AGENTS.md` §4 / §17.4).
 The driver publishes a canonical `BIND_KEYS` table (`AGENTS.md` §18.3): one
 entry matching a probed virtio node whose device id is `virtio-input`
 (`HwMatchKey::virtio(18)`), at the exact-match priority tier. The device id
-comes from `rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID` — the single source of
+comes from `tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID` — the single source of
 truth the device logic, this bind table, and the driver's signed-manifest bind
 table are all authored from (`AGENTS.md` §2.2) — and is the data `devmgr` (or
 the in-kernel bootstrap-floor catalogue) resolves a discovered virtio-input
@@ -52,7 +52,7 @@ node against.
 
 ## Test surface
 
-`cargo test -p rustos-drv-input-virtio-input` exercises:
+`cargo test -p tairix-drv-input-virtio-input` exercises:
 
 - the `register` capability gate, and
 - the §18.3 `BIND_KEYS` table matching a probed `virtio-input` node (device id
@@ -62,12 +62,12 @@ The open/poll/decode device-logic tests (decode, poll-drain, teardown) live with
 the logic in `lib/virtio_input` (`AGENTS.md` §2.2 / §17.4).
 
 Two QEMU integration verticals — `input_virtio_mmio_qemu_aarch64`
-(`rustos-test-input-virtio-mmio-qemu-aarch64`) and
-`input_virtio_mmio_qemu_riscv64` (`rustos-test-input-virtio-mmio-qemu-riscv64`),
+(`tairix-test-input-virtio-mmio-qemu-aarch64`) and
+`input_virtio_mmio_qemu_riscv64` (`tairix-test-input-virtio-mmio-qemu-riscv64`),
 both enrolled in `cargo xtask test --qemu` — boot the production kernel on the
 aarch64 / riscv64 `virt` board, build the virtio-MMIO transport from the device
 tree, arm the device IRQ path (aarch64 GICv2 SPI + EL1 / riscv64 PLIC source +
-S-mode trap), load this driver's signed `.rxe` through `rustos_drvhost::Host`,
+S-mode trap), load this driver's signed `.rxe` through `tairix_drvhost::Host`,
 and drive `lib/virtio_input`'s `VirtioInput` through load → use → unload →
 reload. "Use" is made deterministic by a real injected key: the QEMU runner
 attaches a `virtio-keyboard-device`, waits for the guest to log the

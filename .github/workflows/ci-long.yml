@@ -30,7 +30,7 @@ name: ci-long
 # ONLY on `workflow_dispatch` — never on `pull_request`/`pull_request_target`,
 # so a fork's PR can never execute on the runner — and every job is
 # additionally gated (see the job `if:` below) to the owner (`piemmm`) in the
-# canonical `piemmm/rustos` repo, so a fork or any other actor manually
+# canonical `piemmm/tairix` repo, so a fork or any other actor manually
 # dispatching is refused before any step runs.
 on:
   workflow_dispatch:
@@ -59,8 +59,8 @@ env:
   # 22.1.8; no distro package ships that build, so the official llvm.org
   # release is unpacked once onto the runner's persistent disk (see the
   # "Install pinned C toolchain" step) and resolved through these overrides.
-  RUSTOS_CC_CLANG: /var/lib/actions-runner/rustos-cache/llvm-22.1.8/bin/clang
-  RUSTOS_CC_LLD: /var/lib/actions-runner/rustos-cache/llvm-22.1.8/bin/ld.lld
+  TAIRIX_CC_CLANG: /var/lib/actions-runner/tairix-cache/llvm-22.1.8/bin/clang
+  TAIRIX_CC_LLD: /var/lib/actions-runner/tairix-cache/llvm-22.1.8/bin/ld.lld
   # Self-hosted runner: persist build outputs in one fixed dir on the runner's
   # own disk instead of round-tripping a >1 GB `target/` tarball through
   # GitHub's hosted cache service. `actions/checkout` only wipes the workspace,
@@ -68,7 +68,7 @@ env:
   # bin}` already persist on a self-hosted runner. The hunt runs on its *own*
   # runner instance (the `long` label) so it gets a distinct target dir to
   # avoid stomping on the `ci.yml` runner's shared `target/`.
-  CARGO_TARGET_DIR: /var/lib/actions-runner/rustos-cache/target-long
+  CARGO_TARGET_DIR: /var/lib/actions-runner/tairix-cache/target-long
 
 jobs:
   ci-long:
@@ -76,7 +76,7 @@ jobs:
     # Fail closed: only the owner in the canonical repo may execute on the
     # self-hosted runner. Refuses forks (different `github.repository`) and any
     # non-owner actor (e.g. a collaborator's manual dispatch) before checkout.
-    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
+    if: github.repository == 'piemmm/tairix' && github.actor == 'piemmm'
     # Dedicated `long` label so the hunt runs on its own runner instance and
     # never queues `ci.yml` (which uses the bare `[self-hosted, linux]`) behind
     # it.
@@ -112,22 +112,22 @@ jobs:
       # clang/ld.lld report exactly 22.1.8 (REQUIRED_CLANG_VERSION /
       # REQUIRED_LLD_VERSION). No distro package ships that build, so unpack
       # the official llvm.org release tarball once onto the runner's
-      # persistent disk; RUSTOS_CC_CLANG / RUSTOS_CC_LLD (workflow env above)
+      # persistent disk; TAIRIX_CC_CLANG / TAIRIX_CC_LLD (workflow env above)
       # point the wrapper at it, and the wrapper's own exact-version check
       # re-verifies every build.
       - name: Install pinned C toolchain (clang/lld 22.1.8)
         run: |
-          if ! "$RUSTOS_CC_CLANG" --version 2>/dev/null | grep -q 'clang version 22\.1\.8'; then
+          if ! "$TAIRIX_CC_CLANG" --version 2>/dev/null | grep -q 'clang version 22\.1\.8'; then
             wget -qO /tmp/llvm-22.1.8.tar.xz \
               https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz
-            rm -rf /var/lib/actions-runner/rustos-cache/llvm-22.1.8
-            mkdir -p /var/lib/actions-runner/rustos-cache/llvm-22.1.8
+            rm -rf /var/lib/actions-runner/tairix-cache/llvm-22.1.8
+            mkdir -p /var/lib/actions-runner/tairix-cache/llvm-22.1.8
             tar -xJf /tmp/llvm-22.1.8.tar.xz --strip-components=1 \
-              -C /var/lib/actions-runner/rustos-cache/llvm-22.1.8
+              -C /var/lib/actions-runner/tairix-cache/llvm-22.1.8
             rm /tmp/llvm-22.1.8.tar.xz
           fi
-          "$RUSTOS_CC_CLANG" --version
-          "$RUSTOS_CC_LLD" --version
+          "$TAIRIX_CC_CLANG" --version
+          "$TAIRIX_CC_LLD" --version
 
       # Start every run from a clean slate: the self-hosted runner persists
       # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before

@@ -1,5 +1,5 @@
 //! x86_64 implementation of the Arch HAL "enter user mode" surface
-//! ([`rustos_arch_api::EnterUser`]).
+//! ([`tairix_arch_api::EnterUser`]).
 //!
 //! Dropping a freshly built process image into ring 3 is the `iretq`
 //! sequence: build the interrupt-return frame the CPU pops on `iretq`
@@ -39,7 +39,7 @@
 //! does for a ring-3 program that the kernel never re-entered. This
 //! port adds no `swapgs` of its own.
 
-use rustos_arch_api::{EnterUser, UserEntry};
+use tairix_arch_api::{EnterUser, UserEntry};
 
 /// x86_64 implementation of the Arch HAL "enter user mode" surface.
 ///

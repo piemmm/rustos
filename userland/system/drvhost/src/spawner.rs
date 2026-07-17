@@ -19,8 +19,8 @@
 //! pointer into the driver image, so the in-image function-pointer
 //! binding the former resolver performed cannot reappear.
 
-use rustos_abi::{DriverError, DriverHandle, DriverHost, DriverManifest};
-use rustos_caps::CapabilitySet;
+use tairix_abi::{DriverError, DriverHandle, DriverHost, DriverManifest};
+use tairix_caps::CapabilitySet;
 
 /// Canonical `register` entry-point signature:
 ///
@@ -101,7 +101,7 @@ pub trait DriverSpawner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_abi::DriverKind;
+    use tairix_abi::DriverKind;
 
     fn ok_entry(_host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
         DriverHandle::from_raw(99)
@@ -130,8 +130,8 @@ mod tests {
 
     fn sample_manifest() -> DriverManifest {
         DriverManifest {
-            magic: rustos_abi::DRIVER_MANIFEST_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            magic: tairix_abi::DRIVER_MANIFEST_MAGIC,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
             kind: DriverKind::UserSpace,
             bind_key_count: 0,
             capability_count: 0,
@@ -143,7 +143,7 @@ mod tests {
 
     struct StubHost;
     impl DriverHost for StubHost {
-        fn has_capability(&self, _cap: rustos_abi::CapabilityId) -> bool {
+        fn has_capability(&self, _cap: tairix_abi::CapabilityId) -> bool {
             true
         }
         fn kind(&self) -> DriverKind {

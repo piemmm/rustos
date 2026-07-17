@@ -5,18 +5,18 @@
 //! Unlike the riscv64/aarch64 `mem_map` siblings — which stand up a minimal
 //! self-contained test kernel — the x86_64 ring-3 transition needs the GDT
 //! ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, so
-//! this test boots the production `rustos-kernel` pipeline (exactly like the
-//! sibling `rustos-test-spawn-program-qemu-x86_64`). That pipeline now also
+//! this test boots the production `tairix-kernel` pipeline (exactly like the
+//! sibling `tairix-test-spawn-program-qemu-x86_64`). That pipeline now also
 //! installs the dedicated, error-code-aware page-fault entry
-//! (`rustos_arch_x86_64::fault`), so the deliberate use-after-unmap `#PF` is
+//! (`tairix_arch_x86_64::fault`), so the deliberate use-after-unmap `#PF` is
 //! observable rather than fail-closed-and-opaque.
 //!
 //! On `AuditEvent::BootCompleted` the test enables `IA32_EFER.NXE`, installs a
-//! `rustos_arch_x86_64::fault` observer, builds one hardware-isolated user
+//! `tairix_arch_x86_64::fault` observer, builds one hardware-isolated user
 //! address space from the `rxe` fixture program through the production
-//! capability-checked, audited `rustos_kernel_core::spawn_image` caller,
-//! **retains it live**, and installs a `rustos_kernel_core::MemMap` producer
-//! backed by `rustos_kernel_mem::map_anonymous` / `unmap_anonymous` over that
+//! capability-checked, audited `tairix_kernel_core::spawn_image` caller,
+//! **retains it live**, and installs a `tairix_kernel_core::MemMap` producer
+//! backed by `tairix_kernel_mem::map_anonymous` / `unmap_anonymous` over that
 //! space and its frame pool. It then `iretq`s into the program directly
 //! through `EnterUser::enter_user`; the dispatch callback routes the program's
 //! `mem_map` / `mem_unmap` `syscall`s through the producer.
@@ -33,7 +33,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-mem-map-qemu-x86_64: the `test-hooks` Cargo feature is a \
+    "tairix-test-mem-map-qemu-x86_64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

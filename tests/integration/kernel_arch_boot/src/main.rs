@@ -9,14 +9,14 @@
 //! the boot-completed record fires it flips QEMU's `isa-debug-exit`
 //! device to success (`qemu_exit::exit_success`). The host-side
 //! `tools/qemu::Runner` then registers the test as
-//! `rustos_qemu::Outcome::Pass`.
+//! `tairix_qemu::Outcome::Pass`.
 //!
-//! ## How it differs from the production `rustos-kernel` binary
+//! ## How it differs from the production `tairix-kernel` binary
 //!
 //! The binary re-uses the entire boot pipeline from
-//! `rustos_kernel::boot`; only the audit Sink is replaced. Splitting
+//! `tairix_kernel::boot`; only the audit Sink is replaced. Splitting
 //! the audit-observer behaviour into a separate bin (instead of
-//! gating it behind a Cargo feature on `rustos-kernel`) prevents
+//! gating it behind a Cargo feature on `tairix-kernel`) prevents
 //! feature-unification under `cargo build --workspace` from ever
 //! leaking the QEMU-exit behaviour into the production kernel image
 //! (fail closed; the harness never decides what
@@ -32,19 +32,19 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_x86_64::qemu_exit;
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_arch_x86_64::qemu_exit;
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
     //
-    // Identical to the production `rustos-kernel` bin's allocator
+    // Identical to the production `tairix-kernel` bin's allocator
     // declaration. We re-declare it here (rather than re-exporting
     // the production bin's) because `#[global_allocator]` is a
-    // per-binary attribute — see `kernel/rustos-kernel/Cargo.toml`'s
+    // per-binary attribute — see `kernel/tairix-kernel/Cargo.toml`'s
     // top-level rationale comment.
 
     /// Static heap for the bump allocator.
@@ -69,7 +69,7 @@ mod kernel {
     /// phase completed successfully. Pinned by the
     /// `event_ids_are_unique` test in
     /// `kernel/core/src/audit.rs`; if the catalogue ever renumbers,
-    /// the build of `rustos_kernel_core` fails the assertion and the
+    /// the build of `tairix_kernel_core` fails the assertion and the
     /// integration test stops re-shipping a stale literal here.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
@@ -101,7 +101,7 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
+    /// Forward to the shared bridge in `tairix_kernel::x86_64::panic_ctx`.
     ///
     /// Note: the bridge logs through `SERIAL_SINK`, not through our
     /// `AUDIT_SINK`, so a panic before `BootCompleted` does *not*
@@ -110,7 +110,7 @@ mod kernel {
     /// harness reports `Outcome::Timeout`. This is the documented
     /// fail-loud behaviour for (no flaky tests).
     #[panic_handler]
-    fn rustos_kernel_arch_boot_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_kernel_arch_boot_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
@@ -118,7 +118,7 @@ mod kernel {
 
     /// The symbol the arch crate's boot trampoline calls.
     ///
-    /// Forwards to [`rustos_kernel::boot`] with the production COM1
+    /// Forwards to [`tairix_kernel::boot`] with the production COM1
     /// log sink and our audit-observer sink.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
@@ -126,7 +126,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }

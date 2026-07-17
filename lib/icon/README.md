@@ -1,6 +1,6 @@
-# rustos-icon
+# tairix-icon
 
-Shared desktop-icon library for the RustOS desktop (`lib/icon`, `AGENTS.md`
+Shared desktop-icon library for the TAIRiX desktop (`lib/icon`, `AGENTS.md`
 §6 / §10 — `PLAN.md` Stage 7).
 
 The status/notification icons here are **scalable vector artwork, not fixed

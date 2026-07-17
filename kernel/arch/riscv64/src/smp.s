@@ -1,4 +1,4 @@
-# RustOS riscv64 secondary-hart entry trampoline for the QEMU `virt`
+# TAIRiX riscv64 secondary-hart entry trampoline for the QEMU `virt`
 # board.
 #
 # A secondary hart is parked in OpenSBI (M-mode) until the boot hart
@@ -34,7 +34,7 @@
 #      a `hart_start` is refused unless a pool is registered, so this
 #      stub never reads a null base.
 #   4. `tp` is set to the hartid so `smp::current_hartid` reads it back.
-#   5. `rustos_arch_riscv64_secondary_main` is `-> !` and never returns;
+#   5. `tairix_arch_riscv64_secondary_main` is `-> !` and never returns;
 #      the trailing `wfi` park is defensive.
 
 .section .text, "ax"
@@ -60,7 +60,7 @@ _start_secondary:
 
     # Hand this hart's id to the Rust secondary entry. It does not
     # return.
-    call    rustos_arch_riscv64_secondary_main
+    call    tairix_arch_riscv64_secondary_main
 
     # Defensive park (unreachable: the Rust entry never returns).
 1:

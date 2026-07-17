@@ -45,7 +45,7 @@ pub const DEFAULT_RAM_MIB: u32 = 256;
 pub const QEMU_BINARY: &str = "qemu-system-aarch64";
 
 /// QEMU machine model the runner targets — the generic `virt` board,
-/// the only aarch64 platform RustOS' QEMU tests run on. It carries a
+/// the only aarch64 platform TAIRiX' QEMU tests run on. It carries a
 /// PL011 UART, a GICv2, the ARM generic timer, and a virtio-mmio bus.
 pub const MACHINE: &str = "virt";
 

@@ -10,9 +10,9 @@
 //! nightly soak share one definition of the target set.
 //!
 //! Each [`Target`] names a `#[test]` entry point in the
-//! `rustos-test-fs-soak` integration binary (`tests/fs_soak.rs`). The
-//! orchestrator exports `RUSTOS_FSSOAK_BUDGET_SECS` (loop until it
-//! elapses) and `RUSTOS_FSSOAK_BYTES` (the ≥ 1 GiB device size); a plain
+//! `tairix-test-fs-soak` integration binary (`tests/fs_soak.rs`). The
+//! orchestrator exports `TAIRIX_FSSOAK_BUDGET_SECS` (loop until it
+//! elapses) and `TAIRIX_FSSOAK_BYTES` (the ≥ 1 GiB device size); a plain
 //! `cargo test` leaves both unset and runs a single smoke iteration on a
 //! smaller device instead. A target that finds an inconsistency, hangs,
 //! or otherwise fails its invariant fails the command — the soak fails
@@ -41,7 +41,7 @@ pub struct Target {
 }
 
 /// Workspace package owning the soak harness (`cargo test -p`).
-const PACKAGE: &str = "rustos-test-fs-soak";
+const PACKAGE: &str = "tairix-test-fs-soak";
 
 /// Integration-test binary (the `tests/<name>.rs` file stem).
 const TEST_BIN: &str = "fs_soak";
@@ -53,7 +53,7 @@ const TEST_BIN: &str = "fs_soak";
 const SOAK_DEVICE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// The closed set of soak filesystems, in run order. Mirrors the
-/// `rustos_test_fs_soak::TARGETS` registry the harness owns.
+/// `tairix_test_fs_soak::TARGETS` registry the harness owns.
 pub const TARGETS: &[Target] = &[
     Target {
         name: "arxfs",
@@ -230,8 +230,8 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
             t.test_fn,
             "--nocapture",
         ]);
-        cmd.env("RUSTOS_FSSOAK_BUDGET_SECS", budget.as_secs().to_string());
-        cmd.env("RUSTOS_FSSOAK_BYTES", SOAK_DEVICE_BYTES.to_string());
+        cmd.env("TAIRIX_FSSOAK_BUDGET_SECS", budget.as_secs().to_string());
+        cmd.env("TAIRIX_FSSOAK_BYTES", SOAK_DEVICE_BYTES.to_string());
         let label = format!("fssoak {} ({} s)", t.name, budget.as_secs());
         ctx.run(&label, cmd)?;
     }

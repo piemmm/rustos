@@ -7,14 +7,14 @@
 //! byte, and a *device-specific configuration* area. The bus driver
 //! resolves each capability to a `(BAR, offset, length)` triple,
 //! asks the kernel MMIO-map facility for a
-//! [`RegisterWindow`](rustos_abi::RegisterWindow) over it, and hands
+//! [`RegisterWindow`](tairix_abi::RegisterWindow) over it, and hands
 //! the four windows to [`PciTransport::new`].
 //!
 //! This type therefore performs **no** pointer arithmetic and holds
 //! **no** ambient authority: it can only touch registers the kernel
 //! chose to map for the owning driver task. Every
 //! register access goes through the bounds-checked accessors on
-//! [`RegisterWindow`](rustos_abi::RegisterWindow).
+//! [`RegisterWindow`](tairix_abi::RegisterWindow).
 //!
 //! # No panics on the production path
 //!
@@ -31,7 +31,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_virtio::{PciTransportWindows, Status, Transport, VirtioError};
+use tairix_virtio::{PciTransportWindows, Status, Transport, VirtioError};
 
 /// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
 /// to `queue_msix_vector` / `msix_config` tells the device not to
@@ -135,7 +135,7 @@ impl PciTransport {
     /// into the selected queue's `queue_msix_vector` register and
     /// validates the device accepted it. The matching PCI MSI-X table
     /// entry must already have been routed by the kernel
-    /// ([`route_msix`](rustos_abi::driver::msix::MsixBus::route_msix)).
+    /// ([`route_msix`](tairix_abi::driver::msix::MsixBus::route_msix)).
     ///
     /// Config-change interrupts are intentionally left disabled
     /// (`msix_config` stays [`VIRTIO_MSI_NO_VECTOR`]): a block device's
@@ -345,8 +345,8 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
     use core::ptr::NonNull;
-    use rustos_abi::RegisterWindow;
-    use rustos_virtio::{MockHost, SplitQueue};
+    use tairix_abi::RegisterWindow;
+    use tairix_virtio::{MockHost, SplitQueue};
 
     /// One device register region. The leaked, 8-byte-aligned
     /// backing storage outlives every window built over it (the test

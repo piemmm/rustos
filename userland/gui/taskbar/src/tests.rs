@@ -1,9 +1,9 @@
 //! Headless unit tests for the taskbar layout, model, and rendering.
 
-use rustos_geometry::{Point, Rect, Scale};
-use rustos_input::{InputEvent, PointerButton};
-use rustos_raster::{Color, Pixel, Surface};
-use rustos_theme::Theme;
+use tairix_geometry::{Point, Rect, Scale};
+use tairix_input::{InputEvent, PointerButton};
+use tairix_raster::{Color, Pixel, Surface};
+use tairix_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse};
@@ -440,7 +440,7 @@ fn supplied_scale_relays_the_bar_at_the_new_density() {
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
     let unscaled = bar.layout(Scale::ONE).start_button.width;
 
-    let doubled = Scale::from_dpi(rustos_geometry::REFERENCE_DPI * 2).expect("192 DPI");
+    let doubled = Scale::from_dpi(tairix_geometry::REFERENCE_DPI * 2).expect("192 DPI");
     assert_eq!(doubled.percent(), 200);
     assert_eq!(bar.layout(doubled).start_button.width, unscaled * 2);
     assert_eq!(
@@ -483,9 +483,9 @@ fn apply_theme_switches_corner_radius() {
     let mut metrics = *Theme::dark().metrics();
     metrics.taskbar_corner_radius = 0;
     let squared = Theme::new(
-        rustos_theme::ThemeId(42),
+        tairix_theme::ThemeId(42),
         "Square",
-        rustos_theme::Appearance::Dark,
+        tairix_theme::Appearance::Dark,
         *Theme::dark().palette(),
         metrics,
         Theme::dark().fonts().clone(),
@@ -500,7 +500,7 @@ fn apply_theme_switches_corner_radius() {
 // ---- rendering ------------------------------------------------------
 
 /// The premultiplied pixel a theme palette role paints as.
-fn role(color: rustos_theme::Rgba) -> Pixel {
+fn role(color: tairix_theme::Rgba) -> Pixel {
     Color::from(color).premultiply()
 }
 
@@ -728,10 +728,10 @@ struct MemoryIcons {
     network: Option<&'static [u8]>,
 }
 
-impl rustos_icon::IconAssetSource for MemoryIcons {
-    fn asset(&self, kind: rustos_icon::IconKind) -> Option<&[u8]> {
+impl tairix_icon::IconAssetSource for MemoryIcons {
+    fn asset(&self, kind: tairix_icon::IconKind) -> Option<&[u8]> {
         match kind {
-            rustos_icon::IconKind::Network => self.network,
+            tairix_icon::IconKind::Network => self.network,
             _ => None,
         }
     }
@@ -752,11 +752,11 @@ fn loaded_icon_set_draws_its_authored_colours_not_the_theme_tint() {
     let layout = bar.layout(Scale::ONE);
     let slot = layout.notifications[0];
 
-    let set = rustos_icon::IconSet::from_assets(&MemoryIcons {
+    let set = tairix_icon::IconSet::from_assets(&MemoryIcons {
         network: Some(GREEN_SVG),
     });
     assert!(
-        set.is_loaded(rustos_icon::IconKind::Network),
+        set.is_loaded(tairix_icon::IconKind::Network),
         "the network asset decoded"
     );
 
@@ -788,11 +788,11 @@ fn icon_kind_absent_from_a_loaded_set_falls_back_to_the_built_in_glyph() {
     let layout = bar.layout(Scale::ONE);
     let slot = layout.notifications[0];
 
-    let set = rustos_icon::IconSet::from_assets(&MemoryIcons {
+    let set = tairix_icon::IconSet::from_assets(&MemoryIcons {
         network: Some(GREEN_SVG),
     });
     assert!(
-        !set.is_loaded(rustos_icon::IconKind::Volume),
+        !set.is_loaded(tairix_icon::IconKind::Volume),
         "the volume kind has no asset"
     );
 
@@ -834,7 +834,7 @@ fn installing_a_set_invalidates_the_glyph_cache() {
 
     // Installing a loaded set bumps the cache generation, so the next frame
     // re-rasterises from the new set rather than reusing the cached built-in.
-    renderer.set_icons(rustos_icon::IconSet::from_assets(&MemoryIcons {
+    renderer.set_icons(tairix_icon::IconSet::from_assets(&MemoryIcons {
         network: Some(GREEN_SVG),
     }));
     let after = renderer

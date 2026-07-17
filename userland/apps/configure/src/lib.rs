@@ -1,11 +1,11 @@
-//! RustOS `configure` — read and set the boot-time system-configuration
+//! TAIRiX `configure` — read and set the boot-time system-configuration
 //! store (`plans/APPS.md`).
 //!
 //! The `sysctl`-shaped settings command: with no operand it lists every
 //! setting of the closed registry with its current value; with a key it
 //! shows that setting; with a key and a value it updates the store at
 //! `/System/Settings/Configuration/system.conf`
-//! (`rustos_sysconfig::CONFIG_PATH`). The store's grammar, key registry,
+//! (`tairix_sysconfig::CONFIG_PATH`). The store's grammar, key registry,
 //! fail-closed parse, and canonical render are the shared `lib/sysconfig`
 //! engine — the same engine every boot-time consumer reads through, so this
 //! writer and those readers can never diverge.
@@ -53,9 +53,9 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt;
 
-use rustos_abi::Errno;
-use rustos_help::{own_short_help, HelpSource};
-use rustos_sysconfig::{Key, SystemConfig};
+use tairix_abi::Errno;
+use tairix_help::{own_short_help, HelpSource};
+use tairix_sysconfig::{Key, SystemConfig};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `configure`'s own Help tree is
@@ -92,7 +92,7 @@ pub enum ConfigureError {
     /// The store document on disk could not be fully parsed by the shared
     /// engine (a hand edit outside the grammar); a set refuses rather than
     /// guess at a merge.
-    Malformed(rustos_sysconfig::ConfigError),
+    Malformed(tairix_sysconfig::ConfigError),
     /// The store could not be read.
     Read(Errno),
     /// The store could not be written (e.g. the caller may not change
@@ -125,7 +125,7 @@ impl fmt::Display for ConfigureError {
 /// Reads and replaces the configuration-store document.
 ///
 /// The `Run` binary wires the syscall-backed file at
-/// `rustos_sysconfig::CONFIG_PATH`; tests wire an in-memory fixture. The
+/// `tairix_sysconfig::CONFIG_PATH`; tests wire an in-memory fixture. The
 /// document travels whole in both directions: the engine's canonical render
 /// replaces the file, never a partial patch.
 pub trait Store {
@@ -273,9 +273,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::Errno;
-    use rustos_help::HelpSource;
-    use rustos_sysconfig::{Key, SystemConfig};
+    use tairix_abi::Errno;
+    use tairix_help::HelpSource;
+    use tairix_sysconfig::{Key, SystemConfig};
 
     use super::{parse, run, Command, ConfigureError, Output, Store, USAGE};
 
@@ -336,14 +336,14 @@ mod tests {
     struct NoHelp;
 
     impl HelpSource for NoHelp {
-        fn locale_dirs(&self) -> Result<Vec<String>, rustos_help::SourceError> {
+        fn locale_dirs(&self) -> Result<Vec<String>, tairix_help::SourceError> {
             Ok(Vec::new())
         }
         fn read(
             &self,
             _locale_dir: &str,
             _file_name: &str,
-        ) -> Result<Option<Vec<u8>>, rustos_help::SourceError> {
+        ) -> Result<Option<Vec<u8>>, tairix_help::SourceError> {
             Ok(None)
         }
     }
@@ -517,7 +517,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        for locale in rustos_help::REQUIRED_LOCALES {
+        for locale in tairix_help::REQUIRED_LOCALES {
             let path = format!("{help_root}/{locale}/configure.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             for token in ["`os.loginType`", "`-h, -?`"] {

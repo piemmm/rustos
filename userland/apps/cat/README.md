@@ -1,4 +1,4 @@
-# `rustos-cat` — concatenate files to the terminal
+# `tairix-cat` — concatenate files to the terminal
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`), a `plans/APPS.md`
 command app registered at `/System/Apps/cat.app/Run` so the shell
@@ -6,7 +6,7 @@ resolves the bare word `cat` to it. `cat` reads each of its sources in
 order and writes the bytes to the terminal. A source is a path, standard
 input (the `-` operand, and the default when no operand is given), or a
 typed resource reference (`sys:random`). The reference support is not
-cat's: `rustos_rt::File::open` — the one open-by-name path every
+cat's: `tairix_rt::File::open` — the one open-by-name path every
 command app uses — applies the shared `lib/resref` spelling rule and
 routes a reference to the kernel's capability-checked `resource_open`
 resolver rather than the filesystem, so `cat sys:random` streams the
@@ -22,8 +22,8 @@ usage banner when the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary and the shared
-`rustos-help` engine, so it never links a kernel or driver crate
+dependencies are the audited `tairix-abi` vocabulary and the shared
+`tairix-help` engine, so it never links a kernel or driver crate
 (`AGENTS.md` §17.4). Its manifest (`AppInfo.toml`) requests
 `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` — within
 the session baseline — and the secured VFS still authorises every path
@@ -53,7 +53,7 @@ With no file operand, or when a file operand is `-`, `cat` reads standard
 input. `--` ends option parsing: every later argument is a file path.
 
 The bundle's thirteen-locale `Help/` tree (the canonical `en-US` plus the
-`rustos_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
+`tairix_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
 authored on disk in this crate and
 planted at `/System/Apps/cat.app/Help/` by the image builder from that
 source (`tools/syshelp`) — never embedded in the binary
@@ -70,7 +70,7 @@ crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s
 - `FileSource` — read a byte range of a named file.
 - `Input` — read the next bytes of standard input.
 - `Output` — write rendered bytes to the terminal.
-- `rustos_help::HelpSource` — the tool's own bundled `Help/` tree, read
+- `tairix_help::HelpSource` — the tool's own bundled `Help/` tree, read
   by the short-help switches.
 
 On a running system these are syscall- and console-backed; in tests they
@@ -89,7 +89,7 @@ holds is refused rather than indexed out of bounds.
 
 ## Tests
 
-`cargo test -p rustos-cat` drives the parser and the streaming engine
+`cargo test -p tairix-cat` drives the parser and the streaming engine
 against an in-memory filesystem, a buffered standard input, and a
 recording output: the command grammar (every option, `-`/`--`, and the
 usage-error path, bundled short flags, and the `-b`-overrides-`-n`

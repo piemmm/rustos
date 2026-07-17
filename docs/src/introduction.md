@@ -1,6 +1,6 @@
 # Introduction
 
-RustOS is a security-first, multi-user, multi-core operating system written
+TAIRiX is a security-first, multi-user, multi-core operating system written
 entirely in Rust. It targets bare-metal x86_64, AArch64, RISC-V 64, and a
 browser-hosted `wasm32` profile from a single workspace.
 
@@ -13,5 +13,5 @@ The Stage 0 deliverable is the repository foundation: the workspace, the
 stages introduce the shared libraries, the kernel, architecture ports,
 drivers, the filesystem, userland, the window manager, and the installer.
 
-[agents]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md
-[plan]: https://github.com/rustos-project/rustos/blob/main/PLAN.md
+[agents]: https://github.com/tairix-project/tairix/blob/main/AGENTS.md
+[plan]: https://github.com/tairix-project/tairix/blob/main/PLAN.md

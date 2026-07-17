@@ -16,7 +16,7 @@
 ## Process-instance identity (`ProcId`)
 
 Each `TaskCapabilities` record also carries a kernel-generated
-**process-instance identity**, `rustos_abi::ProcId` — a 128-bit value
+**process-instance identity**, `tairix_abi::ProcId` — a 128-bit value
 distinct from the reusable numeric `TaskId` / PID. The kernel hands out
 task ids from a recycled space, so two process lifetimes can reuse a
 numeric id; they never share a `ProcId`. Security attribution can
@@ -64,8 +64,8 @@ hash-chained log records the exact parent instance of each acting process.
 ### Process name (`comm`)
 
 The record also carries a kernel-attested **process name**
-(`rustos_kernel_sec::ProcName`, a bounded inline name reusing the one
-`PROCESS_NAME_MAX` length `rustos_abi` already defines for the System
+(`tairix_kernel_sec::ProcName`, a bounded inline name reusing the one
+`PROCESS_NAME_MAX` length `tairix_abi` already defines for the System
 Information process record). It is set kernel-side at admit from
 kernel-resolved state, through the one shared naming rule
 (`ProcName::from_path`): a bundle's generic `Run` entry point never names a
@@ -119,7 +119,7 @@ Beyond the owning `uid` the record has always carried, each
 **supplementary groups** — the rest of its POSIX-style credential. Together
 `(uid, primary gid, supplementary gids)` is the kernel-attested identity the
 filesystem permission model checks against and the attested
-`rustos_abi::Origin` reports (the `Origin` gained a `gid` field alongside its
+`tairix_abi::Origin` reports (the `Origin` gained a `gid` field alongside its
 `uid`). The groups confer **no** capability — authority still flows only
 through the effective set — they are identity for the per-inode
 owner/mode/ACL checks.

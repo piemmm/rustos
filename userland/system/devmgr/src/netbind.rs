@@ -2,7 +2,7 @@
 //!
 //! A NIC driver process, once the device manager has autoloaded it for a
 //! matched network node, brings its device online and publishes a child
-//! *device-channel* hardware-tree node: `compatible = "rustos,netchan"`,
+//! *device-channel* hardware-tree node: `compatible = "tairix,netchan"`,
 //! carrying the reserved call-endpoint id it bound as an
 //! [`HwResourceKind::Endpoint`] grant request. Emitting that node bumps the
 //! hardware-tree generation, waking the device manager's reactive loop.
@@ -23,25 +23,25 @@
 
 use alloc::collections::BTreeSet;
 
-use rustos_abi::hwtree::{HwMatchKind, HwResourceKind};
-use rustos_abi::net_ipc::{validate_if_name, IF_NAME_LEN};
-use rustos_abi::{Errno, HwNode};
-use rustos_log::{log as log_event, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_abi::hwtree::{HwMatchKind, HwResourceKind};
+use tairix_abi::net_ipc::{validate_if_name, IF_NAME_LEN};
+use tairix_abi::{Errno, HwNode};
+use tairix_log::{log as log_event, Event, EventId, Field, FieldValue, Level, Sink};
 
 use crate::events;
 
 /// The `compatible` match key a NIC driver process stamps on the `netchan`
 /// device-channel node it emits, so the device manager recognises it as a
 /// bound NIC's frame channel rather than a device awaiting a driver.
-pub const NETCHAN_COMPATIBLE: &[u8] = b"rustos,netchan";
+pub const NETCHAN_COMPATIBLE: &[u8] = b"tairix,netchan";
 
 /// The device manager's call into the network stack to bind one NIC
 /// driver's device channel to a new managed interface.
 ///
 /// The production implementation (the freestanding `devmgr` `Run` binary)
 /// backs this with an `ipc_call` to the reserved
-/// [`NETSTACK_ENDPOINT`](rustos_abi::net_ipc::NETSTACK_ENDPOINT) carrying a
-/// [`NetstackRequest::BindDriver`](rustos_abi::net_ipc::NetstackRequest::BindDriver);
+/// [`NETSTACK_ENDPOINT`](tairix_abi::net_ipc::NETSTACK_ENDPOINT) carrying a
+/// [`NetstackRequest::BindDriver`](tairix_abi::net_ipc::NetstackRequest::BindDriver);
 /// the kernel gates the call on the device manager's `CAP_NET_ADMIN`, so the
 /// seam adds no authority. It is abstracted here so the reactive loop is
 /// host-testable against a recording double.
@@ -100,7 +100,7 @@ pub fn netchan_endpoint(node: &HwNode) -> Option<u64> {
     node.resources()
         .iter()
         .find(|resource| resource.kind() == Some(HwResourceKind::Endpoint))
-        .map(rustos_abi::HwResource::base)
+        .map(tairix_abi::HwResource::base)
 }
 
 /// Hand every not-yet-bound NIC device channel in `nodes` to the network
@@ -214,7 +214,7 @@ mod tests {
     use core::cell::RefCell;
 
     use super::*;
-    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwResource, HW_NODE_ROOT};
+    use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwResource, HW_NODE_ROOT};
 
     /// A recording [`NetstackBind`] double: captures each bind call and
     /// answers each with a scripted result.

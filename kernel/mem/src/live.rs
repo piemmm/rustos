@@ -418,7 +418,7 @@ pub trait LiveUserSpace: Send {
 /// names neither). It owns:
 ///
 /// * `space` — the live arch [`AddressSpace<P>`] (its page-table frames come
-///   from the backend's own [`PageTableFrames`](rustos_arch_api::frames::PageTableFrames)
+///   from the backend's own [`PageTableFrames`](tairix_arch_api::frames::PageTableFrames)
 ///   source, wired at spawn);
 /// * `physmap` — the kernel direct map used to zero anonymous frames on map
 ///   and on free;

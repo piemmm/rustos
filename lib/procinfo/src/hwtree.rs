@@ -11,11 +11,11 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader};
-use rustos_abi::sysinfo::{
+use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader};
+use tairix_abi::sysinfo::{
     HardwareTreeRequest, SysinfoQueryId, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
 };
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::request::{call, CallError};
 use crate::transport::Transport;
@@ -226,7 +226,7 @@ pub fn class_label(class: Option<HwDeviceClass>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use rustos_abi::hwtree::{HwMatchKey, HW_NODE_ROOT};
+    use tairix_abi::hwtree::{HwMatchKey, HW_NODE_ROOT};
 
     use super::*;
 
@@ -283,9 +283,9 @@ mod tests {
 
     impl Transport for PagedFixture {
         fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
-            let header = rustos_abi::sysinfo::SysinfoRequestHeader::from_bytes(request)?;
+            let header = tairix_abi::sysinfo::SysinfoRequestHeader::from_bytes(request)?;
             assert_eq!(header.query, SysinfoQueryId::HARDWARE_TREE);
-            let payload = &request[rustos_abi::sysinfo::SysinfoRequestHeader::WIRE_LEN..];
+            let payload = &request[tairix_abi::sysinfo::SysinfoRequestHeader::WIRE_LEN..];
             let req = HardwareTreeRequest::from_bytes(payload)?;
             let total = self.total_override.unwrap_or(self.nodes.len() as u64);
             let mut reply = Vec::new();

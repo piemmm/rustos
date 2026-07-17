@@ -1,4 +1,4 @@
-//! Stable RustOS user/kernel ABI types.
+//! Stable TAIRiX user/kernel ABI types.
 //!
 //! This crate is the single source of truth for the binary interface between
 //! the kernel and user space. Every public item is `#[repr(C)]` (or

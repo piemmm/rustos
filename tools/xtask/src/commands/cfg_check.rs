@@ -27,9 +27,9 @@ const ALLOWED: &[&str] = &["kernel/arch/", ".cargo/", "tools/mkimage/", "tools/x
 /// only shrink. Each entry is a tracked defect, not a sanctioned pattern.
 ///
 /// Empty: every directory that named the target instruction set inline has
-/// been migrated. `kernel/rustos-kernel` was the last entry; it now gates
+/// been migrated. `kernel/tairix-kernel` was the last entry; it now gates
 /// its freestanding body on the build-script-emitted `freestanding` cfg
-/// (`kernel/rustos-kernel/build.rs`) instead of `cfg(target_arch = …)`.
+/// (`kernel/tairix-kernel/build.rs`) instead of `cfg(target_arch = …)`.
 const GRANDFATHERED: &[&str] = &[];
 
 /// The cfg predicates the charter forbids outside the allow-list.

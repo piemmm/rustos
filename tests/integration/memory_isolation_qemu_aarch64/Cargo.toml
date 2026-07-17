@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-memory-isolation-qemu-aarch64"
+name = "tairix-test-memory-isolation-qemu-aarch64"
 description = "Stage 3b QEMU integration test: the aarch64 MMU enforces memory isolation between two stage-1 address spaces on the virt board."
 version.workspace = true
 edition.workspace = true
@@ -16,24 +16,24 @@ workspace = true
 # the access to the victim-only page" integration test — the aarch64 half
 # of the Stage-3 "memory-isolation test passes" per-sub-stage deliverable
 # (`PLAN.md` Stage 3), the analogue of the x86_64 and riscv64 verticals.
-# It links only the `rustos-arch-aarch64` port and reports the result
+# It links only the `tairix-arch-aarch64` port and reports the result
 # through the ARM semihosting finisher. Keeping the QEMU-exit shortcut in
 # a dedicated bin (not a Cargo feature on the arch crate) prevents feature
 # unification from leaking it into any production build (`AGENTS.md`
 # §5.4.5 — fail closed).
 
 [[bin]]
-name = "rustos-test-memory-isolation-qemu-aarch64"
+name = "tairix-test-memory-isolation-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 # The Arch HAL MMU surface (`AGENTS.md` §17.2): the victim/attacker
-# stage-1 spaces are driven through `rustos_arch_api::mmu::AddressSpace`
+# stage-1 spaces are driven through `tairix_arch_api::mmu::AddressSpace`
 # (`map_page` / `activate`) so isolation is proven *through the HAL*
 # (`plans/WIRING.md` W5b).
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

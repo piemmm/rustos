@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Named-file access for the editor.
 pub trait FileIo {

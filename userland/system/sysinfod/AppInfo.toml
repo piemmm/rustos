@@ -6,7 +6,7 @@
 # primitive it alone holds and re-scopes per client), CAP_SYSINFO_HW for
 # the hardware-tree query, CAP_IPC_BIND_PRIVILEGED for the reserved
 # well-known endpoint, and CAP_LOG_EMIT for its audit records.
-id = "os.rustos.sysinfod"
+id = "os.tairix.sysinfod"
 name = "sysinfod"
 version = "0.1.0"
 kind = "service"

@@ -25,7 +25,7 @@ Fehlt die mitgelieferte Tabelle oder scheitert ihre Prüfung, fällt die
 Auflistung auf nackte Kennungen zurück, mit dem Grund auf der
 Standardfehlerausgabe — das Inventar selbst wird weiterhin gelistet.
 
-RustOS führt kein Linux-Register für Bus-/Gerätenummern: Bus- und
+TAIRiX führt kein Linux-Register für Bus-/Gerätenummern: Bus- und
 Gerätenummern sind kleine, bei 1 beginnende Ordnungszahlen über das
 aktuelle Inventar (Busse in Erkennungsreihenfolge, Geräte in
 Auflistungsreihenfolge je Bus), stabil solange sich die Topologie nicht

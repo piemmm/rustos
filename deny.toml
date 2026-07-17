@@ -1,4 +1,4 @@
-# `cargo deny` policy for RustOS.
+# `cargo deny` policy for TAIRiX.
 #
 # This file is consumed by `cargo deny check` (invoked by `cargo xtask ci`).
 # It enforces the project's license, advisory, source, and ban policy.
@@ -13,8 +13,8 @@ ignore = []
 
 [licenses]
 version = 2
-# RustOS itself is licensed GPL-2.0-or-later with an additional
-# syscall/ABI exception (`RustOS-syscall-note`; see `LICENSE`).
+# TAIRiX itself is licensed GPL-2.0-or-later with an additional
+# syscall/ABI exception (`TAIRiX-syscall-note`; see `LICENSE`).
 # Dependencies may carry any OSI-approved permissive licence that is
 # compatible with distribution as part of a GPL-2.0-or-later combined work.
 allow = [
@@ -51,7 +51,7 @@ deny = []
 skip = []
 skip-tree = []
 
-# Stage 2.7 follow-up (f6): the production `rustos-kernel` crate must
+# Stage 2.7 follow-up (f6): the production `tairix-kernel` crate must
 # **never** grow a `test-hooks` (or similarly-named) Cargo feature.
 # Test affordances live in sibling integration-test crates under
 # `tests/integration/*` — see
@@ -63,7 +63,7 @@ skip-tree = []
 # test bin carries (`AGENTS.md` §1 — no hacks; §5.4.5 — fail
 # closed; §15 — test affordances stay in test crates).
 [[bans.features]]
-crate = "rustos-kernel"
+crate = "tairix-kernel"
 deny = ["test-hooks"]
 
 [sources]

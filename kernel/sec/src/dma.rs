@@ -22,9 +22,9 @@
 //!
 //! No `unsafe`, no `unwrap`, no `panic!`:.
 
-use rustos_abi::{CapabilityId, Errno};
-use rustos_kernel_mem::{DmaBuffer, DmaError, DmaPool, PageTable};
-use rustos_log::{Field, Sink};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_kernel_mem::{DmaBuffer, DmaError, DmaPool, PageTable};
+use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 use crate::captable::TaskCapabilities;
@@ -116,15 +116,15 @@ pub fn alloc_dma<P: PageTable, S: Sink + ?Sized>(
             &[
                 Field {
                     key: "task",
-                    value: rustos_log::FieldValue::Str(task_str),
+                    value: tairix_log::FieldValue::Str(task_str),
                 },
                 Field {
                     key: "uid",
-                    value: rustos_log::FieldValue::Str(uid_str),
+                    value: tairix_log::FieldValue::Str(uid_str),
                 },
                 Field {
                     key: "requested",
-                    value: rustos_log::FieldValue::Str(len_str),
+                    value: tairix_log::FieldValue::Str(len_str),
                 },
             ],
         );
@@ -143,15 +143,15 @@ pub fn alloc_dma<P: PageTable, S: Sink + ?Sized>(
         &[
             Field {
                 key: "task",
-                value: rustos_log::FieldValue::Str(task_str),
+                value: tairix_log::FieldValue::Str(task_str),
             },
             Field {
                 key: "len",
-                value: rustos_log::FieldValue::Str(len_str),
+                value: tairix_log::FieldValue::Str(len_str),
             },
             Field {
                 key: "phys",
-                value: rustos_log::FieldValue::Str(phys_str),
+                value: tairix_log::FieldValue::Str(phys_str),
             },
         ],
     );
@@ -184,7 +184,7 @@ pub fn free_dma<P: PageTable, S: Sink + ?Sized>(
             AuditEvent::DmaAllocDenied,
             &[Field {
                 key: "task",
-                value: rustos_log::FieldValue::Str(task_str),
+                value: tairix_log::FieldValue::Str(task_str),
             }],
         );
         return Err(DmaGateError::CapabilityMissing);

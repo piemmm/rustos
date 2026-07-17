@@ -18,9 +18,9 @@ use super::device::{
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
 use super::*;
-use rustos_abi::driver::input::Input;
-use rustos_abi::Delay;
-use rustos_hid::BootKeyboard;
+use tairix_abi::driver::input::Input;
+use tairix_abi::Delay;
+use tairix_hid::BootKeyboard;
 
 /// The primary bulk pipes most fixtures exercise (BOT-shaped devices).
 const IN_PIPE: BulkPipe = BulkPipe::primary(BulkDirection::In);
@@ -163,7 +163,7 @@ mod slab_coherency_test_state {
     pub(super) static CALLS: AtomicUsize = AtomicUsize::new(0);
     pub(super) static LAST_LEN: AtomicUsize = AtomicUsize::new(0);
 
-    /// A `rustos_abi::driver::dma::SlabCoherencyFn`.
+    /// A `tairix_abi::driver::dma::SlabCoherencyFn`.
     pub(super) fn record(_base: *const u8, len: usize) {
         CALLS.fetch_add(1, Ordering::SeqCst);
         LAST_LEN.store(len, Ordering::SeqCst);
@@ -175,14 +175,14 @@ mod slab_coherency_test_state {
 /// count, an injectable allocation failure, and an optional coherency hook
 /// stamped onto every minted slab.
 ///
-/// [`DmaHost`]: rustos_abi::driver::dma::DmaHost
+/// [`DmaHost`]: tairix_abi::driver::dma::DmaHost
 mod bank_test {
     use core::cell::Cell;
     use core::ptr::NonNull;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
-    use rustos_abi::DriverError;
+    use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
+    use tairix_abi::DriverError;
 
     /// Free shim recording each dropped slab on the host's own counter.
     ///
@@ -4116,7 +4116,7 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
     let node = device
         .describe_device(keyboard, 0, 1)
         .expect("the keyboard describes a child node");
-    assert_eq!(node.class(), Some(rustos_abi::HwDeviceClass::Input));
+    assert_eq!(node.class(), Some(tairix_abi::HwDeviceClass::Input));
     arm_report_request_for(&mut device, keyboard);
     device
         .host_mut()
@@ -5265,8 +5265,8 @@ fn boot_keyboard_decodes_over_the_xhci_transfer_ring() {
     device.host_mut().process_int_ring();
 
     let mut keyboard = BootKeyboard::new(device.engine_for(0));
-    let zero = rustos_abi::driver::input::InputEvent {
-        kind: rustos_abi::driver::input::InputEventKind::Key,
+    let zero = tairix_abi::driver::input::InputEvent {
+        kind: tairix_abi::driver::input::InputEventKind::Key,
         reserved0: 0,
         code: 0,
         value: 0,
@@ -5423,7 +5423,7 @@ fn interface_info_bounds_the_decoded_interface_set() {
 
 #[test]
 fn describe_device_emits_the_hid_child_node() {
-    use rustos_abi::{HwDeviceClass, HwMatchKey};
+    use tairix_abi::{HwDeviceClass, HwMatchKey};
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
@@ -5479,7 +5479,7 @@ fn started_msd(mem: &SharedMem) -> UsbDevice<'static, MockXhci, MockDma> {
 
 #[test]
 fn enumerating_a_mass_storage_device_configures_its_bulk_endpoint_pair() {
-    use rustos_abi::{HwDeviceClass, HwMatchKey};
+    use tairix_abi::{HwDeviceClass, HwMatchKey};
     let mem = shared_mem();
     let mut device = started_msd(&mem);
 
@@ -6771,9 +6771,9 @@ fn bring_up_serves_a_keyboard_and_a_storage_stick_behind_the_hub_together() {
     // Each device's node derives its own class, so `devmgr` autoloads the
     // storage class driver *and* the keyboard class driver.
     let stick_node = device.describe_device(1, 0, 1).expect("stick node");
-    assert_eq!(stick_node.class(), Some(rustos_abi::HwDeviceClass::Storage));
+    assert_eq!(stick_node.class(), Some(tairix_abi::HwDeviceClass::Storage));
     let kbd_node = device.describe_device(2, 0, 2).expect("keyboard node");
-    assert_eq!(kbd_node.class(), Some(rustos_abi::HwDeviceClass::Input));
+    assert_eq!(kbd_node.class(), Some(tairix_abi::HwDeviceClass::Input));
 
     // The keyboard's reports flow on its own index...
     let mut buf = [0u8; REPORT_LEN];
@@ -6903,9 +6903,9 @@ fn bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together() {
     // Each node derives its own class and match key, so the keyboard and
     // the mouse class drivers autoload independently.
     let mouse_node = device.describe_device(1, 0, 1).expect("mouse node");
-    assert_eq!(mouse_node.class(), Some(rustos_abi::HwDeviceClass::Input));
+    assert_eq!(mouse_node.class(), Some(tairix_abi::HwDeviceClass::Input));
     let kbd_node = device.describe_device(2, 0, 2).expect("keyboard node");
-    assert_eq!(kbd_node.class(), Some(rustos_abi::HwDeviceClass::Input));
+    assert_eq!(kbd_node.class(), Some(tairix_abi::HwDeviceClass::Input));
 
     // The keyboard's reports flow on its own index...
     let mut buf = [0u8; REPORT_LEN];
@@ -7025,7 +7025,7 @@ fn a_port_that_never_enables_records_its_stage_port_and_final_status() {
 #[test]
 fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
     use crate::transport::UrbEngine;
-    use rustos_abi::HwMatchKey;
+    use tairix_abi::HwMatchKey;
     // The wireless keyboard+mouse receiver: ONE device behind the hub whose
     // configuration carries a boot-keyboard interface and a boot-mouse
     // interface. Both must be served — each on its own device index with

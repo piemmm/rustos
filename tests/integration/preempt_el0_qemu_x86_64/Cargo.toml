@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-preempt-el0-qemu-x86-64"
-description = "plans/PI.md D2b-2b-A P-1c QEMU integration test (x86_64 sibling of rustos-test-preempt-el0-qemu-aarch64/riscv64): prove the production LAPIC-timer interrupt involuntarily preempts a runaway ring-3 task on x86_64. The build script compiles the pure-Rust EL0 spinner (tests/integration/el0_spinner_program) PIE — a busy loop that issues no syscall — and converts it to an rxe blob; the test boots the production rustos-kernel pipeline (so the GDT ring-3 selectors, the TSS, syscall/IA32_LSTAR entry, and the LAPIC timer are installed) and, on AuditEvent::BootCompleted, enables IA32_EFER.NXE, builds one hardware-isolated ring-3 address space via rustos_kernel_core::spawn_image, admits it as a resumable user kthread whose pre_resume hook reloads CR3 (paging::activate_user_root), repoints the per-CPU syscall entry stack (syscall_entry::set_kernel_rsp0) and the TSS.RSP0 trap stack (percpu::install_tss_rsp0) at the task's own kernel stack, installs the production ring-3-preemption callback (preempt::set_preempt_callback), and drives the cooperative Scheduler::step loop. Because the loop never traps, any reschedule before exit is forced — PASS once the task is preempted at least once AND still completes and exits."
+name = "tairix-test-preempt-el0-qemu-x86-64"
+description = "plans/PI.md D2b-2b-A P-1c QEMU integration test (x86_64 sibling of tairix-test-preempt-el0-qemu-aarch64/riscv64): prove the production LAPIC-timer interrupt involuntarily preempts a runaway ring-3 task on x86_64. The build script compiles the pure-Rust EL0 spinner (tests/integration/el0_spinner_program) PIE — a busy loop that issues no syscall — and converts it to an rxe blob; the test boots the production tairix-kernel pipeline (so the GDT ring-3 selectors, the TSS, syscall/IA32_LSTAR entry, and the LAPIC timer are installed) and, on AuditEvent::BootCompleted, enables IA32_EFER.NXE, builds one hardware-isolated ring-3 address space via tairix_kernel_core::spawn_image, admits it as a resumable user kthread whose pre_resume hook reloads CR3 (paging::activate_user_root), repoints the per-CPU syscall entry stack (syscall_entry::set_kernel_rsp0) and the TSS.RSP0 trap stack (percpu::install_tss_rsp0) at the task's own kernel stack, installs the production ring-3-preemption callback (preempt::set_preempt_callback), and drives the cooperative Scheduler::step loop. Because the loop never traps, any reschedule before exit is forced — PASS once the task is preempted at least once AND still completes and exits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,16 +13,16 @@ workspace = true
 
 # This bin is the `plans/PI.md` D2b-2b-A P-1c x86_64 involuntary-preemption
 # vertical (the cross-port sibling of `preempt_el0_qemu_aarch64` /
-# `preempt_el0_qemu_riscv64`). The fixture program (`rustos-test-el0-spinner`)
+# `preempt_el0_qemu_riscv64`). The fixture program (`tairix-test-el0-spinner`)
 # is built position-independent by `build.rs` and converted to an `rxe` blob
-# (`rustos_itest_harness::elf2rxe`) carrying the kernel's compiled-in syscall
-# CFI tag. It boots the production `rustos-kernel` pipeline (so the GDT ring-3
+# (`tairix_itest_harness::elf2rxe`) carrying the kernel's compiled-in syscall
+# CFI tag. It boots the production `tairix-kernel` pipeline (so the GDT ring-3
 # selectors, the TSS, `syscall`/`IA32_LSTAR` entry, and the periodic LAPIC timer
 # are installed) and, on `AuditEvent::BootCompleted`, enables `IA32_EFER.NXE`,
-# builds one isolated ring-3 address space via `rustos_kernel_core::spawn_image`
+# builds one isolated ring-3 address space via `tairix_kernel_core::spawn_image`
 # (capability-checked + audited), admits it as a resumable user kthread, installs
 # the production ring-3-preemption callback verbatim
-# (`rustos_arch_x86_64::preempt::set_preempt_callback`), and drives the
+# (`tairix_arch_x86_64::preempt::set_preempt_callback`), and drives the
 # cooperative `step` loop. Ring 3 runs preemptible (`userentry`'s `IF`-set
 # `RFLAGS`); the spinner issues no syscall, so the only way it leaves ring 3
 # before its final `exit` is an involuntary LAPIC-timer preemption (taken in
@@ -39,20 +39,20 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-preempt-el0-qemu-x86-64"
+name = "tairix-test-preempt-el0-qemu-x86-64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

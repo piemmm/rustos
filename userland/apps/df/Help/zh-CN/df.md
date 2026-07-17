@@ -35,7 +35,7 @@ inode 数字——诚实的「未跟踪」回答。
 - `-i, --inodes` — 报告 inode 数量而不是块使用量。
 - `-P, --portability` — POSIX 可移植格式（`1024-blocks` 和
   `Capacity` 表头）。
-- `-l, --local` — 将报告限制为本地文件系统（今天 RustOS 的所有挂载
+- `-l, --local` — 将报告限制为本地文件系统（今天 TAIRiX 的所有挂载
   都是本地的，因此不会过滤任何内容）。
 - `--total` — 追加一行标记为 `total` 的合计。
 - `-k` — 1024 字节块（默认）。

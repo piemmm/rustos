@@ -6,7 +6,7 @@
 //! mirroring the seam design of the other userland tools (`cat`'s
 //! `FileSource`/`Input`/`Output`, `rm`'s `Prompt`).
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Reads a byte range of a named file.
 ///

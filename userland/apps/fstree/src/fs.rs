@@ -10,8 +10,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::time::Time64;
-use rustos_abi::{Errno, FileKind};
+use tairix_abi::time::Time64;
+use tairix_abi::{Errno, FileKind};
 
 /// One directory entry as the listing reports it: exactly the fields the
 /// kernel's `fs_readdir` stream carries per entry, so a listing never costs
@@ -94,7 +94,7 @@ pub trait Fs {
     fn stat_mode(&mut self, path: &str) -> Result<u32, Errno>;
 
     /// Set the permission bits of the entry at `path` to `mode` (at most
-    /// [`rustos_abi::FS_MODE_MASK`]). The kernel owns the authorisation:
+    /// [`tairix_abi::FS_MODE_MASK`]). The kernel owns the authorisation:
     /// only the entry's owner may change its mode, and a refusal comes
     /// back as the frozen [`Errno`] the model surfaces unchanged.
     ///

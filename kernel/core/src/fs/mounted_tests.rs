@@ -13,16 +13,16 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
 };
-use rustos_abi::driver::DriverHandle;
-use rustos_abi::{Errno, FileKind, OpenFlags, UnlinkFlags};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{
+use tairix_abi::driver::DriverHandle;
+use tairix_abi::{Errno, FileKind, OpenFlags, UnlinkFlags};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
 };
-use rustos_log::{Event, Sink};
+use tairix_log::{Event, Sink};
 
 use super::{LateFilesystem, LateIdentity, MountedFilesystemService};
 use crate::fs::memfs::RwMockFs;
@@ -238,7 +238,7 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
 #[test]
 fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     use crate::fs::perm::Metadata;
-    use rustos_abi::time::Time64;
+    use tairix_abi::time::Time64;
 
     let h_parent = DriverHandle::from_raw(9).expect("handle");
     let h_usb = DriverHandle::from_raw(10).expect("handle");
@@ -899,11 +899,11 @@ fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
 /// principal installed — the harness the extended-attribute tests share.
 fn attr_service<F>(fs_driver: F, read_only: bool) -> MountedFilesystemService<F>
 where
-    F: rustos_abi::driver::filesystem::FilesystemRead
-        + rustos_abi::driver::filesystem::FilesystemWrite
-        + rustos_abi::driver::filesystem::FilesystemSecurity
-        + rustos_abi::driver::filesystem::FilesystemStats
-        + rustos_abi::driver::filesystem::FilesystemAttrsProvider
+    F: tairix_abi::driver::filesystem::FilesystemRead
+        + tairix_abi::driver::filesystem::FilesystemWrite
+        + tairix_abi::driver::filesystem::FilesystemSecurity
+        + tairix_abi::driver::filesystem::FilesystemStats
+        + tairix_abi::driver::filesystem::FilesystemAttrsProvider
         + Send
         + 'static,
 {
@@ -1154,11 +1154,11 @@ fn attr_key_grammar_and_buffers_fail_closed() {
     );
 }
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemSecurity, FilesystemStats, NodeId, NodeInfo,
     VolumeStats,
 };
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 /// [`RwMockFs`] minus its attribute store: the facet keeps its default
 /// `None` answer, standing in for a FAT32/ext4-class mount.
@@ -1221,13 +1221,13 @@ impl FilesystemSecurity for NoAttrsFs {
     fn security(
         &mut self,
         node: NodeId,
-    ) -> Result<rustos_abi::driver::filesystem::NodeSecurity, DriverError> {
+    ) -> Result<tairix_abi::driver::filesystem::NodeSecurity, DriverError> {
         self.0.security(node)
     }
     fn set_security(
         &mut self,
         node: NodeId,
-        security: rustos_abi::driver::filesystem::NodeSecurity,
+        security: tairix_abi::driver::filesystem::NodeSecurity,
     ) -> Result<(), DriverError> {
         self.0.set_security(node, security)
     }

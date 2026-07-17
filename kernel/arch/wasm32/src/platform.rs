@@ -3,19 +3,19 @@
 //! The browser sandbox has no firmware hardware table; its "hardware" is
 //! the JavaScript host ("host-environment capability
 //! query"). This module implements the Arch HAL
-//! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
+//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice by
 //! querying the host for the facts that *do* map onto the
 //! hardware tree — the number of logical processors (the Web Worker pool)
 //! and whether a display surface exists — and emitting them as
-//! [`rustos_abi::hwtree`] nodes.
+//! [`tairix_abi::hwtree`] nodes.
 //!
 //! The query itself (`HostCapabilities::query`) is a host call, so it is
 //! gated to the wasm target; the normalisation into nodes is pure and
 //! host-testable from a [`HostCapabilities`](crate::platform::HostCapabilities)
 //! built directly.
 
-use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
-use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
+use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
+use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// Upper bound on the number of CPU nodes discovery emits.
 ///
@@ -91,9 +91,9 @@ impl PlatformDiscovery for HostCapabilityDiscovery {
 #[cfg(test)]
 mod tests {
     use super::{HostCapabilities, HostCapabilityDiscovery, MAX_DISCOVERED_CPUS};
-    use rustos_abi::HwDeviceClass;
-    use rustos_abi::HwNode;
-    use rustos_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
+    use tairix_abi::HwDeviceClass;
+    use tairix_abi::HwNode;
+    use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
 
     #[test]
     fn capabilities_clamp_processor_count() {

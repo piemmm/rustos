@@ -30,7 +30,7 @@
 //! substitutes a counter so `start_worker` is exercised under `cargo
 //! test` without a browser (never silently skip a test).
 
-use rustos_arch_api::CpuId;
+use tairix_arch_api::CpuId;
 
 pub use crate::kernel_arch::MAX_WORKERS;
 
@@ -60,7 +60,7 @@ pub enum StartWorkerError {
 /// asking the host to spawn it, so an out-of-range index never reaches
 /// the host (fail closed). The freshly-spawned worker
 /// instantiates the same module and enters through the arch crate's
-/// `rustos_arch_wasm32_main` export trampoline; the host reports its
+/// `tairix_arch_wasm32_main` export trampoline; the host reports its
 /// logical CPU id through [`current_worker`].
 ///
 /// # Errors

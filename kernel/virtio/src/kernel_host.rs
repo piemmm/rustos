@@ -1,12 +1,12 @@
 //! In-kernel [`VirtioHost`] backed by a per-process [`DmaPool`].
 //!
-//! Stage 4.D Item 0 wiring: the always-available [`rustos_virtio::MockHost`]
-//! satisfies [`rustos_virtio::VirtioHost`] by leaking `Box<[u8]>` storage; the
+//! Stage 4.D Item 0 wiring: the always-available [`tairix_virtio::MockHost`]
+//! satisfies [`tairix_virtio::VirtioHost`] by leaking `Box<[u8]>` storage; the
 //! [`KernelVirtioHost`] here satisfies the same trait but routes every
-//! allocation through the capability-gated [`rustos_kernel_sec::alloc_dma`]
-//! / [`rustos_kernel_sec::free_dma`] pair.
+//! allocation through the capability-gated [`tairix_kernel_sec::alloc_dma`]
+//! / [`tairix_kernel_sec::free_dma`] pair.
 //!
-//! The host owns a single [`rustos_kernel_mem::DmaPool`] (per-driver
+//! The host owns a single [`tairix_kernel_mem::DmaPool`] (per-driver
 //! pool "per-process heaps, never a global user
 //! heap"). Allocations:
 //!
@@ -28,10 +28,10 @@
 //! [`KernelVirtioHost::notify_wait`] blocks the calling driver task on
 //! a per-host pre-bound [`IrqHandle`] until the device raises its
 //! interrupt line, driving the shared
-//! [`rustos_kernel_irq::block_until_ready`] poll-and-yield loop
+//! [`tairix_kernel_irq::block_until_ready`] poll-and-yield loop
 //! through an injected [`IrqWaiter`] (Stage 4.D Item 2-tail.3). The
 //! polled in-process `notify_log` is retained only on
-//! [`rustos_virtio::MockHost`]; the production wake-up is the IRQ path.
+//! [`tairix_virtio::MockHost`]; the production wake-up is the IRQ path.
 //!
 //! # Safety
 //!
@@ -55,15 +55,15 @@ use alloc::collections::BTreeMap;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_abi::{DriverError, IrqHandle};
-use rustos_kernel_irq::{block_until_ready, IrqTable, IrqWaiter};
-use rustos_kernel_mem::{DmaBuffer, DmaPool, PageTable};
-use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
-use rustos_log::Sink;
-use rustos_sync::SpinLock;
+use tairix_abi::{DriverError, IrqHandle};
+use tairix_kernel_irq::{block_until_ready, IrqTable, IrqWaiter};
+use tairix_kernel_mem::{DmaBuffer, DmaPool, PageTable};
+use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
+use tairix_log::Sink;
+use tairix_sync::SpinLock;
 
-use rustos_virtio::{DmaHost, DmaSlab, PoolId, VirtioHost};
+use tairix_virtio::{DmaHost, DmaSlab, PoolId, VirtioHost};
 
 /// Capability-checked, [`DmaPool`]-backed [`VirtioHost`].
 ///
@@ -195,13 +195,13 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
 /// `pool` is the host pointer recorded at construction time
 /// (cast through `*const ()`). `slot` is the slab's unique slot
 /// index within this host; `len` is the slab's byte length and is
-/// retained for symmetry with [`rustos_virtio::SlabFreeFn`] — the actual
+/// retained for symmetry with [`tairix_virtio::SlabFreeFn`] — the actual
 /// free goes through [`free_dma`] which keys on the [`DmaBuffer`]
 /// stored in [`KernelVirtioHost::live`].
 ///
 /// # Safety
 ///
-/// Mirrors the [`rustos_virtio::SlabFreeFn`] contract:
+/// Mirrors the [`tairix_virtio::SlabFreeFn`] contract:
 ///
 /// * `pool` must be the `*const ()` produced by
 ///   `KernelVirtioHost::alloc_dma_zeroed` for some slab carrying
@@ -329,7 +329,7 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, 
 /// Capability refusals surface as [`DriverError::PermissionDenied`];
 /// every other failure (oversize requests, OOM, pool config bugs)
 /// collapses to [`DriverError::LengthOutOfRange`] — the same
-/// variant the existing [`rustos_virtio::MockHost`] uses when its
+/// variant the existing [`tairix_virtio::MockHost`] uses when its
 /// 64 MiB cap is hit, so a driver consumer sees a single failure
 /// shape regardless of which host minted it.
 fn map_gate_error(e: DmaGateError) -> DriverError {
@@ -348,16 +348,16 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicU32, AtomicU64};
-    use rustos_abi::CapabilityId;
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_irq::{IrqController, IrqWaitAbort, MaskError};
-    use rustos_kernel_mem::{
+    use tairix_abi::CapabilityId;
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_irq::{IrqController, IrqWaitAbort, MaskError};
+    use tairix_kernel_mem::{
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
         AddressSpace, FrameAllocator, HostPageTable, PhysAddr, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
-    use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-    use rustos_kernel_sec::identity::UserId;
-    use rustos_log::{Event, Sink};
+    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::identity::UserId;
+    use tairix_log::{Event, Sink};
 
     /// Owner task id every fixture binds the device line against. The
     /// host waits on `self.caller.task()`, and [`task_with`] derives

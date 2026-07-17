@@ -1,4 +1,4 @@
-//! RustOS kernel security state.
+//! TAIRiX kernel security state.
 //!
 //! `kernel/sec` owns the in-kernel mirrors of every datum a privileged
 //! operation consults: the user/group tables, the per-task capability
@@ -24,7 +24,7 @@
 //!   checks for `rxe` manifests; produces a [`VerifiedManifest`].
 //! * [`captable`] — [`TaskCapabilities`]: per-task intersection of user
 //!   grant and manifest request, with delegation, revocation, and
-//!   signed [`rustos_caps::CapabilityToken`] application.
+//!   signed [`tairix_caps::CapabilityToken`] application.
 //!
 //! # Out of scope for Stage 2.4 (issue brief)
 //!

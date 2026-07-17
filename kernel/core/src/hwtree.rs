@@ -3,7 +3,7 @@
 //! Design D — `.junie/next-pi-prompt.md`).
 //!
 //! The discovered hardware inventory itself lives in the binding kernel
-//! (`rustos-kernel`'s `HwTreeStore` / `HW_TREE`); this trait is the seam
+//! (`tairix-kernel`'s `HwTreeStore` / `HW_TREE`); this trait is the seam
 //! `kernel/core` reaches it through, exactly as [`crate::users`]'s
 //! [`UsersDbSource`](crate::users::UsersDbSource) is the seam for the user
 //! database. Keeping the seam here, returning an *already wire-encoded*
@@ -17,7 +17,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, HwNode};
+use tairix_abi::{Errno, HwNode};
 
 /// The kernel-held discovered hardware tree the hardware-tree syscalls
 /// serve.
@@ -43,9 +43,9 @@ pub trait HwTreeSource: Sync {
     fn generation(&self) -> Result<u64, Errno>;
 
     /// An owned, wire-encoded snapshot of the current tree: a
-    /// [`rustos_abi::hwtree::HwTreeHeader`] (the generation it was taken at
+    /// [`tairix_abi::hwtree::HwTreeHeader`] (the generation it was taken at
     /// and the node count) followed by that many
-    /// [`rustos_abi::hwtree::HwNode`] records, all little-endian.
+    /// [`tairix_abi::hwtree::HwNode`] records, all little-endian.
     ///
     /// The generation in the returned header and the node bytes are read
     /// together so a `hw_tree_read` caller's header generation always
@@ -64,19 +64,19 @@ pub trait HwTreeSource: Sync {
     ///
     /// This is the store side of the `hw_emit_node` syscall: the handler in
     /// [`crate::syscalls`] has already verified the calling driver holds
-    /// [`rustos_abi::CapabilityId::HW_EMIT`], resolved `parent_id` to the
+    /// [`tairix_abi::CapabilityId::HW_EMIT`], resolved `parent_id` to the
     /// emitter's *own* matched node (so a driver cannot forge its tree
     /// position), and checked that every
-    /// [`rustos_abi::hwtree::HwResource`] the node requests is covered by
+    /// [`tairix_abi::hwtree::HwResource`] the node requests is covered by
     /// one of the caller's minted grants (no ambient
     /// authority). The store **owns identity**: it assigns the node a
-    /// fresh, collision-free [`id`](rustos_abi::HwNode::id) and sets its
+    /// fresh, collision-free [`id`](tairix_abi::HwNode::id) and sets its
     /// parent to `parent_id` ([`HwNode::set_identity`]) before recording
     /// it, so an emitter-chosen id can never collide with an existing node — load-bearing, since the driver-store load path
     /// resolves a matched node by its id. The node is always added, never
     /// dropped, and only the generation advances.
     ///
-    /// Returns the **kernel-assigned** [`id`](rustos_abi::HwNode::id) the
+    /// Returns the **kernel-assigned** [`id`](tairix_abi::HwNode::id) the
     /// store gave the published node, so the emitter can later name it to
     /// [`Self::remove`] when the device goes away (a USB host controller
     /// retracts the interface node it emitted on a port-down). The emitter
@@ -100,7 +100,7 @@ pub trait HwTreeSource: Sync {
     /// This is the store side of the `hw_remove_node` syscall and the exact
     /// mirror of [`Self::publish`]: the handler in [`crate::syscalls`] has
     /// already verified the calling driver holds
-    /// [`rustos_abi::CapabilityId::HW_EMIT`] and resolved `parent_id` to the
+    /// [`tairix_abi::CapabilityId::HW_EMIT`] and resolved `parent_id` to the
     /// emitter's *own* matched node (so a driver cannot remove a node it does
     /// not own — no ambient authority). The store removes
     /// `node_id` **only** when its parent is exactly `parent_id` — a child the

@@ -11,7 +11,7 @@
 //! fuzz target") the consumer is driven here against arbitrary
 //! device-supplied completions.
 //!
-//! RustOS does not pull in an external fuzz runner: a
+//! TAIRiX does not pull in an external fuzz runner: a
 //! deterministic, per-run-seeded PRNG drives random heads, lengths, and
 //! descriptor-table corruption through the in-process [`MockTransport`]
 //! hostile-device seams and asserts the invariants the driver must
@@ -29,11 +29,11 @@
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed. When
-//! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
+//! `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing from the *same continuing* PRNG stream until the budget
 //! elapses, while the logged seed keeps any failure reproducible.
 
-use rustos_virtio::{
+use tairix_virtio::{
     ChainSegment, ChainView, Direction, DmaHost, DmaSlab, MockHost, MockTransport, SplitQueue,
     VirtioError,
 };
@@ -64,9 +64,9 @@ fn static_host() -> &'static MockHost {
 
 #[test]
 fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
-    let mut rng = Rng::new(rustos_fuzzseed::start(
+    let mut rng = Rng::new(tairix_fuzzseed::start(
         "fuzz_poll_used_is_fail_closed_against_a_hostile_device",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut t = MockTransport::new(1, QUEUE_SIZE, 0, 0);
     let host = static_host();
@@ -107,7 +107,7 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
 
     let mut rejected = 0u64;
     let mut accepted = 0u64;
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             // Model a device DMA write scribbling a descriptor field (a
@@ -147,7 +147,7 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
             // matter how the device corrupts the reclaim walk.
             assert!(q.free_count() <= QUEUE_SIZE, "free count stays bounded");
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

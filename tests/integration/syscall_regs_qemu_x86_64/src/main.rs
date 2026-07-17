@@ -22,8 +22,8 @@
 //!
 //! A returning `syscall` can only be exercised from ring 3 (`sysretq`
 //! always returns to CPL 3), so the test enters ring 3 exactly like the
-//! sibling `rustos-test-enter-user-qemu-x86_64`: boot the production
-//! `rustos-kernel` pipeline until `AuditEvent::BootCompleted`, build a
+//! sibling `tairix-test-enter-user-qemu-x86_64`: boot the production
+//! `tairix-kernel` pipeline until `AuditEvent::BootCompleted`, build a
 //! user address space with a USER|R|X alias of the probe's page(s) and a
 //! USER|R|W stack, install a test dispatch callback, switch CR3, and
 //! `iretq` to ring 3 at the probe. The probe (a naked-asm fragment — the
@@ -63,7 +63,7 @@
 // — test affordances must never reach a release binary.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-syscall-regs-qemu-x86_64: the `test-hooks` Cargo feature is a \
+    "tairix-test-syscall-regs-qemu-x86_64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds."
 );
 
@@ -74,15 +74,15 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_abi::SYSCALL_MAX_ARGS;
-    use rustos_arch_api::{EnterUser, UserEntry};
-    use rustos_arch_x86_64::userentry::UserMode;
-    use rustos_arch_x86_64::{paging, qemu_exit, syscall_entry};
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_abi::SYSCALL_MAX_ARGS;
+    use tairix_arch_api::{EnterUser, UserEntry};
+    use tairix_arch_x86_64::userentry::UserMode;
+    use tairix_arch_x86_64::{paging, qemu_exit, syscall_entry};
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     /// Static heap for the bump allocator (per the production bin).
     static mut HEAP: Heap = Heap::ZERO;
@@ -384,8 +384,8 @@ mod kernel {
         if space
             .map_4k(
                 &PAGE_TABLE_POOL,
-                rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
-                rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+                tairix_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+                tairix_arch_x86_64::preempt::LAPIC_BASE_PHYS,
                 true,
             )
             .is_none()
@@ -406,9 +406,9 @@ mod kernel {
         unsafe { UserMode::new().enter_user(UserEntry::new(user_entry, user_sp, 0)) }
     }
 
-    /// Forward to the shared bridge in `rustos_kernel`.
+    /// Forward to the shared bridge in `tairix_kernel`.
     #[panic_handler]
-    fn rustos_test_syscall_regs_qemu_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_test_syscall_regs_qemu_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
@@ -419,7 +419,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }
@@ -439,7 +439,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[panic_handler]
-fn rustos_test_syscall_regs_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
+fn tairix_test_syscall_regs_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
         // SAFETY: same as above.
         unsafe {

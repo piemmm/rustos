@@ -1,14 +1,14 @@
-# rustos-logtool — the `log` CLI
+# tairix-logtool — the `log` CLI
 
 Stability tier: **experimental**
 
-`log` is the terminal reader, renderer, and verifier of the RustOS system log
+`log` is the terminal reader, renderer, and verifier of the TAIRiX system log
 (SYSLOG §14). The system log is a set of immutable, append-only, hash-chained
 segment files under `/System/Logs/<stream>/`, one directory per stream
 (`boot`, `runtime`, `debug`, `security`, `audit`, `journal`). `log` reads those
 files and turns them into readable output, or checks their integrity. There is
 no `/proc` or `/sys`: the authoritative data is the segment files and the
-RustOS APIs.
+TAIRiX APIs.
 
 ## Commands
 
@@ -57,5 +57,5 @@ and no kernel.
 
 The host-testable render/verify library lands here first, following the `cat`
 / `ls` precedent. The freestanding `Run` binary (wiring the real
-`/System/Logs` reader over the `rustos-rt` filesystem syscalls and the standard
+`/System/Logs` reader over the `tairix-rt` filesystem syscalls and the standard
 streams) and its QEMU integration vertical are the next sub-increment.

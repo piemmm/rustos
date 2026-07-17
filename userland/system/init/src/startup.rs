@@ -37,7 +37,7 @@
 //!
 //! Every `session`/`service` directive names its account, and the parser
 //! resolves the name onto its uid **at parse time** through the compiled-in
-//! system identity (`rustos_users::system_account_uid`) — no volume, no
+//! system identity (`tairix_users::system_account_uid`) — no volume, no
 //! syscall, no waiting. A directive naming an unknown account rejects the
 //! whole config ([`ConfigError::UnknownAccount`]): nothing is spawned from a
 //! config whose identities cannot all be resolved (fail closed). PID 1 then
@@ -73,7 +73,7 @@ pub const MAX_SERVICES: usize = 4;
 /// `/System/Settings` once a filesystem is mounted; the parser does not
 /// change.
 pub const DEFAULT_CONFIG: &str = "\
-# RustOS PID 1 startup configuration (plans/PI.md P6b / P11).
+# TAIRiX PID 1 startup configuration (plans/PI.md P6b / P11).
 # Open the system console, launch the System Information, network-stack,
 # device-manager, and seat-manager services, and start the login service as
 # the session — each under its own compiled-in service account
@@ -99,13 +99,13 @@ session /System/Services/login.app/Run login
 /// defeat that — the source-fixed version is the honest, reproducible build
 /// identity. The machine facts appended by [`render_banner`] come from the
 /// kernel-attested `boot_facts_get` answer, never a compiled-in guess.
-const BANNER_PREFIX: &str = concat!("RustOS ", env!("CARGO_PKG_VERSION"));
+const BANNER_PREFIX: &str = concat!("TAIRiX ", env!("CARGO_PKG_VERSION"));
 
 /// Byte capacity of the [`render_banner`] output buffer.
 ///
 /// The banner is bounded by construction: the fixed prefix and layout text,
 /// a `u64` memory figure (at most 20 digits), a CPU name of at most
-/// [`rustos_abi::CPU_NAME_LEN`] (48) bytes — or the fallback's
+/// [`tairix_abi::CPU_NAME_LEN`] (48) bytes — or the fallback's
 /// `Unknown `/` processor` text around the longest arch name — and a `u32`
 /// core count (at most 10 digits) fit comfortably; 160 bytes leaves honest
 /// headroom without a heap. A `Write` overflow is impossible for
@@ -151,7 +151,7 @@ impl core::fmt::Write for BufWriter<'_> {
 /// summary:
 ///
 /// ```text
-/// RustOS 0.0.0 8192MiB
+/// TAIRiX 0.0.0 8192MiB
 ///
 /// ARM Cortex-A72, 4 cores
 /// ```
@@ -164,7 +164,7 @@ impl core::fmt::Write for BufWriter<'_> {
 /// the honest output, never a fabricated machine shape. A formatting
 /// overflow (impossible for well-formed inputs) equally degrades to the
 /// version line, fail closed.
-pub fn render_banner(facts: Option<rustos_abi::BootFacts>, buf: &mut [u8; BANNER_MAX]) -> &str {
+pub fn render_banner(facts: Option<tairix_abi::BootFacts>, buf: &mut [u8; BANNER_MAX]) -> &str {
     use core::fmt::Write as _;
 
     let mut w = BufWriter { buf, len: 0 };
@@ -185,7 +185,7 @@ pub fn render_banner(facts: Option<rustos_abi::BootFacts>, buf: &mut [u8; BANNER
 }
 
 /// Write the full machine-summary banner (see [`render_banner`]).
-fn write_facts_banner(w: &mut BufWriter<'_>, facts: &rustos_abi::BootFacts) -> core::fmt::Result {
+fn write_facts_banner(w: &mut BufWriter<'_>, facts: &tairix_abi::BootFacts) -> core::fmt::Result {
     use core::fmt::Write as _;
 
     write!(w, "{BANNER_PREFIX} ")?;
@@ -395,7 +395,7 @@ fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
     if !path.starts_with('/') {
         return Err(ConfigError::NotAbsolutePath);
     }
-    let uid = rustos_users::system_account_uid(account).ok_or(ConfigError::UnknownAccount)?;
+    let uid = tairix_users::system_account_uid(account).ok_or(ConfigError::UnknownAccount)?;
     Ok(Launch { path, uid: uid.0 })
 }
 
@@ -429,7 +429,7 @@ mod tests {
             config.session(),
             Launch {
                 path: "/System/Services/login.app/Run",
-                uid: rustos_users::LOGIN_UID.0,
+                uid: tairix_users::LOGIN_UID.0,
             }
         );
         // `sysinfod` is launched before `netstack`/`devmgr` so the
@@ -441,19 +441,19 @@ mod tests {
             &[
                 Launch {
                     path: "/System/Services/sysinfod.app/Run",
-                    uid: rustos_users::SYSINFOD_UID.0,
+                    uid: tairix_users::SYSINFOD_UID.0,
                 },
                 Launch {
                     path: "/System/Services/netstack.app/Run",
-                    uid: rustos_users::NETSTACK_UID.0,
+                    uid: tairix_users::NETSTACK_UID.0,
                 },
                 Launch {
                     path: "/System/Services/devmgr.app/Run",
-                    uid: rustos_users::DEVMGR_UID.0,
+                    uid: tairix_users::DEVMGR_UID.0,
                 },
                 Launch {
                     path: "/System/Services/seatmgr.app/Run",
-                    uid: rustos_users::SEATMGR_UID.0,
+                    uid: tairix_users::SEATMGR_UID.0,
                 },
             ],
         );
@@ -476,11 +476,11 @@ mod tests {
             &[
                 Launch {
                     path: "/System/Services/devmgr.app/Run",
-                    uid: rustos_users::DEVMGR_UID.0,
+                    uid: tairix_users::DEVMGR_UID.0,
                 },
                 Launch {
                     path: "/System/Services/netd",
-                    uid: rustos_users::SYSINFOD_UID.0,
+                    uid: tairix_users::SYSINFOD_UID.0,
                 },
             ],
         );
@@ -647,7 +647,7 @@ session /Apps/Shell.app/Run login   # the login service
     }
 
     use super::{render_banner, BANNER_MAX};
-    use rustos_abi::{Arch, BootFacts, CpuName};
+    use tairix_abi::{Arch, BootFacts, CpuName};
 
     /// Render with the given facts into a fresh buffer.
     fn banner(facts: Option<BootFacts>) -> String {
@@ -671,7 +671,7 @@ session /Apps/Shell.app/Run login   # the login service
         assert_eq!(
             banner(Some(facts)),
             format!(
-                "RustOS {} 8192MiB\n\nIntel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz, 36 cores\n",
+                "TAIRiX {} 8192MiB\n\nIntel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz, 36 cores\n",
                 env!("CARGO_PKG_VERSION"),
             ),
         );
@@ -746,7 +746,7 @@ session /Apps/Shell.app/Run login   # the login service
     fn banner_without_facts_degrades_to_the_version_line() {
         assert_eq!(
             banner(None),
-            format!("RustOS {}\n", env!("CARGO_PKG_VERSION")),
+            format!("TAIRiX {}\n", env!("CARGO_PKG_VERSION")),
         );
     }
 
@@ -757,12 +757,12 @@ session /Apps/Shell.app/Run login   # the login service
         // truncation refusal can never fire for real facts.
         let facts = BootFacts {
             arch: Arch::Riscv64,
-            cpu_name: cpu_name(&"x".repeat(rustos_abi::CPU_NAME_LEN)),
+            cpu_name: cpu_name(&"x".repeat(tairix_abi::CPU_NAME_LEN)),
             cpu_count: u32::MAX,
             memory_bytes: u64::MAX,
         };
         let text = banner(Some(facts));
-        assert!(text.starts_with("RustOS "));
+        assert!(text.starts_with("TAIRiX "));
         assert!(text.ends_with(" cores\n"), "{text}");
         // The unknown-name fallback's worst case fits too.
         let facts = BootFacts {

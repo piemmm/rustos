@@ -6,15 +6,15 @@
 //! tree, installs the trap vector + a syscall-dispatch callback, and builds the
 //! **parent** a hardware-isolated Sv39 U-mode address space from the `rxe`
 //! fixture program through the production capability-checked, audited
-//! `rustos_kernel_core::spawn_image` caller, admitting it as a resumable user
-//! kthread via `rustos_kernel_core::spawn_user_kthread`. The cooperative
+//! `tairix_kernel_core::spawn_image` caller, admitting it as a resumable user
+//! kthread via `tairix_kernel_core::spawn_user_kthread`. The cooperative
 //! `Scheduler::step` loop drives it. The parent issues a real
 //! `CAP_PROC_SPAWN`-gated `spawn` `ecall`; the dispatch callback routes it to a
 //! riscv64 `ProcessSpawn` producer that builds the **child** (session) a fresh,
 //! hardware-isolated Sv39 space **through the identity window without switching
 //! the running parent's `satp`** and admits it **Ready** concurrently (the
 //! cross-port equal of the `aarch64`/`x86_64` producers). The callback maps each
-//! `yield`/`exit` `ecall` to `rustos_kernel_core::reschedule_current`, so the
+//! `yield`/`exit` `ecall` to `tairix_kernel_core::reschedule_current`, so the
 //! parent and child timeshare the hart on their own kernel stacks (the RV1
 //! park-safe path).
 //!
@@ -30,7 +30,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-spawn-session-qemu-riscv64: the `test-hooks` Cargo feature is a \
+    "tairix-test-spawn-session-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

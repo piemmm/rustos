@@ -24,7 +24,7 @@ número de tais dispositivos é anotado no fluxo de informação padrão
 degrada para identificadores numéricos com a razão no erro padrão — o
 inventário em si continua a ser listado.
 
-O RustOS não regista um endereço PCI `bus:device.function`: o endereço
+O TAIRiX não regista um endereço PCI `bus:device.function`: o endereço
 estável de uma função é o identificador do seu nó da árvore de
 hardware, mostrado como `#<node>`, e `-s` seleciona esse identificador
 (uma divergência deliberada e documentada face ao `lspci` do Linux). A

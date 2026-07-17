@@ -59,7 +59,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port (the SMP path needs no
+//! It links only the `tairix-arch-aarch64` port (the SMP path needs no
 //! `kernel/*` subsystem) and supplies its own `kernel_main`. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
 //! feature on the arch crate (fail closed).
@@ -75,14 +75,14 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-    use rustos_arch_aarch64::kernel_arch::{read_cntfrq, SecondaryStart};
-    use rustos_arch_aarch64::{
+    use tairix_arch_aarch64::kernel_arch::{read_cntfrq, SecondaryStart};
+    use tairix_arch_aarch64::{
         enable_fp_el1, exceptions, fdt, gic, handle_panic_via_serial, preempt, qemu_exit, smp,
         Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
     };
-    use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
-    use rustos_fdt::Fdt;
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
+    use tairix_fdt::Fdt;
+    use tairix_log::{log, Event, EventId, Level};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`): the GICv2 bases are read from it (P3), proving
@@ -206,12 +206,12 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the core; the
     /// run then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_ipi_smp_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_ipi_smp_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s`
-    /// trampoline calls (via `rustos_arch_aarch64_main`).
+    /// trampoline calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         log(

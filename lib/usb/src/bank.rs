@@ -18,8 +18,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver::dma::{DmaHost, DmaSlab};
-use rustos_abi::DriverError;
+use tairix_abi::driver::dma::{DmaHost, DmaSlab};
+use tairix_abi::DriverError;
 
 use crate::device::DmaBank;
 

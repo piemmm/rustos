@@ -8,7 +8,7 @@
 //! The kernel's validated user-copy path (`kernel/mem::uaccess`) proves
 //! every page before it moves a byte, so a mid-copy hardware fault means
 //! that proof was violated underneath it. The per-port fault window
-//! (`rustos_arch_aarch64::uaccess`) is the backstop that turns such a
+//! (`tairix_arch_aarch64::uaccess`) is the backstop that turns such a
 //! fault into an error return; this vertical proves the whole mechanism
 //! live on the `virt` board: real EL1 data abort → vector table →
 //! frame-ELR rewrite → fix-up return.
@@ -21,7 +21,7 @@
 //! 2. `exceptions::init_vectors` points `VBAR_EL1` at the vector table
 //!    **and arms the Arch HAL guarded-copy slot** — the one chokepoint
 //!    pairing the recovery with the vectors.
-//! 3. The shared `rustos_arch_api::uaccess::conformance` checks pass:
+//! 3. The shared `tairix_arch_api::uaccess::conformance` checks pass:
 //!    an intact copy moves its bytes exactly; a copy reading the
 //!    unmapped page returns the fault error; a copy writing it returns
 //!    the fault error — each taking a *real* hardware data abort whose
@@ -31,7 +31,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port and supplies its own
+//! It links only the `tairix-arch-aarch64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
 //! never behind a Cargo feature on the arch crate (fail closed).
 
@@ -43,13 +43,13 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_aarch64::paging::{AddressSpace, PageTablePool};
-    use rustos_arch_aarch64::{
+    use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool};
+    use tairix_arch_aarch64::{
         enable_fp_el1, exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK,
     };
-    use rustos_arch_api::mmu::AddressSpace as _;
-    use rustos_arch_api::uaccess::conformance::{self, Verdict};
-    use rustos_log::{log, Event, EventId, Field, Level};
+    use tairix_arch_api::mmu::AddressSpace as _;
+    use tairix_arch_api::uaccess::conformance::{self, Verdict};
+    use tairix_log::{log, Event, EventId, Field, Level};
 
     /// Number of GiB the space identity-maps (device MMIO + RAM). The
     /// kernel image and stack live in the Normal RAM gigapage (GiB 1).
@@ -101,15 +101,15 @@ mod kernel {
                 fields: &[
                     Field {
                         key: "esr",
-                        value: rustos_log::FieldValue::UnsignedInt(esr),
+                        value: tairix_log::FieldValue::UnsignedInt(esr),
                     },
                     Field {
                         key: "far",
-                        value: rustos_log::FieldValue::UnsignedInt(far),
+                        value: tairix_log::FieldValue::UnsignedInt(far),
                     },
                     Field {
                         key: "elr",
-                        value: rustos_log::FieldValue::UnsignedInt(elr),
+                        value: tairix_log::FieldValue::UnsignedInt(elr),
                     },
                 ],
             },
@@ -120,7 +120,7 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_uaccess_fault_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_uaccess_fault_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -134,7 +134,7 @@ mod kernel {
                 message: "aarch64 uaccess-fault test: failed",
                 fields: &[Field {
                     key: "stage",
-                    value: rustos_log::FieldValue::Str(what),
+                    value: tairix_log::FieldValue::Str(what),
                 }],
             },
         );
@@ -142,7 +142,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         // SAFETY: runs once on the boot CPU before any FP/SIMD

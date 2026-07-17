@@ -1,4 +1,4 @@
-# `rustos-drv-bus-pcie-brcm` — BCM2711 PCIe root-complex bus driver
+# `tairix-drv-bus-pcie-brcm` — BCM2711 PCIe root-complex bus driver
 
 Autoloaded **user-space bus driver** for the Broadcom BCM2711 (Raspberry
 Pi 4) PCIe root complex. It binds the discovered `brcm,bcm2711-pcie` node,
@@ -17,7 +17,7 @@ other driver.
 
 - BCM2711 PCIe root complex (Raspberry Pi 4 / Pi 400). Binds by the
   device-tree `compatible` string `brcm,bcm2711-pcie` (the crate's
-  `rustos_drv_bus_pcie_brcm::BIND_KEYS`).
+  `tairix_drv_bus_pcie_brcm::BIND_KEYS`).
 
 The controller register window, the inbound-DMA aperture, and the outbound
 MMIO window are **discovered** values threaded from the matched

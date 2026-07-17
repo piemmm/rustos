@@ -1,7 +1,7 @@
 //! The kernel volume forest: durable `id::` volume-root publication and
 //! resolution (`docs/src/filesystem/drives.md` §8, `plans/DEVICES.md` D3a).
 //!
-//! RustOS storage is a forest of independently addressable named roots. The
+//! TAIRiX storage is a forest of independently addressable named roots. The
 //! durable machine form of a root is `id::<volume-id>/path`, where the
 //! volume id is the filesystem's own stable identity (the `ARXFS`
 //! per-volume UUID). This registry is the kernel-side map from that
@@ -27,7 +27,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_sync::RwLock;
+use tairix_sync::RwLock;
 
 /// One published volume root: the volume's stable 16-byte identity and the
 /// `/`-view components its root directory resolves to.

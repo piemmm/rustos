@@ -18,7 +18,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_abi::sysinfo::LOAD_FIXED_SHIFT;
+use tairix_abi::sysinfo::LOAD_FIXED_SHIFT;
 
 /// 1.0 in the fixed-point load representation.
 const FIXED_1: u64 = 1 << LOAD_FIXED_SHIFT;

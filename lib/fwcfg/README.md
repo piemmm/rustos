@@ -1,4 +1,4 @@
-# rustos-fwcfg
+# tairix-fwcfg
 
 **Stability tier: stable.**
 

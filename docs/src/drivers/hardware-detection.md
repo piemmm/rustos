@@ -1,6 +1,6 @@
-# Hardware detection and driver autoload (`rustos-devmgr`)
+# Hardware detection and driver autoload (`tairix-devmgr`)
 
-RustOS detects the hardware actually present at boot and autoloads the
+TAIRiX detects the hardware actually present at boot and autoloads the
 matching drivers; it never ships a hand-maintained, per-image static
 device list (`AGENTS.md` §18). Three pieces compose:
 
@@ -44,8 +44,8 @@ the node's match keys (`HwMatchKey::matches`) — same kind first, then:
   never force a broader match (fail closed, `AGENTS.md` §5.4).
 
 Drivers declare their canonical bind tables as a `pub const BIND_KEYS`
-in the driver crate (e.g. `rustos_drv_bus_pcie_brcm::BIND_KEYS`,
-`rustos_drv_bus_usb::BIND_KEYS`, `rustos_drv_input_usb_kbd::BIND_KEYS`) —
+in the driver crate (e.g. `tairix_drv_bus_pcie_brcm::BIND_KEYS`,
+`tairix_drv_bus_usb::BIND_KEYS`, `tairix_drv_input_usb_kbd::BIND_KEYS`) —
 the single source of truth the signed-manifest bind table is authored
 from (`AGENTS.md` §18.3).
 
@@ -64,9 +64,9 @@ The resolution across drivers is deterministic (`AGENTS.md` §18.3):
 
 This resolution policy (`resolve`, `best_bind_priority`, `DriverCandidate`,
 `MatchResolution`) lives in the shared **`lib/devmatch`** crate, the single
-§18.3 definition. `rustos-devmgr` re-exports it unchanged, and the kernel's
+§18.3 definition. `tairix-devmgr` re-exports it unchanged, and the kernel's
 in-kernel bootstrap-floor driver-candidate catalogue
-(`kernel/rustos-kernel::driver_catalog` — the storage floor only, §18.6, see
+(`kernel/tairix-kernel::driver_catalog` — the storage floor only, §18.6, see
 [Remaining work](#remaining-stage-4hw-work)) resolves against the same crate — the
 kernel cannot depend on the `userland/*` device manager (`AGENTS.md` §17.4),
 so the policy is shared, never duplicated (§2.2).
@@ -74,13 +74,13 @@ so the policy is shared, never duplicated (§2.2).
 ## Public surface
 
 ```rust
-use rustos_devmgr::{DeviceManager, DriverCandidate, DriverLoader};
+use tairix_devmgr::{DeviceManager, DriverCandidate, DriverLoader};
 
 fn autoload_at_boot(deps: &mut ServiceDeps) {
     let candidates: &[DriverCandidate<'_>] = &deps.catalog; // path + decoded bind table
-    let manager = DeviceManager::new(&deps.audit_sink);     // impl rustos_log::Sink
+    let manager = DeviceManager::new(&deps.audit_sink);     // impl tairix_log::Sink
     let report = manager.autoload(
-        &deps.hardware_tree, // &[rustos_abi::HwNode]
+        &deps.hardware_tree, // &[tairix_abi::HwNode]
         candidates,
         &deps.caller_caps,   // must hold CAP_DRV_LOAD for loads to pass
         &mut deps.loader,    // impl DriverLoader over the drvhost gate
@@ -101,7 +101,7 @@ block boot.
 
 ### The `DriverLoader` seam
 
-The §17.4 layering keeps `rustos-devmgr` on `lib/*` only, so the load
+The §17.4 layering keeps `tairix-devmgr` on `lib/*` only, so the load
 *mechanism* sits behind the `DriverLoader` trait:
 
 ```rust
@@ -134,7 +134,7 @@ tables arrive already decoded (fail-closed) by the gate's own
 `ParsedImage::decode_bind_table`.
 
 The production process-spawning integration point is
-`rustos_kernel::driver_spawn_loader::SpawnDriverLoader`: it runs the
+`tairix_kernel::driver_spawn_loader::SpawnDriverLoader`: it runs the
 signed `Host::load` gate on the discovered `kind = UserSpace` image and
 then spawns the verified payload into its own process through the
 architecture `DriverProcessSpawn` seam, minting the new process one
@@ -191,7 +191,7 @@ publish nothing — `hw_emit_node` fails closed with `PermissionDenied`.
 
 Every match, load, skip, and failure is logged through `lib/log` with
 a stable event id in the device manager's reserved `13000..14000`
-range (`rustos_devmgr::events`):
+range (`tairix_devmgr::events`):
 
 | Event id | Meaning |
 |----------|---------|
@@ -204,7 +204,7 @@ The drvhost gate's own `7000`-range records interleave with these on a
 shared sink, giving audit consumers the full causal chain from match
 to load decision.
 
-The reactive `rustos_devmgr::run` loop re-matches the whole tree snapshot on
+The reactive `tairix_devmgr::run` loop re-matches the whole tree snapshot on
 every generation advance (§18.4), but a node's decision is logged only the
 **first** time it is reached and again only when it *changes* (e.g. `13002`
 `NODE_UNBOUND` → `13001` `NODE_BOUND` once the late-bound catalogue arrives):
@@ -244,7 +244,7 @@ binds the bridge and emits the VL805 PCI function, the VL805 driver reloads
 the controller firmware over the mailbox and emits the `usb,xhci` node, and
 the keyboard driver binds that and pumps key edges. Nothing of the chain is
 compiled into the kernel: the in-kernel driver-candidate catalogue
-(`kernel/rustos-kernel::driver_catalog`) is now the storage **bootstrap
+(`kernel/tairix-kernel::driver_catalog`) is now the storage **bootstrap
 floor only** — virtio-blk + EMMC2, the block drivers that must be up before
 the signed store is reachable (§18.6). The remaining work, tracked in
 `PLAN.md`, is the hotplug **removal** runtime path: the kernel side landed

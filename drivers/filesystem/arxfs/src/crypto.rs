@@ -21,7 +21,7 @@
 //! fails the AEAD authentication and the mount is refused, fail-closed, never a panic.
 //!
 //! All primitives come through `lib/crypto`: the KDF
-//! ([`rustos_crypto::derive_key`]), the metadata MAC (HMAC-SHA256), and the
+//! ([`tairix_crypto::derive_key`]), the metadata MAC (HMAC-SHA256), and the
 //! AEAD (ChaCha20-Poly1305). Nothing here hand-rolls a primitive.
 //!
 //! # The key material is drawn from the platform RNG
@@ -42,8 +42,8 @@
 //! encrypted swap, `init`'s `Spawner`, and `login`'s `Authenticator` use. That
 //! keeps the driver architecture-neutral.
 
-use rustos_abi::driver::DriverError;
-use rustos_crypto::{
+use tairix_abi::driver::DriverError;
+use tairix_crypto::{
     derive_key, open, seal, AeadError, AeadKey, AeadNonce, AeadTag, MacKey, AEAD_NONCE_LEN,
 };
 
@@ -80,21 +80,21 @@ pub trait EntropySource {
 }
 
 /// Bytes of per-block crypto trailer appended to every encrypted data and
-/// directory block: a [`rustos_crypto::AEAD_NONCE_LEN`]-byte nonce followed by
-/// a [`rustos_crypto::AEAD_TAG_LEN`]-byte authentication tag.
-pub const CRYPTO_TRAILER: usize = rustos_crypto::AEAD_NONCE_LEN + rustos_crypto::AEAD_TAG_LEN;
+/// directory block: a [`tairix_crypto::AEAD_NONCE_LEN`]-byte nonce followed by
+/// a [`tairix_crypto::AEAD_TAG_LEN`]-byte authentication tag.
+pub const CRYPTO_TRAILER: usize = tairix_crypto::AEAD_NONCE_LEN + tairix_crypto::AEAD_TAG_LEN;
 
 /// On-disk size of the crypto discovery header stored in a superblock slot's
 /// plaintext payload region: a 16-byte salt, the 32-byte AEAD-wrapped master
 /// key, the wrap nonce, and the wrap tag.
 pub const CRYPTO_HEADER_LEN: usize =
-    SALT_LEN + VOLUME_KEY_LEN + rustos_crypto::AEAD_NONCE_LEN + rustos_crypto::AEAD_TAG_LEN;
+    SALT_LEN + VOLUME_KEY_LEN + tairix_crypto::AEAD_NONCE_LEN + tairix_crypto::AEAD_TAG_LEN;
 
 /// Length, in bytes, of the per-volume wrapping salt.
 const SALT_LEN: usize = 16;
 
 // Domain-separating KDF context labels. Each derived key gets its own stable
-// label so no two uses of a parent key ever collide (`rustos_crypto::kdf`).
+// label so no two uses of a parent key ever collide (`tairix_crypto::kdf`).
 const CTX_WRAP: &[u8] = b"arxfs/wrap-key";
 const CTX_META: &[u8] = b"arxfs/meta-mac";
 const CTX_FILENAME: &[u8] = b"arxfs/filename";
@@ -202,8 +202,8 @@ impl CryptoHeader {
         let mut wrap_nonce = [0u8; AEAD_NONCE_LEN];
         wrap_nonce.copy_from_slice(&bytes[off..off + AEAD_NONCE_LEN]);
         off += AEAD_NONCE_LEN;
-        let mut wrap_tag = [0u8; rustos_crypto::AEAD_TAG_LEN];
-        wrap_tag.copy_from_slice(&bytes[off..off + rustos_crypto::AEAD_TAG_LEN]);
+        let mut wrap_tag = [0u8; tairix_crypto::AEAD_TAG_LEN];
+        wrap_tag.copy_from_slice(&bytes[off..off + tairix_crypto::AEAD_TAG_LEN]);
         Some(Self {
             salt,
             wrapped_master,
@@ -333,7 +333,7 @@ pub fn decrypt_region(
 ) -> Result<(), AeadError> {
     let mut nonce = [0u8; AEAD_NONCE_LEN];
     nonce.copy_from_slice(&trailer[..AEAD_NONCE_LEN]);
-    let mut tag = [0u8; rustos_crypto::AEAD_TAG_LEN];
+    let mut tag = [0u8; tairix_crypto::AEAD_TAG_LEN];
     tag.copy_from_slice(&trailer[AEAD_NONCE_LEN..CRYPTO_TRAILER]);
     open(key, &nonce, &phys.to_le_bytes(), region, &tag)
 }

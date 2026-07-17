@@ -2,12 +2,12 @@
 //! the mounted root volume (`plans/PI.md` P10
 //! Stage 4.HW item 5).
 //!
-//! RustOS does not ship a compiled-in list of *which* drivers exist: the discovered driver set is found at runtime by
+//! TAIRiX does not ship a compiled-in list of *which* drivers exist: the discovered driver set is found at runtime by
 //! scanning the installed signed bundles under `/System/Drivers/` and
 //! reading each bundle's manifest bind table. [`enumerate_driver_store`]
 //! is the kernel's half of that scan — the *path enumeration* that turns
 //! the on-disk store tree into the list of bundle image paths the
-//! user-space driver-store scan (`rustos_drvhost::store::scan_store`)
+//! user-space driver-store scan (`tairix_drvhost::store::scan_store`)
 //! reads, bind-decodes, and hands to the `devmgr` autoloader.
 //!
 //! It mirrors [`crate::users::load_users_db`]: given the live
@@ -23,7 +23,7 @@
 //! of each regular file under `/System/Drivers/` (the store tree is
 //! organised `<class>[/<vendor>]/<driver>`); it does **not**
 //! read, parse, signature-verify, or otherwise trust a bundle. That is the
-//! load gate's job (`rustos_drvhost::Host::load`), run only when — and
+//! load gate's job (`tairix_drvhost::Host::load`), run only when — and
 //! only when — a candidate wins a hardware-tree node.
 //!
 //! # Fail closed, never fatal
@@ -47,12 +47,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
-use rustos_abi::Errno;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{GroupId, UserId};
-use rustos_log::{Field, Level, Sink};
-use rustos_util::fmt::format_usize;
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
+use tairix_abi::Errno;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{GroupId, UserId};
+use tairix_log::{Field, Level, Sink};
+use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
 use crate::fs::{Credentials, Path, Vfs, VfsError};
@@ -105,9 +105,9 @@ pub const MAX_STORE_DRIVERS: usize = 256;
 ///
 /// The returned paths are absolute and rooted at `store_root`, in the
 /// driver's on-disk enumeration order. Each is understood verbatim by the
-/// user-space scan (`rustos_drvhost::store::scan_store`, which reads and
+/// user-space scan (`tairix_drvhost::store::scan_store`, which reads and
 /// bind-decodes the bundle) and by the load gate
-/// (`rustos_drvhost::Host::load`, which verifies it). This function does
+/// (`tairix_drvhost::Host::load`, which verifies it). This function does
 /// none of that — it only finds the paths.
 ///
 /// A single [`AuditEvent::DriverStoreScanned`] record is emitted with the
@@ -256,7 +256,7 @@ pub const MAX_DRIVER_IMAGE_LEN: usize = 16 * 1024 * 1024;
 /// Every variant is a fail-closed refusal. The
 /// precise reason is retained for in-kernel logging; [`Self::to_errno`]
 /// maps it to the stable [`Errno`] the user-space scan
-/// (`rustos_drvhost::store::scan_store`) records as the bundle's skip
+/// (`tairix_drvhost::store::scan_store`) records as the bundle's skip
 /// reason.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DriverImageError {
@@ -316,7 +316,7 @@ fn path_within_store(store_root: &str, path: &str) -> bool {
 ///
 /// [`enumerate_driver_store`] finds *which* bundle paths exist; this reader
 /// fetches the *bytes* of a chosen bundle, so the user-space scan
-/// (`rustos_drvhost::store::scan_store`) can parse and bind-decode it. The
+/// (`tairix_drvhost::store::scan_store`) can parse and bind-decode it. The
 /// reader is the byte-fetching half the scan's `ImageSource` seam needs;
 /// the bin crate's `ImageSource` adapter (the one layer that may name
 /// `drvhost`) delegates to it.
@@ -358,7 +358,7 @@ impl DriverImageReader {
     /// leaving `buf` unchanged from its entry length on error.
     ///
     /// Appending (rather than overwriting) matches the
-    /// `rustos_drvhost::ImageSource` contract the bin-crate adapter
+    /// `tairix_drvhost::ImageSource` contract the bin-crate adapter
     /// fulfils.
     ///
     /// # Errors
@@ -424,15 +424,15 @@ fn audit_scan(audit: &dyn Sink, store_root: &str, drivers: usize, skipped: usize
         &[
             Field {
                 key: "path",
-                value: rustos_log::FieldValue::Str(store_root),
+                value: tairix_log::FieldValue::Str(store_root),
             },
             Field {
                 key: "drivers",
-                value: rustos_log::FieldValue::Str(format_usize(drivers, &mut drivers_buf)),
+                value: tairix_log::FieldValue::Str(format_usize(drivers, &mut drivers_buf)),
             },
             Field {
                 key: "skipped",
-                value: rustos_log::FieldValue::Str(format_usize(skipped, &mut skipped_buf)),
+                value: tairix_log::FieldValue::Str(format_usize(skipped, &mut skipped_buf)),
             },
         ],
     );

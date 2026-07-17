@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::fs::Fs;
 use crate::view_text::JobOutcome;

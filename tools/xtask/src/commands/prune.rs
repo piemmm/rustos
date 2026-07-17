@@ -1,6 +1,6 @@
 //! Pre-build cleanup of superseded build-script output directories.
 //!
-//! The `rustos-kernel` build script (`kernel/rustos-kernel/build.rs`)
+//! The `tairix-kernel` build script (`kernel/tairix-kernel/build.rs`)
 //! compiles the embedded userland `Run` programs — each a full `-Z
 //! build-std` target tree of roughly a gigabyte — into its `OUT_DIR`. Cargo
 //! keys a build script's `OUT_DIR` by the *fingerprint* of the build-script
@@ -204,7 +204,7 @@ fn superseded(candidates: &[BuildEntry]) -> Vec<String> {
 /// metadata hash. Requiring exactly that shape means a directory that is not
 /// a cargo build artifact (or whose layout we do not recognise) is left
 /// untouched rather than guessed at. The package portion
-/// itself may contain hyphens (`rustos-kernel-ipc`), so we split on the last
+/// itself may contain hyphens (`tairix-kernel-ipc`), so we split on the last
 /// hyphen only.
 fn package_of(name: &str) -> Option<&str> {
     let (package, hash) = name.rsplit_once('-')?;
@@ -233,12 +233,12 @@ mod tests {
     #[test]
     fn package_of_strips_the_sixteen_hex_hash() {
         assert_eq!(
-            package_of("rustos-kernel-d1e365cab8d956e9"),
-            Some("rustos-kernel")
+            package_of("tairix-kernel-d1e365cab8d956e9"),
+            Some("tairix-kernel")
         );
         assert_eq!(
-            package_of("rustos-kernel-ipc-2416769c78dec007"),
-            Some("rustos-kernel-ipc")
+            package_of("tairix-kernel-ipc-2416769c78dec007"),
+            Some("tairix-kernel-ipc")
         );
     }
 
@@ -246,7 +246,7 @@ mod tests {
     fn package_of_rejects_non_artifact_names() {
         // No hash suffix.
         assert_eq!(package_of("CACHEDIR.TAG"), None);
-        assert_eq!(package_of("rustos-kernel"), None);
+        assert_eq!(package_of("tairix-kernel"), None);
         // Wrong hash length.
         assert_eq!(package_of("foo-deadbeef"), None);
         // Non-hex suffix of the right length.
@@ -258,17 +258,17 @@ mod tests {
     #[test]
     fn superseded_keeps_only_the_newest_per_package() {
         let candidates = [
-            entry("rustos-kernel-1111111111111111", 100),
-            entry("rustos-kernel-2222222222222222", 300),
-            entry("rustos-kernel-3333333333333333", 200),
+            entry("tairix-kernel-1111111111111111", 100),
+            entry("tairix-kernel-2222222222222222", 300),
+            entry("tairix-kernel-3333333333333333", 200),
         ];
         let mut pruned = superseded(&candidates);
         pruned.sort();
         assert_eq!(
             pruned,
             vec![
-                "rustos-kernel-1111111111111111".to_string(),
-                "rustos-kernel-3333333333333333".to_string(),
+                "tairix-kernel-1111111111111111".to_string(),
+                "tairix-kernel-3333333333333333".to_string(),
             ]
         );
     }
@@ -276,25 +276,25 @@ mod tests {
     #[test]
     fn superseded_does_not_cross_package_groups() {
         let candidates = [
-            entry("rustos-kernel-1111111111111111", 100),
-            entry("rustos-kernel-2222222222222222", 300),
-            entry("rustos-kernel-ipc-3333333333333333", 50),
-            entry("rustos-kernel-ipc-4444444444444444", 60),
+            entry("tairix-kernel-1111111111111111", 100),
+            entry("tairix-kernel-2222222222222222", 300),
+            entry("tairix-kernel-ipc-3333333333333333", 50),
+            entry("tairix-kernel-ipc-4444444444444444", 60),
         ];
         let mut pruned = superseded(&candidates);
         pruned.sort();
         assert_eq!(
             pruned,
             vec![
-                "rustos-kernel-1111111111111111".to_string(),
-                "rustos-kernel-ipc-3333333333333333".to_string(),
+                "tairix-kernel-1111111111111111".to_string(),
+                "tairix-kernel-ipc-3333333333333333".to_string(),
             ]
         );
     }
 
     #[test]
     fn superseded_keeps_a_lone_directory() {
-        let candidates = [entry("rustos-kernel-1111111111111111", 100)];
+        let candidates = [entry("tairix-kernel-1111111111111111", 100)];
         assert!(superseded(&candidates).is_empty());
     }
 
@@ -303,12 +303,12 @@ mod tests {
         // Two directories share the newest mtime: neither may be removed, so
         // the live one is never deleted on a timestamp tie.
         let candidates = [
-            entry("rustos-kernel-1111111111111111", 300),
-            entry("rustos-kernel-2222222222222222", 300),
-            entry("rustos-kernel-3333333333333333", 100),
+            entry("tairix-kernel-1111111111111111", 300),
+            entry("tairix-kernel-2222222222222222", 300),
+            entry("tairix-kernel-3333333333333333", 100),
         ];
         let pruned = superseded(&candidates);
-        assert_eq!(pruned, vec!["rustos-kernel-3333333333333333".to_string()]);
+        assert_eq!(pruned, vec!["tairix-kernel-3333333333333333".to_string()]);
     }
 
     #[test]
@@ -317,10 +317,10 @@ mod tests {
         // is never pruned.
         let candidates = [
             entry("CACHEDIR.TAG", 100),
-            entry("rustos-kernel-1111111111111111", 100),
-            entry("rustos-kernel-2222222222222222", 300),
+            entry("tairix-kernel-1111111111111111", 100),
+            entry("tairix-kernel-2222222222222222", 300),
         ];
         let pruned = superseded(&candidates);
-        assert_eq!(pruned, vec!["rustos-kernel-1111111111111111".to_string()]);
+        assert_eq!(pruned, vec!["tairix-kernel-1111111111111111".to_string()]);
     }
 }

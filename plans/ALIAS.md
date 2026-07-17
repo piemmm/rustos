@@ -1,7 +1,7 @@
-# ALIAS.md - RustOS Resource Alias and Selector Specification
+# ALIAS.md - TAIRiX Resource Alias and Selector Specification
 
 Status: normative design input for implementation. The single shared
-reference **parser** is landed as `lib/resref` (`rustos-resref`): the one
+reference **parser** is landed as `lib/resref` (`tairix-resref`): the one
 definition of how the grammar in §5 is lexed and validated into typed values
 (`ResourceRef` and the §16.2 conceptual types it covers), spelling only. The
 **resolver** is split by the layer that owns each resource, not lumped behind
@@ -22,8 +22,8 @@ namespaces via the device manager) and the richer resolver error model (§19)
 are added in place as their consumers appear. See `.junie/PREREQUISITES2.md`
 P5.
 
-This document specifies RustOS resource aliases and selector namespaces. It is
-intended to be used together with the RustOS drive/path conventions document.
+This document specifies TAIRiX resource aliases and selector namespaces. It is
+intended to be used together with the TAIRiX drive/path conventions document.
 The companion file owns filesystem path spelling, drive mount naming, and any
 exact persistent storage path. This file owns non-filesystem resource references
 such as `sys:random`, `disk:backup`, `info:cpu/vendor`, and
@@ -34,7 +34,7 @@ conflict, AGENTS.md wins.
 
 ## 1. Purpose
 
-RustOS has no `/dev`, no `/proc`, and no `/sys`. Resource references therefore
+TAIRiX has no `/dev`, no `/proc`, and no `/sys`. Resource references therefore
 must not be implemented as a pseudo-filesystem and must not create filesystem
 entries that pretend devices, statistics, or kernel state are files.
 
@@ -317,7 +317,7 @@ sys:capability          capability inspection and delegation service handle
 ```
 
 `sys:random` maps to the canonical random ABI. It must not expose hardware RNG
-bytes directly. It must expose random bytes only through the RustOS random
+bytes directly. It must expose random bytes only through the TAIRiX random
 subsystem.
 
 `sys:entropy` is not a writeable byte sink by default. Entropy injection, if
@@ -1008,7 +1008,7 @@ authorization
 payload
 ```
 
-`timestamp` must use the RustOS canonical time representation.
+`timestamp` must use the TAIRiX canonical time representation.
 
 This envelope is realized as `lib/procinfo::resinfo::ResourceResponse`
 (`version`/`producer`/`authorization`/`timestamp`/`query` + a typed
@@ -1368,7 +1368,7 @@ format disk:backup@7K2M
 
 ```text
 disk list removable
-image-write rustos.img -> disk:slot/front-usb@P91Q::raw
+image-write tairix.img -> disk:slot/front-usb@P91Q::raw
 ```
 
 This means: use the device currently in the front USB slot only if it is still
@@ -1454,7 +1454,7 @@ When implementing this specification, an AI agent must satisfy all of these:
 - add tests proving `/dev`, `/proc`, and `/sys` are not created or used;
 - update PLAN.md and relevant docs when adding a new shared crate, ABI surface,
   namespace, or service;
-- run the full RustOS validation gate before reporting an in-repository change
+- run the full TAIRiX validation gate before reporting an in-repository change
   complete.
 
 ## 23. Acceptance tests
@@ -1540,7 +1540,7 @@ namespaces such as `disk:`, `tty:`, `net:`, `input:`, `audio:`, `gpu:`, or
 
 ## 25. Summary
 
-RustOS resource references are typed selectors that resolve to typed
+TAIRiX resource references are typed selectors that resolve to typed
 capabilities or typed information responses. They are not files.
 
 Human-friendly aliases such as `disk:backup` are allowed, but they are not

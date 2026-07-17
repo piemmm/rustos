@@ -3,7 +3,7 @@
 //!
 //! A segment's records are attacker-influenced (a compromised journal, a
 //! tampered or torn file, a volume lifted from another machine), so the
-//! reader-side [`rustos_log::DictionaryView`] must refuse malformed
+//! reader-side [`tairix_log::DictionaryView`] must refuse malformed
 //! dictionary-coded bytes cleanly and never panic. This harness drives it two
 //! ways:
 //!
@@ -15,9 +15,9 @@
 //!   was encoded and the reader consumes exactly the writer's bytes.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
-use rustos_log::{DictionaryBuilder, DictionaryView};
+use tairix_log::{DictionaryBuilder, DictionaryView};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 50_000;
@@ -41,7 +41,7 @@ fn exercise_random(bytes: &[u8]) {
 }
 
 /// Encode a random sequence of small-alphabet strings, then decode it back.
-fn exercise_round_trip(rng: &mut rustos_fuzzseed::Lcg) {
+fn exercise_round_trip(rng: &mut tairix_fuzzseed::Lcg) {
     let count = (rng.next_u64() % 40) as usize;
     let mut strings: Vec<String> = Vec::with_capacity(count);
     for _ in 0..count {
@@ -77,13 +77,13 @@ fn exercise_round_trip(rng: &mut rustos_fuzzseed::Lcg) {
 
 #[test]
 fn random_and_round_trip_dictionary_never_panic() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "random_and_round_trip_dictionary_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
     let mut buf = [0u8; 512];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for i in 0..SMOKE_ITERATIONS {
             if i % 2 == 0 {
@@ -94,7 +94,7 @@ fn random_and_round_trip_dictionary_never_panic() {
                 exercise_round_trip(&mut rng);
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

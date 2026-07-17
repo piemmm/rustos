@@ -1,6 +1,6 @@
 # IO.md — First-party Rust I/O abstraction over the descriptor table
 
-This is a staged build plan for RustOS's userland I/O **library** layer. It is
+This is a staged build plan for TAIRiX's userland I/O **library** layer. It is
 **binding under `AGENTS.md`**; read `AGENTS.md` and `PLAN.md` first. Every rule
 in both applies here without exception. This plan exists because the charter
 requires a `lib/*` crate proposal to be written and approved in a plan file
@@ -19,15 +19,15 @@ its sibling plans, not invented here (§4, §5).
 
 Today every text program (the shell, `init`, `sysinfo`, the CLI utilities,
 system services) does I/O by calling the thin `lib/rt` syscall wrappers
-directly — `rustos_rt::stdout(bytes)`, `rustos_rt::stderr(bytes)`,
-`rustos_rt::stdinfo(bytes)`, `rustos_rt::stdin(&mut buf)` — passing raw byte
+directly — `tairix_rt::stdout(bytes)`, `tairix_rt::stderr(bytes)`,
+`tairix_rt::stdinfo(bytes)`, `tairix_rt::stdin(&mut buf)` — passing raw byte
 slices over the `abi-v1` `stream_write` / `stream_read` traps (`AGENTS.md`
 §20). That floor is correct and stays: §20 already forbids reaching for a
 console/UART/framebuffer device, and software must keep doing I/O over
 inherited fd 0/1/2/3 only.
 
 What is **missing** is the ergonomic *library* on top of those wrappers — the
-RustOS equivalent of the `std::io` surface that real shells and tools program
+TAIRiX equivalent of the `std::io` surface that real shells and tools program
 against instead of hand-marshalling byte slices and re-looping every short
 read/write themselves:
 
@@ -75,7 +75,7 @@ done items):
   (fd 3) unattached and the kernel discards its writes best-effort, so
   advisory records never reach the terminal. Current backings are the
   discovered text consoles (video + UART) only.
-- **DONE — `lib/rt` thin wrappers.** `rustos_rt::{stdin, stdout, stderr,
+- **DONE — `lib/rt` thin wrappers.** `tairix_rt::{stdin, stdout, stderr,
   stdinfo, set_input_mode}` marshal byte slices over the traps. `lib/rt` registers
   the process heap (`AGENTS.md` §25), so `alloc` is available to this layer.
 - **DONE — `stdinfo` framing.** The `StdInfoRecord` JSONL model lives in
@@ -84,23 +84,23 @@ done items):
 - **DONE — the library (IO1–IO3).** The `Read`/`Write` trait layer, the
   fd-generic non-owning `Stream`, the four standard streams, buffering
   (`BufReader`/`BufWriter`, `read_line`/`read_until`/`lines`), and formatting
-  (`write_fmt`) live in `lib/rt/src/io.rs` (module `rustos_rt::io`), with host
+  (`write_fmt`) live in `lib/rt/src/io.rs` (module `tairix_rt::io`), with host
   unit tests and rustdoc + `docs/src/lib/rt-io.md`.
 - **DONE — userland adoption (IO4).** The in-tree callers that hand-rolled a
   short-write loop over the `lib/rt` byte-slice wrappers now write through
-  `rustos_rt::io::{Stdout, Stderr, Write}`, and the duplicated loops are
+  `tairix_rt::io::{Stdout, Stderr, Write}`, and the duplicated loops are
   deleted: `userland/shell/elsh` (`RtConsole`), `userland/session/login`
   (`RtPrompt`), `userland/system/init` (the
   banner write), and `lib/procinfo` (`RtOutput` / `write_stderr_line`, which
   back `sysinfo` / `ps` / `top`). The curses standard-streams channel lives
-  once as `rustos_curses::StreamTty` (`lib/curses`, feature `program`),
+  once as `tairix_curses::StreamTty` (`lib/curses`, feature `program`),
   linked by every full-screen program (`top`, `vim`, `edit`, `fstree`,
   `login`) instead of a per-app `Tty` copy, and writes through the same
-  `rustos_rt::io` loop. There is one `Write::write_all` loop in
+  `tairix_rt::io` loop. There is one `Write::write_all` loop in
   userland. The bounded, edit-aware line readers that are **not** the unbounded
   `BufReader` — the shell REPL's `MAX_LINE`-capped `LineReader` and login's
   byte-wise prompt reads, both running the one shared
-  `rustos_vt::line::LineEditor` — are a deliberate security bound,
+  `tairix_vt::line::LineEditor` — are a deliberate security bound,
   not the duplication IO4 removes, so they stay as their own readers over the
   `read` primitive.
 - **DECIDED — no owning/close-on-drop handle yet.** IO1 deliberately ships a
@@ -176,12 +176,12 @@ done items):
   fixed-capacity where an allocation-free path is required (the kernel-adjacent
   and early-boot callers); any `alloc`-using convenience is gated so the
   allocation-free core is always available.
-- **No C `stdio`** (`AGENTS.md` §16.4, `plans/CCOMPAT.md`): RustOS does **not**
+- **No C `stdio`** (`AGENTS.md` §16.4, `plans/CCOMPAT.md`): TAIRiX does **not**
   ship a system-wide C `stdio` (`FILE*`/`fopen`/`fwrite`/`printf`). The
   *System runtime / C ABI* class stays deliberately minimal — the
-  `ros_sys_stream_*` stubs + `crt0` only. A third-party C program brings its
+  `tairix_sys_stream_*` stubs + `crt0` only. A third-party C program brings its
   own libc/`stdio` inside its app bundle (`AGENTS.md` §16.4, §16.5). Building a
-  RustOS-maintained C `stdio` would be forbidden curated-library bloat
+  TAIRiX-maintained C `stdio` would be forbidden curated-library bloat
   (§2.3) and is explicitly out of scope here.
 - **No stubs** (`AGENTS.md` §15.1): each stage ships code **plus** tests
   **plus** docs, and is only "done" when the whole-project gate (§7) is green.
@@ -194,7 +194,7 @@ already links. Decision (to be confirmed in IO1):
 ```
 lib/rt  → lib/abi, lib/abi-trap (existing thin syscall wrappers)   [backing]
 lib/rt::io  (a module, not a new crate)                            [Read/Write + buffering + fmt]
-userland (shells/apps/services) → rustos_rt::io                    [the I/O surface]
+userland (shells/apps/services) → tairix_rt::io                    [the I/O surface]
 ```
 
 Rationale for a **module inside `lib/rt`** rather than a new `lib/io` crate:
@@ -230,7 +230,7 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
   `stream_read` / `stream_write` primitives (so `stdin` and the fd-generic
   reader share one definition). `StdInfo`'s `Write` honours §20.1 (best-effort,
   never a short write or error on no consumer). Placement decision confirmed: a
-  module inside `lib/rt` (`rustos_rt::io`), not a new crate. Tests cover the
+  module inside `lib/rt` (`tairix_rt::io`), not a new crate. Tests cover the
   short-write loop reaching full length, `read_exact`/EOF semantics, `stdinfo`
   never stalling `write_all`, and a `Stream` over a non-standard fd taking the
   identical trap path as `Stdout` (proves §2.2). Docs: `docs/src/lib/rt-io.md`
@@ -249,12 +249,12 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
 - **IO4 — adopt across userland (delete the hand-rolled loops). DONE.** The
   in-tree callers (`userland/shell/elsh`, `userland/system/init`,
   `userland/apps/top`, and the `sysinfo` / `ps` / `top` output path shared
-  through `lib/procinfo`) write through `rustos_rt::io::{Stdout, Stderr,
+  through `lib/procinfo`) write through `tairix_rt::io::{Stdout, Stderr,
   Write}`, and the open-coded short-write loops they carried are **deleted**
   (no dead code, no parallel I/O paths). After IO4 there is one
   `Write::write_all` loop in userland — this is the stage that proves §2.2.
   The bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader` and
-  login's prompt reads, both over the shared `rustos_vt::line::LineEditor`)
+  login's prompt reads, both over the shared `tairix_vt::line::LineEditor`)
   are retained: they are a security bound
   (§24.4), not the unbounded `BufReader`, so collapsing them would *lose* a
   bound rather than remove duplication. Verified by the existing
@@ -324,5 +324,5 @@ the producer ABI is invented in this plan.
 - `no_std`, fail-closed, no `unwrap`/`expect`/`panic!` in production paths
   (`AGENTS.md` §2.9), no stubs (§15.1), tests + docs in the same change
   (§7, §13).
-- No RustOS-maintained C `stdio`; the C ABI class stays minimal
+- No TAIRiX-maintained C `stdio`; the C ABI class stays minimal
   (`AGENTS.md` §16.4, `plans/CCOMPAT.md`).

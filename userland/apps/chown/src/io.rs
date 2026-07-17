@@ -9,7 +9,7 @@
 //! `cp`'s and `mv`'s `FileSystem`, `chmod`'s `FileSystem`).
 
 use alloc::string::String;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// What kind of object a path or directory entry is, as far as `chown` cares.
 ///
@@ -25,7 +25,7 @@ pub enum EntryKind {
 }
 
 /// The metadata `chown` reads for a path: its kind and current ownership
-/// (the [`rustos_abi::fs::FileStat`] fields the tool actually uses — the
+/// (the [`tairix_abi::fs::FileStat`] fields the tool actually uses — the
 /// old owner backs the `-c`/`-v` reports).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metadata {

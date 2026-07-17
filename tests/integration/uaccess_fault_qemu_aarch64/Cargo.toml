@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-uaccess-fault-qemu-aarch64"
+name = "tairix-test-uaccess-fault-qemu-aarch64"
 description = "tests/SECURITY.md §5 copy_from_user hardware fault fix-up (aarch64) QEMU integration test: a same-EL data abort taken inside the guarded user-copy window is redirected to the copy's fix-up and surfaces as an error, with the CPU continuing to run."
 version.workspace = true
 edition.workspace = true
@@ -14,10 +14,10 @@ workspace = true
 # Freestanding "take a real EL1 data abort inside the guarded user-copy
 # window and observe the copy return an error" integration test — the
 # aarch64 member of the per-port fault-window verticals (`PLAN.md` Stage 7
-# item E, `tests/SECURITY.md` §5). It links only the `rustos-arch-aarch64`
+# item E, `tests/SECURITY.md` §5). It links only the `tairix-arch-aarch64`
 # port: it builds an identity stage-1 `paging::AddressSpace`, installs the
 # EL1 vector table (which arms the Arch HAL guarded-copy slot), activates
-# the space, and drives the shared `rustos_arch_api::uaccess::conformance`
+# the space, and drives the shared `tairix_arch_api::uaccess::conformance`
 # checks against a virtual page beyond the identity map. The fatal `fault`
 # handler reports FAILURE — reaching it means the window redirect did not
 # absorb the abort. Keeping the QEMU-exit shortcut in a dedicated bin (not
@@ -25,16 +25,16 @@ workspace = true
 # leaking it into any production build (fail closed).
 
 [[bin]]
-name = "rustos-test-uaccess-fault-qemu-aarch64"
+name = "tairix-test-uaccess-fault-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 # The Arch HAL guarded-copy seam under test: the vertical drives the shared
-# `rustos_arch_api::uaccess::conformance` checks so the proof is one
+# `tairix_arch_api::uaccess::conformance` checks so the proof is one
 # definition across the ports, never re-derived here.
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

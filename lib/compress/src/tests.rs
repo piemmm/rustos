@@ -67,7 +67,7 @@ fn round_trip_run_length_overlap() {
 fn corpus_round_trips_byte_identical() {
     // A small corpus of varied shapes: text, structured records, a gradient,
     // and pseudo-random noise. Each must round-trip exactly.
-    let text = b"RustOS native filesystem compresses every data record. \
+    let text = b"TAIRiX native filesystem compresses every data record. \
                  Compression is mandatory and not tunable.";
     let mut records = Vec::new();
     for i in 0..256u32 {

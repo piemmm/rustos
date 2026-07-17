@@ -1,4 +1,4 @@
-//! Stable [`rustos_log::EventId`] constants emitted by the device
+//! Stable [`tairix_log::EventId`] constants emitted by the device
 //! manager.
 //!
 //! Per `lib/log` convention every subsystem owns a
@@ -6,7 +6,7 @@
 //! `13000..14000`. Once shipped the numeric values must never be
 //! re-used or re-numbered — external audit-log consumers rely on them.
 
-use rustos_log::EventId;
+use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `devmgr` event identifiers.
 ///
@@ -57,7 +57,7 @@ pub const NODE_UNLOADED: EventId = EventId(13_008);
 /// `init` supervises the relaunch. A silent exit would hide which seam
 /// refused — every abnormal exit states its reason.
 pub const TREE_SEAM_FAILED: EventId = EventId(13_009);
-/// A discovered NIC device-channel node (`compatible = "rustos,netchan"`,
+/// A discovered NIC device-channel node (`compatible = "tairix,netchan"`,
 /// emitted by a bound NIC driver process) was handed to the network stack:
 /// the device manager `ipc_call`ed `netstack` `BindDriver` with the node's
 /// endpoint and a derived interface alias, and the stack accepted it.

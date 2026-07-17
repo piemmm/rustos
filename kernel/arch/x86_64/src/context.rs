@@ -192,7 +192,7 @@ extern "C" {
     /// the correct `extern "C"` ABI so callers can pass `TaskCtx`
     /// pointers as the System V AMD64 first/second argument registers
     /// (`rdi`, `rsi`).
-    pub fn rustos_arch_x86_64_switch(prev: *mut TaskCtx, next: *mut TaskCtx);
+    pub fn tairix_arch_x86_64_switch(prev: *mut TaskCtx, next: *mut TaskCtx);
 }
 
 /// Switch from `prev` to `next` on the current CPU.
@@ -229,7 +229,7 @@ pub unsafe fn switch(prev: *mut TaskCtx, next: *mut TaskCtx) {
     // implementation in `context.s` saves r15/r14/r13/r12/rbx/rbp +
     // implicit return address to `*prev`'s stack, swaps `rsp`, and
     // restores from `*next`'s stack.
-    unsafe { rustos_arch_x86_64_switch(prev, next) }
+    unsafe { tairix_arch_x86_64_switch(prev, next) }
 }
 
 #[cfg(test)]

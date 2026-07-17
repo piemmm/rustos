@@ -1,7 +1,7 @@
-//! RustOS scheduler contract.
+//! TAIRiX scheduler contract.
 //!
 //! This `kernel/sched/api` crate (`SchedApi` in the layering) holds
-//! the architecture-neutral *contract* every RustOS scheduler obeys:
+//! the architecture-neutral *contract* every TAIRiX scheduler obeys:
 //!
 //! * the [`SchedulerPolicy`] trait — task admission, dispatch, yield,
 //!   block/wake, priority/quantum accounting, and the SMP hooks;

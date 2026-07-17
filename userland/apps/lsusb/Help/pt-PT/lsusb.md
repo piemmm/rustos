@@ -26,7 +26,7 @@ faltar ou falhar a validação, a listagem degrada para identificadores
 nus com a razão no erro padrão — o inventário em si continua a ser
 listado.
 
-O RustOS não tem o registo Linux de números de barramento/dispositivo:
+O TAIRiX não tem o registo Linux de números de barramento/dispositivo:
 os números de barramento e de dispositivo são pequenos ordinais que
 começam em 1 sobre o inventário atual (os barramentos por ordem de
 deteção, os dispositivos por ordem de listagem em cada barramento),

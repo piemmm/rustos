@@ -1,4 +1,4 @@
-//! RustOS `cp` — copy files and directories (Stage 6
+//! TAIRiX `cp` — copy files and directories (Stage 6
 //! `userland/apps/`).
 //!
 //! `cp` copies each of its source operands to a destination. With a single
@@ -37,7 +37,7 @@
 //! directory source named without `-r` is a [`CpError::IsDirectory`]; a
 //! directory source whose destination already exists as a non-directory is a
 //! [`CpError::NotADirectory`]; an operand that cannot be inspected surfaces
-//! the underlying [`Errno`](rustos_abi::Errno) as [`CpError::Stat`]; a file or
+//! the underlying [`Errno`](tairix_abi::Errno) as [`CpError::Stat`]; a file or
 //! directory that cannot be read is [`CpError::Read`]; a destination that
 //! cannot be created is [`CpError::Create`]; a failed write is
 //! [`CpError::Write`]. The first failure stops the run before any later

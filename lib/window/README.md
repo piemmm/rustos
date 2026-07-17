@@ -1,4 +1,4 @@
-# rustos-window
+# tairix-window
 
 Stability tier: **experimental**.
 
@@ -13,7 +13,7 @@ server and every app's client can never drift apart.
   `call_peer_origin` — an unforgeable `ProcId`, never a claimed id),
   keys every window to that owner, maps the app's endpoint-directed
   `shm_grant` region **once** at `Create` through the shared
-  `rustos_display::ShmMapper` seam, and hands each `Present` to the
+  `tairix_display::ShmMapper` seam, and hands each `Present` to the
   injected `WindowHost` (the session's compositor bridge) as a
   bounds-checked frame slice plus a validated damage rectangle — no
   per-present mapping, allocation, or copy of its own. A `Present` or
@@ -33,7 +33,7 @@ server and every app's client can never drift apart.
   seam — a **parked** wait on the app's own event endpoint, never a
   poll — and decodes each delivered `WindowEvent` fail-closed.
 
-The wire format itself lives in `rustos_abi::window_ipc`; this crate adds
+The wire format itself lives in `tairix_abi::window_ipc`; this crate adds
 the behaviour. Both halves are host-proven in `src/tests.rs` against an
 in-process loopback (a real `WindowServer` behind the client seams), so
 the request semantics have exactly one tested definition. The production

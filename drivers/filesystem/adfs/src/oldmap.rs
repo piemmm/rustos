@@ -15,8 +15,8 @@
 //! partition pointers round-trip byte-exact.
 
 use crate::volume::{get_u24, put_u24, Volume};
-use rustos_abi::driver::block::Block;
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::Block;
+use tairix_abi::DriverError;
 
 /// Old-map logical sector size in bytes, fixed by the format (`u32`
 /// form first so the wide form derives from it losslessly).

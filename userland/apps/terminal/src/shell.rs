@@ -15,7 +15,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// A bidirectional byte channel to the hosted shell.
 pub trait ShellSource {

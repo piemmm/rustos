@@ -1,8 +1,8 @@
 //! Shared framebuffer text-console engine (`lib/fbcon`).
 //!
 //! An architecture-neutral ANSI/VT/xterm-256color terminal that renders the
-//! shared `rustos_vt::Op` stream straight onto a borrowed 32-bit scan-out
-//! surface with the shared `rustos_font` glyph atlas. Every arch port drives
+//! shared `tairix_vt::Op` stream straight onto a borrowed 32-bit scan-out
+//! surface with the shared `tairix_font` glyph atlas. Every arch port drives
 //! its display console through this one definition; a port supplies only the
 //! board-specific surface (discovered at runtime) and calls
 //! [`TextConsole::write_bytes`].
@@ -25,11 +25,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_font::atlas;
-use rustos_font::glyph::lookup_or_fallback;
-use rustos_vt::{char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION};
+use tairix_font::atlas;
+use tairix_font::glyph::lookup_or_fallback;
+use tairix_vt::{char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION};
 
-pub use rustos_vt::Cell;
+pub use tairix_vt::Cell;
 
 /// Glyph cell width in pixels at scale 1. The face's uniform advance already
 /// carries the inter-character spacing, so the cell is the atlas cell.
@@ -1010,7 +1010,7 @@ impl<'a> Screen<'a> {
     }
 }
 
-/// The framebuffer text console: the shared `rustos_vt::Parser` feeding a
+/// The framebuffer text console: the shared `tairix_vt::Parser` feeding a
 /// screen that applies each parsed operation to its retained cell grid and
 /// repaints the dirtied cells onto the scan-out surface once per write. The
 /// parser and the screen are separate fields so a write can borrow the parser

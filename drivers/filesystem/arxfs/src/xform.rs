@@ -14,7 +14,7 @@
 //! implementation — classification through the kernel's reclaimable-
 //! memory admission gate, byte budgets, pressure-band shrinking, LRU
 //! eviction, and zeroisation of every released buffer — lives with the
-//! host that mounts the volume (`rustos-kernel`'s transform cache). A
+//! host that mounts the volume (`tairix-kernel`'s transform cache). A
 //! volume opened without a cache serves every read through the full
 //! pipeline, exactly as before.
 //!

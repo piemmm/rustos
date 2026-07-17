@@ -7,16 +7,16 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsiz
 extern crate alloc;
 use alloc::sync::Arc;
 
-use rustos_arch_api::SecondaryBringup;
-use rustos_arch_x86_64::acpi::{self, MadtEntry};
-use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-use rustos_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
-use rustos_arch_x86_64::bootinfo::BootData;
-use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
-use rustos_arch_x86_64::smp;
-use rustos_arch_x86_64::{percpu, preempt};
-use rustos_arch_x86_64::{qemu_exit, serial};
-use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerArch, SchedulerConfig, TaskAction};
+use tairix_arch_api::SecondaryBringup;
+use tairix_arch_x86_64::acpi::{self, MadtEntry};
+use tairix_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
+use tairix_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
+use tairix_arch_x86_64::bootinfo::BootData;
+use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
+use tairix_arch_x86_64::smp;
+use tairix_arch_x86_64::{percpu, preempt};
+use tairix_arch_x86_64::{qemu_exit, serial};
+use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerArch, SchedulerConfig, TaskAction};
 
 // --- Workload sizing -----------------------------------------------
 
@@ -117,7 +117,7 @@ const WITNESS_SPIN: u64 = 20_000_000;
 const WITNESSES_PER_CPU: u32 = 2;
 
 /// BSP-computed LAPIC-timer calibration, packed into a `u64` (ticks/s
-/// fit in 32 bits for any LAPIC RustOS targets; `initial_count` is
+/// fit in 32 bits for any LAPIC TAIRiX targets; `initial_count` is
 /// 32 bits). Zero means "not yet calibrated".
 ///
 /// Two fields → one 64-bit atomic: ticks-per-second in the low 32
@@ -389,7 +389,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
 
     // Calibrate the LAPIC timer against the PIT *once*, on the BSP. APs
     // re-use the result via `BSP_CALIBRATION_PACKED`. See the rustdoc on
-    // `rustos_arch_x86_64::preempt` for why per-CPU re-calibration is
+    // `tairix_arch_x86_64::preempt` for why per-CPU re-calibration is
     // unnecessary on QEMU and on homogeneous Intel SMP, plus the
     // fail-loud cross-check (the per-CPU preemption count below).
     let mut pit = PolledPit;
@@ -468,7 +468,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
 
     // Build the bring-up handle from the discovered LAPIC map and start
     // every AP through the Arch HAL `SecondaryBringup` trait. The
-    // INIT-SIPI-SIPI orchestration now lives in `rustos_arch_x86_64::smp`
+    // INIT-SIPI-SIPI orchestration now lives in `tairix_arch_x86_64::smp`
     // (`plans/WIRING.md` Stage W14); this vertical exercises it
     // end-to-end on ≥ 4 real (emulated) cores.
     let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
@@ -868,7 +868,7 @@ fn discover_aps(boot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> Option
     Some(list)
 }
 
-// MADT discovery moved to `rustos_arch_x86_64::acpi::locate_madt`
+// MADT discovery moved to `tairix_arch_x86_64::acpi::locate_madt`
 // in Stage 3a (c7-bin). The previous open-coded `find_madt_via_*` /
 // `try_madt` / `read_phys_*` helpers are gone
 // (no duplication). The `discover_aps` helper above now calls the

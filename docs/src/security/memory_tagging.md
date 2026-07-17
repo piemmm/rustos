@@ -19,7 +19,7 @@ dependency to implement it.
 
 ## The surface
 
-`rustos_arch_api::memtag` defines:
+`tairix_arch_api::memtag` defines:
 
 - `MemTag` — a memory tag (`0..TAG_COUNT`). `TAG_COUNT` is 16, mirroring
   Arm MTE's 4-bit tag.
@@ -52,7 +52,7 @@ stricter gate — it rejects any `Pending` slot.
 
 ## The conformance vertical
 
-`rustos_arch_api::memtag::conformance::run_all` is the §17.2 / §19.10
+`tairix_arch_api::memtag::conformance::run_all` is the §17.2 / §19.10
 acceptance suite. It is portable — it names only the trait — and every
 port runs it against its handle from a host unit test, exactly like the
 side-channel suite. It asserts the profile is honest, the tag geometry is

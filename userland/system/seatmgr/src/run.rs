@@ -3,25 +3,25 @@
 //! PID 1 `init` launches to hold the seat-multiplexing authority
 //! (`plans/DISPLAY.md` D3).
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the
-//! Rust userland runtime `rustos-rt` — never the C ABI, which exists solely
-//! for programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the
+//! Rust userland runtime `tairix-rt` — never the C ABI, which exists solely
+//! for programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `#[global_allocator]`,
 //! and the syscall wrappers (`call_create`/`call_recv`/`call_reply`/
-//! `call_peer_origin`/`seat_switch`/`seat_revoke`); `rustos_rt::entry!`
+//! `call_peer_origin`/`seat_switch`/`seat_revoke`); `tairix_rt::entry!`
 //! names this program's `main`.
 //!
 //! # What this service does
 //!
 //! `seatmgr` is the sole holder of `CAP_SEAT_ADMIN`. At startup it binds
-//! the well-known [`rustos_abi::seat::SEATMGR_ENDPOINT`] (a reserved
+//! the well-known [`tairix_abi::seat::SEATMGR_ENDPOINT`] (a reserved
 //! rendezvous, so binding it needs the manifest's
 //! `CAP_IPC_BIND_PRIVILEGED`: a squatter could otherwise intercept
 //! seat-administration requests) and then blocks in a serve loop: receive
 //! a request, read the requester's kernel-attested `Origin`
 //! (`call_peer_origin`, never a caller claim), run the capability-checked
-//! [`rustos_seatmgr::serve`] dispatcher against the kernel-backed
-//! [`rustos_seatmgr::SeatAdmin`], and reply with the status frame. The
+//! [`tairix_seatmgr::serve`] dispatcher against the kernel-backed
+//! [`tairix_seatmgr::SeatAdmin`], and reply with the status frame. The
 //! kernel re-checks `CAP_SEAT_ADMIN` and every index on each forwarded
 //! syscall, so this broker adds audited policy without widening reach.
 //!
@@ -34,17 +34,17 @@
 
 // --- Pure-Rust program --------------------------------------------------
 // Compiled only for the freestanding service binary, which links the optional
-// `rustos-rt` runtime through the default `program` feature. The kernel and
+// `tairix-rt` runtime through the default `program` feature. The kernel and
 // host tooling build only this crate's *library*, so this module (and
-// `rustos-rt`) never enter those builds.
+// `tairix-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use rustos_abi::reply::encode_status_reply;
-    use rustos_abi::seat::{SEATMGR_ENDPOINT, SEATMGR_MAX_REQUEST, SEATMGR_REPLY_LEN};
-    use rustos_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
-    use rustos_caps::CapabilitySet;
-    use rustos_rt::LogSink;
-    use rustos_seatmgr::{serve, SeatAdmin};
+    use tairix_abi::reply::encode_status_reply;
+    use tairix_abi::seat::{SEATMGR_ENDPOINT, SEATMGR_MAX_REQUEST, SEATMGR_REPLY_LEN};
+    use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
+    use tairix_caps::CapabilitySet;
+    use tairix_rt::LogSink;
+    use tairix_seatmgr::{serve, SeatAdmin};
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory
     /// bound): seat administration is low-volume, so a small queue is ample.
@@ -67,7 +67,7 @@ mod program {
 
     impl SeatAdmin for KernelSeatAdmin {
         fn switch(&self, seat_id: u64, console: u32) -> Result<(), Errno> {
-            let ret = rustos_rt::seat_switch(seat_id, console);
+            let ret = tairix_rt::seat_switch(seat_id, console);
             if ret == 0 {
                 Ok(())
             } else {
@@ -76,7 +76,7 @@ mod program {
         }
 
         fn revoke(&self, seat_id: u64) -> Result<(), Errno> {
-            let ret = rustos_rt::seat_revoke(seat_id);
+            let ret = tairix_rt::seat_revoke(seat_id);
             if ret == 0 {
                 Ok(())
             } else {
@@ -93,7 +93,7 @@ mod program {
     /// (and an audit record) rather than a silent drop.
     fn main() -> i32 {
         let empty = CapabilitySet::empty();
-        let bound = rustos_rt::call_create(
+        let bound = tairix_rt::call_create(
             SEATMGR_ENDPOINT,
             &empty,
             &empty,
@@ -113,7 +113,7 @@ mod program {
         loop {
             let mut ticket: u64 = 0;
             let request_len =
-                match rustos_rt::call_recv(SEATMGR_ENDPOINT, &mut request, &mut ticket) {
+                match tairix_rt::call_recv(SEATMGR_ENDPOINT, &mut request, &mut ticket) {
                     Ok(len) => len,
                     // A transient recv error (e.g. an oversize request left
                     // queued) must not kill the server; drop it and continue.
@@ -124,7 +124,7 @@ mod program {
             // fail-closed: reply an error rather than serving an unattested
             // request.
             let outcome =
-                match rustos_rt::call_peer_origin(SEATMGR_ENDPOINT, ticket, &mut origin_buf) {
+                match tairix_rt::call_peer_origin(SEATMGR_ENDPOINT, ticket, &mut origin_buf) {
                     Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
                         Ok(origin) => serve(&admin, &origin, &LogSink, &request[..request_len]),
                         Err(err) => Err(err),
@@ -133,16 +133,16 @@ mod program {
                 };
 
             let reply = encode_status_reply(outcome);
-            let _ = rustos_rt::call_reply(SEATMGR_ENDPOINT, ticket, &reply);
+            let _ = tairix_rt::call_reply(SEATMGR_ENDPOINT, ticket, &reply);
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
-// Whenever the real freestanding `rustos-rt` `_start` path is not compiled —
+// Whenever the real freestanding `tairix-rt` `_start` path is not compiled —
 // on the host (`cargo build --workspace`, clippy, fmt), or for a
 // `program`-less build of this crate — this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.

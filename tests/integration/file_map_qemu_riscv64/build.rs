@@ -10,18 +10,18 @@
 //!    per-board script the architecture port owns).
 //! 2. Emit the fixture file the kernel-side read-only filesystem double
 //!    serves, from the shared single definition
-//!    (`rustos_itest_harness::filemap_fixture`).
+//!    (`tairix_itest_harness::filemap_fixture`).
 //! 3. Compile the pure-Rust U-mode fixture program
 //!    (`tests/integration/file_map_program`) **once** — the four roles are
 //!    selected at runtime from the registry argument vector —
 //!    position-independent for the freestanding riscv64 target, pinning the
-//!    fixture geometry through the `RUSTOS_FM_*` environment variables the
+//!    fixture geometry through the `TAIRIX_FM_*` environment variables the
 //!    shared definition computes, and convert the linked PIE ELF to an
-//!    `rxe` blob with [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking
+//!    `rxe` blob with [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking
 //!    relocations for the [`USER_BIAS`] the production spawn producer maps
 //!    every image at and stamping the kernel's compiled-in syscall CFI tag
-//!    (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the blob and
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the blob and
 //!    the bias as a Rust source the test `include!`s.
 //!
 //! On any non-riscv64 target (host `cargo build --workspace`, clippy) it
@@ -37,7 +37,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use rustos_itest_harness::filemap_fixture;
+use tairix_itest_harness::filemap_fixture;
 
 /// Virtual base the program image is mapped at. Must equal the production
 /// spawn layout's `CHILD_USER_BIAS` (64 GiB) — the kernel body asserts the
@@ -48,7 +48,7 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -105,11 +105,11 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
+    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
     // position-independent. Scope the PIE link flags to the riscv64 target
     // so the program's own host build script is unaffected, and build
     // `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
+    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
     // `#[global_allocator]`, so the program names `alloc`.
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
@@ -130,7 +130,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-file-map",
+            "tairix-test-file-map",
             "--target",
             RISCV64_TARGET,
             "-Z",
@@ -150,12 +150,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         "building the file-map fixture program failed"
     );
 
-    let elf_path = format!("{target_dir}/{RISCV64_TARGET}/debug/rustos-test-file-map");
+    let elf_path = format!("{target_dir}/{RISCV64_TARGET}/debug/tairix-test-file-map");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .unwrap_or_else(|_| panic!("convert the file-map fixture program ELF into an rxe image"))

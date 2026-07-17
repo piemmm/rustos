@@ -1,4 +1,4 @@
-# `rustos-unmount` — detach a runtime-attached volume
+# `tairix-unmount` — detach a runtime-attached volume
 
 Stability tier: **experimental**.
 
@@ -19,12 +19,12 @@ flush is possible.
 The crate is both the pure `no_std` engine library (parser, resolver,
 seams — host-tested against in-memory fixtures) and the freestanding
 `Run` program (`src/run.rs`), which wires the shared
-`rustos_procinfo::IpcTransport`, the `volume_detach` syscall wrapper,
-and the `rustos_help::BundleHelp` short-help source over the inherited
+`tairix_procinfo::IpcTransport`, the `volume_detach` syscall wrapper,
+and the `tairix_help::BundleHelp` short-help source over the inherited
 standard streams. The kernel is the policy point: `CAP_FS_MOUNT` is
 checked and every decision audited kernel-side; the tool holds no
 ambient authority.
 
-`cargo test -p rustos-unmount` drives the parser, the engine (resolve,
+`cargo test -p tairix-unmount` drives the parser, the engine (resolve,
 force, refusals, the fd-3 `--force` suggestion), and the
 help-document switch pinning across every required locale.

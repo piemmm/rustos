@@ -278,7 +278,7 @@ fn printable_and_unicode_chars_round_trip() {
 fn window_title_round_trips() {
     for title in [
         "",
-        "rustos",
+        "tairix",
         "a long title with spaces",
         "semi;colon",
         "café",
@@ -290,7 +290,7 @@ fn window_title_round_trips() {
 #[test]
 fn a_whole_program_stream_round_trips() {
     let ops = vec![
-        Op::SetTitle(Title::from_text("rustos")),
+        Op::SetTitle(Title::from_text("tairix")),
         Op::EnterAltScreen,
         Op::HideCursor,
         Op::CursorPosition { row: 1, col: 1 },

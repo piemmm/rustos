@@ -1,6 +1,6 @@
 [package]
-name = "rustos-disasm"
-description = "RustOS instruction decoders for the four Tier-1 ISAs — riscv64 (RV64GC including the C extension), aarch64 (A64), wasm code-section bodies, and x86_64 (legacy prefixes, REX, ModRM/SIB over the one- and two-byte opcode maps) — sharing one output vocabulary (address, bytes, mnemonic, operands, branch target). no_std + alloc, forbids unsafe; every decoder is a pure function of a byte slice and a start address that always makes forward progress, never executes or interprets anything, and renders an undecodable encoding honestly instead of guessing."
+name = "tairix-disasm"
+description = "TAIRiX instruction decoders for the four Tier-1 ISAs — riscv64 (RV64GC including the C extension), aarch64 (A64), wasm code-section bodies, and x86_64 (legacy prefixes, REX, ModRM/SIB over the one- and two-byte opcode maps) — sharing one output vocabulary (address, bytes, mnemonic, operands, branch target). no_std + alloc, forbids unsafe; every decoder is a pure function of a byte slice and a start address that always makes forward progress, never executes or interprets anything, and renders an undecodable encoding honestly instead of guessing."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,5 +17,5 @@ workspace = true
 # The in-tree fuzz harnesses draw their inputs through the shared
 # seed/budget seam: one place picks the per-run seed, logs it at the start
 # of the test, and bounds the smoke/soak loop. Test scaffolding only; never
-# in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -1,4 +1,4 @@
-# `rustos-yes` — repeatedly output a line of text
+# `tairix-yes` — repeatedly output a line of text
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/yes.app/` so the shell resolves the bare word
@@ -17,7 +17,7 @@ so the endless writer pays one write per block rather than one per line;
 a full stream backing blocks the write kernel-side, so the tool never
 idle-spins. The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its only dependency is
-the shared `rustos-help` crate, so it never links a kernel or driver
+the shared `tairix-help` crate, so it never links a kernel or driver
 crate. Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
 authorises every path per-inode under the caller's attested identity.

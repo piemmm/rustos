@@ -18,7 +18,7 @@ use alloc::string::String;
 /// of the default shell's application bundle in the system app store.
 ///
 /// The spelling is pinned to the store layout constants
-/// (`rustos_abi::SYSTEM_APP_STORE`, `rustos_abi::BUNDLE_SUFFIX`) by a unit
+/// (`tairix_abi::SYSTEM_APP_STORE`, `tairix_abi::BUNDLE_SUFFIX`) by a unit
 /// test below, so it cannot drift from where the image builder plants the
 /// bundle.
 pub const DEFAULT_SHELL: &str = "/System/Apps/elsh.app/Run";
@@ -98,7 +98,7 @@ pub fn next_id(range: IdRange, taken: impl IntoIterator<Item = u32>) -> Option<u
 mod tests {
     use super::{default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_UID};
     use alloc::format;
-    use rustos_abi::{BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+    use tairix_abi::{BUNDLE_SUFFIX, SYSTEM_APP_STORE};
 
     #[test]
     fn the_default_shell_is_the_store_bundle_run_binary() {

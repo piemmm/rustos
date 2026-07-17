@@ -1,10 +1,10 @@
 //! Capability-checked, audited process-spawn caller.
 //!
-//! [`rustos_kernel_mem::build_process_image`] is the architecture-neutral
-//! *memory mechanism*: given a validated [`rustos_abi::rxe::LoadImage`] it
+//! [`tairix_kernel_mem::build_process_image`] is the architecture-neutral
+//! *memory mechanism*: given a validated [`tairix_abi::rxe::LoadImage`] it
 //! materialises a runnable user address space (segments mapped and filled,
-//! a zeroed user stack, and the `rustos_abi::process` startup-vector block)
-//! and reports the [`rustos_kernel_mem::ProcessImage`] register state. It is
+//! a zeroed user stack, and the `tairix_abi::process` startup-vector block)
+//! and reports the [`tairix_kernel_mem::ProcessImage`] register state. It is
 //! deliberately capability-agnostic and never logs (`kernel/mem` does not depend on the security policy or `lib/log`).
 //!
 //! This module is the *policy* half: the one path that authorises a spawn,
@@ -28,17 +28,17 @@
 
 use alloc::boxed::Box;
 
-use rustos_abi::hwtree::HwResource;
-use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
-use rustos_arch_api::{EnterUser, UserEntry};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{
+use tairix_abi::hwtree::HwResource;
+use tairix_abi::rxe::LoadImage;
+use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
+use tairix_arch_api::{EnterUser, UserEntry};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::{
     build_process_image, AddressSpace, Frame, FrameAllocator, LiveUserSpace, PageTable, PhysMap,
     SpawnError, UserAddressSpace, UserStack,
 };
-use rustos_log::{Event, Field, Level, Sink};
-use rustos_util::fmt::format_hex_u64;
+use tairix_log::{Event, Field, Level, Sink};
+use tairix_util::fmt::format_hex_u64;
 
 use crate::aspace::StackSpan;
 use crate::audit::AuditEvent;
@@ -133,7 +133,7 @@ pub trait InitSpawnCtx {
     /// `space` is the registry-storable, `Send + Sync` snapshot of PID 1's
     /// user mappings (an arch port's *live* `AddressSpace` is not `Sync`
     /// while it owns a `&'static mut` root table, so the seam freezes it —
-    /// [`AddressSpace::freeze`](rustos_kernel_mem::AddressSpace::freeze)),
+    /// [`AddressSpace::freeze`](tairix_kernel_mem::AddressSpace::freeze)),
     /// and `physmap` is the kernel direct map backing it. They are
     /// registered with the kernel-wide [`crate::AddressSpaceRegistry`] under
     /// the *same* numeric id the dispatcher recovers, so PID 1's first
@@ -215,7 +215,7 @@ pub trait InitSpawnCtx {
     /// returns.
     ///
     /// Returns [`Some`] with the admitted task's scheduler
-    /// [`TaskId`](rustos_kernel_sched_api::TaskId) so the
+    /// [`TaskId`](tairix_kernel_sched_api::TaskId) so the
     /// caller can wake the service by id — e.g. register it on a
     /// [`crate::waitq::WaitQueue`] (the driver-store server parks on
     /// [`crate::waitq::SERVE_WAITQ`] and is unparked by
@@ -231,7 +231,7 @@ pub trait InitSpawnCtx {
     fn spawn_kernel_service(
         &self,
         body: crate::kthread::KernelServiceBody,
-    ) -> Option<rustos_kernel_sched_api::TaskId> {
+    ) -> Option<tairix_kernel_sched_api::TaskId> {
         let _ = body;
         None
     }
@@ -285,7 +285,7 @@ pub trait InitSpawnCtx {
     /// set the signed `drvhost::Host::load` gate already derived — plus one
     /// unforgeable, owner-checked device-resource grant per entry of
     /// `grants` (the matched hardware-tree node's requests), and is
-    /// handed `args` as its startup-argument vector (`rustos_rt::arg`). This
+    /// handed `args` as its startup-argument vector (`tairix_rt::arg`). This
     /// seam never widens authority beyond `caps` plus those grants
     /// (no ambient authority); the `grants` originate
     /// kernel-side, from the kernel's own discovered hardware tree, never
@@ -564,7 +564,7 @@ where
             Level::Error,
             &[Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str(spawn_error_cause(error)),
+                value: tairix_log::FieldValue::Str(spawn_error_cause(error)),
             }],
         );
         SpawnCallerError::Build(error)
@@ -577,7 +577,7 @@ where
         Level::Info,
         &[Field {
             key: "entry",
-            value: rustos_log::FieldValue::Str(format_hex_u64(image.entry, &mut entry_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(image.entry, &mut entry_buf)),
         }],
     );
 
@@ -612,11 +612,11 @@ pub fn refuse_spawn(ctx: &dyn SpawnCtx, cause: &'static str) -> Errno {
         &[
             Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str(cause),
+                value: tairix_log::FieldValue::Str(cause),
             },
             Field {
                 key: "free_frames",
-                value: rustos_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
+                value: tairix_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
             },
         ],
     );
@@ -645,11 +645,11 @@ pub fn refuse_admit(ctx: &dyn SpawnCtx, err: AdmitError) -> Errno {
         &[
             Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str(cause),
+                value: tairix_log::FieldValue::Str(cause),
             },
             Field {
                 key: "free_frames",
-                value: rustos_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
+                value: tairix_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
             },
         ],
     );
@@ -700,7 +700,7 @@ pub struct EmbeddedProgram {
     /// grant bounds what the request can yield.
     pub caps: &'static [CapabilityId],
     /// The startup-argument vector handed to the program
-    /// (`rustos_rt::arg`), each entry a NUL-free byte string.
+    /// (`tairix_rt::arg`), each entry a NUL-free byte string.
     pub args: &'static [&'static [u8]],
 }
 
@@ -934,7 +934,7 @@ pub trait ProcessSpawn: Sync {
     /// defaults) — per-program authority, never the spawning caller's. A
     /// *driver* spawn passes the verified driver image's bytes, the
     /// manifest∩caller capability set the load gate already derived, and
-    /// the argument vector the driver reads through `rustos_rt::arg`. The
+    /// the argument vector the driver reads through `tairix_rt::arg`. The
     /// matched hardware-tree node's device-resource grants ride on `ctx`
     /// (the production context mints one owner-checked grant per requested
     /// resource as the child is registered); this seam never widens
@@ -984,7 +984,7 @@ pub static NULL_PROCESS_SPAWN: NullProcessSpawn = NullProcessSpawn;
 
 /// Emit one structured audit record for `event` with `fields`.
 fn emit(audit: &dyn Sink, event: AuditEvent, level: Level, fields: &[Field<'_>]) {
-    rustos_log::log(
+    tairix_log::log(
         audit,
         &Event {
             level,
@@ -999,13 +999,13 @@ fn emit(audit: &dyn Sink, event: AuditEvent, level: Level, fields: &[Field<'_>])
 mod tests {
     use super::*;
     use crate::test_sink::TestSink;
-    use rustos_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
-    use rustos_abi::{ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
-    use rustos_kernel_mem::{
+    use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
+    use tairix_abi::{ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
+    use tairix_kernel_mem::{
         AddressSpace, BootMemoryMap, HostPageTable, MemoryRegion, PhysAddr, RegionKind, SimPhysMap,
         UserStack, PAGE_SIZE,
     };
-    use rustos_log::{set_max_level, Level};
+    use tairix_log::{set_max_level, Level};
 
     extern crate std;
     use std::boxed::Box;
@@ -1089,7 +1089,7 @@ mod tests {
         // it exactly as the reap does — the allocator must return to its
         // pre-spawn level every time, never marching downward (the
         // login/logout leak this closes).
-        use rustos_kernel_mem::{LiveSpace, VirtAddr};
+        use tairix_kernel_mem::{LiveSpace, VirtAddr};
 
         /// A `PhysMap` view over the one leaked [`SimPhysMap`], so the
         /// image build and the teardown scrub touch the same simulated

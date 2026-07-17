@@ -8,7 +8,7 @@
 //! allocator on the hot path; the helpers therefore live here so the
 //! code exists in exactly one place. `lib/util` deliberately has no
 //! direct dependency on `lib/log` (none of its items take a
-//! `rustos_log::Field`), so the cross-crate type is named in prose
+//! `tairix_log::Field`), so the cross-crate type is named in prose
 //! rather than as an intra-doc link.
 //!
 //! Every function is total, panic-free, and writes only ASCII bytes

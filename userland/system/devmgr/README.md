@@ -1,4 +1,4 @@
-# `rustos-devmgr` — device manager (driver autoload)
+# `tairix-devmgr` — device manager (driver autoload)
 
 Stage 4.HW deliverable (`AGENTS.md` §18.3). The user-space service that
 owns driver **autoload**: it matches every hardware-tree node against
@@ -35,7 +35,7 @@ fail-closed (`AGENTS.md` §5.4):
   `ParsedImage::decode_bind_table`. This crate never re-parses image
   bytes.
 - `DriverLoader` — the load mechanism. The deployment integration
-  point implements it over `rustos-drvhost`'s `Host::load` pipeline
+  point implements it over `tairix-drvhost`'s `Host::load` pipeline
   (signature verification, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates,
   spawner hand-off), mapping `HostError` to `Errno` via `as_errno`.
   The device manager never inspects or bypasses the gate's checks.
@@ -56,26 +56,26 @@ Reserved `EventId` range `13000..14000`:
 
 ## Layering & safety
 
-`no_std`, depends only on `rustos-abi`, `rustos-caps`, `rustos-log`,
-and `rustos-util` (all `lib/*`), so the service never links a kernel,
+`no_std`, depends only on `tairix-abi`, `tairix-caps`, `tairix-log`,
+and `tairix-util` (all `lib/*`), so the service never links a kernel,
 driver, or other userland crate (`AGENTS.md` §17.4). No `unsafe`, no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
 
 ## Stability
 
 Tier: `experimental` (`AGENTS.md` §6). The wire formats consumed
-(hardware-tree nodes, bind-table entries) are frozen by `rustos-abi`.
+(hardware-tree nodes, bind-table entries) are frozen by `tairix-abi`.
 
 ## Test surface
 
-`cargo test -p rustos-devmgr` (16 unit tests): exact compatible and
+`cargo test -p tairix-devmgr` (16 unit tests): exact compatible and
 numeric-key matching, multi-match priority resolution and order
 independence, unbroken-tie rejection (and a tie broken by a higher
 priority), no-match → unbound, root-node skip, capability-denied load
 failing closed with the walk continuing, one-load-per-driver dedup,
 and the `EventId` range/uniqueness invariants.
 
-`cargo test -p rustos-drvhost --test devmgr_autoload` closes the loop
+`cargo test -p tairix-drvhost --test devmgr_autoload` closes the loop
 end-to-end: signed `.rxe` images with bind tables, decoded by the real
 gate, matched here, and loaded through a real `Host` — including the
 missing-`CAP_DRV_LOAD` refusal interleaving both subsystems' audit

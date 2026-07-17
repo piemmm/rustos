@@ -48,7 +48,7 @@ nicht verfügbar.
 - `-P, --portability` — das portable POSIX-Format (Kopfzeilen
   `1024-blocks` und `Capacity`).
 - `-l, --local` — den Bericht auf lokale Dateisysteme beschränken
-  (heute jede RustOS-Einhängung, es wird also nichts ausgefiltert).
+  (heute jede TAIRiX-Einhängung, es wird also nichts ausgefiltert).
 - `--total` — eine mit `total` beschriftete Summenzeile anhängen.
 - `-k` — 1024-Byte-Blöcke (die Voreinstellung).
 - `-h, --human-readable` — menschenlesbare Größen in Zweierpotenzen

@@ -1,7 +1,7 @@
 //! The outcomes of running an `mv` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why an `mv` invocation did not complete.
 ///

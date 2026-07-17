@@ -1,4 +1,4 @@
-# `rustos-ls` — list directory contents
+# `tairix-ls` — list directory contents
 
 A `plans/APPS.md` command app (`AGENTS.md` §3 `userland/apps/`),
 registered at `/System/Apps/ls.app/Run` so the shell resolves the bare
@@ -15,8 +15,8 @@ tree through the shared `lib/help` engine (`plans/APPS.md` §4).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `rustos-abi` vocabulary and the shared
-`rustos-help` engine, so it never links a kernel or driver
+dependencies are the audited `tairix-abi` vocabulary and the shared
+`tairix-help` engine, so it never links a kernel or driver
 crate (`AGENTS.md` §17.4). Its manifest requests `CAP_CONSOLE_WRITE`
 plus `CAP_FS_ACCESS` — within the session baseline — and the secured VFS
 authorises every path per-inode under the caller's attested identity.
@@ -68,7 +68,7 @@ injected seams, mirroring the other userland crates (`cat`'s
   it.
 - `Output` — write the rendered listing to the terminal and advisory
   records to the standard information stream (fd 3), best-effort.
-- `rustos_help::HelpSource` — the tool's own `Help/` tree, read by the
+- `tairix_help::HelpSource` — the tool's own `Help/` tree, read by the
   short-help switches.
 
 On a running system these are syscall-backed (`src/run.rs`: `fs_open`/
@@ -93,7 +93,7 @@ Advisory only — never affecting the listing, ordering, or exit status.
 ## Help tree
 
 `Help/<locale>/ls.md` carries the canonical `en-US/` document
-plus the required translations (the `rustos_help::REQUIRED_LOCALES`
+plus the required translations (the `tairix_help::REQUIRED_LOCALES`
 set, `plans/APPS.md` §8.1). The tree is authored on disk only:
 `tools/syshelp` discovers it and the image builder (`tools/mkimage`) and
 the QEMU image fixture plant it at `/System/Apps/ls.app/Help/`; the
@@ -113,7 +113,7 @@ panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-ls` drives the parser, the listing engine, and the
+`cargo test -p tairix-ls` drives the parser, the listing engine, and the
 on-disk help tree against in-memory fixtures; the aarch64
 session-ceiling QEMU vertical types `ls /System/Apps` in a real session
 and sees `man.app` in the listing.

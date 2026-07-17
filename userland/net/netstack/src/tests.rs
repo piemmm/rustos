@@ -5,23 +5,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rustos_abi::driver::net::{DeviceFacts, LinkState, MacAddress, Net, NetOffloads};
-use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::net::{
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, Net, NetOffloads};
+use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::net::{
     decode_bind_reply, decode_socket_reply, SocketAddr, SocketRequest, SocketType,
 };
-use rustos_abi::net_ipc::{
+use tairix_abi::net_ipc::{
     decode_counters_reply, decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceFactsRecord,
     NetInterfaceStateRecord, NetstackRequest, IF_NAME_LEN, NETSTACK_MAX_REPLY,
 };
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::{
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::{
     CapabilityId, CapabilitySummary, DriverError, Duration64, Errno, Origin, ProcId, TrustDomain,
 };
-use rustos_log::{Event, EventId, Level, Sink};
-use rustos_net::addr::{IpAddr, Ipv4Addr};
-use rustos_net::stack::{Stack, StackConfig, StackEvent};
+use tairix_log::{Event, EventId, Level, Sink};
+use tairix_net::addr::{IpAddr, Ipv4Addr};
+use tairix_net::stack::{Stack, StackConfig, StackEvent};
 
 use crate::channel::{FrameService, LocalFrameService};
 use crate::socket::{SocketService, MAX_SOCKETS_PER_PRINCIPAL};
@@ -172,7 +172,7 @@ fn caller(caps: &[CapabilityId]) -> Caller {
         10,
         ProcId::from_raw([0x10; 16]),
         summary,
-        rustos_abi::ORIGIN_CONSOLE_NONE,
+        tairix_abi::ORIGIN_CONSOLE_NONE,
     ))
 }
 
@@ -227,7 +227,7 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
         .interface_mut(name("wan"))
         .expect("iface")
         .stack_mut()
-        .send_echo_request(IpAddr::V4(V4_B), 0x77, 1, b"rustos-netstack", t(2))
+        .send_echo_request(IpAddr::V4(V4_B), 0x77, 1, b"tairix-netstack", t(2))
         .expect("send echo");
     push_tx(&mut fs, &out.frames);
 
@@ -248,7 +248,7 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
         source: IpAddr::V4(V4_B),
         identifier: 0x77,
         sequence: 1,
-        payload: b"rustos-netstack".to_vec(),
+        payload: b"tairix-netstack".to_vec(),
     }));
 
     // The counters observed the exchange.
@@ -306,12 +306,12 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
     }));
 }
 
-fn link_local(iid: [u8; 8]) -> rustos_net::addr::Ipv6Addr {
+fn link_local(iid: [u8; 8]) -> tairix_net::addr::Ipv6Addr {
     let mut octets = [0u8; 16];
     octets[0] = 0xFE;
     octets[1] = 0x80;
     octets[8..].copy_from_slice(&iid);
-    rustos_net::addr::Ipv6Addr::from(octets)
+    tairix_net::addr::Ipv6Addr::from(octets)
 }
 
 fn v4_bytes(addr: Ipv4Addr) -> [u8; 16] {
@@ -574,7 +574,7 @@ fn net_caller(proc_byte: u8) -> Caller {
         u64::from(proc_byte),
         ProcId::from_raw([proc_byte; 16]),
         summary,
-        rustos_abi::ORIGIN_CONSOLE_NONE,
+        tairix_abi::ORIGIN_CONSOLE_NONE,
     ))
 }
 
@@ -982,7 +982,7 @@ fn inbound_datagram_is_delivered_to_the_bound_socket() {
     let deliveries = svc.deliver(&event);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].deliver_port, 0x5000);
-    let parsed = rustos_abi::net::SocketDatagram::parse(&deliveries[0].datagram).expect("datagram");
+    let parsed = tairix_abi::net::SocketDatagram::parse(&deliveries[0].datagram).expect("datagram");
     assert_eq!(parsed.socket, id);
     assert_eq!(parsed.source.port, 40000);
     assert_eq!(parsed.payload, b"payload");
@@ -1163,8 +1163,8 @@ fn local_group(addr: Ipv4Addr) -> SocketAddr {
 
 use crate::channel::NetChannelClient;
 use alloc::rc::Rc;
-use rustos_abi::driver::net_channel::NetChannelRequest;
-use rustos_virtio_net::NetChannelServer;
+use tairix_abi::driver::net_channel::NetChannelRequest;
+use tairix_virtio_net::NetChannelServer;
 
 /// A representative notify endpoint id the stack would `port_bind`.
 const NOTIFY_ENDPOINT: u64 = 0x4E45_5453_5430_3030;

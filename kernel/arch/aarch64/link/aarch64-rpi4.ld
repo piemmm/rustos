@@ -1,4 +1,4 @@
-/* Linker script for RustOS aarch64 kernels on the Raspberry Pi 4 (BCM2711).
+/* Linker script for TAIRiX aarch64 kernels on the Raspberry Pi 4 (BCM2711).
  *
  * The Raspberry Pi firmware (`start4.elf`) loads the AArch64 kernel image
  * `kernel8.img` at physical address 0x8_0000 (512 KiB) and enters it at

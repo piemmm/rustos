@@ -12,24 +12,24 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ptr;
 
-use rustos_abi::driver::display::{Display, DisplayFormat};
-use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
-use rustos_arch_riscv64::{qemu_exit, SERIAL_SINK};
-use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
-use rustos_display::{Framebuffer, FramebufferConfig};
-use rustos_drvhost::{
+use tairix_abi::driver::display::{Display, DisplayFormat};
+use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
+use tairix_arch_riscv64::{qemu_exit, SERIAL_SINK};
+use tairix_caps::CapabilitySet;
+use tairix_crypto::Ed25519PublicKey;
+use tairix_display::{Framebuffer, FramebufferConfig};
+use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
-use rustos_fdt::Fdt;
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_kernel_virtio::KernelMmioMapper;
-use rustos_log::{Event, EventId, Level, Sink};
-use rustos_test_riscv64_boot::published_dtb;
+use tairix_fdt::Fdt;
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_kernel_virtio::KernelMmioMapper;
+use tairix_log::{Event, EventId, Level, Sink};
+use tairix_test_riscv64_boot::published_dtb;
 
-use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 
 use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -130,11 +130,11 @@ impl DriverSpawner for ResolveFramebuffer {
     fn spawn_and_register(
         &self,
         ctx: &SpawnContext<'_>,
-    ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
+    ) -> Result<tairix_abi::DriverHandle, SpawnRegisterError> {
         if !ctx.host.has_capability(CapabilityId::DRV_LOAD) {
             return Err(SpawnRegisterError::Register(DriverError::PermissionDenied));
         }
-        rustos_abi::DriverHandle::from_raw(FB_HANDLE_MARKER).map_err(SpawnRegisterError::Register)
+        tairix_abi::DriverHandle::from_raw(FB_HANDLE_MARKER).map_err(SpawnRegisterError::Register)
     }
 }
 
@@ -295,7 +295,7 @@ fn drive_lifecycle(config: FramebufferConfig) {
     let mut host = Host::new(HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYSCALL_TABLE_HASH,
-        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
         source: &source,
         spawner: &spawner,
         sink: &SERIAL_SINK,

@@ -1,4 +1,4 @@
-# `rustos-basename` — strip directory and suffix from names
+# `tairix-basename` — strip directory and suffix from names
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/basename.app/` so the shell resolves the bare
@@ -13,15 +13,15 @@ bundled forms), `-z`/`--zero`, `--`, and option/operand permutation.
 `Help/` tree through the shared `lib/help` engine, in the locale the
 inherited `LANG` variable names.
 
-One RustOS extension: a `Name:/` alias root (`plans/DRIVES.md`) plays
+One TAIRiX extension: a `Name:/` alias root (`plans/DRIVES.md`) plays
 the role POSIX gives `/` — it is never stripped into, so
 `basename Home:/` is `Home:/` exactly as `basename /` is `/`. Where the
 root prefix ends is decided by the shared path grammar's own rule
-(`rustos_path::alias_root_len`); the tool carries no second path parser.
+(`tairix_path::alias_root_len`); the tool carries no second path parser.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `rustos-path` and `rustos-help` crates, so it never links a kernel
+shared `tairix-path` and `tairix-help` crates, so it never links a kernel
 or driver crate. Its manifest (`AppInfo.toml`) requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every path per-inode under the

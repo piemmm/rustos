@@ -11,7 +11,7 @@ whoami — argraffu enw cyfrif y defnyddiwr cyfredol
 Mae'n argraffu'r enw defnyddiwr sy'n gysylltiedig â hunaniaeth y broses
 hon, ac yna nod llinell newydd — a dim byd arall.
 
-Nid oes gan RustOS `/etc/passwd`: daw'r dynodwr defnyddiwr o'r cofnod
+Nid oes gan TAIRiX `/etc/passwd`: daw'r dynodwr defnyddiwr o'r cofnod
 y mae'r cnewyllyn yn ei gadw am y broses sy'n galw, a daw enw'r cyfrif
 cyfatebol o gyfeiriadur cyhoeddus y cyfrifon yn yr API gwybodaeth
 system. Os nad yw'r cyfeiriadur yn cynnwys enw ar gyfer y dynodwr,

@@ -24,7 +24,7 @@ pub enum Command {
 
 /// A parsed `useradd` account specification.
 ///
-/// All ids are **decimal** (RustOS has no name-to-id seam in this tool, so a
+/// All ids are **decimal** (TAIRiX has no name-to-id seam in this tool, so a
 /// name would be interface creep). The primary group is
 /// always present — `useradd` requires `-g` rather than guessing a default
 /// group.
@@ -422,7 +422,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/useradd.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

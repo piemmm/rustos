@@ -8,9 +8,9 @@ use alloc::collections::VecDeque;
 use core::cell::{Cell, RefCell};
 
 use super::*;
-use rustos_abi::driver::input::{InputEvent, InputEventKind};
-use rustos_abi::driver::DriverKind;
-use rustos_abi::CapabilityId;
+use tairix_abi::driver::input::{InputEvent, InputEventKind};
+use tairix_abi::driver::DriverKind;
+use tairix_abi::CapabilityId;
 
 /// Mock i8042: a FIFO of `(byte, is_aux)` entries modelling the
 /// controller's output buffer. Reading the status port reports

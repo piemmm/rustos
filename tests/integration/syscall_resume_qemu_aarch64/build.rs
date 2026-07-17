@@ -10,7 +10,7 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -34,7 +34,7 @@ fn main() {
         println!("cargo:rerun-if-changed={kernel_linker}");
         println!("cargo:rustc-link-arg=-T{kernel_linker}");
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_bytes(&dtb_path, "DTB_BLOB", &dtb);
         let rxe = build_program(manifest_dir, &out_dir, &program_dir, &linker);
         write_program(&rxe_path, &rxe);
@@ -59,7 +59,7 @@ fn build_program(manifest_dir: &str, out_dir: &str, program_dir: &str, linker: &
         .args([
             "build",
             "-p",
-            "rustos-test-syscall-resume-program",
+            "tairix-test-syscall-resume-program",
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -71,12 +71,12 @@ fn build_program(manifest_dir: &str, out_dir: &str, program_dir: &str, linker: &
         .expect("spawn syscall-resume fixture build");
     assert!(status.success(), "building syscall-resume fixture failed");
     let elf_path =
-        format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-test-syscall-resume-program");
+        format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-syscall-resume-program");
     let elf = fs::read(&elf_path).unwrap_or_else(|error| panic!("read {elf_path}: {error}"));
     let _ = program_dir;
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert syscall-resume fixture to rxe")

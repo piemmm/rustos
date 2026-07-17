@@ -1,6 +1,6 @@
 [package]
-name = "rustos-util"
-description = "RustOS placeholder: shared utilities used by two or more crates."
+name = "tairix-util"
+description = "TAIRiX placeholder: shared utilities used by two or more crates."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -8,12 +8,12 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_geometry::Rect;
-use rustos_raster::Color;
-use rustos_theme::Theme;
+use tairix_abi::Errno;
+use tairix_geometry::Rect;
+use tairix_raster::Color;
+use tairix_theme::Theme;
 
-use rustos_vt::{encode_all_into, BasicColor, Color as VtColor, Op, Sgr};
+use tairix_vt::{encode_all_into, BasicColor, Color as VtColor, Op, Sgr};
 
 /// Encode a sequence of operations into a fresh `Vec` over the sink API.
 fn encode_all(ops: &[Op]) -> alloc::vec::Vec<u8> {
@@ -115,7 +115,7 @@ fn a_wide_glyph_occupies_a_lead_and_a_continuation_cell() {
     // console produce, so column arithmetic agrees across the stack.
     let grid = render_bytes(6, 2, "世a".as_bytes());
     assert_eq!(glyph(&grid, 0, 0), '世');
-    assert_eq!(glyph(&grid, 1, 0), rustos_vt::CONTINUATION);
+    assert_eq!(glyph(&grid, 1, 0), tairix_vt::CONTINUATION);
     assert_eq!(glyph(&grid, 2, 0), 'a');
     assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 0));
 }
@@ -128,7 +128,7 @@ fn a_wide_glyph_wraps_whole_when_one_column_remains() {
     // The leftover column was blanked rather than half-filled.
     assert_eq!(glyph(&grid, 2, 0), ' ');
     assert_eq!(glyph(&grid, 0, 1), '世');
-    assert_eq!(glyph(&grid, 1, 1), rustos_vt::CONTINUATION);
+    assert_eq!(glyph(&grid, 1, 1), tairix_vt::CONTINUATION);
 }
 
 #[test]
@@ -162,13 +162,13 @@ fn partial_erase_expands_to_clear_a_complete_wide_glyph() {
     let mut grid = Grid::new(4, 1).expect("valid size");
     grid.write_char('日');
     grid.move_to(0, 0);
-    grid.erase_in_line(rustos_vt::EraseMode::ToStart);
+    grid.erase_in_line(tairix_vt::EraseMode::ToStart);
     assert_eq!((glyph(&grid, 0, 0), glyph(&grid, 1, 0)), (' ', ' '));
 
     grid.move_to(0, 0);
     grid.write_char('日');
     grid.move_to(1, 0);
-    grid.erase_in_line(rustos_vt::EraseMode::ToEnd);
+    grid.erase_in_line(tairix_vt::EraseMode::ToEnd);
     assert_eq!((glyph(&grid, 0, 0), glyph(&grid, 1, 0)), (' ', ' '));
 }
 
@@ -363,7 +363,7 @@ fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
         assert!(
             (first_x..first_x + 15).any(|x| {
                 (0..28).any(|y| {
-                    surface.get(x, y).map(rustos_raster::Pixel::unpremultiply) != Some(background)
+                    surface.get(x, y).map(tairix_raster::Pixel::unpremultiply) != Some(background)
                 })
             }),
             "Hebrew cell {column} contains only background"
@@ -380,7 +380,7 @@ fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
     assert!(
         (15..30).any(|x| {
             (0..28).any(|y| {
-                surface.get(x, y).map(rustos_raster::Pixel::unpremultiply) != Some(background)
+                surface.get(x, y).map(tairix_raster::Pixel::unpremultiply) != Some(background)
             })
         }),
         "the continuation cell contains only background"
@@ -397,7 +397,7 @@ fn render_highlights_the_cursor_cell() {
     let surface_bg: Color = theme.palette().surface.into();
     // The top-left pixel sits under the home cursor, so it carries the accent
     // fill rather than the plain surface colour.
-    let top_left = surface.get(0, 0).map(rustos_raster::Pixel::unpremultiply);
+    let top_left = surface.get(0, 0).map(tairix_raster::Pixel::unpremultiply);
     assert_eq!(top_left, Some(accent));
     assert_ne!(accent, surface_bg);
 }
@@ -430,7 +430,7 @@ fn sgr_folds_colour_and_flags_into_the_written_cells() {
 fn sgr_reset_returns_following_cells_to_plain() {
     let grid = render_bytes(10, 2, b"\x1b[1ma\x1b[0mb");
     assert!(cell_at(&grid, 0, 0).attrs.bold);
-    assert_eq!(cell_at(&grid, 1, 0).attrs, rustos_vt::Attributes::PLAIN);
+    assert_eq!(cell_at(&grid, 1, 0).attrs, tairix_vt::Attributes::PLAIN);
 }
 
 #[test]
@@ -509,14 +509,14 @@ fn hidden_cursor_is_not_painted() {
     let surface = crate::render(&term, &theme, Rect::new(0, 0, 120, 40)).expect("surface");
     let surface_bg: Color = theme.palette().surface.into();
     // With the cursor hidden the home cell shows the plain surface, not accent.
-    let top_left = surface.get(0, 0).map(rustos_raster::Pixel::unpremultiply);
+    let top_left = surface.get(0, 0).map(tairix_raster::Pixel::unpremultiply);
     assert_eq!(top_left, Some(surface_bg));
 }
 
 #[test]
 fn osc_sets_the_window_title() {
-    let grid = render_bytes(10, 2, b"\x1b]0;RustOS\x07rest");
-    assert_eq!(grid.title(), "RustOS");
+    let grid = render_bytes(10, 2, b"\x1b]0;TAIRiX\x07rest");
+    assert_eq!(grid.title(), "TAIRiX");
     // The title sequence leaves the screen text alone.
     assert_eq!(row_text(&grid, 0), "rest");
 }
@@ -556,14 +556,14 @@ fn emitter_output_is_parsed_identically_by_the_consumer() {
 
     let plain = cell_at(&grid, 0, 1);
     assert_eq!(plain.ch, 'p');
-    assert_eq!(plain.attrs, rustos_vt::Attributes::PLAIN);
+    assert_eq!(plain.attrs, tairix_vt::Attributes::PLAIN);
 }
 
 // --- The spawned shell's pipe wiring (`spawned`) -------------------------
 
 #[test]
 fn shell_wires_route_input_output_and_diagnostics_onto_the_pipes() {
-    use rustos_abi::{FdWire, SpawnAttach, CONSOLE_INHERIT, SPAWN_UID_INHERIT};
+    use tairix_abi::{FdWire, SpawnAttach, CONSOLE_INHERIT, SPAWN_UID_INHERIT};
 
     let attach = crate::spawned::shell_wires(7, 9);
     // The child's stdin is the keystroke pipe; stdout *and* stderr land on

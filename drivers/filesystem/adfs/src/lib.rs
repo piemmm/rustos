@@ -1,12 +1,12 @@
-//! RustOS Acorn ADFS filesystem driver (read/write).
+//! TAIRiX Acorn ADFS filesystem driver (read/write).
 //!
 //! Attaches an Acorn ADFS / RISC OS `FileCore` volume sitting behind any
-//! [`rustos_abi::driver::block::Block`] device and exposes it through the
+//! [`tairix_abi::driver::block::Block`] device and exposes it through the
 //! versioned [`FilesystemRead`], [`FilesystemWrite`],
 //! [`FilesystemTimestamps`], [`FilesystemAttrs`], and [`FilesystemStats`]
 //! surfaces (new behaviour ships as a new trait, never by widening the
 //! frozen mount/unmount
-//! [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
+//! [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)).
 //!
 //! # Supported formats
 //!
@@ -36,7 +36,7 @@
 //!
 //! Load/exec addresses, the 12-bit filetype, the 40-bit centisecond
 //! datestamp, and the `FileCore` attribute bits are surfaced through the
-//! shared `rustos_fsmeta` Acorn preset as the canonical `acorn.*`
+//! shared `tairix_fsmeta` Acorn preset as the canonical `acorn.*`
 //! attribute keys, so a copy to `ARXFS` and back is byte-exact.
 //!
 //! # Public surface
@@ -49,21 +49,21 @@
 //! # Capabilities
 //!
 //! Loading requires
-//! [`CapabilityId::DRV_LOAD`](rustos_abi::CapabilityId::DRV_LOAD). The
+//! [`CapabilityId::DRV_LOAD`](tairix_abi::CapabilityId::DRV_LOAD). The
 //! driver runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemTimestamps,
     FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
 };
-use rustos_abi::time::Time64;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
-use rustos_fsmeta::preset::acorn;
+use tairix_abi::time::Time64;
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_fsmeta::preset::acorn;
 
 mod bigdir;
 mod dir;
@@ -1408,7 +1408,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         key: &[u8],
         value_out: &mut [u8],
     ) -> Result<Option<usize>, DriverError> {
-        let key = rustos_fsmeta::AttrKey::parse(key).map_err(|_| DriverError::OutOfRange)?;
+        let key = tairix_fsmeta::AttrKey::parse(key).map_err(|_| DriverError::OutOfRange)?;
         if !node_is_valid(node) {
             return Err(DriverError::NotFound);
         }
@@ -1463,7 +1463,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
     }
 
     fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
-        let key = rustos_fsmeta::AttrKey::parse(key).map_err(|_| DriverError::OutOfRange)?;
+        let key = tairix_fsmeta::AttrKey::parse(key).map_err(|_| DriverError::OutOfRange)?;
         if !node_is_valid(node) {
             return Err(DriverError::NotFound);
         }
@@ -1559,7 +1559,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
     }
 
     fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
-        let key = rustos_fsmeta::AttrKey::parse(key).map_err(|_| DriverError::OutOfRange)?;
+        let key = tairix_fsmeta::AttrKey::parse(key).map_err(|_| DriverError::OutOfRange)?;
         if !node_is_valid(node) {
             return Err(DriverError::NotFound);
         }

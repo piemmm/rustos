@@ -1,4 +1,4 @@
-# `rustos-caps`
+# `tairix-caps`
 
 Capability primitives: identifiers, sets, and signed delegation tokens.
 

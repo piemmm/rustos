@@ -46,7 +46,7 @@ pub mod dep_info;
 
 /// The M1 demand-paged file-mapping fixture: the single definition of the
 /// fixture file the `file_map_qemu_*` verticals serve kernel-side and probe
-/// from EL0 (geometry constants, content generator, `RUSTOS_FM_*` env
+/// from EL0 (geometry constants, content generator, `TAIRIX_FM_*` env
 /// pinning, and the kernel-side constants emitter).
 pub mod filemap_fixture;
 
@@ -214,7 +214,7 @@ pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
 /// A blob too short for the 40-byte header, with the wrong magic, or
 /// whose header offsets escape the buffer is returned unchanged — trimming
 /// is an optimisation, never a parser (: callers still
-/// validate the result through `rustos_fdt::Fdt::new`).
+/// validate the result through `tairix_fdt::Fdt::new`).
 #[must_use]
 pub fn trim_fdt_to_extent(bytes: &[u8]) -> Vec<u8> {
     const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn trimming_drops_padding_and_keeps_the_tree_parseable() {
-        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
+        let blob = tairix_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
         // Simulate QEMU `dumpdtb` padding the blob out to its 1 MiB region.
         let mut padded = blob.clone();
         padded.resize(blob.len() + 4096, 0);
@@ -338,7 +338,7 @@ mod tests {
         assert!(trimmed.len() < padded.len(), "padding was not dropped");
         assert!(trimmed.len() <= blob.len());
 
-        let fdt = rustos_fdt::Fdt::new(&trimmed).expect("trimmed fdt parses");
+        let fdt = tairix_fdt::Fdt::new(&trimmed).expect("trimmed fdt parses");
         assert_eq!(fdt.first_memory_region(), Some((0x4000_0000, 0x2000_0000)));
         let method = fdt
             .property(&[b"psci"], b"method")
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn trimming_rewrites_totalsize_to_the_trimmed_length() {
-        let blob = rustos_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "smc", 30);
+        let blob = tairix_fdt::fixture::virt_like_arm(0x4000_0000, 0x2000_0000, "smc", 30);
         let mut padded = blob.clone();
         padded.resize(blob.len() + 8192, 0);
         let trimmed = trim_fdt_to_extent(&padded);

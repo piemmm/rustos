@@ -1,7 +1,7 @@
 //! The executable-inspection decode service — the seam's first consumers.
 //!
-//! This module wires `rustos-binfmt` (container summaries) and
-//! `rustos-disasm` (instruction windows) behind the sandbox seam: the
+//! This module wires `tairix-binfmt` (container summaries) and
+//! `tairix-disasm` (instruction windows) behind the sandbox seam: the
 //! [`DecodeService`] runs *inside* the sandboxed worker, and the client
 //! helpers ([`container_summary`], [`manifest_summary`], [`disassemble`])
 //! run in the calling program, marshalling typed requests and validating
@@ -17,8 +17,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_binfmt::{elf, wasm, Format};
-use rustos_disasm::{aarch64, riscv64, wasm as wasm_isa, x86_64, Insn, MAX_INSN_BYTES};
+use tairix_binfmt::{elf, wasm, Format};
+use tairix_disasm::{aarch64, riscv64, wasm as wasm_isa, x86_64, Insn, MAX_INSN_BYTES};
 
 use crate::host::{Launcher, ParserSandbox, SandboxError};
 use crate::wire::{Reader, Writer};
@@ -81,7 +81,7 @@ impl Isa {
 /// The container format a summary reports.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContainerFormat {
-    /// A RustOS `rxe` load image.
+    /// A TAIRiX `rxe` load image.
     Rxe,
     /// A 64-bit little-endian ELF file.
     Elf64,
@@ -293,7 +293,7 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, DecodeRefusal> {
             if !r.is_exhausted() {
                 return Err(DecodeRefusal::MalformedRequest);
             }
-            let info = rustos_binfmt::rxe::ManifestSummary::parse(manifest)
+            let info = tairix_binfmt::rxe::ManifestSummary::parse(manifest)
                 .map_err(|_| DecodeRefusal::MalformedContainer)?;
             Ok(encode_manifest(&info))
         }
@@ -318,7 +318,7 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, DecodeRefusal> {
 
 /// Build the container summary for `image`.
 fn summarise(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
-    match rustos_binfmt::detect(image) {
+    match tairix_binfmt::detect(image) {
         Some(Format::Rxe) => summarise_rxe(image),
         Some(Format::Elf64) => summarise_elf(image),
         Some(Format::Wasm) => summarise_wasm(image),
@@ -354,7 +354,7 @@ fn bounded_name(name: &str) -> String {
 
 fn summarise_rxe(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {
     let view =
-        rustos_binfmt::rxe::RxeView::parse(image).map_err(|_| DecodeRefusal::MalformedContainer)?;
+        tairix_binfmt::rxe::RxeView::parse(image).map_err(|_| DecodeRefusal::MalformedContainer)?;
     let mut list = RegionList::default();
     for segment in view.segments() {
         let executable = segment.permission.is_executable();
@@ -720,7 +720,7 @@ fn encode_summary(summary: &ContainerSummary) -> Vec<u8> {
     w.finish()
 }
 
-fn encode_manifest(info: &rustos_binfmt::rxe::ManifestSummary) -> Vec<u8> {
+fn encode_manifest(info: &tairix_binfmt::rxe::ManifestSummary) -> Vec<u8> {
     let mut w = Writer::new();
     w.u8(REPLY_MANIFEST);
     w.u32(info.header().abi_version);
@@ -760,7 +760,7 @@ fn encode_disasm(window: &DisasmWindow) -> Vec<u8> {
 ///
 /// [`DecodeFailure`]: the sandbox failed, the worker refused typed, or
 /// the worker's reply violated the reply grammar.
-pub fn container_summary<L: Launcher, S: rustos_log::Sink>(
+pub fn container_summary<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     image: &[u8],
 ) -> Result<ContainerSummary, DecodeFailure> {
@@ -781,7 +781,7 @@ pub fn container_summary<L: Launcher, S: rustos_log::Sink>(
 /// # Errors
 ///
 /// As [`container_summary`].
-pub fn manifest_summary<L: Launcher, S: rustos_log::Sink>(
+pub fn manifest_summary<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     manifest: &[u8],
 ) -> Result<ManifestInfo, DecodeFailure> {
@@ -806,7 +806,7 @@ pub fn manifest_summary<L: Launcher, S: rustos_log::Sink>(
 /// # Errors
 ///
 /// As [`container_summary`].
-pub fn disassemble<L: Launcher, S: rustos_log::Sink>(
+pub fn disassemble<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     isa: Isa,
     address: u64,
@@ -933,7 +933,7 @@ fn decode_manifest_reply(reply: &[u8]) -> Result<ManifestInfo, DecodeFailure> {
     let mut r = reply_body(reply, REPLY_MANIFEST)?;
     let abi_version = r.u32().map_err(|_| DecodeFailure::ReplyMalformed)?;
     let count = r.u32().map_err(|_| DecodeFailure::ReplyMalformed)? as usize;
-    if count > usize::from(rustos_abi::MANIFEST_MAX_CAPABILITIES) {
+    if count > usize::from(tairix_abi::MANIFEST_MAX_CAPABILITIES) {
         return Err(DecodeFailure::ReplyMalformed);
     }
     let mut capabilities = Vec::with_capacity(count);
@@ -1010,11 +1010,11 @@ mod tests {
     use crate::worker::Service;
     use alloc::vec;
     use alloc::vec::Vec;
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilityId, LoadHeader, ManifestHeader, RxePermission, Segment, LOAD_FLAG_PIE,
         LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
     };
-    use rustos_log::{Event, Sink};
+    use tairix_log::{Event, Sink};
 
     /// Discards every event: these tests exercise healthy workers.
     struct SilentSink;
@@ -1051,7 +1051,7 @@ mod tests {
         };
         let header = LoadHeader {
             magic: LOAD_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
             flags: LOAD_FLAG_PIE,
             segment_count: 2,
             needed_count: 0,
@@ -1069,7 +1069,7 @@ mod tests {
     fn manifest_bytes(ids: &[CapabilityId]) -> Vec<u8> {
         let header = ManifestHeader {
             magic: MANIFEST_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
             flags: 0,
             capability_count: u16::try_from(ids.len()).expect("test counts fit"),
             reserved0: 0,
@@ -1162,7 +1162,7 @@ mod tests {
         let mut sandbox = sandbox();
         let manifest = manifest_bytes(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let info = manifest_summary(&mut sandbox, &manifest).expect("manifest");
-        assert_eq!(info.abi_version, rustos_abi::ABI_VERSION_CURRENT);
+        assert_eq!(info.abi_version, tairix_abi::ABI_VERSION_CURRENT);
         assert_eq!(
             info.capabilities,
             vec![

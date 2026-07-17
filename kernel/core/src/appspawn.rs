@@ -3,7 +3,7 @@
 //! A program the embedded boot-floor registry does not carry is resolved as
 //! an on-disk `<Name>.app` bundle: the kernel reads the bundle through the
 //! mounted, secured VFS under the **caller's** kernel-attested identity,
-//! judges it through the one shared `rustos_appload` load gate (layout,
+//! judges it through the one shared `tairix_appload` load gate (layout,
 //! signed `AppInfo`, content hash, syscall-interface hash, `rxe` hardening
 //! invariants), and spawns exactly the bytes the gate validated. App code is
 //! never baked into the kernel; the bundle directory on the volume is the
@@ -29,9 +29,9 @@
 //!   ([`AppStore::install_reclaim`]); until then — and whenever the
 //!   classification gate refuses — the store serves every launch uncached
 //!   through the full load gate (fail closed).
-//! * [`FsBundleStore`] — the [`rustos_appload::BundleStore`] over the
+//! * [`FsBundleStore`] — the [`tairix_appload::BundleStore`] over the
 //!   kernel [`FilesystemService`], with fail-closed size/depth bounds.
-//! * [`AnchorVerifier`] — the [`rustos_appload::Verifier`] pinning the
+//! * [`AnchorVerifier`] — the [`tairix_appload::Verifier`] pinning the
 //!   manifest's signer to the build's embedded app trust anchor and
 //!   verifying the Ed25519 signature through `lib/crypto`.
 //! * [`bundle_run_path`] — the strict `<root>/<Name>.app/Run` path shape a
@@ -46,16 +46,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use rustos_abi::{
+use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityQuery, Errno, FileKind,
     APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN, SYSTEM_APP_STORE,
     SYSTEM_SERVICE_STORE,
 };
-use rustos_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
-use rustos_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
-use rustos_kernel_mem::{CacheBudget, MemoryPressure};
-use rustos_log::Sink;
-use rustos_sync::RwLock;
+use tairix_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
+use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
+use tairix_kernel_mem::{CacheBudget, MemoryPressure};
+use tairix_log::Sink;
+use tairix_sync::RwLock;
 
 use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
@@ -423,7 +423,7 @@ impl Verifier for AnchorVerifier {
 ///
 /// It reports the current CPU's monotonic nanoseconds on every read (the
 /// same source `clock_get` and the wait-queue deadlines use), so the
-/// [`rustos_appload::events::APP_LOADED`] record can attribute a slow first
+/// [`tairix_appload::events::APP_LOADED`] record can attribute a slow first
 /// launch to disk reads versus verification. The reading is audit-only and
 /// never affects a load decision.
 pub struct ArchClock<'a, A: KernelArch> {
@@ -505,11 +505,11 @@ mod tests {
     use super::*;
     use crate::test_bundle::{composed_bundle, MemFs};
     use crate::test_sink::TestSink;
-    use rustos_abi::rxe::{LoadHeader, Segment};
-    use rustos_abi::{BundleLayoutError, CapabilityId, RxeError, ABI_VERSION_CURRENT};
-    use rustos_appload::{AppLoader, AppLoaderConfig};
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
+    use tairix_abi::rxe::{LoadHeader, Segment};
+    use tairix_abi::{BundleLayoutError, CapabilityId, RxeError, ABI_VERSION_CURRENT};
+    use tairix_appload::{AppLoader, AppLoaderConfig};
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
     extern crate std;
     use std::boxed::Box;
@@ -537,7 +537,7 @@ mod tests {
     fn load(
         fs: &MemFs,
         anchor: [u8; 32],
-    ) -> Result<rustos_appload::LoadedApp, rustos_appload::AppError> {
+    ) -> Result<tairix_appload::LoadedApp, tairix_appload::AppError> {
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let store = FsBundleStore::new(fs, 1000, &NoCaps);
         let verifier = AnchorVerifier::new(anchor);
@@ -561,7 +561,7 @@ mod tests {
         let (fs, anchor, run) =
             composed_bundle(vec![CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS]);
         let app = load(&fs, anchor).expect("loads");
-        assert_eq!(app.id(), "os.rustos.ps");
+        assert_eq!(app.id(), "os.tairix.ps");
         // The full-word grant set is the intersection identity, so the
         // granted ceiling is exactly the manifest request.
         assert!(app.granted().contains(CapabilityId::CONSOLE_WRITE));

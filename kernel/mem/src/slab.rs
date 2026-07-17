@@ -1,7 +1,7 @@
 //! Kernel slab allocator with guard pages on both sides.
 //!
 //! the charter mandates *"Guard pages around kernel slabs."* In a
-//! real RustOS deployment the guard pages are unmapped virtual pages
+//! real TAIRiX deployment the guard pages are unmapped virtual pages
 //! immediately above and below each slab; a buffer-overflow write past
 //! the slab faults loudly instead of silently corrupting the next slab.
 //!
@@ -20,7 +20,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_arch_api::{next_free_tag, MemTag, MemoryTagging, TAG_COUNT};
+use tairix_arch_api::{next_free_tag, MemTag, MemoryTagging, TAG_COUNT};
 
 use crate::error::AllocError;
 use crate::frame::PAGE_SIZE;
@@ -133,7 +133,7 @@ impl SlabHandle {
 /// hardware-tagging port flips it off via [`Slab::with_tag_check`].
 ///
 /// [`TaggingProfile::enforces_uaf_in_hardware`]:
-///     rustos_arch_api::TaggingProfile::enforces_uaf_in_hardware
+///     tairix_arch_api::TaggingProfile::enforces_uaf_in_hardware
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SoftwareTagCheck {
     /// Rotate the slot tag on every allocation and reject a handle whose
@@ -160,7 +160,7 @@ impl SoftwareTagCheck {
     /// available and enabled.
     ///
     /// [`TaggingProfile::enforces_uaf_in_hardware`]:
-    ///     rustos_arch_api::TaggingProfile::enforces_uaf_in_hardware
+    ///     tairix_arch_api::TaggingProfile::enforces_uaf_in_hardware
     #[must_use]
     pub fn for_tagging(tagging: &dyn MemoryTagging) -> Self {
         if tagging.profile().enforces_uaf_in_hardware() {
@@ -495,7 +495,7 @@ impl Slab {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use rustos_arch_api::{MemoryTagging, Tagging, TaggingProfile};
+    use tairix_arch_api::{MemoryTagging, Tagging, TaggingProfile};
 
     /// Minimal [`MemoryTagging`] stub for exercising
     /// [`SoftwareTagCheck::for_tagging`]: it reports a fixed profile and

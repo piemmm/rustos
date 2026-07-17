@@ -26,7 +26,7 @@ invalide, l'affichage se replie sur les identifiants numériques avec
 la raison sur la sortie d'erreur standard — l'inventaire lui-même
 reste listé.
 
-RustOS n'enregistre pas d'adresse PCI `bus:device.function` : l'adresse
+TAIRiX n'enregistre pas d'adresse PCI `bus:device.function` : l'adresse
 stable d'une fonction est son identifiant de nœud de l'arbre matériel,
 affiché `#<node>`, et `-s` sélectionne cet identifiant (une divergence
 délibérée et documentée par rapport au `lspci` de Linux). La vue `-k`

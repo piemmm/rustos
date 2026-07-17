@@ -14,8 +14,8 @@ use crate::dma::DmaSlab;
 use crate::host::VirtioHost;
 use crate::transport::{Direction, Transport, VirtioError};
 use core::mem::size_of;
-use rustos_abi::DriverError;
-use rustos_dma_barrier::{dma_rmb, dma_wmb};
+use tairix_abi::DriverError;
+use tairix_dma_barrier::{dma_rmb, dma_wmb};
 
 /// Wire layout of a virtio split-queue descriptor (virtio 1.1 §2.6.5).
 #[repr(C, align(16))]

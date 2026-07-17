@@ -15,7 +15,7 @@ se toca en el disco. Una ruta sin barra restante tiene como padre `.`;
 un padre que queda vacío es la raíz.
 
 Una raíz nunca se recorta: `dirname /tools` es `/`, y — el equivalente
-en el bosque de almacenamiento de RustOS — `dirname Home:/tools` es
+en el bosque de almacenamiento de TAIRiX — `dirname Home:/tools` es
 `Home:/`. Una raíz de alias (`Home:/`, `System:/`, …) desempeña
 exactamente el papel que `/` desempeña en los sistemas POSIX.
 

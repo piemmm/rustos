@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-input-virtio-mmio-qemu-riscv64"
+name = "tairix-test-input-virtio-mmio-qemu-riscv64"
 description = "WIRING QEMU integration test: boot the riscv64 virt-board pipeline, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, arm the device's PLIC source + S-mode trap path, mint a KernelVirtioHost over a carved per-device DMA pool, load the signed virtio-input `.rxe`, then decode a real injected key press+release (the QEMU runner sends a key over the monitor once the guest signals its event queue is armed) before reporting SiFive Test success. The riscv64 virtio-input analogue of the aarch64 virtio-input input vertical; the device-tail key decode is the same shared code."
 version.workspace = true
 edition.workspace = true
@@ -12,12 +12,12 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-input-virtio-mmio-qemu-riscv64"
+name = "tairix-test-input-virtio-mmio-qemu-riscv64"
 path = "src/main.rs"
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 # The device-agnostic bring-up scaffolding and the virtio-input
@@ -25,6 +25,6 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # in only the abi and the virtio-input driver it resolves the loaded
 # image to (`AGENTS.md` §2.2).
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }
-rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }
+tairix-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

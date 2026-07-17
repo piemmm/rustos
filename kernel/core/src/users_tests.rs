@@ -5,11 +5,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
 };
-use rustos_abi::{CapabilityId, DriverError};
-use rustos_users::{
+use tairix_abi::{CapabilityId, DriverError};
+use tairix_users::{
     AccountState, Gid, Identity, ParseError, Salt, Uid, UserRecord, UsersDb, MAX_DB_LEN,
     MIN_ITERATIONS, SALT_LEN,
 };
@@ -20,7 +20,7 @@ use crate::users::{
     load_users_db, load_users_db_source, LateUsersDb, UsersDbAlreadyInstalled, UsersDbSource,
     UsersLoadError,
 };
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 const ROOT: u64 = 1;
 const SYSTEM: u64 = 2;
@@ -149,7 +149,7 @@ fn valid_db_text() -> String {
             display_name: "Ada Lovelace",
             home: Some("/Users/ada"),
             shell: Some("/System/Apps/elsh.app/Run"),
-            capabilities: rustos_caps::CapabilitySet::empty(),
+            capabilities: tairix_caps::CapabilitySet::empty(),
             state: AccountState::Active,
         },
         b"correct horse",
@@ -309,7 +309,7 @@ fn a_short_read_is_refused() {
 #[test]
 fn non_utf8_bytes_are_refused() {
     let sink = TestSink::new();
-    let mut fs = MockRoot::with_text("rustos-users-v1\n");
+    let mut fs = MockRoot::with_text("tairix-users-v1\n");
     fs.content[0] = 0xFF;
 
     let err = load_users_db(&mut fs, &sink).expect_err("non-UTF-8 refused");

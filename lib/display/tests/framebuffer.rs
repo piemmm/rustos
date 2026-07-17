@@ -10,10 +10,10 @@ use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use rustos_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
-use rustos_abi::driver::DriverKind;
-use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapError, MmioMapper, RegisterWindow};
-use rustos_display::{Framebuffer, FramebufferConfig};
+use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
+use tairix_abi::driver::DriverKind;
+use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapError, MmioMapper, RegisterWindow};
+use tairix_display::{Framebuffer, FramebufferConfig};
 
 /// Stand-in for the kernel's MMIO-map facility. Backs every minted
 /// [`RegisterWindow`] with a fixed `u32` buffer (≥ 4-byte aligned,

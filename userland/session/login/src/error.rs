@@ -8,7 +8,7 @@
 
 use core::fmt;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why [`Login::run`](crate::Login::run) returned without an active session.
 ///
@@ -45,7 +45,7 @@ impl fmt::Display for LoginError {
 #[cfg(test)]
 mod tests {
     use super::LoginError;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     extern crate alloc;
     use alloc::format;

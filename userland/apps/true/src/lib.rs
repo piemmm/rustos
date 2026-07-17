@@ -1,4 +1,4 @@
-//! RustOS `true` — do nothing, successfully (`plans/APPS.md` §12.1 Stage C).
+//! TAIRiX `true` — do nothing, successfully (`plans/APPS.md` §12.1 Stage C).
 //!
 //! The GNU coreutils `true`: it ignores its arguments and exits `0`, so a
 //! shell script can use it wherever a command that always succeeds is
@@ -101,7 +101,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/true.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

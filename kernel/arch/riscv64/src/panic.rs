@@ -39,9 +39,9 @@ pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
     // that message is the requested byte count). Terse and factual.
     let _ = writeln!(
         w,
-        "\n==================== RustOS KERNEL PANIC ===================="
+        "\n==================== TAIRiX KERNEL PANIC ===================="
     );
-    let _ = writeln!(w, "[rustos-kernel] riscv64 panic on hart {hart}: {info}");
+    let _ = writeln!(w, "[tairix-kernel] riscv64 panic on hart {hart}: {info}");
     let _ = writeln!(
         w,
         "hart {hart} halted; the kernel is non-recoverable in production."

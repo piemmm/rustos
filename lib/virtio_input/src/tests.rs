@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use rustos_virtio::{ChainView, DmaHost, DmaSlab, MockHost, MockTransport};
+use tairix_virtio::{ChainView, DmaHost, DmaSlab, MockHost, MockTransport};
 
 /// A queued raw `virtio_input_event` the mock device will deliver:
 /// `(type, code, value)`.

@@ -1,8 +1,8 @@
-//! The volume manager's blkio block client: `rustos_abi::driver::block::Block`
+//! The volume manager's blkio block client: `tairix_abi::driver::block::Block`
 //! over the block-service call endpoint + shared data window its matched
 //! storage node granted.
 //!
-//! The wire protocol is the fixed-frame `rustos_abi::blkio` request/reply
+//! The wire protocol is the fixed-frame `tairix_abi::blkio` request/reply
 //! pair; data moves through the shared window the serving block driver
 //! created. The transport call lives behind the [`BlkCall`] seam so the
 //! client is host-testable without a kernel: each call receives the
@@ -18,12 +18,12 @@
 //! **read-only**: the probe writes nothing, so `write_blocks` refuses
 //! rather than carrying authority the volume manager does not need.
 
-use rustos_abi::blkio::{
+use tairix_abi::blkio::{
     BlkCompletion, BlkOp, BlkRequest, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY,
     BLK_REQUEST_LEN,
 };
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::{DriverError, Errno};
 
 /// Smallest logical block size a sane device reports.
 const MIN_BLOCK_SIZE: u32 = 512;
@@ -122,7 +122,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
         let len = request.encode(&mut frame)?;
         let mut reply = [0u8; BLK_COMPLETION_LEN];
         let got = self.call.call(&frame[..len], &mut reply, self.window)?;
-        rustos_abi::blkio::decode_completion(reply.get(..got).ok_or(Errno::BadMagic)?)
+        tairix_abi::blkio::decode_completion(reply.get(..got).ok_or(Errno::BadMagic)?)
     }
 
     /// Largest whole-block chunk a single transfer can move through the
@@ -234,7 +234,7 @@ mod tests {
                 BlkOp::Read => {
                     let bytes = decoded.blocks as usize * self.block_size as usize;
                     if bytes > window.len() {
-                        return rustos_abi::blkio::encode_error_completion(
+                        return tairix_abi::blkio::encode_error_completion(
                             reply,
                             Errno::LengthOutOfRange,
                         );
@@ -245,7 +245,7 @@ mod tests {
                     );
                     BlkCompletion::default().encode(reply)
                 }
-                _ => rustos_abi::blkio::encode_error_completion(reply, Errno::PermissionDenied),
+                _ => tairix_abi::blkio::encode_error_completion(reply, Errno::PermissionDenied),
             }
         }
     }
@@ -395,7 +395,7 @@ mod tests {
                     }
                     .encode(reply)
                 } else {
-                    rustos_abi::blkio::encode_error_completion(reply, Errno::PermissionDenied)
+                    tairix_abi::blkio::encode_error_completion(reply, Errno::PermissionDenied)
                 }
             }
         }

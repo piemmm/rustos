@@ -1,7 +1,7 @@
 //! `unlink(2)` conformance: removing a file, `ENOENT`, and reuse of the
 //! freed name.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn unlink_removes_a_file() {

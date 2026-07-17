@@ -8,7 +8,7 @@ describes what is implemented.
 
 ## The model (`lib/seat`)
 
-`rustos_seat` is the arch-neutral, dependency-free, `no_std` state machine
+`tairix_seat` is the arch-neutral, dependency-free, `no_std` state machine
 behind seat ownership — the single definition the in-kernel seat registry and
 the user-space seat manager both build on (Stages D2–D6 of
 `plans/DISPLAY.md`).
@@ -50,7 +50,7 @@ reached, and the registry hosting it owns the synchronisation.
 ## What the kernel enforces (Stage D2)
 
 The kernel hosts this state machine in its seat registry
-(`rustos_kernel_core::seat::SeatRegistry`): every seat on the machine,
+(`tairix_kernel_core::seat::SeatRegistry`): every seat on the machine,
 each holding its own `SeatState` under its own lock next to the input
 sinks it routes between — the seat's foreground text console type-ahead
 queue and its bounded desktop keyboard and pointer channels. The two
@@ -104,7 +104,7 @@ that does not (or no longer) exist.
 Both `display_*` calls are audited per call (a seat hand-over is the
 analogue of a foreground-tty switch), and every refusal is a typed
 `Errno`, mapped from `SeatError` in exactly one place
-(`rustos_kernel_core::seat::seat_errno`).
+(`tairix_kernel_core::seat::seat_errno`).
 
 ## Seat administration (Stage D3)
 
@@ -132,7 +132,7 @@ audited syscalls and held by exactly one service:
 - **`seatmgr`** (`userland/system/seatmgr`, installed at
   `/System/Services/seatmgr.app/Run`, launched by PID 1) is the sole
   manifest holder of `CAP_SEAT_ADMIN`. It binds the reserved
-  `SEATMGR_ENDPOINT` rendezvous (`rustos_abi::seat`, squat-protected by
+  `SEATMGR_ENDPOINT` rendezvous (`tairix_abi::seat`, squat-protected by
   the `CAP_IPC_BIND_PRIVILEGED` gate) and serves the typed
   `SeatAdminRequest` operations, requiring each *requester's*
   kernel-attested origin to itself carry `CAP_SEAT_ADMIN` before the
@@ -148,10 +148,10 @@ Mapping the framebuffer (`CAP_MMIO_MAP`) and owning the seat
 driver's present path, so "I can write pixels" no longer implies "I own
 the screen":
 
-- The `lib/abi` seat handle is `rustos_abi::seat::SeatLease` — seat id,
+- The `lib/abi` seat handle is `tairix_abi::seat::SeatLease` — seat id,
   owning task, and the mint-time generation `display_acquire` returned.
   The generation is what makes a stale pre-revoke handle refusable even
-  after its owner reacquires the seat: `rustos_seat::SeatState::verify`
+  after its owner reacquires the seat: `tairix_seat::SeatState::verify`
   (the one definition of the check) accepts exactly the live
   owner-and-generation pair.
 - The check reaches a display driver through its host:
@@ -293,7 +293,7 @@ Its kernel surfaces are live:
 On top of those surfaces, the display-service protocol and its engine
 are live (stage D7b):
 
-- **The wire protocol** is `rustos_abi::display_ipc`: one reserved,
+- **The wire protocol** is `tairix_abi::display_ipc`: one reserved,
   squat-protected rendezvous (`DISPLAY_ENDPOINT`, bindable only under
   `CAP_IPC_BIND_PRIVILEGED`) serving the fixed-width, fail-closed
   requests `Query` (→ the mode reply), `Configure { shm grant handle,

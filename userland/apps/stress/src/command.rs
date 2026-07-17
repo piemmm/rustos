@@ -4,7 +4,7 @@
 //! conventions (`AGENTS.md` §16.7): `--cpu`/`--io`/`--vm`/`--vm-bytes`/
 //! `--hdd`/`--hdd-bytes`/`--timeout`/`--quiet` keep their GNU `stress`
 //! meaning and value grammar (binary byte suffixes, `s`/`m`/`h` time
-//! suffixes). The RustOS-only options — `--cache`, `--all`, `--overcommit`,
+//! suffixes). The TAIRiX-only options — `--cache`, `--all`, `--overcommit`,
 //! `--monitor`, `--background`, `--temp-path` — are additive and spelled so
 //! they cannot collide with the GNU set.
 

@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::CapabilityId;
+use tairix_abi::CapabilityId;
 
 use crate::command::Command;
 use crate::error::GetcapError;
@@ -36,7 +36,7 @@ argument is an operand.
 /// # Errors
 ///
 /// * [`GetcapError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](rustos_abi::Errno).
+///   underlying [`Errno`](tairix_abi::Errno).
 /// * [`GetcapError::Query`] — a node's capability gate could not be read.
 /// * [`GetcapError::Read`] — a directory's entries could not be read during a
 ///   recursive descent.
@@ -123,7 +123,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::{CapabilityId, Errno};
+    use tairix_abi::{CapabilityId, Errno};
 
     /// An in-memory tree. Each node carries its kind and optional capability
     /// gate; a directory's children are derived by parent path. Failure

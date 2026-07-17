@@ -22,7 +22,7 @@
 //! > Chase, D. & Lev, Y. *Dynamic Circular Work-Stealing Deque*. SPAA '05.
 //! > <https://www.dre.vanderbilt.edu/~schmidt/PDF/work-stealing-dequeue.pdf>
 //!
-//! with three RustOS-specific simplifications:
+//! with three TAIRiX-specific simplifications:
 //!
 //! 1. The buffer is **bounded** (its capacity is fixed at construction).
 //!    An unbounded queue is a `DoS` vector against the kernel. Overflow is signalled to the caller via

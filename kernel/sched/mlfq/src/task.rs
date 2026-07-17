@@ -17,7 +17,7 @@ use crate::loom_compat::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::{CpuId, Priority, TaskAction, TaskContext, TaskId, TaskState};
 
 use alloc::boxed::Box;
-use rustos_sync::SpinLock;
+use tairix_sync::SpinLock;
 
 /// Concrete closure type stored inside a task. Boxed and trait-object'd
 /// because tasks are owned heterogeneously by [`crate::Scheduler`].

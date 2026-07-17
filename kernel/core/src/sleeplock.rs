@@ -1,7 +1,7 @@
 //! A scheduler-blocking mutual-exclusion lock (a *sleeping* mutex).
 //!
-//! Every lock in `lib/sync` ([`SpinLock`](rustos_sync::SpinLock),
-//! [`RwLock`](rustos_sync::RwLock), [`McsLock`](rustos_sync::McsLock), …)
+//! Every lock in `lib/sync` ([`SpinLock`](tairix_sync::SpinLock),
+//! [`RwLock`](tairix_sync::RwLock), [`McsLock`](tairix_sync::McsLock), …)
 //! *spins* on contention. That is correct only for a short critical section
 //! whose holder never gives up the CPU. A `SleepLock` is the opposite: its
 //! critical section may **park** — most importantly it may be held across a
@@ -296,8 +296,8 @@ mod tests {
     use super::*;
 
     use alloc::vec::Vec;
-    use rustos_kernel_sched_api::TaskId;
-    use rustos_sync::SpinLock;
+    use tairix_kernel_sched_api::TaskId;
+    use tairix_sync::SpinLock;
 
     struct RecordingWake {
         tasks: SpinLock<Vec<TaskId>>,

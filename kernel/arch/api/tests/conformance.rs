@@ -9,20 +9,20 @@
 //! over a faithful in-test double to prove the suite itself runs. The
 //! *real* per-port coverage lives in each `kernel/arch/<target>` crate's
 //! own `conformance` host test, which instantiates the same
-//! [`rustos_arch_api::conformance`] suite over its real `*Arch`,
+//! [`tairix_arch_api::conformance`] suite over its real `*Arch`,
 //! `SideChannel`, and `MemoryTags` handles.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
-use rustos_arch_api::conformance;
-use rustos_arch_api::context::{self, ContextSwitch, PrepareError, TaskContext, TaskEntry};
-use rustos_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
-use rustos_arch_api::percpu;
-use rustos_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
-use rustos_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
-use rustos_arch_api::timer::{self, TickFn, Timer};
-use rustos_arch_api::{CpuId, PerCpu, SchedulerArch};
+use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
+use tairix_arch_api::conformance;
+use tairix_arch_api::context::{self, ContextSwitch, PrepareError, TaskContext, TaskEntry};
+use tairix_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
+use tairix_arch_api::percpu;
+use tairix_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
+use tairix_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
+use tairix_arch_api::timer::{self, TickFn, Timer};
+use tairix_arch_api::{CpuId, PerCpu, SchedulerArch};
 
 #[derive(Default)]
 struct DoubleArch {

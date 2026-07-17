@@ -15,7 +15,7 @@ disk. A spelling with no remaining slash has the parent `.`; a parent
 that empties out is the root.
 
 A root is never stripped into: `dirname /tools` is `/`, and — the
-RustOS storage forest's equivalent — `dirname Home:/tools` is `Home:/`.
+TAIRiX storage forest's equivalent — `dirname Home:/tools` is `Home:/`.
 An alias root (`Home:/`, `System:/`, …) plays exactly the role `/`
 plays on POSIX systems.
 

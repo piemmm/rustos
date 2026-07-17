@@ -1,8 +1,8 @@
-# `rustos-drv-fs-fat32` — FAT32 filesystem driver (read/write)
+# `tairix-drv-fs-fat32` — FAT32 filesystem driver (read/write)
 
 Stage 5 deliverable. Reads and writes a FAT32 volume behind any
-`rustos_abi::driver::block::Block` device and exposes it through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead` and
+`tairix_abi::driver::block::Block` device and exposes it through the
+versioned `tairix_abi::driver::filesystem::FilesystemRead` and
 `FilesystemWrite` traits.
 
 The frozen `Filesystem` trait carries only `mount`/`unmount` and a
@@ -78,7 +78,7 @@ normalisation policy likewise belong to the VFS, not the driver.
 
 ## Test surface
 
-`cargo test -p rustos-drv-fs-fat32` builds a specification-shaped,
+`cargo test -p tairix-drv-fs-fat32` builds a specification-shaped,
 allocation-free in-memory FAT32 image and exercises:
 
 - Boot-sector validation (`open`), including bad-signature and
@@ -107,7 +107,7 @@ An **end-to-end QEMU vertical** drives the driver against a real
 kernel, brings the block device online, mounts a planted FAT32 image
 through `Fat32::open`, verifies the planted file, and creates + writes +
 reads back a fresh file. The image is built by the shared
-`rustos-test-fat32-image` fixture and planted by `cargo xtask test
+`tairix-test-fat32-image` fixture and planted by `cargo xtask test
 --qemu`; the guest tail names the same files through that fixture, so
 both sides share one source of truth (`AGENTS.md` §2.2). A
 `pjdfstest`-equivalent POSIX suite is still tracked in

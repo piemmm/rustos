@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_curses::Event;
+use tairix_curses::Event;
 
 use crate::buffer::{Buffer, Position};
 use crate::fileio::FileIo;

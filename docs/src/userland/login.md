@@ -1,6 +1,6 @@
 # Text login (`userland/session/login`)
 
-`rustos-login` authenticates a user against `kernel/sec` and launches a
+`tairix-login` authenticates a user against `kernel/sec` and launches a
 session on their behalf. Which session runs is **system policy, never a
 per-login prompt**: the authenticated account's text shell by default,
 or the graphical desktop when the administrator configured
@@ -13,8 +13,8 @@ command. The installed binary lives at
 `/System/Services/login.app/Run`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
-the audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
-`rustos-users`, and `rustos-vt` (the shared terminal-control vocabulary the
+the audited `lib/*` crates `tairix-abi`, `tairix-caps`, `tairix-log`,
+`tairix-users`, and `tairix-vt` (the shared terminal-control vocabulary the
 read line discipline keys off), so a userland service never links a kernel
 or driver crate (`AGENTS.md` §17.4).
 
@@ -109,7 +109,7 @@ exhaustively testable.
 ## The production authenticator (`UsersAuthenticator`)
 
 `auth::UsersAuthenticator` is the shipped `Authenticator`: it wraps a
-parsed [`rustos-users`](../lib/users.md) database — the
+parsed [`tairix-users`](../lib/users.md) database — the
 `/System/Security/Users` text — and delegates the whole verification to
 `UsersDb::authenticate` (PBKDF2-HMAC-SHA256 through `lib/crypto`,
 constant-time hash comparison, and a timing-equalised refusal for unknown
@@ -121,7 +121,7 @@ launches as the text session.
 
 ## The `Run` binary (`/System/Services/login.app/Run`)
 
-`src/run.rs` is the shipped login service — the pure-Rust (`rustos-rt`,
+`src/run.rs` is the shipped login service — the pure-Rust (`tairix-rt`,
 `AGENTS.md` §1) program PID 1 `init`'s `session` directive launches and
 supervises (`plans/PI.md` P11). It wires the real seams:
 
@@ -131,7 +131,7 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   screen model (`AGENTS.md` §2.2). The page shows whoever is at the
   console *which system they are logging in to*: a white-on-blue top bar
   with the machine name, OS version, and the wall-clock time; the
-  cyan-bordered `RustOS Login` box in the middle carrying the `Username:`
+  cyan-bordered `TAIRiX Login` box in the middle carrying the `Username:`
   prompt (which becomes `Password:`); a red, running `N failed attempts`
   line beneath the box that accumulates until a session launches; and a
   white-on-blue bottom bar with the memory in use, task count, logged-in
@@ -145,11 +145,11 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   deadline, never a poll — and each elapsed bound re-queries the figures
   and repaints (`AGENTS.md` §2.23, §17.1 tickless). The view selects the
   raw (echo-off) discipline with `stream_input_mode`
-  (`rustos_rt::set_input_mode`) for the whole page: it echoes the
+  (`tairix_rt::set_input_mode`) for the whole page: it echoes the
   username into the box itself (bounded at the account format's
   `MAX_USERNAME_LEN`, 32, so the field can never overflow its one-line
   box — an over-long line is refused whole, never truncated), renders
-  the shared `[input active...]` marker (`rustos_vt::secret`) in place of
+  the shared `[input active...]` marker (`tairix_vt::secret`) in place of
   every hidden field's text — its dots animated by the shared
   `SecretIndicator` timer cadence (one frame per second, freezing after
   the bounded window with no input), never by a keystroke, so the
@@ -162,7 +162,7 @@ supervises (`plans/PI.md` P11). It wires the real seams:
 - **`UsersAuthenticator`** over the database obtained through the
   capability-gated `users_db_read` syscall (`CAP_USERS_READ`, see
   [`architecture/syscalls.md`](../architecture/syscalls.md)) and re-parsed
-  with the fail-closed `rustos-users` parser. `rustos_login::supervise`
+  with the fail-closed `tairix-users` parser. `tairix_login::supervise`
   classifies each read into one of three states and acts on it **before
   every round** (never a once-read cache):
   - **Pending** (`Errno::WouldBlock`) — the encrypted root is still being
@@ -196,7 +196,7 @@ supervises (`plans/PI.md` P11). It wires the real seams:
 - **`SessionLauncher`** over the `spawn`/`wait` syscalls: the chosen
   session's program — the record's shell of choice for a text session,
   the OS `desktop` command app
-  (`rustos_login::DESKTOP_SESSION_PATH`,
+  (`tairix_login::DESKTOP_SESSION_PATH`,
   `/System/Apps/desktop.app/Run` — the same bundle the shell's
   `desktop` command word resolves to) for a graphical one
   (`session_program`, one mapping defined beside `SessionKind`) — is
@@ -227,7 +227,7 @@ supervises (`plans/PI.md` P11). It wires the real seams:
   seat and gains no authority.
 - **The elevation broker** (`plans/CAPABILITY_USE.md` CU5): at startup
   login binds its console's reserved elevation call endpoint
-  (`rustos_abi::elevate::elevate_endpoint` over its own kernel-attested
+  (`tairix_abi::elevate::elevate_endpoint` over its own kernel-attested
   `Origin::console`; the reserved id needs login's
   `CAP_IPC_BIND_PRIVILEGED`, so a squatter can never claim it). While a
   session runs, the supervision wait is a kernel wait-set multiplexing the
@@ -270,7 +270,7 @@ on fd 2 until a userland audit transport exists.
 
 ## Tests
 
-`cargo test -p rustos-login` drives the state machine against an in-memory
+`cargo test -p tairix-login` drives the state machine against an in-memory
 `LoginView`/`Authenticator`/`SessionLauncher` and a recording log sink,
 covering a successful text login, the text default launching the shell
 even when a graphical session is available, the configured graphical

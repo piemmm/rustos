@@ -9,9 +9,9 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_abi::driver::net_ring::RingGeometry;
-use rustos_abi::driver::BufferClass;
-use rustos_virtio::{ChainView, DmaHost, MockHost, MockTransport};
+use tairix_abi::driver::net_ring::RingGeometry;
+use tairix_abi::driver::BufferClass;
+use tairix_virtio::{ChainView, DmaHost, MockHost, MockTransport};
 
 /// MAC address the mock device exposes through its config window.
 const DEVICE_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
@@ -98,7 +98,7 @@ impl AutoDrainHost {
 }
 
 impl DmaHost for AutoDrainHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_virtio::DmaSlab, DriverError> {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
 }
@@ -132,7 +132,7 @@ struct SpuriousWakeHost {
 }
 
 impl DmaHost for SpuriousWakeHost {
-    fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_virtio::DmaSlab, DriverError> {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
 }

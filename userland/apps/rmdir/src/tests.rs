@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_help::SourceError;
+use tairix_help::SourceError;
 
 extern crate std;
 use std::collections::{BTreeMap, BTreeSet};
@@ -379,7 +379,7 @@ fn help_documents_the_parser_switches() {
     use std::fs;
 
     let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-    let locales = rustos_help::REQUIRED_LOCALES;
+    let locales = tairix_help::REQUIRED_LOCALES;
     for locale in locales {
         let path = format!("{help_root}/{locale}/rmdir.md");
         let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

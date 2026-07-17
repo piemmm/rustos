@@ -1,6 +1,6 @@
 [package]
-name = "rustos-stress"
-description = "RustOS `stress`: a load-generation command app in the spirit of the established `stress`/`stress-ng` surface — an unswappable controller spawning swappable CPU/memory/I-O/disk/cache workers, with overcommit, timeout, signal teardown, and a `sysmon` monitor option (§3 `userland/apps/` — `plans/STRESSTEST.md` ST5)."
+name = "tairix-stress"
+description = "TAIRiX `stress`: a load-generation command app in the spirit of the established `stress`/`stress-ng` surface — an unswappable controller spawning swappable CPU/memory/I-O/disk/cache workers, with overcommit, timeout, signal teardown, and a `sysmon` monitor option (§3 `userland/apps/` — `plans/STRESSTEST.md` ST5)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,22 +11,22 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-sysmon`. `cargo
-# build -p rustos-stress` builds the tool program with it; host tooling
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-sysmon`. `cargo
+# build -p tairix-stress` builds the tool program with it; host tooling
 # builds only the parse/plan/control *library*, so the host test build never
 # pulls the userland runtime's `_start` / `#[global_allocator]` / panic
 # handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-stress` load-generation library (below) and
+# The package is both the `tairix-stress` load-generation library (below) and
 # the `Run` entry-point binary of the `stress` tool. The binary is a
 # freestanding pure-Rust program on the native Tier-1 targets and an inert
 # host stub elsewhere (see `src/run.rs`).
 [[bin]]
-name = "rustos-stress-run"
+name = "tairix-stress-run"
 path = "src/run.rs"
 
 [dependencies]
@@ -34,17 +34,17 @@ path = "src/run.rs"
 # spawn/wait/waitset vocabulary, and the fd-3 `StdInfoRecord` this tool
 # emits; `stress` invents no parallel error set (§2.2) and never links a
 # kernel or driver crate (§17.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the mount-table walk the
 # disk-worker sizing reads its free-space figure from (§16.6) — never a
 # second data channel.
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`/`--help`
 # switches use (plans/APPS.md §4, §6).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, and the
 # spawn/wait/waitset/signal/fs syscall wrappers) plus the production
 # `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`) and the help
@@ -52,8 +52,8 @@ rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
 # pulled in only for the bare-metal targets the program is actually built
 # for; on the host none is linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

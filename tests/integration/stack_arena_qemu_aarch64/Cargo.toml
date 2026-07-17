@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-stack-arena-qemu-aarch64"
+name = "tairix-test-stack-arena-qemu-aarch64"
 description = "plans/PI.md guard-page fault-form (stage G2) QEMU integration test: prove the boot-time kthread-stack guard arena is laid out so a guard page in it can be unmapped — faulting on access — without ever shattering the 2 MiB block the running CPU executes on, on the virt board."
 version.workspace = true
 edition.workspace = true
@@ -17,24 +17,24 @@ workspace = true
 # integration test: the `-M virt` proof of the `plans/PI.md` stage-G2
 # guarded kthread-stack arena (`AddressSpace::prepare_guard_arena`). The
 # arena is its own 2 MiB-aligned block, so re-expressing it never touches
-# the block the CPU runs on. It links only the `rustos-arch-aarch64` port
+# the block the CPU runs on. It links only the `tairix-arch-aarch64` port
 # and reports the result through the ARM semihosting finisher. Keeping the
 # QEMU-exit shortcut in a dedicated bin (not a Cargo feature on the arch
 # crate) prevents feature unification from leaking it into any production
 # build (`AGENTS.md` §5.4.5 — fail closed).
 
 [[bin]]
-name = "rustos-test-stack-arena-qemu-aarch64"
+name = "tairix-test-stack-arena-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 # The Arch HAL MMU + TLB surface (`AGENTS.md` §17.2): the guard page is
-# torn down through `rustos_arch_api::mmu::AddressSpace::unmap` and the
-# stale entry flushed through `rustos_arch_api::tlb::TlbShootdown::flush_page`,
+# torn down through `tairix_arch_api::mmu::AddressSpace::unmap` and the
+# stale entry flushed through `tairix_arch_api::tlb::TlbShootdown::flush_page`,
 # so the fault-form is proven *through the HAL*.
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

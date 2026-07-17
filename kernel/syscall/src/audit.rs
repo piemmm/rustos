@@ -21,7 +21,7 @@
 //! Adding a new event takes the next free identifier in this file and a
 //! row in `docs/src/architecture/syscalls.md`.
 
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 /// Audit event identifiers used by `kernel/syscall`.
 ///
@@ -60,7 +60,7 @@ pub enum AuditEvent {
     /// record remains available for flood/DoS forensics when the level is
     /// lowered.
     ///
-    /// [`Errno::WouldBlock`]: rustos_abi::Errno::WouldBlock
+    /// [`Errno::WouldBlock`]: tairix_abi::Errno::WouldBlock
     SyscallHandlerWouldBlock,
     /// The owning subsystem answered that the named object does not exist
     /// (the handler returned [`Errno::NotFound`]).
@@ -76,7 +76,7 @@ pub enum AuditEvent {
     /// flood the boot log with errors, while the record remains available
     /// for probing/enumeration forensics when the level is lowered.
     ///
-    /// [`Errno::NotFound`]: rustos_abi::Errno::NotFound
+    /// [`Errno::NotFound`]: tairix_abi::Errno::NotFound
     SyscallHandlerNotFound,
 }
 
@@ -138,7 +138,7 @@ impl AuditEvent {
 
 /// Emit `event` to `sink` with the supplied structured fields.
 ///
-/// Returns whatever [`rustos_log::log`] returns: `true` if the event made
+/// Returns whatever [`tairix_log::log`] returns: `true` if the event made
 /// it past the global level filter, `false` if it was dropped. The
 /// dispatcher ignores the return value because the audit trail's
 /// configuration — not the call site — decides whether the record
@@ -159,7 +159,7 @@ pub(crate) fn record<S: Sink + ?Sized>(sink: &S, event: AuditEvent, fields: &[Fi
 #[cfg(test)]
 mod tests {
     use super::AuditEvent;
-    use rustos_log::{EventId, Level};
+    use tairix_log::{EventId, Level};
 
     #[test]
     fn ids_are_frozen_and_in_range() {

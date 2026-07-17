@@ -39,10 +39,10 @@
 //!   implementation; the keyed authenticity of the block still rests on the
 //!   AEAD and the metadata MAC.
 
-use rustos_crypto::sha256;
+use tairix_crypto::sha256;
 
 /// Length, in bytes, of a data block's logical content hash (SHA-256).
-pub const LOGICAL_HASH_LEN: usize = rustos_crypto::SHA256_OUTPUT_LEN;
+pub const LOGICAL_HASH_LEN: usize = tairix_crypto::SHA256_OUTPUT_LEN;
 
 /// Length, in bytes, of a data block's fast physical checksum.
 pub const PHYS_CHECKSUM_LEN: usize = 8;
@@ -126,7 +126,7 @@ pub fn read_stored_form(src: &[u8]) -> Result<StoredForm, DataFault> {
 }
 
 /// Which integrity layer rejected a data block. Surfaced to the caller as a
-/// single [`rustos_abi::DriverError::DeviceFault`] (the `abi-v1` error surface
+/// single [`tairix_abi::DriverError::DeviceFault`] (the `abi-v1` error surface
 /// is frozen), but kept distinct internally so a media /
 /// transport corruption (the fast [`Physical`](Self::Physical) checksum) is
 /// not confused with a ciphertext tamper (the [`Aead`](Self::Aead) tag) or a

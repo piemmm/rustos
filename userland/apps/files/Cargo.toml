@@ -1,6 +1,6 @@
 [package]
-name = "rustos-files"
-description = "RustOS filesystem browser app: the `Run` entry-point binary of the on-disk files.app bundle, composing the shared lib/browse engine over the live capability-checked directory source (§10/§16 — PLAN.md Stage 7, plans/APPWIN.md AW3/AW5)."
+name = "tairix-files"
+description = "TAIRiX filesystem browser app: the `Run` entry-point binary of the on-disk files.app bundle, composing the shared lib/browse engine over the live capability-checked directory source (§10/§16 — PLAN.md Stage 7, plans/APPWIN.md AW3/AW5)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,7 +18,7 @@ publish.workspace = true
 # Tier-1 targets and an inert host stub elsewhere (see `src/run.rs` /
 # `build.rs`).
 [[bin]]
-name = "rustos-files-run"
+name = "tairix-files-run"
 path = "src/run.rs"
 
 # Everything the freestanding `Run` binary links is pulled in for the
@@ -27,24 +27,24 @@ path = "src/run.rs"
 [target.'cfg(target_os = "none")'.dependencies]
 # The frozen `Errno`, the input/display vocabulary, and the window-channel
 # wire types the binary speaks (§2.2, §17.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one shared directory-browser engine: `Browser`, the themed
 # `render`, the `VfsDirectorySource` composition, and the canonical
 # browser-view geometry (§2.2, §6).
-rustos-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # Shared integer screen geometry (`Rect`) for the render viewport (§2.2).
-rustos-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The single shared theme definition (§10).
-rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The app half of the window channel: `WindowClient` (create / present /
 # close over the `WindowTransport` seam) and `WindowEvents` (the typed,
 # parked event wait over the `EventSource` seam).
-rustos-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the syscall wrappers (`shm_create` /
 # `shm_grant`, `port_bind` / `ipc_recv`, `ipc_call`, `waitset_*`,
 # `read_dir_all`).
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 
 [lints]
 workspace = true

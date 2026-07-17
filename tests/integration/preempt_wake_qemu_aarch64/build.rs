@@ -2,7 +2,7 @@
 //! regression vertical.
 //!
 //! Identical in shape to the sibling `preempt_el0_qemu_aarch64` build script
-//! (the shared dump/convert helpers live in `rustos_itest_harness`, so no
+//! (the shared dump/convert helpers live in `tairix_itest_harness`, so no
 //! aarch64 build script re-rolls them):
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel and dump the
@@ -10,7 +10,7 @@
 //!    discovers the GICv2 base and generic-timer rate from the firmware tree.
 //! 2. Compile the pure-Rust EL0 spinner program (`tests/integration/
 //!    el0_spinner_program`) position-independent for the freestanding aarch64
-//!    target, pinning its busy-loop count through `RUSTOS_EL0_SPINS`.
+//!    target, pinning its busy-loop count through `TAIRIX_EL0_SPINS`.
 //! 3. Convert the linked PIE ELF to an `rxe` blob stamped with the kernel's
 //!    compiled-in syscall CFI tag, emitted as a Rust source the test
 //!    `include!`s.
@@ -42,7 +42,7 @@ const SPINS: u64 = 20_000_000;
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -65,7 +65,7 @@ fn main() {
 
         // One CPU: this is a single-core preemption slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
         let rxe = build_and_convert_program(manifest_dir, &out_dir, &program_dir);
@@ -95,7 +95,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         // Pin the program's busy-loop count (the single source of truth).
-        .env("RUSTOS_EL0_SPINS", SPINS.to_string())
+        .env("TAIRIX_EL0_SPINS", SPINS.to_string())
         .env(
             "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
@@ -103,7 +103,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-el0-spinner",
+            "tairix-test-el0-spinner",
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -118,12 +118,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         "building the el0-spinner fixture program failed"
     );
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-test-el0-spinner");
+    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-el0-spinner");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert the el0-spinner fixture program ELF into an rxe image")

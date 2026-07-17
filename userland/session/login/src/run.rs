@@ -2,17 +2,17 @@
 //! `/System/Services/login.app/Run` (`plans/PI.md` P11) — the
 //! program PID 1 `init` launches as the per-console session supervisor.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so
-//! it links the Rust userland runtime `rustos-rt` — never the C ABI, which
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so
+//! it links the Rust userland runtime `tairix-rt` — never the C ABI, which
 //! exists solely for programs **not** written in Rust.
-//! `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, the `mem_map`-backed global allocator, and the
-//! syscall wrappers; `rustos_rt::entry!` names this program's `main`.
+//! `tairix-rt` provides `_start`, the per-process stack canary, the panic handler, the `mem_map`-backed global allocator, and the
+//! syscall wrappers; `tairix_rt::entry!` names this program's `main`.
 //!
-//! `main` wires the real seams the [`rustos_login::Login`] state machine
+//! `main` wires the real seams the [`tairix_login::Login`] state machine
 //! drives and supervises sessions on this console:
 //!
-//! * [`rustos_login::LoginView`] as the full-screen curses view
-//!   ([`rustos_login::CursesView`]) over the **inherited standard
+//! * [`tairix_login::LoginView`] as the full-screen curses view
+//!   ([`tairix_login::CursesView`]) over the **inherited standard
 //!   streams**: rendered bytes go to fd 1, keystrokes come from fd 0. The
 //!   view selects the raw (echo-off) discipline through the
 //!   `stream_input_mode` syscall for the whole page — it echoes the
@@ -21,16 +21,16 @@
 //!   credential). Its status bars query `sysinfod` (identity, memory,
 //!   load/task/user censuses) and the kernel wall clock; a refused or
 //!   unavailable figure renders as a placeholder and never blocks a login.
-//! * [`rustos_login::UsersAuthenticator`] over the user database obtained
-//!   through the capability-gated `users_db_read` syscall (`CAP_USERS_READ`) and re-parsed with the fail-closed `rustos-users`
+//! * [`tairix_login::UsersAuthenticator`] over the user database obtained
+//!   through the capability-gated `users_db_read` syscall (`CAP_USERS_READ`) and re-parsed with the fail-closed `tairix-users`
 //!   parser. When no database is held — an installer image, or the boot
 //!   read refused the record — a deny-all authenticator is wired instead,
 //!   so the prompt stays up and **every** login is refused (fail closed, never invent an account).
-//! * [`rustos_login::SessionLauncher`] through the `spawn` syscall: the
+//! * [`tairix_login::SessionLauncher`] through the `spawn` syscall: the
 //!   authenticated
 //!   record's **shell of choice** is spawned and supervised; the session's
 //!   exit code is reported back to the login loop.
-//! * [`rustos_login::handle_elevate_request`] over this console's reserved
+//! * [`tairix_login::handle_elevate_request`] over this console's reserved
 //!   elevation call endpoint (`plans/CAPABILITY_USE.md` CU5): while the
 //!   session runs, the supervision wait multiplexes the shell child with the
 //!   endpoint, so an `elevate <user> <program>` request from the session's
@@ -58,33 +58,33 @@
 mod program {
     // The session-launch path builds the child environment with the heap,
     // which is live by then (a successful authentication already parsed the
-    // user database). `rustos-rt` registers the process global allocator.
+    // user database). `tairix-rt` registers the process global allocator.
     extern crate alloc;
 
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use rustos_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
-    use rustos_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
-    use rustos_abi::seat::SEAT_PRIMARY;
-    use rustos_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
-    use rustos_abi::{
+    use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
+    use tairix_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
+    use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
+    use tairix_abi::{
         Errno, InputMode, OpenFlags, Origin, Time64, WaitSetOp, WaitSourceKind, CONSOLE_INHERIT,
         ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
-    use rustos_caps::CapabilitySet;
-    use rustos_curses::{Screen, Size, StreamTty};
-    use rustos_login::elevate::ElevateLauncher;
-    use rustos_login::{
+    use tairix_caps::CapabilitySet;
+    use tairix_curses::{Screen, Size, StreamTty};
+    use tairix_login::elevate::ElevateLauncher;
+    use tairix_login::{
         events, handle_elevate_request, session_environment, session_program, supervise,
         AuthenticatedUser, Authenticator, ConsoleMode, CursesView, DbLoad, Login, LoginConfig,
         LoginError, LoginStatus, LoginView, SessionKind, SessionLauncher, SessionOutcome,
         StatusSource, DESKTOP_SESSION_PATH,
     };
-    use rustos_procinfo::{call, IpcTransport};
-    use rustos_rt::LogSink;
-    use rustos_termcap::TermType;
-    use rustos_users::{UsersDb, MAX_DB_LEN};
+    use tairix_procinfo::{call, IpcTransport};
+    use tairix_rt::LogSink;
+    use tairix_termcap::TermType;
+    use tairix_users::{UsersDb, MAX_DB_LEN};
 
     /// Authentication attempts per login round before the round fails
     /// closed and the loop opens a fresh one. The
@@ -112,11 +112,11 @@ mod program {
 
     impl ConsoleMode for RtConsoleMode {
         fn raw(&self) -> bool {
-            rustos_rt::set_input_mode(InputMode::Raw) >= 0
+            tairix_rt::set_input_mode(InputMode::Raw) >= 0
         }
 
         fn cooked(&self) {
-            let _ = rustos_rt::set_input_mode(InputMode::Cooked);
+            let _ = tairix_rt::set_input_mode(InputMode::Cooked);
         }
     }
 
@@ -171,12 +171,12 @@ mod program {
         }
 
         fn now(&self) -> Option<Time64> {
-            let reading = rustos_rt::wall_time().ok()?;
+            let reading = tairix_rt::wall_time().ok()?;
             reading.state().is_set().then(|| reading.time())
         }
 
         fn monotonic_ns(&self) -> u64 {
-            rustos_rt::clock_get()
+            tairix_rt::clock_get()
         }
     }
 
@@ -227,7 +227,7 @@ mod program {
         /// refusal (id squatted ahead of us, no registry) must never be
         /// "recovered" by serving elsewhere.
         fn bind() -> Option<Self> {
-            let own_console = rustos_rt::self_origin().ok()?.console();
+            let own_console = tairix_rt::self_origin().ok()?.console();
             if own_console == ORIGIN_CONSOLE_NONE {
                 return None;
             }
@@ -237,7 +237,7 @@ mod program {
             // re-authentication are enforced per request by the broker.
             // Capacity 1: elevation is serialised per console by design, so
             // a second concurrent post fails closed instead of queueing.
-            if rustos_rt::call_create(
+            if tairix_rt::call_create(
                 endpoint,
                 &empty,
                 &empty,
@@ -248,13 +248,13 @@ mod program {
             {
                 return None;
             }
-            let waitset = rustos_rt::waitset_create();
+            let waitset = tairix_rt::waitset_create();
             if waitset < 0 {
                 return None;
             }
             #[allow(clippy::cast_sign_loss)] // `waitset >= 0` is the handle encoding.
             let waitset = waitset as u64;
-            if rustos_rt::waitset_ctl(
+            if tairix_rt::waitset_ctl(
                 waitset,
                 WaitSetOp::Add,
                 WaitSourceKind::Endpoint,
@@ -287,7 +287,7 @@ mod program {
         fn serve_one(&self, authenticator: &dyn Authenticator, sink: &LogSink) {
             let mut request = [0u8; ELEVATE_MAX_REQUEST];
             let mut ticket = 0u64;
-            let Ok(len) = rustos_rt::call_recv_nonblock(self.endpoint, &mut request, &mut ticket)
+            let Ok(len) = tairix_rt::call_recv_nonblock(self.endpoint, &mut request, &mut ticket)
             else {
                 request.fill(0);
                 return;
@@ -296,7 +296,7 @@ mod program {
             // origin fails closed as "no console", which the broker refuses.
             let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
             let peer_console =
-                match rustos_rt::call_peer_origin(self.endpoint, ticket, &mut origin_buf) {
+                match tairix_rt::call_peer_origin(self.endpoint, ticket, &mut origin_buf) {
                     Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
                         Ok(origin) => origin.console(),
                         Err(_) => ORIGIN_CONSOLE_NONE,
@@ -314,7 +314,7 @@ mod program {
             request.fill(0);
             let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
             if let Ok(total) = reply.encode(&mut reply_buf) {
-                let _ = rustos_rt::call_reply(self.endpoint, ticket, &reply_buf[..total]);
+                let _ = tairix_rt::call_reply(self.endpoint, ticket, &reply_buf[..total]);
             }
         }
     }
@@ -328,7 +328,7 @@ mod program {
 
     impl ElevateLauncher for RtElevateLauncher {
         fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
-            let ret = rustos_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
+            let ret = tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -336,7 +336,7 @@ mod program {
             // `ret >= 0` here, so the cast preserves the PID value; PIDs
             // fit an `i32` on this ABI.
             #[allow(clippy::cast_possible_truncation)]
-            let wret = rustos_rt::wait_exit(ret as i32, &mut status);
+            let wret = tairix_rt::wait_exit(ret as i32, &mut status);
             if wret < 0 {
                 return Err(errno_from(wret));
             }
@@ -382,7 +382,7 @@ mod program {
         /// spinning or abandoning the session.
         fn supervise_session(&self, context: &ElevationContext, pid: i32) -> Result<i32, Errno> {
             let child_id = u64::from(pid.unsigned_abs());
-            if rustos_rt::waitset_ctl(
+            if tairix_rt::waitset_ctl(
                 context.waitset,
                 WaitSetOp::Add,
                 WaitSourceKind::Child,
@@ -394,7 +394,7 @@ mod program {
             }
             let status = loop {
                 let mut token = 0u64;
-                let ret = rustos_rt::waitset_wait(context.waitset, u64::MAX, &mut token);
+                let ret = tairix_rt::waitset_wait(context.waitset, u64::MAX, &mut token);
                 if ret != 0 {
                     // An unexpected wait failure must not wedge the session:
                     // fall back to the plain blocking wait.
@@ -407,7 +407,7 @@ mod program {
             };
             // Remove the reaped child's member so the reusable set never
             // carries a stale PID into the next session.
-            let _ = rustos_rt::waitset_ctl(
+            let _ = tairix_rt::waitset_ctl(
                 context.waitset,
                 WaitSetOp::Del,
                 WaitSourceKind::Child,
@@ -420,7 +420,7 @@ mod program {
         /// The targeted blocking reap of the session's shell.
         fn plain_wait(&self, pid: i32) -> Result<i32, Errno> {
             let mut status = 0i32;
-            let wret = rustos_rt::wait_exit(pid, &mut status);
+            let wret = tairix_rt::wait_exit(pid, &mut status);
             if wret < 0 {
                 return Err(errno_from(wret));
             }
@@ -455,7 +455,7 @@ mod program {
             // manifest ∩ the account ceiling), never login's.
             let program = session_program(user, kind);
             let ret =
-                rustos_rt::spawn_with(program.as_bytes(), CONSOLE_INHERIT, user.uid.0, &[], &env);
+                tairix_rt::spawn_with(program.as_bytes(), CONSOLE_INHERIT, user.uid.0, &[], &env);
             if ret < 0 {
                 return Err(errno_from(ret));
             }
@@ -502,7 +502,7 @@ mod program {
         // The wrapper returns the raw `-errno` on failure; `WouldBlock` is the only one that means "retry", every
         // other refusal fails closed to the deny-all prompt.
         let pending = -i64::from(Errno::WouldBlock.as_i32());
-        let state = match rustos_rt::users_db_read(&mut buf) {
+        let state = match tairix_rt::users_db_read(&mut buf) {
             Ok(len) => match core::str::from_utf8(&buf[..len])
                 .ok()
                 .and_then(|text| UsersDb::parse(text).ok())
@@ -530,7 +530,7 @@ mod program {
     /// default rather than a guessed intent — a malformed store never
     /// breaks the login.
     fn configured_session_default() -> SessionKind {
-        let fd = rustos_rt::fs_open(rustos_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
+        let fd = tairix_rt::fs_open(tairix_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
         if fd < 0 {
             return SessionKind::Text;
         }
@@ -540,19 +540,19 @@ mod program {
         // One bounded read suffices: the engine refuses any document
         // longer than its own ceiling, so a store that does not fit this
         // buffer could never parse anyway.
-        let mut buf = [0u8; rustos_sysconfig::MAX_CONFIG_LEN];
-        let outcome = rustos_rt::fs_read(fd, 0, &mut buf);
-        let _ = rustos_rt::fs_close(fd);
+        let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN];
+        let outcome = tairix_rt::fs_read(fd, 0, &mut buf);
+        let _ = tairix_rt::fs_close(fd);
         let Ok(len) = outcome else {
             return SessionKind::Text;
         };
         let Ok(text) = core::str::from_utf8(&buf[..len]) else {
             return SessionKind::Text;
         };
-        match rustos_sysconfig::SystemConfig::parse(text) {
+        match tairix_sysconfig::SystemConfig::parse(text) {
             Ok(config) => match config.login_type {
-                rustos_sysconfig::LoginType::Graphical => SessionKind::Graphical,
-                rustos_sysconfig::LoginType::Text => SessionKind::Text,
+                tairix_sysconfig::LoginType::Graphical => SessionKind::Graphical,
+                tairix_sysconfig::LoginType::Text => SessionKind::Text,
             },
             Err(_) => SessionKind::Text,
         }
@@ -579,19 +579,19 @@ mod program {
     ///   unbound endpoint fails the call itself with `NotFound`. The probe
     ///   learns nothing about the seat and gains no authority.
     fn graphical_session_available() -> bool {
-        let fd = rustos_rt::fs_open(DESKTOP_SESSION_PATH.as_bytes(), OpenFlags::READ);
+        let fd = tairix_rt::fs_open(DESKTOP_SESSION_PATH.as_bytes(), OpenFlags::READ);
         if fd < 0 {
             return false;
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         // `fd >= 0` checked above; descriptors are small kernel indices.
-        let _ = rustos_rt::fs_close(fd as u32);
+        let _ = tairix_rt::fs_close(fd as u32);
         let request = DisplayRequest::Query {
             seat_id: SEAT_PRIMARY,
         }
         .to_le_bytes();
         let mut reply = [0u8; DISPLAY_MODE_REPLY_LEN];
-        rustos_rt::ipc_call(DISPLAY_ENDPOINT, &request, &mut reply).is_ok()
+        tairix_rt::ipc_call(DISPLAY_ENDPOINT, &request, &mut reply).is_ok()
     }
 
     /// Run one login round: prompt → authenticate → run the session to
@@ -638,7 +638,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// [`supervise`] reloads the user database (and so re-wires the
@@ -659,10 +659,10 @@ mod program {
         // closed at the missing endpoint, never served unattested.
         let elevation = ElevationContext::bind();
         if elevation.is_none() {
-            rustos_log::log(
+            tairix_log::log(
                 &sink,
-                &rustos_log::Event {
-                    level: rustos_log::Level::Warn,
+                &tairix_log::Event {
+                    level: tairix_log::Level::Warn,
                     id: events::ELEVATE_UNAVAILABLE,
                     message: "elevation endpoint unavailable; sessions run without a broker",
                     fields: &[],
@@ -683,7 +683,7 @@ mod program {
         // screen is re-entered at each round. The terminal geometry comes
         // from the console stream; a console that cannot report one gets
         // the classic 80×25 rather than no login at all.
-        let size = rustos_rt::terminal_size(1)
+        let size = tairix_rt::terminal_size(1)
             .map(|s| Size::new(s.rows(), s.cols()))
             .unwrap_or(Size::new(25, 80));
         let screen = Screen::new(StreamTty, TermType::Xterm256Color, size);
@@ -691,20 +691,20 @@ mod program {
         supervise(
             load_users_db,
             || {
-                let _ = rustos_rt::users_db_wait(DB_WAIT_TIMEOUT_NS);
+                let _ = tairix_rt::users_db_wait(DB_WAIT_TIMEOUT_NS);
             },
             |authenticator| login_round(&view, elevation.as_ref(), authenticator, &sink),
         );
         1
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

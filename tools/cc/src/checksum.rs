@@ -5,7 +5,7 @@
 //! the exact bytes that were run are recorded for the audit trail. When a caller (or the environment) supplies an
 //! expected digest, the wrapper *verifies* it and fails closed on a mismatch; otherwise it records the computed digest for logging.
 
-use rustos_crypto::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
+use tairix_crypto::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
 
 /// Compute the SHA-256 digest of `bytes`.
 #[must_use]

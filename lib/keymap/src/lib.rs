@@ -1,4 +1,4 @@
-//! RustOS shared terminal key map (`lib/keymap`).
+//! TAIRiX shared terminal key map (`lib/keymap`).
 //!
 //! A console-input *producer* — a directly attached keyboard driver such as
 //! `drivers/input/usb_kbd` or `drivers/input/ps2` — decodes its device's
@@ -20,8 +20,8 @@
 //!
 //! The escape sequences the named keys send are *not* defined here: they are
 //! the canonical ANSI / VT / xterm vocabulary `lib/vt` already owns. This crate
-//! reuses [`rustos_vt::control`]'s control-byte constants and
-//! [`rustos_vt::key::Key`]'s `SS3` / `CSI … ~` tables, so there is no second
+//! reuses [`tairix_vt::control`]'s control-byte constants and
+//! [`tairix_vt::key::Key`]'s `SS3` / `CSI … ~` tables, so there is no second
 //! escape-sequence definition in the tree. Only those
 //! `const` tables are touched, so the crate is allocation-free.
 //!
@@ -38,9 +38,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use rustos_input::{Key, Modifiers, NamedKey};
-use rustos_vt::control;
-use rustos_vt::key::Key as VtKey;
+use tairix_input::{Key, Modifiers, NamedKey};
+use tairix_vt::control;
+use tairix_vt::key::Key as VtKey;
 
 /// The longest console sequence any single key press encodes to, in bytes.
 ///
@@ -156,7 +156,7 @@ impl<'a> Writer<'a> {
 ///   [`NamedKey::Backspace`] → `DEL` (`0x7F`), [`NamedKey::Escape`] → `ESC`.
 /// * The arrow keys send `ESC [ A`..`ESC [ D` (normal cursor mode).
 /// * The editing / navigation keys and `F1`..`F12` send the canonical
-///   [`rustos_vt`] `SS3` / `CSI … ~` sequences.
+///   [`tairix_vt`] `SS3` / `CSI … ~` sequences.
 ///
 /// # Errors
 ///
@@ -233,7 +233,7 @@ fn encode_named(named: NamedKey, writer: &mut Writer<'_>) -> Result<(), KeymapEr
 const DEL: u8 = 0x7f;
 
 /// Map an editing / navigation / function [`NamedKey`] to its canonical
-/// [`rustos_vt`] key, or `None` for a key handled directly (the arrows and the
+/// [`tairix_vt`] key, or `None` for a key handled directly (the arrows and the
 /// control keys) or one with no terminal encoding (a malformed function
 /// number).
 fn named_to_vt(named: NamedKey) -> Option<VtKey> {
@@ -274,7 +274,7 @@ fn named_to_vt(named: NamedKey) -> Option<VtKey> {
 ///
 /// Kept behind module aliases so the wire [`AbiModifiers`] never collides with
 /// the `lib/input` [`Modifiers`] this crate's encoder already uses.
-use rustos_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
 
 /// Map a wire [`NamedKeyCode`] to the `lib/input` [`NamedKey`].
 ///

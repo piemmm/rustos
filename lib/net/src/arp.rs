@@ -10,7 +10,7 @@
 //! binding is link-layer evidence, and the cache itself is shared with
 //! the IPv6 Neighbour Discovery provider.
 
-use rustos_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
+use tairix_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
 
 use crate::addr::Ipv4Addr;
 

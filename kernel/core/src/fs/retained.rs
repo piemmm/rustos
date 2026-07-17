@@ -56,11 +56,11 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::DriverError;
-use rustos_kernel_mem::{CacheBudget, MemoryPressure};
-use rustos_sync::SpinLock;
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::DriverError;
+use tairix_kernel_mem::{CacheBudget, MemoryPressure};
+use tairix_sync::SpinLock;
 use zeroize::Zeroize;
 
 /// Approximate per-entry bookkeeping cost (map node, the fixed entry
@@ -99,7 +99,7 @@ pub trait FlushBlock: Block {
 /// The dual-acceptance shadow of a volume's mutation-evidence window
 /// (`plans/DEVICES.md` D4c): the on-medium region any foreign mutation of
 /// the volume must rewrite (the format's superblock ring / superblock /
-/// boot+`FSInfo` head, sized by `rustos_fsprobe::evidence_len`), held as two
+/// boot+`FSInfo` head, sized by `tairix_fsprobe::evidence_len`), held as two
 /// acceptable states — the content of the last **committed** device flush
 /// and the **latest** content this kernel wrote. At re-insert each
 /// evidence block on the medium must equal one of the two (the device may
@@ -190,7 +190,7 @@ impl RetainedWrites {
     /// whole blocks. A malformed window (empty, or not block-aligned) or
     /// a refused allocation leaves the journal without evidence — the
     /// re-insert then fails closed to the conflict path, never a guess.
-    /// The window is bounded by `rustos_fsprobe::EVIDENCE_MAX`, far below
+    /// The window is bounded by `tairix_fsprobe::EVIDENCE_MAX`, far below
     /// the retention budget, so it is not charged against it.
     pub fn set_evidence(&mut self, first_lba: u64, bytes: &[u8]) {
         self.invalidate_evidence();
@@ -556,7 +556,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use rustos_kernel_mem::FreeMemorySource;
+    use tairix_kernel_mem::FreeMemorySource;
 
     const BLOCK_SIZE: u32 = 512;
 

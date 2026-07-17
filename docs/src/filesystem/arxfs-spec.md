@@ -1,11 +1,11 @@
 # ARXFS specification
 
 Status: implementation spec  
-Target: RustOS  
+Target: TAIRiX  
 Driver path: `drivers/filesystem/arxfs/`  
 Last updated: 2026-06-02
 
-ARXFS is the native RustOS filesystem: copy-on-write, encrypted, checksummed,
+ARXFS is the native TAIRiX filesystem: copy-on-write, encrypted, checksummed,
 compressed, deduplicating, SSD-aware, and recoverable. It is optimised for high
 I/O throughput, low CPU use, data integrity, and clean fsck/recovery.
 
@@ -50,7 +50,7 @@ Allowed implementation flexibility:
   incompressible record raw;
 - future on-disk format versions that change constants globally.
 
-Normal RustOS mount security flags such as `ro`, `noexec`, `nosuid`, and
+Normal TAIRiX mount security flags such as `ro`, `noexec`, `nosuid`, and
 `nodev` remain valid because they are permission policy, not ARXFS feature
 configuration.
 
@@ -66,7 +66,7 @@ configuration.
 | Data integrity | Every physical record is checksummed; every logical record has a strong hash. |
 | Redundancy | Critical metadata has at least two physical copies. |
 | Encryption | Every ARXFS volume is encrypted. Plaintext ARXFS is forbidden. |
-| Compression | First-party RustOS zstd-fast-style compression is always active. |
+| Compression | First-party TAIRiX zstd-fast-style compression is always active. |
 | Deduplication | Exact verified dedupe is always active; it may miss duplicates but may never merge unequal bytes. |
 | Shared extents | Reflink/shared immutable chunks are core storage. |
 | Sparse files | Always active. All-zero logical ranges are stored as metadata-only ZERO/Hole extents, never a physical data record (§19). |
@@ -75,7 +75,7 @@ configuration.
 | Scrub | Online verification and repair from redundant copies. |
 | Check/fsck | Offline structural validation, repair, and index rebuild. |
 | Rescue | Damaged-volume root discovery and file extraction. |
-| Time | All persistent timestamps use RustOS `Time64`. |
+| Time | All persistent timestamps use TAIRiX `Time64`. |
 | Security | POSIX bits + ACLs + capability gates on every inode. |
 | Extended metadata | Every inode has a namespaced extended-attribute store (encrypted, mirrored, COW); foreign per-file metadata (Acorn/Amiga/Atari/Mac) is preserved across copies (§21). |
 
@@ -108,7 +108,7 @@ No external zstd/compression dependency is allowed.
 
 ARXFS must not use `zstd`, `zstd-safe`, `zstd-sys`, `libzstd`, a vendored C
 library, a registry compression crate, or code downloaded from another site.
-The zstd-compatible codec subset used by ARXFS must be written in the RustOS
+The zstd-compatible codec subset used by ARXFS must be written in the TAIRiX
 workspace in Rust.
 
 Placement:
@@ -318,7 +318,7 @@ volume wrapping key
       -> dedupe-domain key
 ```
 
-Secret-holding allocations inherit RustOS zero-on-free requirements.
+Secret-holding allocations inherit TAIRiX zero-on-free requirements.
 
 > **Implementation.** `ARXFS::format` takes an `EntropySource` seam onto the
 > platform RNG and draws the master key, wrapping salt, wrap nonce, and UUID
@@ -464,7 +464,7 @@ Missing a duplicate is acceptable. Merging unequal data is corruption.
 
 ## 10. Compression
 
-Compression is mandatory and uses the first-party RustOS zstd codec.
+Compression is mandatory and uses the first-party TAIRiX zstd codec.
 
 Rules:
 
@@ -596,8 +596,8 @@ ARXFS must enforce:
 
 - no ambient root authority;
 - capability checks before state access;
-- no `/proc`, `/sys`, or legacy top-level RustOS layout assumptions;
-- RustOS-forbidden top-level names rejected on the system volume;
+- no `/proc`, `/sys`, or legacy top-level TAIRiX layout assumptions;
+- TAIRiX-forbidden top-level names rejected on the system volume;
 - fail-closed behaviour.
 
 ### Directory-entry names
@@ -672,7 +672,7 @@ Discard may never destroy data reachable from retained roots.
 3. Metadata authentication/checksums and duplicated critical metadata.
 4. Encrypted volume creation, key hierarchy, filename/data encryption.
 5. Data records with physical checksum and logical hash.
-6. First-party RustOS zstd codec and ARXFS compression integration.
+6. First-party TAIRiX zstd codec and ARXFS compression integration.
 7. Chunk table, refcounts, reverse refs, reflinks, dedupe index.
 8. Online scrub.
 9. Offline check and rescue.
@@ -705,7 +705,7 @@ Minimum acceptance tests:
 - fuzz targets for mount, metadata decode, directory decode, compression decode,
   check, and rescue.
 
-The implementing agent must run the full RustOS CI/test requirements from
+The implementing agent must run the full TAIRiX CI/test requirements from
 `AGENTS.md` before reporting completion. 
 ---
 
@@ -720,7 +720,7 @@ ARXFS is not complete until:
 - ABI changes are versioned and documented;
 - docs under `docs/src/filesystem/` are updated;
 - `cargo fmt --all`, `cargo xtask ci`, and required fuzz/proptest runs pass for
-  the whole RustOS workspace;
+  the whole TAIRiX workspace;
 
 ---
 
@@ -752,7 +752,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 3 | Metadata authentication/checksums and duplicated critical metadata. | ✓ |
 | 4 | Encrypted volume creation, key hierarchy, filename/data encryption. | ✓ |
 | 5 | Data records with physical checksum and logical hash. | ✓ |
-| 6 | First-party RustOS zstd codec and ARXFS compression integration. | ✓ |
+| 6 | First-party TAIRiX zstd codec and ARXFS compression integration. | ✓ |
 | 7 | Chunk table, refcounts, reverse refs, reflinks, dedupe index. | ✓ |
 | 8 | Online scrub. | ✓ |
 | 9 | Offline check and rescue. | ✓ |
@@ -848,7 +848,7 @@ rewrite — all pass, alongside the crash-replay sweep, the 1 GiB `fssoak`, the
 posix suite, and the QEMU vertical.
 
 Stage 6 made compression **mandatory and always on** (§1, §10) with a
-**first-party RustOS codec — no external zstd/compression dependency** (§3,
+**first-party TAIRiX codec — no external zstd/compression dependency** (§3,
 `AGENTS.md` §2.12 / §16.4). The codec landed as the new `lib/compress` crate:
 a low-CPU, byte-oriented LZ77 ("zstd-fast-style") codec with a `"RLZ1"` frame
 header, a greedy hash-table match finder, and LZ4-style literal/match token
@@ -1072,7 +1072,7 @@ rescue" are all present: the `fuzz_mount` harness (`tests/fuzz_mount.rs`) drives
 the mount / metadata / scrub-progress / health-baseline / check / rescue decode
 paths and now also the **directory-block decode** path (`read_dir`/`lookup`
 decrypt and parse the encrypted dirent payload that the mount-time free-space
-walk never reads), while the `rustos-compress` `fuzz_compress` harness covers
+walk never reads), while the `tairix-compress` `fuzz_compress` harness covers
 compression decode; every harness keeps the single invariant "returns a
 `Result`, never panics, fails closed" and is wired into `cargo xtask fuzz` /
 `--quick` / `ci` / the nightly `--soak`. The crash-replay sweep is generalised
@@ -1186,7 +1186,7 @@ ARXFS gives every inode a general-purpose, namespaced `key → value`
 extended-attribute store, and uses it to preserve foreign-filesystem per-file
 metadata (Acorn/RISC OS, Amiga, Atari, classic Mac) that has no POSIX
 equivalent and would otherwise be destroyed by a copy. Preserving another
-system's metadata is interoperability with foreign data, not RustOS
+system's metadata is interoperability with foreign data, not TAIRiX
 self-compatibility, and is explicitly permitted (`AGENTS.md` §2.13).
 
 The key grammar, the bounded attribute model, the on-disk encoding, and the
@@ -1221,11 +1221,11 @@ drawn from a **closed, curated** namespace set:
 | `amiga` | AmigaDOS preset metadata | file read/write permission |
 | `atari` | Atari GEMDOS/TOS preset metadata | file read/write permission |
 | `mac` | classic Mac OS / HFS preset metadata | file read/write permission |
-| `rustos` | RustOS-native extended metadata | file read/write permission |
+| `tairix` | TAIRiX-native extended metadata | file read/write permission |
 | `system` | security-sensitive, ACL-adjacent metadata | privileged (VFS capability gate) |
 | `trusted` | metadata only privileged services may set | privileged (VFS capability gate) |
 
-The `user`, foreign, and `rustos` namespaces are ordinary file metadata: they
+The `user`, foreign, and `tairix` namespaces are ordinary file metadata: they
 need only the file's own read/write permission (the per-inode owner/mode/ACL
 model, `AGENTS.md` §5.3), no new capability. The `system` and `trusted`
 namespaces guard a real security boundary; the VFS gates them with a capability
@@ -1250,7 +1250,7 @@ self-identifying framing — serialises into a single metadata block on a
 4 KiB-block volume. A value larger than `VALUE_MAX` is **not** an extended
 attribute; it is a *named stream* (a fork — e.g. a classic-Mac resource fork),
 stored through the file-data pipeline (COW extents, checksummed, compressed,
-encrypted, dedupable, sparse-capable) under a `mac`/`rustos`-namespaced key, so
+encrypted, dedupable, sparse-capable) under a `mac`/`tairix`-namespaced key, so
 large forks stay out of the inline set and reuse the whole data path with no
 second data path (§6–§10, §19). *(The named-stream content path is staged
 future work; see §18.)* On a smaller-block volume a set that does not fit one
@@ -1294,6 +1294,6 @@ under an explicit, documented lossy policy. The `lib/fsmeta` preset registry is
 the single source of truth for the value encodings (see the registry reference
 page). Indicative v1 entries: `acorn.filetype`/`loadaddr`/`execaddr`/
 `datestamp`, `amiga.protection`/`comment`, `atari.attributes`/`gemdos_date`,
-`mac.type`/`creator`/`finderflags`/`resourcefork`, `rustos.origin`/`mime`.
+`mac.type`/`creator`/`finderflags`/`resourcefork`, `tairix.origin`/`mime`.
 *(The `cp`/`mv`/desktop/archive tooling and the per-family driver wiring are
 staged future work; see §18.)*

@@ -6,7 +6,7 @@
 //! On boot the test enables `CPACR_EL1.FPEN`, builds a stage-1 address space
 //! that identity-maps the kernel and MMIO (EL1), activates it, installs the EL1
 //! vector table and a dispatch callback, then calls the production
-//! capability-checked, audited spawn caller (`rustos_kernel_core::spawn_and_enter`,
+//! capability-checked, audited spawn caller (`tairix_kernel_core::spawn_and_enter`,
 //! gated on `CAP_PROC_SPAWN`) to materialise the program's EL0 image — built
 //! from the `rxe` blob the build script produced — and `eret` into it. The C
 //! program checks a Time64 value across the boundaries, an ipc header, and
@@ -21,7 +21,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-c-program-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-c-program-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

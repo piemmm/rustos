@@ -25,7 +25,7 @@ pub const MAX_COMPONENT_LEN: usize = 255;
 /// here, not a per-call override.
 pub const MAX_PATH_COMPONENTS: usize = 64;
 
-/// The only four top-level directories RustOS has.
+/// The only four top-level directories TAIRiX has.
 ///
 /// The default root template ([`super::Vfs::with_default_layout`])
 /// provides exactly these and nothing else.
@@ -33,7 +33,7 @@ pub const ROOT_TEMPLATE: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 
 /// Resolve a machine-alias name to the top-level view component it roots at.
 ///
-/// RustOS storage is a forest of named roots (`docs/src/filesystem/drives.md`):
+/// TAIRiX storage is a forest of named roots (`docs/src/filesystem/drives.md`):
 /// a path names its root explicitly, and `System:` is a canonical first-class
 /// root of which `/System` is merely the synthetic-view *projection*. The four
 /// **machine aliases** are therefore exactly [`ROOT_TEMPLATE`] — one

@@ -1,6 +1,6 @@
-//! A `mem_map`-backed userland heap allocator for `rustos-rt`.
+//! A `mem_map`-backed userland heap allocator for `tairix-rt`.
 //!
-//! A freshly spawned RustOS process boots with only its fixed spawn-time image
+//! A freshly spawned TAIRiX process boots with only its fixed spawn-time image
 //! (code/data/bss plus a fixed stack, `plans/SPAWN.md` SP2/SP3); it has no heap.
 //! This module turns the `abi-v1` anonymous-memory pair
 //! ([`crate::mem_map`] / [`crate::mem_unmap`]) into a `#[global_allocator]` so a
@@ -63,7 +63,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use rustos_sync::SpinLock;
+use tairix_sync::SpinLock;
 
 /// Page size of every Tier-1 target's smallest translation granule. The arena
 /// grows in whole pages, and `mem_map` rounds its length up to this.
@@ -490,7 +490,7 @@ fn align_up(addr: usize, align: usize) -> Option<usize> {
 /// free-span table) so the same allocator logic is driven by the real syscalls
 /// in production and by host fixtures in the unit tests. The lock makes the
 /// allocator `Sync`, which the [`GlobalAlloc`] contract requires even though
-/// current RustOS userland processes are single-threaded.
+/// current TAIRiX userland processes are single-threaded.
 struct Heap<P: Pager, S: SpanStore> {
     state: SpinLock<HeapState<S>>,
     pager: P,
@@ -569,7 +569,7 @@ impl Pager for SyscallPager {
         let len = pages * PAGE_SIZE;
         // FIXED placement: the heap owns the arena layout, so the kernel must
         // map at exactly `base` or fail (it never relocates the region).
-        let ret = crate::mem_map(len, rustos_abi::MapFlags::FIXED, base);
+        let ret = crate::mem_map(len, tairix_abi::MapFlags::FIXED, base);
         #[allow(clippy::cast_sign_loss)]
         // Guarded by `ret >= 0`; the non-negative result is the base address.
         {
@@ -636,7 +636,7 @@ impl SpanStore for MappedSpanStore {
         // FIXED placement: the store owns the metadata window, so the kernel
         // must map at exactly `base` (immediately above the slots already
         // mapped) or fail; it never relocates the region.
-        let ret = crate::mem_map(PAGE_SIZE, rustos_abi::MapFlags::FIXED, base);
+        let ret = crate::mem_map(PAGE_SIZE, tairix_abi::MapFlags::FIXED, base);
         #[allow(clippy::cast_sign_loss)]
         // Guarded by `ret >= 0`; the non-negative result is the base address.
         if ret >= 0 && ret as u64 == base {

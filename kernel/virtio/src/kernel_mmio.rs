@@ -4,7 +4,7 @@
 //! `drivers/bus/mmio`) reaches a device's register block through the
 //! [`MmioMapper`] ABI seam. The always-available path is this
 //! [`KernelMmioMapper`], which routes every request through the
-//! capability-gated [`rustos_kernel_sec::map_mmio`]: it verifies [`CapabilityId::MMIO_MAP`], maps the device's
+//! capability-gated [`tairix_kernel_sec::map_mmio`]: it verifies [`CapabilityId::MMIO_MAP`], maps the device's
 //! physical register block into the driver's address space with
 //! caching disabled, and mints a [`RegisterWindow`] over the result.
 //!
@@ -17,7 +17,7 @@
 //!
 //! A [`RegisterWindow`] carries a raw pointer into the [`MmioMap`]'s
 //! window backing but no lifetime in its type and no free-on-drop
-//! shim (unlike [`rustos_virtio::DmaSlab`]). A device's register window
+//! shim (unlike [`tairix_virtio::DmaSlab`]). A device's register window
 //! lives for the whole duration of a driver load — it is not a
 //! transient allocation — so the mapper retains every mapped region
 //! and the kernel reclaims them when the driver's [`MmioMap`] (and
@@ -27,16 +27,16 @@
 //! once at construction and never resized, so the pointer a window
 //! holds stays valid for the mapper's lifetime.
 //!
-//! [`MmioMapper`]: rustos_abi::MmioMapper
-//! [`CapabilityId::MMIO_MAP`]: rustos_abi::CapabilityId::MMIO_MAP
+//! [`MmioMapper`]: tairix_abi::MmioMapper
+//! [`CapabilityId::MMIO_MAP`]: tairix_abi::CapabilityId::MMIO_MAP
 
 use core::cell::RefCell;
 
-use rustos_abi::{MmioMapError, MmioMapper, RegisterWindow};
-use rustos_kernel_mem::{MmioError, MmioMap, PageTable};
-use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_kernel_sec::mmio::{map_mmio, MmioGateError};
-use rustos_log::Sink;
+use tairix_abi::{MmioMapError, MmioMapper, RegisterWindow};
+use tairix_kernel_mem::{MmioError, MmioMap, PageTable};
+use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_kernel_sec::mmio::{map_mmio, MmioGateError};
+use tairix_log::Sink;
 
 /// Capability-checked, [`MmioMap`]-backed [`MmioMapper`].
 ///
@@ -124,12 +124,12 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use core::cell::RefCell as StdRefCell;
-    use rustos_abi::CapabilityId;
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_mem::{AddressSpace, HostPageTable, PhysAddr, SimPhysMap, VirtAddr};
-    use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-    use rustos_kernel_sec::identity::UserId;
-    use rustos_log::{Event, Sink};
+    use tairix_abi::CapabilityId;
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_mem::{AddressSpace, HostPageTable, PhysAddr, SimPhysMap, VirtAddr};
+    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::identity::UserId;
+    use tairix_log::{Event, Sink};
 
     struct Recorder {
         events: StdRefCell<Vec<u32>>,

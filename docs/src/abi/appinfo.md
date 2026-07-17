@@ -1,6 +1,6 @@
 # Application bundles (`AppInfo`, `abi-v1`)
 
-`lib/abi/src/appinfo.rs` (`rustos_abi::appinfo`) is the frozen `abi-v1`
+`lib/abi/src/appinfo.rs` (`tairix_abi::appinfo`) is the frozen `abi-v1`
 surface for installed application bundles (`AGENTS.md` §16.4, §16.5). It
 defines three things and carries the same freeze discipline as the syscall
 table (§9): existing fields, offsets, and names never change; new behaviour

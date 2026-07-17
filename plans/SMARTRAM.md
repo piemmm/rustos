@@ -28,19 +28,19 @@ events; `plans/STRESSTEST.md` ST1 has since exported them through the
 capability-gated System Information queries), SMART10 (the cross-cache integration,
 thrash, and benchmark-evidence suites over one shared gauge), and
 SMART11 (the whole-disk block-level LRU cache,
-`kernel/rustos-kernel::block_cache::BlockCache`: the classified,
+`kernel/tairix-kernel::block_cache::BlockCache`: the classified,
 budgeted, pressure-governed, zeroing per-block cache the boot path
 installs under the block-sharing layer; see `PLAN.md` §SMARTRAM for
 the done-state summaries) are implemented; SMART5–SMART8
 (desktop/UI, reliability-assist, background-validation, and predictive
 caches) are **shelved — not added**; the remaining classes are staged
 below  
-Target: RustOS  
+Target: TAIRiX  
 Primary code areas: `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
 Secondary code areas: `drivers/filesystem/arxfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
 Repository placement: `plans/SMARTRAM.md`, unless the repository layout in `AGENTS.md` is updated to permit another location
 
-This document defines the staged RustOS plan for using otherwise idle RAM as a
+This document defines the staged TAIRiX plan for using otherwise idle RAM as a
 bounded, reclaimable set of memory services rather than as only a disk block
 cache. It is a design, invariant, staging, and acceptance document. It is not a
 changelog and not a merge-ready implementation.
@@ -84,7 +84,7 @@ Before touching code, the implementing agent must read and reconcile:
     application-load, command-resolution, compression, crypto, logging, theme,
     icon, font, raster, or metadata behaviour.
 
-RustOS rules that matter especially for this work:
+TAIRiX rules that matter especially for this work:
 
 - The implementation remains Rust-only, with no C, C++, hand-written headers,
   build glue in another language, or new assembly.
@@ -117,7 +117,7 @@ RustOS rules that matter especially for this work:
 
 ## 2. Goal
 
-RustOS shall treat spare RAM as a general, bounded, opportunistic, reclaimable
+TAIRiX shall treat spare RAM as a general, bounded, opportunistic, reclaimable
 memory-services pool. Disk and filesystem cache remain important, but the
 system should also use idle RAM to avoid repeated computation, verification,
 decompression, rendering, parsing, lookup, recovery, and cold-page restoration
@@ -409,7 +409,7 @@ Rules:
 - the compositor and desktop services use existing shared raster, SVG, theme,
   icon, font, and geometry libraries rather than creating a second rendering
   path;
-- headless RustOS retains the same memory-safety and pressure behaviour without
+- headless TAIRiX retains the same memory-safety and pressure behaviour without
   desktop-specific kernel policy;
 - cached window contents are user/session data and must not cross users,
   seats, or sessions;
@@ -767,13 +767,13 @@ Status: **done** for every part with a current in-tree consumer
   `lib/fsmeta` as the one key grammar).
 - The **ARXFS transform cache** retains the verified, decrypted,
   decompressed plaintext of compressed clusters. The driver exposes an
-  injected seam (`rustos_drv_fs_arxfs::ClusterCache`, keyed by the
+  injected seam (`tairix_drv_fs_arxfs::ClusterCache`, keyed by the
   run's first stored block) consulted only in the serving read path —
   never by scrub/check/rescue — with invalidation funnelled through the
   driver's single block-free choke point, a whole-cache purge on
   transaction rollback, and a fail-closed `DeviceFault` if an entry
   cannot make progress. The kernel's production implementation
-  (`rustos_kernel::transform_cache::TransformClusterCache`) is
+  (`tairix_kernel::transform_cache::TransformClusterCache`) is
   classified through the SMART1 gate (class `TransformCache`, owned by
   the volume's stable per-boot mount handle), LRU-bounded with
   hysteresis, pressure-enforced per operation (preserved at mild,
@@ -1049,7 +1049,7 @@ What now holds:
   remains, open once their own operations drain it, never at critical
   — escalation yields the VM policy); the shared reserve floor; and
   no-stale-serving for a file mutated while the caches were drained.
-- **The layered stack** (`kernel/rustos-kernel/src/`
+- **The layered stack** (`kernel/tairix-kernel/src/`
   `transform_cache_tests.rs`): `CachedFs` over a real ARXFS volume
   whose read path consults the installed `TransformClusterCache`, both
   on one gauge — a filesystem-cache hit never reaches the transform
@@ -1090,7 +1090,7 @@ filesystem block-level cache the section 6.1 model implies below the
 volume layer, subject to the same pressure-integration reclaim
 ordering as every other class:
 
-- `kernel/rustos-kernel::block_cache::BlockCache` wraps the one
+- `kernel/tairix-kernel::block_cache::BlockCache` wraps the one
   brought-up boot disk **below** the block-sharing layer
   (`shared_block::SharedBlock`), on the device side of its sleep
   lock, so every window onto the disk — the `/System` driver-store
@@ -1126,7 +1126,7 @@ ordering as every other class:
   events.
 
 The SMART11 test matrix lands with the stage
-(`kernel/rustos-kernel/src/block_cache_tests.rs`): classification/
+(`kernel/tairix-kernel/src/block_cache_tests.rs`): classification/
 owner, hit/miss/insertion accounting with a device-corruption proof
 that a hit never reaches the device, multi-block partial-hit
 behaviour, write-through coherence, failed-write and discard
@@ -1319,7 +1319,7 @@ This work is complete only when all applicable items are true:
   recreate pressure.
 - Predictive cache is authority-checked, scoped, disposable, and
   privacy-preserving.
-- Headless RustOS remains first-class.
+- Headless TAIRiX remains first-class.
 - No production `unwrap()`, `expect()`, `panic!()`, `todo!()`, ignored test,
   sleep loop, retry loop, global mutable static, or commented-out test was
   introduced.
@@ -1342,11 +1342,11 @@ This work is complete only when all applicable items are true:
 
 ## 16. Prompt for an implementation agent
 
-Use this prompt when RustOS is ready to implement the next approved stage:
+Use this prompt when TAIRiX is ready to implement the next approved stage:
 
 ```text
 You are implementing the next approved stage of `plans/SMARTRAM.md` for
-RustOS.
+TAIRiX.
 
 Before coding, read `AGENTS.md`, `PLAN.md`, `plans/SMARTRAM.md`,
 `plans/SWAPSWAPSWAP.md`, `plans/ALIAS.md`, `plans/DRIVES.md`,

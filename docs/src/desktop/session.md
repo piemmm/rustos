@@ -1,6 +1,6 @@
 # Desktop session glue
 
-`userland/gui/session` (`rustos-desktop-session`) is the desktop's **session
+`userland/gui/session` (`tairix-desktop-session`) is the desktop's **session
 glue** (`AGENTS.md` §10, `PLAN.md` Stage 7): the component that owns the shared
 theme registry and the taskbar model and resolves the taskbar's abstract menu
 actions against state the taskbar itself cannot see.
@@ -11,18 +11,18 @@ The taskbar deliberately owns no theme registry and no spawn capability. When
 a start-menu entry is activated it only *reports* an abstract `MenuAction` — a
 session control, an application launcher, or the light/dark `ToggleAppearance`.
 Resolving that action belongs to the session, which holds the shared
-`rustos_theme::ThemeRegistry` and (in later increments) the window-manager and
+`tairix_theme::ThemeRegistry` and (in later increments) the window-manager and
 process capabilities. This crate is that resolver. Its first increment is the
 runtime **light/dark switch**.
 
-It composes the other GUI crates and `lib/*` only — `rustos-taskbar` and the
-shared `rustos-theme` definition — which is the permitted `userland/gui/*`
+It composes the other GUI crates and `lib/*` only — `tairix-taskbar` and the
+shared `tairix-theme` definition — which is the permitted `userland/gui/*`
 edge (`AGENTS.md` §17.4). Nothing outside `userland/gui/*` depends on it
 (§17.3), so a headless image omits it cleanly.
 
 ## Resolving a taskbar response
 
-`DesktopSession::resolve` turns a `rustos_taskbar::TaskbarResponse` into a
+`DesktopSession::resolve` turns a `tairix_taskbar::TaskbarResponse` into a
 `SessionEvent`:
 
 - Selecting the start menu's appearance-toggle entry
@@ -59,11 +59,11 @@ screen — the same two calls `handle` makes for the menu toggle.
 
 ## Presenting the taskbar through the window manager
 
-The taskbar paints a *rectangular* `rustos_raster::Surface` and the window
+The taskbar paints a *rectangular* `tairix_raster::Surface` and the window
 manager composites and rounds windows; neither depends on the other
 (`AGENTS.md` §17.4). `TaskbarPresenter` is the session's glue between them.
-Given a `&mut rustos_wm::Compositor` and the taskbar's own
-`rustos_taskbar::TaskbarRenderer` (which holds the across-frame glyph cache),
+Given a `&mut tairix_wm::Compositor` and the taskbar's own
+`tairix_taskbar::TaskbarRenderer` (which holds the across-frame glyph cache),
 `present` paints the bar and, while the start menu is open, its popup, and
 presents each as a compositor window:
 
@@ -85,11 +85,11 @@ window the compositor no longer knows is re-created on the next present, and
 
 ## Routing one input stream to both routers
 
-The desktop has two input routers — the window manager's `rustos_wm::InputRouter`
+The desktop has two input routers — the window manager's `tairix_wm::InputRouter`
 (focus, click-to-activate, interactive move-grabs) and the taskbar's
-`rustos_taskbar::TaskbarInput` (start-menu toggle, task activate/minimise,
+`tairix_taskbar::TaskbarInput` (start-menu toggle, task activate/minimise,
 notification/clock presses) — and both consume the **same** shared
-`rustos_input` event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source
+`tairix_input` event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source
 produces one event stream, so `SessionInputRouter` is the glue that fans it to
 the right router, driven through `handle(event, &mut Compositor, &mut Taskbar)`:
 
@@ -115,8 +115,8 @@ itself no authority; every routed sub-call is itself total and fails closed
 The taskbar models a running-task list — one entry per top-level window, with
 the click-to-activate / minimise rule — but owns no window manager, and the
 window manager owns no task list (`AGENTS.md` §17.4). `TaskBridge` is the glue
-between them. A task is named by a `rustos_taskbar::TaskId` and a window by an
-opaque `rustos_wm::WindowId`, so the bridge owns the correspondence: it mints a
+between them. A task is named by a `tairix_taskbar::TaskId` and a window by an
+opaque `tairix_wm::WindowId`, so the bridge owns the correspondence: it mints a
 stable task id per window it tracks and never reuses one, then translates
 between the two whenever the bar acts on a window or the window manager moves
 focus. Each operation is total and fails closed (`AGENTS.md` §2.9):
@@ -184,7 +184,7 @@ The `InputSource` the shell `pump`s is now backed by a live device channel.
 `DeviceInputSource` (the `device` module) wraps an injected
 `PointerInputChannel` seam — a capability-checked kernel input channel on a
 running system, an in-memory queue in tests (`AGENTS.md` §7) — that hands the
-desktop one framed `rustos_abi::input::PointerInput` record at a time. Each
+desktop one framed `tairix_abi::input::PointerInput` record at a time. Each
 `poll` reads one record and decodes it through `PointerInput::from_bytes` into
 the `lib/input` `InputEvent` the window manager and taskbar route: a `MovedBy`
 record's relative displacement is accumulated — saturating, clamped to the
@@ -211,7 +211,7 @@ The keyboard's live backing is `KeyboardInputSource` (the `keyboard` module),
 the counterpart of `DeviceInputSource`. It wraps an injected `KeyInputChannel`
 seam — a capability-checked kernel keyboard channel on a running system, an
 in-memory queue in tests (`AGENTS.md` §7) — that hands the desktop one framed
-`rustos_abi::input::KeyInput` record at a time. Each `poll` decodes one record
+`tairix_abi::input::KeyInput` record at a time. Each `poll` decodes one record
 through `KeyInput::from_bytes` into the same `lib/input` `InputEvent` stream the
 shell pumps: a `Pressed` / `Released` record becomes a `KeyPressed` /
 `KeyReleased` carrying the resolved `Key` (a produced `Char`, or a `NamedKey` —
@@ -232,7 +232,7 @@ channel the kernel routed the desktop's input to
 ([the seat page](./seat.md)). The records arrive through an injected
 `SeatEventReader` seam — the seat-addressed
 [`pointer_read` / `keyboard_read`](../architecture/syscalls.md) syscalls
-(`rustos_rt::pointer_read` / `rustos_rt::keyboard_read`) on a running system,
+(`tairix_rt::pointer_read` / `tairix_rt::keyboard_read`) on a running system,
 an in-memory queue in tests (`AGENTS.md` §7) — so the crate holds no seat
 lease of its own and stays host-testable (`AGENTS.md` §17.4).
 
@@ -259,7 +259,7 @@ channels.
 
 ## Tests
 
-`cargo test -p rustos-desktop-session` covers: the default dark start and the
+`cargo test -p tairix-desktop-session` covers: the default dark start and the
 seeded appearance-toggle entry; resolving the toggle entry flipping dark↔light
 and forwarding every other response unchanged without touching the theme;
 `set_theme`/`toggle_appearance` relaying the new metrics to the taskbar

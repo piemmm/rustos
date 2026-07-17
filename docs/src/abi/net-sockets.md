@@ -2,7 +2,7 @@
 
 The socket ABI is how a program opens UDP sockets through the user-space
 network stack (`userland/net/netstack`). It is defined once, as a pure wire
-contract, in `lib/abi/src/net.rs` (`rustos_abi::net`), so the client-side
+contract, in `lib/abi/src/net.rs` (`tairix_abi::net`), so the client-side
 wrappers and the serving stack share a single source of truth and can never
 drift.
 
@@ -21,7 +21,7 @@ service tests, which drive the same `SocketService` engine over the same
 The `netstack` service binds a second reserved endpoint,
 `NETSTACK_SOCKET_ENDPOINT`, alongside its admin endpoint and serves it from
 the same event-driven wait-set loop. Each socket request is dispatched by
-`rustos_netstack::SocketService::serve`, which:
+`tairix_netstack::SocketService::serve`, which:
 
 - **checks `CAP_NET` before any state is touched** — the coarse "originate
   transport traffic" capability (`CapabilityId::NET`), granted to ordinary
@@ -45,10 +45,10 @@ is sent straight to the group MAC with a link-local scope (TTL/hop-limit 1),
 needing no route and no membership (a host may send to a group it has not
 joined).
 
-## The client side (`rustos_rt::net`)
+## The client side (`tairix_rt::net`)
 
 A first-party Rust program links the thin client wrappers in
-`rustos_rt::net` — `socket`, `bind`, `connect`, `send`, `recv`, `close`,
+`tairix_rt::net` — `socket`, `bind`, `connect`, `send`, `recv`, `close`,
 `join_multicast`, `leave_multicast` — which marshal over `ipc_call` to the
 socket endpoint (control plane) and `ipc_recv` on the client's own delivery
 port (receive plane). `recv` returns both the decoded datagram and the

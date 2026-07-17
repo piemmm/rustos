@@ -1,6 +1,6 @@
-# `rustos-vim`
+# `tairix-vim`
 
-The RustOS `vim`: the modal text editor, drawn with the OS curses library
+The TAIRiX `vim`: the modal text editor, drawn with the OS curses library
 (`lib/curses`). It implements the vim *core* — the modal command set
 virtually every vim user exercises daily — with everything beyond that core
 deliberately staged, feature by feature, in `plans/VIM.md`.
@@ -66,8 +66,8 @@ curses consumer.
 ## Layering & capabilities
 
 `no_std` (with `alloc`), `#![forbid(unsafe_code)]`. It links only `lib/*`
-crates — `rustos-abi`, `rustos-curses`, `rustos-termcap`, `rustos-vt`,
-`rustos-help`, plus `rustos-rt` for the freestanding `Run` binary — never
+crates — `tairix-abi`, `tairix-curses`, `tairix-termcap`, `tairix-vt`,
+`tairix-help`, plus `tairix-rt` for the freestanding `Run` binary — never
 a kernel or driver crate. Its manifest (`AppInfo.toml`) requests
 `CAP_CONSOLE_WRITE` (the full-screen display on fd 1), `CAP_CONSOLE_READ`
 (raw-mode keystrokes on fd 0), and `CAP_FS_ACCESS` (its file operands and
@@ -85,7 +85,7 @@ visual `s` (charwise). Each is recorded with its stage in the plan.
 
 ## Testing
 
-`cargo test -p rustos-vim` drives the whole editor host-side: the buffer's
+`cargo test -p tairix-vim` drives the whole editor host-side: the buffer's
 grouped undo/redo, every motion family and text object, operators with
 counts and registers, dot-repeat (including insert replay), the search
 engine (with the pathological-pattern budget), the ex command set over the

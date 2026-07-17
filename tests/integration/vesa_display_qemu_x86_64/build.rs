@@ -12,7 +12,7 @@
 //!    a Rust source file the bin pulls in via `include!`.
 //!
 //! The manifest requests only `CAP_DRV_LOAD`:
-//! `rustos_drv_display_vesa::register` gates on it, and the host installs
+//! `tairix_drv_display_vesa::register` gates on it, and the host installs
 //! the manifest's requested set intersected with the caller's grants. The `CAP_MMIO_MAP` the surface mapping
 //! additionally requires is granted on the separate `DriverHost` the bin
 //! builds for `VesaFramebuffer::open`, never through the manifest,
@@ -23,11 +23,11 @@
 //! seed; the test is therefore deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
-use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 
 /// Deterministic signing seed so the trust anchor is stable across
 /// builds. Distinct from the other QEMU fixtures' seeds so the images
@@ -42,7 +42,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x22; 32];
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();
@@ -65,7 +65,7 @@ fn main() {
     let caps: &[u16] = &[CapabilityId::DRV_LOAD.as_u16()];
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         kind: DriverKind::UserSpace,
         bind_key_count: 0,
         capability_count: u16::try_from(caps.len()).expect("caps fit in u16"),

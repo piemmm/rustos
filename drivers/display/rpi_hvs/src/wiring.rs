@@ -19,8 +19,8 @@
 //! `VideoCore`), and the doorbell below the seam is
 //! the on-metal acceptance item.
 
-use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
-use rustos_vcmailbox::{
+use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
+use tairix_vcmailbox::{
     arm_physical_to_bus, discover_framebuffer, FramebufferRequest, MailboxError, MailboxTransport,
     MmioMailbox, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
 };
@@ -46,7 +46,7 @@ pub struct MailboxWiring {
     /// (e.g. [`crate::DEFAULT_BUS_ALIAS`]).
     pub bus_alias: u32,
     /// Doorbell poll budget
-    /// ([`rustos_vcmailbox::DEFAULT_POLL_BUDGET`] unless tuned).
+    /// ([`tairix_vcmailbox::DEFAULT_POLL_BUDGET`] unless tuned).
     pub poll_budget: u32,
 }
 

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kernel-ipc"
-description = "RustOS kernel IPC: capability-checked message ports, shared memory, and asynchronous notifications."
+name = "tairix-kernel-ipc"
+description = "TAIRiX kernel IPC: capability-checked message ports, shared memory, and asynchronous notifications."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,13 +16,13 @@ workspace = true
 # kernel/{sync, mem, sched, sec} and lib/{abi, caps, log} (plus `lib/util`
 # for the formatters extracted out of `kernel/sec` in this same stage,
 # `AGENTS.md` §2.2). Nothing more is needed.
-rustos-sync = { path = "../../lib/sync", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }
-rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
-rustos-log = { path = "../../lib/log", version = "=0.0.0" }
-rustos-util = { path = "../../lib/util", version = "=0.0.0" }
+tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
+tairix-log = { path = "../../lib/log", version = "=0.0.0" }
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 
 # The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
 # capability-checked port endpoint under randomised command sequences. Same
@@ -30,10 +30,10 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 [dev-dependencies]
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
 # The §19.7 model drives its programs through the shared seed/budget runner
-# (`rustos_fuzzseed::prop::drive`), so the seed selection, start-of-test
+# (`tairix_fuzzseed::prop::drive`), so the seed selection, start-of-test
 # seed log, and smoke/soak loop live in one place (`AGENTS.md` §2.2). Test
-# scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
+# scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
 
 
 # Loom is only pulled in when the caller opts in with

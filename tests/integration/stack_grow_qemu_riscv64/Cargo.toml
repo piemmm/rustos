@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-stack-grow-qemu-riscv64"
+name = "tairix-test-stack-grow-qemu-riscv64"
 description = "SP11c QEMU integration test (docs/src/architecture/memory.md §7c): prove the demand-grown user stack end to end on the riscv64 virt board — the riscv64 twin of stack_grow_qemu_aarch64. The build script compiles the pure-Rust four-role fixture program (tests/integration/stack_grow_program) PIE once and converts it to an rxe blob. The kernel installs the production KernelDispatchHook through a DispatchCallbackSlot — the production LiveMemMap producer backing both mem_map and the stack-growth fault path, a real KernelProcessWait, a ProgramRegistry carrying the three child roles with parameters derived from the one shared spawn_layout policy — and binds the production user-fault resolver to the same slot (load and store/AMO U-mode page faults), then spawns the parent role through the production InitSpawnCtx::spawn_driver_process seam. The parent drives grow (recursion far past the eagerly committed stack top grows transparently and every frame's bytes survive, exit 0), limit (a ulimit-lowered StackBytes soft bound kills growth past it, exit 139), and guard (the unmapped guard page below the reserved span stays fatal, exit 139) through production spawn + wait. PASS once the chassis reaps a parent exit of 0."
 version.workspace = true
 edition.workspace = true
@@ -25,30 +25,30 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-stack-grow-qemu-riscv64"
+name = "tairix-test-stack-grow-qemu-riscv64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
 # The shared harness: the target cfg emitter and the ELF→rxe converter.
 # Host-only build glue (`AGENTS.md` §12).
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
 # The build script stamps the kernel's compiled-in syscall CFI tag into the
 # converted `rxe` so the production loader admits it (`AGENTS.md` §9).
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

@@ -11,7 +11,7 @@ concession; the nightly soak is where the real coverage comes from.
 
 ## In-tree harnesses, no external runner
 
-RustOS does not pull in an external fuzz runner. §19.6 explicitly
+TAIRiX does not pull in an external fuzz runner. §19.6 explicitly
 sanctions an "equivalent in-tree harness", and `AGENTS.md` §2.12
 ("roll your own") makes that the default: every dependency widens the
 trusted computing base. Each harness is therefore an ordinary
@@ -90,7 +90,7 @@ cargo xtask fuzz --secs 5   # custom budget (local iteration / tests)
 cargo xtask fuzz --seed 42  # reproduce a logged run's input stream
 ```
 
-The orchestrator exports `RUSTOS_FUZZ_BUDGET_SECS`. A harness reads it
+The orchestrator exports `TAIRIX_FUZZ_BUDGET_SECS`. A harness reads it
 and, when it is a positive value, keeps drawing fresh inputs from the
 *same continuing* PRNG stream until the budget elapses; when it is unset
 the harness runs its smoke sweep exactly once.
@@ -98,22 +98,22 @@ the harness runs its smoke sweep exactly once.
 ## Seeding: fresh per run, logged for replay
 
 Seed selection, the start-of-test seed log, and the smoke/soak loop are
-the single shared seam `tests/fuzzseed` (`rustos_fuzzseed`), used by
+the single shared seam `tests/fuzzseed` (`tairix_fuzzseed`), used by
 every fuzz harness, every proptest model, and the filesystem soak, so
 the policy has one definition (`AGENTS.md` §2.2). The seed comes from
-`RUSTOS_FUZZ_SEED`:
+`TAIRIX_FUZZ_SEED`:
 
 * By default each run draws a *fresh* seed from host entropy (wall-clock
   time, pid, a monotonic counter), so two runs never replay the same
   stream — coverage genuinely progresses, and even repeated `cargo test`
   runs explore new inputs (`AGENTS.md` §2.1).
-* Setting `RUSTOS_FUZZ_SEED=N` (the orchestrator's `--seed N` derives a
+* Setting `TAIRIX_FUZZ_SEED=N` (the orchestrator's `--seed N` derives a
   deterministic per-harness value from `N`) pins it, so a crash a run
   reported can be replayed exactly.
 
 **Every test logs the seed at its start**, before the first input is
 drawn — `[fuzzseed] <test>: PRNG seed = N …; replay with
-RUSTOS_FUZZ_SEED=N` — so a fresh-seed crash is reproducible from the
+TAIRIX_FUZZ_SEED=N` — so a fresh-seed crash is reproducible from the
 logged value regardless of how it was launched (a plain `cargo test`, a
 CI runner, or a soak job). This is a *test-input* seed, not a security
 seed; it deliberately does not go through `lib/crypto`/`lib/rng` (those
@@ -121,7 +121,7 @@ govern the kernel CSPRNG, §22).
 
 The stateful proptest models (`AGENTS.md` §19.7) follow the identical
 pattern through `cargo xtask proptest --seed N` and
-`RUSTOS_PROPTEST_SEED`.
+`TAIRIX_PROPTEST_SEED`.
 
 ## CI integration
 

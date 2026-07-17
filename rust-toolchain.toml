@@ -1,4 +1,4 @@
-# Pinned toolchain for RustOS.
+# Pinned toolchain for TAIRiX.
 #
 # The workspace is built and tested with the nightly toolchain pinned below so
 # that `-Z build-std`, inline assembly stabilisation deltas, and unstable

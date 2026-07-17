@@ -9,7 +9,7 @@
 # CAP_LOG_EMIT for its diagnostics. No console pair: it writes no standard
 # stream, and a loaded driver's grants are minted from its matched node,
 # never from this caller.
-id = "os.rustos.devmgr"
+id = "os.tairix.devmgr"
 name = "devmgr"
 version = "0.1.0"
 kind = "service"

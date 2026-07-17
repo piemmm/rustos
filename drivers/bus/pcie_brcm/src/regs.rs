@@ -7,7 +7,7 @@
 //! All offsets are relative to the controller's MMIO register block —
 //! the `reg` window the `brcm,bcm2711-pcie` device-tree node advertises
 //! (CPU-physical base `0xfd50_0000`, length `0x9310`), which the wiring
-//! maps under [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId).
+//! maps under [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId).
 
 /// Minimum controller register-window length the driver requires, in
 /// bytes: through the [`RGR1_SW_INIT_1`] reset register (`0x9210`) plus
@@ -221,7 +221,7 @@ pub const RC_SECONDARY_BUS: u8 = 1;
 /// would not reach more hardware (there is no on-board PCIe switch) and
 /// would let the root port forward configuration to buses that no device
 /// answers — a transaction the windowed accessor already refuses to
-/// issue (`rustos_pci::mechanism_brcm`), but the bridge bound is
+/// issue (`tairix_pci::mechanism_brcm`), but the bridge bound is
 /// kept honest to the topology too (no speculative
 /// width for a switch this platform does not have).
 pub const RC_SUBORDINATE_BUS: u8 = RC_SECONDARY_BUS;

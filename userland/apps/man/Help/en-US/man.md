@@ -11,7 +11,7 @@ man — show a command's help document
 Renders the help document a command's application bundle ships, in your
 language where a translation exists.
 
-Every RustOS program is an application bundle carrying a `Help/` tree: one
+Every TAIRiX program is an application bundle carrying a `Help/` tree: one
 structured document per command or topic, per language. `man` resolves
 `<command>` exactly as the shell does — the system app store first, then
 the directories on `PATH` — so the page shown always documents the program

@@ -1,4 +1,4 @@
-# `rustos-drv-bus-mmio`
+# `tairix-drv-bus-mmio`
 
 Memory-mapped IO bus driver. Enumerates virtio-MMIO transport slots
 described by the boot-time flat device-tree blob (FDT v17) the
@@ -41,7 +41,7 @@ requested (`AGENTS.md` §4).
 
 ## Tests
 
-`cargo test -p rustos-drv-bus-mmio` runs:
+`cargo test -p tairix-drv-bus-mmio` runs:
 
 - Volatile-reader round-trip against an aligned host buffer.
 - The exact `virt` device-list assertion (four-slot fixture, two
@@ -51,5 +51,5 @@ requested (`AGENTS.md` §4).
 
 ## License
 
-GPL-2.0-or-later, with the `RustOS-syscall-note` syscall / ABI exception
+GPL-2.0-or-later, with the `TAIRiX-syscall-note` syscall / ABI exception
 (see the repository-root `LICENSE`).

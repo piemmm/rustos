@@ -1,6 +1,6 @@
-//! RustOS shared command-help engine (`lib/help`, `plans/APPS.md`).
+//! TAIRiX shared command-help engine (`lib/help`, `plans/APPS.md`).
 //!
-//! Every application bundle may ship a `Help/` tree (`rustos_abi::appinfo`,
+//! Every application bundle may ship a `Help/` tree (`tairix_abi::appinfo`,
 //! `AGENTS.md` §16.5): one structured-Markdown document per command or topic,
 //! under one directory per BCP-47 locale, with the mandatory `en-US/`
 //! directory as the canonical source. Three consumers read that tree — the

@@ -9,19 +9,19 @@
 //! cfg-check` stays clean.
 //!
 //! The consuming verticals (`file_map_qemu_aarch64` / `…_riscv64`) pin the
-//! fixture geometry through the `RUSTOS_FM_*` environment variables when they
+//! fixture geometry through the `TAIRIX_FM_*` environment variables when they
 //! compile this program, so a changed geometry must force a recompile;
 //! declare those dependencies here.
 
 /// The fixture-geometry environment variables the consuming vertical pins.
 const GEOMETRY_ENV: &[&str] = &[
-    "RUSTOS_FM_FILE_LEN",
-    "RUSTOS_FM_PATH",
-    "RUSTOS_FM_PATH_OFFSET",
-    "RUSTOS_FM_INTERIOR_OFFSET",
-    "RUSTOS_FM_BYTE_FIRST",
-    "RUSTOS_FM_BYTE_INTERIOR",
-    "RUSTOS_FM_BYTE_LAST",
+    "TAIRIX_FM_FILE_LEN",
+    "TAIRIX_FM_PATH",
+    "TAIRIX_FM_PATH_OFFSET",
+    "TAIRIX_FM_INTERIOR_OFFSET",
+    "TAIRIX_FM_BYTE_FIRST",
+    "TAIRIX_FM_BYTE_INTERIOR",
+    "TAIRIX_FM_BYTE_LAST",
 ];
 
 fn main() {

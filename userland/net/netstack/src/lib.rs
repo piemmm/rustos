@@ -1,4 +1,4 @@
-//! RustOS network-stack service engine (`plans/NETWORK.md` N3b).
+//! TAIRiX network-stack service engine (`plans/NETWORK.md` N3b).
 //!
 //! `netstack` is the user-space process that owns the network: every
 //! managed interface, its addresses and routes, and the frame flow
@@ -8,7 +8,7 @@
 //! ([`Netstack`]), the ring pump, and the capability-checked request
 //! dispatcher ([`serve`]) — while `src/run.rs` is the thin freestanding
 //! `Run` binary that binds the reserved
-//! [`NETSTACK_ENDPOINT`](rustos_abi::net_ipc::NETSTACK_ENDPOINT) and
+//! [`NETSTACK_ENDPOINT`](tairix_abi::net_ipc::NETSTACK_ENDPOINT) and
 //! parks on its wait sources.
 //!
 //! # Security

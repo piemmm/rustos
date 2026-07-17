@@ -1,6 +1,6 @@
 [package]
-name = "rustos-fstree"
-description = "RustOS `fstree`: the full-screen tree file manager, drawn with the OS curses library (`.junie/fstree-next-plan.md`)."
+name = "tairix-fstree"
+description = "TAIRiX `fstree`: the full-screen tree file manager, drawn with the OS curses library (`.junie/fstree-next-plan.md`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,85 +11,85 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-vim`. `cargo build
-# -p rustos-fstree` builds the tool program with it; host tooling builds only
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-vim`. `cargo build
+# -p tairix-fstree` builds the tool program with it; host tooling builds only
 # the file-manager *library*, so the host test build never pulls the userland
 # runtime's `_start` / `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt", "rustos-sandbox/program"]
+program = ["dep:tairix-rt", "tairix-sandbox/program"]
 
-# The package is both the `rustos-fstree` library (below) and the `Run`
+# The package is both the `tairix-fstree` library (below) and the `Run`
 # entry-point binary of the `fstree` tool. The binary is a freestanding pure-
 # Rust program on the native Tier-1 targets and an inert host stub elsewhere
 # (see `src/run.rs`).
 [[bin]]
-name = "rustos-fstree-run"
+name = "tairix-fstree-run"
 path = "src/run.rs"
 
 [dependencies]
 # The frozen `Errno`, `FileKind`, and `Time64` vocabulary the file seam
 # reports; `fstree` invents no parallel error or time set and never links a
 # kernel or driver crate.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The OS-provided Terminal/TUI library: the curses screen model,
 # minimal-diff renderer, and typed input. `fstree` draws through it instead
 # of emitting escape sequences by hand.
-rustos-curses = { path = "../../../lib/curses", version = "=0.0.0" }
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 # The closed `TermType` set the screen driver is configured with (the honest
 # terminal the session advertises).
-rustos-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
+tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
 # The shared escape/attribute vocabulary: `fstree` styles cells with
-# `rustos_vt::Attributes`, the one vocabulary the renderer emits.
-rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# `tairix_vt::Attributes`, the one vocabulary the renderer emits.
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches and the in-app `?` overlay use (plans/APPS.md).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The one path grammar: the destination the copy/move prompt takes is
 # parsed and normalised through it (relative spellings joined onto the
 # listed directory), never by a second in-app path parser.
-rustos-path = { path = "../../../lib/path", version = "=0.0.0" }
+tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The one filename-glob matcher: tag-by-pattern (`T`) compiles and matches
 # through it, never a second in-app wildcard matcher.
-rustos-glob = { path = "../../../lib/glob", version = "=0.0.0" }
+tairix-glob = { path = "../../../lib/glob", version = "=0.0.0" }
 # The one filename-completion engine: the destination prompts' Tab
 # completion applies its path-candidate policy and common-prefix
 # discipline, never a second in-app engine.
-rustos-complete = { path = "../../../lib/complete", version = "=0.0.0" }
+tairix-complete = { path = "../../../lib/complete", version = "=0.0.0" }
 # The one civil-date calendar: the mtime column's date render and the
 # date-range tag bounds both convert through it, never an in-app copy.
-rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The parser-sandbox seam: the disassembly viewer's container summaries,
 # manifest summaries, and instruction windows are decoded only by the
 # sandboxed decode service, never in this process.
-rustos-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
 # The structured-event vocabulary the sandbox containment events are
 # logged through (the `Sink` the decode seam is generic over).
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # Magic-prefix recognition only (`detect`): which files route to the
 # disassembly viewer. Every actual container decode runs in the sandbox.
-rustos-binfmt = { path = "../../../lib/binfmt", version = "=0.0.0" }
+tairix-binfmt = { path = "../../../lib/binfmt", version = "=0.0.0" }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the syscall
 # wrappers, `terminal_size`, `stdin`/`stdout`/`set_input_mode`, and the
 # kernel-authorised `fs_*` view the file seam is built on). Pulled in only
 # for the bare-metal targets the program is actually built for; on the host
 # it is not linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The shared System Information API client: the one mount-list walk the
 # status line's volume free-space figure rides (best-effort, `MOUNT_LIST`).
-rustos-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 # The freestanding `Run` binary also enables the help engine's
 # syscall-backed own-bundle `HelpSource` (`BundleHelp`), shared by every
 # command app.
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
 # The freestanding `Run` binary also enables the curses library's shared
 # standard-streams `Tty` (`StreamTty`), the one channel definition every
 # full-screen tool links instead of a per-app copy.
-rustos-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
     "program",
 ] }

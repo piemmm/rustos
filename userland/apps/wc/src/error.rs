@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a `wc` invocation did not complete.
 ///

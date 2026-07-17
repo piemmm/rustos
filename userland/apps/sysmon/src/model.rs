@@ -11,12 +11,12 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     CpuLoadRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, ProcessRecord, RamzipStats,
     ReclaimClassRecord, SysinfoQueryId, Uptime,
 };
-use rustos_curses::Event;
-use rustos_procinfo::{
+use tairix_curses::Event;
+use tairix_procinfo::{
     call, for_each_cpu_load, for_each_cpu_time, for_each_process, for_each_reclaim_class,
     memory_pressure, ramzip_stats, CallError, ListError, Transport,
 };
@@ -198,7 +198,7 @@ impl Default for Snapshot {
 /// never inherit another lifetime's statistics.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct ProcHistory {
-    proc_id: rustos_abi::ProcId,
+    proc_id: tairix_abi::ProcId,
     cpu_time_ns: u64,
 }
 
@@ -211,7 +211,7 @@ pub struct Model {
     cpu_busy: Vec<CpuBusy>,
     proc_history: Vec<ProcHistory>,
     prev_uptime_ns: Option<u64>,
-    proc_pct: Vec<(rustos_abi::ProcId, u32)>,
+    proc_pct: Vec<(tairix_abi::ProcId, u32)>,
     focus: Focus,
     scroll: usize,
     viewport: usize,
@@ -277,7 +277,7 @@ impl Model {
     /// The `%CPU` share (tenths of a percent, over the last refresh
     /// interval) derived for `proc_id`, when one could be measured.
     #[must_use]
-    pub fn proc_pct(&self, proc_id: rustos_abi::ProcId) -> Option<u32> {
+    pub fn proc_pct(&self, proc_id: tairix_abi::ProcId) -> Option<u32> {
         self.proc_pct
             .iter()
             .find(|(id, _)| *id == proc_id)

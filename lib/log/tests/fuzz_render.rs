@@ -2,7 +2,7 @@
 //!
 //! A committed log record carries attacker-controlled text (`caller.message`,
 //! `caller.component`, the caller's *requested* source, string `data.*`
-//! values). [`rustos_log::render_line`] must turn any such record into a
+//! values). [`tairix_log::render_line`] must turn any such record into a
 //! terminal line that a hostile caller cannot use to inject escape sequences,
 //! move the cursor, or forge lines: the rendered bytes must be free of C0
 //! controls and `DEL`, whatever the input, and rendering must never panic.
@@ -13,13 +13,13 @@
 //! (so the message/component/source/field escaping paths are actually reached).
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
-use rustos_abi::{
+use tairix_abi::{
     CapabilitySummary, Duration64, FieldName, FieldValue, Origin, ProcId, TrustDomain,
     WallClockReading, ORIGIN_CONSOLE_NONE,
 };
-use rustos_log::{
+use tairix_log::{
     decode_record, render_line, CallerContent, DictionaryBuilder, DictionaryView, Level, LogRecord,
     LogRecordRef,
 };
@@ -113,13 +113,13 @@ fn exercise_hostile(raw: &[u8], monotonic: Duration64, level: Level) {
 
 #[test]
 fn rendered_lines_are_control_free_and_never_panic() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "rendered_lines_are_control_free_and_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
     let mut buf = [0u8; 512];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for i in 0..SMOKE_ITERATIONS {
             let monotonic = Duration64::from_nanos(rng.next_u64());
@@ -134,7 +134,7 @@ fn rendered_lines_are_control_free_and_never_panic() {
                 exercise_hostile(&buf[..size], monotonic, level);
             }
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

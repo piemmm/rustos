@@ -22,7 +22,7 @@
 //!
 //! The capability check (`CapabilityId::MMIO_MAP`) lives in
 //! `kernel/sec::mmio`, since `kernel/mem` deliberately depends on
-//! neither `rustos-abi` nor `rustos-caps` (see `kernel/mem/Cargo.toml`).
+//! neither `tairix-abi` nor `tairix-caps` (see `kernel/mem/Cargo.toml`).
 //!
 //! # CPU access
 //!

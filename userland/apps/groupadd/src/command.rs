@@ -25,7 +25,7 @@ pub enum Command {
 
 /// A parsed `groupadd` group specification.
 ///
-/// The gid is **decimal** (RustOS has no name-to-id seam in this tool, so a
+/// The gid is **decimal** (TAIRiX has no name-to-id seam in this tool, so a
 /// name would be interface creep). A missing `-g` is left to
 /// the database to allocate rather than guessed here.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,7 +288,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/groupadd.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

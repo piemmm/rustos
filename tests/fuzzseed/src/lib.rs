@@ -26,9 +26,9 @@
 //!    [`within_budget`] says the time is up.
 //!
 //! This crate is **test scaffolding only**. It lives under `tests/` (not
-//! `lib/`, which is reserved for code that ships inside RustOS) and is pulled
+//! `lib/`, which is reserved for code that ships inside TAIRiX) and is pulled
 //! in solely as a `[dev-dependencies]` entry of the harness crates, so it is
-//! never part of any RustOS build graph.
+//! never part of any TAIRiX build graph.
 //!
 //! It deliberately depends on nothing: the seed is a *test-input* seed, not a
 //! security seed, so it must not route through `lib/crypto` / `lib/rng`
@@ -39,19 +39,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Seed environment variable the `cargo xtask fuzz` orchestrator exports and
 /// the fuzz harnesses read.
-pub const FUZZ_SEED_ENV: &str = "RUSTOS_FUZZ_SEED";
+pub const FUZZ_SEED_ENV: &str = "TAIRIX_FUZZ_SEED";
 
 /// Wall-clock budget (seconds) the `cargo xtask fuzz` orchestrator exports for
 /// a soak; unset or zero selects the single smoke iteration.
-pub const FUZZ_BUDGET_ENV: &str = "RUSTOS_FUZZ_BUDGET_SECS";
+pub const FUZZ_BUDGET_ENV: &str = "TAIRIX_FUZZ_BUDGET_SECS";
 
 /// Seed environment variable the `cargo xtask proptest` orchestrator exports
 /// and the models read.
-pub const PROPTEST_SEED_ENV: &str = "RUSTOS_PROPTEST_SEED";
+pub const PROPTEST_SEED_ENV: &str = "TAIRIX_PROPTEST_SEED";
 
 /// Wall-clock budget (seconds) the `cargo xtask proptest` orchestrator exports
 /// for a soak; unset or zero selects the single smoke iteration.
-pub const PROPTEST_BUDGET_ENV: &str = "RUSTOS_PROPTEST_BUDGET_SECS";
+pub const PROPTEST_BUDGET_ENV: &str = "TAIRIX_PROPTEST_BUDGET_SECS";
 
 /// `SplitMix64` finaliser: spreads the bits of `x` so even sequential inputs
 /// (a counter, a job index) map to well-separated outputs.
@@ -276,11 +276,11 @@ pub mod prop {
     /// Run `check` over programs drawn from `strategy`, panicking with the
     /// shrunk counterexample on the first failure.
     ///
-    /// The seed for the run is resolved from `RUSTOS_PROPTEST_SEED` (fresh
+    /// The seed for the run is resolved from `TAIRIX_PROPTEST_SEED` (fresh
     /// entropy when unset) and **logged before the first case is drawn**, so a
     /// fresh-seed run is still reproducible from the logged value via
     /// `--seed`. A plain `cargo test` (no budget) runs `smoke_cases` once;
-    /// `cargo xtask proptest --soak` sets `RUSTOS_PROPTEST_BUDGET_SECS` and the
+    /// `cargo xtask proptest --soak` sets `TAIRIX_PROPTEST_BUDGET_SECS` and the
     /// model keeps running `budget_batch_cases` batches off the same continuing
     /// RNG until the deadline elapses.
     pub fn drive<S: Strategy>(
@@ -349,7 +349,7 @@ mod tests {
     fn resolve_seed_uses_the_env_when_set() {
         // A process-unique variable name keeps this test independent of any
         // other test that touches the environment.
-        let var = "RUSTOS_FUZZSEED_SELFTEST_SEED";
+        let var = "TAIRIX_FUZZSEED_SELFTEST_SEED";
         std::env::set_var(var, "12345");
         assert_eq!(resolve_seed(var), 12345);
         std::env::remove_var(var);
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn budget_unset_runs_a_single_iteration() {
-        let var = "RUSTOS_FUZZSEED_SELFTEST_BUDGET";
+        let var = "TAIRIX_FUZZSEED_SELFTEST_BUDGET";
         std::env::remove_var(var);
         assert!(budget_deadline(var).is_none());
         assert!(!within_budget(budget_deadline(var)));
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn budget_set_yields_a_live_deadline() {
-        let var = "RUSTOS_FUZZSEED_SELFTEST_BUDGET2";
+        let var = "TAIRIX_FUZZSEED_SELFTEST_BUDGET2";
         std::env::set_var(var, "3600");
         let deadline = budget_deadline(var).expect("positive budget");
         assert!(deadline > Instant::now());

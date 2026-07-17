@@ -41,8 +41,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
 
 use crate::grants::{
     capability_set, DEVMGR_CEILING, LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING,

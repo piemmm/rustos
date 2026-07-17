@@ -1,5 +1,5 @@
-//! Integration test for `rustos_kernel_core::kernel_main` and
-//! `rustos_kernel_core::handle_panic`.
+//! Integration test for `tairix_kernel_core::kernel_main` and
+//! `tairix_kernel_core::handle_panic`.
 //!
 //! Drives the architecture-neutral kernel entry on the host with a
 //! [`TestArch`] and a [`TestSink`], then asserts:
@@ -21,14 +21,14 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
-use rustos_kernel_core::test_arch::{TestArch, HALT_SENTINEL};
-use rustos_kernel_core::test_sink::TestSink;
-use rustos_kernel_core::{
+use tairix_kernel_core::test_arch::{TestArch, HALT_SENTINEL};
+use tairix_kernel_core::test_sink::TestSink;
+use tairix_kernel_core::{
     kernel_main, panic_dump, AuditEvent, BootInfo, DispatchCallbackSlot, PanicContext, Phase,
 };
-use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
-use rustos_kernel_sched_api::SchedulerConfig;
-use rustos_log::Level;
+use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
+use tairix_kernel_sched_api::SchedulerConfig;
+use tairix_log::Level;
 
 fn make_usable_map() -> BootMemoryMap {
     let mut map = BootMemoryMap::new();

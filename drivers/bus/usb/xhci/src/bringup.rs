@@ -9,7 +9,7 @@
 //! watch armed when none is (a keyboard absent at boot is a first-class state,
 //! not a failure).
 //! The HCD then serves that device's transfers over the URB transport seam
-//! (`rustos_usb::transport`) to the autoloaded class driver — it does **not**
+//! (`tairix_usb::transport`) to the autoloaded class driver — it does **not**
 //! decode HID reports itself; that is the class driver's job.
 //!
 //! # What lives here, and what does not
@@ -23,7 +23,7 @@
 //! runtime builds over those grants. So this orchestration knows nothing of
 //! PCI, the BCM2711, or any board: it maps a register window by address,
 //! carves a DMA region, and speaks the bus-agnostic xHCI protocol in
-//! [`rustos_usb`].
+//! [`tairix_usb`].
 //!
 //! # Testing boundary
 //!
@@ -33,10 +33,10 @@
 //! [`DriverError::DeviceFault`], which is exactly the on-metal boundary. The
 //! live controller bring-up is the on-metal acceptance item.
 
-use rustos_abi::hwtree::{HwResource, HwResourceKind};
-use rustos_abi::{CapabilityId, Delay, DriverError, DriverHost, MmioMapper, RegisterWindow};
-use rustos_usb::device::{EnumStage, EventWait, UsbDevice};
-use rustos_usb::{SlabBank, Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET};
+use tairix_abi::hwtree::{HwResource, HwResourceKind};
+use tairix_abi::{CapabilityId, Delay, DriverError, DriverHost, MmioMapper, RegisterWindow};
+use tairix_usb::device::{EnumStage, EventWait, UsbDevice};
+use tairix_usb::{SlabBank, Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET};
 
 /// The brought-up controller engine the HCD serves: a [`UsbDevice`] over the
 /// mapped register BAR and a growable [`SlabBank`] of DMA chunks minted from
@@ -375,7 +375,7 @@ pub fn bring_up_controller_diagnostic<'h>(
     // Bring the controller up to serve every reachable device, transparently
     // descending through hubs — including a hub plugged into a hub. The
     // arch-neutral root→hub→downstream orchestration lives once in
-    // `rustos_usb`, so each device is discovered, never a guessed port. A
+    // `tairix_usb`, so each device is discovered, never a guessed port. A
     // device absent at boot is
     // **not** a failure: `bring_up` leaves the controller up with the
     // first-connect watch armed (the onboard hub's status-change endpoint, or

@@ -69,7 +69,7 @@ The shape-neutral data plumbing both the files app's future `Run` binary
 and today's `ls` share, landed with today's consumers so nothing is
 speculative:
 
-- `rustos_abi::fs::DirEntries` — the **one** whole-stream walker over the
+- `tairix_abi::fs::DirEntries` — the **one** whole-stream walker over the
   `fs_readdir` byte stream: a fused iterator yielding each decoded
   `DirEntry` and surfacing the first decode error as a terminal
   `Err` (the caller refuses the whole listing, never a partial one).
@@ -90,13 +90,13 @@ speculative:
   composition over an injected `fetch(path) -> stream` primitive, so the
   engine is host-proven end to end (a `Browser` navigating an in-memory
   tree of *encoded* `DirEntry` streams). The freestanding fetcher is one
-  line (`rustos_rt::read_dir_all`) and lands wired inside the files `Run`
+  line (`tairix_rt::read_dir_all`) and lands wired inside the files `Run`
   binary in AW3, exactly as staged consumers landed for the encrypted-swap
   layer and the SP11 stack spans.
 
 ### AW2 — the window protocol + engine `[x]`
 
-- `rustos_abi::window_ipc` — the fixed-width, versioned, fail-closed
+- `tairix_abi::window_ipc` — the fixed-width, versioned, fail-closed
   vocabulary: `WindowRequest` (`Create` with the granted shm surface, the
   app's event endpoint — reserved endpoints refused — geometry, and a
   bounded control-character-free `WindowTitle`; `Present` by frame index
@@ -110,7 +110,7 @@ speculative:
   (`call_peer_origin`) → owner/bounds validation → the `WindowHost`
   compositor bridge; windows keyed to the owner's `ProcId`, `NotFound`
   for any window the caller does not own, map-once regions via the
-  shared `rustos_display::ShmMapper`, `WINDOWS_PER_CLIENT_MAX` cap,
+  shared `tairix_display::ShmMapper`, `WINDOWS_PER_CLIENT_MAX` cap,
   `client_exited` teardown, `deliver_event` app-ward routing validated
   against the live window) and `WindowClient`/`WindowEvents` (typed
   calls over `WindowTransport`, parked — never polling — event wait
@@ -135,11 +135,11 @@ Done. What now holds:
   members re-report on the next wait.
 - `userland/apps/files` ships its `Run` binary + signed `AppInfo`
   (`CAP_FS_ACCESS` only) inside the bundle: `VfsDirectorySource` over
-  `rustos_rt::read_dir_all`, rendering through the shared theme, window
+  `tairix_rt::read_dir_all`, rendering through the shared theme, window
   create/present over the AW2 client, parked event wait, redraw on
   focus/theme-relevant events, clean exit on `CloseRequested`. The
   session's start-menu "Files" entry spawns it
-  (`rustos_desktop_session::config` — the one production configuration
+  (`tairix_desktop_session::config` — the one production configuration
   the QEMU harness also imports for its click coordinates).
 - The autoload QEMU vertical drives the full click-through with injected
   pointer buttons (`tools/qemu` ordered `PointerStep` script + ordered
@@ -161,14 +161,14 @@ Done. What now holds:
 
 - `WaitSourceKind::Stream` (see §0): the kernel wait-set wakes a parked
   owner on its own pipe read end's buffered bytes or end-of-stream.
-- `rustos_terminal::spawned` — the production `ShellSource`, host-tested
+- `tairix_terminal::spawned` — the production `ShellSource`, host-tested
   over injected closures: `shell_wires` (the one attach-block layout —
   child stdin from the keystroke pipe, stdout *and* stderr onto the one
   output pipe, fd 3 closed; canonical under `SpawnAttach::parse`) and
   `PipeShellSource` (one bounded chunk per wake, end-of-stream surfaced
   as the typed "shell exited" refusal, short-write resume, wedged-channel
   fail-closed). The `Run` binary supplies `pipe_create` ×2,
-  `spawn_attached` of `rustos_users::policy::DEFAULT_SHELL` (with `TERM`
+  `spawn_attached` of `tairix_users::policy::DEFAULT_SHELL` (with `TERM`
   exported and the child-side ends closed after the spawn), and
   `fs_read`/`fs_write` under the seam.
 - `userland/apps/terminal` ships its `Run` bundle (signed `AppInfo`:
@@ -178,9 +178,9 @@ Done. What now holds:
   dispatch, `lib/keymap`-encoded key presses, pump-and-present on shell
   output, clean teardown on end-of-stream / child exit / close. The
   session's start-menu `Terminal` entry spawns it; the app event-mailbox
-  naming rule is now `rustos_window::event_endpoint_for` (one definition,
+  naming rule is now `tairix_window::event_endpoint_for` (one definition,
   shared with the files app), and the cascade placement is
-  `rustos_desktop_session::windows::cascade_origin_for` (shared with the
+  `tairix_desktop_session::windows::cascade_origin_for` (shared with the
   vertical's click script).
 - The autoload QEMU vertical drives the AW4 tail after the AW3
   click-through: menu → `Terminal` row, the terminal-window click gated
@@ -212,7 +212,7 @@ Done (code + host coverage). What now holds:
   and re-delegation all refuse), the grant is dispatcher-audited with
   `CAP_FS_ACCESS`, redemption is unprivileged and audited, and an
   exited recipient's pending delegations are reclaimed. `lib/rt`
-  wrappers, `lib/abi-sys` `ros_sys_*` stubs, and the regenerated C
+  wrappers, `lib/abi-sys` `tairix_sys_*` stubs, and the regenerated C
   header carry the surface.
 - **Protocol**: `WindowRequest::PickFile { window_id }` (op 4, status
   reply = acceptance only) and the conclusions
@@ -224,13 +224,13 @@ Done (code + host coverage). What now holds:
   `deliver_event` requires-and-clears the pending pick on a conclusion
   so exactly one conclusion follows each acceptance; the client half is
   `WindowClient::pick_file`.
-- **The shared browser engine moved to `lib/browse`** (`rustos-browse`):
+- **The shared browser engine moved to `lib/browse`** (`tairix-browse`):
   the AW1 model/renderer/path-spelling hoisted out of the files app (its
   package is now the `Run` binary only) because the picker is its second
   consumer, plus the renderer-mirroring row hit-test
   (`render::entry_index_at`/`row_height`) the picker's clicks resolve
   through.
-- **The session's trusted picker** (`rustos_desktop_session::picker`):
+- **The session's trusted picker** (`tairix_desktop_session::picker`):
   `SessionPicker` — one picker slot at a time, a fresh root listing under
   the session's own authority per pick (a refused listing refuses the
   pick), a session-owned window at the deterministic `PICKER_ORIGIN`,

@@ -1,4 +1,4 @@
-# rustos-fsprobe
+# tairix-fsprobe
 
 Filesystem signature, label, and identity probe — the one `no_std`
 definition of how the head of a block extent is recognised as a supported
@@ -19,7 +19,7 @@ disagree about what identifies a volume.
   removable-media content: every access is bounds-checked, every field
   is sanity-validated, and no match means `None`, never a guess.
 - `ProbedVolume` — the matched filesystem type
-  (`rustos_abi::volume::VolumeFsType`), the volume's stable identity
+  (`tairix_abi::volume::VolumeFsType`), the volume's stable identity
   exactly as the matching filesystem driver publishes it, and its
   recorded label (trimmed; empty where the format records none).
 - `fat32_identity_from_boot` — the FAT32 content-derived identity
@@ -32,4 +32,4 @@ disagree about what identifies a volume.
 ## Stability
 
 `experimental`. The probed on-disk formats are external and fixed; the
-Rust API may still change while RustOS is pre-release.
+Rust API may still change while TAIRiX is pre-release.

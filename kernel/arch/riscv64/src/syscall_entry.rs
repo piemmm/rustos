@@ -10,7 +10,7 @@
 //!   / [`SCAUSE_ECALL_FROM_S`]) the trap handler matches.
 //! * Marshalling the register-passed arguments (`a0`–`a5`) and the
 //!   syscall number (`a7`) out of the saved [`crate::trap::TrapFrame`]
-//!   into the architecture-neutral `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
+//!   into the architecture-neutral `tairix_abi` `[u64; SYSCALL_MAX_ARGS]`
 //!   layout — the same layout `kernel/arch/x86_64` builds (one ABI, no duplication).
 //! * The dispatch callback the trap path forwards each `ecall` to,
 //!   mirroring the [`crate::preempt`] timer-callback design. The
@@ -20,7 +20,7 @@
 //!
 //! # Calling convention
 //!
-//! RustOS follows the established RISC-V Linux register convention: the
+//! TAIRiX follows the established RISC-V Linux register convention: the
 //! syscall number is in `a7`, arguments in `a0`–`a5` (six — exactly
 //! `SYSCALL_MAX_ARGS`), and the result is returned in `a0`. After the
 //! dispatch the handler advances `sepc` past the 4-byte `ecall`
@@ -37,7 +37,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_abi::SYSCALL_MAX_ARGS;
+use tairix_abi::SYSCALL_MAX_ARGS;
 
 use crate::trap::{TrapFrame, SCAUSE_INTERRUPT_BIT};
 
@@ -62,7 +62,7 @@ pub const fn is_ecall_from_user(scause: u64) -> bool {
 }
 
 /// Pack the six riscv64 syscall argument registers into the canonical
-/// `rustos_abi` layout. The order matches the ABI definition pinned in
+/// `tairix_abi` layout. The order matches the ABI definition pinned in
 /// `lib/abi/src/syscalls.rs`, identical to the x86_64 port's
 /// `pack_raw_args` (one ABI).
 #[must_use]

@@ -1,6 +1,6 @@
-# rustos-cursor
+# tairix-cursor
 
-Shared pointer-cursor library for the RustOS desktop (`lib/cursor`, `AGENTS.md`
+Shared pointer-cursor library for the TAIRiX desktop (`lib/cursor`, `AGENTS.md`
 §6 / §10 — `PLAN.md` Stage 7).
 
 Cursors here are **richer than a one-bit fill mask**: each is a small ordered
@@ -19,7 +19,7 @@ so the same definition is
 - `vector` — `Vertex`, `Shape`, `VectorCursor`: the vector representation.
 - `raster` — `VectorCursor::rasterise` → `CursorImage` (a `lib/raster`
   `Surface` plus the hotspot in pixel coordinates).
-- `theme` — `CursorTheme`: one `VectorCursor` per `rustos_theme::CursorKind`,
+- `theme` — `CursorTheme`: one `VectorCursor` per `tairix_theme::CursorKind`,
   plus the built-in default set (light body over dark outline, two-tone busy
   disc).
 - `registry` — `CursorRegistry`: the available cursor sets and the active one,

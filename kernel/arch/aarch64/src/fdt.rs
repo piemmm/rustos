@@ -1,19 +1,19 @@
 //! aarch64 device-tree access.
 //!
 //! The flattened-device-tree parser itself is architecture-neutral and
-//! lives once in [`rustos_fdt`] (no duplication); this
+//! lives once in [`tairix_fdt`] (no duplication); this
 //! module re-exports it and layers the aarch64-specific *queries* the boot
 //! path needs from the `virt` board's device tree:
 //!
 //! * the first `/memory` region (delegated to
-//!   [`rustos_fdt::Fdt::first_memory_region`]);
+//!   [`tairix_fdt::Fdt::first_memory_region`]);
 //! * the `/psci` `method` — the conduit (`hvc`/`smc`) the kernel uses to
 //!   call PSCI firmware for secondary-core bring-up (the prerequisite for
 //!   aarch64 SMP, `plans/WIRING.md` Stage W6);
 //! * the optional generic-timer `clock-frequency` counter-rate override
 //!   the `/timer` node may carry (`plans/PI.md` P4).
 //!
-//! Devices reach [`rustos_abi::hwtree`] through the *generic* walk in
+//! Devices reach [`tairix_abi::hwtree`] through the *generic* walk in
 //! [`crate::platform`] — no per-device query is needed for a node to be
 //! discovered and matched.
 //!
@@ -28,9 +28,9 @@
 //! `#address-cells`/`#size-cells` and `ranges`, so a raw `reg` read is a
 //! *bus* address — never the CPU-physical base a driver may touch.
 
-use rustos_fdt::{read_cells, Node};
+use tairix_fdt::{read_cells, Node};
 
-pub use rustos_fdt::{Fdt, FdtError};
+pub use tairix_fdt::{Fdt, FdtError};
 
 /// Deepest device-tree nesting the shared walks track per-level state
 /// for.
@@ -466,7 +466,7 @@ pub fn psci_method(fdt: &Fdt<'_>) -> Option<PsciMethod> {
 /// `arm,psci` `compatible` prefix (covering `arm,psci`, `arm,psci-0.2`,
 /// `arm,psci-1.0`, …) so the conduit is read from the firmware's PSCI
 /// node regardless of the exact revision it advertises.
-fn node_is_psci(node: &rustos_fdt::Node<'_>) -> bool {
+fn node_is_psci(node: &tairix_fdt::Node<'_>) -> bool {
     node.property("compatible").is_some_and(|compatible| {
         compatible
             .iter_strings()
@@ -598,7 +598,7 @@ mod tests {
         GIC_TYPE_SPI,
     };
     use crate::gic::{MAX_INTID, MIN_SPI_INTID};
-    use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
+    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
 
     /// Build a single-node tree whose `pcie` node carries `dma-ranges`,
     /// then hand that node to `f`. The `PCIe` binding's cells are fixed:

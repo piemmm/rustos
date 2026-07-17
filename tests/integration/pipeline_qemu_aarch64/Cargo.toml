@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-pipeline-qemu-aarch64"
-description = "plans/SPAWN.md SP10b pipeline/redirection QEMU vertical: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board with the planted whole-disk encrypted-root image, unlock the root, authenticate root/root at the console login, and drive the spawned shell through real pipelines and redirections — `yes | head -n 2` (kernel-pipe back-pressure: the broken pipe ends the producer and the shell reaps both members), `seq 1 1000 | wc -c` (the consumer's byte-exact 3893 proves the pipe carried every byte), and a `> file` / `< file` round trip whose `cat` output proves the written content. PASS once the round trip's `cat` exits (its audited exit arms the sink) and the shell's scripted exit, typed only after the content marker appeared, follows it — so the verified output provably reached the transcript before the run ended."
+name = "tairix-test-pipeline-qemu-aarch64"
+description = "plans/SPAWN.md SP10b pipeline/redirection QEMU vertical: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board with the planted whole-disk encrypted-root image, unlock the root, authenticate root/root at the console login, and drive the spawned shell through real pipelines and redirections — `yes | head -n 2` (kernel-pipe back-pressure: the broken pipe ends the producer and the shell reaps both members), `seq 1 1000 | wc -c` (the consumer's byte-exact 3893 proves the pipe carried every byte), and a `> file` / `< file` round trip whose `cat` output proves the written content. PASS once the round trip's `cat` exits (its audited exit arms the sink) and the shell's scripted exit, typed only after the content marker appeared, follows it — so the verified output provably reached the transcript before the run ended."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,13 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-pipeline-qemu-aarch64"
+name = "tairix-test-pipeline-qemu-aarch64"
 path = "src/main.rs"
 
 # Freestanding "boot the production aarch64 pipeline with the planted
 # encrypted-root disk and prove shell pipelines and redirections end to
 # end" integration test. It reuses the entire production boot pipeline
-# through `rustos-kernel`'s library half — discovery, the unlock kthread,
+# through `tairix-kernel`'s library half — discovery, the unlock kthread,
 # PID 1 supervision, login's spawn-as-user, the shell's spawn-attach
 # launch path, kernel pipes, and the disk-backed bundle spawn path — and
 # only swaps the audit sink (no duplication). Keeping the QEMU-exit
@@ -26,10 +26,10 @@ path = "src/main.rs"
 # prevents feature unification from leaking it into any production build
 # (fail closed).
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

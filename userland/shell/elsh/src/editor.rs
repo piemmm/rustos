@@ -2,9 +2,9 @@
 //! out (`plans/SHELL.md`, "Interactive terminal").
 //!
 //! One [`Session`] edits one line. The REPL decodes raw input bytes through
-//! the shared terminal stack (`rustos_curses::Input` over the one `lib/vt`
+//! the shared terminal stack (`tairix_curses::Input` over the one `lib/vt`
 //! parser — never a shell-private key table) and feeds each
-//! [`rustos_curses::Event`] to [`Session::handle`]; the session repaints
+//! [`tairix_curses::Event`] to [`Session::handle`]; the session repaints
 //! itself through the shell's [`Console`] after every event using the same
 //! `lib/vt` escape vocabulary. The editor is pure state over injected seams,
 //! so every keystroke behaviour is host-testable.
@@ -32,9 +32,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_complete::common_prefix;
-use rustos_curses::Event;
-use rustos_vt::{EraseMode, Op};
+use tairix_complete::common_prefix;
+use tairix_curses::Event;
+use tairix_vt::{EraseMode, Op};
 
 use crate::complete::Completion;
 use crate::host::Console;
@@ -599,7 +599,7 @@ impl<'a> Session<'a> {
 /// degrades to writing nothing (fail closed, never a panic).
 fn encode_ops(ops: &[Op]) -> String {
     let mut bytes: Vec<u8> = Vec::new();
-    rustos_vt::emit::encode_all_into(ops, &mut bytes);
+    tairix_vt::emit::encode_all_into(ops, &mut bytes);
     String::from_utf8(bytes).unwrap_or_default()
 }
 
@@ -611,7 +611,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec;
     use alloc::vec::Vec;
-    use rustos_curses::Event;
+    use tairix_curses::Event;
 
     /// A scripted completer: returns a fixed span and candidate list.
     struct FixedCompleter {

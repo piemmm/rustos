@@ -17,7 +17,7 @@
 //! DMA publication (cache cleaning, address translation, write
 //! ordering) stays with the seam that owns the memory.
 
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 use crate::trb::{Trb, TrbType, CONTROL_CYCLE, CONTROL_LINK_TOGGLE};
 

@@ -174,7 +174,7 @@ per program in the kernel's `program_manifests` module, pinned by an
 exact-set unit test, with the above-baseline subset of every session
 tool additionally pinned as its own audited, reviewed set (CU2, CU7).
 The whole lifecycle is proven end to end by the
-`rustos-test-session-ceiling-qemu-aarch64` QEMU vertical: unlock, root
+`tairix-test-session-ceiling-qemu-aarch64` QEMU vertical: unlock, root
 login, `cd`/`pwd`/`ps` under the seeded ceiling, and a `ulimit`
 hard-bound raise refused because the shell's manifest does not request
 `CAP_RLIMIT_RAISE` even though the account ceiling carries it.

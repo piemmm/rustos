@@ -13,7 +13,7 @@
 //! reads and writes the directory bytes through the map engines.
 
 use crate::volume::{get_u24, get_u32, put_u24, put_u32};
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 /// Byte size of an old-format directory.
 pub const OLD_DIR_SIZE: usize = 1280;

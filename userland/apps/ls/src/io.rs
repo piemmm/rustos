@@ -13,11 +13,11 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use rustos_abi::fs::FileKind;
-use rustos_abi::Errno;
+use tairix_abi::fs::FileKind;
+use tairix_abi::Errno;
 
 /// The metadata `ls` renders for a path: its kind, permission bits, and
-/// size — the [`rustos_abi::fs::FileStat`] fields the listing actually
+/// size — the [`tairix_abi::fs::FileStat`] fields the listing actually
 /// shows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metadata {

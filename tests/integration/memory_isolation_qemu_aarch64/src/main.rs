@@ -26,7 +26,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-aarch64` port and supplies its own
+//! It links only the `tairix-arch-aarch64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
 //! never behind a Cargo feature on the arch crate (fail closed).
 
@@ -40,10 +40,10 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_arch_aarch64::paging::{AddressSpace, PageTablePool, PAGE_SIZE};
-    use rustos_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-    use rustos_arch_api::mmu::{AddressSpace as _, PageFlags};
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool, PAGE_SIZE};
+    use tairix_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
+    use tairix_log::{log, Event, EventId, Level};
 
     /// Virtual address the victim space maps and the attacker does not.
     /// 64 GiB — well above the 2 GiB identity window — so the walk uses
@@ -99,12 +99,12 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_memory_isolation_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_memory_isolation_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s`
-    /// trampoline calls (via `rustos_arch_aarch64_main`).
+    /// trampoline calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         log(
@@ -124,7 +124,7 @@ mod kernel {
         let mut victim = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
             .unwrap_or_else(|| fail("victim identity map"));
         // Install the victim mapping through the Arch HAL MMU surface
-        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the path
+        // (`tairix_arch_api::mmu::AddressSpace::map_page`), the path
         // the architecture-neutral kernel uses, rather than the port's
         // inherent `map_4k` (`plans/WIRING.md` W5b).
         victim
@@ -183,9 +183,9 @@ mod kernel {
                 level: Level::Error,
                 id: MISO_TEST_FAIL,
                 message: "aarch64 memory-isolation test: setup failed",
-                fields: &[rustos_log::Field {
+                fields: &[tairix_log::Field {
                     key: "stage",
-                    value: rustos_log::FieldValue::Str(what),
+                    value: tairix_log::FieldValue::Str(what),
                 }],
             },
         );

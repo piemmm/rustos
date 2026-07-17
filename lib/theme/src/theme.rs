@@ -119,12 +119,12 @@ impl Theme {
         &self.cursors
     }
 
-    /// The built-in **dark** theme — RustOS's default.
+    /// The built-in **dark** theme — TAIRiX's default.
     #[must_use]
     pub fn dark() -> Self {
         Self::new(
             ThemeId::DARK,
-            "RustOS Dark",
+            "TAIRiX Dark",
             Appearance::Dark,
             Palette {
                 desktop: Rgba::rgb(0x12, 0x14, 0x18),
@@ -147,7 +147,7 @@ impl Theme {
     pub fn light() -> Self {
         Self::new(
             ThemeId::LIGHT,
-            "RustOS Light",
+            "TAIRiX Light",
             Appearance::Light,
             Palette {
                 desktop: Rgba::rgb(0xd9, 0xdd, 0xe3),
@@ -181,8 +181,8 @@ fn common_metrics() -> Metrics {
 /// The fonts shared by both built-in themes.
 fn common_fonts() -> Fonts {
     Fonts {
-        ui: FontSpec::new("RustOS Sans", 14, FontWeight::Regular),
-        monospace: FontSpec::new("RustOS Mono", 14, FontWeight::Regular),
+        ui: FontSpec::new("TAIRiX Sans", 14, FontWeight::Regular),
+        monospace: FontSpec::new("TAIRiX Mono", 14, FontWeight::Regular),
     }
 }
 

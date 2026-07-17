@@ -1,6 +1,6 @@
 //! aarch64 per-CPU storage ("per-CPU storage").
 //!
-//! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
+//! Implements the Arch HAL [`PerCpu`](tairix_arch_api::PerCpu) surface
 //! for aarch64 over the **`TPIDR_EL1`** system register — the
 //! EL1-private thread-pointer the kernel uses as its per-CPU anchor
 //! (its EL0 counterpart `TPIDR_EL0` belongs to user-space TLS and is
@@ -10,14 +10,14 @@
 //!
 //! The stored word is opaque to this surface: the kernel decides whether
 //! it holds the address of a per-CPU control block or a dense CPU index
-//! (see the [`PerCpu`](rustos_arch_api::PerCpu) trait docs). On the host
+//! (see the [`PerCpu`](tairix_arch_api::PerCpu) trait docs). On the host
 //! build there is no `TPIDR_EL1`, so the handle backs the word with an
 //! in-handle cell solely for the unit tests; it is never linked into a
 //! kernel image.
 
 use core::sync::atomic::AtomicUsize;
 
-use rustos_arch_api::PerCpu;
+use tairix_arch_api::PerCpu;
 
 /// aarch64 implementation of the Arch HAL per-CPU storage surface.
 ///
@@ -86,7 +86,7 @@ impl PerCpu for PerCpuStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::percpu::conformance;
+    use tairix_arch_api::percpu::conformance;
 
     #[test]
     fn passes_per_cpu_conformance() {

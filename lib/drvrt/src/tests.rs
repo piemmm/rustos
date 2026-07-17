@@ -19,12 +19,12 @@ use super::*;
 use core::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use rustos_abi::driver::dma::{DmaHost, SlabCoherencyFn};
-use rustos_abi::hwtree::HwResource;
-use rustos_abi::{
+use tairix_abi::driver::dma::{DmaHost, SlabCoherencyFn};
+use tairix_abi::hwtree::HwResource;
+use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
 };
-use rustos_caps::CapabilitySet;
+use tairix_caps::CapabilitySet;
 
 /// The three shared `irq_*` observers a test clones out of the mock before it
 /// moves into the host: `(last bound line, irq_bind call count, irq_wait call
@@ -79,7 +79,7 @@ struct MockSyscalls {
     ipc_error: Cell<Option<Errno>>,
     /// Every node passed to `hw_emit_node`, in call order. Shared so a test
     /// can read it after the mock moves into the host.
-    emitted: Rc<RefCell<Vec<rustos_abi::HwNode>>>,
+    emitted: Rc<RefCell<Vec<tairix_abi::HwNode>>>,
     /// The raw signed result `hw_emit_node` returns (`0` published by
     /// default, or `-errno` to model a kernel refusal).
     emit_result: Cell<i64>,
@@ -115,7 +115,7 @@ impl MockSyscalls {
 
     /// A shared handle to the recorded `hw_emit_node` nodes, read after the
     /// mock moves into the host.
-    fn emitted(&self) -> Rc<RefCell<Vec<rustos_abi::HwNode>>> {
+    fn emitted(&self) -> Rc<RefCell<Vec<tairix_abi::HwNode>>> {
         Rc::clone(&self.emitted)
     }
 
@@ -299,15 +299,15 @@ impl GrantSyscalls for MockSyscalls {
         }
     }
 
-    fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64 {
+    fn hw_emit_node(&self, node: &tairix_abi::HwNode) -> i64 {
         self.emitted.borrow_mut().push(*node);
         self.emit_result.get()
     }
 
-    fn msi_alloc(&self) -> Result<rustos_abi::MsiAllocation, i64> {
+    fn msi_alloc(&self) -> Result<tairix_abi::MsiAllocation, i64> {
         // A canned allocation: a doorbell pair and a virtual line, so a test
         // exercising the MSI-routing path sees a stable, non-failing result.
-        Ok(rustos_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, 1024))
+        Ok(tairix_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, 1024))
     }
 }
 
@@ -389,16 +389,16 @@ fn maps_a_framebuffer_scanout_window() {
     // block — the display service's bring-up failed closed when it did not.
     const FB_HANDLE: u64 = 7;
     const FB_BASE: u64 = 0x4120_0000;
-    let mode = rustos_abi::driver::display::DisplayMode {
+    let mode = tairix_abi::driver::display::DisplayMode {
         width_px: 8,
         height_px: 4,
         stride_bytes: 32,
-        format: rustos_abi::driver::display::DisplayFormat::Bgra8888,
+        format: tairix_abi::driver::display::DisplayFormat::Bgra8888,
     };
     let fb = HwResource::framebuffer(
         FB_BASE,
         &mode,
-        rustos_abi::hwtree::FramebufferMemory::WriteCombine,
+        tairix_abi::hwtree::FramebufferMemory::WriteCombine,
     )
     .expect("valid mode");
     let len = usize::try_from(fb.length()).expect("small surface");
@@ -850,8 +850,8 @@ fn notify_wait_binds_the_granted_line_once_then_parks_each_call() {
     let host =
         RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
 
-    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
-    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
 
     assert_eq!(line.get(), IRQ_LINE, "binds the node's granted line");
     assert_eq!(binds.get(), 1, "the line is bound exactly once (cached)");
@@ -873,7 +873,7 @@ fn notify_wait_without_an_irq_grant_is_a_noop() {
     )
     .unwrap();
 
-    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
     assert_eq!(binds.get(), 0);
     assert_eq!(waits.get(), 0);
 }
@@ -886,7 +886,7 @@ fn notify_wait_without_the_bind_capability_is_a_noop() {
     let (_, binds, waits) = mock.irq_observers();
     let host = RtDriverHost::new(caps(&[]), mock, &[irq_grant()], None).unwrap();
 
-    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
     assert_eq!(binds.get(), 0);
     assert_eq!(waits.get(), 0);
 }
@@ -903,8 +903,8 @@ fn notify_wait_does_not_park_when_the_bind_is_refused() {
     let host =
         RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
 
-    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
-    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
     assert_eq!(binds.get(), 2, "a refused bind is retried, never cached");
     assert_eq!(waits.get(), 0, "never parks on an unbound handle");
 }
@@ -973,8 +973,8 @@ fn bind_irq_surfaces_a_refused_bind_and_caches_nothing() {
 
 #[test]
 fn mailbox_exchange_marshals_to_the_endpoint_and_decodes_the_reply() {
-    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
-    use rustos_abi::mailbox_ipc;
+    use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+    use tairix_abi::mailbox_ipc;
 
     // The host's `MailboxChannel` is purely the client side of the IPC: it
     // encodes the request, posts it to the well-known mailbox endpoint, and
@@ -1001,7 +1001,7 @@ fn mailbox_exchange_marshals_to_the_endpoint_and_decodes_the_reply() {
 
 #[test]
 fn mailbox_exchange_fails_closed_on_a_transport_error() {
-    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+    use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 
     // A missing `CAP_MAILBOX` (or any other kernel refusal of the call) is
     // surfaced as a `DriverError`, never papered over.
@@ -1018,8 +1018,8 @@ fn mailbox_exchange_fails_closed_on_a_transport_error() {
 
 #[test]
 fn mailbox_exchange_surfaces_a_service_error_reply() {
-    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
-    use rustos_abi::mailbox_ipc;
+    use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+    use tairix_abi::mailbox_ipc;
 
     // A status-framed error reply (the service mapped its `DriverError` to an
     // `Errno`) fails the exchange closed: a firmware fault / timeout
@@ -1041,7 +1041,7 @@ fn mailbox_exchange_surfaces_a_service_error_reply() {
 
 #[test]
 fn emit_node_publishes_the_child_through_the_syscall() {
-    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode};
+    use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode};
 
     // A bus driver publishes an enumerated child; the host forwards the
     // encoded node through `hw_emit_node` and reports success. The kernel — not the host — enforces `CAP_HW_EMIT` and
@@ -1063,7 +1063,7 @@ fn emit_node_publishes_the_child_through_the_syscall() {
 
 #[test]
 fn emit_node_surfaces_a_kernel_refusal_fail_closed() {
-    use rustos_abi::hwtree::{HwDeviceClass, HwNode};
+    use tairix_abi::hwtree::{HwDeviceClass, HwNode};
 
     // A kernel refusal — the driver lacks `CAP_HW_EMIT`, or the node requests
     // a resource outside its grants — is surfaced as `PermissionDenied`,

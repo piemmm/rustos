@@ -154,7 +154,7 @@ unsafe fn set_handler(vector: usize, addr: u64) {
 /// can be audited as plain Rust. Receives the error code and the faulting
 /// `rip` straight from the trap frame; never returns.
 #[no_mangle]
-extern "C" fn rustos_arch_x86_64_page_fault(error_code: u64, rip: u64) -> ! {
+extern "C" fn tairix_arch_x86_64_page_fault(error_code: u64, rip: u64) -> ! {
     // SAFETY: `IDT.pf_handler` is set exactly once by `init` and never
     // changed again; reading it here is therefore a data-race-free read
     // of an initialised `Option<fn>` through an aliased shared reference.
@@ -166,7 +166,7 @@ extern "C" fn rustos_arch_x86_64_page_fault(error_code: u64, rip: u64) -> ! {
 }
 
 #[no_mangle]
-extern "C" fn rustos_arch_x86_64_general_protection(error_code: u64, rip: u64) -> ! {
+extern "C" fn tairix_arch_x86_64_general_protection(error_code: u64, rip: u64) -> ! {
     // GP doesn't fire in either Stage-2 test on a healthy kernel; treat
     // it as a closed-fail. `error_code` and `rip` are
     // accepted into the ABI now so adding diagnostics in Stage 3a does
@@ -177,12 +177,12 @@ extern "C" fn rustos_arch_x86_64_general_protection(error_code: u64, rip: u64) -
 }
 
 #[no_mangle]
-extern "C" fn rustos_arch_x86_64_double_fault(_error_code: u64) -> ! {
+extern "C" fn tairix_arch_x86_64_double_fault(_error_code: u64) -> ! {
     crate::qemu_exit::exit_failure();
 }
 
 #[no_mangle]
-extern "C" fn rustos_arch_x86_64_unexpected_interrupt() -> ! {
+extern "C" fn tairix_arch_x86_64_unexpected_interrupt() -> ! {
     crate::qemu_exit::exit_failure();
 }
 
@@ -202,7 +202,7 @@ core::arch::global_asm!(
         // [rsp+8] = rip
         mov rdi, [rsp]
         mov rsi, [rsp+8]
-        call rustos_arch_x86_64_page_fault
+        call tairix_arch_x86_64_page_fault
     1:  cli
         hlt
         jmp 1b
@@ -211,7 +211,7 @@ core::arch::global_asm!(
     gp_thunk:
         mov rdi, [rsp]
         mov rsi, [rsp+8]
-        call rustos_arch_x86_64_general_protection
+        call tairix_arch_x86_64_general_protection
     1:  cli
         hlt
         jmp 1b
@@ -219,14 +219,14 @@ core::arch::global_asm!(
     .global df_thunk
     df_thunk:
         mov rdi, [rsp]
-        call rustos_arch_x86_64_double_fault
+        call tairix_arch_x86_64_double_fault
     1:  cli
         hlt
         jmp 1b
 
     .global default_thunk
     default_thunk:
-        call rustos_arch_x86_64_unexpected_interrupt
+        call tairix_arch_x86_64_unexpected_interrupt
     1:  cli
         hlt
         jmp 1b

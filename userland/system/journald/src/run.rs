@@ -3,13 +3,13 @@
 //! `init` launches to own authoritative system-log segment writes
 //! (`AGENTS.md` §16.2; SYSLOG §12/§15).
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `#[global_allocator]`, and
 //! the syscall wrappers (`call_create`/`call_recv`/`call_reply`/
 //! `call_peer_origin`/`self_origin`/`boot_id`/`clock_get`/`wall_time`/the
-//! `fs_*` file API); `rustos_rt::entry!` names this program's `main`.
+//! `fs_*` file API); `tairix_rt::entry!` names this program's `main`.
 //!
 //! # What this service does
 //!
@@ -27,7 +27,7 @@
 //! request, read the caller's kernel-attested `Origin` (`call_peer_origin`,
 //! never a caller claim), stamp the record with the journal's own ingest lane
 //! and the current monotonic + wall time, and hand it to the `serve` dispatch
-//! core (`rustos_journald::serve`), which admits it under the attested origin
+//! core (`tairix_journald::serve`), which admits it under the attested origin
 //! and commits it. It installs a per-stream rate limit so a log flood on the
 //! caller-writable `runtime`/`debug` streams is bounded (the system-authority
 //! streams are never dropped); dropped records surface as coalesced trusted
@@ -49,9 +49,9 @@
 
 // --- Pure-Rust program --------------------------------------------------
 // Compiled only for the freestanding service binary, which links the optional
-// `rustos-rt` runtime through the default `program` feature. The kernel and
+// `tairix-rt` runtime through the default `program` feature. The kernel and
 // host tooling build only this crate's *library*, so this module (and
-// `rustos-rt`) never enter those builds.
+// `tairix-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
     extern crate alloc;
@@ -59,17 +59,17 @@ mod program {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use rustos_abi::log_ingress::{
+    use tairix_abi::log_ingress::{
         encode_reply, LOG_INGRESS_ENDPOINT, LOG_INGRESS_MAX_REQUEST, LOG_INGRESS_REPLY_LEN,
     };
-    use rustos_abi::time::{Duration64, WallClockReading};
-    use rustos_abi::{Errno, Origin, MACHINE_ID_LEN, ORIGIN_WIRE_LEN};
-    use rustos_caps::CapabilitySet;
-    use rustos_journald::store::{
+    use tairix_abi::time::{Duration64, WallClockReading};
+    use tairix_abi::{Errno, Origin, MACHINE_ID_LEN, ORIGIN_WIRE_LEN};
+    use tairix_caps::CapabilitySet;
+    use tairix_journald::store::{
         segment_placement_for, LOG_ATTESTATION_KEY_PATH, MACHINE_ID_PATH,
     };
-    use rustos_journald::{serve, Clock, Ingest};
-    use rustos_log::{
+    use tairix_journald::{serve, Clock, Ingest};
+    use tairix_log::{
         machine_id_hash, Journal, LogAttestationKey, RateLimit, RateLimiter, SegmentStore,
         LOG_ATTESTATION_KEY_FILE_LEN, MAX_RECORD_PAYLOAD, STREAM_COUNT,
     };
@@ -123,7 +123,7 @@ mod program {
     /// returning `Ok(())` only when exactly `buf.len()` bytes were read. A
     /// missing file, a short read, or any I/O error fails closed.
     fn read_exact_file(path: &str, buf: &mut [u8]) -> Result<(), i64> {
-        let file = rustos_rt::open(path.as_bytes())?;
+        let file = tairix_rt::open(path.as_bytes())?;
         let read = file.read_at(0, buf)?;
         if read == buf.len() {
             Ok(())
@@ -152,7 +152,7 @@ mod program {
             // Ensure the per-stream directory exists. An `AlreadyExists`
             // return is the steady-state case and is not an error; any other
             // failure is surfaced.
-            let mkdir = rustos_rt::fs_mkdir(dir.as_bytes());
+            let mkdir = tairix_rt::fs_mkdir(dir.as_bytes());
             if mkdir < 0 {
                 let err = errno_from(mkdir);
                 if err != Errno::AlreadyExists {
@@ -161,13 +161,13 @@ mod program {
             }
 
             // Create the immutable segment file and write the whole image.
-            let file = rustos_rt::create(path.as_bytes()).map_err(errno_from)?;
+            let file = tairix_rt::create(path.as_bytes()).map_err(errno_from)?;
             let written = file.write_at(0, bytes).map_err(errno_from)?;
             if written != bytes.len() {
                 return Err(Errno::NoSpace);
             }
             // Flush so an acknowledged segment survives a power loss.
-            let synced = rustos_rt::fs_sync(file.fd());
+            let synced = tairix_rt::fs_sync(file.fd());
             if synced < 0 {
                 return Err(errno_from(synced));
             }
@@ -181,8 +181,8 @@ mod program {
     /// degrades to `Unset` rather than dropping the record (the monotonic
     /// clock is the ordering authority, never the wall clock — SYSLOG §5.1).
     fn read_clock() -> Clock {
-        let monotonic = Duration64::from_nanos(rustos_rt::clock_get());
-        let wall = rustos_rt::wall_time().unwrap_or_else(|_| WallClockReading::UNSET);
+        let monotonic = Duration64::from_nanos(tairix_rt::clock_get());
+        let wall = tairix_rt::wall_time().unwrap_or_else(|_| WallClockReading::UNSET);
         Clock { monotonic, wall }
     }
 
@@ -191,7 +191,7 @@ mod program {
     /// reply and fails closed on decode.
     fn reply(reply_buf: &mut [u8], ticket: u64, result: Result<(), Errno>) {
         if let Ok(total) = encode_reply(result, reply_buf) {
-            let _ = rustos_rt::call_reply(LOG_INGRESS_ENDPOINT, ticket, &reply_buf[..total]);
+            let _ = tairix_rt::call_reply(LOG_INGRESS_ENDPOINT, ticket, &reply_buf[..total]);
         }
     }
 
@@ -211,7 +211,7 @@ mod program {
         // The per-boot id likewise binds the genesis; it is minted early in
         // boot, so a failure here means the random subsystem never seeded and
         // the service fails closed (PID 1 relaunches).
-        let boot_id = match rustos_rt::boot_id() {
+        let boot_id = match tairix_rt::boot_id() {
             Ok(id) => id,
             Err(_) => return 3,
         };
@@ -219,7 +219,7 @@ mod program {
         // The journal's own attested origin, for the trusted records it authors
         // itself (the `security` spoof-notes). Read from the kernel, never
         // self-claimed.
-        let own_origin = match rustos_rt::self_origin() {
+        let own_origin = match tairix_rt::self_origin() {
             Ok(origin) => origin,
             Err(_) => return 4,
         };
@@ -274,7 +274,7 @@ mod program {
         // process may post a log record. `recv_caps` is empty — endpoint
         // ownership already restricts receive to this task.
         let empty = CapabilitySet::empty();
-        let bound = rustos_rt::call_create(
+        let bound = tairix_rt::call_create(
             LOG_INGRESS_ENDPOINT,
             &empty,
             &empty,
@@ -295,7 +295,7 @@ mod program {
         loop {
             let mut ticket: u64 = 0;
             let request_len =
-                match rustos_rt::call_recv(LOG_INGRESS_ENDPOINT, &mut request, &mut ticket) {
+                match tairix_rt::call_recv(LOG_INGRESS_ENDPOINT, &mut request, &mut ticket) {
                     Ok(len) => len,
                     // A transient recv error (e.g. an oversize request left
                     // queued) must not kill the server; drop it and continue.
@@ -306,7 +306,7 @@ mod program {
             // fail-closed: reply an error rather than admitting an unattested
             // record.
             let caller =
-                match rustos_rt::call_peer_origin(LOG_INGRESS_ENDPOINT, ticket, &mut origin_buf) {
+                match tairix_rt::call_peer_origin(LOG_INGRESS_ENDPOINT, ticket, &mut origin_buf) {
                     Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
                         Ok(origin) => origin,
                         Err(err) => {
@@ -333,12 +333,12 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
-// Whenever the real freestanding `rustos-rt` `_start` path is not compiled —
+// Whenever the real freestanding `tairix-rt` `_start` path is not compiled —
 // on the host (`cargo build --workspace`, clippy, fmt), or for a
 // `program`-less build of this crate — this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.

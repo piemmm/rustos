@@ -18,7 +18,7 @@ use crate::dir::{
     MAX_NAME_LEN,
 };
 use crate::volume::{get_u32, put_u32};
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 /// The `SBPr` header marker.
 pub const BIG_START: [u8; 4] = *b"SBPr";

@@ -1,11 +1,11 @@
 //! Loom model-checking harness for the lock-free send fast path of
-//! [`rustos_kernel_ipc::port::Port`].
+//! [`tairix_kernel_ipc::port::Port`].
 //!
 //! Run with:
 //!
 //! ```text
 //! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p rustos-kernel-ipc --release
+//!     -p tairix-kernel-ipc --release
 //! ```
 //!
 //! When `loom` is *not* enabled, this file compiles to an empty test
@@ -35,12 +35,12 @@
 use loom::sync::Arc;
 use loom::thread;
 
-use rustos_abi::{CapabilityId, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_ipc::port::{EndpointId, Port};
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_log::{Event, Sink};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_ipc::port::{EndpointId, Port};
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_log::{Event, Sink};
 
 /// A do-nothing sink: loom tests are not interested in audit
 /// observability, only the lock-free state machine, and `RefCell` is

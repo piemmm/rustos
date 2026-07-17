@@ -12,7 +12,7 @@
 //! # Why caller-provided storage and not a fixed `.bss` arena?
 //!
 //! `kernel/arch/x86_64` is deliberately `alloc`-free: the freestanding
-//! QEMU test binaries link it without an allocator and `rustos-kernel`
+//! QEMU test binaries link it without an allocator and `tairix-kernel`
 //! is *not* on the `alloc` heap before the per-CPU IDT is installed —
 //! there is no allocator yet. A fixed `static mut PER_CPU: [PerCpu;
 //! MAX_CPUS]` would therefore size the per-CPU arena to a hand-picked

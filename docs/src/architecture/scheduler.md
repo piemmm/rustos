@@ -1,6 +1,6 @@
 # Kernel scheduler
 
-`kernel/sched` ships the architecture-neutral half of RustOS' SMP
+`kernel/sched` ships the architecture-neutral half of TAIRiX' SMP
 scheduler. It owns the run queues and the dispatch policy; the
 architecture ports (Stage 3 of [`PLAN.md`](../../../PLAN.md)) plug in the
 real IPI and timer surfaces through the [`SchedulerArch`] trait.
@@ -100,7 +100,7 @@ policy is the classical MLFQ as described in:
 > Three Easy Pieces*, ch. 8. <https://pages.cs.wisc.edu/~remzi/OSTEP/>
 
 The run-queue is a bounded variant of the Chase–Lev work-stealing
-deque (Chase & Lev, SPAA '05) with two RustOS-specific simplifications:
+deque (Chase & Lev, SPAA '05) with two TAIRiX-specific simplifications:
 
 1. The buffer is bounded, so a misbehaving task source cannot
    amplify into a kernel-wide DoS (`AGENTS.md` §5).
@@ -346,7 +346,7 @@ calls this once per fire, *after* it has acknowledged the device-
 level interrupt source (EOI on the LAPIC, etc.). The scheduler
 itself never reaches for a timer register; the arch port owns that.
 
-RustOS is a **tickless (NO_HZ)** kernel (`AGENTS.md` §17.1) under every
+TAIRiX is a **tickless (NO_HZ)** kernel (`AGENTS.md` §17.1) under every
 policy but the one sanctioned exception, **CFQ** (the default). Under a
 tickless policy no CPU is driven by a fixed-frequency periodic timer
 interrupt: the timer is armed **one-shot**, to the next event the
@@ -416,7 +416,7 @@ task's quantum deadline (now + one quantum) and `set_wakeup` records the
 nearest waiter deadline, both as absolute ticks of the port's free-running
 counter (`CNTPCT_EL0` on aarch64, the `time` CSR on riscv64, the TSC on
 x86_64); a shared `reprogram` arms the single one-shot to the earlier of
-the two via the host-tested `rustos_arch_api::wakeup::earliest` helper, or
+the two via the host-tested `tairix_arch_api::wakeup::earliest` helper, or
 disarms when neither is pending. The conversion from monotonic-ns deadline
 to counter ticks, and (on x86_64) the rebase of the chosen TSC duration
 onto the LAPIC count, use the same calibrated frequency `monotonic_ns`
@@ -431,7 +431,7 @@ no-op, so a non-preemptive port inherits the explicit-wake path only; the
 host `TestArch` records each call so the wait syscalls' re-arm epilogues
 are asserted directly.
 
-The dispatch loop runs with **device interrupts enabled** — RustOS is a
+The dispatch loop runs with **device interrupts enabled** — TAIRiX is a
 fully preemptive kernel (`AGENTS.md` §17.1). It calls
 [`KernelArch::set_device_irqs(true)`] before steady-state dispatching **and
 again whenever a scheduler step returns**. The second edge is required
@@ -548,7 +548,7 @@ enabled) remains the only writer of run-queue state. An interrupt handler
 **never** takes a scheduler lock: it does its work lock-free and, when it
 needs to wake a waiter, only sets an atomic flag
 (`WaitQueue::request_wake` / the `timed_wake_sweep` pending bit), mirroring
-`rustos_kernel_irq::IrqTable::fire`. The real `unpark` — which reads the
+`tairix_kernel_irq::IrqTable::fire`. The real `unpark` — which reads the
 registry `RwLock` and the run-queue lock — runs at the next
 dispatcher-context safe point (`waitq::drain_pending_wakes`, between steps
 and before idle), so the scheduler's locks are never acquired with
@@ -841,17 +841,17 @@ These hold at every API boundary:
 The scheduler is split per `AGENTS.md` §17.1 into a contract crate and
 one policy crate per implementation:
 
-* `kernel/sched/api` (`rustos-kernel-sched-api`) — the
+* `kernel/sched/api` (`tairix-kernel-sched-api`) — the
   `SchedulerPolicy` trait, the policy-neutral lifecycle vocabulary
   (`Priority`, `TaskState`, `TaskAction`, `TaskContext`, `TaskId`,
   `SchedError`, `StepOutcome`, `SchedulerConfig`), the re-exported
   Arch HAL surface (`CpuId`, `SchedulerArch`), the host `TestArch`
   double, and the shared `conformance` suite.
-* `kernel/sched/cfq` (`rustos-kernel-sched-cfq`) — the CFQ policy
+* `kernel/sched/cfq` (`tairix-kernel-sched-cfq`) — the CFQ policy
   described above, implementing `SchedulerPolicy`. This is the default.
-* `kernel/sched/eevdf` (`rustos-kernel-sched-eevdf`) — the EEVDF policy
+* `kernel/sched/eevdf` (`tairix-kernel-sched-eevdf`) — the EEVDF policy
   described above, implementing `SchedulerPolicy`.
-* `kernel/sched/mlfq` (`rustos-kernel-sched-mlfq`) — the MLFQ policy
+* `kernel/sched/mlfq` (`tairix-kernel-sched-mlfq`) — the MLFQ policy
   described above, implementing `SchedulerPolicy`. The three are siblings
   (`AGENTS.md` §2.2 carve-out — parallel policies are deliberate, not
   duplication); adding another policy means adding a sibling crate,

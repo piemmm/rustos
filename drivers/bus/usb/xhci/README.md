@@ -1,4 +1,4 @@
-# `rustos-drv-bus-usb` — xHCI USB host-controller driver (HCD)
+# `tairix-drv-bus-usb` — xHCI USB host-controller driver (HCD)
 
 `plans/USB.md` U3b. The loadable, autoloaded **host-controller driver**: the
 sole owner of one xHCI controller. It maps the controller's register BAR, owns
@@ -16,7 +16,7 @@ The crate is a `lib` (host-testable logic) **and** a `Run` binary (the process).
 The bus-agnostic xHCI **protocol** (the `XhciHost` register seam, the `Xhci`
 controller engine, the TRB/ring vocabulary, the `UsbDevice` enumeration engine,
 and the URB transport `drive_urb`/`UrbEngine`) lives in
-[`rustos-usb`](../../../../lib/usb) (`lib/usb`), so this driver and the class
+[`tairix-usb`](../../../../lib/usb) (`lib/usb`), so this driver and the class
 drivers build on the same engine without depending on each other (`drivers/* →
 lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
 
@@ -27,7 +27,7 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
 - `bringup` — `derive_controller_resources` + `bring_up_controller[_diagnostic]`:
   derive the BAR/DMA bounds from the granted resources, carve+aperture-check
   the DMA region (fail-closed `OutOfRange`, §5.4), map the BAR, and bring the
-  controller up via `rustos_usb::Xhci::open` + `UsbDevice::start` (which also
+  controller up via `tairix_usb::Xhci::open` + `UsbDevice::start` (which also
   enables the completion interrupter — the engine's synchronous waits park on
   the caller-supplied `EventWait` seam, wall-clock-bounded, never an
   iteration-count spin) + `UsbDevice::bring_up`, returning the `UsbDevice`
@@ -35,7 +35,7 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   watch armed when none is yet attached.
 - `serve` — `UrbService`, the per-interface state holding at most one
   outstanding interrupt-IN URB (a second concurrent submit fails closed
-  `AlreadyExists`), driven on submit/IRQ through `rustos_usb::drive_urb` /
+  `AlreadyExists`), driven on submit/IRQ through `tairix_usb::drive_urb` /
   `frame_completion`; a disconnect aborts any parked URB with `NotFound` before
   the interface node is retracted, and any later submit while no interface node
   is live is rejected with `NotFound`, so a replugged class driver starts from a
@@ -123,16 +123,16 @@ controller behaviour is a metal checklist (`plans/PI.md` §0.4).
 
 The xHCI protocol layers (bring-up, port/doorbell decode, ring state machines,
 DMA programming, the full HID enumeration chain, the `ReportSource` report path,
-and the URB transport) are tested in `lib/usb` (`cargo test -p rustos-usb`).
+and the URB transport) are tested in `lib/usb` (`cargo test -p tairix-usb`).
 
-`cargo test -p rustos-drv-bus-usb` exercises the pieces here: the `bringup`
+`cargo test -p tairix-drv-bus-usb` exercises the pieces here: the `bringup`
 fail-closed paths up to the controller hand-off (the inert mock window faults —
 the on-metal boundary), and the `serve` `UrbService` state machine (held
 interrupt-IN completed on a later event; synchronous control-IN; second-submit
 `AlreadyExists`; aborting a parked URB on disconnect before stale transfer
 faults are drained; rejecting a stale submit after interface removal;
 illegal/fail-closed URBs; idle event) plus the interface-node grant builder,
-over a mock engine. `cargo test -p rustos-usb` also covers confirming a watched
+over a mock engine. `cargo test -p tairix-usb` also covers confirming a watched
 hub-downstream detach from a failed report transfer while preserving ordinary
 live-device report faults, and re-arming a stashed hub status-change completion
 or delayed disconnect latch so a later reconnect re-enumerates.

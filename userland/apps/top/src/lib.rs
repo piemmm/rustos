@@ -1,4 +1,4 @@
-//! RustOS `top` — a live process-overview TUI (Stage C5 of
+//! TAIRiX `top` — a live process-overview TUI (Stage C5 of
 //! `plans/CURSES.md`).
 //!
 //! `top` is the first in-tree consumer of the OS curses library
@@ -57,5 +57,5 @@ pub use app::{list_capacity, render, run};
 pub use command::{parse, Command, DEFAULT_DELAY_TENTHS, MIN_DELAY_TENTHS, USAGE};
 pub use error::TopError;
 pub use model::{Action, CpuSplit, CpuTimes, Model, Scope, ALL_DENIED_NOTICE};
-pub use rustos_curses::{Screen, Tty};
-pub use rustos_procinfo::Transport;
+pub use tairix_curses::{Screen, Tty};
+pub use tairix_procinfo::Transport;

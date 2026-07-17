@@ -1,7 +1,7 @@
 //! Rendering the two help surfaces as `lib/vt` operations.
 //!
-//! Both renderers emit a `Vec<rustos_vt::Op>` the caller encodes with
-//! `rustos_vt::encode_all_into` and writes to its own stdout stream. Emitting
+//! Both renderers emit a `Vec<tairix_vt::Op>` the caller encodes with
+//! `tairix_vt::encode_all_into` and writes to its own stdout stream. Emitting
 //! typed operations rather than raw bytes keeps the escape vocabulary the
 //! one `lib/vt` definition, and — because the parser already rejected every
 //! control character — guarantees the output carries no control bytes
@@ -17,8 +17,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_curses::str_width;
-use rustos_vt::{Op, Sgr};
+use tairix_curses::str_width;
+use tairix_vt::{Op, Sgr};
 
 use crate::doc::{Align, Block, HelpDoc, ListItem, Section, SectionKind, Span, Table};
 

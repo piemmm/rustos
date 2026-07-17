@@ -65,7 +65,7 @@ pub const DEFAULT_RAM_MIB: u32 = 256;
 pub const QEMU_BINARY: &str = "qemu-system-riscv64";
 
 /// QEMU machine model the runner targets. The generic `virt` board is
-/// the only riscv64 platform RustOS' QEMU tests run on — it carries the
+/// the only riscv64 platform TAIRiX' QEMU tests run on — it carries the
 /// `SiFive` Test device, eight virtio-mmio transports, and a `PCIe` host
 /// bridge the Stage 4.D drivers exercise.
 pub const MACHINE: &str = "virt";
@@ -158,7 +158,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     }
     // Present every virtio-mmio transport as a *modern* (virtio 1.x,
     // version 2) device. QEMU's virtio-mmio defaults to the legacy
-    // (version 1) interface for backwards compatibility; RustOS' MMIO
+    // (version 1) interface for backwards compatibility; TAIRiX' MMIO
     // transport only drives the modern layout, so force it board-wide.
     argv.push("-global".into());
     argv.push("virtio-mmio.force-legacy=false".into());
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn argv_forces_modern_virtio_mmio() {
-        // RustOS' MMIO transport only drives modern (version 2)
+        // TAIRiX' MMIO transport only drives modern (version 2)
         // virtio-mmio; the runner must override QEMU's legacy default.
         let spec = fixture_spec(1);
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));

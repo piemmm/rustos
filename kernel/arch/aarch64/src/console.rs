@@ -30,7 +30,7 @@
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use rustos_fdt::Fdt;
+use tairix_fdt::Fdt;
 
 /// MMIO base the console points at before any discovery runs: the QEMU
 /// `virt` board's PrimeCell PL011 UART (fixed by the `virt` memory map,
@@ -657,7 +657,7 @@ pub fn tx_wait(mut tx_ready: impl FnMut() -> bool, wedged: bool, budget: u32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm};
+    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm};
 
     #[test]
     fn compatible_selects_the_register_layout() {

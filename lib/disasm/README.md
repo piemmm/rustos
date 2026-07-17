@@ -1,6 +1,6 @@
-# rustos-disasm
+# tairix-disasm
 
-Instruction decoders for RustOS (`lib/disasm`).
+Instruction decoders for TAIRiX (`lib/disasm`).
 
 The file manager's disassembly viewer — and an `objdump`-class command app
 next — need to render machine code as text for the four Tier-1 ISAs. That

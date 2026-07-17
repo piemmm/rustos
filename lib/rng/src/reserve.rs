@@ -64,7 +64,7 @@ impl ReseedMode {
 
 /// Default reserve size, in bytes (the charter permits 2 KiB).
 ///
-/// Matches `rustos_abi::RANDOM_RESERVE_DEFAULT_BYTES`; the two are kept equal
+/// Matches `tairix_abi::RANDOM_RESERVE_DEFAULT_BYTES`; the two are kept equal
 /// but the crates do not depend on one another, so each states it
 /// independently.
 pub const DEFAULT_RESERVE_BYTES: usize = 2048;

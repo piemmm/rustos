@@ -2,7 +2,7 @@
 #
 # The Pi firmware blobs are third-party redistributables (Broadcom /
 # Raspberry Pi Ltd, see `boot/LICENCE.broadcom` in the source repository)
-# and are NOT committed to this tree. `rustos-mkimage` consumes them as
+# and are NOT committed to this tree. `tairix-mkimage` consumes them as
 # build inputs from a caller-supplied directory and refuses — fail closed —
 # any file whose byte length or SHA-256 does not match this manifest.
 #
@@ -10,7 +10,7 @@
 # files under `boot/`. The `source` directive below pins the upstream
 # directory: `cargo xtask image` fetches any blob missing from its cache
 # as `<source>/<name>` and verifies it against this manifest before use;
-# an operator-staged directory (`--firmware` / $RUSTOS_PI_FIRMWARE) is
+# an operator-staged directory (`--firmware` / $TAIRIX_PI_FIRMWARE) is
 # only ever verified, never written. Updating the pin means replacing the
 # source line and every blob line below from the new release and
 # re-running the supply-chain review (AGENTS.md §19.3).

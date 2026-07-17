@@ -1,4 +1,4 @@
-//! RustOS `dirname` — strip the last component from names
+//! TAIRiX `dirname` — strip the last component from names
 //! (`plans/APPS.md` §12.1 Stage C).
 //!
 //! The GNU coreutils `dirname`: print each path spelling with its last
@@ -7,12 +7,12 @@
 //!
 //! # Divergence from GNU `dirname`
 //!
-//! RustOS paths may be anchored to a named alias root (`Home:/tools`,
+//! TAIRiX paths may be anchored to a named alias root (`Home:/tools`,
 //! `plans/DRIVES.md`) as well as to the view root `/`. An alias root is
 //! treated the way POSIX treats `/`: it is never stripped into, so
 //! `dirname Home:/tools` is `Home:/` exactly as `dirname /tools` is `/`.
 //! Where the root prefix ends is decided by the shared path grammar's own
-//! rule (`rustos_path::alias_root_len`) — this tool carries no second
+//! rule (`tairix_path::alias_root_len`) — this tool carries no second
 //! path parser. Documented in the tool's `Help/` documents.
 //!
 //! # What this crate is
@@ -42,7 +42,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_path::alias_root_len;
+use tairix_path::alias_root_len;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `dirname`'s own Help tree is
@@ -141,7 +141,7 @@ pub fn parse(args: &[&str]) -> Result<Command, DirnameError> {
 /// The classic algorithm — strip trailing slashes, remove the last
 /// component, strip the slashes before it; a spelling with no remaining
 /// `/` has the parent `.`, and a parent that empties out is the root —
-/// with one RustOS extension: a `Name:/` alias root (decided by the
+/// with one TAIRiX extension: a `Name:/` alias root (decided by the
 /// shared grammar's [`alias_root_len`]) plays the role POSIX gives `/`,
 /// so `dirname_of("Home:/tools")` is `Home:/` exactly as
 /// `dirname_of("/tools")` is `/`. The surgery is purely lexical; nothing
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn alias_roots_behave_like_the_view_root() {
-        // The RustOS extension: `Name:/` plays the role of `/`.
+        // The TAIRiX extension: `Name:/` plays the role of `/`.
         assert_eq!(dirname_of("Home:/tools/x"), "Home:/tools");
         assert_eq!(dirname_of("Home:/tools"), "Home:/");
         assert_eq!(dirname_of("Home:/tools/"), "Home:/");
@@ -304,7 +304,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/dirname.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

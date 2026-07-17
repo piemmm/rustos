@@ -1,6 +1,6 @@
-//! RustOS `getcap` — report a file's required-capability gate (Stage 6 `userland/apps/`).
+//! TAIRiX `getcap` — report a file's required-capability gate (Stage 6 `userland/apps/`).
 //!
-//! Every inode in the RustOS permission model may carry an **optional
+//! Every inode in the TAIRiX permission model may carry an **optional
 //! capability requirement**: a capability the caller must hold to reach the
 //! node at all, on top of the mode/ACL checks. `getcap`
 //! reports that gate. For each file operand it prints one line —
@@ -34,7 +34,7 @@
 //!
 //! An unknown option or a missing operand is a [`GetcapError::Usage`] that
 //! reports nothing; an operand that cannot be inspected surfaces the
-//! underlying [`Errno`](rustos_abi::Errno) as [`GetcapError::Stat`]; a gate
+//! underlying [`Errno`](tairix_abi::Errno) as [`GetcapError::Stat`]; a gate
 //! that cannot be read is [`GetcapError::Query`]; a directory whose entries
 //! cannot be read during a recursive descent is [`GetcapError::Read`]; a
 //! failed write is [`GetcapError::Output`]. The first failure stops the run

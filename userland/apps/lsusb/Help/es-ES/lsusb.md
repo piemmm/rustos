@@ -25,7 +25,7 @@ falta o no supera la validación, el listado se degrada a
 identificadores desnudos con la razón en la salida de error estándar —
 el inventario en sí sigue listándose.
 
-RustOS no tiene el registro de números de bus/dispositivo de Linux: los
+TAIRiX no tiene el registro de números de bus/dispositivo de Linux: los
 números de bus y de dispositivo son pequeños ordinales que comienzan en
 1 sobre el inventario actual (los buses en orden de detección, los
 dispositivos en orden de listado en cada bus), estables mientras la

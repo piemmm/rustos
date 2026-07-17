@@ -1,10 +1,10 @@
-//! [`KthreadIrqWaiter`] — the cooperative [`rustos_kernel_irq::IrqWaiter`]
+//! [`KthreadIrqWaiter`] — the cooperative [`tairix_kernel_irq::IrqWaiter`]
 //! an in-kernel service kthread drives to block on a bound IRQ line
 //! (`plans/PI.md` P11 Chunk B-2 INCREMENT (1)).
 //!
 //! The `irq_wait` syscall handler blocks a *user* task on a bound line
 //! through `SyscallIrqWaiter` (in [`crate::syscalls`]), which composes the
-//! shared [`rustos_kernel_irq::block_until_ready`] loop with
+//! shared [`tairix_kernel_irq::block_until_ready`] loop with
 //! `Scheduler::yield_current` + `KernelArch::monotonic_ns`. An in-kernel
 //! service kthread — the INCREMENT (2) root-unlock kthread, which must
 //! drive interrupt-driven [`VirtioBlk`]/EMMC2 block I/O before any login
@@ -13,11 +13,11 @@
 //! [`YieldHandle`] the core hands its body.
 //!
 //! [`KthreadIrqWaiter`] is the second (and only other)
-//! [`rustos_kernel_irq::IrqWaiter`] the production kernel installs. It
+//! [`tairix_kernel_irq::IrqWaiter`] the production kernel installs. It
 //! adapts that kthread handle into the same shared blocking loop, so there
 //! is **one** IRQ blocking loop in the tree: both the
 //! syscall path and the kthread path reach
-//! [`rustos_kernel_irq::block_until_ready`].
+//! [`tairix_kernel_irq::block_until_ready`].
 //!
 //! Unlike `SyscallIrqWaiter` and [`crate::blockwait::IrqParkWaiter`] —
 //! which park the caller off the run queue and are woken through the
@@ -32,7 +32,7 @@
 
 use core::cell::RefCell;
 
-use rustos_kernel_irq::{IrqWaitAbort, IrqWaiter};
+use tairix_kernel_irq::{IrqWaitAbort, IrqWaiter};
 
 use crate::kthread::YieldHandle;
 
@@ -40,7 +40,7 @@ use crate::kthread::YieldHandle;
 ///
 /// Holds the kthread's object-safe [`YieldHandle`] and a monotonic-clock
 /// closure, both borrowed for the duration of one
-/// [`rustos_kernel_irq::block_until_ready`] call. Construct one fresh per
+/// [`tairix_kernel_irq::block_until_ready`] call. Construct one fresh per
 /// blocking wait inside the kthread body, where the
 /// [`YieldHandle`] the core supplied is in
 /// scope:
@@ -175,9 +175,9 @@ mod tests {
 
     use core::cell::Cell;
 
-    use rustos_abi::IrqHandle;
-    use rustos_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
-    use rustos_kernel_sec::TaskId;
+    use tairix_abi::IrqHandle;
+    use tairix_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
+    use tairix_kernel_sec::TaskId;
 
     /// Permissive controller so [`IrqTable::fire`] can set the ready flag
     /// without a real architecture port.

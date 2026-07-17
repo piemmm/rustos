@@ -1,6 +1,6 @@
 [package]
-name = "rustos-collections"
-description = "RustOS placeholder: no_std collections shared by RustOS."
+name = "tairix-collections"
+description = "TAIRiX placeholder: no_std collections shared by TAIRiX."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

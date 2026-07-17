@@ -1,6 +1,6 @@
 //! Keyed message authentication (HMAC-SHA256).
 //!
-//! The one MAC exposed by RustOS is HMAC-SHA256 (RFC 2104, FIPS 198-1). It is
+//! The one MAC exposed by TAIRiX is HMAC-SHA256 (RFC 2104, FIPS 198-1). It is
 //! the keyed authenticator `ARXFS` seals every metadata block with
 //! (`docs/src/filesystem/arxfs-spec.md` §5, §8): the tag covers a block's
 //! identity, owner, generation, expected address, and payload, so a stale,
@@ -48,7 +48,7 @@ pub fn hmac_sha256(key: &MacKey, data: &[u8]) -> MacTag {
 /// Equivalent to [`hmac_sha256`] over `parts.concat()`, but feeds each part
 /// to the underlying streaming HMAC in turn so the caller never has to
 /// allocate or stack-copy a contiguous buffer. This is what lets the
-/// `rustos-rng` HMAC-DRBG compute `HMAC(K, V ‖ byte ‖ data)` (NIST SP
+/// `tairix-rng` HMAC-DRBG compute `HMAC(K, V ‖ byte ‖ data)` (NIST SP
 /// 800-90A) over its working state without an allocator (the kernel allocator must not be on the entropy path) or an arbitrary
 /// fixed-size scratch bound.
 ///

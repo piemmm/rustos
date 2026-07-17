@@ -35,7 +35,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use zeroize::Zeroize;
 
-use rustos_crypto::{sha256, SHA256_OUTPUT_LEN};
+use tairix_crypto::{sha256, SHA256_OUTPUT_LEN};
 
 use crate::entropy::{EntropyError, EntropySource};
 

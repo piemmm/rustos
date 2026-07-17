@@ -203,7 +203,7 @@ pub trait ContextSwitch: Send + Sync {
     /// (aarch64 saves `SP_EL0`/`ELR_EL1`/`SPSR_EL1` in the trap frame;
     /// riscv64 has no cooperative mid-handler park yet) need nothing here.
     /// Only the cooperative-park path
-    /// ([`reschedule_current`](../../rustos_kernel_core/index.html)) calls it;
+    /// ([`reschedule_current`](../../tairix_kernel_core/index.html)) calls it;
     /// the first trampoline→user entry never does, so it stays balanced.
     ///
     /// # Safety

@@ -49,7 +49,7 @@ The crate is `no_std` and holds no global mutable state. The
 production wiring lives in `kernel/core::init::KernelState`, which
 constructs one `IrqTable` and one `IrqHost` impl composed from
 the scheduler, the architecture handle, and the per-platform
-interrupt controller (where one exists — `kernel/rustos-kernel`
+interrupt controller (where one exists — `kernel/tairix-kernel`
 wires the IO-APIC redirection-entry mask on x86_64; on
 aarch64 / riscv64 / wasm32 the production host's `mask` returns
 `IrqError::ArchUnsupported`, surfaced at the syscall boundary as
@@ -58,7 +58,7 @@ naming the architecture per AGENTS.md §5.4.4 — fail closed).
 
 ## Tests
 
-Host-side `cargo test -p rustos-kernel-irq` covers:
+Host-side `cargo test -p tairix-kernel-irq` covers:
 
 * `bind_mints_handle_and_records_owner`
 * `bind_refuses_duplicate_line`

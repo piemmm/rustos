@@ -21,11 +21,11 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_abi::{Errno, Signal};
-use rustos_kernel_sched_api::{SchedError, SchedulerArch, SchedulerPolicy};
-use rustos_kernel_sec::TaskId;
-use rustos_sync::once::OnceCell;
-use rustos_sync::SpinLock;
+use tairix_abi::{Errno, Signal};
+use tairix_kernel_sched_api::{SchedError, SchedulerArch, SchedulerPolicy};
+use tairix_kernel_sec::TaskId;
+use tairix_sync::once::OnceCell;
+use tairix_sync::SpinLock;
 
 use crate::procwait::{KernelProcessWait, ProcessWait};
 
@@ -740,8 +740,8 @@ mod tests {
     use super::*;
     use std::boxed::Box;
 
-    use rustos_abi::{WaitFlags, WaitStatus};
-    use rustos_kernel_sched_api::{Priority, SchedulerConfig, TaskAction};
+    use tairix_abi::{WaitFlags, WaitStatus};
+    use tairix_kernel_sched_api::{Priority, SchedulerConfig, TaskAction};
 
     use crate::procwait::{ProcessWait, WaitedChild};
     use crate::sched::Scheduler;
@@ -832,7 +832,7 @@ mod tests {
         // as if it had exited with that code itself.
         let pid = u32::try_from(child).expect("host task id fits u32");
         assert_eq!(
-            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(143)
@@ -873,7 +873,7 @@ mod tests {
         assert_eq!(scheduler.live_task_count(), 1);
         assert!(kill_pending(child));
         assert_eq!(
-            wait.poll(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::WouldBlock)
         );
         // The syscall boundary takes the deferred kill exactly once.
@@ -949,7 +949,7 @@ mod tests {
         let pid = u32::try_from(child).expect("host task id fits u32");
         // Kill surfaces as SIGKILL's familiar 137, distinct from Terminate.
         assert_eq!(
-            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(137)
@@ -973,7 +973,7 @@ mod tests {
         let pid = u32::try_from(child).expect("host task id fits u32");
         // Interrupt surfaces as the `^C` 130 every POSIX shell reports.
         assert_eq!(
-            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(130)
@@ -998,7 +998,7 @@ mod tests {
         assert_eq!(
             wait.poll(
                 TaskId(7),
-                rustos_abi::WAIT_PID_ANY,
+                tairix_abi::WAIT_PID_ANY,
                 WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
                     .expect("defined bits")
             ),
@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(
             wait.poll(
                 TaskId(7),
-                rustos_abi::WAIT_PID_ANY,
+                tairix_abi::WAIT_PID_ANY,
                 WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
                     .expect("defined bits")
             ),
@@ -1056,7 +1056,7 @@ mod tests {
         assert!(!task_is_stopped(child));
         // The terminal exit superseded the unobserved stop.
         assert_eq!(
-            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::STOPPED),
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::STOPPED),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(137)
@@ -1087,7 +1087,7 @@ mod tests {
         assert_eq!(signaller.deliver(TaskId(child), Signal::Interrupt), Ok(()));
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(130)
@@ -1236,7 +1236,7 @@ mod tests {
         );
         assert_eq!(scheduler.live_task_count(), 1);
         assert_eq!(
-            wait.poll(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            wait.poll(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::NONBLOCK),
             Err(Errno::WouldBlock)
         );
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
@@ -1245,7 +1245,7 @@ mod tests {
         assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(137)
@@ -1279,7 +1279,7 @@ mod tests {
         );
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(TaskId(7), rustos_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(130)

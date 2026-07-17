@@ -2,7 +2,7 @@
 //! (the L2 kernel enforcement of the `lib/abi` rlimit
 //! contract).
 //!
-//! `lib/abi` ([`rustos_abi::rlimit`]) fixes the *wire* contract: the closed
+//! `lib/abi` ([`tairix_abi::rlimit`]) fixes the *wire* contract: the closed
 //! [`LimitKind`] set, the soft/hard [`ResourceLimit`] pair, and its
 //! little-endian encoding. This module is the kernel side: the [`LimitSet`]
 //! a task carries (one [`ResourceLimit`] per [`LimitKind`]), the default
@@ -33,7 +33,7 @@
 //! security/format bounds on untrusted input; those stay fixed and
 //! fail closed in their own modules.
 
-use rustos_abi::{Errno, LimitKind, ResourceLimit};
+use tairix_abi::{Errno, LimitKind, ResourceLimit};
 
 /// The default `LimitKind::StackBytes` policy: the size, in bytes, of the
 /// reserved user-stack span every spawned process receives (8 MiB — the
@@ -180,7 +180,7 @@ impl Default for LimitSet {
 /// * Lowering, or any change that does not raise the hard bound above the
 ///   current ceiling, is free — a process may always tighten its own limits.
 /// * Raising the hard bound above `current.hard` requires
-///   [`rustos_abi::CapabilityId::RLIMIT_RAISE`]; without it the request is
+///   [`tairix_abi::CapabilityId::RLIMIT_RAISE`]; without it the request is
 ///   refused with [`Errno::PermissionDenied`] (fail closed). Because
 ///   `requested` is well-formed, a permitted request (hard not raised) also
 ///   never lets the soft bound exceed the current ceiling.
@@ -205,7 +205,7 @@ pub fn authorize_set(
 #[cfg(test)]
 mod tests {
     use super::{authorize_set, default_pinned_limit_bytes, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
-    use rustos_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
+    use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
     #[test]
     fn pinned_default_policy_scales_with_discovered_memory() {

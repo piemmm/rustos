@@ -15,7 +15,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_util::size::{parse_block_size, SizeScale};
+use tairix_util::size::{parse_block_size, SizeScale};
 
 /// A parsed `du` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]

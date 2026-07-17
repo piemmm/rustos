@@ -20,7 +20,7 @@ charter-legal *only* because two rules combine:
 
 The defect: for VL805/xHCI the `kernel/*` consumer is a **transitional
 in-kernel keyboard bring-up scaffold** (`lib/vl805` README, "the transitional
-in-kernel keyboard bring-up scaffold (`rustos-kernel`)"). A USB keyboard / xHCI
+in-kernel keyboard bring-up scaffold (`tairix-kernel`)"). A USB keyboard / xHCI
 / VL805 driver sits **above** the §18.6 bootstrap-floor (the driver store, not
 below it), so per **§18.5** it "belongs in the store, discovered and loaded
 into user space" — it is a defect, not a floor item. That illegitimate kernel

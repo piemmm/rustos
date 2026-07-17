@@ -9,7 +9,7 @@
 //!
 //! # Invariants enforced by the verifier
 //!
-//! The builder fails (returns [`rustos_abi::Errno`] and emits a single
+//! The builder fails (returns [`tairix_abi::Errno`] and emits a single
 //! [`AuditEvent::IdentityTableRejected`])
 //! when:
 //!
@@ -36,9 +36,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_log::{Field, Sink};
+use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 
@@ -273,7 +273,7 @@ impl IdentityTableBuilder {
                 AuditEvent::IdentityTableRejected,
                 &[Field {
                     key: "errno",
-                    value: rustos_log::FieldValue::Str(cause),
+                    value: tairix_log::FieldValue::Str(cause),
                 }],
             );
             return Err(err);
@@ -289,11 +289,11 @@ impl IdentityTableBuilder {
             &[
                 Field {
                     key: "users",
-                    value: rustos_log::FieldValue::Str(user_count),
+                    value: tairix_log::FieldValue::Str(user_count),
                 },
                 Field {
                     key: "groups",
-                    value: rustos_log::FieldValue::Str(group_count),
+                    value: tairix_log::FieldValue::Str(group_count),
                 },
             ],
         );
@@ -343,14 +343,14 @@ impl IdentityTableBuilder {
 // caller. Re-exported under their original
 // crate-local names so the existing call sites and tests are not
 // touched purely for the rename.
-pub(crate) use rustos_util::fmt::{format_hex_u64, format_i32, format_usize};
+pub(crate) use tairix_util::fmt::{format_hex_u64, format_i32, format_usize};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audit::AuditEvent;
     use crate::audit::RecordingSink;
-    use rustos_abi::CapabilityId;
+    use tairix_abi::CapabilityId;
 
     fn sample_group(g: u32) -> GroupRecord {
         GroupRecord { gid: GroupId(g) }

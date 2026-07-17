@@ -28,10 +28,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 
-use rustos_abi::Errno;
-use rustos_kernel_mem::PAGE_SIZE;
-use rustos_kernel_sec::TaskId;
-use rustos_sync::SpinLock;
+use tairix_abi::Errno;
+use tairix_kernel_mem::PAGE_SIZE;
+use tairix_kernel_sec::TaskId;
+use tairix_sync::SpinLock;
 
 use crate::devres::{SharedChunk, SharedMemFacility};
 

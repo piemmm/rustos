@@ -9,9 +9,9 @@
 //! definition rather than each carrying its own copy. Each operates over the `abi-v1` [`PciBus`] seam, so a caller never
 //! names this concrete crate's internals.
 
-use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::driver::pci::PciBus;
-use rustos_abi::{DriverError, MmioMapper, RegisterWindow};
+use tairix_abi::driver::bus::BusDevice;
+use tairix_abi::driver::pci::PciBus;
+use tairix_abi::{DriverError, MmioMapper, RegisterWindow};
 
 /// PCI base-class + sub-class identifying a USB host controller (PCI Local
 /// Bus 3.0 Appendix D: base `0x0C` Serial Bus Controller, sub-class `0x03`
@@ -45,7 +45,7 @@ const MAX_BUS_SCAN: usize = 32;
 /// * [`DriverError::NotFound`] — no function on the bus carries `class`
 ///   (fail closed, never a fabricated target).
 /// * any non-[`BufferTooSmall`](DriverError::BufferTooSmall) error of
-///   [`Bus::enumerate`](rustos_abi::driver::bus::Bus::enumerate).
+///   [`Bus::enumerate`](tairix_abi::driver::bus::Bus::enumerate).
 pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, DriverError> {
     let mut devices = [BusDevice {
         vendor: 0,
@@ -84,7 +84,7 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
 ///   controller's upstream DMA depends on (firmware leaves it clear, PCI
 ///   Local Bus 3.0 §6.2.2); and
 /// * [`PciBus::map_bar_window`] maps the BAR through `mapper`, which enforces
-///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+///   [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
 ///   kernel-side (no ambient authority).
 ///
 /// The returned window's [`phys_base`](RegisterWindow::phys_base) is the
@@ -98,11 +98,11 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
 /// [`PciBus::assign_bar`] (the BAR cannot be placed inside `outbound_window`),
 /// [`PciBus::enable_bus_master`], or [`PciBus::map_bar_window`] (no such BAR,
 /// an I/O-port BAR, a size past `usize`, or a missing
-/// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)).
+/// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)).
 ///
 /// # Capabilities
 ///
-/// Requires [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+/// Requires [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
 /// (the BAR map, enforced by `mapper` kernel-side).
 pub fn assign_and_map_bar(
     bus: &dyn PciBus,
@@ -122,11 +122,11 @@ pub fn assign_and_map_bar(
 ///
 /// `outbound` is the bridge's outbound window as `(cpu_base, pcie_base,
 /// size)` — the CPU aperture base, the PCIe-bus base it maps to, and the
-/// size — exactly as the discovered [`BusWindow`](rustos_abi::HwResourceKind::BusWindow)
+/// size — exactly as the discovered [`BusWindow`](tairix_abi::HwResourceKind::BusWindow)
 /// resource carries it. A device's BAR is assigned a
 /// PCIe-bus address inside this window ([`assign_and_map_bar`]); a bus driver
 /// publishing that BAR as a child node's CPU-physical
-/// [`Mmio`](rustos_abi::HwResourceKind::Mmio) grant translates it here, so the
+/// [`Mmio`](tairix_abi::HwResourceKind::Mmio) grant translates it here, so the
 /// arithmetic has one definition and the result is a
 /// CPU-side address the kernel's grant-coverage check accepts against the
 /// bridge's outbound `BusWindow` grant (`HwResource::covers`).
@@ -151,8 +151,8 @@ mod tests {
     // `Bus` is the supertrait the `StubBus` double implements; it is not
     // needed to *call* `enumerate` on a `&dyn PciBus` (the method is in the
     // trait object's vtable), only to write the `impl` below.
-    use rustos_abi::driver::bus::Bus;
-    use rustos_abi::HwNode;
+    use tairix_abi::driver::bus::Bus;
+    use tairix_abi::HwNode;
 
     /// A recording [`PciBus`] double: a fixed device list for
     /// [`find_function_by_class`], and assign/enable/map calls captured so a
@@ -217,7 +217,7 @@ mod tests {
             &self,
             phys_base: u64,
             len: usize,
-        ) -> Result<RegisterWindow, rustos_abi::MmioMapError> {
+        ) -> Result<RegisterWindow, tairix_abi::MmioMapError> {
             // A leaked, aligned, zeroed window for the test process lifetime.
             let words = len.div_ceil(4).max(1);
             let buf: alloc::boxed::Box<[u32]> = alloc::vec![0u32; words].into_boxed_slice();

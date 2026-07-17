@@ -1,8 +1,8 @@
 //! Deterministic fuzz harness for the `lib/binfmt` rxe inspection view and
 //! manifest summary (decoders of untrusted executable-file bytes).
 //!
-//! [`rustos_binfmt::rxe::RxeView::parse`] and
-//! [`rustos_binfmt::rxe::ManifestSummary::parse`] decode any file a viewer
+//! [`tairix_binfmt::rxe::RxeView::parse`] and
+//! [`tairix_binfmt::rxe::ManifestSummary::parse`] decode any file a viewer
 //! is pointed at. The harness invariants:
 //!
 //! * parsing any byte string never panics — it returns a view or a typed
@@ -11,17 +11,17 @@
 //!   segments, needed libraries, capabilities) can be walked without a
 //!   panic.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG mutates a
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates a
 //! valid image/manifest built through the `lib/abi` encoders and mixes in
 //! pure noise. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep
 //! once from a fresh, logged seed; `cargo xtask fuzz` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
-use rustos_abi::{
+use tairix_abi::{
     CapabilityId, LoadHeader, ManifestHeader, NeededLibrary, RxePermission, Segment,
     ABI_VERSION_CURRENT, LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
 };
-use rustos_binfmt::rxe::{ManifestSummary, RxeView};
+use tairix_binfmt::rxe::{ManifestSummary, RxeView};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -117,10 +117,10 @@ fn exercise(bytes: &[u8]) {
 
 #[test]
 fn parse_never_panics_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = rustos_fuzzseed::start(
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut state: u64 = tairix_fuzzseed::start(
         "parse_never_panics_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -164,7 +164,7 @@ fn parse_never_panics_for_any_input() {
         exercise(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

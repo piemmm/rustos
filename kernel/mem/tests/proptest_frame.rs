@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 
-use rustos_kernel_mem::{
+use tairix_kernel_mem::{
     BootMemoryMap, Frame, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
 

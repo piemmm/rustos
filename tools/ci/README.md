@@ -1,6 +1,6 @@
 # `tools/ci` — CI / build-host orchestration
 
-Scripts for standing up an unattended RustOS build/CI/test machine. They are
+Scripts for standing up an unattended TAIRiX build/CI/test machine. They are
 thin wrappers around `cargo xtask`, which is the **single source of truth** for
 what every check does (`AGENTS.md` §15): these scripts add only environment
 setup, logging, and parallel scheduling — never new pipeline steps. A new check
@@ -50,10 +50,10 @@ only the trigger differs.
   timers (no root needed):
   ```sh
   mkdir -p ~/.config/systemd/user
-  cp tools/ci/systemd/rustos-*.{service,timer} ~/.config/systemd/user/
+  cp tools/ci/systemd/tairix-*.{service,timer} ~/.config/systemd/user/
   # edit the absolute ExecStart path in each .service to match your checkout
   systemctl --user daemon-reload
-  systemctl --user enable --now rustos-ci.timer rustos-soak.timer
+  systemctl --user enable --now tairix-ci.timer tairix-soak.timer
   loginctl enable-linger "$USER"   # let timers fire while logged out
   ```
 - **Linux/Unix (cron):** `crontab tools/ci/crontab.sample` (edit `REPO` first).
@@ -117,10 +117,10 @@ tools/ci/soak.sh --secs 30       # short budget for a smoke run
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `RUSTOS_CI_REPO` | resolved from the script path | Repository root. |
-| `RUSTOS_CI_LOGDIR` | `~/ci-logs/rustos` | Where logs land — **outside** the repo (`AGENTS.md` §3: no CI artefact in the tracked tree). |
-| `RUSTOS_CI_BRANCH` | `master` | Branch a dedicated builder tracks. |
-| `RUSTOS_CI_SYNC` | `0` | `1` = `git fetch && git reset --hard origin/<branch>` before each run. Off by default so a developer checkout is never reset by surprise; set it on a dedicated builder. |
+| `TAIRIX_CI_REPO` | resolved from the script path | Repository root. |
+| `TAIRIX_CI_LOGDIR` | `~/ci-logs/tairix` | Where logs land — **outside** the repo (`AGENTS.md` §3: no CI artefact in the tracked tree). |
+| `TAIRIX_CI_BRANCH` | `master` | Branch a dedicated builder tracks. |
+| `TAIRIX_CI_SYNC` | `0` | `1` = `git fetch && git reset --hard origin/<branch>` before each run. Off by default so a developer checkout is never reset by surprise; set it on a dedicated builder. |
 
 ## Notes
 
@@ -136,6 +136,6 @@ tools/ci/soak.sh --secs 30       # short budget for a smoke run
   soak crash, the reproducer in the job log is what turns into a regression
   test + corpus entry (§19.6).
 - **Self-hosting honesty.** `AGENTS.md` §19.3 forbids the *OS* from fetching
-  executable code post-install; that governs RustOS, not the build host. A
+  executable code post-install; that governs TAIRiX, not the build host. A
   normal `cargo`/`rustup` host is fine. Keep `Cargo.lock` committed so
   `supply-chain` source-hash pinning stays meaningful.

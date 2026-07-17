@@ -19,10 +19,10 @@
 //! only on a hand-off refusal (fail closed: unpublished slot, an id out
 //! of range) or a scheduler error, and the port's entry parks the core.
 
-use rustos_kernel_sched_api::CpuId;
-use rustos_log::{Field, FieldValue, Level, Sink};
-use rustos_sync::OnceCell;
-use rustos_util::fmt::format_usize;
+use tairix_kernel_sched_api::CpuId;
+use tairix_log::{Field, FieldValue, Level, Sink};
+use tairix_sync::OnceCell;
+use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
 

@@ -1,4 +1,4 @@
-//! RustOS PCI/USB ID-database engine (`lib/devids`).
+//! TAIRiX PCI/USB ID-database engine (`lib/devids`).
 //!
 //! The `lspci` and `lsusb` command apps (plans/DEVICES.md DEVICE1) render the
 //! numeric identities the hardware tree already carries — PCI

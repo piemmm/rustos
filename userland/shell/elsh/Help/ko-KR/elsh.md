@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — RustOS의 명령 셸
+elsh — TAIRiX의 명령 셸
 
 ## SYNOPSIS
 

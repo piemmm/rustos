@@ -1,22 +1,22 @@
 <!doctype html>
 <meta charset="utf-8" />
-<title>RustOS wasm32 framebuffer-display vertical</title>
+<title>TAIRiX wasm32 framebuffer-display vertical</title>
 <!--
   Browser entry point for the wasm32 framebuffer-display vertical
   (`plans/WIRING.md` — the wasm32 `display`-row parity gap). It fetches
   the compiled kernel module (its URL is passed in the `wasm` query
   parameter by `web/harness.mjs`), hands it to the shared host loader
-  (`kernel/arch/wasm32/web/rustos.js`, served at `/rustos.js`), and logs
+  (`kernel/arch/wasm32/web/tairix.js`, served at `/tairix.js`), and logs
   each kernel console line to the page console. Crucially it supplies a
   real `presentFramebuffer` hook backed by an on-page <canvas>: the
-  kernel's `rustos_host_present_framebuffer` import calls it to paint the
+  kernel's `tairix_host_present_framebuffer` import calls it to paint the
   presented RGBA8888 surface and read it back, so the vertical proves the
   pixels reach a genuine display surface. The puppeteer harness scrapes
   the console lines to decide PASS/FAIL.
 -->
 <canvas id="fb"></canvas>
 <script type="module">
-  import { boot } from "/rustos.js";
+  import { boot } from "/tairix.js";
 
   // Paint an RGBA8888 surface onto the canvas and read it back, returning
   // the number of pixels that survived the round-trip unchanged. Every

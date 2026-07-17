@@ -1,9 +1,9 @@
 # Standard Information Stream (`stdinfo`, fd 3)
 
-RustOS reserves file descriptor 3 as `stdinfo`: an optional, structured
+TAIRiX reserves file descriptor 3 as `stdinfo`: an optional, structured
 advisory stream for concise human context and AI/tool metadata about a
 command's output (`AGENTS.md` §20). The ABI lives in
-`lib/abi/src/stdinfo.rs` (`rustos_abi::stdinfo`).
+`lib/abi/src/stdinfo.rs` (`tairix_abi::stdinfo`).
 
 ## What it is, and is not
 
@@ -48,10 +48,10 @@ a caller-provided byte buffer through [`StdInfoRecord::write_jsonl`],
 which JSON-escapes the string fields, embeds the `ai` object verbatim, and
 fails closed with [`Errno::BufferTooSmall`] rather than truncating.
 
-[`STDINFO_FD`]: ../../rustos_abi/stdinfo/constant.STDINFO_FD.html
-[`StdInfoRecord`]: ../../rustos_abi/stdinfo/struct.StdInfoRecord.html
-[`StdInfoRecord::write_jsonl`]: ../../rustos_abi/stdinfo/struct.StdInfoRecord.html#method.write_jsonl
-[`StdInfoKind`]: ../../rustos_abi/stdinfo/enum.StdInfoKind.html
-[`Severity`]: ../../rustos_abi/stdinfo/enum.Severity.html
-[`Human`]: ../../rustos_abi/stdinfo/struct.Human.html
-[`Errno::BufferTooSmall`]: ../../rustos_abi/error/enum.Errno.html
+[`STDINFO_FD`]: ../../tairix_abi/stdinfo/constant.STDINFO_FD.html
+[`StdInfoRecord`]: ../../tairix_abi/stdinfo/struct.StdInfoRecord.html
+[`StdInfoRecord::write_jsonl`]: ../../tairix_abi/stdinfo/struct.StdInfoRecord.html#method.write_jsonl
+[`StdInfoKind`]: ../../tairix_abi/stdinfo/enum.StdInfoKind.html
+[`Severity`]: ../../tairix_abi/stdinfo/enum.Severity.html
+[`Human`]: ../../tairix_abi/stdinfo/struct.Human.html
+[`Errno::BufferTooSmall`]: ../../tairix_abi/error/enum.Errno.html

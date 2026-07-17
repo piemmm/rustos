@@ -1,4 +1,4 @@
-# `rustos-usb`
+# `tairix-usb`
 
 `lib/usb` is the **bus-agnostic xHCI USB host-controller protocol**: the
 host-provable, controller-agnostic layers of an xHCI stack, with no PCI or
@@ -59,7 +59,7 @@ build on the *same* engine without depending on each other — exactly the split
   installed, descended — every connected downstream port, nested tiers
   included — and watched; a directly-attached device (the Pi 4B's USB3 side
   of each jack is wired straight to a root port) is served beside it (settle
-  windows supplied by the `rustos_abi::Delay` seam) — a keyboard and a
+  windows supplied by the `tairix_abi::Delay` seam) — a keyboard and a
   storage stick plugged in together are both served, neither displacing the
   other, and a port whose device fails enumeration is skipped with its slot
   released, never allowed to cost the other devices their service. A device
@@ -88,7 +88,7 @@ build on the *same* engine without depending on each other — exactly the split
   `KEYBOARD_BIND_KEYS`) share (§2.2 / §2.20).
 
 - `transport` — the **bus-agnostic URB transport seam** the modular USB stack
-  (`plans/USB.md`) is built on. The wire contract is `rustos_abi::usb_urb`: a
+  (`plans/USB.md`) is built on. The wire contract is `tairix_abi::usb_urb`: a
   `UrbRequest` (endpoint, transfer type, direction, shared-buffer handle,
   length, control SETUP) and a status-framed completion (bytes transferred, or
   an in-band `Errno`). `transport` adds the two ends both sides share:

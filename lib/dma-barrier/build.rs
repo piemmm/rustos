@@ -1,4 +1,4 @@
-//! Build script for the `rustos-dma-barrier` crate.
+//! Build script for the `tairix-dma-barrier` crate.
 //!
 //! Sole responsibility, and it is build glue (confines
 //! target-conditional decisions to the architecture ports and the build

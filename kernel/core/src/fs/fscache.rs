@@ -75,18 +75,18 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
     VolumeStats,
 };
-use rustos_abi::DriverError;
-use rustos_kernel_mem::{
+use tairix_abi::DriverError;
+use tairix_kernel_mem::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
     ReclaimOwner, ReclaimRule, Sensitivity, PAGE_SIZE,
 };
-use rustos_log::Sink;
+use tairix_log::Sink;
 use zeroize::Zeroize;
 
 use super::path::MAX_COMPONENT_LEN;

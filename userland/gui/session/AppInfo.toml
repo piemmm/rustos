@@ -23,7 +23,7 @@
 # endpoint is called, never bound, and binding the seat-scoped window
 # rendezvous is authorised by the session's kernel-attested live seat
 # lease, not a capability.
-id = "os.rustos.desktop"
+id = "os.tairix.desktop"
 name = "desktop"
 version = "0.1.0"
 kind = "command"

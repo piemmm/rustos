@@ -1,5 +1,5 @@
 //! Design D P-3 QEMU integration test (`.junie/next-pi-prompt.md`): boot the
-//! production aarch64 (Raspberry Pi 4) `rustos-kernel` pipeline on the `virt`
+//! production aarch64 (Raspberry Pi 4) `tairix-kernel` pipeline on the `virt`
 //! board, have PID 1 (`init`) launch the **perpetual device-manager service**
 //! (`/System/Services/devmgr.app/Run`), and prove the service's
 //! reactive observe loop end to end: it reads the discovered hardware tree
@@ -97,14 +97,14 @@ mod kernel {
 
     use alloc::vec::Vec;
 
-    use rustos_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
-    use rustos_abi::Errno;
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_kernel::hwtree_store::{HW_TREE, HW_TREE_SOURCE};
-    use rustos_kernel_core::waitq::HW_TREE_WAITQ;
-    use rustos_kernel_core::HwTreeSource;
+    use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
+    use tairix_abi::Errno;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::boot as boot_aarch64;
+    use tairix_kernel::hwtree_store::{HW_TREE, HW_TREE_SOURCE};
+    use tairix_kernel_core::waitq::HW_TREE_WAITQ;
+    use tairix_kernel_core::HwTreeSource;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -199,12 +199,12 @@ mod kernel {
     /// finisher parks the CPU, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_devmgr_hwtree_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_devmgr_hwtree_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
     /// address is forwarded to the production boot pipeline with the observing
@@ -218,7 +218,7 @@ mod kernel {
             dtb,
             &SERIAL_SINK,
             &SERIAL_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
             &WITNESS_SOURCE,
         )
     }

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-elsh"
-description = "elsh (Element Shell): the default RustOS command interpreter — a POSIX-ish shell with quoting, variable expansion, pipelines, redirections, sequencing, and job control (Stage 6 — `PLAN.md`)."
+name = "tairix-elsh"
+description = "elsh (Element Shell): the default TAIRiX command interpreter — a POSIX-ish shell with quoting, variable expansion, pipelines, redirections, sequencing, and job control (Stage 6 — `PLAN.md`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The package is both the `rustos-elsh` interpreter library (above) and the
+# The package is both the `tairix-elsh` interpreter library (above) and the
 # `Run` entry-point binary of the `Shell` application bundle (`AGENTS.md`
 # §16.5) — the program PID 1 `init` launches as the user's session
 # (`plans/SPAWN.md` SP3b / `plans/PI.md` P6e). The binary is a freestanding
@@ -19,7 +19,7 @@ workspace = true
 # elsewhere (see `src/run.rs` / `build.rs`); wiring the interpreter library
 # into it (a real REPL over the console) is `plans/PI.md` P6e.
 [[bin]]
-name = "rustos-elsh-run"
+name = "tairix-elsh-run"
 path = "src/run.rs"
 
 [dependencies]
@@ -27,60 +27,60 @@ path = "src/run.rs"
 # as the stable `Errno`, so the same error vocabulary the kernel returns
 # flows back to the user verbatim — the shell invents no parallel error set
 # (§2.2).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 # The single shared command-word resolution policy (`plans/APPS.md` §8–§9):
 # the system app store first, then the alias-aware `PATH` split. The shell's
 # process host attempts the candidates this crate spells; `man` walks the
 # same order to find a command's bundle — one policy, never two (§2.2).
 # Spelling only: it performs no I/O and grants nothing.
-rustos-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
+tairix-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
 
 # The single shared filename-completion engine: the path-candidate policy
 # (directory-part/leaf split, dotfile rule, prefix filter) and the
 # longest-common-prefix Tab discipline. The shell dresses its candidates in
 # shell escaping and merges them with its command and resource-reference
 # classes; the policy itself is never re-derived here (§2.2).
-rustos-complete = { path = "../../../lib/complete", version = "=0.0.0" }
+tairix-complete = { path = "../../../lib/complete", version = "=0.0.0" }
 
 # The single shared resource-reference spelling parser. The shell classifies a
 # redirection target as a resource reference (`sys:null`) versus a filesystem
 # path through this one parser — it never embeds a second reference grammar.
 # This crate only *parses*; it never resolves, opens, or checks a capability,
 # so linking it grants the shell no authority.
-rustos-resref = { path = "../../../lib/resref", version = "=0.0.0" }
+tairix-resref = { path = "../../../lib/resref", version = "=0.0.0" }
 
 # The shared curses/TUI input decoder (`plans/CURSES.md` C4): the REPL's raw
 # interactive mode decodes key bytes into typed events through this one
 # `lib/vt`-backed decoder — never a shell-private key table (`AGENTS.md`
 # §2.2; `plans/SHELL.md` "Interactive terminal").
-rustos-curses = { path = "../../../lib/curses", version = "=0.0.0" }
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 
 # The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
 # REPL's line reader runs the read line discipline's buffer half
-# (`rustos_vt::line::LineEditor`) — CR and LF both terminate a line
+# (`tairix_vt::line::LineEditor`) — CR and LF both terminate a line
 # (a serial terminal sends CR for Return) and an erase (the rub-out
 # controls or the Delete key's `CSI 3 ~` sequence) edits the kept bytes —
 # from the one definition the kernel console echo also keys off, so screen
 # and buffer can never disagree.
-rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
-# The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
+# The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.
-# RustOS is Rust-only, so the shell links this runtime, never the C ABI
+# TAIRiX is Rust-only, so the shell links this runtime, never the C ABI
 # (`AGENTS.md` §16.4). Pulled in only for the bare-metal targets the program
 # is actually built for; on the host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The one help engine, with its syscall-backed own-bundle `HelpSource`
 # (`BundleHelp`): the freestanding `Run` binary's reserved `-h`/`-?`
 # short-help switches render the shell's own Help document through it
 # (plans/APPS.md §4, §6).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
 
 [dev-dependencies]
 # The one help engine, for the standing required-locale set
 # (`REQUIRED_LOCALES`) the shell's own Help-tree switch pin iterates —
 # never a second copy of the locale list (plans/APPS.md §8.1). Test-only:
 # the host library never reads help at runtime.
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }

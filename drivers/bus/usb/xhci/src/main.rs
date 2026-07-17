@@ -43,19 +43,19 @@
 //! DMA-granted ring.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt` (`_start`, the stack canary, the panic handler, the
+//! runtime `tairix-rt` (`_start`, the stack canary, the panic handler, the
 //! syscall wrappers); on the host it is an inert stub so `cargo build
 //! --workspace`, clippy, and fmt still cover the file. The live controller
 //! bring-up and report path are metal-only because QEMU models no Pi USB; the
 //! HCD's host-testable logic lives in the crate's `lib` target
-//! ([`rustos_drv_bus_usb::bringup`] / [`rustos_drv_bus_usb::serve`]).
+//! ([`tairix_drv_bus_usb::bringup`] / [`tairix_drv_bus_usb::serve`]).
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
 // The per-index URB transport table grows with the devices the controller
-// actually serves; `rustos-rt` supplies the process heap.
+// actually serves; `tairix-rt` supplies the process heap.
 #[cfg(freestanding)]
 extern crate alloc;
 
@@ -75,21 +75,21 @@ const WAIT_FOREVER_NS: u64 = u64::MAX;
 #[cfg(freestanding)]
 mod program {
     use alloc::vec::Vec;
-    use rustos_abi::hwtree::HW_NODE_ROOT;
-    use rustos_abi::usb_urb::{decode_completion, URB_COMPLETION_LEN, URB_REQUEST_LEN};
-    use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use rustos_abi::{CapabilityId, Errno};
-    use rustos_caps::CapabilitySet;
-    use rustos_drv_bus_usb::bringup::{
+    use tairix_abi::hwtree::HW_NODE_ROOT;
+    use tairix_abi::usb_urb::{decode_completion, URB_COMPLETION_LEN, URB_REQUEST_LEN};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::{CapabilityId, Errno};
+    use tairix_caps::CapabilitySet;
+    use tairix_drv_bus_usb::bringup::{
         bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
     };
-    use rustos_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_log::{log, Event, EventId, Field, Level};
-    use rustos_rt::{ClockDelay, LogSink};
-    use rustos_usb::device::{EventWait, HubEvent, MAX_INTERFACES, XHCI_MAX_SLOTS};
-    use rustos_usb::XhciOpenStage;
-    use rustos_util::fmt::format_hex_u64;
+    use tairix_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_log::{log, Event, EventId, Field, Level};
+    use tairix_rt::{ClockDelay, LogSink};
+    use tairix_usb::device::{EventWait, HubEvent, MAX_INTERFACES, XHCI_MAX_SLOTS};
+    use tairix_usb::XhciOpenStage;
+    use tairix_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
@@ -166,12 +166,12 @@ mod program {
     const URB_ENDPOINT_BLOCKS: u64 = 64;
 
     /// Bytes of shared buffer per interface: one bulk chunk
-    /// ([`rustos_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
+    /// ([`tairix_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
     /// one definition, never a second constant), which also comfortably
     /// holds a boot report and any control-IN descriptor a class driver
     /// reads. One page, so the mass-storage data path costs the keyboard
     /// path nothing extra.
-    const SHM_LEN: usize = rustos_usb::device::BULK_BUF_LEN;
+    const SHM_LEN: usize = tairix_usb::device::BULK_BUF_LEN;
 
     /// Outstanding-URB capacity of the per-interface endpoint. The class
     /// driver submits one at a time (it blocks on the reply); a small queue
@@ -183,22 +183,22 @@ mod program {
     /// budget as the deadline, so a completion wakes the wait early, a
     /// timeout returns it to the caller's deadline check, and a quiet
     /// controller costs no CPU. The clock is the kernel monotonic clock,
-    /// the same source [`rustos_rt::ClockDelay`] reads.
+    /// the same source [`tairix_rt::ClockDelay`] reads.
     struct IrqEventWait {
-        /// The bound controller interrupt line ([`rustos_rt::irq_bind`]).
+        /// The bound controller interrupt line ([`tairix_rt::irq_bind`]).
         handle: u64,
     }
 
     impl EventWait for IrqEventWait {
         fn now_us(&self) -> u64 {
-            rustos_rt::clock_get() / 1_000
+            tairix_rt::clock_get() / 1_000
         }
 
         fn wait_us(&self, budget_us: u64) {
             // A refused wait (a revoked handle) degrades to the caller's
             // deadline check rather than spinning: the caller re-reads the
             // clock and fails closed when the budget is spent.
-            let _ = rustos_rt::irq_wait(self.handle, budget_us.saturating_mul(1_000));
+            let _ = tairix_rt::irq_wait(self.handle, budget_us.saturating_mul(1_000));
         }
     }
 
@@ -224,14 +224,14 @@ mod program {
                 message,
                 fields: &[Field {
                     key,
-                    value: rustos_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
                 }],
             },
         );
     }
 
-    fn reply_to_urb(endpoint_id: u64, reply: rustos_drv_bus_usb::serve::UrbReply) {
-        let ret = rustos_rt::call_reply(endpoint_id, reply.ticket, &reply.bytes[..reply.len]);
+    fn reply_to_urb(endpoint_id: u64, reply: tairix_drv_bus_usb::serve::UrbReply) {
+        let ret = tairix_rt::call_reply(endpoint_id, reply.ticket, &reply.bytes[..reply.len]);
         if ret == 0 {
             log_hex_event(
                 HCD_URB_REPLY,
@@ -259,7 +259,7 @@ mod program {
 
     fn reply_error(endpoint_id: u64, ticket: u64, errno: Errno) {
         let mut bytes = [0u8; URB_COMPLETION_LEN];
-        let len = rustos_usb::transport::frame_completion(&mut bytes, Err(errno)).unwrap_or(0);
+        let len = tairix_usb::transport::frame_completion(&mut bytes, Err(errno)).unwrap_or(0);
         reply_to_urb(endpoint_id, UrbReply { ticket, bytes, len });
     }
 
@@ -296,7 +296,7 @@ mod program {
     /// transport, logging the attach. A device that cannot be described or
     /// whose node the kernel refuses stays unpublished (fail closed).
     fn publish_interface(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
         transport: &mut Transport,
     ) {
@@ -323,7 +323,7 @@ mod program {
     /// stays parked on a dead device.
     fn retract_interface(transport: &mut Transport) {
         if transport.node_live {
-            if rustos_rt::hw_remove_node(transport.node_id) < 0 {
+            if tairix_rt::hw_remove_node(transport.node_id) < 0 {
                 log_hex_event(
                     HCD_WAIT_ERROR,
                     Level::Warn,
@@ -350,7 +350,7 @@ mod program {
     /// retried on the next reconcile; a created transport is kept across
     /// detaches so a re-plug finds it waiting.
     fn reconcile_interfaces(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
@@ -384,7 +384,7 @@ mod program {
     /// logged with its whole attach-fault breadcrumb and the loop stops
     /// (the latch was consumed, so it cannot re-fire spuriously).
     fn service_root_changes(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
@@ -433,7 +433,7 @@ mod program {
     /// the watch, reconciling the published interfaces with whatever the
     /// change attached or detached.
     fn service_hub_after_fault_detach(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
@@ -468,7 +468,7 @@ mod program {
     /// (the reply has then been answered); `false` leaves the reply for the
     /// caller to send.
     fn retract_after_fault_if_gone(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
@@ -527,7 +527,7 @@ mod program {
     /// device present yet it simply leaves the controller awaiting that
     /// connect.
     fn reset_reenumerate_and_publish(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
@@ -551,7 +551,7 @@ mod program {
     /// whether a recovery ran (the caller then restarts its service pass on
     /// the freshly reset controller).
     fn recover_if_controller_faulted(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
@@ -608,7 +608,7 @@ mod program {
         let mut send_caps = CapabilitySet::empty();
         send_caps.insert(CapabilityId::IPC_ENDPOINT);
         let recv_caps = CapabilitySet::empty();
-        rustos_rt::call_create(
+        tairix_rt::call_create(
             id,
             &send_caps,
             &recv_caps,
@@ -649,7 +649,7 @@ mod program {
             return None;
         }
         let mut shm_id = 0u64;
-        let shm_base = rustos_rt::shm_create(SHM_LEN, &mut shm_id);
+        let shm_base = tairix_rt::shm_create(SHM_LEN, &mut shm_id);
         if shm_base < 0 {
             return None;
         }
@@ -667,7 +667,7 @@ mod program {
         let shm: &'static mut [u8] =
             unsafe { core::slice::from_raw_parts_mut(shm_base as usize as *mut u8, SHM_LEN) };
         let token = TOKEN_URB_BASE + u64::try_from(index).ok()?;
-        let endpoint_add = rustos_rt::waitset_ctl(
+        let endpoint_add = tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Endpoint,
@@ -705,14 +705,14 @@ mod program {
     /// OS sink. `None` if the device is not enumerated or the kernel refuses
     /// the node.
     fn emit_interface_node(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
         endpoint_id: u64,
         shm_id: u64,
     ) -> Option<u32> {
         let node = device.describe_device(index, HW_NODE_ROOT, 0).ok()?;
         let node = attach_transport_grants(node, endpoint_id, shm_id).ok()?;
-        let emit = rustos_rt::hw_emit_node(&node);
+        let emit = tairix_rt::hw_emit_node(&node);
         if emit < 0 {
             return None;
         }
@@ -729,7 +729,7 @@ mod program {
     /// interrupt. A transport whose device just detached has already had
     /// its URB aborted, so it is simply not busy.
     fn service_busy_urbs(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
@@ -791,8 +791,8 @@ mod program {
     fn opt_u32_field(key: &'static str, value: Option<u32>) -> Field<'static> {
         Field {
             key,
-            value: value.map_or(rustos_log::FieldValue::Null, |v| {
-                rustos_log::FieldValue::UnsignedInt(u64::from(v))
+            value: value.map_or(tairix_log::FieldValue::Null, |v| {
+                tairix_log::FieldValue::UnsignedInt(u64::from(v))
             }),
         }
     }
@@ -804,7 +804,7 @@ mod program {
     /// errno — e.g. the keyboard's collateral fault while a sibling
     /// port's attach was being serviced.
     fn log_urb_error(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
         errno: Errno,
     ) {
@@ -817,15 +817,15 @@ mod program {
                 fields: &[
                     Field {
                         key: "index",
-                        value: rustos_log::FieldValue::UnsignedInt(index as u64),
+                        value: tairix_log::FieldValue::UnsignedInt(index as u64),
                     },
                     Field {
                         key: "errno",
-                        value: rustos_log::FieldValue::UnsignedInt(errno as u64),
+                        value: tairix_log::FieldValue::UnsignedInt(errno as u64),
                     },
                     Field {
                         key: "fault_code",
-                        value: rustos_log::FieldValue::UnsignedInt(u64::from(
+                        value: tairix_log::FieldValue::UnsignedInt(u64::from(
                             device.last_report_fault_code(index),
                         )),
                     },
@@ -846,11 +846,11 @@ mod program {
     /// This is how a metal capture localises a failed hot-plug (QEMU
     /// models no Pi USB).
     fn log_topology_service_failure(
-        device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>,
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         message: &'static str,
-        err: rustos_abi::DriverError,
+        err: tairix_abi::DriverError,
     ) {
-        let u = |v: u64| rustos_log::FieldValue::UnsignedInt(v);
+        let u = |v: u64| tairix_log::FieldValue::UnsignedInt(v);
         let usbsts = opt_u32_field("usbsts", device.read_usbsts());
         let event = |fields: &[Field<'_>]| {
             log(
@@ -927,14 +927,14 @@ mod program {
     /// run localises the stall. The phase alone cannot separate a timeout
     /// from a rejected completion or name the failing enumeration step, so
     /// the phase-specific controller state is always included.
-    fn log_bringup_failure(err: &rustos_drv_bus_usb::bringup::ControllerBringupError) {
+    fn log_bringup_failure(err: &tairix_drv_bus_usb::bringup::ControllerBringupError) {
         let phase = Field {
             key: "phase",
-            value: rustos_log::FieldValue::Str(err.phase.as_str()),
+            value: tairix_log::FieldValue::Str(err.phase.as_str()),
         };
         let error = Field {
             key: "error",
-            value: rustos_log::FieldValue::UnsignedInt(err.error as u64),
+            value: tairix_log::FieldValue::UnsignedInt(err.error as u64),
         };
         let event = |fields: &[Field<'_>]| {
             log(
@@ -953,7 +953,7 @@ mod program {
                 error,
                 Field {
                     key: "open_stage",
-                    value: rustos_log::FieldValue::Str(
+                    value: tairix_log::FieldValue::Str(
                         err.open_stage.map_or("-", XhciOpenStage::as_str),
                     ),
                 },
@@ -965,21 +965,21 @@ mod program {
                 error,
                 Field {
                     key: "enum_stage",
-                    value: rustos_log::FieldValue::UnsignedInt(u64::from(
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(
                         err.enum_stage.map_or(0, |stage| stage.as_u8()),
                     )),
                 },
                 Field {
                     key: "completion",
-                    value: rustos_log::FieldValue::UnsignedInt(u64::from(err.last_completion)),
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(err.last_completion)),
                 },
                 Field {
                     key: "event_type",
-                    value: rustos_log::FieldValue::UnsignedInt(u64::from(err.last_event_type)),
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(err.last_event_type)),
                 },
                 Field {
                     key: "reject",
-                    value: rustos_log::FieldValue::UnsignedInt(u64::from(err.last_reject)),
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(err.last_reject)),
                 },
                 opt_u32_field("port1_portsc", err.port1_portsc),
             ]),
@@ -993,7 +993,7 @@ mod program {
     /// what the walk actually served — and warn when a connected device was
     /// present but failed enumeration and was skipped, which otherwise looks
     /// exactly like an empty port.
-    fn log_bringup_summary(device: &mut rustos_drv_bus_usb::bringup::ControllerDevice<'_>) {
+    fn log_bringup_summary(device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>) {
         let live = (0..device.device_table_len())
             .filter(|&index| device.device_live(index))
             .count();
@@ -1006,11 +1006,11 @@ mod program {
                 fields: &[
                     Field {
                         key: "devices",
-                        value: rustos_log::FieldValue::UnsignedInt(live as u64),
+                        value: tairix_log::FieldValue::UnsignedInt(live as u64),
                     },
                     Field {
                         key: "hub_watch",
-                        value: rustos_log::FieldValue::Bool(device.hub_watch_active()),
+                        value: tairix_log::FieldValue::Bool(device.hub_watch_active()),
                     },
                 ],
             },
@@ -1024,7 +1024,7 @@ mod program {
                     message: "usb-hcd: connected device(s) failed enumeration and were skipped",
                     fields: &[Field {
                         key: "skipped_ports",
-                        value: rustos_log::FieldValue::UnsignedInt(u64::from(
+                        value: tairix_log::FieldValue::UnsignedInt(u64::from(
                             device.skipped_port_count(),
                         )),
                     }],
@@ -1033,7 +1033,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     fn main() -> i32 {
         // Coherent DMA is carved kernel-side, so no architecture-specific
@@ -1056,7 +1056,7 @@ mod program {
         // is touched.
         let irq_handle = match host.irq_line() {
             Some(line) => {
-                let handle = rustos_rt::irq_bind(line);
+                let handle = tairix_rt::irq_bind(line);
                 if handle >= 0 {
                     #[allow(clippy::cast_sign_loss)] // `handle >= 0` is the bound IrqHandle.
                     let handle = handle as u64;
@@ -1117,7 +1117,7 @@ mod program {
         // the controller IRQ line. All must succeed before any interface is
         // published, because interrupt-IN URBs complete only through that
         // event-driven wake path.
-        let set = rustos_rt::waitset_create();
+        let set = tairix_rt::waitset_create();
         if set < 0 {
             return EXIT_NO_TRANSPORT;
         }
@@ -1136,7 +1136,7 @@ mod program {
         };
         let mut transports: Vec<Option<Transport>> = Vec::new();
 
-        let irq_add = rustos_rt::waitset_ctl(
+        let irq_add = tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Irq,
@@ -1198,7 +1198,7 @@ mod program {
         // Port Status Change interrupt.
         loop {
             let mut token = 0u64;
-            let wait_ret = rustos_rt::waitset_wait(set, super::WAIT_FOREVER_NS, &mut token);
+            let wait_ret = tairix_rt::waitset_wait(set, super::WAIT_FOREVER_NS, &mut token);
             if wait_ret < 0 {
                 log_hex_event(
                     HCD_WAIT_ERROR,
@@ -1227,7 +1227,7 @@ mod program {
                     // in-flight calls) — and this loop serves every transport
                     // plus the controller IRQ, so it must never park on one
                     // endpoint.
-                    match rustos_rt::call_recv_nonblock(
+                    match tairix_rt::call_recv_nonblock(
                         transport.endpoint_id,
                         &mut request,
                         &mut ticket,
@@ -1374,7 +1374,7 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------

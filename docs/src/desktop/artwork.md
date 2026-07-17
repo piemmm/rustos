@@ -1,7 +1,7 @@
 # Design artwork and storyboards
 
 The top-level `artwork/` directory (`AGENTS.md` §3) holds the **design source**
-for the RustOS desktop and brand: concept art, an iconset reference sheet, and
+for the TAIRiX desktop and brand: concept art, an iconset reference sheet, and
 UI storyboards that inform the look of the window manager, taskbar, and default
 apps.
 
@@ -27,7 +27,7 @@ look changes.
   resourceful guardian of the system core, drawn approachable and readable at
   small sizes — never aggressive or overtly heroic.
 
-- **`rustos_iconset_sheet.svg`** — the system pictogram reference, *"Secure core.
+- **`tairix_iconset_sheet.svg`** — the system pictogram reference, *"Secure core.
   Fearless systems."* A 24px master-grid iconset grouped by usage: **Brand /
   System** (OS mark, Cinder, launcher, core, kernel, boot, user, lock, power),
   **Window decorations** (close, minimise, maximise, restore, fullscreen, pin,

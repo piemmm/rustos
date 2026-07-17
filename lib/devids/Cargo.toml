@@ -1,6 +1,6 @@
 [package]
-name = "rustos-devids"
-description = "RustOS PCI/USB ID-database engine (`lib/devids`): the one definition of the vetted pci.ids/usb.ids snapshot grammar, the strict fail-closed vetting filter, the compact sorted lookup-table encoder, and the allocation-free binary-search decoder the `lspci`/`lsusb` command apps read their bundled `Resources/*.ids.bin` tables through (plans/DEVICES.md DEVICE1)."
+name = "tairix-devids"
+description = "TAIRiX PCI/USB ID-database engine (`lib/devids`): the one definition of the vetted pci.ids/usb.ids snapshot grammar, the strict fail-closed vetting filter, the compact sorted lookup-table encoder, and the allocation-free binary-search decoder the `lspci`/`lsusb` command apps read their bundled `Resources/*.ids.bin` tables through (plans/DEVICES.md DEVICE1)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,6 +22,6 @@ textdb = []
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget
 # seam: one place picks the per-run seed, logs it at the start of the test,
-# and bounds the smoke/soak loop. Test scaffolding only; never in a RustOS
+# and bounds the smoke/soak loop. Test scaffolding only; never in a TAIRiX
 # build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

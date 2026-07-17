@@ -5,7 +5,7 @@
 //! for the Stage-2 deliverable "Stress test for the scheduler under
 //! load on ≥ 4 emulated cores", lifting the in-crate test in
 //! `kernel/sched/tests/stress.rs` to a *consumer*-side perspective:
-//! it links against `rustos-kernel-sched-mlfq` exactly the way Stage 3a's
+//! it links against `tairix-kernel-sched-mlfq` exactly the way Stage 3a's
 //! kernel entry will, and exercises the public API only.
 //!
 //! ## Scope

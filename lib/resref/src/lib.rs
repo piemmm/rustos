@@ -1,6 +1,6 @@
-//! RustOS shared resource-reference parser (`lib/resref`).
+//! TAIRiX shared resource-reference parser (`lib/resref`).
 //!
-//! RustOS has no `/dev`, `/proc`, or `/sys`. Non-filesystem resources — the
+//! TAIRiX has no `/dev`, `/proc`, or `/sys`. Non-filesystem resources — the
 //! random source, a disk, a serial port, a live metric — are named instead by
 //! typed *resource references* such as `sys:random`, `disk:backup@7K2M`, or
 //! `stats:net/wan/rx.pps?window=1s`. Several components need to turn such a
@@ -61,7 +61,7 @@
 //! # Example
 //!
 //! ```
-//! use rustos_resref::{parse, KnownNamespace, Op};
+//! use tairix_resref::{parse, KnownNamespace, Op};
 //!
 //! let r = parse("stats:net/wan/rx.pps?window=1s").unwrap();
 //! assert_eq!(r.namespace().known(), Some(KnownNamespace::Stats));
@@ -326,7 +326,7 @@ impl Param {
     }
 }
 
-/// A parsed, validated RustOS resource reference.
+/// A parsed, validated TAIRiX resource reference.
 ///
 /// A reference is `namespace:selector[@guard][::facet][?params]`. The selector
 /// may be empty when a `guard` (the `disk:@7K2M` fingerprint shorthand) or a
@@ -506,7 +506,7 @@ impl fmt::Display for RefError {
     }
 }
 
-/// Parse and validate a RustOS resource-reference string into a typed
+/// Parse and validate a TAIRiX resource-reference string into a typed
 /// [`ResourceRef`].
 ///
 /// See the crate documentation for the grammar, the fixed security bounds, and
@@ -577,7 +577,7 @@ pub fn parse(input: &str) -> Result<ResourceRef, RefError> {
 /// What a `:`-bearing target string names: one of the two worlds a shell
 /// word, redirection target, or tool operand can belong to.
 ///
-/// RustOS has no `/dev`: the byte sinks and sources a program can name
+/// TAIRiX has no `/dev`: the byte sinks and sources a program can name
 /// (`sys:null`, `sys:random`, …) are resource references, not device files.
 /// [`classify_target`] decides which world a target belongs to *before* any
 /// filesystem lookup, so a real on-disk file whose name happens to contain

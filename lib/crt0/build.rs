@@ -1,4 +1,4 @@
-//! Build script for the `rustos-crt0` crate.
+//! Build script for the `tairix-crt0` crate.
 //!
 //! Sole responsibility, and it is build glue (confines
 //! target-conditional decisions to the architecture ports and the build

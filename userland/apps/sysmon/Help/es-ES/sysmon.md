@@ -57,7 +57,7 @@ aquí solo el censo y los mayores consumidores por `%CPU` y por memoria.
   en segundos con fracción opcional (solo se conserva el primer dígito
   decimal, las décimas): `sysmon -d 1.5` refresca cada 1,5 segundos.
   Por defecto 3,0. GNU `top` acepta un intervalo cero y refresca tan
-  rápido como puede; RustOS nunca gira en vacío, así que un cero se
+  rápido como puede; TAIRiX nunca gira en vacío, así que un cero se
   eleva al mínimo de 0,1 s.
 - `-h, -?` — mostrar la ayuda breve de esta orden y salir. Dentro de
   una sesión en marcha, las mismas teclas alternan el resumen de

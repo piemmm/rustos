@@ -1,25 +1,25 @@
 //! riscv64 memory tagging.
 //!
 //! Implements the Arch HAL
-//! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for riscv64.
+//! [`MemoryTagging`](tairix_arch_api::MemoryTagging) surface for riscv64.
 //!
-//! The RISC-V cores RustOS targets — the QEMU `virt` board and the
+//! The RISC-V cores TAIRiX targets — the QEMU `virt` board and the
 //! SiFive U-series (U54 / U74) — implement neither a ratified
 //! memory-tagging extension nor pointer masking. The relevant proposals
 //! (the pointer-masking extension `Zjpm` and the tagging work that builds
 //! on it) are not present on this silicon, so there is no store-tag
 //! instruction to emit and no tag-check fault to take.
 //!
-//! Both features are therefore an honest [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported).
+//! Both features are therefore an honest [`Tagging::Unsupported`](tairix_arch_api::Tagging::Unsupported).
 //! Use-after-free on riscv64 is hardened by the architecture-neutral
 //! *software* tag check in `kernel/mem` (sharing the
-//! [`rustos_arch_api::next_free_tag`] rotation this HAL defines) plus the
-//! slab guard pages and W^X. Were RustOS to add a RISC-V core that
+//! [`tairix_arch_api::next_free_tag`] rotation this HAL defines) plus the
+//! slab guard pages and W^X. Were TAIRiX to add a RISC-V core that
 //! implements ratified memory tagging, this profile must be revisited and
 //! the store-tag / fault path wired, exactly as the side-channel
 //! profile is revisited for an out-of-order core.
 
-use rustos_arch_api::{MemoryTagging, Tagging, TaggingProfile};
+use tairix_arch_api::{MemoryTagging, Tagging, TaggingProfile};
 
 /// riscv64 implementation of the Arch HAL memory-tagging surface.
 ///
@@ -39,7 +39,7 @@ impl MemoryTags {
     pub const fn declared_profile() -> TaggingProfile {
         TaggingProfile {
             tag_storage: Tagging::Unsupported(
-                "the RISC-V cores RustOS targets (QEMU virt, SiFive U54/U74) implement no \
+                "the RISC-V cores TAIRiX targets (QEMU virt, SiFive U54/U74) implement no \
                  ratified memory-tagging extension, so there is no store-tag instruction",
             ),
             tag_check_faults: Tagging::Unsupported(
@@ -67,7 +67,7 @@ impl MemoryTagging for MemoryTags {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::memtag::conformance;
+    use tairix_arch_api::memtag::conformance;
 
     #[test]
     fn passes_memtag_conformance() {

@@ -6,7 +6,7 @@
 # covers the short-help read of the bundle's own Help/ documents through
 # the secured VFS — the tool itself is pure string surgery and touches no
 # operand path. It reads no input, so it requests no CAP_CONSOLE_READ.
-id = "os.rustos.dirname"
+id = "os.tairix.dirname"
 name = "dirname"
 version = "0.1.0"
 kind = "command"

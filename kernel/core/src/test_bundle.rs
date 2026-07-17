@@ -9,15 +9,15 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
-use rustos_abi::{
+use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
+use tairix_abi::{
     BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags,
     UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
-use rustos_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
-use rustos_caps::CapabilitySet;
-use rustos_itest_harness::app_image::{compose_signed_appinfo, AppKind, AppManifestSource};
-use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
+use tairix_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
+use tairix_caps::CapabilitySet;
+use tairix_itest_harness::app_image::{compose_signed_appinfo, AppKind, AppManifestSource};
+use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::appspawn::{AnchorVerifier, FsBundleStore};
 use crate::fs::{FilesystemService, ReaddirEntry};
@@ -84,7 +84,7 @@ impl MemFs {
                     kind,
                     size,
                     allocated: size,
-                    modified: rustos_abi::time::Time64::UNIX_EPOCH,
+                    modified: tairix_abi::time::Time64::UNIX_EPOCH,
                     name: name.to_string(),
                 });
             }
@@ -298,7 +298,7 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
     let run = tiny_run();
     let help = b"# ps\n";
     let manifest = AppManifestSource {
-        id: "os.rustos.ps".to_string(),
+        id: "os.tairix.ps".to_string(),
         name: "ps".to_string(),
         version: "1.0".to_string(),
         kind: AppKind::Command,
@@ -346,7 +346,7 @@ impl Clock for NullClock {
     }
 }
 
-/// Run the full `rustos_appload` gate over `fs`, exactly as the spawn
+/// Run the full `tairix_appload` gate over `fs`, exactly as the spawn
 /// path does.
 pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppError> {
     let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));

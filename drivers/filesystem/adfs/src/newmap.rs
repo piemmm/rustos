@@ -14,8 +14,8 @@
 
 use crate::disc::{DiscRecord, DISC_RECORD_SIZE, DISC_RECORD_SIZE_U32, FRAG_ROOT};
 use crate::volume::Volume;
-use rustos_abi::driver::block::Block;
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::Block;
+use tairix_abi::DriverError;
 
 /// Largest map sector (zone) size: `log2secsize` is at most 10.
 pub const MAX_ZONE_BYTES: usize = 1024;

@@ -1,4 +1,4 @@
-# rustos-abi-trap
+# tairix-abi-trap
 
 The raw `abi-v1` user→kernel syscall trap primitive: the single
 per-architecture `syscall` (x86_64) / `svc` (AArch64) / `ecall` (RISC-V)
@@ -8,11 +8,11 @@ reads. It exposes one function, `raw_syscall(number, args) -> result`.
 This crate exists so the trap assembly lives in **exactly one place**
 (`AGENTS.md` §2.2). Two userland runtimes build on it:
 
-- `rustos-abi-sys` — the C-callable `ros_sys_<name>` stub runtime that a
+- `tairix-abi-sys` — the C-callable `tairix_sys_<name>` stub runtime that a
   program **not** written in Rust links (the curated *System runtime / C ABI*
   class, `AGENTS.md` §9, §16.4).
-- `rustos-rt` — the pure-Rust userland runtime that first-party RustOS
-  programs link. RustOS code is Rust-only and never routes through the C ABI
+- `tairix-rt` — the pure-Rust userland runtime that first-party TAIRiX
+  programs link. TAIRiX code is Rust-only and never routes through the C ABI
   meant for third parties (`AGENTS.md` §1).
 
 ## Security

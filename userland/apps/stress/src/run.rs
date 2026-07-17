@@ -2,8 +2,8 @@
 //! a shell spawns (`plans/STRESSTEST.md` ST5).
 //!
 //! This is a **pure-Rust** program linking the Rust userland runtime
-//! `rustos-rt` (`_start`, canary, panic handler, `mem_map` allocator, and
-//! the syscall wrappers); `rustos_rt::entry!` names this program's `main`.
+//! `tairix-rt` (`_start`, canary, panic handler, `mem_map` allocator, and
+//! the syscall wrappers); `tairix_rt::entry!` names this program's `main`.
 //!
 //! One binary, two roles decided by argv:
 //!
@@ -13,13 +13,13 @@
 //!   observed and the workers are torn down before exit, prepares the
 //!   scratch directory, sizes the byte targets from discovered RAM and
 //!   free space, spawns the workers (and `--monitor`'s `sysmon`), and
-//!   drives the [`rustos_stress::Controller`] state machine off one
+//!   drives the [`tairix_stress::Controller`] state machine off one
 //!   wait-set (child exits + the signal intake + the timeout/grace
 //!   deadline). Teardown removes every scratch file on every exit path.
 //! * **Worker** (`stress --worker …`, spawned by the controller through
 //!   the kernel's attested `@self` token): runs its load unit in a loop
 //!   until terminated; a typed refusal is reported once and exits
-//!   [`rustos_stress::REFUSED_EXIT`]; any other failure exits 1.
+//!   [`tairix_stress::REFUSED_EXIT`]; any other failure exits 1.
 //!
 //! The program binds only to its inherited descriptors (fd 0/1/2/3) and
 //! holds no ambient authority. On the host it is an inert stub so `cargo
@@ -40,14 +40,14 @@ mod controller_main;
 mod program {
     extern crate alloc;
 
-    use rustos_help::{own_short_help, BundleHelp};
-    use rustos_rt::io::{write_stderr_line, Stdout, Write};
-    use rustos_stress::{parse, Command, USAGE};
+    use tairix_help::{own_short_help, BundleHelp};
+    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_stress::{parse, Command, USAGE};
 
     /// Render `stress`'s own short help through the one shared engine;
     /// the usage banner stands in when no document can be served.
     fn short_help() -> i32 {
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let bytes = own_short_help(&BundleHelp::new("stress"), locale, "stress")
             .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
         match Stdout.write_all(&bytes) {
@@ -61,16 +61,16 @@ mod program {
     /// Exit codes: `0` on a clean run (or served help/version), `1` on a
     /// failed run or terminal failure, `2` on a usage error, `130`/`143`
     /// when a signal ended the run, and — in a worker —
-    /// [`rustos_stress::REFUSED_EXIT`] for a typed resource refusal.
+    /// [`tairix_stress::REFUSED_EXIT`] for a typed resource refusal.
     fn main() -> i32 {
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
         match parse(&arguments) {
             Ok(Command::Help) => short_help(),
             Ok(Command::Version) => {
-                let line = alloc::format!("stress (RustOS) {}\n", env!("CARGO_PKG_VERSION"));
+                let line = alloc::format!("stress (TAIRiX) {}\n", env!("CARGO_PKG_VERSION"));
                 match Stdout.write_all(line.as_bytes()) {
                     Ok(()) => 0,
                     Err(_) => 1,
@@ -85,13 +85,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

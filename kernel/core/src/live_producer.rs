@@ -24,12 +24,12 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, MapFlags};
-use rustos_kernel_mem::{
+use tairix_abi::{Errno, MapFlags};
+use tairix_kernel_mem::{
     page_count_for, AllocError, AnonError, DmaError, Frame, FrameAllocator, LiveSpaceError,
     MmioError, PhysAddr, PhysMap, PAGE_SIZE,
 };
-use rustos_kernel_sched_api::SchedulerArch;
+use tairix_kernel_sched_api::SchedulerArch;
 
 use crate::devres::{
     DmaAllocFacility, DmaCarve, MmioMapFacility, MmioMemoryKind, SharedChunk, SharedMemFacility,
@@ -490,7 +490,7 @@ mod tests {
     use std::boxed::Box;
     use std::vec::Vec;
 
-    use rustos_kernel_mem::{
+    use tairix_kernel_mem::{
         AddressSpace, DmaMapping, FrozenAddressSpace, HostPageTable, LiveUserSpace,
     };
 
@@ -643,8 +643,8 @@ mod tests {
 
         fn translate_page(
             &self,
-            _page: rustos_kernel_mem::Page,
-        ) -> Option<(rustos_kernel_mem::Frame, rustos_kernel_mem::MapFlags)> {
+            _page: tairix_kernel_mem::Page,
+        ) -> Option<(tairix_kernel_mem::Frame, tairix_kernel_mem::MapFlags)> {
             // The routing double models no page table; fault-resolution
             // translation is covered by the real `LiveSpace` in `kernel/mem`.
             None

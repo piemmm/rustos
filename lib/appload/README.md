@@ -1,4 +1,4 @@
-# `rustos-appload` — application-bundle load gate
+# `tairix-appload` — application-bundle load gate
 
 Shared `lib/*` crate (`AGENTS.md` §16.4, §16.5, §17.4). The one place a
 `<Name>.app/` bundle is judged before it may be launched — the gate the
@@ -19,7 +19,7 @@ ceiling is the caller's job (the same load gate `init`/`drvhost` use,
 Fails closed at the first problem (`AGENTS.md` §5.4):
 
 1. **Layout** — the bundle's top-level entries must be exactly drawn from the
-   fixed `rustos_abi::BundleEntry` set, with the mandatory `AppInfo` and
+   fixed `tairix_abi::BundleEntry` set, with the mandatory `AppInfo` and
    `Run` present (`AppError::Layout`).
 2. **Manifest** — decode the signed `AppInfoHeader` and check its ABI version
    (`AppError::Manifest`).
@@ -38,7 +38,7 @@ Fails closed at the first problem (`AGENTS.md` §5.4):
    capabilities with the launching user's grants; ambient authority is
    forbidden (§4, §5.2), so a request is never widened.
 7. **Run image** — validate the already-read `Run` bytes through
-   `rustos_abi::rxe::LoadImage::parse` with the kernel's syscall hash as the
+   `tairix_abi::rxe::LoadImage::parse` with the kernel's syscall hash as the
    expected CFI tag (no re-read). This enforces the §19.2 hardening
    invariants (PIE, W^X, CFI tag) on the entry-point binary; a malformed
    image or a CFI-tag mismatch is refused (`AppError::RunImage`).
@@ -98,14 +98,14 @@ Reserved `EventId` range `11000..12000`:
 
 ## Layering & safety
 
-`no_std` (with `alloc`), depends only on `rustos-abi`, `rustos-caps`, and
-`rustos-log` (all `lib/*`), so it links no kernel or driver crate and both a
+`no_std` (with `alloc`), depends only on `tairix-abi`, `tairix-caps`, and
+`tairix-log` (all `lib/*`), so it links no kernel or driver crate and both a
 kernel and a userland consumer may share it (`AGENTS.md` §17.4). No `unsafe`,
 no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
 
 ## Test surface
 
-`cargo test -p rustos-appload`: the happy path with capability intersection;
+`cargo test -p tairix-appload`: the happy path with capability intersection;
 the minimal (`AppInfo` + `Run`) layout; fail-closed unknown-entry /
 missing-`Run` layouts; an undecodable manifest; an unsupported ABI version; a
 syscall-hash mismatch; a bad signature; a content-hash mismatch; a store
@@ -118,7 +118,7 @@ read exactly once per load; the `APP_LOADED` record carrying non-zero `load`
 and `verify` durations; plus the `EventId` range/uniqueness invariants.
 
 The kernel-side single-read guarantee is additionally pinned by
-`rustos-kernel-core`'s `the_run_binary_is_read_from_disk_exactly_once`, which
+`tairix-kernel-core`'s `the_run_binary_is_read_from_disk_exactly_once`, which
 counts the `FilesystemService::read` calls the `FsBundleStore` makes for the
 `Run` path over a full load.
 

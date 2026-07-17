@@ -1,5 +1,5 @@
 [package]
-name = "rustos-syshelp"
+name = "tairix-syshelp"
 description = "Build-discovered system app-store Help payload for image authoring: scans the command-app bundles' on-disk `Help/` trees and exposes them as data, so the image builder plants help without a hand-maintained per-bundle list (plans/APPS.md §2.1, AGENTS.md §2.2)."
 version.workspace = true
 edition.workspace = true
@@ -28,6 +28,6 @@ path = "src/lib.rs"
 # shared lint `cargo xtask help-lint` gates on, so a malformed, incomplete,
 # drifted, or policy-violating tree can never reach an image and the two
 # judgements can never diverge (AGENTS.md §2.2).
-rustos-help = { path = "../../lib/help", version = "=0.0.0", features = [
+tairix-help = { path = "../../lib/help", version = "=0.0.0", features = [
     "lint",
 ] }

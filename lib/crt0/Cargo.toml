@@ -1,5 +1,5 @@
 [package]
-name = "rustos-crt0"
+name = "tairix-crt0"
 description = "C-callable abi-v1 program startup/teardown object (crt0): the per-target entry trampoline that marshals the kernel's startup vector into C argc/argv/envp, installs the per-process stack canary, calls the program entry point, and routes its return through the exit syscall."
 version.workspace = true
 edition.workspace = true
@@ -12,12 +12,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
-# The teardown path (`ros_sys_exit`) and the startup trampoline are compiled
+# The teardown path (`tairix_sys_exit`) and the startup trampoline are compiled
 # in only for the three native Tier-1 targets (all `target_os = "none"`); the
 # host build keeps just the `build_c_runtime` marshalling core, which is
 # unit-tested directly. wasm32 (`target_os = "unknown"`) has no trap
 # instruction and is out of scope for this runtime (`plans/CCOMPAT.md` §1).
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-abi-sys = { path = "../abi-sys", version = "=0.0.0" }
+tairix-abi-sys = { path = "../abi-sys", version = "=0.0.0" }

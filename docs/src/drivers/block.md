@@ -2,7 +2,7 @@
 
 Block drivers expose a fixed-size logical-block array to higher layers
 (filesystems, swap, dump). They implement
-[`rustos_abi::driver::block::Block`](../abi/driver_traits.md) and are
+[`tairix_abi::driver::block::Block`](../abi/driver_traits.md) and are
 loaded as user-space drivers unless their manifest declares
 `kind = "in-kernel"` (in which case they require `CAP_DRV_KERNEL`).
 
@@ -46,7 +46,7 @@ Design D, the `/System` store must stay reachable for on-demand and reactive
 (hotplug) driver loads (`AGENTS.md` §18.3 / §18.4). One disk must therefore
 back two concurrent partition windows.
 
-The kernel block-sharing layer (`rustos_kernel::shared_block`) is that
+The kernel block-sharing layer (`tairix_kernel::shared_block`) is that
 primitive. A `SharedBlock<B>` owns the brought-up device behind a `lib/sync`
 `SpinLock` and hands out `SharedBlockHandle`s, each of which is itself a
 `Block`. Every byte-moving operation takes the lock for the duration of one
@@ -71,7 +71,7 @@ borrowing then moving the one device.
 
 Design D needs the `/System` driver store reachable for the life of the system
 (on-demand and reactive driver loads, `AGENTS.md` §18.3 / §18.4), not only
-during boot. `DriverStoreService<B>` (`rustos_kernel::shared_block`) owns the
+during boot. `DriverStoreService<B>` (`tairix_kernel::shared_block`) owns the
 boot disk's `SharedBlock` and hands out a fresh read-only window
 (`SharedBlockHandle`) for each `/System` read.
 
@@ -100,9 +100,9 @@ driving the device from an arbitrary caller's context.
 
 | Driver                                   | Crate                                | Supported buses     | Status                                   |
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
-| [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
-| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | ADMA2 DMA + PIO read/write host-tested; interrupt-driven; wired into root-unlock over DMA; DMA metal acceptance pending (Pi 4) |
-| USB mass storage (BOT / CBI / UAS)        | `rustos-drv-storage-usb-msd`         | any USB host via the URB transport | shared SCSI layer + three wire transports (incl. UFI floppies) host-tested over scripted doubles; metal acceptance pending (Pi 4) |
+| [virtio-blk](./virtio.md)                | `tairix-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
+| Raspberry Pi 4 EMMC2                      | `tairix-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | ADMA2 DMA + PIO read/write host-tested; interrupt-driven; wired into root-unlock over DMA; DMA metal acceptance pending (Pi 4) |
+| USB mass storage (BOT / CBI / UAS)        | `tairix-drv-storage-usb-msd`         | any USB host via the URB transport | shared SCSI layer + three wire transports (incl. UFI floppies) host-tested over scripted doubles; metal acceptance pending (Pi 4) |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
@@ -135,7 +135,7 @@ store, never grows.
 
 ### Raspberry Pi 4 EMMC2 (SDHCI)
 
-`rustos-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2
+`tairix-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2
 controller — an Arasan / SDHCI-5.1 SD host — and exposes the card
 through `Block`. The fast transfer path is **32-bit ADMA2 DMA**: the
 controller masters a whole 64 KiB chunk (`DMA_STAGE_BLOCKS` = 128 blocks)
@@ -240,7 +240,7 @@ through the signed §8 load gate, **discovers the controller's GIC SPI from the 
 tree (`emmc2_spi`) and binds, routes, and arms it on the published IRQ
 table** — supplying the driver a `CompletionWait` (`Emmc2Completion`) that
 blocks on that line through the same task-parking waiter the virtio
-bring-up uses (`rustos_kernel_core::IrqParkWaiter`, §2.2): a syscall-context
+bring-up uses (`tairix_kernel_core::IrqParkWaiter`, §2.2): a syscall-context
 wait parks its task off the run queue (woken by the ISR's `irq_wake`), a
 boot-kthread wait takes the bounded race-free `wfi` fallback, and a
 controller silent past the 2 s budget fails the transfer closed as
@@ -260,7 +260,7 @@ host test and the §0.9 metal checklist are the acceptance artefacts.
 
 ### USB mass storage (BOT / CBI / UAS) — `drivers/storage/usb_msd`
 
-`rustos-drv-storage-usb-msd` is the first **discovered-tier, user-space**
+`tairix-drv-storage-usb-msd` is the first **discovered-tier, user-space**
 block driver (`plans/DEVICES.md` D2/D5): a pure USB *class* driver `devmgr`
 autoloads against the mass-storage interface node the xHCI host-controller
 driver emits. It owns no register window, no DMA, and no IRQ — every
@@ -306,9 +306,9 @@ horizon), and the command set's write-protect bit — enforced driver-side
 merely reported.
 
 Each ready LUN is published as a **storage-class hardware-tree node**
-(compatible `rustos,usb-msd-lun`) carrying two grants: a block-service
+(compatible `tairix,usb-msd-lun`) carrying two grants: a block-service
 call endpoint and a 32 KiB shared data window. Consumers drive the unit
-with the fixed-frame `rustos_abi::blkio` protocol (`BlkRequest`:
+with the fixed-frame `tairix_abi::blkio` protocol (`BlkRequest`:
 geometry / read / write / flush; completions carry the geometry and the
 read-only flag) — the same request-reply IPC shape as the URB transport,
 served by the driver's wait-set loop (never a busy-poll). A hot-unplug
@@ -319,9 +319,9 @@ doubles; the live path is Pi 4 metal acceptance (QEMU models no Pi USB).
 
 ### Volume manager (automount policy) — `drivers/storage/volmgr`
 
-`rustos-drv-storage-volmgr` closes the hotplug loop (`plans/DEVICES.md`
+`tairix-drv-storage-volmgr` closes the hotplug loop (`plans/DEVICES.md`
 D3c): it is the **policy driver** `devmgr` autoloads against each per-LUN
-block-service node (compatible `rustos,usb-msd-lun`), one instance per
+block-service node (compatible `tairix,usb-msd-lun`), one instance per
 node, spawned with exactly that node's blkio endpoint + shared-window
 grants — the same discovery/match/grant machinery every driver uses, so
 no new kernel surface and no ambient authority (an instance can never

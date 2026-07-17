@@ -9,11 +9,11 @@
 //!    respects the eight-byte-header lower bound.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from
-//! the same seeded stream until `RUSTOS_FUZZ_BUDGET_SECS` elapses under
+//! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
-use rustos_net::udp::{self, Pseudo, UdpDatagram, UDP_HEADER_LEN};
-use rustos_net::{Ipv4Addr, Ipv6Addr};
+use tairix_net::udp::{self, Pseudo, UdpDatagram, UDP_HEADER_LEN};
+use tairix_net::{Ipv4Addr, Ipv6Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -92,12 +92,12 @@ impl Lcg {
 
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(rustos_fuzzseed::start(
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut buf = [0u8; 128];
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let p = pseudo(&mut rng);
@@ -106,7 +106,7 @@ fn random_inputs_never_panic() {
             exercise_parse(p, &buf[..size]);
             exercise_round_trip(&mut rng, p);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

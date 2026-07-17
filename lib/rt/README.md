@@ -1,18 +1,18 @@
-# rustos-rt
+# tairix-rt
 
 The pure-Rust userland runtime: the `_start` entry trampoline, idiomatic
 `abi-v1` syscall wrappers, the `entry!` macro, the per-process stack-canary
-symbols, and the panic handler that a **first-party RustOS program written in
-Rust** links. RustOS is Rust-only (`AGENTS.md` §1), so its own programs use
+symbols, and the panic handler that a **first-party TAIRiX program written in
+Rust** links. TAIRiX is Rust-only (`AGENTS.md` §1), so its own programs use
 this runtime.
 
 ## Relationship to the C ABI (`crt0` + `abi-sys`)
 
-`rustos-crt0` and `rustos-abi-sys` are the curated *System runtime / C ABI*
+`tairix-crt0` and `tairix-abi-sys` are the curated *System runtime / C ABI*
 class (`AGENTS.md` §9, §16.4): a libc-equivalent that exists **solely** so a
 program **not** written in Rust (C, …) can call `abi-v1`. They are not for
-RustOS's own code. `rustos-rt` is the Rust counterpart. Both build on the one
-shared syscall trap (`rustos-abi-trap`, `AGENTS.md` §2.2), so the trap assembly
+TAIRiX's own code. `tairix-rt` is the Rust counterpart. Both build on the one
+shared syscall trap (`tairix-abi-trap`, `AGENTS.md` §2.2), so the trap assembly
 is not duplicated, and neither is a privileged path — every capability and
 input check happens kernel-side (`AGENTS.md` §5.4).
 
@@ -26,11 +26,11 @@ A program is `#![no_std]`, `#![no_main]`, declares its `main`, and hands it to
 #![no_main]
 
 fn main() -> i32 {
-    rustos_rt::stdout(b"hello\n");
+    tairix_rt::stdout(b"hello\n");
     0
 }
 
-rustos_rt::entry!(main);
+tairix_rt::entry!(main);
 ```
 
 `_start` validates the kernel-supplied startup vector, installs the
@@ -39,7 +39,7 @@ return value through the `exit` syscall.
 
 ## Heap (`#[global_allocator]`)
 
-On the three native targets `rustos-rt` registers a `#[global_allocator]`
+On the three native targets `tairix-rt` registers a `#[global_allocator]`
 (`src/heap.rs`) so a first-party Rust program can use `alloc` (`Box`, `Vec`,
 `String`, …). It is a free-span allocator over a single contiguous virtual
 arena that grows upward, one or more whole pages at a time, by `mem_map`ping
@@ -70,7 +70,7 @@ arena and metadata bases are fixed virtual addresses documented in
 
 ## I/O abstraction (`io` module)
 
-`rustos_rt::io` is the ergonomic `std::io`-style layer a program programs
+`tairix_rt::io` is the ergonomic `std::io`-style layer a program programs
 against instead of hand-marshalling byte slices: one fd-generic `Read`/`Write`
 trait pair (with looping `read_exact`/`write_all`/`write_fmt`), the buffering
 built on them (`BufReader` with `read_line`/`read_until`/`lines`, `BufWriter`
@@ -85,7 +85,7 @@ panic. See `docs/src/lib/rt-io.md` and `plans/IO.md`.
 
 ## Filesystem (`File`, `Dir`)
 
-`rustos-rt` exposes the userland filesystem surface (`PREREQUISITES.md` P-A):
+`tairix-rt` exposes the userland filesystem surface (`PREREQUISITES.md` P-A):
 thin `fs_open`/`fs_close`/`fs_read`/`fs_write`/`fs_readdir`/`fs_stat_raw`/
 `fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink`/`fs_rename` wrappers over the
 `abi-v1` syscalls, the working-directory pair (`fs_chdir`/`fs_getcwd`, against
@@ -93,7 +93,7 @@ which relative paths resolve, `.junie/PREREQUISITES2.md` P2), plus the
 ergonomic `File` and `Dir` handles a program normally uses.
 `File` owns its descriptor and releases it with `fs_close` on `Drop`, so a
 handle is never leaked; `File::read_at` / `write_at` split a transfer larger
-than `rustos_abi::FS_IO_MAX` across successive syscalls. A program names a
+than `tairix_abi::FS_IO_MAX` across successive syscalls. A program names a
 descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
 per-inode check stays kernel-side behind the secured VFS (`AGENTS.md` §5.4); a
 refusal surfaces as the raw `-errno`. The `open` / `create` / `open_dir` free
@@ -127,7 +127,7 @@ compiled, unit-tested through the trap crate's injectable seam.
 ## Stability tier
 
 `experimental` — `abi-v1` is **not** frozen yet (`plans/CCOMPAT.md` §0). The
-exposed syscall-wrapper surface grows as RustOS programs need it: the
+exposed syscall-wrapper surface grows as TAIRiX programs need it: the
 standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`, `AGENTS.md`
 §20), `spawn` / `spawn_at` / `console_count` / `wait` / `yield_now` / `exit`,
 the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed

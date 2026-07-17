@@ -82,7 +82,7 @@ done
 ci_prepare
 
 stamp="$(ci_stamp)"
-soak_dir="$RUSTOS_CI_LOGDIR/soak-$stamp"
+soak_dir="$TAIRIX_CI_LOGDIR/soak-$stamp"
 mkdir -p "$soak_dir"
 
 # Optional per-job budget override, applied to both orchestrators.

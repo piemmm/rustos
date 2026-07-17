@@ -6,7 +6,7 @@
 //! drivers and encoders so the fixture cannot drift from the system that
 //! mounts the disk:
 //!
-//! 1. An **MBR** ([`rustos_partition::mbr::encode`]) describing two
+//! 1. An **MBR** ([`tairix_partition::mbr::encode`]) describing two
 //!    1 MiB-aligned primary partitions.
 //! 2. A **FAT32 boot partition** at [`BOOT_LBA`], authored by the real
 //!    [`Fat32`] driver, carrying the plaintext `root.unlock`
@@ -15,13 +15,13 @@
 //!    volume key is **derived from [`PASSPHRASE`]** through the descriptor
 //!    above, carrying `/System/Security/Users` with the
 //!    single [`USERNAME`]/[`PASSWORD`] account — the shared
-//!    [`rustos_test_arxfs_image`] users-root volume.
+//!    [`tairix_test_arxfs_image`] users-root volume.
 //!
 //! The host harness (`tools/xtask`) plants [`build_image`]'s bytes on the
 //! test's virtio-blk backing; the freestanding guest tail
 //! (`tests/integration/virtio_qemu_support`) drives the production
 //! interactive unlock policy
-//! (`rustos_kernel::root_mount::unlock_root_disk_interactively`) over that
+//! (`tairix_kernel::root_mount::unlock_root_disk_interactively`) over that
 //! disk: it types [`PASSPHRASE`] at the prompt, the descriptor re-derives
 //! the volume key, the root mounts, the database installs, and the planted
 //! [`USERNAME`]/[`PASSWORD`] account authenticates.
@@ -39,16 +39,16 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use rustos_abi::DriverError;
-use rustos_drv_fs_arxfs::{
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::DriverError;
+use tairix_drv_fs_arxfs::{
     EntropySource, UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY,
     UNLOCK_DESCRIPTOR_LEN, UNLOCK_MIN_ITERATIONS,
 };
-use rustos_drv_fs_fat32::Fat32;
-use rustos_partition::{mbr, Partition, PartitionType};
-use rustos_test_arxfs_image as root_image;
+use tairix_drv_fs_fat32::Fat32;
+use tairix_partition::{mbr, Partition, PartitionType};
+use tairix_test_arxfs_image as root_image;
 
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// the 512-byte sector QEMU's virtio-blk reports by default and the sector
@@ -85,7 +85,7 @@ pub const SYSTEM_SECTORS: u64 = 65_536;
 pub const ROOT_LBA: u64 = SYSTEM_LBA + SYSTEM_SECTORS;
 
 /// Sectors in the encrypted `ARXFS` root partition — the shared
-/// [`rustos_test_arxfs_image`] users-root volume's footprint.
+/// [`tairix_test_arxfs_image`] users-root volume's footprint.
 pub const ROOT_SECTORS: u64 = root_image::TOTAL_SECTORS;
 
 /// Total sectors in the assembled whole-disk image.
@@ -97,7 +97,7 @@ pub const TOTAL_SECTORS: u64 = ROOT_LBA + ROOT_SECTORS;
 pub const PASSPHRASE: &[u8] = b"unlock-vertical correct horse battery staple";
 
 /// Username of the single account planted on the root volume — the shared
-/// [`rustos_test_arxfs_image`] users-root account, so the guest tail's
+/// [`tairix_test_arxfs_image`] users-root account, so the guest tail's
 /// authentication proof names exactly what the volume carries.
 pub const USERNAME: &str = root_image::USERS_FIXTURE_USERNAME;
 
@@ -257,10 +257,10 @@ fn build_system_partition(
     }
     // The system app store's bundle data, exactly as `tools/mkimage` plants
     // it: each command app's internationalised Help/ tree, discovered from
-    // the bundle's own on-disk `Help/` source (`rustos_syshelp`) — never a
+    // the bundle's own on-disk `Help/` source (`tairix_syshelp`) — never a
     // hand-maintained list here — so the session vertical reads the same
     // bytes a real image ships.
-    for doc in rustos_syshelp::HELP_FILES {
+    for doc in tairix_syshelp::HELP_FILES {
         let components: [&[u8]; 5] = [
             b"Apps",
             doc.bundle.as_bytes(),
@@ -274,7 +274,7 @@ fn build_system_partition(
     // ID-database table), exactly as `tools/mkimage` plants them: read from
     // the bundle's own on-disk `Resources/` source, never a per-bundle list
     // here, so the signed content hash the load gate recomputes matches.
-    for res in rustos_syshelp::RESOURCE_FILES {
+    for res in tairix_syshelp::RESOURCE_FILES {
         let components: [&[u8]; 4] = [
             b"Apps",
             res.bundle.as_bytes(),
@@ -345,7 +345,7 @@ pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverE
 /// each `(path_components, bytes)` is laid into the **read-only `/System`
 /// volume**'s `Drivers/` store exactly as a real installation carries it, so
 /// the pre-unlock autoload
-/// (`rustos_kernel::root_mount::autoload_system_drivers` →
+/// (`tairix_kernel::root_mount::autoload_system_drivers` →
 /// `driver_autoload::autoload_from_mounted_root`) discovers, verifies, and
 /// spawns the bundle off the `/System` volume *before* the encrypted root is
 /// unlocked (design B — the store lives on a volume reachable before the
@@ -417,7 +417,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use rustos_partition::{parse_partition_table, PartitionBlock};
+    use tairix_partition::{parse_partition_table, PartitionBlock};
 
     /// The assembled image carries exactly the three design-B partitions,
     /// of the right types, at the documented 1 MiB-aligned offsets.
@@ -518,7 +518,7 @@ mod tests {
     /// the volume the fixture provisions agree.
     #[test]
     fn the_root_window_mounts_under_the_passphrase_derived_key() {
-        use rustos_drv_fs_arxfs::ARXFS;
+        use tairix_drv_fs_arxfs::ARXFS;
 
         let bytes = build_image().expect("the whole-disk image assembles");
         let mut disk = MemDisk { store: bytes };

@@ -3,7 +3,7 @@
 //! This module owns the per-CPU machine state required to take a
 //! user-space `syscall` instruction, marshal its register-passed
 //! arguments into the architecture-neutral
-//! `rustos_kernel_syscall::RawArgs` layout, and return to user space
+//! `tairix_kernel_syscall::RawArgs` layout, and return to user space
 //! via `sysretq`. The architecture-neutral dispatcher (validation,
 //! capability checks, audit) is owned by `kernel/syscall` and is
 //! re-used verbatim — this crate never duplicates the
@@ -22,12 +22,12 @@
 //!    points at *that CPU's* slot, so the assembly entry path can
 //!    swap stacks with two `gs:`-relative moves.
 //! 3. **Bare-metal entry path** — the naked `syscall_entry_stub` and
-//!    its Rust trampoline `rustos_arch_x86_64_syscall_dispatch`,
+//!    its Rust trampoline `tairix_arch_x86_64_syscall_dispatch`,
 //!    both gated to `target_os = "none"`. The trampoline forwards
 //!    the syscall to a binary-installed callback (mirroring the
 //!    [`crate::preempt`] timer-callback design); the (c7) binary
 //!    glue is the only writer of that callback and wires it to a
-//!    real `rustos_kernel_syscall::Dispatcher`.
+//!    real `tairix_kernel_syscall::Dispatcher`.
 //!
 //! # MSR programming
 //!
@@ -71,7 +71,7 @@
 //! # Why a callback?
 //!
 //! `kernel/arch/x86_64` is dep-light by design (one production dep,
-//! `rustos-abi`, see `Cargo.toml`). Pulling in `kernel/syscall` here
+//! `tairix-abi`, see `Cargo.toml`). Pulling in `kernel/syscall` here
 //! would invert the layering — the dispatcher already depends on
 //! `kernel/sec`, `kernel/sched`, `lib/log`, and `lib/crypto`. The
 //! arch port instead exposes a single atomic callback slot
@@ -85,7 +85,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
-use rustos_abi::SYSCALL_MAX_ARGS;
+use tairix_abi::SYSCALL_MAX_ARGS;
 
 // --- MSR addresses (Intel SDM Vol 3A §2.7, §5.8.8) ------------------
 
@@ -156,7 +156,7 @@ pub const fn fmask_value() -> u64 {
 }
 
 /// Pack the six System V AMD64 syscall-argument registers into the
-/// canonical layout expected by [`rustos_abi`]'s syscall ABI.
+/// canonical layout expected by [`tairix_abi`]'s syscall ABI.
 ///
 /// The x86_64 `syscall` instruction passes the user-space arguments
 /// in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` (System V — `r10` in
@@ -620,7 +620,7 @@ pub type SyscallDispatchFn =
 ///
 /// `0` is the "no callback installed" sentinel. The trampoline
 /// fail-closes via [`crate::qemu_exit::exit_failure`] in that case
-/// (see [`rustos_arch_x86_64_syscall_dispatch`]'s rustdoc); a
+/// (see [`tairix_arch_x86_64_syscall_dispatch`]'s rustdoc); a
 /// silent return would be an "open by default" failure per
 /// . Storage is gated to the freestanding target — the
 /// host build never reads or writes it (matches the
@@ -695,7 +695,7 @@ pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
 ///   for the duration of the call.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_arch_x86_64_syscall_dispatch(
+unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
     number: u64,
     args_ptr: *const [u64; SYSCALL_MAX_ARGS],
 ) -> u64 {
@@ -744,7 +744,7 @@ pub fn syscall_entry_addr() -> u64 {
 /// 4. Build the [`SYSCALL_MAX_ARGS`]-wide argument array on the
 ///    kernel stack from `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`.
 /// 5. Set up the System V args: `%rdi = syscall number (saved rax)`,
-///    `%rsi = &args[0]`. Call [`rustos_arch_x86_64_syscall_dispatch`].
+///    `%rsi = &args[0]`. Call [`tairix_arch_x86_64_syscall_dispatch`].
 /// 6. The return value is in `%rax` already — leave it.
 /// 7. Pop the arg array back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`
 ///    (restoring the caller's argument registers — the user-side trap
@@ -804,7 +804,7 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         "popq %rsp",
         "swapgs",
         "sysretq",
-        dispatch = sym rustos_arch_x86_64_syscall_dispatch,
+        dispatch = sym tairix_arch_x86_64_syscall_dispatch,
         options(att_syntax),
     )
 }

@@ -3,7 +3,7 @@
 //! A hardware RNG (RDRAND/RDSEED, ARMv8.5 `RNDR`, virtio-rng) is a single
 //! opaque source: if it is backdoored, stuck, or merely observable, a
 //! generator seeded from it alone inherits that weakness. The charter forbids
-//! trusting one source, so RustOS mixes an **independent** software source
+//! trusting one source, so TAIRiX mixes an **independent** software source
 //! into the seed — this one — via [`crate::MixedPair`] before it ever reaches
 //! [`crate::CsRng`]. XOR-mixing is entropy-preserving for independent inputs,
 //! so even a conservative amount of genuine timing jitter raises the bar
@@ -45,7 +45,7 @@
 
 use zeroize::Zeroize;
 
-use rustos_crypto::{sha256, SHA256_OUTPUT_LEN};
+use tairix_crypto::{sha256, SHA256_OUTPUT_LEN};
 
 use crate::entropy::{EntropyError, EntropySource};
 

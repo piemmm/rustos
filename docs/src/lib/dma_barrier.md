@@ -1,4 +1,4 @@
-# `rustos-dma-barrier`
+# `tairix-dma-barrier`
 
 DMA memory-ordering barriers for user-space drivers.
 
@@ -27,7 +27,7 @@ crate supplies the one barrier each needs:
 non-coherent outer/system-domain DMA master.
 
 This is the single home of the barrier instruction (`AGENTS.md` §2.2) — the
-user-space analogue of [`rustos-abi-trap`](./overview.md)'s syscall-trap
+user-space analogue of [`tairix-abi-trap`](./overview.md)'s syscall-trap
 carve-out and part of the §1 assembly carve-out. The per-architecture
 instruction is selected by `build.rs` (`dma_barrier_<arch>` cfgs), keeping the
 target choice out of the source tree the §17.2 `cfg-check` guards.
@@ -41,7 +41,7 @@ target choice out of the source tree the §17.2 `cfg-check` guards.
 
 ## Consumers
 
-`rustos-usb` wires `dma_wmb()` into the controller-start and doorbell handoffs
+`tairix-usb` wires `dma_wmb()` into the controller-start and doorbell handoffs
 and `dma_rmb()` into the event-ring read (cycle bit first, barrier, then the
 entry body). The same ordering applies to any user-space driver sharing
 Non-Cacheable memory with a device; `lib/virtio`'s queue-notify / used-ring

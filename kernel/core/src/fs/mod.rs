@@ -7,7 +7,7 @@
 //!
 //! The block-device and on-disk-format side of a filesystem lives in the
 //! `drivers/filesystem/*` crates behind the
-//! [`rustos_abi::driver::filesystem::Filesystem`] trait; this module is
+//! [`tairix_abi::driver::filesystem::Filesystem`] trait; this module is
 //! the policy layer above them and does not duplicate their I/O. Until a
 //! block-backed driver mounts, the [`Vfs`] is backed by an in-RAM node
 //! arena — the natural shape of the boot-time root before storage comes
@@ -20,7 +20,7 @@
 //! [`DriverHandle`], and the
 //! [`Vfs::read_via`] / [`Vfs::list_via`] / [`Vfs::stat_via`] methods route
 //! resolution below the mount point to a
-//! [`rustos_abi::driver::filesystem::FilesystemRead`] driver supplied by the
+//! [`tairix_abi::driver::filesystem::FilesystemRead`] driver supplied by the
 //! caller (the kernel maps the handle to the live driver). The driver
 //! returns *structural* I/O only; the VFS remains the single policy
 //! point, authorising every traversal against the mount point's
@@ -79,9 +79,9 @@ pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 
 use core::fmt;
 
-use rustos_abi::driver::DriverHandle;
-use rustos_abi::Errno;
-use rustos_kernel_sec::{GroupId, UserId};
+use tairix_abi::driver::DriverHandle;
+use tairix_abi::Errno;
+use tairix_kernel_sec::{GroupId, UserId};
 
 /// Handle for the kernel's *private root mount* — the in-memory [`Vfs`] a
 /// boot-time reader builds to delegate to the mounted root volume's
@@ -161,14 +161,14 @@ pub(crate) fn read_bootstrap_file<F>(
     max_len: usize,
 ) -> Result<alloc::vec::Vec<u8>, BootstrapReadError>
 where
-    F: rustos_abi::driver::filesystem::FilesystemRead
-        + rustos_abi::driver::filesystem::FilesystemSecurity
+    F: tairix_abi::driver::filesystem::FilesystemRead
+        + tairix_abi::driver::filesystem::FilesystemSecurity
         + ?Sized,
 {
-    use rustos_abi::driver::filesystem::NodeKind;
+    use tairix_abi::driver::filesystem::NodeKind;
 
     let vfs = root_backed_vfs()?;
-    let caps = rustos_caps::CapabilitySet::empty();
+    let caps = tairix_caps::CapabilitySet::empty();
     let cred = Credentials {
         uid: UserId(0),
         gid: GroupId(0),
@@ -275,7 +275,7 @@ impl VfsError {
     /// is reported as [`Errno::PermissionDenied`]. An unrecoverable backing
     /// fault ([`Self::Io`]) is [`Errno::DeviceFault`] — the `EIO` analogue,
     /// and what a surprise-removed volume's operations report — mirroring
-    /// how [`DriverError::DeviceFault`](rustos_abi::driver::DriverError)
+    /// how [`DriverError::DeviceFault`](tairix_abi::driver::DriverError)
     /// maps. The precise [`VfsError`] is retained in-kernel for logging.
     #[must_use]
     pub const fn to_errno(self) -> Errno {

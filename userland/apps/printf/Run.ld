@@ -2,7 +2,7 @@
  * (`userland/apps/printf/src/run.rs`).
  *
  * The `Run` program is a position-independent **pure-Rust** program whose
- * entry point is the `rustos-rt` runtime's `_start`. It links no architecture
+ * entry point is the `tairix-rt` runtime's `_start`. It links no architecture
  * crate, so nothing in the default object graph references `_start`; this
  * script makes `_start` the entry GC root and lays the loadable sections out
  * at a fixed, non-zero base so the consuming boot path maps the image at its

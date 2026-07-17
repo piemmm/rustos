@@ -10,8 +10,8 @@
 use super::{build_c_runtime, read_total_len};
 use core::ffi::c_char;
 
-use rustos_abi::process::{ProcessStartHeader, StringSlot, PROCESS_START_MAGIC};
-use rustos_abi::{Errno, ABI_VERSION_CURRENT};
+use tairix_abi::process::{ProcessStartHeader, StringSlot, PROCESS_START_MAGIC};
+use tairix_abi::{Errno, ABI_VERSION_CURRENT};
 
 /// Build a valid startup-vector block from argument and environment strings,
 /// mirroring what the kernel loader will write (and `process.rs`'s own test

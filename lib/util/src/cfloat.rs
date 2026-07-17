@@ -1,6 +1,6 @@
 //! C-locale `printf(3)` floating-point rendering.
 //!
-//! RustOS is Rust-only, so the coreutils-compatible tools that promise
+//! TAIRiX is Rust-only, so the coreutils-compatible tools that promise
 //! printf semantics (`seq -f`, `printf`'s `%e`/`%f`/`%g`/`%a`) cannot hand
 //! their formats to a C library — they render through this one engine
 //! instead, so C's rounding, flag, padding, and special-value rules exist

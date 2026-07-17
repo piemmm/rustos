@@ -1,6 +1,6 @@
 [package]
-name = "rustos-logtool"
-description = "RustOS `log` CLI: the terminal reader/renderer/verifier of the system log under /System/Logs (SYSLOG §14)."
+name = "tairix-logtool"
+description = "TAIRiX `log` CLI: the terminal reader/renderer/verifier of the system log under /System/Logs (SYSLOG §14)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,9 +14,9 @@ workspace = true
 [dependencies]
 # The stable `Errno` the seams speak, so the tool invents no parallel error
 # set and never links a kernel or driver crate.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one system-log model: the segment reader, the record decoder + its
 # per-segment dictionary view, the boot/rich renderers, the segment verifier,
 # and the closed `Stream` vocabulary. The `log` tool renders and verifies
 # through these rather than re-implementing the on-disk format (SYSLOG §14).
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

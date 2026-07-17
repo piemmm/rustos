@@ -1,7 +1,7 @@
-//! RustOS `sysinfo` — the terminal client of the System Information API
+//! TAIRiX `sysinfo` — the terminal client of the System Information API
 //! (Stage 6).
 //!
-//! RustOS has no `/proc` and no `/sys`. Every piece of live system
+//! TAIRiX has no `/proc` and no `/sys`. Every piece of live system
 //! information is exposed through the typed, versioned, capability-checked
 //! `sysinfo-v1` API served by `/System/Services/sysinfod.app/Run`. `sysinfo` is the
 //! single command-line tool that exposes that same API to the terminal: it
@@ -13,7 +13,7 @@
 //! A **request/render state machine**, not a data source. For one parsed
 //! [`Command`] it:
 //!
-//! 1. Builds the typed [`SysinfoRequestHeader`](rustos_abi::sysinfo::SysinfoRequestHeader)
+//! 1. Builds the typed [`SysinfoRequestHeader`](tairix_abi::sysinfo::SysinfoRequestHeader)
 //!    and any typed request payload from the `sysinfo-v1` ABI.
 //! 2. Hands the request bytes to the injected [`Transport`] seam, which
 //!    carries them to `sysinfod` and returns the reply bytes.
@@ -22,7 +22,7 @@
 //!    seam.
 //!
 //! The capability gate lives in `sysinfod`, not here: a denied query comes
-//! back as [`Errno::PermissionDenied`](rustos_abi::Errno::PermissionDenied),
+//! back as [`Errno::PermissionDenied`](tairix_abi::Errno::PermissionDenied),
 //! which the CLI renders honestly without inventing a parallel policy.
 //!
 //! The two operations that touch the outside world — issuing the request and
@@ -63,4 +63,4 @@ pub mod error;
 pub use client::{run, USAGE};
 pub use command::{parse, Command};
 pub use error::SysinfoError;
-pub use rustos_procinfo::{Output, Transport};
+pub use tairix_procinfo::{Output, Transport};

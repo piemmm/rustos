@@ -1,4 +1,4 @@
-# `rustos-hid`
+# `tairix-hid`
 
 Arch-neutral, transport-agnostic HID boot-protocol logic: the keyboard/mouse
 report decoders, the console-input producer, and the xHCI boot-keyboard
@@ -14,7 +14,7 @@ See `docs/src/lib/hid.md` for the full description and test surface.
 ## Public surface
 
 - `BootKeyboard`, `BootMouse` — boot-protocol report decoders over the
-  `rustos_abi::driver::input::ReportSource` seam.
+  `tairix_abi::driver::input::ReportSource` seam.
 - `KeyboardConsole`, `pump_once`, `ConsoleSink` — the console-input producer
   that resolves HID usages to `KeyInput` records (via `lib/keymap`) and injects
   them through a sink.
@@ -37,5 +37,5 @@ it exchanges are governed by `lib/abi`.
 
 ## Tests
 
-`cargo test -p rustos-hid` — decode, console-producer, orchestration, and
+`cargo test -p tairix-hid` — decode, console-producer, orchestration, and
 grant-derivation unit tests against in-process mocks (`AGENTS.md` §7).

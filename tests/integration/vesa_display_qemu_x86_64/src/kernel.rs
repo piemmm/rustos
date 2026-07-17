@@ -1,7 +1,7 @@
 //! Freestanding (`x86_64-unknown-none`) half of the vesa-display QEMU
 //! vertical.
 //!
-//! Boots the production `rustos-kernel` pipeline with an audit-observer
+//! Boots the production `tairix-kernel` pipeline with an audit-observer
 //! sink in place. On `AuditEvent::BootCompleted` it:
 //!
 //! 1. programs QEMU's `ramfb` over the `fw_cfg` I/O-port DMA interface so a
@@ -10,10 +10,10 @@
 //! 2. publishes a bootloader-captured VBE `ModeInfoBlock` describing that
 //!    surface as the boot hand-off;
 //! 3. loads the signed vesa display `.rxe` through
-//!    [`rustos_drvhost::Host`] (the load gate) and drives it through
+//!    [`tairix_drvhost::Host`] (the load gate) and drives it through
 //!    `load -> use -> unload -> reload`, where "use" decodes the block
 //!    with `VesaFramebuffer::open`, maps the surface through the
-//!    capability-gated [`rustos_kernel_virtio::KernelMmioMapper`], and
+//!    capability-gated [`tairix_kernel_virtio::KernelMmioMapper`], and
 //!    `present`s a frame; a second independently-mapped window reads the
 //!    pixels back to confirm they landed in the scan-out memory.
 //!
@@ -28,12 +28,12 @@ mod scenario;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_arch_x86_64::qemu_exit;
-use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::{
+use tairix_arch_x86_64::qemu_exit;
+use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
-use rustos_log::{Event, EventId, Sink};
+use tairix_log::{Event, EventId, Sink};
 
 /// Static heap backing the bump allocator. Sized identically to the
 /// other x86_64 QEMU verticals' — the workload is the same shape (one
@@ -71,13 +71,13 @@ impl Sink for BootObserverSink {
 
 static AUDIT_SINK: BootObserverSink = BootObserverSink;
 
-/// Panic handler — forwards through `rustos_kernel`'s shared bridge.
+/// Panic handler — forwards through `tairix_kernel`'s shared bridge.
 #[panic_handler]
 fn vesa_qemu_panic(info: &PanicInfo<'_>) -> ! {
     handle_panic_via_kernel_core(info)
 }
 
-/// Boot entry point — the production `rustos-kernel` surface with the
+/// Boot entry point — the production `tairix-kernel` surface with the
 /// audit observer sink in place.
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
@@ -85,6 +85,6 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         multiboot_info,
         &SERIAL_SINK,
         &AUDIT_SINK,
-        rustos_log::Level::Info,
+        tairix_log::Level::Info,
     )
 }

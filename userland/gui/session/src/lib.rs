@@ -1,9 +1,9 @@
-//! RustOS desktop **session glue** (`userland/gui/session`).
+//! TAIRiX desktop **session glue** (`userland/gui/session`).
 //!
 //! The taskbar models the desktop's controls but, by design, owns no theme
 //! registry and no spawn capability: activating its start-menu entries only
-//! *reports* an abstract [`MenuAction`](rustos_taskbar::MenuAction) (e.g. the
-//! light/dark [`ToggleAppearance`](rustos_taskbar::MenuAction::ToggleAppearance)),
+//! *reports* an abstract [`MenuAction`](tairix_taskbar::MenuAction) (e.g. the
+//! light/dark [`ToggleAppearance`](tairix_taskbar::MenuAction::ToggleAppearance)),
 //! leaving the actual work to the session glue. This
 //! crate is that glue.
 //!
@@ -26,8 +26,8 @@
 //! [`TaskbarPresenter`] (the [`presenter`] module) is the session's glue to
 //! the compositor: it paints the taskbar's bar — and, while open, its
 //! start-menu popup — with the taskbar's own
-//! [`TaskbarRenderer`](rustos_taskbar::TaskbarRenderer) and presents each as a
-//! window in the [`Compositor`](rustos_wm::Compositor), placed at its computed
+//! [`TaskbarRenderer`](tairix_taskbar::TaskbarRenderer) and presents each as a
+//! window in the [`Compositor`](tairix_wm::Compositor), placed at its computed
 //! origin and rounded through the compositor's single anti-aliased
 //! rounded-corner path. Composing the taskbar and window
 //! manager is the permitted `userland/gui/*` edge.
@@ -36,8 +36,8 @@
 //!
 //! A real input source produces one stream of pointer events, but the desktop
 //! has two routers — the window manager's
-//! [`InputRouter`](rustos_wm::InputRouter) and the taskbar's
-//! [`TaskbarInput`](rustos_taskbar::TaskbarInput). [`SessionInputRouter`] (the
+//! [`InputRouter`](tairix_wm::InputRouter) and the taskbar's
+//! [`TaskbarInput`](tairix_taskbar::TaskbarInput). [`SessionInputRouter`] (the
 //! [`input`] module) is the glue that fans that one stream to the right one:
 //! the taskbar claims a press over the bar or while its menu is open, the
 //! window manager handles everything else, motion is fanned to both so their
@@ -51,15 +51,15 @@
 //! [`GraphicsAssetReader`] seam reads the bytes (a filesystem capability the
 //! `no_std` `lib/cursor` / `lib/icon` crates must not hold),
 //! and [`DesktopSession::load_cursors`] / [`DesktopSession::load_icons`]
-//! assemble a [`CursorTheme`](rustos_cursor::CursorTheme) /
-//! [`IconSet`](rustos_icon::IconSet), failing closed per kind to the built-in
+//! assemble a [`CursorTheme`](tairix_cursor::CursorTheme) /
+//! [`IconSet`](tairix_icon::IconSet), failing closed per kind to the built-in
 //! artwork.
 //!
 //! # Where it sits
 //!
 //! As a `userland/gui/*` crate it composes the other GUI crates and `lib/*`
 //! only: it owns the [`Taskbar`] and reads the shared
-//! [`rustos_theme`] definition. Nothing outside `userland/gui/*` depends on
+//! [`tairix_theme`] definition. Nothing outside `userland/gui/*` depends on
 //! it — the desktop is an optional, one-way-dependent frontend.
 //!
 //! # Driving the desktop from a live input stream
@@ -76,22 +76,22 @@
 //!
 //! The live backing for that [`InputSource`] is [`DeviceInputSource`] (the
 //! [`device`] module): it reads framed
-//! [`PointerInput`](rustos_abi::input::PointerInput) records from an injected
+//! [`PointerInput`](tairix_abi::input::PointerInput) records from an injected
 //! [`PointerInputChannel`] (the kernel input channel) and decodes each into
-//! the `lib/input` [`InputEvent`](rustos_wm::InputEvent) the shell routes,
+//! the `lib/input` [`InputEvent`](tairix_wm::InputEvent) the shell routes,
 //! failing closed on a malformed record. The
 //! keyboard's live backing is its counterpart [`KeyboardInputSource`] (the
 //! [`keyboard`] module): it decodes framed
-//! [`KeyInput`](rustos_abi::input::KeyInput) records from an injected
-//! [`KeyInputChannel`] into the same [`InputEvent`](rustos_wm::InputEvent)
+//! [`KeyInput`](tairix_abi::input::KeyInput) records from an injected
+//! [`KeyInputChannel`] into the same [`InputEvent`](tairix_wm::InputEvent)
 //! stream, which the window manager delivers to the focused window.
 //!
 //! Both of those channels are, in turn, backed by the kernel seat registry:
 //! [`SeatInputChannel`] (the [`seat`] module) drains each fixed-width input
 //! record from the per-seat, owner-gated channel the kernel routed the
 //! desktop's input to, through an injected [`SeatEventReader`] seam (the
-//! seat-addressed [`POINTER_READ`](rustos_abi::SyscallNumber::POINTER_READ) /
-//! [`KEYBOARD_READ`](rustos_abi::SyscallNumber::KEYBOARD_READ) syscalls on a
+//! seat-addressed [`POINTER_READ`](tairix_abi::SyscallNumber::POINTER_READ) /
+//! [`KEYBOARD_READ`](tairix_abi::SyscallNumber::KEYBOARD_READ) syscalls on a
 //! running system, an in-memory queue in tests). Only the task holding the
 //! seat lease may drain — the kernel owner-gates every read — and the
 //! channel implements both [`PointerInputChannel`] and [`KeyInputChannel`]
@@ -116,10 +116,10 @@
 //!
 //! [`toggle_appearance`]: DesktopSession::toggle_appearance
 //! [`set_theme`]: DesktopSession::set_theme
-//! [`ThemeRegistry`]: rustos_theme::ThemeRegistry
-//! [`ThemeId`]: rustos_theme::ThemeId
-//! [`Taskbar`]: rustos_taskbar::Taskbar
-//! [`TaskbarResponse`]: rustos_taskbar::TaskbarResponse
+//! [`ThemeRegistry`]: tairix_theme::ThemeRegistry
+//! [`ThemeId`]: tairix_theme::ThemeId
+//! [`Taskbar`]: tairix_taskbar::Taskbar
+//! [`TaskbarResponse`]: tairix_taskbar::TaskbarResponse
 
 #![no_std]
 #![forbid(unsafe_code)]

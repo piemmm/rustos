@@ -1,18 +1,18 @@
-# RustOS Storage Namespaces, Volume Roots, and Aliases
+# TAIRiX Storage Namespaces, Volume Roots, and Aliases
 
-This is the binding RustOS storage-namespace specification. It supersedes the
+This is the binding TAIRiX storage-namespace specification. It supersedes the
 AI-facing design brief `plans/DRIVES.md` (which remains only as source
 material) and is binding under `AGENTS.md`. Where an earlier informal
 description of the filesystem layout disagrees with this page, this page wins.
 
 The one-line decision this page turns into a contract:
 
-> RustOS native storage paths are alias-rooted or ID-rooted. `/` is a
+> TAIRiX native storage paths are alias-rooted or ID-rooted. `/` is a
 > generated **view**, not the root of storage.
 
 ## 1. Purpose and non-goals
 
-RustOS storage is a **forest of independently addressable named roots**, not a
+TAIRiX storage is a **forest of independently addressable named roots**, not a
 single global Unix tree. A path names its root explicitly (by human alias or by
 stable ID); the familiar `/System`, `/Users`, `/Apps`, `/Storage` layout is a
 convenience *view* projected over that forest, never the identity of storage.
@@ -93,7 +93,7 @@ operation that may perform attach + publish + alias + view projection — never
 The user-facing native spelling is `Alias:/path/inside/root`:
 
 ```text
-System:/Kernel/rustos.rxe
+System:/Kernel/tairix.rxe
 Users:/ian/Documents/design.md
 Home:/Documents/spec.md
 Apps:/Editor.app/Run
@@ -107,8 +107,8 @@ explicitly for durable/administrative use:
 ```text
 alias::Home/Documents/file.txt                              # expanded Alias:/…
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt # stable, durable
-fs::arxfs/System/Kernel/rustos.rxe                         # explicit driver
-arxfs::System/Kernel/rustos.rxe                            # driver shorthand
+fs::arxfs/System/Kernel/tairix.rxe                         # explicit driver
+arxfs::System/Kernel/tairix.rxe                            # driver shorthand
 adfs::HardDisc4/Apps/Paint                                  # driver shorthand
 ```
 
@@ -146,7 +146,7 @@ Home:/../../System      # cannot escape the Home root
 Home:/Documents/file.txt
 alias::Home/Documents/file.txt
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt
-arxfs::System/Kernel/rustos.rxe
+arxfs::System/Kernel/tairix.rxe
 /Users/ian/Documents/file.txt          # valid view path, not canonical identity
 ```
 
@@ -247,7 +247,7 @@ driver-specific resolver would bypass normal policy.
 
 ## 12. Path parser (`lib/path`)
 
-The single shared parser is `lib/path` (`rustos-path`): `no_std` + `alloc`,
+The single shared parser is `lib/path` (`tairix-path`): `no_std` + `alloc`,
 `#![forbid(unsafe_code)]`, linear-time, non-recursive, fail-closed, with fixed
 security bounds (`MAX_PATH_LEN`, `MAX_COMPONENTS`, `MAX_COMPONENT_LEN`,
 `MAX_ALIAS_LEN` — untrusted-input bounds, not growable capacities,
@@ -366,20 +366,20 @@ over the target root and is subject to the same two-phase capability check
 ## 20. Foreign-filesystem behaviour
 
 Reading a foreign volume (ext4, FAT32, ADFS, …) is interoperability with the
-outside world, not RustOS self-compatibility (`AGENTS.md` §2.13). A foreign
+outside world, not TAIRiX self-compatibility (`AGENTS.md` §2.13). A foreign
 driver declares its feature limits (permissions/ACL support, stable file IDs,
 label uniqueness/mutability, and timestamp range/precision/representability,
 `AGENTS.md` §21) through the filesystem capability API. A weak foreign
-filesystem must not weaken RustOS security: if it cannot store RustOS ACLs or
+filesystem must not weaken TAIRiX security: if it cannot store TAIRiX ACLs or
 capabilities, its root publication applies a policy wrapper and defaults to
 restrictive flags. Narrowing a `Time64` to a foreign field is checked and fails
 with `TimestampOutOfRange` rather than silently truncating (§22).
 
 **The ownerless-format policy wrapper is landed** (`plans/DEVICES.md` D3d):
 a runtime-attached FAT32 volume is mounted under the kernel's storage-group
-identity map (`rustos_kernel::volume_policy::GroupMappedFs`) — every node
+identity map (`tairix_kernel::volume_policy::GroupMappedFs`) — every node
 appears owned by the system user and the well-known `storage` group
-(`rustos_users::STORAGE_GROUP`, resolved **by name** from the loaded group
+(`tairix_users::STORAGE_GROUP`, resolved **by name** from the loaded group
 registry at root unlock), directories `rwxrwxr-x` and files `rw-rw-r--`, so
 any logged-in member reads and writes the medium while security-record
 stores stay refused (the format cannot hold one). A registry without the
@@ -391,7 +391,7 @@ owners/modes/ACLs.
 
 | Home | Owns |
 |---|---|
-| `lib/path` (`rustos-path`) | The `no_std` path parser and normalizer (§12). |
+| `lib/path` (`tairix-path`) | The `no_std` path parser and normalizer (§12). |
 | `lib/abi` (`fs` / `storage` / `sysinfo` types) | ABI-visible filesystem/path/root/volume-metadata types + the descriptor-producing open-a-path ABI + storage sysinfo queries (§16). All `Time64` where time is stored/reported. |
 | `lib/caps` | Capability IDs and checks. |
 | `userland/system/devmgr` | Storage-driver autoload integration. |
@@ -400,7 +400,7 @@ owners/modes/ACLs.
 
 The **descriptor-producing open-a-path ABI** — the syscall that opens a
 resolved path to a new file descriptor (consumed by, not invented in,
-`rustos_rt::io`) — is landed: `fs_open` and its `fs_close`/`fs_read`/
+`tairix_rt::io`) — is landed: `fs_open` and its `fs_close`/`fs_read`/
 `fs_write`/`fs_readdir`/`fs_stat`/`fs_truncate`/`fs_sync`/`fs_mkdir`/
 `fs_unlink`/`fs_rename` family, all gated by `CAP_FS_ACCESS` and fail-closed,
 and the ergonomic I/O layer opens files over the same `Read`/`Write`

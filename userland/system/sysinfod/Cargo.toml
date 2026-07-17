@@ -1,6 +1,6 @@
 [package]
-name = "rustos-sysinfod"
-description = "RustOS System Information service: the capability-checked dispatcher that serves the `sysinfo` API (Stage 6 — `AGENTS.md` §16.6)."
+name = "tairix-sysinfod"
+description = "TAIRiX System Information service: the capability-checked dispatcher that serves the `sysinfo` API (Stage 6 — `AGENTS.md` §16.6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,36 +11,36 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-devmgr`. `cargo
-# build -p rustos-sysinfod` builds the service program with it; host tooling
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-devmgr`. `cargo
+# build -p tairix-sysinfod` builds the service program with it; host tooling
 # builds only the dispatcher *library* (`serve` + `SysinfoSource`), so the
 # host test build never pulls the userland runtime's `_start` /
 # `#[global_allocator]` / `panic_impl`.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-sysinfod` dispatcher library (above) and the
+# The package is both the `tairix-sysinfod` dispatcher library (above) and the
 # `Run` entry-point binary of the System Information service installed at
 # `/System/Services/sysinfod.app/Run` (`AGENTS.md` §16.2, §16.6) — the long-running
 # user-space service PID 1 `init` launches to serve the `sysinfo` API. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets and
 # an inert host stub elsewhere (see `src/run.rs`).
 [[bin]]
-name = "rustos-sysinfod-run"
+name = "tairix-sysinfod-run"
 path = "src/run.rs"
 
 [dependencies]
 # The frozen `sysinfo-v1` wire surface, the `Errno` table, the
 # `CapabilityId` registry, and the object-safe `CapabilityQuery` seam the
 # dispatcher gates on.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # §19.4 structured audit log: every cross-principal invocation and every
-# capability denial is recorded through a `rustos_log::Sink`.
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# capability denial is recorded through a `tairix_log::Sink`.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
-# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `rustos-rt`
+# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the
 # `#[global_allocator]`, and the syscall wrappers (`call_create`/`call_recv`/
 # `call_reply`/`call_peer_origin`/`sysinfo_introspect`/`hw_tree_read`), plus the
@@ -48,5 +48,5 @@ rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 # for the bare-metal targets the program is actually built for; on the host the
 # binary is an inert stub and neither is linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }

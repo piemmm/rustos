@@ -1,4 +1,4 @@
-# PI.md — Booting RustOS on a real Raspberry Pi 4 (BCM2711, aarch64)
+# PI.md — Booting TAIRiX on a real Raspberry Pi 4 (BCM2711, aarch64)
 
 This is the staged build plan for taking the `kernel/arch/aarch64` port
 from "boots on the QEMU `virt` board" to "boots a real Raspberry Pi 4
@@ -40,7 +40,7 @@ say — the standing task direction supersedes that language. Changing a
    Pi 4 hardware — the `/memory` map, the UART (`compatible`,
    `reg`), the GIC-400 (`reg` for GICD/GICC), the timer PPIs, the mailbox,
    the SD host, the USB host — is read from the Pi 4 device tree through
-   the shared `lib/fdt` reader and normalised into `rustos_abi::hwtree`
+   the shared `lib/fdt` reader and normalised into `tairix_abi::hwtree`
    by `kernel/arch/aarch64::platform::FdtDiscovery` (§18.2). The MMIO
    bases currently hard-coded as `virt` constants
    (`serial::PL011_BASE`, `gic::{GICD_BASE,GICC_BASE}`) must become
@@ -114,7 +114,7 @@ under `qemu-system-aarch64 -M virt`.
 
 | Concern | Today (`virt`) | Pi 4 (BCM2711) |
 | --- | --- | --- |
-| Production kernel binary | none — aarch64 boots only via per-test bins; `rustos-kernel/build.rs` wires **only** `x86_64` | a real `aarch64-unknown-none` `rustos-kernel` image is required |
+| Production kernel binary | none — aarch64 boots only via per-test bins; `tairix-kernel/build.rs` wires **only** `x86_64` | a real `aarch64-unknown-none` `tairix-kernel` image is required |
 | Boot protocol | QEMU `-kernel <elf>`, aarch64 hand-off `x0 = DTB` at EL2/EL1 | Pi firmware (`start4.elf`) loads `kernel8.img` at `0x80000`, enters EL2, `x0 = DTB` (Pi firmware-supplied) |
 | Load address / linker | `0x4020_0000` (`aarch64-virt.ld`) | `0x8_0000` (needs an `aarch64-rpi4.ld`) |
 | Console UART | PL011 @ `0x0900_0000` (fixed const) | PL011 @ `0xFE20_1000` *or* mini-UART (AUX) @ `0xFE21_5040`, base discovered |
@@ -123,7 +123,7 @@ under `qemu-system-aarch64 -M virt`.
 | Display | virtio-gpu / ramfb | VideoCore mailbox framebuffer → `drivers/display/rpi_hvs` (HVS) |
 | Storage | virtio-blk-mmio | EMMC2 SD host controller (`drivers/storage`) |
 | Input | virtio-keyboard-mmio | USB HID via the VL805/DWC2 USB host (`drivers/bus/usb`) |
-| Image builder | `tools/mkimage` emits `images/rustos-aarch64-rpi.img` (P9) | flash + boot the emitted image on metal |
+| Image builder | `tools/mkimage` emits `images/tairix-aarch64-rpi.img` (P9) | flash + boot the emitted image on metal |
 
 `drivers/display/rpi_hvs` already exists (HVS layer compositor, mock-host
 tested) and consumes an `HvsConfig` the boot capability provides; it has
@@ -191,7 +191,7 @@ docs-check`), and is referenced by P1+. No source code changes.
   `_start` (firmware default, no `armstub` spin-table), the stub must park
   secondaries (`MPIDR_EL1` affinity ≠ 0 → `wfe` loop) until PSCI/SMP
   bring-up wants them — fail closed, never race (§2.1).
-- Teach `kernel/rustos-kernel/build.rs` + source to build as the
+- Teach `kernel/tairix-kernel/build.rs` + source to build as the
   freestanding **aarch64** production kernel (today `is_freestanding()`
   is hard-coded to `x86_64`). The `freestanding` cfg and the
   boot/panic/serial-sink modules must select the aarch64 boot path and
@@ -201,7 +201,7 @@ docs-check`), and is referenced by P1+. No source code changes.
   (the single §17.1/§17.2 selection point), mirroring the x86_64 `boot`
   module.
 
-**Done when:** `cargo build -p rustos-kernel --target aarch64-unknown-none`
+**Done when:** `cargo build -p tairix-kernel --target aarch64-unknown-none`
 produces a freestanding ELF that links against `aarch64-rpi4.ld`; a host
 unit test covers the new `build.rs` arch/linker selection; no `cfg-check`
 / `deps-check` regressions.
@@ -222,7 +222,7 @@ UNKNOWN `WXN`/`EE` bit hung the metal Pi 4 at the MMU switch while QEMU
 The same UNKNOWN-reset-state rule holds one level up: the Pi firmware
 stub sets only `SCTLR_EL2` and `CPUECTLR_EL1.SMPEN`, so `boot.s`'s EL2
 path writes every EL2 control register **whole** with the
-unit-test-pinned hand-off values in `rustos_arch_aarch64::el2`
+unit-test-pinned hand-off values in `tairix_arch_aarch64::el2`
 (`HCR_EL2 = RW`, `CNTHCTL_EL2 = EL1PCTEN|EL1PCEN`, `CPTR_EL2 =` RES1,
 `MDCR_EL2 = 0`, `VPIDR/VMPIDR` mirrored) — an UNKNOWN `HCR_EL2.TVM`
 traps EL1's first `MAIR/TCR/TTBR/SCTLR` write into vector-less EL2,
@@ -267,29 +267,29 @@ from PID 1's root). The session formerly read end-of-input at its first
 prompt (the metal had nothing queued in the PL011 RX FIFO) and exited,
 exhausting `init`'s crash-loop budget; the kernel-core
 `BlockingConsoleRead` backing (P6e-2) now parks the reader until UART
-RX delivers bytes, so the metal session waits at `rustos$ ` for the
+RX delivers bytes, so the metal session waits at `tairix$ ` for the
 user to type.
-`kernel/rustos-kernel/build.rs` factors its pure selection logic into
+`kernel/tairix-kernel/build.rs` factors its pure selection logic into
 `src/build_support.rs` (host-unit-tested) and emits a build-glue
 `kernel_isa` cfg + the per-board linker script — no `cfg(target_arch)` in
 the crate body (cfg-check clean). The crate's x86_64 boot pipeline is
 gated `kernel_isa="x86_64"`; the new freestanding `boot_aarch64` module +
 the aarch64 `kernel_main(dtb)` in `main.rs` construct `Aarch64Arch` (the
 §17 selection point), bring up the console, log a boot line, and park
-fail-closed. `cargo build -p rustos-kernel --target aarch64-unknown-none`
+fail-closed. `cargo build -p tairix-kernel --target aarch64-unknown-none`
 links a freestanding ELF entered at `0x8_0000`. The discovery-fed
 `kernel_core::kernel_main` hand-off (a real memory map / IRQ routing) is
 deliberately staged to P2/P3 — fabricating a hardware map would violate
 §18.5, and the `-M raspi4b` runtime vertical that proves it cannot pass
 until P2's console discovery lands. The `CPACR_EL1.FPEN` enable is now a
-single `rustos_arch_aarch64::enable_fp_el1()` helper (§2.2), adopted by
+single `tairix_arch_aarch64::enable_fp_el1()` helper (§2.2), adopted by
 the production binary and the existing aarch64 verticals.
 
 ### P2 — Board-discovered UART console (PL011 + mini-UART) `[x]`
 
 - The fixed `serial::PL011_BASE` constant is gone: the console MMIO base +
   register model now live in a new host-testable
-  `rustos_arch_aarch64::console` module (an atomic `(base, model)` pair,
+  `tairix_arch_aarch64::console` module (an atomic `(base, model)` pair,
   default = the `virt` PL011 base) that the freestanding `serial` sink
   transmits through on every byte. `console::configure_from_fdt` reads the
   base + model from the device tree, decoding the node's `reg` with its
@@ -302,7 +302,7 @@ the production binary and the existing aarch64 verticals.
   `raspi_like_arm` fixture mirrors that real shape (root 2+1 cells,
   `/soc` simple-bus with 1+1 cells and the three BCM2711 `ranges`,
   bus-address parameters). The BCM2835 **AUX mini-UART** is a
-  second `ConsoleModel` behind the same `rustos_log::Sink` seam (its own
+  second `ConsoleModel` behind the same `tairix_log::Sink` seam (its own
   `AUX_MU_IO`/`AUX_MU_LSR` register offsets + opposite-sense TX-ready bit),
   selected by the `compatible` string — `brcm,bcm2835-aux-uart` vs
   `arm,pl011`. One console abstraction, two register backends (§2.2).
@@ -328,7 +328,7 @@ the production binary and the existing aarch64 verticals.
 
 **Done when:** host unit tests cover the mini-UART/PL011 register
 encoders and the `compatible`-string console selection + the discovered
-`serial` `HwNode` (against the new `rustos_fdt` `raspi_like_arm` fixture);
+`serial` `HwNode` (against the new `tairix_fdt` `raspi_like_arm` fixture);
 and the new `tests/integration/uart_console_qemu_aarch64` vertical boots
 the `virt` board, **poisons** the console base, then proves
 `configure_from_fdt` overwrites it with the base read from the firmware
@@ -509,7 +509,7 @@ byte-safe traversal `gic::configure_from_fdt` /
 path where a full-tree scan faults. `boot_aarch64` reads the mechanism
 from the `x0` DTB — the `/psci` conduit when declared, else each
 `/cpus/cpu@*` node's spin-table release word
-(`rustos_fdt::CpuNode::spin_table_release`, dense-aligned by
+(`tairix_fdt::CpuNode::spin_table_release`, dense-aligned by
 `cpu_topology::align_release_addrs`) — installs it via
 `Aarch64Arch::with_secondary_start`, and logs `smp_start_method`
 (`psci`/`spin_table`/`none`); a tree declaring neither leaves the
@@ -586,8 +586,8 @@ only by the 64 KiB stride). The failure was a **race**, not bad state:
 deterministic-then-intermittent (~50/50) on the highest/last-released
 core. On AArch64 a core's cache contents are architecturally UNKNOWN at
 power-on; a freshly-released secondary can hold stale lines over the very
-physical addresses RustOS now uses for the boot page tables and that
-core's stack. RustOS enabled `SCTLR_EL1.C` on the secondary
+physical addresses TAIRiX now uses for the boot page tables and that
+core's stack. TAIRiX enabled `SCTLR_EL1.C` on the secondary
 (`program_stage1_translation`) **without first invalidating its local
 D-cache**, so the first cacheable access after the MMU came on — the
 translation-table walk or a stack access — intermittently read a stale
@@ -629,21 +629,21 @@ on its own before the next.
   `kernel/syscall` dispatch arm + recomputed `SYSCALL_TABLE_HASH`, the
   `kernel/core` `ConsoleWrite` seam (boot installs the device — framebuffer
   else first UART — defaulting to a fail-closed `NULL_CONSOLE` →
-  `NotImplemented`) + the copy-in handler, the `ros_sys_console_write`
+  `NotImplemented`) + the copy-in handler, the `tairix_sys_console_write`
   C stub, and the regenerated C header. `SYSCALL_NAME_MAX` bumped 12→13
   to fit the name. All host tests + `abi-check` + `c-header` green.
-- **P6b — `rustos-init` becomes a real program `[x]`.** The `rustos-init`
+- **P6b — `tairix-init` becomes a real program `[x]`.** The `tairix-init`
   package now builds the `init` bundle's `Run` entry-point binary
-  (`src/run.rs`, `AGENTS.md` §16.5) as a **pure-Rust** program. RustOS is
+  (`src/run.rs`, `AGENTS.md` §16.5) as a **pure-Rust** program. TAIRiX is
   Rust-only (`AGENTS.md` §1), so it links the new pure-Rust userland runtime
-  `lib/rt` (`rustos-rt`) — **never** the C ABI (`crt0` + `abi-sys`), which
-  exists solely for non-Rust programs (`AGENTS.md` §16.4). `rustos-rt`
+  `lib/rt` (`tairix-rt`) — **never** the C ABI (`crt0` + `abi-sys`), which
+  exists solely for non-Rust programs (`AGENTS.md` §16.4). `tairix-rt`
   provides `_start`, the §19.2 stack canary, the panic handler, and idiomatic
-  syscall wrappers; `rustos_rt::entry!` names the program's safe `main() ->
+  syscall wrappers; `tairix_rt::entry!` names the program's safe `main() ->
   i32`, which parses the compiled-in startup config and writes its first
   banner line through the P6a `console_write` syscall, the runtime routing the
-  return through `exit`. Both `rustos-rt` and the C ABI reach the kernel
-  through the **one** shared trap primitive `lib/abi-trap` (`rustos-abi-trap`,
+  return through `exit`. Both `tairix-rt` and the C ABI reach the kernel
+  through the **one** shared trap primitive `lib/abi-trap` (`tairix-abi-trap`,
   the §1 syscall/svc/ecall carve-out), so the trap assembly is not duplicated
   (`AGENTS.md` §2.2). The **startup config** (`src/startup.rs`) is a tiny,
   allocation-free, host-tested text format with two required directives —
@@ -654,17 +654,17 @@ on its own before the next.
   the orchestrator library, whose `alloc`+crypto chain would be §2.3 bloat —
   so the parser lives beside the binary and the shipped image carries no
   crypto and **no `unsafe`** (verified: the linked aarch64 PIE exports
-  `_start`/`__rustos_rt_main`/`rust_rt_start` and the mangled
-  `rustos_rt::console_write`, with zero `ros_sys_*` and zero crypto symbols).
+  `_start`/`__tairix_rt_main`/`rust_rt_start` and the mangled
+  `tairix_rt::console_write`, with zero `tairix_sys_*` and zero crypto symbols).
   A self-contained `build.rs` sets the `freestanding` cfg from `target_os`
   only (no `target_arch`, so `cfg-check` stays clean; no dependency on the
   tests harness, so §17.4 layering stays clean); `Run.ld` mirrors the proven
   PIE link layout the userland runtimes share. Host DoD green (3 new
-  `rustos-rt` tests + 10 startup-config tests + the freestanding aarch64 build
+  `tairix-rt` tests + 10 startup-config tests + the freestanding aarch64 build
   via `build-std=core,alloc,compiler_builtins`). The end-to-end EL0 spawn of
   this binary is P6c.
 - **P6c — production boot reaches EL0 `[x]`.** Wire the freestanding
-  aarch64 `rustos-kernel` boot path through `kernel/{mem,ipc,sec,syscall}`
+  aarch64 `tairix-kernel` boot path through `kernel/{mem,ipc,sec,syscall}`
   over the discovered `/memory` map, install the console (discovered
   framebuffer else first UART) via `with_console`, embed the `init` rxe,
   and spawn PID 1 into EL0 via the `userentry` `eret` path. Add a `-M virt`
@@ -680,7 +680,7 @@ on its own before the next.
     allocator hand-off consumes (reserve `[ram_base, __kernel_end)`,
     page-align the rest usable), the riscv64 boot pipeline's
     `build_memory_map` analogue. The bounds/overflow arithmetic lives in a
-    host-tested `rustos_kernel::mem_map` module (8 unit tests; gated to the
+    host-tested `tairix_kernel::mem_map` module (8 unit tests; gated to the
     aarch64 build and `cargo test` so it is never dead code, §2.3) because
     the bare-metal `boot_aarch64` cannot be host-compiled. The boot audit
     line now records `mem_map_built` / `mem_map_status` /
@@ -716,11 +716,11 @@ on its own before the next.
     to `AuditEvent::BootCompleted` on `-M virt` (embedded `virt` DTB; QEMU
     passes no `x0`). `boot.rs::main` passes `&SERIAL_SINK` as both sinks.
   - **P6c-3 — embed `init` rxe + spawn PID 1 into EL0 `[x]`.** The
-    `rustos-kernel` build script compiles the pure-Rust `rustos-init-run`
+    `tairix-kernel` build script compiles the pure-Rust `tairix-init-run`
     `Run` binary PIE (its own `Run.ld`) and converts the linked ELF to an
-    embedded `rxe` blob with `rustos_itest_harness::elf2rxe` (stamped with
+    embedded `rxe` blob with `tairix_itest_harness::elf2rxe` (stamped with
     the kernel's `SYSCALL_TABLE_HASH`, biased to 64 GiB) — the same path the
-    cc3/spawn fixtures use (§2.2; host-only build glue, RustOS stays
+    cc3/spawn fixtures use (§2.2; host-only build glue, TAIRiX stays
     Rust-only §1). `kernel/core` gained an arch-neutral PID-1 spawn seam:
     `BootInfo.init: Option<&dyn InitSpawn>` + `with_init`, invoked by
     `kernel_main` after `BootCompleted`; the object-safe `InitSpawnCtx`
@@ -795,14 +795,14 @@ on its own before the next.
   full path. **SP2c then proves two EL0 user tasks timeshare one CPU**:
   the new `tests/integration/spawn_el0_timeshare_qemu_aarch64` vertical
   builds two hardware-isolated EL0 address spaces from the pure-Rust
-  `rustos-test-el0-yielder` fixture (it links the new `rustos_rt::yield_now`
+  `tairix-test-el0-yielder` fixture (it links the new `tairix_rt::yield_now`
   wrapper), admits each as a resumable user kthread via `spawn_user_kthread`,
   and drains the cooperative `step` loop while a dispatch callback maps each
   task's `yield`/`exit` to `reschedule_current` — verified green on `-M
   virt`. **SP3 (the `spawn` syscall #12 + embedded-program registry) is
   staged SP3a/SP3b; SP3a is landed:** the `abi-v1` `spawn` syscall #12
   (`CAP_PROC_SPAWN`, audited) is wired end to end — `lib/abi` row + frozen
-  tests, the `ros_sys_spawn` C stub + regenerated header, the
+  tests, the `tairix_sys_spawn` C stub + regenerated header, the
   `kernel/syscall` dispatch arm + recomputed `SYSCALL_TABLE_HASH` — plus
   the `kernel/core` path-keyed `ProgramRegistry` and the fail-closed
   `ProcessSpawn`/`SpawnCtx` seam (default `NULL_PROCESS_SPAWN` →
@@ -811,7 +811,7 @@ on its own before the next.
   kthread through `SpawnCtx::admit_process` (host-proven by a `ProcessSpawn`
   double + 8 host tests). **SP3b and SP4 are now landed too, so P6d is
   complete:** the real aarch64 `ProcessSpawn` producer
-  (`kernel/rustos-kernel/src/spawn_producer.rs`) builds each child a fresh,
+  (`kernel/tairix-kernel/src/spawn_producer.rs`) builds each child a fresh,
   hardware-isolated identity address space (window mask-derived, as PID
   1's) whose page tables come from
   the kernel's live `FrameAllocator` through a boot-cached `kernel/mem`
@@ -821,13 +821,13 @@ on its own before the next.
   installed via `BootInfo::with_spawn`; the kernel `build.rs` now embeds both
   `init` and the `Shell` session program through one `elf2rxe` helper. PID 1
   `init` (granted `CAP_PROC_SPAWN`) spawns `config.session()`
-  (`/System/Apps/elsh.app/Run`) through `rustos_rt::spawn` and keeps running; the
+  (`/System/Apps/elsh.app/Run`) through `tairix_rt::spawn` and keeps running; the
   `tests/integration/spawn_session_qemu_aarch64` vertical proves both
   processes run on `-M virt` (PASS on two `ProcessSpawned` + three audited
   syscalls — the session's gated banner+exit is necessarily last).
 - **P6e — real shell REPL + session supervision `[x]`.** The `session`
   program `init` launches is currently a banner+exit `Run` stub in the
-  `Shell` bundle; P6e wires the existing `rustos-elsh` interpreter library
+  `Shell` bundle; P6e wires the existing `tairix-elsh` interpreter library
   into it (a real REPL) and has `init` supervise the session across its
   lifetime (restart, reap). **Design correction (binding, AGENTS.md §20):**
   the shell must do its text I/O over its **inherited standard streams
@@ -836,7 +836,7 @@ on its own before the next.
   Binding the REPL to the discovered console hard-codes "whichever console
   the kernel found" into the shell — ambient authority (§4) and hidden
   device coupling (§17.3/§17.4). Reading fd 0 / writing fd 1 makes the same
-  `rustos-elsh` binary "just work" whether started on a UART, a
+  `tairix-elsh` binary "just work" whether started on a UART, a
   framebuffer console, a network socket, or a WM terminal surface, with
   **zero** shell-side changes — only the *backing* of its descriptors
   differs. The gap this exposes: `abi-v1`'s startup vector
@@ -857,7 +857,7 @@ on its own before the next.
     reads into a bounded (`CONSOLE_READ_MAX`) kernel staging buffer and
     `copy_out`s to the caller (short/zero reads valid, defensive clamp,
     `BadAddress` on a faulting/unregistered caller). `lib/rt::console_read`
-    + `lib/abi-sys::ros_sys_console_read` wrappers. Host-proven by 7
+    + `lib/abi-sys::tairix_sys_console_read` wrappers. Host-proven by 7
     `kernel/core` tests + the rt/abi-sys/abi drift+marshalling tests; the
     dispatcher reachability/fuzz/proptest doubles gained the new arm. **No
     device read is wired yet** — the aarch64 serial has no RX primitive, so
@@ -903,9 +903,9 @@ on its own before the next.
     path installed (the P6e-1/P6e-2 UART backing **reused behind the
     stream**, not exposed). `lib/rt` now exposes `stdout`/`stderr`/`stdinfo`/
     `stdin` (over fd 0/1/2/3, `console_*` removed); `lib/abi-sys` exports
-    `ros_sys_stream_write`/`ros_sys_stream_read`; `init` + the `Shell`
-    session write their banner via `rustos_rt::stdout`. C header regenerated
-    (`ROS_SYS_STREAM_WRITE`/`_READ`) and `SYSCALL_TABLE_HASH` recomputed
+    `tairix_sys_stream_write`/`tairix_sys_stream_read`; `init` + the `Shell`
+    session write their banner via `tairix_rt::stdout`. C header regenerated
+    (`TAIRIX_SYS_STREAM_WRITE`/`_READ`) and `SYSCALL_TABLE_HASH` recomputed
     (`1cfbad…`); the abi-check + c-header drift guards are green. Proven
     host-side (the `lib/abi` descriptor-table tests, the `aspace` stream-map
     tests, the 11 reworked + 3 new `kernel/core` handler gate tests, the
@@ -917,17 +917,17 @@ on its own before the next.
     Real UART **RX** over fd 0 on silicon remains an on-metal item (no
     deterministic `-M virt` serial-RX injection, consistent with P6e-2).
   - **P6e-3b — shell REPL over its streams + `init` supervision `[x]`.**
-    Wire `rustos-elsh` to read fd 0 / write fd 1 (and emit `stdinfo` on
+    Wire `tairix-elsh` to read fd 0 / write fd 1 (and emit `stdinfo` on
     fd 3 per §20) through the `lib/rt` standard-stream wrappers, with
     `init` supervising the session (restart, reap). The shell contains
     **no** reference to `console_*` or to any device. Staged into the REPL
     itself (P6e-3b-i) and `init` supervision (P6e-3b-ii) — **both landed**.
     - **P6e-3b-i — shell REPL over fd 0/1/2/3 `[x]`.** The `Shell` bundle's
       `Run` binary (`userland/shell/elsh/src/run.rs`) no longer prints a
-      banner and exits: it runs the sibling `rustos-elsh` interpreter as a
+      banner and exits: it runs the sibling `tairix-elsh` interpreter as a
       read-eval-print loop (the new `repl` lib module) over its **inherited
       standard streams** (`AGENTS.md` §20). `repl::run` reads command lines
-      from fd 0 (`rustos_rt::stdin`, reassembling lines across reads,
+      from fd 0 (`tairix_rt::stdin`, reassembling lines across reads,
       stripping CRLF, capping a line at 4 KiB and discarding an over-length
       line), runs each through `Shell::run_line`, writes the prompt + output
       to fd 1/2 through the `RtConsole` seam, and emits one `omission`
@@ -943,7 +943,7 @@ on its own before the next.
       dynamic descriptors, fd ≥ 10, stay refused closed).
       `lib/abi` gained a tested `Errno::from_i32` decoder
       (single source of truth, §2.2; no C-header/hash impact — a method, not
-      an ABI type change) and `rustos_rt::stdin` now clamps a negative
+      an ABI type change) and `tairix_rt::stdin` now clamps a negative
       `-errno` to a zero-length read and clamps the count to `buf.len()`
       (defence in depth, §5.4). Host-proven (6 new `repl` tests over scripted
       stdin/stdinfo + `Console`/`ProcessHost` fixtures; 3 new `lib/rt` stdin
@@ -1014,7 +1014,7 @@ on its own before the next.
       folded into those ports' user-mode bring-up follow-ons. Docs:
       `docs/src/platform/aarch64.md` (Interrupts).
     - **Prerequisite — `lib/rt` `mem_map`-backed `#[global_allocator]`
-      `[x]`.** The `rustos-elsh` interpreter is `no_std + alloc`, but the
+      `[x]`.** The `tairix-elsh` interpreter is `no_std + alloc`, but the
       freestanding userland runtime had no heap, so the shell could not link
       it. `lib/rt` now registers a `#[global_allocator]`
       (`lib/rt/src/heap.rs`): a free-span allocator over a fixed-base virtual
@@ -1038,7 +1038,7 @@ on its own before the next.
       spawn-and-forget. **SP6 is COMPLETE** (`plans/SPAWN.md` SP6): SP6a
       landed the `abi-v1` surface (`SyscallNumber::WAIT` #16 + `WAIT_PID_ANY`, the
       `wait(I32 pid, UserPtr status) -> U64` row, unprivileged + audited),
-      the `ros_sys_wait` C stub + regenerated header, the `rustos_rt::wait`
+      the `tairix_sys_wait` C stub + regenerated header, the `tairix_rt::wait`
       wrapper, the `kernel/syscall` dispatch arm + doubles, and the
       fail-closed `kernel/core::procwait::ProcessWait` seam + handler. **SP6b
       (this session)** landed the scheduler-side producer: the `ProcessWait`
@@ -1078,7 +1078,7 @@ anonymous map/unmap pair a future `lib/rt` `malloc`/`free` layers over.
 **SP5-0 (design note) and SP5a (the `abi-v1` surface + fail-closed seam)
 are landed:** `SyscallNumber::MEM_MAP` (#14) / `MEM_UNMAP` (#15), the
 `MapFlags` type (with `FIXED`), the appended `Errno::OutOfMemory` (#20),
-the `ros_sys_mem_map`/`ros_sys_mem_unmap` C stubs + regenerated header,
+the `tairix_sys_mem_map`/`tairix_sys_mem_unmap` C stubs + regenerated header,
 the dispatcher arms, and `kernel/core`'s `MemMap` seam (`NULL_MEM_MAP` /
 `with_mem_map`, unprivileged + unaudited, fail-closed `NotImplemented`).
 **SP5b-1 is also landed:** the reusable, host-proven `kernel/mem::anon`
@@ -1092,7 +1092,7 @@ producer over `map_anonymous`/`unmap_anonymous`, admits the program as a
 resumable user kthread, and routes the program's `mem_map`/`mem_unmap`
 `svc`s through it; the pure-Rust EL0 fixture
 `tests/integration/mem_map_program` (linking the new
-`rustos_rt::mem_map`/`mem_unmap` wrappers) maps a region (FIXED),
+`tairix_rt::mem_map`/`mem_unmap` wrappers) maps a region (FIXED),
 writes+verifies a pattern, unmaps it, then faults on use — the fault handler
 reports PASS, **verified green under QEMU on `-M virt`**. The **riscv64
 sibling `tests/integration/mem_map_qemu_riscv64` is now landed too**: it
@@ -1134,7 +1134,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
   G1..G3:
 
   - **G1 — aarch64 page-table block-split primitive `[x]`.** The missing
-    foundation: `rustos_arch_aarch64::paging::AddressSpace::split_block(vaddr)`
+    foundation: `tairix_arch_aarch64::paging::AddressSpace::split_block(vaddr)`
     re-expresses the coarse block covering `vaddr` at 4 KiB granularity (L1
     1 GiB block → table of 512 × 2 MiB blocks, then the covering 2 MiB block
     → table of 512 × 4 KiB pages), preserving the output address and **every**
@@ -1159,7 +1159,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     shattering the block the CPU runs on, by mapping a kthread-stack arena
     at 2 MiB/4 KiB granularity at boot (so a guard page is its own L3 leaf
     reachable through the G1 split run on a 2 MiB block that holds no running
-    context). `rustos_arch_aarch64::paging::AddressSpace::prepare_guard_arena(base, len)`
+    context). `tairix_arch_aarch64::paging::AddressSpace::prepare_guard_arena(base, len)`
     is `split_block` applied to every 2 MiB block the arena spans — idempotent,
     fail-closed (`Misaligned`/`NotMapped`/`PoolExhausted`), BBM-free against the
     live regime (it only *adds* table levels reproducing the translation), and
@@ -1191,7 +1191,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     HAL `AddressSpace` surface is **G3**.
   - **G3a — `split_block` HAL promotion `[x]`.** The coarse-block split is
     now part of the architecture-neutral Arch HAL `AddressSpace` surface
-    (`rustos_arch_api::mmu`, §17.2), so the kernel reaches it through one
+    (`tairix_arch_api::mmu`, §17.2), so the kernel reaches it through one
     vocabulary instead of naming a concrete port. Two members:
     `block_split_support() -> BlockSplit` (each port's honest declaration,
     modelled on the §19.1/§19.10 `Mitigation`/`Tagging` profiles —
@@ -1218,7 +1218,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
   - **G3b-1 — `prepare_guard_arena` HAL promotion `[x]`.** The arena form
     of the split (G2 — `split_block` applied to every coarse block an arena
     spans) is now part of the architecture-neutral Arch HAL `AddressSpace`
-    surface (`rustos_arch_api::mmu`, §17.2), beside the G3a `split_block`
+    surface (`tairix_arch_api::mmu`, §17.2), beside the G3a `split_block`
     members. `AddressSpace::prepare_guard_arena(base, len)` defaults to a
     fail-closed `MapError::Unsupported`, so a port whose
     `block_split_support` is not `Supported` falls back to the software
@@ -1242,7 +1242,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     `kernel/core` (whose `UserAddressSpace` view is read-only by design,
     §2.4). Staged by spawn path:
     - **G3b-2-i — PID 1 (`init`) path `[x]`.** A grow-and-shrink block
-      allocator `stack_arena::KTHREAD_STACK_ARENA` (`rustos-kernel`) hands
+      allocator `stack_arena::KTHREAD_STACK_ARENA` (`tairix-kernel`) hands
       kthread kernel stacks out of the boot-reserved arena (`boot_aarch64`
       `install`s it from the carved `(base, len)`); each `ArenaStack` is a
       one-page guard below the usable `KTHREAD_STACK_BYTES` stack, identical
@@ -1348,7 +1348,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     `[guard page | usable stack]` out of it, installs the EL1 vectors + a
     `fault` handler, enables the MMU, then `unmap`s the guard page through
     the Arch HAL + `flush_page`s it — exactly the G3b-2 production mechanism.
-    It then builds the live `rustos-kernel-sched-eevdf` `Scheduler` over
+    It then builds the live `tairix-kernel-sched-eevdf` `Scheduler` over
     `Aarch64Arch`, admits a kthread on that stack via
     `kernel_core::spawn_kthread_with_stack` (the production runtime path),
     and drives the cooperative `step` loop. The kthread body overruns its
@@ -1402,7 +1402,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     granularity (`prepare_guard_arena`, G2), installs the S-mode trap vector +
     a `fault` handler, turns paging on, then `unmap`s + `flush_page`s one
     kthread stack's one-page guard through the Arch HAL (the production
-    mechanism), builds the live `rustos-kernel-sched-eevdf` `Scheduler` over
+    mechanism), builds the live `tairix-kernel-sched-eevdf` `Scheduler` over
     `RiscvArch`, and admits a kthread on that arena stack via
     `spawn_kthread_with_stack` (the **production runtime path**) laid out
     `[guard | usable]`. The kthread overruns into the unmapped guard page → a
@@ -1418,7 +1418,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
   - **x86_64 four-level huge-page split + guard-page fault-form (G1/G2)
     `[x]`.** The last `BlockSplit::Pending` port brought to `Supported`, so
     all three bare-metal ports now declare and implement the split.
-    `rustos_arch_x86_64::paging::AddressSpace` implements the inherent
+    `tairix_arch_x86_64::paging::AddressSpace` implements the inherent
     `split_block(vaddr)` (1 GiB PDPTE huge leaf → PD of 512 × 2 MiB huge
     leaves, keeping the page-size bit; then the 2 MiB PD huge leaf → PT of
     512 × 4 KiB pages, **clearing** the page-size bit since at PT level bit 7
@@ -1434,7 +1434,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     the new `tests/integration/stack_guard_qemu_x86_64` (enrolled in
     `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s, the sibling of
     `stack_guard_qemu_{aarch64,riscv64}`): it boots the production
-    `rustos-kernel` pipeline (so the GDT, the dedicated error-code-aware `#PF`
+    `tairix-kernel` pipeline (so the GDT, the dedicated error-code-aware `#PF`
     entry, and the bump heap are installed) and, on `BootCompleted`, builds a
     4 GiB-identity space, activates it (`CR3`), `split_block`s the 2 MiB huge
     page covering a dedicated guard static (reached through its low-identity
@@ -1455,12 +1455,12 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     `BoxStack` falls back to. The new
     `tests/integration/stack_overrun_qemu_x86_64` (enrolled in
     `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s) boots the
-    production `rustos-kernel` pipeline (GDT + dedicated error-code-aware
+    production `tairix-kernel` pipeline (GDT + dedicated error-code-aware
     `#PF` entry + bump heap) and, on `BootCompleted`, builds a 4 GiB-identity
     space, activates it (`CR3`), re-expresses a 2 MiB-aligned guard arena at
     4 KiB granularity (`prepare_guard_arena`, G2), `unmap`s + `flush_page`s
     one kthread stack's one-page guard through the Arch HAL (the production
-    mechanism), builds the live `rustos-kernel-sched-eevdf` `Scheduler` over
+    mechanism), builds the live `tairix-kernel-sched-eevdf` `Scheduler` over
     `X86_64Arch`, and admits a kthread on that arena stack via
     `spawn_kthread_with_stack` (the **production runtime path**) laid out
     `[guard | usable]` on the arena's low-identity alias. The kthread overruns
@@ -1486,7 +1486,7 @@ section): its `trap.s` runs the handler on the interrupted **user** `sp` with no
 cooperative mid-handler park can work at all.
 
 The X1–X4 chunks (below) were staged lowest-risk-first because the x86_64
-machinery already existed: ring-3 entry (`rustos_arch_x86_64::userentry`), the
+machinery already existed: ring-3 entry (`tairix_arch_x86_64::userentry`), the
 `mem_map` producer path (`mem_map_qemu_x86_64`), a `syscall`/`sysret` stub that
 already switches to a kernel stack, an `X86_64Arch: SchedulerArch`, and an
 x86_64 `ContextSwitchHal`.
@@ -1524,7 +1524,7 @@ copy is added on the syscall hot path (§2.16).
 - **X1 — x86_64 single resumable user-kthread `[x]`.** A single ring-3 task
   is admitted as a resumable user kthread and cooperatively parks/resumes under
   the live scheduler on x86_64. Two primitives, the siblings of the aarch64
-  `activate_user_root`: `rustos_arch_x86_64::paging::activate_user_root(root_phys)`
+  `activate_user_root`: `tairix_arch_x86_64::paging::activate_user_root(root_phys)`
   reloads CR3 (free `mov cr3`, host no-op; the load flushes non-global TLB
   entries so no `invlpg`), and `syscall_entry::set_kernel_rsp0(cpu, top)`
   repoints only the per-CPU `SyscallTls.kernel_rsp0` field (no MSR rewrite, no
@@ -1578,7 +1578,7 @@ copy is added on the syscall hot path (§2.16).
     wrong way → `movq %gs:0,%rsp` reads address 0 → push faults → #PF on a
     null stack → #DF. X1 never exposes it because the same task always does the
     matching exit `swapgs`. Fix: a HAL cooperative-park hook pair on
-    `rustos_arch_api::ContextSwitch` — `enter_cooperative_park` /
+    `tairix_arch_api::ContextSwitch` — `enter_cooperative_park` /
     `leave_cooperative_park`, default no-op (aarch64/riscv64 need nothing) —
     that `kernel/core`'s kthread runtime calls in `suspend_thunk_syscall`
     around the suspend switch (the user-kthread mid-handler park path; a
@@ -1595,7 +1595,7 @@ copy is added on the syscall hot path (§2.16).
 
 - **X3a — x86_64 PID 1 (`init`) reaches ring 3 (production path) `[x]`.** The
   prerequisite for the x86_64 `spawn` producer: the **production**
-  `rustos_kernel::boot` pipeline now spawns PID 1 into ring 3 through the real
+  `tairix_kernel::boot` pipeline now spawns PID 1 into ring 3 through the real
   `kernel_main` + `InitSpawn` path (not a test-driven ad-hoc scheduler like
   X1/X2), the cross-port sibling of the aarch64 P6c-3 milestone. Three pieces,
   all wired into `BootInfo`:
@@ -1619,7 +1619,7 @@ copy is added on the syscall hot path (§2.16).
     (PASS on `ProcessSpawned` + an audited `SyscallInvoked`). **No ABI change.**
 
 - **X3b — x86_64 `spawn` concurrent producer `[x]`.** The real x86_64
-  `ProcessSpawn` producer — `kernel/rustos-kernel/src/x86_64/spawn_producer.rs`,
+  `ProcessSpawn` producer — `kernel/tairix-kernel/src/x86_64/spawn_producer.rs`,
   the cross-port sibling of the aarch64 `spawn_producer.rs` — is wired through
   `BootInfo::with_spawn` (in `boot::try_boot`, beside the X3a `with_init` seam)
   with the shared embedded `spawn_layout::PROGRAM_REGISTRY` (the `Shell` `rxe` `build.rs`
@@ -1657,7 +1657,7 @@ copy is added on the syscall hot path (§2.16).
   fire), so X4 added the proving vertical:
   `tests/integration/wait_qemu_x86_64` (enrolled in
   `tools/xtask/src/commands/qemu_tests.rs`), the cross-port sibling of
-  `wait_qemu_aarch64`. It boots the production `rustos-kernel` pipeline (GDT
+  `wait_qemu_aarch64`. It boots the production `tairix-kernel` pipeline (GDT
   ring-3 selectors / TSS / `syscall` entry), and on `BootCompleted` builds a
   **parent** and a **child** hardware-isolated ring-3 space (two PML4s, one
   shared frame pool) from the cross-arch `wait_program` fixture (built PIE in
@@ -1740,7 +1740,7 @@ parity with the aarch64 and x86_64 ports.
   `docs/src/platform/riscv64.md` ("Per-task kernel stack + frame-resident
   return state").
 - **RV-X1 — single resumable user-kthread `[x]`.** The riscv64 sibling of
-  x86_64 X1 / aarch64 SP2b. `rustos_arch_riscv64::paging::activate_user_root(
+  x86_64 X1 / aarch64 SP2b. `tairix_arch_riscv64::paging::activate_user_root(
   root_phys)` is the per-task `pre_resume` reactivation primitive: it
   reprograms `satp` (`satp_sv39(root_phys)` + `sfence.vma`) on a hart whose
   paging is already on — a free function over the raw `u64` root (so the hook
@@ -1814,14 +1814,14 @@ parity with the aarch64 and x86_64 ports.
 
 **riscv64 production boot path (RV-P series).** The riscv64 spawn/wait
 arc above proved the concurrent-user-mode *mechanism* in test mini-kernels;
-the RV-P series brings the **production `rustos-kernel` binary** up on
+the RV-P series brings the **production `tairix-kernel` binary** up on
 riscv64, mirroring the aarch64 P-stage arc.
 
 - **RV-P1 — production boot to `BootCompleted` `[x]`.** The production
-  `rustos-kernel` binary now boots the QEMU `virt` / SiFive board
+  `tairix-kernel` binary now boots the QEMU `virt` / SiFive board
   (`riscv64gc-unknown-none-elf`, linked with the arch port's
   `riscv64-virt.ld`) to `AuditEvent::BootCompleted`. The boot pipeline is
-  the new `rustos_kernel::boot_riscv64` (`RiscvBinArch` `KernelArch`
+  the new `tairix_kernel::boot_riscv64` (`RiscvBinArch` `KernelArch`
   adapter, `build_boot_memory_map`, `try_boot`, `boot`): it parses the
   OpenSBI-handed device tree for the RAM window + `timebase-frequency`,
   builds the two-region `BootMemoryMap` (`[ram_base, __kernel_end)`
@@ -1871,7 +1871,7 @@ riscv64, mirroring the aarch64 P-stage arc.
   allocator-backed `FrameTableSource` (no fixed reserve, §24.1) and admits
   it Ready. The kernel `build.rs` now also builds the embedded `init`/`Shell`
   `rxe` blobs for the riscv64 target. Proven by `spawn_init_qemu_riscv64`
-  (`id=4030` PID 1 → the `RustOS <version>: …` machine-summary banner → `id=4030`
+  (`id=4030` PID 1 → the `TAIRiX <version>: …` machine-summary banner → `id=4030`
   Shell → `id=5000 sc=spawn` → SiFive PASS). **No ABI change.** Doc:
   `docs/src/platform/riscv64.md` ("PID 1 into user mode").
 
@@ -1915,7 +1915,7 @@ property-channel client lives in the shared `lib/vcmailbox` crate
 **Landed — the metal wiring.**
 
 - `FdtDiscovery` discovers the mailbox node (`brcm,bcm2835-mbox`) and
-  emits it into `rustos_abi::hwtree` through the generic Stage 4.HW
+  emits it into `tairix_abi::hwtree` through the generic Stage 4.HW
   walk (`kernel/arch/aarch64::platform`): the doorbell window as a
   capability-gated MMIO resource (base/length read from the tree, never
   a `const`) plus the one per-device augmentation — a `HwResource::dma`
@@ -1959,13 +1959,13 @@ console".
   size (`0×0` = no display → UART keeps the console) and allocates a
   32-bit surface at exactly that size. `TextConsole` is a full
   `xterm-256color` terminal: shell output is fed through the one shared
-  streaming parser (`rustos_vt::Parser`, §2.2 — no second escape parser,
+  streaming parser (`tairix_vt::Parser`, §2.2 — no second escape parser,
   depended `default-features = false` so only its allocation-free parser
   view links into the allocator-free QEMU bins), each `Op` mutates the
   retained cell grid, and the dirtied cells are repainted onto the
   scan-out surface once per write — SGR 16/256/truecolour, bold/reverse,
   cursor positioning, erase, scroll region, and explicit scroll. Glyphs
-  are the shared `rustos_font` Inconsolata coverage atlas (§2.2, generated
+  are the shared `tairix_font` Inconsolata coverage atlas (§2.2, generated
   by `cargo xtask font-atlas`) at an integer scale (`height / 1080`,
   clamped 1…4). Reaching the bottom margin scrolls the retained cell grid
   up one line (a real terminal scroll), not a ring wrap; the pixels are
@@ -1977,7 +1977,7 @@ console".
   fragmented at every line feed; scheduling relies on preemption between
   syscalls, not an output-path yield.
 - Bring-up runs in the **pre-MMU** phase of
-  `rustos-kernel::boot_aarch64` (caches off ⇒ the property exchange is
+  `tairix-kernel::boot_aarch64` (caches off ⇒ the property exchange is
   DMA-coherent with no maintenance; the state cell is written by the
   single-threaded boot CPU — no atomic RMW MMU-off). Post-MMU rendering
   serialises on a private DAIF-masking spinlock (not `lib/sync`: feature
@@ -2022,8 +2022,8 @@ against its `compatible` string (§18.3).
 
 **Landed — the storage path is a discovery-matched bootstrap floor
 (§18.6).** Both block drivers now publish a canonical `pub const
-BIND_KEYS` (`rustos_drv_storage_emmc2` → compatible
-`brcm,bcm2711-emmc2`; `rustos_drv_storage_virtio_blk` → virtio device id
+BIND_KEYS` (`tairix_drv_storage_emmc2` → compatible
+`brcm,bcm2711-emmc2`; `tairix_drv_storage_virtio_blk` → virtio device id
 2) — the single §18.3 source the signed manifest's bind table is authored
 from. As the storage path that must be up before the signed driver store
 is reachable, both are registered in the kernel binary's
@@ -2034,13 +2034,13 @@ driver's bind table — through the one shared `lib/devmatch` policy
 `devmgr` uses (§2.2) — never a hand-wired probe (§18.5). Host-proven
 (`driver_catalog` storage-node binding + signed-gate admission; the two
 crates' bind-table tests). The boot path that *resolves* the discovered
-root block node against this floor is landed (`rustos_kernel::root_storage`,
+root block node against this floor is landed (`tairix_kernel::root_storage`,
 the `4135` `ROOT_STORAGE_AUTOLOAD` bind gate — Chunk B-2 below); bringing
 the bound driver up and mounting the volume is the rest of Chunk B-2.
 
 **Landed — the block driver (ADMA2 DMA fast path + PIO fallback).**
-`drivers/storage/emmc2` (`rustos-drv-storage-emmc2`) is an Arasan /
-SDHCI-5.1 block driver implementing `rustos_abi::driver::block::Block`:
+`drivers/storage/emmc2` (`tairix-drv-storage-emmc2`) is an Arasan /
+SDHCI-5.1 block driver implementing `tairix_abi::driver::block::Block`:
 
 - The SDHCI command/response and block-transfer state machine (`Emmc2`)
   is written against the `SdhciHost` register seam (the one register
@@ -2114,8 +2114,8 @@ the ARXFS root from a real card — done (operator metal acceptance).
 The image builder is landed and the emitted image boots a real Pi 4 into
 user mode (operator metal acceptance).
 
-- `tools/mkimage` (`rustos-mkimage`, lib + bin) authors
-  `images/rustos-aarch64-rpi.img` in pure Rust (§12 — no
+- `tools/mkimage` (`tairix-mkimage`, lib + bin) authors
+  `images/tairix-aarch64-rpi.img` in pure Rust (§12 — no
   `parted`/`mkfs` shell-outs): an MBR (two 1 MiB-aligned primaries,
   `0x0C` FAT32 boot @ LBA 2048, `0x7F` ARXFS root, 64 MiB each), with
   both partitions laid down by the **real** in-tree drivers
@@ -2167,8 +2167,8 @@ user mode (operator metal acceptance).
   delegating `cargo xtask build --target aarch64-rpi` (`--headless`
   accepted; the image content is identical until installable GUI userland
   ships). A staged firmware dir may come from `--firmware` or
-  `$RUSTOS_PI_FIRMWARE`; otherwise the pinned blobs are fetched
-  automatically. The standalone `rustos-mkimage rpi` CLI mirrors the
+  `$TAIRIX_PI_FIRMWARE`; otherwise the pinned blobs are fetched
+  automatically. The standalone `tairix-mkimage rpi` CLI mirrors the
   same flags (with `--firmware` required — no network I/O in mkimage).
 - Host tests: ELF→flat layout + every refusal, manifest parse/verify
   fail-closed (incl. the committed manifest), boot/root partition
@@ -2228,10 +2228,10 @@ display + input drivers are present (the headless build stays first-class,
 seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
 §0.4):
 
-- `drivers/input/usb_hid` (`rustos-drv-input-usb-hid`): HID
+- `drivers/input/usb_hid` (`tairix-drv-input-usb-hid`): HID
   boot-protocol keyboard + mouse report decode (USB HID 1.11 App. B)
-  into `rustos_abi` `InputEvent`s behind the `ReportSource` seam,
-  which lives in `lib/abi` (`rustos_abi::driver::input`) because its
+  into `tairix_abi` `InputEvent`s behind the `ReportSource` seam,
+  which lives in `lib/abi` (`tairix_abi::driver::input`) because its
   producer is the sibling xHCI driver and drivers depend only on
   `lib/*` (§17.4). Stateful report diffing (one `Key` edge per change;
   HID usage IDs, modifiers `0xE0..=0xE7`, buttons `0x110..` matching
@@ -2239,7 +2239,7 @@ seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
   length/forged-source validation (§5.4), an event latch so undersized
   `poll` buffers lose nothing, and a per-`poll` report budget (§2.1).
   21 host tests; docs: `docs/src/drivers/input.md`.
-- `drivers/bus/usb` (`rustos-drv-bus-usb`, placeholder replaced): the
+- `drivers/bus/usb` (`tairix-drv-bus-usb`, placeholder replaced): the
   xHCI protocol layers and the HID enumeration engine over the
   `XhciHost` register seam (`RegisterWindow` on metal, register-level
   mock in tests) and the `DmaBank` memory seam (the `SlabBank` over
@@ -2268,7 +2268,7 @@ seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
 **Landed — ECAM configuration access** (the cross-arch path the VL805
 sits behind): `drivers/bus/pci` gained `mechanism_ecam`, an
 `EcamConfigSpace` `ConfigSpace` impl over a capability-mapped
-`rustos_abi::RegisterWindow` (PCI Express Base 3.0 §7.2.2 flat
+`tairix_abi::RegisterWindow` (PCI Express Base 3.0 §7.2.2 flat
 offset, `ConfigAddress::ecam_offset`), fail-closed to the all-ones
 "no device" sentinel on an out-of-window or malformed access (§5.4).
 The mechanism-agnostic enumeration / capability / BAR core is reused
@@ -2298,7 +2298,7 @@ no C-header regen). Docs: `docs/src/platform/aarch64.md` ("Platform
 discovery").
 
 **Landed — the VL805 `wiring::open_discovered`** (host-provable): the
-generic-PCI seam `rustos_abi::driver::pci::PciBus` (a supertrait of
+generic-PCI seam `tairix_abi::driver::pci::PciBus` (a supertrait of
 `Bus`) carries `map_bar_window` + `enable_bus_master` — the smaller
 surface a non-virtio, DMA-driving controller needs (no MSI-X). `Pci<C>`
 implements it by forwarding to the inherent BAR resolver and a shared
@@ -2356,7 +2356,7 @@ view (alongside the existing `virtio_host()` DMA seam), so a loaded bus
 driver maps its own register windows through the capability-gated
 `KernelMmioMapper` *and* carves its DMA region through the per-driver
 `KernelVirtioHost` — both fail closed at the kernel `map_mmio`/`alloc_dma`
-gates (§5.4). `kernel/rustos-kernel/src/driver_host.rs`'s
+gates (§5.4). `kernel/tairix-kernel/src/driver_host.rs`'s
 `run_with_driver_host` assembles that host on a single boot frame
 (`KernelMmioMapper` + `KernelVirtioFactory`) and lends it to a `body`
 closure; every window and DMA pool is reclaimed when the closure returns
@@ -2390,7 +2390,7 @@ inbound `dma-ranges` aperture is now emitted as
 (`fdt::dma_ranges_aperture` captures the child PCI base in the resource's
 translation field — no wire change, the `xlate` field already existed),
 so `PcieWindows` is *fully* tree-derived. The whole chain is composed in
-`kernel/rustos-kernel::usb_keyboard` — the image-assembly seam
+`kernel/tairix-kernel::usb_keyboard` — the image-assembly seam
 (`Layer::Tooling`) is the one crate that may name the four driver crates
 across strata (§17.4 / §8), so the composition lives there, like
 `virtio_boot`; the engine is architecture-neutral (it consumes only the
@@ -2445,7 +2445,7 @@ keyboard service kthread**:
   seam's `SpinLock` `compare_exchange` is an atomic RMW that is
   UNPREDICTABLE on MMU-off memory (P6c-2), so the store is deferred past
   translation-enable while the windows themselves are read pre-MMU.
-- `kernel/rustos-kernel::keyboard_service` supplies the concrete
+- `kernel/tairix-kernel::keyboard_service` supplies the concrete
   `DriverHost` halves: an `IdentityMmioMapper` (capability-gated; admits a
   window only inside the controller block or outbound window, returns a
   `phys == virt` `RegisterWindow` — no live page-table edit, since the boot
@@ -2504,7 +2504,7 @@ keyboard service kthread**:
   `err=out_of_range`: the device-shared DMA carve was bounded in the wrong
   address space. `DmaSlab::phys()` is a *device-visible* (PCIe-space)
   address, but `keyboard_service::FrameDmaHost` and
-  `rustos_drv_bus_usb::wiring::open_discovered` compared it against the
+  `tairix_drv_bus_usb::wiring::open_discovered` compared it against the
   *CPU-physical* inbound-aperture top (`0x2_0000_0000`). The Pi 4 inbound
   viewport maps PCIe `[0x4_0000_0000, 0x6_0000_0000)` onto RAM
   `[0, 0x2_0000_0000)`, so every frame's device address (≈ `0x4_xxxx`)
@@ -2874,7 +2874,7 @@ keyboard service kthread**:
     bank cannot supply the chunk or a scratchpad-needing controller reports no
     page size / an unaligned base); `UsbDevice::start` fills the array with
     each buffer's device-visible base and points `DCBAA[0]` at it; and the
-    engine's shared chunk is grown from the `rustos_usb::SlabBank` sized
+    engine's shared chunk is grown from the `tairix_usb::SlabBank` sized
     exactly to that reported geometry (the 31 × 4 KiB pages plus the
     rings/contexts), with each device's region a further chunk grown on
     attach and released on detach. Host-proven by `drivers/bus/usb`
@@ -3166,7 +3166,7 @@ keyboard service kthread**:
   `outbound_window_decodes_a_non_empty_range_covering_the_cpu_window` (below).
 - **Resolved (superseded) — reset the controller before touching MISC,
   unconditionally.** `0xdead_dead` is the **BCM2711 root complex's master-abort
-  poison** (distinct from RustOS's all-ones `0xffff_ffff` sentinel) — returned
+  poison** (distinct from TAIRiX's all-ones `0xffff_ffff` sentinel) — returned
   when a CPU access reaches the RC but no target decodes the address. An
   earlier design read `MISC_PCIE_STATUS` at entry and *skipped* the reset when
   the link was already up, to preserve the bootloader-loaded VL805 firmware.
@@ -3203,7 +3203,7 @@ keyboard service kthread**:
   `dead_dead`; that, plus USB working under other operating systems on the same
   card/firmware, redirected the search from the firmware to the **outbound
   (CPU→PCIe) translation window** (the path config reads do not exercise). The
-  bug was in `rustos_drv_bus_pcie_brcm::regs`: the BCM2711 *proprietary*
+  bug was in `tairix_drv_bus_pcie_brcm::regs`: the BCM2711 *proprietary*
   `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` (`0x4070`) packs the **limit** in bits
   `[31:20]` and the **base** in `[15:4]`,
   but `MEM_WIN0_BASE_LIMIT_BASE_MASK`/`..._LIMIT_MASK` were
@@ -3228,7 +3228,7 @@ keyboard service kthread**:
   loaded, a non-zero build id once `VideoCore` loads the blob). It is read
   over configuration space, which works on metal even while the BAR aborts,
   so a metal capture now distinguishes "firmware never loaded" (`0x50`=0,
-  a board/firmware matter outside RustOS code) from "loaded but the BAR
+  a board/firmware matter outside TAIRiX code) from "loaded but the BAR
   window still does not decode" (`0x50`≠0) directly, instead of inferring it
   from the `dead_dead` BAR. Host-proven by
   `config_readback_dumps_each_register_once`.
@@ -3256,7 +3256,7 @@ path if needed; then the WM/taskbar/session on the HVS path.
 
 **Migrating the chain onto `hwtree` + `devmgr` autoload, then deleting the
 composition module — in progress (`PLAN.md` Stage 4.HW item 5).**
-`kernel/rustos-kernel::usb_keyboard` is a *scaffold*: the one crate §17.4
+`kernel/tairix-kernel::usb_keyboard` is a *scaffold*: the one crate §17.4
 lets name the four driver crates of the Pi 4 chain (`pcie_brcm` →
 `pci::mechanism_brcm` → `bus_usb` → `input_usb_hid`). It must not become
 the model for board support — one hand-written composition module per board
@@ -3270,7 +3270,7 @@ table, so a new board is match **data**, not new code. Sub-increments
   `bus_usb` xHCI PCI class `0x0C0330` vendor/device-wildcard; `usb_hid`
   HID boot keyboard `0x030101` + mouse `0x030102` vendor/product-wildcard),
   `HwMatchKey`'s constructors are `const`, and `HwMatchKey::matches` adds
-  the PCI/USB class-with-wildcard semantics `rustos_devmgr` resolves
+  the PCI/USB class-with-wildcard semantics `tairix_devmgr` resolves
   against (no `#[repr(C)]` change, no C-header drift).
 - **5b** runtime `hwtree` child attachment by the bus drivers. **5b-i —
   done:** `PciBus::describe_function(bdf, parent_id, node_id)` (lib/abi,
@@ -3302,7 +3302,7 @@ table, so a new board is match **data**, not new code. Sub-increments
     `DriverCandidate`/`MatchResolution`), the single §18.3 definition the
     kernel reaches without a kernel→userland edge (§2.2 / §17.4; `devmgr`
     re-exports it). The in-kernel production driver-candidate catalogue
-    (`kernel/rustos-kernel::driver_catalog`) pairs each chain driver's
+    (`kernel/tairix-kernel::driver_catalog`) pairs each chain driver's
     canonical `BIND_KEYS` with its `/System/Drivers/` path (authored from
     the crates' tables, never re-typed), and `keyboard_service` gates the
     bring-up on it: `resolve_discovered_bridge` resolves the discovered
@@ -3324,7 +3324,7 @@ table, so a new board is match **data**, not new code. Sub-increments
     the driver crate's own `BIND_KEYS` — Ed25519-signed with the build's
     deterministic driver-signing key (`KERNEL_DRIVER_SIGNING_SEED`), and
     embeds the matching public key as the kernel's sole driver trust anchor.
-    `kernel/rustos-kernel::driver_loader::ChainDriverLoader::admit` runs the
+    `kernel/tairix-kernel::driver_loader::ChainDriverLoader::admit` runs the
     full `Host::load` pipeline (trust-anchor + signature verification,
     syscall-hash match, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates, bind-table
     validation, in-process `register()` hand-off). The chain `register()`s
@@ -3337,7 +3337,7 @@ table, so a new board is match **data**, not new code. Sub-increments
     catalogue (`bring_up_keyboard` now returns the keyboard + the
     `UsbDevice::describe_device` `HwNode`) and admits `usb_hid` before the
     report pump (fail closed → no input). Audited at `EventId(4132)`.
-    `rustos-drvhost` is now an aarch64 dependency. Host-tested
+    `tairix-drvhost` is now an aarch64 dependency. Host-tested
     (`driver_loader` 5 tests: all three baked images verify, the
     `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` / unknown-path refusals fail closed);
     the freestanding aarch64 kernel builds clean. **Metal checkpoint
@@ -3444,7 +3444,7 @@ table, so a new board is match **data**, not new code. Sub-increments
     `mmio_map_qemu_aarch64` vertical: the kernel retains a `LiveSpace`, admits
     the EL0 fixture via `spawn_user_kthread_with_stack_live`, mints a grant for
     the first virtio-MMIO transport, and the program maps it through `mmio_map`
-    + reads the `MagicValue` register (`0x74726976`) back. New `rustos_rt::mmio_map`
+    + reads the `MagicValue` register (`0x74726976`) back. New `tairix_rt::mmio_map`
     wrapper; no `lib/abi`/C-header change. The registry-backed grant
     owner-check (§5.4) is host-proven in `kernel/core`.
     **5d-0-ii (c) — non-`FIXED` `mem_map` placement allocator — LANDED.**
@@ -3497,14 +3497,14 @@ table, so a new board is match **data**, not new code. Sub-increments
     producer, `abi-sys` marshalling) and proven on `-M virt` by the extended
     `mmio_map_qemu_aarch64` vertical (the EL0 program now also carves a
     `dma_alloc` buffer and round-trips a sentinel through it). New
-    `rustos_rt::dma_alloc` + `ros_sys_dma_alloc`; C header regenerated.
+    `tairix_rt::dma_alloc` + `tairix_sys_dma_alloc`; C header regenerated.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
     - **5d-1 — the rt-backed `DriverHost` (`lib/drvrt`) — DONE
       (host-proven).** The user-space analogue of the in-kernel keyboard
       service's `IdentityMmioMapper` + frame-allocator DMA host: a driver
       process can no longer reach the kernel frame allocator / identity map,
-      so `rustos_drvrt::RtDriverHost` implements `DriverHost` + `MmioMapper` +
+      so `tairix_drvrt::RtDriverHost` implements `DriverHost` + `MmioMapper` +
       `VirtioHost` over a fixed table of kernel-issued device-resource grants
       (`GrantedResource` = handle + `HwResource`). `map_window` resolves a
       requested `(phys,len)` to the covering grant, maps that grant's whole
@@ -3516,7 +3516,7 @@ table, so a new board is match **data**, not new code. Sub-increments
       `SlabCoherencyFn` — the shim is never synthesised in this
       platform-neutral crate, §2.20). The two syscalls sit behind the
       host-testable `GrantSyscalls` seam (production `RtGrantSyscalls` forwards
-      to `rustos_rt`, §2.2); the host adds no authority — every capability +
+      to `tairix_rt`, §2.2); the host adds no authority — every capability +
       bound is re-checked kernel-side and a forged/foreign handle fails closed
       (§4/§5.4/§2.9). Allocation-free (`MAX_GRANTS` array) so it works before
       the SP5b heap. 18 host tests (window resolve, sub-offset, BAR
@@ -3530,7 +3530,7 @@ table, so a new board is match **data**, not new code. Sub-increments
       **no capability** — a task reads only its own grants, the §16.6/§24.3
       own-process baseline; unaudited) serialises the **calling task's** minted
       grant set from the same per-task `AddressSpaceRegistry` grant table as
-      consecutive `rustos_abi::hwtree::GrantedResource` records (handle +
+      consecutive `tairix_abi::hwtree::GrantedResource` records (handle +
       `HwResource`, `WIRE_LEN` = 40; the one wire/owning definition, re-exported
       by `lib/drvrt`, §2.2), copies them out through the validated boundary, and
       returns the byte count — `0` for an unbound task (§18.4), `BufferTooSmall`
@@ -3540,7 +3540,7 @@ table, so a new board is match **data**, not new code. Sub-increments
       production constructor that issues the syscall into a fixed `MAX_GRANTS`
       buffer and builds the grant table (`RtDriverHost::new` keeps the
       caller-supplied-slice path for tests/verticals). New
-      `rustos_rt::resource_grants` + `ros_sys_resource_grants`; C header
+      `tairix_rt::resource_grants` + `tairix_sys_resource_grants`; C header
       regenerated. Host-tested (abi round-trip + decode-reject, 5 kernel-core
       handler tests, 4 drvrt `from_grants_query` tests, abi-sys marshal). **No
       metal/virt step** (no production grant-minter / driver-process consumer
@@ -3569,7 +3569,7 @@ table, so a new board is match **data**, not new code. Sub-increments
       `resources: &[HwResource]` argument that `DeviceManager::autoload`
       sources from the matched `HwNode::resources`, realising §18.3 (a loaded
       driver receives only the resources its matched node requested). The
-      production loader `kernel/rustos-kernel::driver_spawn_loader::
+      production loader `kernel/tairix-kernel::driver_spawn_loader::
       SpawnDriverLoader` (impl `devmgr::DriverLoader`) runs the signed
       `drvhost::Host::load` gate on the discovered `kind = UserSpace` image and
       spawns the verified payload through the arch `DriverProcessSpawn` seam,
@@ -3589,11 +3589,11 @@ table, so a new board is match **data**, not new code. Sub-increments
       the bus driver. The bus-agnostic xHCI protocol (`XhciHost` register seam,
       `Xhci` controller engine, TRB/ring vocabulary, single-device HID
       `UsbDevice` enumeration) therefore moved into a new `lib/usb`
-      (`rustos-usb`, `lib/abi`-only, `no_std`, Tier-1-portable) — the USB
+      (`tairix-usb`, `lib/abi`-only, `no_std`, Tier-1-portable) — the USB
       analogue of `lib/virtio` ↔ `drivers/bus/virtio` (§2.2/§6/§17.4).
       `drivers/bus/usb` keeps only the §8 `register`, the §18.3 `BIND_KEYS`, and
-      the PCI BAR/DMA `wiring` over `rustos_usb`; the kernel scaffold + `wiring`
-      repoint to `rustos_usb::{Xhci, device::*, regs}`. The 81 USB tests split
+      the PCI BAR/DMA `wiring` over `tairix_usb`; the kernel scaffold + `wiring`
+      repoint to `tairix_usb::{Xhci, device::*, regs}`. The 81 USB tests split
       with the code (71 protocol `lib/usb` + 10 driver `register`/bind/wiring);
       whole gate green (`cargo xtask ci` incl. both Pi images, `fuzz --secs 5`,
       `soak both`, `cargo xtask test --qemu`). Docs: `docs/src/lib/usb.md`,
@@ -3601,13 +3601,13 @@ table, so a new board is match **data**, not new code. Sub-increments
     - **5d-2-ii (b-2-ii) — generic boot-keyboard orchestration + shared
       `Delay` seam — done (host-proven).** The arch-neutral
       root→hub→downstream-HID bring-up sequence is now one definition,
-      `rustos_usb::device::UsbDevice::enumerate_boot_keyboard(delay)` in
+      `tairix_usb::device::UsbDevice::enumerate_boot_keyboard(delay)` in
       `lib/usb` (§2.2/§18): enumerate the first connected root-hub port and,
       when it is a hub (the Pi 4B onboard hub), power its ports, settle, find
       the connected one, reset it, settle, and address the device behind it on
       a second slot — discovered, never a guessed port, failing closed. Its
       timed settles use the microsecond `Delay` seam, hoisted from
-      `drivers/bus/pcie_brcm` into `lib/abi` (`rustos_abi::Delay`) so the PCIe
+      `drivers/bus/pcie_brcm` into `lib/abi` (`tairix_abi::Delay`) so the PCIe
       and USB driver crates share one trait (§2.2; `pcie_brcm` re-exports it,
       callers unchanged; a trait, so no C-header change). The in-kernel
       `keyboard_service` scaffold's `bring_up_keyboard` now calls the shared
@@ -3625,10 +3625,10 @@ table, so a new board is match **data**, not new code. Sub-increments
       (host-proven).** `drivers/input/usb_hid::service::bring_up_boot_keyboard`
       is the composition the user-space keyboard driver runs at start-up. Over
       its `DriverHost` (the rt-backed host built from its kernel-issued grants)
-      it builds the growable `rustos_usb::SlabBank` over its host's DMA seam
+      it builds the growable `tairix_usb::SlabBank` over its host's DMA seam
       with the discovered aperture top (every chunk is aperture-checked at
       allocation time, fail closed, §5.4), maps its granted xHCI register
-      BAR, brings the controller up (`rustos_usb::Xhci::open` +
+      BAR, brings the controller up (`tairix_usb::Xhci::open` +
       `UsbDevice::start`, growing the geometry-sized shared chunk — the one
       engine definition in `lib/usb`, §2.2), and runs the
       arch-neutral `enumerate_boot_keyboard`, returning a `BootKeyboard` the
@@ -3653,25 +3653,25 @@ table, so a new board is match **data**, not new code. Sub-increments
         `drivers/*`/`userland/*` crate from depending on another `drivers/*`
         crate, and the kernel still links `drivers/input/usb_hid` for the
         transitional in-kernel scaffold (so adding the userland runtime
-        `rustos-rt` there would inject a duplicate `panic_impl`/`_start` into the
+        `tairix-rt` there would inject a duplicate `panic_impl`/`_start` into the
         kernel). Both are resolved by extracting the reusable HID logic into a
-        **new `lib/hid` (`rustos-hid`)** crate — the decoders (`BootKeyboard`,
+        **new `lib/hid` (`tairix-hid`)** crate — the decoders (`BootKeyboard`,
         `BootMouse`), the console producer (`KeyboardConsole`, `pump_once`,
         `ConsoleSink`), and the xHCI boot-keyboard orchestration
         (`bring_up_boot_keyboard`, `derive_keyboard_resources`,
         `KeyboardResources`) — the USB analogue of `lib/usb` ↔ `drivers/bus/usb`
         (§2.2 / §6 / §17.4). `drivers/input/usb_hid` shrinks to the §8 driver
         identity (`register` + `BIND_KEYS`, `lib/abi`-only). The kernel scaffold
-        repoints its decode/console imports to `rustos_hid` (keeping `register`
+        repoints its decode/console imports to `tairix_hid` (keeping `register`
         + `BIND_KEYS` from `usb_hid`). The new **`drivers/input/usb_kbd`
-        (`rustos-drv-input-usb-kbd`, `src/main.rs`)** binary is the
-        `devmgr`-autoloaded user-space keyboard driver: a pure-Rust `rustos-rt`
+        (`tairix-drv-input-usb-kbd`, `src/main.rs`)** binary is the
+        `devmgr`-autoloaded user-space keyboard driver: a pure-Rust `tairix-rt`
         program depending **only** on `lib/*` (hid/drvrt/rt/caps/abi, so §17.4
-        holds and the kernel never links `rustos-rt`) that builds
+        holds and the kernel never links `tairix-rt`) that builds
         `RtDriverHost::from_grants_query` over its kernel-issued grants
         (coherency `None` — the kernel carves coherent DMA, platform-neutral
         §2.20), derives its BAR + DMA aperture from the same delivered grants
-        with the new host-tested `rustos_hid::derive_keyboard_resources` over the
+        with the new host-tested `tairix_hid::derive_keyboard_resources` over the
         new `RtDriverHost::resources()` accessor (no second `resource_grants`
         syscall, §2.16), runs `bring_up_boot_keyboard`, then loops `pump_once`
         with a `KeyInjectSink` over `key_inject` and the userland `ClockDelay`,
@@ -3680,7 +3680,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         `derive_keyboard_resources` handles the Pi 4 shape (outbound `BusWindow`
         BAR + translated inbound `Dma`) and the `virt` shape (`Mmio` BAR +
         untranslated `Dma`), ignores an IRQ grant, and refuses a
-        missing/ambiguous/zero-length grant. Host-proven (`rustos-hid` 45 tests
+        missing/ambiguous/zero-length grant. Host-proven (`tairix-hid` 45 tests
         incl. 9 derivation cases; `usb_hid` 4; `drvrt` 24 incl. 2 `resources()`);
         usb_kbd + the aarch64 kernel build freestanding on all three Tier-1
         targets. **No `lib/abi`/C-header change.** No metal step yet (additive;
@@ -3691,7 +3691,7 @@ table, so a new board is match **data**, not new code. Sub-increments
       - **Scheduler-agnostic kernel/core spawn-with seam — done (host-proven).**
         The production boot wiring is "hosted in `kernel/core`, which owns the
         scheduler", but the bin crate must not name the concrete scheduler
-        (§17.1) and kernel/core cannot depend on `rustos_devmgr` (userland,
+        (§17.1) and kernel/core cannot depend on `tairix_devmgr` (userland,
         §17.4). The seam that resolves this is now landed: the kernel/core
         [`ProcessSpawn`] trait gained `spawn_with(rxe, ctx, granted, args)` (the
         driver-spawn analogue of `spawn(EmbeddedProgram, ctx)` — raw image bytes
@@ -3705,14 +3705,14 @@ table, so a new board is match **data**, not new code. Sub-increments
         chain through it. No `lib/abi`/C-header change.
       - **Signed-store candidate scan — done (host-proven).** The §18.3 store
         scan that turns the installed `/System/Drivers/` bundles into autoload
-        candidates is landed as `rustos_drvhost::store`
+        candidates is landed as `tairix_drvhost::store`
         (`userland/system/drvhost/src/store.rs`): `scan_store(source, paths,
         sink) -> DriverStore` reads each enumerated bundle through the existing
         `ImageSource`, parses its `.rxe` manifest with the same `ParsedImage`
         splitter the load gate uses (no drift, §2.2), decodes its bind table
         fail-closed, and emits an owned `ScannedDriver` whose
         `DriverStore::candidates()` lends the canonical
-        `rustos_devmatch::DriverCandidate` slice `DeviceManager::autoload`
+        `tairix_devmatch::DriverCandidate` slice `DeviceManager::autoload`
         consumes. The scan is a **match** step only — it grants no authority and
         verifies no signature; signature/syscall-hash/capability/`kind`
         verification stay at `Host::load` when (and only when) a candidate wins
@@ -3726,7 +3726,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         `docs/src/drivers/host.md` ("Signed-store scan"). No metal step (the
         scan has no production consumer yet — the boot wiring below is next).
       - **`/System/Drivers/` store enumeration (kernel half) — done
-        (host-proven).** `rustos_kernel_core::driver_store::enumerate_driver_store`
+        (host-proven).** `tairix_kernel_core::driver_store::enumerate_driver_store`
         is the boot-time walk that turns the on-disk store tree into the bundle
         image-path list `scan_store` consumes. Mirroring `users::load_users_db`,
         it builds the shared root-backed VFS (`crate::fs::root_backed_vfs` — the
@@ -3746,7 +3746,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         production consumer yet — the boot wiring below is next).
       - **VFS-backed `ImageSource` (the bundle-byte reader) — done
         (host-proven).** The enumeration above yields the bundle *paths*; this
-        reads their *bytes*. `rustos_kernel_core::driver_store::DriverImageReader`
+        reads their *bytes*. `tairix_kernel_core::driver_store::DriverImageReader`
         builds the shared root-backed VFS once (§2.16) and `read_image(fs, path,
         buf)` reads one bundle off the mounted root under the uid-0 bootstrap
         identity: it validates the path lies strictly within `/System/Drivers/`,
@@ -3756,7 +3756,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         any refusal (§5.4/§2.9); `DriverImageError`→`Errno`. The `ImageSource`
         trait is `drvhost`'s (userland) and §17.4 forbids a `kernel/core`→drvhost
         edge, so the bin crate (the one layer that may name `drvhost`) supplies
-        the thin delegating adapter `rustos_kernel::driver_store_source::VfsImageSource`
+        the thin delegating adapter `tairix_kernel::driver_store_source::VfsImageSource`
         — `DriverImageReader` + the root-volume driver behind a `RefCell` (the
         `&self` `read` vs `&mut` driver bridge; the scan is single-threaded, one
         bundle at a time), adding no authority. Host-proven (11 kernel-core
@@ -3768,7 +3768,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         the bundle bytes off the root volume"). No metal step (no production
         consumer yet — the boot wiring below is next).
       - **Boot-wiring composition — done (host-proven).**
-        `rustos_kernel::driver_autoload::autoload_drivers(tree, store_paths,
+        `tairix_kernel::driver_autoload::autoload_drivers(tree, store_paths,
         image_source, trusted, spawn, args, caller_caps, sink)` is the single
         production composition that turns the discovered hardware tree + the
         installed signed store into autoloaded user-space drivers: it scans the
@@ -3787,7 +3787,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         an empty store binds nothing). No `lib/abi`/C-header change. Docs:
         `docs/src/drivers/host.md` ("Autoloading by discovery").
       - **Mounted-root composition — done (host-proven).**
-        `rustos_kernel::driver_autoload::autoload_from_mounted_root(fs, tree,
+        `tairix_kernel::driver_autoload::autoload_from_mounted_root(fs, tree,
         trusted, spawn, args, caller_caps, sink)` is the thin production glue
         the live boot path drives once the root is mounted: it sources the
         store paths *and* the bundle bytes from the just-mounted root volume
@@ -3857,31 +3857,31 @@ table, so a new board is match **data**, not new code. Sub-increments
           priority tier — the single source of truth its signed manifest is
           authored from; host-tested + README/`docs/src/drivers/input.md`).
           The reusable `open`/`poll`/`decode` device logic is **now extracted**
-          to the new `lib/virtio_input` (`rustos-virtio-input`) crate — the
+          to the new `lib/virtio_input` (`tairix-virtio-input`) crate — the
           §17.4 analogue of `lib/hid` ↔ `usb_hid` — so both the in-kernel
           `-M virt` verticals and the user-space `rxe` compose it without a
           `drivers/*`→`drivers/*` edge; `drivers/input/virtio_input` is now the
           thin §8 `register` + `BIND_KEYS` shell (the device id is
-          `rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID`), and the
+          `tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID`), and the
           `virtio_qemu_support` harness consumes `VirtioInput` from the lib.
-          Host-proven (`rustos-virtio-input` 9 device-logic tests, driver shell
+          Host-proven (`tairix-virtio-input` 9 device-logic tests, driver shell
           2). The **lib-reachable concrete virtio MMIO transport** the
           user-space driver needs is **now landed**: `MmioTransport` moved from
           `drivers/bus/virtio` into `lib/virtio` (it depends only on the
           bounds-checked `RegisterWindow` + the protocol types), so an
           arch-neutral `drivers/input/*` `rxe` can build it without a
           `drivers/*`→`drivers/*` edge (§17.4 — the `lib/usb` ↔ `drivers/bus/usb`
-          precedent). `drivers/bus/virtio` re-exports it from `rustos_virtio`
-          (existing `rustos_drv_bus_virtio::MmioTransport` import sites resolve
+          precedent). `drivers/bus/virtio` re-exports it from `tairix_virtio`
+          (existing `tairix_drv_bus_virtio::MmioTransport` import sites resolve
           unchanged, §2.2); §3, `docs/src/drivers/virtio.md`, and the
           `transport_mmio` tests moved with it. The autoloadable `rxe`
           **binary is now landed**: `drivers/input/virtio_kbd`
-          (`rustos-drv-input-virtio-kbd`, `src/main.rs`) is the `usb_kbd`
-          analogue — a freestanding `rustos-rt` program depending only on
+          (`tairix-drv-input-virtio-kbd`, `src/main.rs`) is the `usb_kbd`
+          analogue — a freestanding `tairix-rt` program depending only on
           `lib/*` (`lib/virtio`, `lib/virtio_input`, `lib/drvrt`, `lib/rt`,
           `lib/caps`, `lib/abi`) that builds `RtDriverHost::from_grants_query`
           over its kernel-issued grants, resolves its sole granted register
-          window with the new `rustos_abi::driver::sole_register_window`
+          window with the new `tairix_abi::driver::sole_register_window`
           (built on `HwResource::register_window_base`, the one §2.2 definition
           of "which address names this resource's register window" — shared
           with `lib/hid`'s `derive_keyboard_resources`), maps it, builds the
@@ -3889,7 +3889,7 @@ table, so a new board is match **data**, not new code. Sub-increments
           `VirtioHost`, and loops `poll` → `VirtioKeyboardConsole::feed` →
           `key_inject` (the new `evdev`-keycode console producer in
           `lib/virtio_input`, resolving the US layout through the shared
-          `rustos_keymap::key_input`, §2.2). The
+          `tairix_keymap::key_input`, §2.2). The
           `virtio_driver_layer_is_on_lib_only` deps-check binds the new crate to
           `lib/virtio` (not the bus driver). Host-proven (`lib/abi`
           `sole_register_window`/`register_window_base` tests,
@@ -3939,8 +3939,8 @@ table, so a new board is match **data**, not new code. Sub-increments
           definition every image consumer shares, §2.2) cross-compiles
           `drivers/input/virtio_kbd` PIE (its `drivers/input/virtio_kbd/Run.ld`),
           converts it to an `rxe` relocated for the shared
-          `rustos_itest_harness::USER_IMAGE_BIAS`, and signs it via the shared
-          `rustos_itest_harness::driver_image` composer with
+          `tairix_itest_harness::USER_IMAGE_BIAS`, and signs it via the shared
+          `tairix_itest_harness::driver_image` composer with
           `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
           `BIND_KEYS` + caps (`CAP_MMIO_MAP`/`CAP_MEM_DMA`/`CAP_INPUT_INJECT`).
           The autoload caller presents the delegatable
@@ -3971,15 +3971,15 @@ table, so a new board is match **data**, not new code. Sub-increments
           scaffold stays the metal keyboard driver and stays wired, so the
           working metal keyboard never regresses (§2.17).
       - **Userland clock + `Delay` prerequisite — done (host-proven).**
-        `rustos_rt::clock_get` (the first-party wrapper over `abi-v1` syscall 7,
+        `tairix_rt::clock_get` (the first-party wrapper over `abi-v1` syscall 7,
         the raw `u64` nanosecond reading, no coarsening of its own) and
-        `rustos_rt::ClockDelay` — the one userland `rustos_abi::Delay`
+        `tairix_rt::ClockDelay` — the one userland `tairix_abi::Delay`
         implementation (`delay_us` parks cooperatively via `clock_get` +
         `yield_now`, never a hard spin §2.1; `now_us` floors the reading to
         whole microseconds) — live in the single userland runtime so every
         driver process shares one clock-backed `Delay` rather than each rolling
         its own (§2.2). This is the `Delay` the keyboard-driver binary hands to
-        `service::bring_up_boot_keyboard`. Host-proven (`rustos-rt` tests: the
+        `service::bring_up_boot_keyboard`. Host-proven (`tairix-rt` tests: the
         `clock_get` trap marshalling via the `abi-trap` seam, `now_us`
         flooring, and the cooperative-wait core `spin_until_ns` — past-deadline
         returns without yielding, advancing-clock yields a bounded count). No
@@ -4020,7 +4020,7 @@ mode may not collapse it.
 **Boot sequencing (the §18 path, no ambient authority, fail closed §5.4):**
 1. bootstrap-floor storage + bus bring-up (incl. the metal PCIe-RC + xHCI);
 2. enumerate every device — **including the USB-HID keyboard behind the VL805
-   hub — into the `rustos_abi::hwtree`** (metal USB→tree enumeration, the
+   hub — into the `tairix_abi::hwtree`** (metal USB→tree enumeration, the
    piece the deleted scaffold did imperatively);
 3. mount the read-only `/System` volume and **autoload its signed
    `/System/Drivers/` store against the discovered tree** (`devmgr` match →
@@ -4040,7 +4040,7 @@ keyboard never regresses (§2.17), until the final flip:
   `0x7e`, GPT GUID `TYPE_GUID_ARXFS_SYSTEM`). `ARXFS::open_read_only` mounts
   a volume read-only and every mutator fails closed (`commit` backstop +
   early `deny_if_read_only` guards, §5.4). The `/System` volume is a `ARXFS`
-  volume keyed by the non-secret well-known `rustos_drv_fs_arxfs::
+  volume keyed by the non-secret well-known `tairix_drv_fs_arxfs::
   SYSTEM_VOLUME_KEY` (effectively unencrypted; integrity rests on the
   per-bundle signatures, §18.6). `tools/mkimage::rootfs::build_system_partition`
   lays the §16.2 skeleton at the volume root and `build_rpi_image` emits the
@@ -4063,10 +4063,10 @@ keyboard never regresses (§2.17), until the final flip:
   is deleted (§2.14). The driver store is addressed **relative to the scanned
   volume's root**: `enumerate_driver_store`/`DriverImageReader::read_image` take
   an explicit `store_root`, and the `/System` volume (whose own root *is*
-  `/System`) is scanned at the volume-relative `rustos_kernel_core::
+  `/System`) is scanned at the volume-relative `tairix_kernel_core::
   SYSTEM_VOLUME_STORE_PATH` (`/Drivers`), the §16.2 `/System/Drivers/` store.
   The fixtures plant the signed `virtio_kbd` bundle into the `/System` volume's
-  `Drivers/` store (shared `rustos_test_arxfs_image::plant_nested_file`; the
+  `Drivers/` store (shared `tairix_test_arxfs_image::plant_nested_file`; the
   encrypted root carries no drivers, §2.14); `SYSTEM_SECTORS` grown to 8 MiB to
   hold it. `autoload_input_qemu_aarch64` proves the full discover→signed
   gate→spawn→`key_inject` path runs pre-unlock (PASS on
@@ -4104,9 +4104,9 @@ keyboard never regresses (§2.17), until the final flip:
   on which floor block driver `root_storage` bound: `virtio_blk_unlock` (the
   proven `-M virt` / x86_64 path, device-IRQ + DMA) or the new `emmc2_unlock`
   arm. EMMC2 is programmed-I/O, so its arm binds no device IRQ and carves no
-  DMA pool: it admits `rustos-drv-storage-emmc2` through the signed §8 load
+  DMA pool: it admits `tairix-drv-storage-emmc2` through the signed §8 load
   gate, resolves the matched node's **sole register window**
-  (`rustos_abi::driver::sole_register_window` — never a board constant, §18.1
+  (`tairix_abi::driver::sole_register_window` — never a board constant, §18.1
   / §2.20), maps it under `CAP_MMIO_MAP` through a minimal in-kernel
   MMIO-only `Emmc2Host` + the shared `KernelMmioMapper`, opens the card, and
   feeds the `Block` to the **shared** `finish_unlock` tail (mount + read-only
@@ -4139,7 +4139,7 @@ keyboard never regresses (§2.17), until the final flip:
   `root`/`root` forever; and (2) `login` printed its `Username:` prompt
   immediately, on the **same** console the unlock kthread was prompting
   `Root passphrase:` on, so the two prompts drew over each other. Both are
-  fixed by the `LateUsersDb` three-state machine + `rustos_login::supervise`
+  fixed by the `LateUsersDb` three-state machine + `tairix_login::supervise`
   (see P11): while the unlock is pending `users_db_read` returns
   `WouldBlock`, so `login` waits without prompting; once it resolves the
   installed database is picked up (or the deny-all prompt runs).
@@ -4239,7 +4239,7 @@ keyboard never regresses (§2.17), until the final flip:
     neither the per-boot probe nor routine retries flood the log, while the
     record stays available for brute-force forensics when the level is
     lowered (`AGENTS.md` §2.1 / §19.4). Regressions in
-    `kernel/rustos-kernel` `root_mount`: the two wrong-passphrase tests
+    `kernel/tairix-kernel` `root_mount`: the two wrong-passphrase tests
     assert no `4134`, a new classifier test pins
     wrong-passphrase → (4142, Debug) and every structural refusal →
     (4134, Error).
@@ -4262,7 +4262,7 @@ two users — or the same user twice — can be logged in concurrently.
 - `lib/crypto`: PBKDF2-HMAC-SHA256 (`pbkdf2_sha256` / `pbkdf2_sha256_verify`,
   published vectors, `ct_eq` comparison) — the password derivation the user
   database stores.
-- `lib/users` (`rustos-users`): the `/System/Security/Users` `users-v1`
+- `lib/users` (`tairix-users`): the `/System/Security/Users` `users-v1`
   format — full §5.1 account identity (username, uid/gids, display name,
   home, shell of choice, `CAP_*` grant ceiling, `active`/`locked` state,
   salted PBKDF2 record at a bounded per-record cost), fail-closed bounded
@@ -4276,19 +4276,19 @@ two users — or the same user twice — can be logged in concurrently.
   `Errno::PermissionDenied`. Login's `Uid`/`Gid` now come from `lib/users`.
 - `tools/mkimage` image profiles: `cargo xtask image --target aarch64-rpi
   [--profile debug|installer]` emits
-  `images/rustos-aarch64-rpi-<profile>.img`. The **debug** image seeds
+  `images/tairix-aarch64-rpi-<profile>.img`. The **debug** image seeds
   `/System/Security/Users` with the `root`/`root` test account (per-build
   random salt, default cost, explicit admin cap ceiling); the **installer**
   image seeds none (the §11 installer authors it on first boot). Proven by
   mkimage host tests mounting the built root and authenticating.
 - **Root-volume read path at boot** (former increment 1):
-  `rustos_kernel_core::users::load_users_db` reads
+  `tairix_kernel_core::users::load_users_db` reads
   `/System/Security/Users` off the mounted root volume's
   `FilesystemRead` + `FilesystemSecurity` driver through the VFS's
   §5.3-checked per-inode delegation — the root mount carries the volume's
   driver (`MountTable::back_root`, exactly once), the file is bounded
   against the format's 64 KiB maximum *before* reading, and the bytes go
-  through the fail-closed `rustos-users` parser. The read runs under the
+  through the fail-closed `tairix-users` parser. The read runs under the
   kernel bootstrap identity (`uid 0`, **no** capabilities — a
   capability-gated or unreadable record refuses, §5.1/§5.4); every
   outcome is audited (`USERS_DB_LOADED` 4040 / `USERS_DB_REJECTED` 4041)
@@ -4302,20 +4302,20 @@ two users — or the same user twice — can be logged in concurrently.
 - **The login `Run` binary + the `users_db_read` delivery seam**
   (former increment 1): the login service ships at
   `/System/Services/login.app/Run` (`userland/session/login/src/run.rs`, a
-  `rustos-rt` program) and PID 1 `init`'s `session` directive points at
+  `tairix-rt` program) and PID 1 `init`'s `session` directive points at
   it. The kernel-held database is delivered through the new `abi-v1`
   syscall **`users_db_read`** (no. 19, gated on the new
   **`CAP_USERS_READ`** (21), audited): the kernel serves the exact
   `users-v1` text from the `kernel/core::users::UsersDbSource` seam
   (installed via `with_users_db`; fail-closed `NotImplemented` unwired /
   `NotFound` with no database / `BufferTooSmall` rather than truncate),
-  and login re-parses it with the same fail-closed `rustos-users`
+  and login re-parses it with the same fail-closed `tairix-users`
   parser. With no database (installer image, no root volume) login wires
   a deny-all authenticator — the prompt stays up and every attempt is
   refused (§5.4.5). Design B spawns `login` **before** the in-kernel unlock
   kthread mounts the encrypted root, and the kthread prompts for the
   passphrase on the **same** console, so the `users_db_read` seam is a
-  **three-state** machine (`LateUsersDb`) and `rustos_login::supervise`
+  **three-state** machine (`LateUsersDb`) and `tairix_login::supervise`
   acts on it **before every round**: while the unlock is still running the
   read returns `WouldBlock` and `login` *waits without prompting* (yielding
   the CPU) so the unlock owns the console and the two prompts never collide;
@@ -4353,7 +4353,7 @@ two users — or the same user twice — can be logged in concurrently.
   (`plans/SPAWN.md` SP5b), so any allocation there would abort the
   process (the original per-keystroke `Vec::push` did exactly that on
   metal: every typed character killed login and `init`'s relaunch
-  re-printed `Username: `). `rustos_login::Prompt` fills caller stack
+  re-printed `Username: `). `tairix_login::Prompt` fills caller stack
   buffers (`INPUT_LINE_MAX` = 512), `Credentials` borrows `&str`, and
   `Login::run` zeroes the password buffer after every attempt; only the
   authenticate path (which parses a delivered database) still needs
@@ -4381,7 +4381,7 @@ two users — or the same user twice — can be logged in concurrently.
 - **Separate console contexts — LANDED** (former increment 1, minus
   echo). The video console and the UART are independent stream backings
   with their own login sessions:
-  - `rustos_abi::DescriptorTable` records, per standard descriptor, the
+  - `tairix_abi::DescriptorTable` records, per standard descriptor, the
     installed-console index backing it (`standard_on(console)`;
     `standard()` = console 0). `spawn` (now 3-arg) takes a `console`
     selector — `CONSOLE_INHERIT` (all-ones sentinel) copies the
@@ -4390,8 +4390,8 @@ two users — or the same user twice — can be logged in concurrently.
     closed with `NotFound` otherwise. New `abi-v1` syscall
     **`console_count`** (no. 20, `CAP_CONSOLE_WRITE`, unaudited)
     reports the installed-list length. C view regenerated
-    (`ros_sys_spawn` 3-arg, `ros_sys_console_count`,
-    `ROS_CONSOLE_INHERIT`).
+    (`tairix_sys_spawn` 3-arg, `tairix_sys_console_count`,
+    `TAIRIX_CONSOLE_INHERIT`).
   - kernel-core holds a `'static [ConsoleDevice]` list
     (`BootInfo::with_consoles` → `KernelSyscallHandlers::with_consoles`;
     empty fail-closed default). `stream_write`/`stream_read` resolve
@@ -4439,8 +4439,8 @@ two users — or the same user twice — can be logged in concurrently.
   read and restores cooked after, so a credential is never rendered, and
   fails the read closed if the mode cannot be selected (`AGENTS.md`
   §5.4); `top`/`man` select raw so neither echo nor marker paints over
-  their displays. First-party wrapper `rustos_rt::set_input_mode`; C
-  stub `ros_sys_stream_input_mode` (header regenerated). Proven by
+  their displays. First-party wrapper `tairix_rt::set_input_mode`; C
+  stub `tairix_sys_stream_input_mode` (header regenerated). Proven by
   kernel-core tests (echo to the write half + CR/LF translation, secret
   and raw suppressing echo, fail-closed on the reserved/unknown mode and
   a non-read fd), console.rs `echo_bytes` unit tests, and lib/rt +
@@ -4458,7 +4458,7 @@ two users — or the same user twice — can be logged in concurrently.
   every `set_input_mode` change) so an erase at the start of the input line
   never walks back over the prompt; the state persists across the many
   per-byte `stream_read` drains one logical input line spans. Reader
-  **buffer** half (`rustos_vt::line::LineEditor`, a host-tested
+  **buffer** half (`tairix_vt::line::LineEditor`, a host-tested
   allocation-free editor shared by the root-unlock passphrase prompt,
   login's prompt reads, and the shell REPL's line reader): CR/LF completes
   the line, an erase pops the last byte (zeroed on removal, §4) and is
@@ -4471,7 +4471,7 @@ two users — or the same user twice — can be logged in concurrently.
   `docs/src/userland/login.md`.
 - **Secret-entry feedback (`[input active...]`) — LANDED.** Every
   echo-suppressed (password) prompt shows the shared activity marker: the
-  pure `rustos_vt::secret::SecretIndicator` state machine (show on first
+  pure `tairix_vt::secret::SecretIndicator` state machine (show on first
   typed character, dots cycling `.`/`..`/`...` on a one-second cadence).
   The animation is bounded: it runs for at least three seconds
   (`SECRET_ANIMATE_NS`) after the most recent keystroke and then freezes
@@ -4492,7 +4492,7 @@ two users — or the same user twice — can be logged in concurrently.
   *count* is tracked; no secret byte is stored or rendered. The aarch64
   framebuffer text console honours Backspace (cursor back one column, no
   glyph), so the marker's rub-outs and dot redraws render correctly on the
-  HDMI console, not as `?` fallback glyphs. Proven by `rustos_vt::secret`
+  HDMI console, not as `?` fallback glyphs. Proven by `tairix_vt::secret`
   tests and the `console.rs` feedback tests (inert until armed, marker
   show, freeze after the window, resume/extend on typing, `[input
   complete]` on Enter, erase/abort removal, secret-mode arm / cooked- and
@@ -4505,7 +4505,7 @@ two users — or the same user twice — can be logged in concurrently.
   unaudited): a driver that has decoded a directly attached keyboard
   pushes the decoded console bytes into a target installed-console index;
   the kernel copies them in (capability- and bounds-checked, §5.4),
-  enqueues them on that console's `rustos_kernel_core::ConsoleInputQueue`
+  enqueues them on that console's `tairix_kernel_core::ConsoleInputQueue`
   (a bounded type-ahead ring that is both the console's `ConsoleRead`
   half — drained by a video-login `stream_read`, waking a reader parked
   in `BlockingConsoleRead` — and its `ConsoleInput` half), and zeroes
@@ -4516,8 +4516,8 @@ two users — or the same user twice — can be logged in concurrently.
   is backed by the shared `VIDEO_KEYBOARD` queue, so the
   video login takes input only from its own keyboard, never the serial
   line (with a display active the UART is not installed as a console at
-  all). First-party wrapper `rustos_rt::console_input`; C stub
-  `ros_sys_console_input` (header regenerated). Proven by kernel-core
+  all). First-party wrapper `tairix_rt::console_input`; C stub
+  `tairix_sys_console_input` (header regenerated). Proven by kernel-core
   queue unit tests (FIFO drain, short read, ring wrap, overflow short
   push) + the `console_input` handler tests (push→read round trip;
   fail-closed for an unknown console and for a non-injectable UART
@@ -4525,7 +4525,7 @@ two users — or the same user twice — can be logged in concurrently.
 - **Keyboard input for the video console — host-side producer LANDED.**
   The producer that turns decoded key events into the bytes
   `console_input` injects is now host-proven. The shared terminal key
-  map is the new `lib/keymap` crate (`rustos-keymap`): `encode_key(Key,
+  map is the new `lib/keymap` crate (`tairix-keymap`): `encode_key(Key,
   Modifiers, &mut [u8])` writes the console (tty) bytes one key press
   sends — a printable char (UTF-8, with the `Ctrl` C0-control and `Alt`
   meta-prefix arithmetic), `Enter`→CR, `Backspace`→DEL, `Tab`, `Escape`,
@@ -4534,7 +4534,7 @@ two users — or the same user twice — can be logged in concurrently.
   §2.2). It is `no_std`, allocation-free (writes a caller buffer, so it
   works before the SP5b userland heap), and fail-closed (`MAX_KEY_BYTES`
   bounds it; an unmappable key emits nothing). `drivers/input/usb_hid`
-  gained a `console` module: the US HID-usage→`rustos_input::Key` table
+  gained a `console` module: the US HID-usage→`tairix_input::Key` table
   (letters/digits/shifted symbols/named keys/keypad), a stateful
   `KeyboardConsole` tracking the modifier bits + caps/num lock, and
   `pump_once` — the driver loop that polls the keyboard, feeds each event
@@ -4616,7 +4616,7 @@ two users — or the same user twice — can be logged in concurrently.
      - **Kernel-neutral install seam — LANDED.** The architecture-neutral
        half of this — the §17.4 boundary between the install *policy* and
        the board storage bring-up that *produces* the mounted driver — is
-       wired: `rustos_kernel_core::users::load_users_db_source` reads
+       wired: `tairix_kernel_core::users::load_users_db_source` reads
        `/System/Security/Users` off a mounted root FS driver (sharing the
        §5.3-checked read, the fail-closed parse, and the `USERS_DB_*`
        audit with `load_users_db`, §2.2) and returns a
@@ -4631,8 +4631,8 @@ two users — or the same user twice — can be logged in concurrently.
        builder). No `lib/abi`/C-header change (`BootInfo` is a kernel/core
        handover type, not FFI).
      - **Chunk A — the arch-neutral unlock + mount + load composition —
-       LANDED (host-proven).** `rustos_kernel::root_mount::unlock_root_and_load_users`
-       (`kernel/rustos-kernel/src/root_mount.rs`) is the one composition —
+       LANDED (host-proven).** `tairix_kernel::root_mount::unlock_root_and_load_users`
+       (`kernel/tairix-kernel/src/root_mount.rs`) is the one composition —
        in the `Layer::Tooling` bin crate, the only layer permitted to name
        both the `arxfs` driver and `kernel/core` (§17.4) — that turns the
        three artefacts a boot path recovers off storage into the served
@@ -4650,18 +4650,18 @@ two users — or the same user twice — can be logged in concurrently.
        tests (the correct passphrase unlocks the volume and the served text
        parses + authenticates the planted `root`/`root`; a wrong passphrase,
        a tampered descriptor, and a non-arxfs volume each refused
-       fail-closed). The shared `rustos_test_arxfs_image` fixture gained
+       fail-closed). The shared `tairix_test_arxfs_image` fixture gained
        `build_users_root_image_with_key` + `VecBlock::from_bytes` so the
        test authors a real volume under a passphrase-derived key through the
        one on-disk-layout source of truth (§2.2). No `lib/abi`/C-header
        change.
      - **Chunk B-1 — the FAT `root.unlock` reader — LANDED (host-proven).**
-       `rustos_kernel::root_mount::read_root_unlock_descriptor` reads the
+       `tairix_kernel::root_mount::read_root_unlock_descriptor` reads the
        plaintext `root.unlock` key-derivation descriptor off the FAT boot
        partition through the **same** real FAT32 driver `tools/mkimage`
        authored it with — one on-disk definition for writer and reader
        (§2.2). The file name is now the shared
-       `rustos_drv_fs_arxfs::ROOT_UNLOCK_NAME` constant (hoisted from
+       `tairix_drv_fs_arxfs::ROOT_UNLOCK_NAME` constant (hoisted from
        `tools/mkimage::fatboot`, which re-exports it; §2.2 / §2.14). The
        descriptor is a fixed-length record, so the read is strictly bounded
        and fail-closed (§5.4 / §24.4): the entry's size is checked to be
@@ -4674,7 +4674,7 @@ two users — or the same user twice — can be logged in concurrently.
        partition refused) over a FAT volume authored through the real FAT32
        driver. No `lib/abi`/C-header change.
      - **Chunk B-2 boot-path entry composition — LANDED (host-proven).**
-       `rustos_kernel::root_mount::mount_root_and_load_users` is the single
+       `tairix_kernel::root_mount::mount_root_and_load_users` is the single
        boot-path entry that threads Chunk B-1 into Chunk A: given the two
        brought-up `Block` devices (FAT boot partition + encrypted root) and
        the typed passphrase it reads the `root.unlock` descriptor
@@ -4689,7 +4689,7 @@ two users — or the same user twice — can be logged in concurrently.
        missing descriptor refused with no unlock; a wrong passphrase refused
        fail-closed). No `lib/abi`/C-header change.
      - **Chunk B-2 single-disk partition split — LANDED (host-proven).**
-       `rustos_kernel::root_mount::mount_root_disk_and_load_users` is the
+       `tairix_kernel::root_mount::mount_root_disk_and_load_users` is the
        entry for the common case: **one** whole-disk `Block` device. It
        parses the partition table through the shared, scheme-neutral
        `lib/partition` layer — MBR encode (the image author) + fail-closed
@@ -4710,7 +4710,7 @@ two users — or the same user twice — can be logged in concurrently.
        `lib/abi` ABI change (the `&mut B` `Block` impl is a forwarding impl,
        not a new method — no C-header regen).
      - **Chunk B-2 root-storage bind gate — LANDED (host-proven).**
-       `rustos_kernel::root_storage` resolves which **discovered**
+       `tairix_kernel::root_storage` resolves which **discovered**
        hardware-tree node carries the bootstrap root block device, and which
        floor block driver binds it, through the **same** shared `lib/devmatch`
        policy the user-space `devmgr` autoloader uses — applied against the
@@ -4734,7 +4734,7 @@ two users — or the same user twice — can be logged in concurrently.
        (8 `root_storage` tests + the `driver_catalog` block-flag test);
        aarch64 kernel builds freestanding. No `lib/abi`/C-header change.
      - **Chunk B-2 late-bound users-db cell — LANDED (host-proven).**
-       `rustos_kernel_core::LateUsersDb` (`kernel/core/src/users.rs`) is the
+       `tairix_kernel_core::LateUsersDb` (`kernel/core/src/users.rs`) is the
        set-once `UsersDbSource` the post-boot unlock step publishes the
        mounted database into. The encrypted root is unlocked only **after**
        the console keyboard is live (the operator types the passphrase, §11),
@@ -4753,12 +4753,12 @@ two users — or the same user twice — can be logged in concurrently.
        authenticate; set-once-refuses-replacement). No `lib/abi`/C-header
        change.
      - **Chunk B-2 interactive unlock policy — LANDED (host-proven).**
-       `rustos_kernel::root_mount::unlock_root_disk_interactively` is the
+       `tairix_kernel::root_mount::unlock_root_disk_interactively` is the
        device-independent prompt + retry + install policy the in-kernel
        unlock kthread runs once the board has brought up the root block
        device and the console keyboard is live. Generic over the `Block`
        disk and taking the console halves as the object-safe
-       `rustos_kernel_core::{ConsoleWrite, ConsoleRead}` seams, it names no
+       `tairix_kernel_core::{ConsoleWrite, ConsoleRead}` seams, it names no
        arch or device type (§17.4). Each attempt prompts
        `ARXFS passphrase:`, reads one line into a zeroized,
        fixed-length on-stack buffer
@@ -4784,7 +4784,7 @@ two users — or the same user twice — can be logged in concurrently.
        `lib/abi`/C-header change.
      - **Chunk B-2 `&'static LateUsersDb` dispatch-hook wiring — LANDED
        (whole gate green).** The shared set-once cell
-       `rustos_kernel::root_mount::LATE_USERS_DB` is the one definition the
+       `tairix_kernel::root_mount::LATE_USERS_DB` is the one definition the
        dispatch hook reads and the unlock kthread installs into; the aarch64
        boot path hands it to the hook via `BootInfo::with_users_db`, so
        `users_db_read` reads that cell on every call. Until an install it
@@ -4794,7 +4794,7 @@ two users — or the same user twice — can be logged in concurrently.
        `lib/abi`/C-header change.
      - **Chunk B-2 root-mount->login QEMU vertical — LANDED (whole gate
        green, incl. both Pi images).** A new `-M virt`
-       `rustos-test-root-unlock-login-qemu-aarch64` vertical reuses the
+       `tairix-test-root-unlock-login-qemu-aarch64` vertical reuses the
        virtio-blk-mmio bring-up, then drives the production
        `unlock_root_disk_interactively` over a planted **whole-disk**
        encrypted-root image (MBR + FAT boot carrying `root.unlock` + a
@@ -4802,7 +4802,7 @@ two users — or the same user twice — can be logged in concurrently.
        at the prompt over a scripted console, mounts the root, installs the
        database into a `LateUsersDb`, and proves the planted account
        authenticates while a wrong password is refused. The disk is the
-       shared `rustos-test-encrypted-root-image` fixture (authored by the
+       shared `tairix-test-encrypted-root-image` fixture (authored by the
        real in-tree FAT32/`ARXFS` drivers + `mbr::encode`), which the
        `root_mount` host tests also split, so the in-memory split tests and
        the live (emulated) board exercise one on-disk layout (§2.2). No
@@ -4810,16 +4810,16 @@ two users — or the same user twice — can be logged in concurrently.
      - **INCREMENT (1) — production aarch64 device-IRQ subsystem — LANDED
        (host-proven + `-M virt` vertical).** The prerequisite that lets a
        kthread block on a device interrupt is complete:
-       `kernel/rustos-kernel::aarch64::gic_irq::GicIrqController` bridges the
-       arch `GicController` to `rustos_kernel_irq::IrqController`,
+       `kernel/tairix-kernel::aarch64::gic_irq::GicIrqController` bridges the
+       arch `GicController` to `tairix_kernel_irq::IrqController`,
        `Aarch64BinArch::irq_routing`/`install_irq_dispatch` wire the GICv2
        routing + the EL1-vector `set_device_irq_dispatch` seam into the
        kernel/core `irq` phase (additive, no SPI bound until INCREMENT (2), so
        the metal boot is unaffected, §2.17); `kernel/arch/aarch64::fdt::
        gic_device_intid` decodes a device node's `interrupts` triple into a
        GICv2 INTID (SPI=number+`MIN_SPI_INTID`, no board constant, §2.20); and
-       `rustos_kernel_core::KthreadIrqWaiter` is the cooperative
-       `rustos_kernel_irq::IrqWaiter` an in-kernel service kthread drives
+       `tairix_kernel_core::KthreadIrqWaiter` is the cooperative
+       `tairix_kernel_irq::IrqWaiter` an in-kernel service kthread drives
        (yields via the `YieldHandle`, mirrors `SyscallIrqWaiter`). Proven by
        `tests/integration/irq_kthread_qemu_aarch64`: a discovered RTC SPI wakes
        a `spawn_kthread` service parked in `block_until_ready` under the live
@@ -4828,7 +4828,7 @@ two users — or the same user twice — can be logged in concurrently.
        No `lib/abi`/C-header change.
      - **INCREMENT (2) — Chunk B-2 the live in-kernel unlock kthread —
        LANDED (host-proven + the whole `-M virt` QEMU matrix green, both Pi
-       images built).** `kernel/rustos-kernel::unlock_service` admits an
+       images built).** `kernel/tairix-kernel::unlock_service` admits an
        in-kernel root-unlock scheduler kthread at the aarch64 init seam (in
        `init_spawn`, right after the keyboard scaffold, before `admit_init`
        diverges) that brings the bootstrap virtio-blk root device up over the
@@ -4859,7 +4859,7 @@ two users — or the same user twice — can be logged in concurrently.
          subtree beside `boot`/`init_spawn`): the **arch-specific bring-up
          only** — `spawn_if_present` + `run_unlock` (over the arch-neutral
          helpers above), the GIC/FDT `device_spi`, the `wfi_fallback_park`
-         supplied to the shared `rustos_kernel_core::IrqParkWaiter`,
+         supplied to the shared `tairix_kernel_core::IrqParkWaiter`,
          and the throwaway-bookkeeping VBASE/`PageTablePool` constants —
          build the bring-up
          off the boot-discovered DTB — `virtio_mmio_bus_from_dtb` → `MmioMap` +
@@ -4879,7 +4879,7 @@ two users — or the same user twice — can be logged in concurrently.
          `irq` phase) calls `gic::init()` (enable distributor + CPU interface;
          additive — no line delivers until a driver routes its own, §2.17).
          The unlock kthread binds the device SPI on the core-published
-         `IrqTable`; the shared waiter (`rustos_kernel_core::IrqParkWaiter`)
+         `IrqTable`; the shared waiter (`tairix_kernel_core::IrqParkWaiter`)
          re-arms the line (`gic_irq::CompositeIrqController::rearm`; unmask is
          the arch op the kernel `IrqController` trait omits) and **parks the
          calling task off the run queue** (register on `IRQ_WAITQ` → re-check
@@ -4896,7 +4896,7 @@ two users — or the same user twice — can be logged in concurrently.
          into a budget-bounded busy-poll.
          `KthreadConsoleRead` keeps the cooperative `CooperativeYield` for the
          IRQ-less, polled passphrase read.
-       - **virtio-MMIO device-interrupt ACK (load-bearing).** `rustos_virtio::
+       - **virtio-MMIO device-interrupt ACK (load-bearing).** `tairix_virtio::
          Transport` gained a default-no-op `ack_interrupt`; `MmioTransport`
          overrides it to read `InterruptStatus` and write `InterruptACK`
          (virtio 1.1 §4.2.2), and `virtio_blk::run_request` calls it after
@@ -4929,11 +4929,11 @@ two users — or the same user twice — can be logged in concurrently.
          `virtio,mmio` node, so it is a no-op there and metal-neutral
          (§2.17). The reused `aarch64::root_unlock` device-id constant is
          deduped to the canonical
-         `rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID` (§2.2).
+         `tairix_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID` (§2.2).
          Host-tested (7 `root_storage` cases over a fake `Bus`).
-       - The **admission vertical** `rustos-test-root-unlock-admission-qemu-
+       - The **admission vertical** `tairix-test-root-unlock-admission-qemu-
          aarch64` boots the production pipeline (`boot_aarch64::boot`) on
-         `-M virt` with the planted `rustos-test-encrypted-root-image`
+         `-M virt` with the planted `tairix-test-encrypted-root-image`
          virtio-blk disk: the enumeration binds the root, `spawn_if_present`
          admits the kthread, and it brings the device up over the device-IRQ
          path, reads the typed passphrase, mounts the encrypted root, and
@@ -4953,7 +4953,7 @@ two users — or the same user twice — can be logged in concurrently.
          (`run_unlock` → `virtio_blk_unlock` / `emmc2_unlock`); the EMMC2
          arm maps the matched node's sole SDHCI register window under
          `CAP_MMIO_MAP` through a minimal in-kernel MMIO-only `Emmc2Host`,
-         admits `rustos-drv-storage-emmc2` through the signed §8 gate, and
+         admits `tairix-drv-storage-emmc2` through the signed §8 gate, and
          feeds the opened `Block` to the shared `finish_unlock` tail
          virtio-blk also uses (§2.2). See design B's **B4** above.
        - **Remaining (metal-gated, §0.4 — `raspi4b` cannot model EMMC2):**
@@ -4961,7 +4961,7 @@ two users — or the same user twice — can be logged in concurrently.
          mount; (b) the §0.9 metal UART-typed-login acceptance.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
-   - The `-M virt` `rustos-test-root-unlock-login-qemu-aarch64` vertical
+   - The `-M virt` `tairix-test-root-unlock-login-qemu-aarch64` vertical
      proves the unlock + install + `root`/`root` authentication end to end
      over the passphrase path (landed, above); the live UART-typed login on
      the booted system rides the kthread flip + the §0.9 metal checkpoint.
@@ -5016,7 +5016,7 @@ machine support lands in the runner:
 
 ```
 cargo build -p <pkg> --target aarch64-unknown-none
-cargo run -q -p rustos-qemu --bin rustos-qemu-run -- \
+cargo run -q -p tairix-qemu --bin tairix-qemu-run -- \
     --kernel target/aarch64-unknown-none/debug/<bin> --arch aarch64 \
     --board raspi4b --timeout-secs 60
 ```

@@ -12,8 +12,8 @@
 //! scans the ring and selects the highest-generation slot that decodes
 //! cleanly *and* whose referenced root also decodes cleanly (`transaction`).
 
-use rustos_abi::DriverError;
-use rustos_crypto::MacKey;
+use tairix_abi::DriverError;
+use tairix_crypto::MacKey;
 
 use crate::crypto::CRYPTO_HEADER_LEN;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
@@ -34,7 +34,7 @@ pub const RING_SLOTS: u64 = 4;
 /// verified re-insert path sizes its mutation-evidence window from the same
 /// value, so the driver and the verifier can never disagree about where the
 /// ring ends.
-pub use rustos_fsprobe::ARXFS_RING_BLOCKS as RING_BLOCKS;
+pub use tairix_fsprobe::ARXFS_RING_BLOCKS as RING_BLOCKS;
 
 /// The shared ring constant covers exactly the mirrored slots this module
 /// lays out.

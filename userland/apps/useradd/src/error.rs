@@ -1,7 +1,7 @@
 //! The outcomes of running a `useradd` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a `useradd` invocation did not complete.
 ///

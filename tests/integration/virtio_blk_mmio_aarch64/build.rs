@@ -14,11 +14,11 @@
 //! seed; the test is therefore deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
-use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 
 /// Deterministic signing seed so the trust anchor is stable across
 /// builds. Distinct from the other QEMU fixtures' seeds so the images
@@ -33,7 +33,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x22; 32];
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR set by cargo");
@@ -47,7 +47,7 @@ fn main() {
         );
         println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
-        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
+        tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.
         Vec::new()
@@ -66,7 +66,7 @@ fn main() {
     ];
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         kind: DriverKind::UserSpace,
         bind_key_count: 0,
         capability_count: u16::try_from(caps.len()).expect("caps fit in u16"),

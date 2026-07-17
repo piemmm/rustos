@@ -1,16 +1,16 @@
-//! RustOS kernel IPC subsystem (Stage 2.5 of `PLAN.md`).
+//! TAIRiX kernel IPC subsystem (Stage 2.5 of `PLAN.md`).
 //!
 //! This crate ships the capability-checked primitives every higher-level
 //! kernel and userland component uses to talk to another address space:
 //!
-//! 1. [`port`] — typed message ports declared via [`rustos_abi::ipc`].
+//! 1. [`port`] — typed message ports declared via [`tairix_abi::ipc`].
 //!    Sender and receiver capabilities are checked **at port creation**
 //!    and on **every** send. Per the receiver does
 //!    not re-check; the kernel enforces.
 //! 2. [`registry`] — the named-port registry mapping an
 //!    [`port::EndpointId`] to the kernel-owned [`port::Port`] bound to
 //!    it, so the syscall dispatcher can resolve the endpoint carried in
-//!    an [`rustos_abi::ipc::IpcMessageHeader`] to a live port. It owns
+//!    an [`tairix_abi::ipc::IpcMessageHeader`] to a live port. It owns
 //!    no lock of its own (the synchronisation policy lives with
 //!    `kernel/core`'s `KernelState`, mirroring `kernel/sec`'s
 //!    `CapTable`).
@@ -21,7 +21,7 @@
 //!    same capability gates as ports.
 //!
 //! Every refused operation emits exactly one structured audit event
-//! through [`audit`] before returning a stable [`rustos_abi::Errno`]
+//! through [`audit`] before returning a stable [`tairix_abi::Errno`]
 //! to the caller ("fail-closed everywhere"). Audit IDs live in the
 //! `kernel/ipc` reserved range `3_000..4_000`; the catalogue is in
 //! [`audit`].

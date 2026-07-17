@@ -1,4 +1,4 @@
-# `rustos-hid`
+# `tairix-hid`
 
 `lib/hid` is the arch-neutral, transport-agnostic HID boot-protocol logic the
 USB-HID keyboard/mouse driver is built from: the report decoders, the
@@ -10,13 +10,13 @@ and mouse class-driver processes (`drivers/input/usb_kbd`,
 `drivers/input/usb_mouse`) compose it without a `drivers/*`→`drivers/*`
 dependency (`AGENTS.md` §17.4 /
 §2.2), exactly as the bus-agnostic xHCI protocol lives in
-[`rustos-usb`](./usb.md) rather than the xHCI driver.
+[`tairix-usb`](./usb.md) rather than the xHCI driver.
 
 ## What it provides
 
 - **Decoders** (`BootKeyboard`, `BootMouse`): the fixed 8-byte keyboard report
   and the 3-or-more-byte mouse report (USB HID 1.11 Appendix B) decoded into
-  platform-neutral `rustos_abi::driver::input::InputEvent`s. The decoders are
+  platform-neutral `tairix_abi::driver::input::InputEvent`s. The decoders are
   written against the `ReportSource` seam (defined in `lib/abi`, because its
   producer is the xHCI driver), so they are proven host-side over a mock report
   queue while the transport below them is proven on metal (`AGENTS.md` §2.2).
@@ -26,18 +26,18 @@ dependency (`AGENTS.md` §17.4 /
   events are latched not dropped, a per-`poll` budget bounds a flooding device,
   `AGENTS.md` §5.4 / §2.1).
 - **Console-input producer** (`KeyboardConsole`, `pump_once`, `ConsoleSink`):
-  resolves each HID-usage key edge into the `rustos_input::Key` a US layout
+  resolves each HID-usage key edge into the `tairix_input::Key` a US layout
   produces (applying held modifiers + caps/num lock) and emits the decoded
-  `rustos_abi::input::KeyInput` record through the shared `lib/keymap` map — the
+  `tairix_abi::input::KeyInput` record through the shared `lib/keymap` map — the
   one definition of the `Key`→record translation (`AGENTS.md` §2.2). A driver
   loop (`pump_once`) injects each record through a `ConsoleSink`; the kernel
   input-focus arbiter decides the encoding and destination (`AGENTS.md` §17.4).
 - **Boot-keyboard orchestration** (`bring_up_boot_keyboard`,
   `derive_keyboard_resources`, `KeyboardResources`): the composition a
   user-space keyboard driver runs at start-up. Over its
-  `rustos_abi::DriverHost` it carves the device-shared DMA region (aperture
+  `tairix_abi::DriverHost` it carves the device-shared DMA region (aperture
   checked before any register is touched, `AGENTS.md` §5.4), maps the granted
-  xHCI register BAR, brings the controller up over `rustos-usb`, and enumerates
+  xHCI register BAR, brings the controller up over `tairix-usb`, and enumerates
   the boot keyboard. `derive_keyboard_resources` turns the kernel-issued
   device-resource grants into the BAR window + DMA-aperture bounds the bring-up
   needs — exactly one register window (an `Mmio` window by base, or an outbound
@@ -59,7 +59,7 @@ DMA region by constraint.
 
 ## Test surface
 
-`cargo test -p rustos-hid` exercises, against an in-process mock report queue
+`cargo test -p tairix-hid` exercises, against an in-process mock report queue
 and mock `DriverHost`:
 
 - Keyboard decode: press/release edges, one edge per held key, modifier edges,
@@ -81,13 +81,13 @@ and mock `DriverHost`:
   `virt` shape (`Mmio` BAR + untranslated `Dma`) decode to the right bounds; an
   IRQ grant is ignored; missing / ambiguous / zero-length grants fail closed.
 - Bind table: `KEYBOARD_BIND_KEYS` matches the published xHCI controller node
-  (`rustos_usb::XHCI_COMPATIBLE`) and rejects a different `compatible` string.
+  (`tairix_usb::XHCI_COMPATIBLE`) and rejects a different `compatible` string.
 
 ## Bind table
 
 `KEYBOARD_BIND_KEYS` is the §18.3 bind table for the user-space USB
 boot-keyboard driver (`drivers/input/usb_kbd`): an exact `compatible`-string
-match on `rustos_usb::XHCI_COMPATIBLE` (`usb,xhci`), the identity the VL805 USB
+match on `tairix_usb::XHCI_COMPATIBLE` (`usb,xhci`), the identity the VL805 USB
 bus driver publishes the controller node under (`drivers/bus/usb/vl805`'s
 `node B`). The keyboard driver brings the whole xHCI controller up itself — the
 `Xhci` controller object cannot cross a process boundary — so it binds the

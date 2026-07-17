@@ -37,7 +37,7 @@ use crate::pressure::{
 use crate::ptr::slice_within;
 use crate::seal::{EntropySource, NonceSequence, SealError, SealKey};
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError};
-use rustos_log::Sink;
+use tairix_log::Sink;
 
 use super::audit::{log_ramzip_failure, RamzipAuditEvent};
 use super::caps::{decompression_floor, RamzipCaps};

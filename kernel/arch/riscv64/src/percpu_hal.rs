@@ -1,6 +1,6 @@
 //! riscv64 per-CPU storage ("per-CPU storage").
 //!
-//! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
+//! Implements the Arch HAL [`PerCpu`](tairix_arch_api::PerCpu) surface
 //! for riscv64 over the **`tp`** (thread-pointer) register. `tp` is the
 //! conventional RISC-V per-hart anchor: `boot.s` (boot hart) and `smp.s`
 //! (secondary harts) seed it with the SBI-handed hart id before entering
@@ -11,13 +11,13 @@
 //!
 //! The stored word is opaque to this surface: the kernel decides whether
 //! `tp` holds the hart id or the address of a per-hart control block (see
-//! the [`PerCpu`](rustos_arch_api::PerCpu) trait docs). On the host build
+//! the [`PerCpu`](tairix_arch_api::PerCpu) trait docs). On the host build
 //! there is no `tp`, so the handle backs the word with an in-handle cell
 //! solely for the unit tests; it is never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
 
-use rustos_arch_api::PerCpu;
+use tairix_arch_api::PerCpu;
 
 /// riscv64 implementation of the Arch HAL per-CPU storage surface.
 ///
@@ -86,7 +86,7 @@ impl PerCpu for PerCpuStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::percpu::conformance;
+    use tairix_arch_api::percpu::conformance;
 
     #[test]
     fn passes_per_cpu_conformance() {

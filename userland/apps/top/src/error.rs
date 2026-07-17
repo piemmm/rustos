@@ -2,9 +2,9 @@
 
 use core::fmt;
 
-use rustos_abi::Errno;
-use rustos_curses::CursesError;
-use rustos_procinfo::{CallError, ListError};
+use tairix_abi::Errno;
+use tairix_curses::CursesError;
+use tairix_procinfo::{CallError, ListError};
 
 /// Why a `top` session ended other than by the user quitting.
 ///

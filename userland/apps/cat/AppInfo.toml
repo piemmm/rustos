@@ -5,7 +5,7 @@
 # standard streams (`-` and the no-operand default read standard input);
 # CAP_FS_ACCESS is the tool's job — reading its file operands (and its own
 # bundle's Help/ documents) through the secured VFS.
-id = "os.rustos.cat"
+id = "os.tairix.cat"
 name = "cat"
 version = "0.1.0"
 kind = "command"

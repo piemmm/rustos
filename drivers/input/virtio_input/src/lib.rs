@@ -1,11 +1,11 @@
-//! RustOS virtio-input driver (keyboard / pointer) — the entry.
+//! TAIRiX virtio-input driver (keyboard / pointer) — the entry.
 //!
 //! This crate is the thin driver shell: the only
 //! public *function* is [`register`], and [`BIND_KEYS`] is the
 //! bind table `devmgr` (or the in-kernel bootstrap-floor catalogue)
 //! resolves a discovered virtio-input node against. The arch-neutral,
 //! transport-agnostic open/poll/decode device logic lives in
-//! `lib/virtio_input` (`rustos_virtio_input`) so both this driver and
+//! `lib/virtio_input` (`tairix_virtio_input`) so both this driver and
 //! the user-space input-driver process compose it without a
 //! `drivers/*`→`drivers/*` dependency (the
 //! virtio analogue of `lib/hid` ↔ `drivers/input/usb_kbd`).
@@ -18,8 +18,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
-use rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID;
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_5054_0000_0001; // "VNPT" (Virtio iNPuT)

@@ -1,4 +1,4 @@
-/* Linker script for RustOS riscv64 kernels on the QEMU `virt` board.
+/* Linker script for TAIRiX riscv64 kernels on the QEMU `virt` board.
  *
  * OpenSBI (`-bios default`) occupies the bottom of RAM at 0x80000000
  * and jumps to the `-kernel` ELF's entry point in S-mode. The

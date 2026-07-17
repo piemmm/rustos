@@ -1,6 +1,6 @@
 //! The desktop DPI / UI scale factor (`lib/geometry`).
 //!
-//! RustOS authors every desktop length — theme corner radii and border
+//! TAIRiX authors every desktop length — theme corner radii and border
 //! thicknesses, font sizes, taskbar extents, window chrome — in *logical*
 //! pixels at a fixed reference density ([`REFERENCE_DPI`]). A display panel's
 //! real pixel density varies wildly (a low-DPI monitor versus a high-DPI

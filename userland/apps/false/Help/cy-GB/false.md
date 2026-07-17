@@ -17,7 +17,7 @@ Dim ond ymresymiad **cyntaf** o `-h`, `-?` neu `--help` a anrhydeddir
 safle diweddarach anwybyddir y tocynnau hynny fel popeth arall. Yn
 wahanol i `false --help` GNU, sy'n dal i orffen gyda `1`, mae cymorth
 byr a gyflwynwyd yn gorffen gyda `0` yma — confensiwn cymorth byr
-RustOS.
+TAIRiX.
 
 ## OPTIONS
 

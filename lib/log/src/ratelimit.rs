@@ -23,7 +23,7 @@
 //! them. It is `Copy`, `no_std`, and allocation-free, so a [`crate::Journal`]
 //! holds one directly with no allocator and no lock.
 
-use rustos_abi::Duration64;
+use tairix_abi::Duration64;
 
 use crate::stream::Stream;
 
@@ -307,7 +307,7 @@ impl Default for RateLimiter {
 mod tests {
     use super::{gated_index, DropReport, RateDecision, RateLimit, RateLimiter, GATED_STREAMS};
     use crate::stream::Stream;
-    use rustos_abi::Duration64;
+    use tairix_abi::Duration64;
 
     fn at(ns: u64) -> Duration64 {
         Duration64::from_nanos(ns)

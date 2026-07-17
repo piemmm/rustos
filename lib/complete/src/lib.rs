@@ -1,6 +1,6 @@
-//! RustOS shared filename-completion engine (`lib/complete`).
+//! TAIRiX shared filename-completion engine (`lib/complete`).
 //!
-//! More than one interactive RustOS program completes a partially typed
+//! More than one interactive TAIRiX program completes a partially typed
 //! filesystem path: the shell's Tab completion first, and the tree file
 //! manager's destination prompts beside it. The policy is *identical*
 //! wherever it happens — split the word at its last `/` into a directory
@@ -34,7 +34,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// One directory entry a [`DirLister`] reports: the name and whether it
 /// is a directory (a directory candidate stays open for further
@@ -136,7 +136,7 @@ mod tests {
     use super::{common_prefix, path_matches, split_path_word, DirEntryInfo, DirLister};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory directory tree: `(path, entries)` pairs.
     struct MapLister {

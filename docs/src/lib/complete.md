@@ -1,4 +1,4 @@
-# `rustos-complete` — the shared filename-completion engine
+# `tairix-complete` — the shared filename-completion engine
 
 `lib/complete` is the one definition of how a partially typed filesystem
 path is completed interactively. Two programs complete paths today — the

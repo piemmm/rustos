@@ -39,15 +39,15 @@ const VERTICALS: &[Vertical] = &[
     // Stage 3d + W8: boot, per-worker isolation, live scheduler ticks,
     // multi-worker SMP + cross-context IPI.
     Vertical {
-        package: "rustos-test-kernel-arch-boot-wasm32",
-        artifact: "rustos_test_kernel_arch_boot_wasm32.wasm",
+        package: "tairix-test-kernel-arch-boot-wasm32",
+        artifact: "tairix_test_kernel_arch_boot_wasm32.wasm",
         harness: "tests/integration/kernel_arch_boot_wasm32/web/harness.mjs",
     },
     // The `display`-row parity vertical: signed framebuffer `.rxe`
     // lifecycle presenting to a real canvas (`plans/WIRING.md`).
     Vertical {
-        package: "rustos-test-framebuffer-display-wasm32",
-        artifact: "rustos_test_framebuffer_display_wasm32.wasm",
+        package: "tairix-test-framebuffer-display-wasm32",
+        artifact: "tairix_test_framebuffer_display_wasm32.wasm",
         harness: "tests/integration/framebuffer_display_wasm32/web/harness.mjs",
     },
 ];

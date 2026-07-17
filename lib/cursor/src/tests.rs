@@ -3,8 +3,8 @@
 
 use alloc::vec;
 
-use rustos_raster::Color;
-use rustos_theme::CursorKind;
+use tairix_raster::Color;
+use tairix_theme::CursorKind;
 
 use crate::registry::{CursorRegistry, CursorRegistryError, CursorSetId};
 use crate::theme::CursorTheme;

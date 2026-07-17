@@ -97,7 +97,7 @@ flags:
 ## Boot-time volume layering: writable root, read-only `/System` shadow
 
 `with_default_layout` is the in-RAM shape before any disk is mounted. At
-boot the production `fs_*` mount table (`kernel/rustos-kernel`'s
+boot the production `fs_*` mount table (`kernel/tairix-kernel`'s
 `system_mount`) wires two on-disk `ARXFS` volumes into that layout:
 
 - the **encrypted, writable root volume** (`ARXFSRoot`) is mounted as

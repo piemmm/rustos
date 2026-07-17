@@ -23,12 +23,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use ed25519_dalek::{Signer, SigningKey};
-use rustos_abi::{
+use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest,
     DRIVER_MANIFEST_MAGIC,
 };
-use rustos_crypto::Ed25519PublicKey;
-use rustos_drvhost::{
+use tairix_crypto::Ed25519PublicKey;
+use tairix_drvhost::{
     DriverSpawner, Event as LogEvent, Field, ImageSource, Sink, SpawnContext, SpawnRegisterError,
 };
 
@@ -66,7 +66,7 @@ pub fn build_signed_image_with_bind_keys(
     // the prefix the signer must cover.
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         kind,
         bind_key_count,
         capability_count: count,
@@ -125,7 +125,7 @@ pub fn alternative_signing_key() -> SigningKey {
     SigningKey::from_bytes(&seed)
 }
 
-/// Convert a `SigningKey` into the `rustos_crypto::Ed25519PublicKey`
+/// Convert a `SigningKey` into the `tairix_crypto::Ed25519PublicKey`
 /// the host stores on its trust anchor list.
 pub fn pubkey_of(sk: &SigningKey) -> Ed25519PublicKey {
     let bytes = sk.verifying_key().to_bytes();
@@ -150,14 +150,14 @@ impl MemSource {
 }
 
 impl ImageSource for MemSource {
-    fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), rustos_abi::Errno> {
+    fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), tairix_abi::Errno> {
         *self.reads.borrow_mut().entry(path.to_string()).or_insert(0) += 1;
         match self.images.get(path) {
             Some(bytes) => {
                 buf.extend_from_slice(bytes);
                 Ok(())
             }
-            None => Err(rustos_abi::Errno::NotFound),
+            None => Err(tairix_abi::Errno::NotFound),
         }
     }
 }

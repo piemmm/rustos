@@ -24,7 +24,7 @@ endpoints — the service does no work and consumes no CPU.
 
 - **The engine stays pure.** All protocol behaviour lives in
   `lib/net`; the service is thin glue. Each managed interface is one
-  `rustos_net::stack::Stack`, named by its admin-chosen alias (`wan`,
+  `tairix_net::stack::Stack`, named by its admin-chosen alias (`wan`,
   `lan0` — never a discovery-order name).
 - **Frames move over rings, not IPC payloads.** The service owns a
   `FrameRings` pair per interface and pumps it through the driver's
@@ -44,7 +44,7 @@ endpoints — the service does no work and consumes no CPU.
   grants it, `port_bind`s a per-interface notify port
   (`net_channel::notify_endpoint_for`), `NetChannelClient::attach`es,
   and derives the interface's IPv6 identity (modified EUI-64 of the
-  device MAC, `rustos_net::iface::eui64_interface_id`) and a CSPRNG
+  device MAC, `tairix_net::iface::eui64_interface_id`) and a CSPRNG
   IPv4 identification seed. The one generic
   `Netstack::service_interface` pump drives both an in-process device
   (`LocalFrameService`) and a channel-backed one (`NetChannelClient`)
@@ -53,7 +53,7 @@ endpoints — the service does no work and consumes no CPU.
 ## The `netstack-v1` IPC surface
 
 One fixed-width, fail-closed request frame
-(`rustos_abi::net_ipc::NetstackRequest`); every request is
+(`tairix_abi::net_ipc::NetstackRequest`); every request is
 capability-checked against the caller's kernel-attested origin
 **before any state is touched**, and every mutation and refusal is a
 structured audit record (event range `16000..17000`).
@@ -89,7 +89,7 @@ driver's restricted-sender device channel), `CAP_SHM` (create and
 grant the shared frame-ring region each channel client owns),
 `CAP_IPC_BIND_PRIVILEGED` (the reserved endpoint), and `CAP_LOG_EMIT`
 (audit records); the service account's ceiling
-(`rustos_users::NETSTACK_CEILING`) carries exactly those. The service
+(`tairix_users::NETSTACK_CEILING`) carries exactly those. The service
 *enforces* `CAP_NET_ADMIN` against its callers and never holds it;
 the administrator account ceiling — and the device manager, which
 makes the `BindDriver` call — carries it.
@@ -102,7 +102,7 @@ supervises and relaunches the service.
 
 ## Tests
 
-`cargo test -p rustos-netstack` drives the engine end-to-end over a
+`cargo test -p tairix-netstack` drives the engine end-to-end over a
 loopback fake whose "device" is a full peer `Stack` (v4 ARP + echo
 and v6 DAD + ND + echo round-trips through the real ring pump) and
 exercises the dispatcher's capability-refusal/audit matrix.

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-fbcon"
-description = "RustOS shared framebuffer text-console engine: an architecture-neutral ANSI/VT/xterm-256color terminal that renders the shared rustos_vt Op stream straight onto a 32-bit scan-out surface with the shared rustos_font glyph atlas, so every arch port (x86_64/aarch64/riscv64/wasm32) drives its display console through one definition instead of re-deriving it (§2.2, §2.20, §2.21, §17.4)."
+name = "tairix-fbcon"
+description = "TAIRiX shared framebuffer text-console engine: an architecture-neutral ANSI/VT/xterm-256color terminal that renders the shared tairix_vt Op stream straight onto a 32-bit scan-out surface with the shared tairix_font glyph atlas, so every arch port (x86_64/aarch64/riscv64/wasm32) drives its display console through one definition instead of re-deriving it (§2.2, §2.20, §2.21, §17.4)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,9 +21,9 @@ path = "src/lib.rs"
 # `Vec`-returning `encode*` helpers behind `lib/vt`'s default `alloc` feature
 # are unused here, so this edge is `default-features = false` and the engine
 # stays allocator-free for the freestanding boot-console consumers.
-rustos-vt = { path = "../vt", version = "=0.0.0", default-features = false }
+tairix-vt = { path = "../vt", version = "=0.0.0", default-features = false }
 # The shared 5×7 monospace glyph atlas the console renders with — one font
 # definition across the desktop and the boot console (§2.2). Atlas-only
 # (`default-features = false`): the engine blits into the borrowed surface
 # itself and stays alloc-free.
-rustos-font = { path = "../font", version = "=0.0.0", default-features = false }
+tairix-font = { path = "../font", version = "=0.0.0", default-features = false }

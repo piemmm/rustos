@@ -1,9 +1,9 @@
-# rustos-devmatch
+# tairix-devmatch
 
-Deterministic hardware-node ↔ driver bind-table match resolution for RustOS
+Deterministic hardware-node ↔ driver bind-table match resolution for TAIRiX
 (`lib/devmatch`, `AGENTS.md` §18.3 / §2.2).
 
-A discovered hardware-tree node (`rustos_abi::HwNode`) carries the match keys
+A discovered hardware-tree node (`tairix_abi::HwNode`) carries the match keys
 its discoverer emitted; a driver candidate carries the bind table its signed
 manifest declared. This crate decides which driver binds which node:
 
@@ -30,7 +30,7 @@ manifest declared. This crate decides which driver binds which node:
 
 The same match policy is reached from two strata the §17.4 layering keeps
 apart: the user-space device manager (`userland/system/devmgr`) and the
-kernel's interim in-kernel driver-candidate catalogue (`kernel/rustos-kernel`,
+kernel's interim in-kernel driver-candidate catalogue (`kernel/tairix-kernel`,
 PLAN Stage 4.HW item 5). The kernel may not depend on a `userland/*` crate, so
 the policy lives here in `lib/*` as the single definition both reach, never
 duplicated (§2.2).
@@ -39,7 +39,7 @@ duplicated (§2.2).
 
 - `no_std`, `#![forbid(unsafe_code)]`, pure data comparison — no allocation, no
   I/O, no logging. Audit and the load mechanism stay with each consumer.
-- Depends only on `rustos-abi` (the lowest layer): it compares ABI-owned wire
+- Depends only on `tairix-abi` (the lowest layer): it compares ABI-owned wire
   types (`HwMatchKey`, `DriverBindKey`).
 
 ## Stability

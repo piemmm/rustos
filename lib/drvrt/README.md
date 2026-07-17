@@ -1,6 +1,6 @@
-# rustos-drvrt
+# tairix-drvrt
 
-User-space driver runtime host for RustOS (`lib/drvrt`, `AGENTS.md` §6 / §2.2
+User-space driver runtime host for TAIRiX (`lib/drvrt`, `AGENTS.md` §6 / §2.2
 — `plans/PI.md` P10 chunk 5d).
 
 A first-party driver that runs in **user space** (the §4 microkernel goal) is
@@ -32,7 +32,7 @@ grants and:
 - `GrantedResource::new(handle, resource)` — pair a grant handle with the
   `HwResource` it names.
 - `GrantSyscalls` — the `mmio_map` / `dma_alloc` seam; production code uses
-  `RtGrantSyscalls`, which forwards to `rustos_rt`.
+  `RtGrantSyscalls`, which forwards to `tairix_rt`.
 
 ## Design
 

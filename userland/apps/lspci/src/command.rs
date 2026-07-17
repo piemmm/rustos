@@ -7,7 +7,7 @@
 //! `--help` answer with the bundle's own short help. `lspci` takes no
 //! positional operands; one is a usage error, never silently ignored.
 //!
-//! RustOS's hardware model has no PCI bus/device/function address — a
+//! TAIRiX's hardware model has no PCI bus/device/function address — a
 //! discovered function is a hardware-tree node with a stable node id — so
 //! the `-s` selector names that node id (the same deliberate divergence
 //! `lsusb`'s bus/device numbers make; the Help document states it).

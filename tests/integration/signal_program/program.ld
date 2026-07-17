@@ -2,7 +2,7 @@
  * (`tests/integration/signal_program`).
  *
  * The program is a position-independent **pure-Rust** executable whose entry
- * point is the `rustos-rt` runtime's `_start`. It links no architecture crate,
+ * point is the `tairix-rt` runtime's `_start`. It links no architecture crate,
  * so nothing in the default object graph references `_start`; this script makes
  * `_start` the entry GC root and lays the loadable sections out at a fixed,
  * non-zero base so the consuming test maps the image at its link addresses with

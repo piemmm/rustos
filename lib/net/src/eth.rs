@@ -6,7 +6,7 @@
 //! frame carrying them is simply an unrecognised `EtherType`, dropped
 //! by the dispatcher (fail closed) rather than mis-parsed.
 
-use rustos_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
+use tairix_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
 
 /// Length of the fixed Ethernet II header (no VLAN tag).
 pub const ETHERNET_HEADER_LEN: usize = 2 * MAC_ADDRESS_LEN + 2;

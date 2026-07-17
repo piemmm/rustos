@@ -1,6 +1,6 @@
 # Filesystem overview
 
-RustOS separates **filesystem policy** from **filesystem I/O**:
+TAIRiX separates **filesystem policy** from **filesystem I/O**:
 
 - **Policy** — path resolution, the mount table, the on-disk layout rules
   of `AGENTS.md` §16, and the §5.3 permission model — lives in
@@ -116,7 +116,7 @@ A driver-backed mount normally sits *below* the root (`/Storage/usb0`,
 (`MountTable::back_root`, exactly once — a second root volume is refused)
 — the shape of a real installation, whose root volume carries the whole
 `AGENTS.md` §16 tree from its own root directory. The kernel's boot-time
-users-database load (`rustos_kernel_core::users::load_users_db`, see the
+users-database load (`tairix_kernel_core::users::load_users_db`, see the
 [kernel page](../architecture/kernel.md)) reads
 `/System/Security/Users` through exactly this path.
 

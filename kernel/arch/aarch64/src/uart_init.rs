@@ -17,7 +17,7 @@
 //! volatile MMIO on the target (one definition shared
 //! by the metal path and the unit tests).
 
-use rustos_fdt::Fdt;
+use tairix_fdt::Fdt;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use crate::console;
@@ -273,7 +273,7 @@ fn apply_pl011_init(base: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm};
+    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm};
 
     #[test]
     fn fsel1_routes_only_pins_14_and_15_to_alt0() {

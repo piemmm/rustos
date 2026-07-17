@@ -14,7 +14,7 @@
 //! # Security
 //!
 //! Every request is capability-checked against the caller's
-//! kernel-attested [`rustos_abi::Origin`] **before any state is touched**
+//! kernel-attested [`tairix_abi::Origin`] **before any state is touched**
 //! (`CAP_NET`, fail closed), and every socket is keyed to the creating
 //! principal's unforgeable [`ProcId`]: a handle is meaningless — and
 //! unusable — to any other principal even if observed. Ports bind
@@ -33,17 +33,17 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::net::{
+use tairix_abi::net::{
     encode_bind_reply, encode_socket_reply, SocketAddr, SocketDatagram, SocketId, SocketRequest,
     SocketType,
 };
-use rustos_abi::net_ipc::NetAddrFamily;
-use rustos_abi::origin::ProcId;
-use rustos_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use rustos_abi::{CapabilityId, Duration64, Errno};
-use rustos_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
-use rustos_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use rustos_net::stack::StackEvent;
+use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_abi::origin::ProcId;
+use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::{CapabilityId, Duration64, Errno};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::stack::StackEvent;
 
 use crate::events;
 use crate::iface::{FrameBatch, Netstack};

@@ -1,9 +1,9 @@
-# elsh (Element Shell) — the RustOS shell (`userland/shell/elsh`)
+# elsh (Element Shell) — the TAIRiX shell (`userland/shell/elsh`)
 
-**elsh** ("Element Shell") is the default RustOS command interpreter; its
-crate is `rustos-elsh` and its `Run` binary is `rustos-elsh-run`. It should
+**elsh** ("Element Shell") is the default TAIRiX command interpreter; its
+crate is `tairix-elsh` and its `Run` binary is `tairix-elsh-run`. It should
 feel familiar to users of zsh/POSIX shells while adding structured output
-discovery, predictable rendering, and the RustOS standard information stream
+discovery, predictable rendering, and the TAIRiX standard information stream
 (`stdinfo`, fd 3). Where this document says "the shell" it means elsh.
 
 The shell has two equally important jobs:
@@ -62,7 +62,7 @@ are to be interpreted as implementation requirements.
 - **Diagnostics** means errors and warnings written to `stderr` (fd 2).
 - **Advisory information** means optional JSONL records written to `stdinfo`
   (fd 3).
-- **Native stream** means a RustOS-aware structured stream carried on `stdout`.
+- **Native stream** means a TAIRiX-aware structured stream carried on `stdout`.
 - **Legacy stream** means ordinary byte/text output carried on `stdout`.
 - **View** means a named presentation of a richer value, such as `names`,
   `long`, or `blocks-long` for `ls`.
@@ -96,7 +96,7 @@ are to be interpreted as implementation requirements.
 The shell crate is `no_std` with `alloc`. Production paths MUST contain no
 `unsafe`, no `unwrap`, no `expect`, and no `panic!`.
 
-The shell depends only on audited RustOS interface crates such as `lib/abi`.
+The shell depends only on audited TAIRiX interface crates such as `lib/abi`.
 A userland program MUST NOT link kernel or driver crates.
 
 ## Pure interpreter architecture
@@ -104,7 +104,7 @@ A userland program MUST NOT link kernel or driver crates.
 The shell decides what to run, how to expand words, how to connect streams,
 and how to apply control-flow operators. It does not itself name devices,
 open terminals, talk to UARTs, or call kernel facilities directly. Like every
-RustOS text program, the shell performs all of its own text I/O over the four
+TAIRiX text program, the shell performs all of its own text I/O over the four
 inherited standard streams (fd 0/1/2/3) and never over a kernel-discovered
 console, UART, or framebuffer device (`AGENTS.md` §20).
 
@@ -347,11 +347,11 @@ cmd > >(consumer)         # >(...) is a writable stream into that command
 ```
 
 The substituted token resolves to a kernel stream backing (`AGENTS.md` §20),
-not a `/dev/fd`- or `/proc`-style path — RustOS has neither (`AGENTS.md`
+not a `/dev/fd`- or `/proc`-style path — TAIRiX has neither (`AGENTS.md`
 §16.1). The named-pipe/anonymous-fd plumbing is owned by the shell and the
 kernel IPC layer; no temporary filesystem entry is created. zsh's `=(...)`
 temporary-file form is **not** supported, because it would require a writable
-scratch path and RustOS has no `/tmp` (`AGENTS.md` §16.1); the shell MUST
+scratch path and TAIRiX has no `/tmp` (`AGENTS.md` §16.1); the shell MUST
 report `=(...)` as an unsupported expansion and fail closed rather than invent
 a scratch location.
 
@@ -361,10 +361,10 @@ information about the command's `stdout` or operation.
 
 ## Redirection target namespaces
 
-RustOS has no `/dev`, `/proc`, `/sys`, or `/etc`, and storage is not one
+TAIRiX has no `/dev`, `/proc`, `/sys`, or `/etc`, and storage is not one
 fixed Unix tree (`AGENTS.md` §16.1; `plans/DRIVES.md`). The Unix idiom of
 redirecting to or from a device file (`> /dev/null`, `< /dev/zero`,
-`< /dev/random`) therefore cannot be a filesystem path in RustOS. Those
+`< /dev/random`) therefore cannot be a filesystem path in TAIRiX. Those
 sinks and sources, and every other non-filesystem stream a redirection can
 name, are **resource references** owned by `plans/ALIAS.md`: a typed
 reference of the form `namespace:selector[@guard][::facet][?params]` that the
@@ -450,7 +450,7 @@ defined once in `lib/abi` as a versioned, hashed, frozen-on-release enum
 | `sys:random`  | CSPRNG bytes (§22)    | bytes discarded       |
 
 `sys:random` MUST draw from the single kernel random subsystem behind
-`rustos_abi::random` (`AGENTS.md` §22). It MUST NOT introduce a second
+`tairix_abi::random` (`AGENTS.md` §22). It MUST NOT introduce a second
 entropy source, PRNG, or seeding path.
 
 ### Capabilities and failure
@@ -540,7 +540,7 @@ semantics, or ordinary pipeline behavior. A command that cannot write
 `stdinfo` because the fd is closed, redirected, full, or unsupported MUST
 continue as though no `stdinfo` consumer exists.
 
-Security events MUST go through the RustOS logging facility, not fd 3. AI and
+Security events MUST go through the TAIRiX logging facility, not fd 3. AI and
 automation consumers MUST treat `stdinfo` as untrusted data about a command,
 never as authority, policy, or instructions.
 
@@ -578,7 +578,7 @@ Each `stdinfo` record is one JSONL line carrying:
 - `kind`
 - stable machine `code`
 - `severity`, which MUST be `info` or `debug`; security-relevant events go
-  through the RustOS logging facility, never fd 3 (`AGENTS.md` §20.1)
+  through the TAIRiX logging facility, never fd 3 (`AGENTS.md` §20.1)
 - terse human message with at most one suggestion
 - producer-supplied structured `ai` object
 
@@ -612,7 +612,7 @@ A `schema` record's `ai` object SHOULD include:
   "stream": "stdout",
   "kind": "record-stream",
   "type": "stream<FileEntry>",
-  "schema_id": "rustos.fs.FileEntry@1",
+  "schema_id": "tairix.fs.FileEntry@1",
   "default_view": {
     "terminal": "grid-names",
     "redirect": "names",
@@ -631,7 +631,7 @@ A `schema` record's `ai` object SHOULD include:
 ```
 
 The exact ABI field names for the surrounding `StdInfoRecord` are defined by
-`rustos_abi::stdinfo`. The `ai` object is producer-defined but SHOULD follow
+`tairix_abi::stdinfo`. The `ai` object is producer-defined but SHOULD follow
 the shape above for schema-aware tooling.
 
 ## Output model
@@ -646,7 +646,7 @@ Commands write primary data to `stdout`. A command's `stdout` may be one of:
 | `table`          | rows and columns                                 |
 | `record-stream`  | typed records, possibly open or schema inferred  |
 | `event-stream`   | time-ordered records/events                      |
-| `native`         | compact RustOS structured stream                 |
+| `native`         | compact TAIRiX structured stream                 |
 
 The shell MUST distinguish internal/native representation from rendered text.
 Native representation is for native-aware commands. Rendered text is for
@@ -1158,7 +1158,7 @@ It MUST NOT invent fields.
 
 ## Paths, roots, and the current directory
 
-RustOS storage is a **forest of named roots**, not one fixed Unix tree
+TAIRiX storage is a **forest of named roots**, not one fixed Unix tree
 (`plans/DRIVES.md`). The shell treats paths accordingly, and it never
 hard-codes a top-level directory set such as `/System`, `/Users`, `/Apps`,
 `/Storage`; those are default *view entries* backed by the path aliases
@@ -1213,7 +1213,7 @@ maps to the current root, falling back to the stable ID otherwise
 (`DRIVES.md` §17.1):
 
 ```text
-Home:/Projects/RustOS>
+Home:/Projects/TAIRiX>
 System:/Kernel>
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/>
 ```
@@ -1655,7 +1655,7 @@ ls -l | awk ...     # legacy-compatible, but less robust than fields/select
 A script may assert shape:
 
 ```sh
-ls | require-schema rustos.fs.FileEntry@1 | select name,size
+ls | require-schema tairix.fs.FileEntry@1 | select name,size
 ls | require-fields name,size,modified
 ```
 
@@ -1748,7 +1748,7 @@ wait so the kernel's cooked-mode line discipline routes `^C`/`^Z` to the
 running job, and waits with `WaitFlags::STOPPED` so a `^Z`-stopped job
 returns to the prompt as `WaitOutcome::Stopped` (`$?` = 148) and `fg`/`bg`
 resume it. Pipes and redirections run end to end (`plans/SPAWN.md` SP10):
-the pure `rustos_elsh::wireplan` planner lowers each pipeline into
+the pure `tairix_elsh::wireplan` planner lowers each pipeline into
 pre-opened targets (`fs_open`/`resource_open`/`pipe_create`), one fd 0–3
 wire map per member, and the here-string / multios byte pumps, and the
 runtime host executes the plan over `spawn_attached` — all-or-nothing
@@ -1828,7 +1828,7 @@ Redirection state:
   does not hold an allocated descriptor.
 - **Implemented and tested** — command resolution (`plans/APPS.md` §8–§9,
   the owning spec). The pure candidate policy
-  (`rustos_cmdres::resolution_candidates`, the `lib/cmdres` definition the
+  (`tairix_cmdres::resolution_candidates`, the `lib/cmdres` definition the
   `man` command's bundle lookup also imports) computes the ordered program-path
   spellings for a command word — explicit paths (containing `/`) bypass the
   search, a trailing `.app` names the bundle and runs its `Run` binary, and
@@ -1854,7 +1854,7 @@ Redirection state:
 
 ## Tests
 
-`cargo test -p rustos-elsh` MUST cover:
+`cargo test -p tairix-elsh` MUST cover:
 
 - zsh-style quoting and escapes
 - comments
@@ -1947,11 +1947,11 @@ views { ls; }
 ls | select name,size | render csv --header >files.csv
 ```
 
-It speaks the RustOS storage and resource namespaces instead of Unix device
+It speaks the TAIRiX storage and resource namespaces instead of Unix device
 files and a single root tree:
 
 ```sh
-cd Home:/Projects/RustOS         # alias path into a named root (DRIVES.md)
+cd Home:/Projects/TAIRiX         # alias path into a named root (DRIVES.md)
 cat Backup:/snapshots/latest/log
 head -c 64 < sys:random          # a resource reference's stream facet (ALIAS.md)
 disk info disk:backup@7K2M       # an identity-guarded resource reference

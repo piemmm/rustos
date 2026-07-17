@@ -14,7 +14,7 @@
 //! The driver never synthesises a pointer: the configuration region
 //! is reached through a kernel-mapped [`RegisterWindow`] obtained
 //! from the MMIO-map facility after a
-//! [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+//! [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
 //! check, exactly like a device's BAR window. The
 //! caller passes that window to [`crate::mechanism_ecam`]; the
 //! window's bounds checking turns any access beyond the mapped region
@@ -27,7 +27,7 @@
 // covers every helper directly.
 #![allow(dead_code)]
 
-use rustos_abi::RegisterWindow;
+use tairix_abi::RegisterWindow;
 
 use crate::config::{ConfigAddress, ConfigSpace};
 

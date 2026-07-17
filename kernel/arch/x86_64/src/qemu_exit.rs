@@ -2,7 +2,7 @@
 //!
 //! Writing a single byte to I/O port `0xf4` (configured via `-device
 //! isa-debug-exit,iobase=0xf4,iosize=0x4`) causes QEMU to exit with status
-//! `(byte << 1) | 1`. The host-side [`rustos_qemu`][crate-runner] crate
+//! `(byte << 1) | 1`. The host-side [`tairix_qemu`][crate-runner] crate
 //! decodes that status back into Pass/Fail. The byte values here therefore
 //! must stay in sync with `tools/qemu/src/lib.rs` — they're duplicated as a
 //! pair of `const u8`s on each side rather than shared through a common
@@ -12,11 +12,11 @@
 //! [crate-runner]: ../../../tools/qemu/src/lib.rs
 
 /// Byte value reported on a successful test. Must match
-/// `rustos_qemu::SUCCESS_EXIT_CODE`.
+/// `tairix_qemu::SUCCESS_EXIT_CODE`.
 pub const SUCCESS: u8 = 0x10;
 
 /// Byte value reported on a failed test. Must match
-/// `rustos_qemu::FAILURE_EXIT_CODE`.
+/// `tairix_qemu::FAILURE_EXIT_CODE`.
 pub const FAILURE: u8 = 0x11;
 
 /// I/O port the `isa-debug-exit` device listens on.

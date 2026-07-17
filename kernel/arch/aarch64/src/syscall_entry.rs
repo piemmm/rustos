@@ -9,7 +9,7 @@
 //!   the handler matches to distinguish a syscall from a user fault.
 //! * Marshalling the register-passed arguments (`x0`–`x5`) and the
 //!   syscall number (`x8`) out of the saved register frame into the
-//!   architecture-neutral `rustos_abi` `[u64; SYSCALL_MAX_ARGS]` layout —
+//!   architecture-neutral `tairix_abi` `[u64; SYSCALL_MAX_ARGS]` layout —
 //!   the same layout the x86_64 and riscv64 ports build (one ABI, no duplication).
 //! * The dispatch callback the syscall path forwards each `svc` to,
 //!   mirroring the [`crate::preempt`] timer-callback design. The
@@ -19,7 +19,7 @@
 //!
 //! # Calling convention
 //!
-//! RustOS follows the established AArch64 Linux register convention: the
+//! TAIRiX follows the established AArch64 Linux register convention: the
 //! syscall number is in `x8`, arguments in `x0`–`x5` (six — exactly
 //! `SYSCALL_MAX_ARGS`), and the result is returned in `x0`. The PE sets
 //! `ELR_EL1` to the instruction *after* the `svc`, so unlike riscv64's
@@ -33,7 +33,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_abi::SYSCALL_MAX_ARGS;
+use tairix_abi::SYSCALL_MAX_ARGS;
 
 use crate::fault::exception_class;
 
@@ -62,7 +62,7 @@ pub struct SyscallFrame {
 }
 
 /// Pack the six aarch64 syscall argument registers into the canonical
-/// `rustos_abi` layout. The order matches the ABI definition pinned in
+/// `tairix_abi` layout. The order matches the ABI definition pinned in
 /// `lib/abi/src/syscalls.rs`, identical to the x86_64 and riscv64 ports
 /// (one ABI).
 #[must_use]

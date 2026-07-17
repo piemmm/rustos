@@ -1,6 +1,6 @@
 [package]
-name = "rustos-fdt"
-description = "RustOS shared flattened-device-tree (FDT/DTB) reader: the one device-tree parser every architecture port builds its platform discovery on (AGENTS.md §2.2 / §18.2)."
+name = "tairix-fdt"
+description = "TAIRiX shared flattened-device-tree (FDT/DTB) reader: the one device-tree parser every architecture port builds its platform discovery on (AGENTS.md §2.2 / §18.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,10 +27,10 @@ test-fixtures = []
 
 [dev-dependencies]
 # The §19.6 fuzz harness draws its inputs through the shared seed/budget
-# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# §2.2). Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The §19.6 fuzz harness (`tests/fuzz_fdt.rs`) drives the parser against
 # mutated-but-structured device trees. It builds those templates with the
 # crate's own `fixture` DTB builder rather than re-rolling a second builder
@@ -39,4 +39,4 @@ rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # to turn a feature on only for this crate's own tests; it never reaches the
 # `default = []` production surface (the `fixture`/`alloc` code stays out of
 # the parser that the architecture ports link).
-rustos-fdt = { path = ".", features = ["test-fixtures"] }
+tairix-fdt = { path = ".", features = ["test-fixtures"] }

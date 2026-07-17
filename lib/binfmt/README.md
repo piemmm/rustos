@@ -1,15 +1,15 @@
-# rustos-binfmt
+# tairix-binfmt
 
-Read-only executable-container decoder for RustOS (`lib/binfmt`).
+Read-only executable-container decoder for TAIRiX (`lib/binfmt`).
 
-Several RustOS components need to *look inside* an executable file without
+Several TAIRiX components need to *look inside* an executable file without
 loading it — the file manager's disassembly viewer first, an
 `objdump`/`readelf`-class command app next. That decoding is identical
 wherever it happens, so it lives here once and every consumer imports it.
 
 ## What it decodes
 
-- **`rxe`** — the RustOS load image (`rxe::RxeView`: header, W^X-clean
+- **`rxe`** — the TAIRiX load image (`rxe::RxeView`: header, W^X-clean
   segment table, needed libraries, entry point) and the signed manifest
   summary (`rxe::ManifestSummary`: header plus requested capabilities).
   Both decode *through* the `lib/abi` wire types
@@ -46,7 +46,7 @@ they link into that sandbox process unchanged.
 ## Design
 
 - `no_std` + `alloc`, `#![forbid(unsafe_code)]`.
-- One dependency: `rustos-abi` (the rxe/manifest wire types this crate
+- One dependency: `tairix-abi` (the rxe/manifest wire types this crate
   reads through).
 - Fuzzed: `fuzz_rxe`, `fuzz_elf`, and `fuzz_wasm` are enrolled in
   `cargo xtask fuzz`.

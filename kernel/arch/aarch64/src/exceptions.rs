@@ -3,13 +3,13 @@
 //!
 //! The assembly vector table (`vectors.s`, included via `global_asm!` in
 //! `lib.rs`) tags every exception with a numeric *kind* and calls
-//! `rustos_aarch64_trap_handler`. This module:
+//! `tairix_aarch64_trap_handler`. This module:
 //!
 //! * `init_vectors` points `VBAR_EL1` at the table.
 //! * `enable_irq` unmasks IRQs at the PE (`DAIF.I`), the aarch64
 //!   analogue of riscv64's `sstatus.SIE` enable — kept separate from
 //!   arming the timer so the caller controls exactly when ticks begin.
-//! * `rustos_aarch64_trap_handler` dispatches an IRQ to the GIC
+//! * `tairix_aarch64_trap_handler` dispatches an IRQ to the GIC
 //!   acknowledge → timer/SGI → end-of-interrupt handshake, routes an EL0
 //!   `svc` (lower-EL synchronous exception) to the installed
 //!   [`crate::syscall_entry`] dispatch callback, redirects a same-EL
@@ -84,7 +84,7 @@ pub const fn is_sync(kind: u64) -> bool {
 // forwarded to a set-once dispatch callback the binary installs. This
 // mirrors riscv64's `trap::set_trap_dispatch` external-interrupt seam:
 // the callback claims/services the source and forwards it to
-// `rustos_kernel_irq::IrqTable::fire` (which masks the GIC line before
+// `tairix_kernel_irq::IrqTable::fire` (which masks the GIC line before
 // the waiter observes the wake — `docs/src/security/irq.md`), while the
 // GIC end-of-interrupt handshake stays in [`handle_irq`]. The slot is
 // set-once, backed by an atomic so the IRQ path reads it without a lock
@@ -164,7 +164,7 @@ fn dispatch_device_irq(intid: u32) {
 extern "C" {
     /// EL1 vector table published by `vectors.s`. Installed into
     /// `VBAR_EL1` by [`init_vectors`]; never called from Rust.
-    fn rustos_aarch64_vectors();
+    fn tairix_aarch64_vectors();
 }
 
 /// Point `VBAR_EL1` at the exception vector table.
@@ -201,7 +201,7 @@ pub unsafe fn init_vectors() {
     if crate::uaccess::install().is_err() {
         crate::kernel_arch::halt_current_cpu();
     }
-    let base = rustos_aarch64_vectors as *const () as u64;
+    let base = tairix_aarch64_vectors as *const () as u64;
     // SAFETY: `base` is the 2 KiB-aligned address of the asm vector
     // table; writing it to `VBAR_EL1` has no side effect beyond the
     // system register.
@@ -398,14 +398,14 @@ fn handle_irq(from_el0: bool) {
 ///
 /// # Safety
 ///
-/// Only callable from `rustos_aarch64_trap_common`, which has saved the
+/// Only callable from `tairix_aarch64_trap_common`, which has saved the
 /// interrupted GP registers (so `frame` is a valid `[u64; SAVED_GPRS]`
 /// for the duration of this call) and tagged the exception kind. An IRQ
 /// or a serviced `svc` returns (the trampoline `eret`s); a fault diverges
 /// (the installed handler or the park never returns).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
+unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
     if is_irq(kind) {
         // `LOWER_IRQ` is the only IRQ entry whose interrupted context was
         // EL0 user mode; `CUR_SP0_IRQ`/`CUR_SPX_IRQ` interrupted EL1

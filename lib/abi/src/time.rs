@@ -1,11 +1,11 @@
-//! 64-bit-native time types for the RustOS ABI.
+//! 64-bit-native time types for the TAIRiX ABI.
 //!
-//! RustOS is 64-bit-time-native: no kernel ABI, userland ABI, IPC type, log
+//! TAIRiX is 64-bit-time-native: no kernel ABI, userland ABI, IPC type, log
 //! format, native filesystem, or persistent OS metadata may store absolute
 //! time as 32-bit seconds. The two canonical types live here:
 //!
 //! - [`Time64`] — an absolute instant, signed 64-bit seconds since the Unix
-//!   epoch plus a nanosecond field. It is RustOS's equivalent of Linux's
+//!   epoch plus a nanosecond field. It is TAIRiX's equivalent of Linux's
 //!   `timespec64` (seconds *and* nanoseconds), not a seconds-only
 //!   `time64_t`.
 //! - [`Duration64`] — a span of time, signed 64-bit seconds plus a
@@ -60,7 +60,7 @@ pub const fn coarsen_clock_ns(ns: u64) -> u64 {
 /// An absolute instant: signed seconds since the Unix epoch plus a
 /// nanosecond field in `0..NANOS_PER_SEC`.
 ///
-/// This is the RustOS canonical time type. Absolute time is
+/// This is the TAIRiX canonical time type. Absolute time is
 /// never stored as 32-bit seconds anywhere in the ABI; it is stored as a
 /// `Time64`.
 #[repr(C)]

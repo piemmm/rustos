@@ -1,4 +1,4 @@
-# RustOS riscv64 boot trampoline for the QEMU `virt` board.
+# TAIRiX riscv64 boot trampoline for the QEMU `virt` board.
 #
 # OpenSBI (loaded by `-bios default`) runs in M-mode, then enters this
 # ELF's entry point in S-mode with paging disabled (`satp = 0`, bare
@@ -20,7 +20,7 @@
 #   2. `a0`/`a1` carry the SBI hand-off values described above.
 #   3. The default code model is `medany`: every reference is
 #      pc-relative, so no global pointer (`gp`) setup is required.
-#   4. `rustos_arch_riscv64_main` is `-> !` and never returns; the
+#   4. `tairix_arch_riscv64_main` is `-> !` and never returns; the
 #      trailing `wfi` park is unreachable under QEMU but is the correct
 #      conservative behaviour on bare metal.
 
@@ -53,7 +53,7 @@ _start:
     # Hand (hartid, dtb) to the Rust entry. `a0`/`a1` already hold the
     # SBI hand-off values, so they pass straight through. It does not
     # return.
-    call    rustos_arch_riscv64_main
+    call    tairix_arch_riscv64_main
 
     # Defensive park (unreachable: the Rust entry never returns).
 3:

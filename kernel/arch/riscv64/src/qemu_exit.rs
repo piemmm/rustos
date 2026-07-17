@@ -9,7 +9,7 @@
 //!   code in the high half (see [`fail_word`]) — makes QEMU exit with
 //!   that code.
 //!
-//! The host-side [`rustos_qemu`][crate-runner] crate decodes that status
+//! The host-side [`tairix_qemu`][crate-runner] crate decodes that status
 //! back into Pass/Fail (zero ⇒ Pass on this board, unlike x86_64's
 //! `isa-debug-exit` where success is a *non-zero* status). The constants
 //! here therefore must stay in sync with `tools/qemu/src/riscv64.rs` —
@@ -21,17 +21,17 @@
 //! [crate-runner]: ../../../tools/qemu/src/riscv64.rs
 
 /// MMIO base address of the `virt` board's `SiFive` Test device. Must
-/// match `rustos_qemu::riscv64::SIFIVE_TEST_BASE`.
+/// match `tairix_qemu::riscv64::SIFIVE_TEST_BASE`.
 pub const SIFIVE_TEST_BASE: u64 = 0x10_0000;
 
 /// Finisher word reported on a successful test. QEMU exits the host
 /// process with status `0`. Must match
-/// `rustos_qemu::riscv64::FINISHER_PASS`.
+/// `tairix_qemu::riscv64::FINISHER_PASS`.
 pub const FINISHER_PASS: u32 = 0x5555;
 
 /// Low half of every failure finisher word. The high 16 bits carry the
 /// caller's exit code (see [`fail_word`]). Must match
-/// `rustos_qemu::riscv64::FINISHER_FAIL`.
+/// `tairix_qemu::riscv64::FINISHER_FAIL`.
 pub const FINISHER_FAIL: u32 = 0x3333;
 
 /// Build the failure finisher word for `code`.

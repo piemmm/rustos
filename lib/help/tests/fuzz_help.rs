@@ -1,26 +1,26 @@
 //! Deterministic fuzz harness for the `lib/help` document parser and
 //! renderers (its untrusted-input surface).
 //!
-//! [`rustos_help::HelpDoc::parse`] consumes a help document read from an
+//! [`tairix_help::HelpDoc::parse`] consumes a help document read from an
 //! installed bundle — signed, but parsed as hostile input. The harness's
 //! invariants are:
 //!
 //! * parsing any byte string never panics — it returns a `HelpDoc` or a
 //!   typed `HelpError` (fail closed), in bounded time;
 //! * any document that parses renders through both surfaces
-//!   ([`rustos_help::render_short`], [`rustos_help::render_full`]) without
+//!   ([`tairix_help::render_short`], [`tairix_help::render_full`]) without
 //!   panicking, and the emitted operations print no control character (the
 //!   parser's control-byte rejection holds through to the output).
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG mutates a
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates a
 //! real help document, splices structural Markdown tokens into random
 //! blobs, and feeds pure noise. A plain `cargo test` runs the
 //! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed;
-//! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the loop
+//! `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop
 //! to a wall-clock budget.
 
-use rustos_help::{render_full, render_short, HelpDoc};
-use rustos_vt::Op;
+use tairix_help::{render_full, render_short, HelpDoc};
+use tairix_vt::Op;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -100,13 +100,13 @@ fn exercise(input: &[u8]) {
 
 #[test]
 fn parse_and_render_never_panic_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh per
-    // run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh per
+    // run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "parse_and_render_never_panic_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -147,7 +147,7 @@ fn parse_and_render_never_panic_for_any_input() {
         exercise(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

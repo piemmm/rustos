@@ -4,6 +4,6 @@
 //! `tests/integration` build scripts.
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 }

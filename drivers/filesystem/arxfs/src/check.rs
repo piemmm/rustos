@@ -32,9 +32,9 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
-use rustos_log::{log, Event, EventId, Level, Sink};
+use tairix_abi::driver::block::Block;
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
+use tairix_log::{log, Event, EventId, Level, Sink};
 
 use crate::header::{BlockType, HEADER_LEN};
 use crate::scrub::{ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};

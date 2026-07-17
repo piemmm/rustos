@@ -1,7 +1,7 @@
-# Userland driver host (`rustos-drvhost`)
+# Userland driver host (`tairix-drvhost`)
 
-`rustos-drvhost` is the userland service that owns the lifecycle of every
-`.rxe` driver module on a running RustOS system. It is the single point at
+`tairix-drvhost` is the userland service that owns the lifecycle of every
+`.rxe` driver module on a running TAIRiX system. It is the single point at
 which an image is parsed, verified, capability-checked, and handed an
 environment to register itself against (`AGENTS.md` §8). The host runs in
 user space by default (`AGENTS.md` §4); the same code path also services
@@ -11,19 +11,19 @@ the universal `CAP_DRV_LOAD`.
 ## Public surface
 
 ```rust
-use rustos_drvhost::{Host, HostConfig, HostError, ImageSource, DriverSpawner};
-use rustos_virtio::VirtioHostFactory; // the host's virtio seam lives in lib/virtio
+use tairix_drvhost::{Host, HostConfig, HostError, ImageSource, DriverSpawner};
+use tairix_virtio::VirtioHostFactory; // the host's virtio seam lives in lib/virtio
 
 fn drive_one_module(deps: &ServiceDeps) -> Result<(), HostError> {
     let cfg = HostConfig {
         trusted_signers: &[/* Ed25519PublicKey ... */],
         syscall_table_hash: [/* SHA-256 of the kernel's syscall table */],
-        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
         source: &deps.source,   // impl ImageSource
         spawner: &deps.spawner, // impl DriverSpawner
-        sink: &deps.audit_sink, // impl rustos_log::Sink
+        sink: &deps.audit_sink, // impl tairix_log::Sink
         virtio_host_factory: None, // or Some(&dyn VirtioHostFactory)
-        mmio_mapper: None,         // or Some(&dyn rustos_abi::MmioMapper)
+        mmio_mapper: None,         // or Some(&dyn tairix_abi::MmioMapper)
     };
     let mut host = Host::new(cfg);
 
@@ -82,7 +82,7 @@ known entry point in-process through `ctx.host`. The seam returns the
 *outcome* of registration rather than an entry point, so the host
 never holds a pointer into the driver image.
 
-The `kernel/rustos-kernel/src/driver_spawn_loader.rs` `SpawnDriverLoader`
+The `kernel/tairix-kernel/src/driver_spawn_loader.rs` `SpawnDriverLoader`
 is the production process-spawning loader: it implements the device
 manager's `DriverLoader` seam, so the autoload walk drives it directly,
 runs this same `Host::load` gate on the discovered `kind = UserSpace`
@@ -95,11 +95,11 @@ devmgr → signed-gate → spawn → grant path on the `virt` board (a virtio
 node stands in for the metal controller).
 
 The IPC half of that handshake is defined: the spawned driver reads
-the reply endpoint id from its startup arguments (`rustos_rt::arg`),
+the reply endpoint id from its startup arguments (`tairix_rt::arg`),
 encodes a
 [`DriverRegisterReply`](../abi/driver_traits.md#driverregisterreply)
 (`registered(handle)` / `failed(error)`), and sends it with the
-`rustos-rt` `ipc_send` wrapper; the host decodes it fail-closed and
+`tairix-rt` `ipc_send` wrapper; the host decodes it fail-closed and
 treats the reported handle as informational only (it mints its own).
 
 The kernel-side spawn path behind that handshake is in place on
@@ -112,7 +112,7 @@ lets a scheduler-agnostic caller (a generic `kernel_main` holding `&dyn
 ProcessSpawn`) spawn a driver without naming the port's spawn mechanism
 or the selected scheduler (`AGENTS.md` §17.1 / §17.4); the default fails
 closed with `Errno::NotImplemented` (§2.9). The aarch64 producer
-(`kernel/rustos-kernel/src/aarch64/spawn_producer.rs`) implements it —
+(`kernel/tairix-kernel/src/aarch64/spawn_producer.rs`) implements it —
 the `spawn` syscall path delegates to it with the fixed session grant —
 and `kernel/core` exports `KernelSpawnCtx`, the same admit context the
 `spawn` syscall
@@ -143,12 +143,12 @@ entry — a malformed table never reaches the device manager
 
 `HostConfig::virtio_host_factory: Option<&dyn VirtioHostFactory>` is
 the seam at which the host supplies a per-driver
-`rustos_abi::driver::VirtioHost` for the duration of a single
+`tairix_abi::driver::VirtioHost` for the duration of a single
 `register()` call. The `VirtioHostFactory` trait itself lives in the
 bus-agnostic `lib/virtio` host seam, so both the userland host and any
 kernel-side implementation depend on `lib/*` rather than on each other
 (`AGENTS.md` §17.4); its `mint` is handed the driver's granted
-capabilities as a `&dyn rustos_abi::CapabilityQuery` so the seam need
+capabilities as a `&dyn tairix_abi::CapabilityQuery` so the seam need
 not name `lib/caps`. The driver retrieves the host through the new
 `DriverHost::virtio_host(&self) -> Option<&dyn VirtioHost>` accessor
 (an `abi-v1` internal addition; the public `register(host: &dyn
@@ -186,7 +186,7 @@ trait signature prevents this at compile time).
 
 ### MMIO mapper
 
-`HostConfig::mmio_mapper: Option<&dyn rustos_abi::MmioMapper>` is the
+`HostConfig::mmio_mapper: Option<&dyn tairix_abi::MmioMapper>` is the
 seam at which the host supplies a bus driver the means to map a
 device's register window. A driver retrieves it through the
 `DriverHost::mmio_mapper(&self) -> Option<&dyn MmioMapper>` accessor
@@ -199,7 +199,7 @@ synthesises (`AGENTS.md` §4). A host that leaves the slot unset reports
 
 The concrete production mapper is `KernelMmioMapper` (`kernel/virtio`),
 which routes every request through the capability-gated
-`rustos_kernel_sec::map_mmio` path; it lives in `kernel/virtio`, not in
+`tairix_kernel_sec::map_mmio` path; it lives in `kernel/virtio`, not in
 `drvhost`, so the host crate stays free of every `kernel/*` dependency
 and the `MmioMapper` trait it implements lives in `lib/abi` (`AGENTS.md`
 §17.4). Unlike the per-load boxed virtio host, the mapper is borrowed
@@ -207,8 +207,8 @@ for the host's lifetime and lent unchanged to every driver load — its
 own window bitmap is the per-load state. The in-kernel composition that
 wires both seams at once (a bus driver that maps register windows *and*
 carves a DMA region — the VL805 xHCI behind the BCM2711 PCIe root
-complex, `plans/PI.md` P10) is `rustos_kernel::run_with_driver_host`
-(`kernel/rustos-kernel/src/driver_host.rs`).
+complex, `plans/PI.md` P10) is `tairix_kernel::run_with_driver_host`
+(`kernel/tairix-kernel/src/driver_host.rs`).
 
 ### In-kernel chain admission (the Pi 4 USB keyboard)
 
@@ -216,7 +216,7 @@ The Pi 4 USB-keyboard chain (`pcie_brcm` → `bus_usb` → `usb_kbd`) is the
 first *production* caller of the `Host::load` gate (`plans/PI.md` P10
 5c-ii). Its drivers are statically linked, and their §8 `register()`
 entries are admission-only (a `CAP_DRV_LOAD` check returning a marker),
-so `kernel/rustos-kernel/src/driver_loader.rs`'s `ChainDriverLoader`
+so `kernel/tairix-kernel/src/driver_loader.rs`'s `ChainDriverLoader`
 admits each one through a plain `Host` (no MMIO/DMA host: the real
 register-window mapping and DMA carve run afterwards over the keyboard
 service's own capability-gated host). The signed manifest images and the
@@ -227,7 +227,7 @@ InKernel`, stamped with the kernel's `SYSCALL_TABLE_HASH`, requests
 Ed25519-signed with the build's deterministic driver-signing key
 (`KERNEL_DRIVER_SIGNING_SEED`); the matching public key is embedded as
 the kernel's sole driver trust anchor. The seed has a single home in
-`kernel/rustos-kernel/src/build_support.rs` (the dependency-free
+`kernel/tairix-kernel/src/build_support.rs` (the dependency-free
 `#[path]` module the build script pulls in), so a fixture or image build
 that lays a *kernel-trusted* bundle into the driver store signs from the
 same definition rather than a copy (`AGENTS.md` §2.2). The kernel trusts
@@ -241,10 +241,10 @@ step (`AGENTS.md` §5.4).
 
 ### Signed-store scan
 
-RustOS ships no compiled-in list of *which* drivers exist: the
+TAIRiX ships no compiled-in list of *which* drivers exist: the
 discovered driver set is found at runtime by scanning the installed
 signed bundles under `/System/Drivers/` (`AGENTS.md` §18.6). The
-`rustos_drvhost::store` module is that scan. Given the bundle paths a
+`tairix_drvhost::store` module is that scan. Given the bundle paths a
 caller enumerated (a VFS directory walk of `/System/Drivers/` in
 production; the bin-crate boot wiring is the one layer that may name
 both `drvhost` and `devmgr`, `AGENTS.md` §17.4) and an `ImageSource`,
@@ -254,7 +254,7 @@ load gate uses (so the match data can never drift from the gate's view
 of the bytes, `AGENTS.md` §2.2), and decodes its bind table fail-closed.
 Each accepted bundle becomes an owned `ScannedDriver`, and
 `DriverStore::candidates()` lends the borrowed `DriverCandidate` slice
-that `rustos_devmgr::DeviceManager::autoload` matches against the
+that `tairix_devmgr::DeviceManager::autoload` matches against the
 hardware tree.
 
 The scan is a **match** step only and grants no authority. Building a
@@ -272,13 +272,13 @@ never fatal: one bad bundle cannot block the rest of the boot
 In production the bundle bytes live in the §16.2 `/System/Drivers/` store.
 The store path is taken **relative to the root of the volume being
 scanned**, passed explicitly as a `store_root` argument: a whole-root
-volume uses `rustos_kernel_core::DRIVER_STORE_PATH` (`/System/Drivers`),
+volume uses `tairix_kernel_core::DRIVER_STORE_PATH` (`/System/Drivers`),
 while the design-B dedicated `/System` volume — whose own root *is*
-`/System` — uses `rustos_kernel_core::SYSTEM_VOLUME_STORE_PATH`
+`/System` — uses `tairix_kernel_core::SYSTEM_VOLUME_STORE_PATH`
 (`/Drivers`). The kernel finds *which* paths exist with
-`rustos_kernel_core::enumerate_driver_store(fs, store_root, audit)` (a
+`tairix_kernel_core::enumerate_driver_store(fs, store_root, audit)` (a
 §5.3-checked VFS walk under the uid-0 bootstrap identity), and reads the
-bytes of a chosen bundle with `rustos_kernel_core::DriverImageReader`: it
+bytes of a chosen bundle with `tairix_kernel_core::DriverImageReader`: it
 builds the root-backed VFS **once** (`AGENTS.md` §2.16), then per call
 validates that the path lies strictly within that same `store_root`,
 bounds the file against `MAX_DRIVER_IMAGE_LEN` (a 16 MiB §24.4 validation
@@ -292,7 +292,7 @@ ambient bypass (`AGENTS.md` §5.1).
 The `ImageSource` trait lives in `drvhost` (userland), and the §17.4
 layering forbids `kernel/core` from depending on it, so the bin crate —
 the one layer that may name `drvhost` — supplies the read-only `/System`
-file service `rustos_kernel::system_files::SystemFileService`. It is the
+file service `tairix_kernel::system_files::SystemFileService`. It is the
 one object over the mounted `/System` volume that both **lists** the store
 (`list_store`, delegating to `enumerate_driver_store`) and **reads** a
 bundle's bytes (an `ImageSource`, delegating to `DriverImageReader`). It
@@ -306,7 +306,7 @@ one seam (`AGENTS.md` §2.2) is what the Design-D D2b-2 `/System` file-read
 
 #### Autoloading by discovery
 
-`rustos_kernel::driver_autoload::autoload_drivers` is the one boot-wiring
+`tairix_kernel::driver_autoload::autoload_drivers` is the one boot-wiring
 composition that turns the discovered hardware tree and the installed
 signed store into running user-space drivers — the "drivers in user space
 by discovery" steady state (`AGENTS.md` §4 / §18). It adds no policy of its
@@ -320,7 +320,7 @@ own; it threads the building blocks above together:
    candidates through the shared `lib/devmatch` policy (§18.3), leaving an
    unmatched node unbound and logged (§18.4).
 3. Each winning node's driver is loaded through
-   `rustos_kernel::driver_spawn_loader::SpawnDriverLoader`, which runs the
+   `tairix_kernel::driver_spawn_loader::SpawnDriverLoader`, which runs the
    signed `Host::load` gate and **spawns** the verified payload into its own
    process, minting it one device-resource grant per `HwResource` the
    matched node requested — and nothing more (§18.3 / §4).
@@ -341,7 +341,7 @@ fail-closed, §5.4), and exposes the discovered hardware tree
 over the service, resolves each node against the decoded candidates with the
 shared `lib/devmatch` policy (§18.3), and asks the kernel to load each
 winner; the kernel re-runs the full signed `Host::load` gate and spawns the
-verified payload through `rustos_kernel::driver_spawn_loader::SpawnDriverLoader`,
+verified payload through `tairix_kernel::driver_spawn_loader::SpawnDriverLoader`,
 minting one device-resource grant per `HwResource` the matched node requested
 — and nothing more (§18.3 / §4). The `/System` volume holds no secrets; its
 store's integrity rests on the per-bundle Ed25519 signatures the load gate
@@ -372,8 +372,8 @@ interrupt-driven event loop parks on — and nothing the kthread holds ambiently
 
 ### Audit sink
 
-Every state transition emits one structured `rustos_log::Event` with a
-stable `EventId` from `rustos_drvhost::events`:
+Every state transition emits one structured `tairix_log::Event` with a
+stable `EventId` from `tairix_drvhost::events`:
 
 | `EventId` | Meaning                                              |
 |----------:|------------------------------------------------------|
@@ -399,7 +399,7 @@ uniqueness test and may never be re-numbered.
 
 ## Error mapping
 
-`HostError::as_errno(self) -> rustos_abi::Errno` is total: every
+`HostError::as_errno(self) -> tairix_abi::Errno` is total: every
 variant has a stable counterpart in `abi-v1`. Callers wrapping the host
 behind a syscall surface the result without inventing new error codes.
 

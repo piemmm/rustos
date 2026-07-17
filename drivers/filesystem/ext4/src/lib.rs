@@ -1,12 +1,12 @@
-//! RustOS ext4 filesystem driver (read/write).
+//! TAIRiX ext4 filesystem driver (read/write).
 //!
 //! Attaches an ext2/ext3/ext4 volume sitting behind any
-//! [`rustos_abi::driver::block::Block`] device and exposes it through
-//! the versioned [`rustos_abi::driver::filesystem::FilesystemRead`],
+//! [`tairix_abi::driver::block::Block`] device and exposes it through
+//! the versioned [`tairix_abi::driver::filesystem::FilesystemRead`],
 //! [`FilesystemWrite`], and [`FilesystemSecurity`] surfaces
 //! (new behaviour ships as a new trait,
 //! never by widening the frozen mount/unmount
-//! [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
+//! [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)).
 //!
 //! The driver makes **no** permission decisions: owner, mode, ACL, and
 //! the capability gate live in the VFS metadata layer that mounts
@@ -60,21 +60,21 @@
 //! # Capabilities
 //!
 //! Loading requires
-//! [`CapabilityId::DRV_LOAD`](rustos_abi::CapabilityId::DRV_LOAD). The
+//! [`CapabilityId::DRV_LOAD`](tairix_abi::CapabilityId::DRV_LOAD). The
 //! driver runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
     FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, SecurityAcl, SecuritySubject,
     VolumeStats,
 };
-use rustos_abi::time::Time64;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_abi::time::Time64;
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4558_5434_0000_0001; // "EXT4" + index
@@ -111,7 +111,7 @@ const SUPERBLOCK_LEN: usize = 1024;
 /// On-disk superblock magic (`s_magic`), little-endian `0xEF53`. The one
 /// definition lives in `lib/fsprobe`, which the volume manager's signature
 /// probe shares, so the probe and this driver can never disagree.
-const EXT_MAGIC: u16 = rustos_fsprobe::EXT4_SUPERBLOCK_MAGIC;
+const EXT_MAGIC: u16 = tairix_fsprobe::EXT4_SUPERBLOCK_MAGIC;
 
 /// `s_feature_incompat`: directory entries carry a file-type byte.
 const INCOMPAT_FILETYPE: u32 = 0x0002;
@@ -2669,7 +2669,7 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
-        // The ext4 on-disk format cannot faithfully store a full RustOS
+        // The ext4 on-disk format cannot faithfully store a full TAIRiX
         // security record: it has no representation for the capability
         // gate, and this driver does not rewrite POSIX-ACL xattr blocks.
         // Storing a silently-lossy record is forbidden, so the write is
@@ -2679,7 +2679,7 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
     }
 }
 
-/// The on-disk format has nowhere to store RustOS extended attributes, so
+/// The on-disk format has nowhere to store TAIRiX extended attributes, so
 /// the default facet answer stands: a mounted volume refuses the
 /// `fs_attr_*` surface with the typed unsupported-backing error.
 impl<B: Block> FilesystemAttrsProvider for Ext4<B> {}

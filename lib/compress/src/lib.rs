@@ -1,6 +1,6 @@
-//! First-party RustOS LZ compression codec (`lib/compress`).
+//! First-party TAIRiX LZ compression codec (`lib/compress`).
 //!
-//! This crate is the single shared home of RustOS's general-purpose,
+//! This crate is the single shared home of TAIRiX's general-purpose,
 //! lossless compression (lists compression as a curated
 //! shared-library class). `ARXFS` uses it to compress every file-data record
 //! before encryption (`docs/src/filesystem/arxfs-spec.md` §6, §10), and it
@@ -50,7 +50,7 @@
 #[cfg(test)]
 mod tests;
 
-/// Frame magic identifying a RustOS LZ stream (`RLZ1`, format version 1).
+/// Frame magic identifying a TAIRiX LZ stream (`RLZ1`, format version 1).
 const MAGIC: [u8; 4] = *b"RLZ1";
 
 /// Bytes of fixed frame header: the [`MAGIC`] plus the [`u32`] little-endian
@@ -135,7 +135,7 @@ fn clamp_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// Widen a `u32` to `usize`. Infallible on every RustOS target (pointers are
+/// Widen a `u32` to `usize`. Infallible on every TAIRiX target (pointers are
 /// at least 32-bit); the clamp keeps it total without a panic regardless.
 fn to_usize(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)

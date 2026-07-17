@@ -9,7 +9,7 @@
 #![deny(missing_docs)]
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
-compile_error!("rustos-test-syscall-resume-qemu-aarch64: test hooks are debug-only");
+compile_error!("tairix-test-syscall-resume-qemu-aarch64: test hooks are debug-only");
 
 #[cfg(all(itest_aarch64, feature = "test-hooks"))]
 extern crate alloc;

@@ -11,13 +11,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rustos_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-use rustos_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
-use rustos_abi::origin::{ProcId, PROC_ID_LEN};
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::window_ipc::{PointerAction, WindowEvent};
-use rustos_abi::Errno;
-use rustos_display::{FrameRegion, ShmMapper};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
+use tairix_abi::origin::{ProcId, PROC_ID_LEN};
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::window_ipc::{PointerAction, WindowEvent};
+use tairix_abi::Errno;
+use tairix_display::{FrameRegion, ShmMapper};
 
 use crate::client::{EventSource, WindowClient, WindowEvents, WindowTransport};
 use crate::server::{
@@ -687,7 +687,7 @@ fn event_endpoint_ids_are_distinct_per_task_and_never_reserved() {
     assert_eq!(event_endpoint_for(0x1234) & 0xFFFF, 0x1234);
     // No app mailbox may land on a reserved well-known rendezvous.
     for pid in [0u64, 1, 7, 0x0000_FFFF_FFFF] {
-        assert!(!rustos_abi::ipc::is_reserved_endpoint(event_endpoint_for(
+        assert!(!tairix_abi::ipc::is_reserved_endpoint(event_endpoint_for(
             pid
         )));
     }

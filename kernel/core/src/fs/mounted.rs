@@ -15,7 +15,7 @@
 //! IRQ wait rather than behind a single global server. Operations on
 //! *different* mounts proceed fully in parallel. Within one mount the
 //! filesystem driver needs `&mut self` per operation and may **park** across a
-//! block-device completion IRQ ([`rustos_abi::driver::block::Block::read_blocks`]
+//! block-device completion IRQ ([`tairix_abi::driver::block::Block::read_blocks`]
 //! parks the caller), so the per-mount lock is a scheduler-blocking
 //! [`SleepLock`] held across that park — never a `lib/sync` spin lock, which a
 //! second contender would busy-spin on while the holder sleeps
@@ -27,7 +27,7 @@
 //!
 //! The syscall handler supplies the caller's owning `uid` and effective
 //! capability set, both read from the task's
-//! [`rustos_kernel_sec::TaskCapabilities`] — never anything the caller passed.
+//! [`tairix_kernel_sec::TaskCapabilities`] — never anything the caller passed.
 //! This service resolves the caller's primary and supplementary **groups**
 //! from the authoritative [`IdentityTable`] keyed by that uid (a frozen,
 //! credential-free index — it carries no password material), then runs
@@ -40,19 +40,19 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     NodeKind as DriverNodeKind, VolumeStats,
 };
-use rustos_abi::driver::DriverHandle;
-use rustos_abi::sysinfo::{MountAvailability, MountRecord};
-use rustos_abi::time::Time64;
-use rustos_abi::{
+use tairix_abi::driver::DriverHandle;
+use tairix_abi::sysinfo::{MountAvailability, MountRecord};
+use tairix_abi::time::Time64;
+use tairix_abi::{
     CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
 };
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{GroupId, IdentityTable, UserId};
-use rustos_sync::{OnceCell, RwLock, SpinLock};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
+use tairix_sync::{OnceCell, RwLock, SpinLock};
 
 use crate::sleeplock::SleepLock;
 

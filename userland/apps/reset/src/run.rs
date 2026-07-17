@@ -1,11 +1,11 @@
 //! The `Run` entry-point binary of the `reset` tool — the program a shell
 //! spawns to restore a wedged terminal to a sane state.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `mem_map`-backed global
-//! allocator, and the syscall wrappers; `rustos_rt::entry!` names this
+//! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector (the reserved `-h`/`-?`
@@ -30,11 +30,11 @@
 mod program {
     extern crate alloc;
 
-    use rustos_abi::InputMode;
-    use rustos_help::{own_short_help, BundleHelp};
-    use rustos_reset::{parse, reset_bytes, Command, USAGE};
-    use rustos_rt::io::{write_stderr_line, Stdout, Write};
-    use rustos_termcap::from_term;
+    use tairix_abi::InputMode;
+    use tairix_help::{own_short_help, BundleHelp};
+    use tairix_reset::{parse, reset_bytes, Command, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_termcap::from_term;
 
     /// Render `reset`'s own short help (`NAME` + `SYNOPSIS` + compact
     /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
@@ -42,7 +42,7 @@ mod program {
     /// documents) the usage banner stands in — the tool's own text, not
     /// fabricated help content — so `-h` never fails.
     fn short_help() -> i32 {
-        let locale = rustos_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let bytes = own_short_help(&BundleHelp::new("reset"), locale, "reset")
             .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
         match Stdout.write_all(&bytes) {
@@ -51,7 +51,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when the terminal was restored (or short help
@@ -60,7 +60,7 @@ mod program {
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
-        let Some(arguments) = rustos_rt::args() else {
+        let Some(arguments) = tairix_rt::args() else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -77,16 +77,16 @@ mod program {
         // program may have left the console raw, and the user typing this
         // very command could not see it. Best-effort — a stream-fed session
         // (a pipe) has no console discipline to restore.
-        let _ = rustos_rt::set_input_mode(InputMode::Cooked);
+        let _ = tairix_rt::set_input_mode(InputMode::Cooked);
 
         // The terminal's capabilities come from the inherited `TERM`
         // (fail-closed: unknown or absent degrades to the dumb baseline
         // inside `from_term`), never a hard-coded terminal model. The dumb
         // baseline yields an empty sequence — the discipline restore above
         // is the whole reset for a terminal with no controls.
-        let term = rustos_rt::env_var(b"TERM")
+        let term = tairix_rt::env_var(b"TERM")
             .and_then(|raw| core::str::from_utf8(raw).ok())
-            .map_or(rustos_termcap::TermType::Dumb, from_term);
+            .map_or(tairix_termcap::TermType::Dumb, from_term);
         let bytes = reset_bytes(&term.capabilities());
         match Stdout.write_all(&bytes) {
             Ok(()) => 0,
@@ -94,13 +94,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(all(freestanding, feature = "program")))]

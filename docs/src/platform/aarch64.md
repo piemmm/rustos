@@ -1,6 +1,6 @@
 # aarch64
 
-RustOS targets `aarch64-unknown-none` as a Tier-1 platform. Stage 3b
+TAIRiX targets `aarch64-unknown-none` as a Tier-1 platform. Stage 3b
 delivers the QEMU `virt`-board boot and Arch-HAL primitives for the
 64-bit Arm port: an EL1 boot trampoline, a PL011 UART console, the
 `Aarch64Arch` implementation of the Arch HAL, the EL1 exception vector
@@ -21,7 +21,7 @@ southbridge) are out of scope here; they reuse this work as later board ports.
 Per `plans/PI.md` §0.2, the `virt` board and the Pi 4 are two *boards of the
 same `aarch64` architecture*: every base below is consumed as **runtime
 device-tree data** discovered by `kernel/arch/aarch64::platform::FdtDiscovery`
-into `rustos_abi::hwtree`, never a `cfg(board = …)` fork (`AGENTS.md` §17.2 /
+into `tairix_abi::hwtree`, never a `cfg(board = …)` fork (`AGENTS.md` §17.2 /
 §2.2). The numbers are recorded here only as the facts the discovery path must
 yield, and as the input to the one legitimate per-board artefact — the boot
 stub, linker script, and load address (the `AGENTS.md` §1 boot-stub carve-out).
@@ -43,7 +43,7 @@ The AUX block base is `0xFE21_5000` (the `brcm,bcm2835-aux` peripheral); the
 mini-UART register window begins at `+0x40` (`0xFE21_5040`), behind the AUX
 enable register at `+0x04`. The mini-UART register layout differs from the
 PL011 (a narrower, 7-bit-addressed 16550-derived block), which is why P2 adds
-it as a second console backend behind one `rustos_log::Sink` seam, selected by
+it as a second console backend behind one `tairix_log::Sink` seam, selected by
 the device-tree `compatible` string.
 
 ### Interrupt controller (GIC-400)
@@ -129,8 +129,8 @@ in the kernel's window, every other window wholly usable — and logs the
 resulting split (`mem_map_built` / `mem_map_status` / `usable_bytes_hex` /
 `reserved_bytes_hex`), failing closed to a status string (never a panic,
 `AGENTS.md` §2.9) on an absent or malformed discovery. The arithmetic is
-the host-tested `rustos_kernel::mem_map` module (the analogue of the
-riscv64 boot pipeline's `rustos_kernel::boot_riscv64::build_boot_memory_map`).
+the host-tested `tairix_kernel::mem_map` module (the analogue of the
+riscv64 boot pipeline's `tairix_kernel::boot_riscv64::build_boot_memory_map`).
 Handing that map to
 `kernel_core::kernel_main` is P6c-2 — it needs the MMU enabled first, since
 the allocator/scheduler atomics are UNPREDICTABLE on the MMU-off
@@ -139,14 +139,14 @@ Device-memory the boot CPU runs on (a hard-coded map would violate
 
 ### Production kernel image (P1)
 
-The production aarch64 kernel is the `rustos-kernel` binary built for
+The production aarch64 kernel is the `tairix-kernel` binary built for
 `aarch64-unknown-none`. Its boot artefacts are the one legitimate per-board
 fork (`AGENTS.md` §1 boot-stub carve-out; `plans/PI.md` §0.2):
 
 - **Linker script** `kernel/arch/aarch64/link/aarch64-rpi4.ld` places the
   image at the firmware load address `0x8_0000`. It is identical to
   `aarch64-virt.ld` (used by the QEMU `virt` per-test bins) save for the
-  origin address. `kernel/rustos-kernel/build.rs` selects it for the
+  origin address. `kernel/tairix-kernel/build.rs` selects it for the
   `aarch64-unknown-none` target; the pure target→linker/`kernel_isa`
   selection logic lives in the host-unit-tested `src/build_support.rs`, so
   the crate body never names `target_arch` (cfg-check clean).
@@ -156,13 +156,13 @@ fork (`AGENTS.md` §1 boot-stub carve-out; `plans/PI.md` §0.2):
   no-op on `virt` (secondaries held in firmware until PSCI). The boot CPU
   drops EL2→EL1 (if entered at EL2, as the Pi firmware does) and tail-calls
   `kernel_main(dtb)`.
-- **`kernel_main(dtb)`** enables FP/SIMD via `rustos_arch_aarch64::enable_fp_el1`,
+- **`kernel_main(dtb)`** enables FP/SIMD via `tairix_arch_aarch64::enable_fp_el1`,
   constructs `Aarch64Arch` (the single `AGENTS.md` §17.1/§17.2 concrete-arch
   selection point for the image), records a boot audit line over the
   console, and parks fail-closed.
 
 Since P2 the console base is **device-tree-discovered**: `kernel_main`
-calls `rustos_arch_aarch64::console::configure_from_fdt` on the `x0` DTB
+calls `tairix_arch_aarch64::console::configure_from_fdt` on the `x0` DTB
 before its first log line, so the console points at whatever UART the
 firmware tree describes (see [Board-discovered console](#board-discovered-console)).
 Since **P3** it also points the GICv2 driver at the discovered GICD/GICC
@@ -192,7 +192,7 @@ starts each secondary over the discovered mechanism (audited
 adopts the boot identity map (`paging::adopt_boot_translation` over the
 published park root), installs its own EL1 vectors, GICv2 CPU
 interface, and tickless preemption/IPI arming, and joins the shared
-kernel dispatch loop through `rustos_kernel_core::run_secondary`,
+kernel dispatch loop through `tairix_kernel_core::run_secondary`,
 attesting `SecondaryCpuOnline`. `adopt_boot_translation` first
 invalidates the calling core's local data cache to the point of
 coherency (set/way `dc isw`, never a clean) **before** enabling the
@@ -219,7 +219,7 @@ violate `AGENTS.md` §18.5.
 
 Like x86_64 and riscv64, `kernel/arch/aarch64` is a pure Arch HAL
 implementation (`AGENTS.md` §17.2 / §17.4): it implements
-`rustos_arch_api::SchedulerArch` (`Aarch64Arch`) plus the monotonic
+`tairix_arch_api::SchedulerArch` (`Aarch64Arch`) plus the monotonic
 clock and a CPU-park primitive, and names only `kernel/arch/api` and
 `lib/*` — never a concrete kernel subsystem. A downstream boot consumer
 wraps `Aarch64Arch` in its own `kernel_core::KernelArch` adapter.
@@ -249,7 +249,7 @@ The trampoline:
 2. If entered at EL2 (the Pi firmware, or a `virtualization=on` board),
    establishes a **fully-known EL2 state** before dropping to EL1: every
    EL2 control register is *written whole* with the unit-test-pinned
-   hand-off values in `rustos_arch_aarch64::el2` — `HCR_EL2 = RW` only
+   hand-off values in `tairix_arch_aarch64::el2` — `HCR_EL2 = RW` only
    (EL1 is AArch64, no stage-2, no traps), `CNTHCTL_EL2 = EL1PCTEN |
    EL1PCEN` (EL1/EL0 own the physical counter/timer), `CNTVOFF_EL2 = 0`,
    `CPTR_EL2 =` its RES1 bits (no FP/SIMD trap), `MDCR_EL2 = 0` (no
@@ -270,7 +270,7 @@ The trampoline:
    it is exercised. The secondary-core trampoline (`smp.s`) does the
    same at its PSCI `CPU_ON` entry.
 4. Establishes the boot stack, zeroes `.bss`, and tail-calls
-   `rustos_arch_aarch64_main(dtb)`, which forwards to the
+   `tairix_arch_aarch64_main(dtb)`, which forwards to the
    binary-supplied `kernel_main`.
 
 The console (`serial.rs`) routes the boot log by build profile. A
@@ -404,7 +404,7 @@ hand-off: they enter an ELF `-kernel` with `x0 = 0` (GDB-verified on
 hand the kernel a generated tree (with a real `arm,pl011` node), so the
 runtime discover→configure→print path is CI-proven on `virt` against a
 genuine firmware tree; the Pi's specific console base and the mini-UART
-register layout are covered by host unit tests against the `rustos_fdt`
+register layout are covered by host unit tests against the `tairix_fdt`
 `raspi_like_arm` fixture and are on-metal acceptance items for the Arc C
 peripheral stages.
 
@@ -458,7 +458,7 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
 - **Bring-up (pre-MMU, by design).** `video::configure_from_fdt` runs
   in the same pre-MMU phase as the console/GIC discovery: with the
   data caches still off, the CPU↔firmware property exchange over the
-  shared `rustos-vcmailbox` protocol crate is coherent without cache
+  shared `tairix-vcmailbox` protocol crate is coherent without cache
   maintenance, and the console state cell is written by the
   single-threaded boot CPU without an atomic read-modify-write (which
   is UNPREDICTABLE MMU-off — the constraint that orders this boot).
@@ -470,7 +470,7 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
 - **QEMU `virt` fallback (`ramfb`).** A tree with no mailbox is probed
   for a `qemu,fw-cfg-mmio` node instead. When QEMU was started with
   `-device ramfb`, `video::configure_ramfb` programs the device's
-  scan-out — over the shared `rustos-fwcfg` DMA client (`AGENTS.md`
+  scan-out — over the shared `tairix-fwcfg` DMA client (`AGENTS.md`
   §2.2), the same protocol definition the display verticals use — to a
   statically-reserved 1024×768 surface in kernel BSS, and records the
   same surface over it (`publish_console`, the shared tail of both
@@ -480,7 +480,7 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   UART-backed verticals are unchanged.
 - **Cell-grid attach (post-MMU, by design).** The pre-MMU phase only
   *records* the discovered surface and clears it to a clean background;
-  it does **not** build the renderer, because `rustos_fbcon` keeps a
+  it does **not** build the renderer, because `tairix_fbcon` keeps a
   retained cell grid (below) and that grid is leaked from the kernel
   heap, which is unusable MMU-off (its allocator's atomics are
   UNPREDICTABLE on the MMU-off Device-typed memory the boot CPU runs).
@@ -496,12 +496,12 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   console (fail closed).
 - **Rendering — a real `xterm-256color` terminal, in a shared engine.**
   The terminal is not this port's own code: it is the shared,
-  architecture-neutral `rustos_fbcon` engine (`lib/fbcon`, `AGENTS.md`
+  architecture-neutral `tairix_fbcon` engine (`lib/fbcon`, `AGENTS.md`
   §2.2 / §2.20 / §2.21), so every arch port renders its display console
   through one definition and this port supplies only the board-specific
   surface discovery above. Shell output is not drawn byte-for-byte: it is
   fed through the **one** streaming ANSI/VT/xterm parser in the tree
-  (`rustos_vt::Parser` — no second escape parser), each parsed `Op` mutates
+  (`tairix_vt::Parser` — no second escape parser), each parsed `Op` mutates
   the retained cell grid, and the dirtied cells are repainted onto the
   scan-out surface once per write. The console therefore
   *interprets*
@@ -512,13 +512,13 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   (`ED`/`EL`), the scroll region (`DECSTBM`) and explicit scrolling
   (`SU`/`SD`), the alternate screen, and the saved cursor. Glyphs are
   the shared Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans Hebrew
-  coverage atlas (`rustos_font::atlas` — one font definition), including all
+  coverage atlas (`tairix_font::atlas` — one font definition), including all
   precomposed Hangul syllables, at an integer scale chosen
   from the display height
   (`height / 1080`, clamped to 1…4: 1080p → 1×, 2160p → 2×), packed
   `0xFF00_0000 | (r<<16) | (g<<8) | b` — correct on both the mailbox
   (`Bgra8888`) and ramfb (`XRGB8888`) surfaces, whose bytes coincide.
-  The engine keeps a **retained character-cell grid** (`rustos_vt::Cell`
+  The engine keeps a **retained character-cell grid** (`tairix_vt::Cell`
   per position): each write mutates the grid and the dirtied cell rect is
   repainted from it **once** at the end of the write, so reaching the
   bottom margin performs a real terminal scroll (grid `copy_within`), not a
@@ -527,13 +527,13 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   monopolise the CPU for seconds on the Pi 4, starving the buffered serial
   drain). The grid is what lets the console restore the primary screen
   when a full-screen program leaves the alternate screen (below).
-  `rustos_fbcon`
+  `tairix_fbcon`
   (and, through it, `lib/vt` and `lib/font`) is depended on
   `default-features = false`: `lib/vt`'s `Vec`-returning `encode*` helpers
   ride its default-on `alloc` feature, while `Op` itself owns no heap (the
   OSC title is a bounded inline `Title`), so the allocator-free parser is
   all the minimal QEMU test bins link (the same discipline as the
-  `rustos-font` atlas-only dependency). The parser is
+  `tairix-font` atlas-only dependency). The parser is
   total, so a malformed or unrecognised sequence is consumed without
   disturbing the screen; a Unicode scalar the atlas cannot draw renders
   `?`. Attributes with no bitmap rendering (underline/italic/blink/dim/
@@ -571,7 +571,7 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   split a scrolling burst into one render-lock hold per line; preemption, not
   a cooperative output yield, schedules other work between syscalls. Raw log
   writes continue through `video::write_bytes`. The input half is the shared `VIDEO_KEYBOARD`
-  queue (`rustos_kernel_core::ConsoleInputQueue`), which is both the
+  queue (`tairix_kernel_core::ConsoleInputQueue`), which is both the
   console's `ConsoleRead` half (drained by a video-login `stream_read`)
   and its `ConsoleInput` half (fed by the `console_input` syscall a
   keyboard-input driver issues after decoding a directly attached
@@ -606,9 +606,9 @@ acceptance item like the rest of the Pi peripherals.
 `qemu-system-aarch64 -M virt`. The Pi-linked kernel inside the image
 loads at `0x8_0000` (not RAM on `virt`), and QEMU's ELF `-kernel` path
 passes no DTB, so `run` additionally builds the **`virt`-board form of
-the same production kernel crate** (`RUSTOS_KERNEL_BOARD=virt` →
+the same production kernel crate** (`TAIRIX_KERNEL_BOARD=virt` →
 `aarch64-virt.ld`) and boots it as an arm64-`Image`-wrapped raw binary
-(`rustos_mkimage::elfflat::build_virt_boot_image`), which QEMU loads at
+(`tairix_mkimage::elfflat::build_virt_boot_image`), which QEMU loads at
 the `virt` link address and enters with the generated device tree in
 `x0` — the same hand-off shape as the Pi firmware. The session attaches
 the image as the virtio-blk root disk, `-device ramfb` for the windowed
@@ -647,7 +647,7 @@ keys and both register windows as capability-gated MMIO resources.
 
 The runtime walk is MMU-off-safe for the same byte-wise reason as the
 console (`plans/PI.md` W17), and is CI-proven on `virt`: the
-`rustos-test-ipi-smp-qemu-aarch64` vertical **poisons** the GIC base, then
+`tairix-test-ipi-smp-qemu-aarch64` vertical **poisons** the GIC base, then
 discovers it from the embedded `virt` tree before `gic::init`, so the
 delivered IPI exercises the *discovered* base. The Pi 4's specific GIC-400
 bases are covered by host unit tests against the `raspi_like_arm` fixture
@@ -762,7 +762,7 @@ microseconds). The gentlest **no-touch-probe** bring-up (below) does
 The keyboard path treats VL805 firmware as boot-firmware-owned. The user's
 known-good capture on the same board/SD/firmware shows the board loads
 the VL805 firmware before the OS, USB works in the pre-boot firmware menu,
-and no runtime VL805 reload is needed. The RustOS path therefore keeps the boot firmware's
+and no runtime VL805 reload is needed. The TAIRiX path therefore keeps the boot firmware's
 PCIe/VL805 state intact wherever it can — `reset_controller` only releases the
 reset the previous stage left asserted (below), never re-asserting a
 fundamental reset that could drop resident firmware. A `NOTIFY_XHCI_RESET`
@@ -832,7 +832,7 @@ the `4120` capture identical to the known-good runtime window with
 `4118 fw_version=0` pins the residual on the firmware handoff below.
 
 The residual is therefore **outside the PCI path**, in the firmware
-handoff. RustOS's own aarch64 boot/arch code never writes
+handoff. TAIRiX's own aarch64 boot/arch code never writes
 `RGR1_SW_INIT_1` (only `pcie_brcm::reset_controller` does, *after*
 sampling `entry_rgr1_sw_init`), so the metal `entry_rgr1_sw_init=0x3`
 (PERST + bridge `sw_init` asserted) is `start4.elf`'s handoff state. A
@@ -940,7 +940,7 @@ With `-semihosting-config enable=on,target=native`, the guest issues a
 exit with status `0`, any other status is a failure. This matches
 riscv64's zero-is-pass convention (and is the inverse of x86_64's
 non-zero `isa-debug-exit`), so the host-side decode is per-arch
-(`rustos_qemu::aarch64::outcome_from_status`).
+(`tairix_qemu::aarch64::outcome_from_status`).
 
 ## Stage 3 architecture primitives
 
@@ -1023,7 +1023,7 @@ system-register/assembly/MMIO operations to the freestanding target.
   framebuffer console already cleans its writes to the point of
   coherency.
 - **Context switch** (`context` + `context.s`). `TaskCtx { sp }` plus
-  `rustos_arch_aarch64_switch`, saving the AAPCS64 callee-saved registers
+  `tairix_arch_aarch64_switch`, saving the AAPCS64 callee-saved registers
   (`x19`–`x28`, `x29`/FP, `x30`/LR), the first-run argument `x0`, the
   callee-saved FP/SIMD halves `d8`–`d15`, and the continuation's `DAIF`.
   The interrupt mask is restored only after the inbound stack and register
@@ -1058,7 +1058,7 @@ system-register/assembly/MMIO operations to the freestanding target.
   31 frame slots are the `[u64; SAVED_GPRS]` view `syscall_entry` reads,
   so their offsets are fixed.
 - **Syscall entry** (`syscall_entry`). The `svc` exception class decode
-  and the `x8`/`x0`–`x5` → `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
+  and the `x8`/`x0`–`x5` → `tairix_abi` `[u64; SYSCALL_MAX_ARGS]`
   marshalling, with a set-once dispatch callback (the same shape the
   x86_64 and riscv64 ports install). The EL0 register frame is now wired
   through: the `vectors.s` trampoline passes the saved-frame base to the
@@ -1077,13 +1077,13 @@ checklist (plus the PI Stage P2 console-discovery vertical, the CCOMPAT
 CC2 syscall round-trip, the Stage W3-B device-IRQ vertical, the Stage W6
 SMP/IPI vertical, and the Stage W7 live-scheduler vertical) on the `virt`
 board; each links only the arch port (the live-scheduler vertical also
-links the `rustos-kernel-sched-mlfq` policy) and reports its result
+links the `tairix-kernel-sched-mlfq` policy) and reports its result
 through the semihosting finisher. They are enrolled in
 `cargo xtask test --qemu`.
 
-- `rustos-test-kernel-arch-boot-aarch64` — **boots the production
+- `tairix-test-kernel-arch-boot-aarch64` — **boots the production
   pipeline to `BootCompleted`** (PI Stage P6c-2): drives the real
-  `rustos_kernel::boot_aarch64::boot`, which discovers the console + GIC
+  `tairix_kernel::boot_aarch64::boot`, which discovers the console + GIC
   bases MMU-off from the embedded `virt` device tree and derives the
   identity map's Device and RAM gigapage masks from them, enables the stage-1
   identity MMU (512×1 GiB gigapages over a static boot `PageTablePool`,
@@ -1098,18 +1098,18 @@ through the semihosting finisher. They are enrolled in
   with all three online (a `SecondaryCpuStartFailed` is an immediate
   FAIL) — the aarch64 analogue of the x86_64 / riscv64 boot verticals,
   extended into the end-to-end multi-core boot proof.
-- `rustos-test-uart-console-qemu-aarch64` — **the console base is
+- `tairix-test-uart-console-qemu-aarch64` — **the console base is
   discovered, not hard-wired** (PI Stage P2): poisons the console base,
   then proves `console::configure_from_fdt` overwrites it with the base
   read from the board's embedded device tree and that writes reach that
   base (it prints two lines over the *discovered* console before the PASS
   finisher).
-- `rustos-test-timer-preempt-qemu-aarch64` — **timer interrupt drives
+- `tairix-test-timer-preempt-qemu-aarch64` — **timer interrupt drives
   the scheduler**: arms the EL1 physical timer at 100 Hz and confirms the
   GICv2 IRQ path drives the `preempt` callback ≥ 20 times.
-- `rustos-test-irq-qemu-aarch64` — **a device IRQ reaches a Rust
+- `tairix-test-irq-qemu-aarch64` — **a device IRQ reaches a Rust
   handler** (Stage W3-B): binds the PL031 RTC's GICv2 SPI (INTID 34) in a
-  kernel-neutral `rustos_kernel_irq::IrqTable`, routes that SPI to CPU 0
+  kernel-neutral `tairix_kernel_irq::IrqTable`, routes that SPI to CPU 0
   through `gic::route_spi` (`GICD_ITARGETSR`), installs a set-once
   device-IRQ dispatcher (`exceptions::set_device_irq_dispatch`) that
   forwards the line to `IrqTable::fire` over a `GicController` bridge,
@@ -1117,18 +1117,18 @@ through the semihosting finisher. They are enrolled in
   and the dispatcher masks the line + sets the wait flag; the test then
   asserts the GIC enable bit re-reads masked (mask-before-wake,
   `docs/src/security/irq.md`) before the PASS finisher.
-- `rustos-test-memory-isolation-qemu-aarch64` — **memory-isolation test
+- `tairix-test-memory-isolation-qemu-aarch64` — **memory-isolation test
   passes**: a victim and an attacker stage-1 address space disagree on
   one page; switching to the attacker and reading that page raises a
   data abort the `fault` handler confirms.
-- `rustos-test-stack-guard-qemu-aarch64` — **the guard-page fault-form
+- `tairix-test-stack-guard-qemu-aarch64` — **the guard-page fault-form
   works** (`plans/PI.md` G1): `AddressSpace::split_block` shatters the
   coarse identity block covering a dedicated guard page down to 4 KiB
   pages, then that single page is `unmap`ped + `flush_page`d through the
   Arch HAL; reading it raises a data abort the `fault` handler confirms.
   A sentinel write/read-back before the unmap proves the split preserved
   the live mapping.
-- `rustos-test-ipi-smp-qemu-aarch64` — **multi-core bring-up + IPI**
+- `tairix-test-ipi-smp-qemu-aarch64` — **multi-core bring-up + IPI**
   (Stage W6) **over a discovered GIC base** (PI Stage P3): the boot core
   first poisons the GICv2 base and rediscovers it from the embedded
   `virt` device tree (`gic::configure_from_fdt`), then starts core 1
@@ -1137,11 +1137,11 @@ through the semihosting finisher. They are enrolled in
   through `Aarch64Arch::send_ipi` (a GICv2 SGI); PASS once core 1's IRQ
   path runs the IPI callback with core 1's id — so the IPI is delivered
   over the *discovered* base. Runs with `--cpus 2`.
-- `rustos-test-sched-drive-qemu-aarch64` — **the arch primitives drive
+- `tairix-test-sched-drive-qemu-aarch64` — **the arch primitives drive
   the live scheduler** (Stage W7): the EL1/GICv2 analogue of
-  `rustos-test-sched-drive-qemu-riscv64`. With interrupts off it performs
+  `tairix-test-sched-drive-qemu-riscv64`. With interrupts off it performs
   a real bidirectional `context::switch` round-trip, then builds a real
-  `rustos_kernel_sched_mlfq::Scheduler` over `Aarch64Arch` and installs
+  `tairix_kernel_sched_mlfq::Scheduler` over `Aarch64Arch` and installs
   the `preempt` generic-timer callback **and** the GICv2 IPI (SGI)
   callback so both drive `Scheduler::on_timer_tick`. It arms the 100 Hz
   generic timer + IPI, spawns and dispatches a batch of tasks through the
@@ -1153,15 +1153,15 @@ through the semihosting finisher. They are enrolled in
   rediscovered (`gic::configure_from_fdt`) before `gic::init`, so the
   ticks + IPI run over the *discovered* base and rate, not the
   pre-discovery defaults. Single CPU.
-- `rustos-test-abi-sys-syscall-qemu-aarch64` — **CC2 `svc` round-trip**
+- `tairix-test-abi-sys-syscall-qemu-aarch64` — **CC2 `svc` round-trip**
   (`plans/CCOMPAT.md`): stands up a minimal EL0 context — identity-maps
-  the kernel (EL1), aliases the `lib/abi-sys` `ros_sys_cap_query` stub
+  the kernel (EL1), aliases the `lib/abi-sys` `tairix_sys_cap_query` stub
   page at a user VA with EL0-executable attributes
   (`paging::el0_code_leaf_attrs`, mapped via `map_4k_with_attrs`) plus an
   EL0 stack (`el0_data_leaf_attrs`), installs the dispatch callback and
   the EL1 vector table, and `eret`s to EL0. The stub's real `svc` then
   traps into the EL1 vector and the callback asserts the kernel-observed
-  `(number, args)` are exactly what `ros_sys_cap_query` should have
+  `(number, args)` are exactly what `tairix_sys_cap_query` should have
   marshalled into `x8`/`x0` before the semihosting PASS finisher; any
   mismatch (or the `svc` resuming in EL0) trips a distinct failure
   finisher. This exercises the real `svc` (`lib/abi-sys/src/trap.rs`) and
@@ -1171,17 +1171,17 @@ through the semihosting finisher. They are enrolled in
 
 ```text
 # Build a vertical for the freestanding target:
-cargo build --locked -p rustos-test-timer-preempt-qemu-aarch64 \
+cargo build --locked -p tairix-test-timer-preempt-qemu-aarch64 \
     --target aarch64-unknown-none
 
 # Run it under QEMU (runner exit 0 == PASS):
-cargo run -p rustos-qemu --bin rustos-qemu-run -- \
-    --kernel target/aarch64-unknown-none/debug/rustos-test-timer-preempt-qemu-aarch64 \
+cargo run -p tairix-qemu --bin tairix-qemu-run -- \
+    --kernel target/aarch64-unknown-none/debug/tairix-test-timer-preempt-qemu-aarch64 \
     --arch aarch64 --cpus 1 --timeout-secs 60
 
 # Host unit tests for the arch crate (paging / context / preempt /
 # syscall / fault / gic / kernel_arch):
-cargo test -p rustos-arch-aarch64
+cargo test -p tairix-arch-aarch64
 ```
 
 The host-side argv contract lives in `tools/qemu/src/aarch64.rs`:
@@ -1321,7 +1321,7 @@ the service binds.
   `build.rs` and the autoload fixtures also use (`AGENTS.md` §2.2);
   `tools/mkimage` only plants the bytes (`build_rpi_image`'s `drivers`
   argument), it never drives `cargo`. The store-planting routine is the single
-  `rustos_drv_fs_arxfs::plant_nested_file`.
+  `tairix_drv_fs_arxfs::plant_nested_file`.
 
 Metal-only (`plans/PI.md` §0.4): QEMU `virt` models no `VideoCore` mailbox, so
 the wire protocol, the client channel, and the server transform are host-tested
@@ -1409,7 +1409,7 @@ on-change capped error, and a capped heartbeat), so the log stays finite
 | `4120` | `usb_keyboard::bring_up_keyboard` | a one-shot capture of the controller's **inbound** (PCIe→system-memory) viewport registers **as the previous boot stage (`start4.elf`) left them**, sampled before bring-up programs `RC_BAR2` (`BrcmPcieRc::entry_inbound_window`): `rc_bar1_lo_hex`/`rc_bar3_lo_hex` (the unused PCIe→GISB / PCIe→SCB inbound windows), `rc_bar2_lo_hex`/`rc_bar2_hi_hex` (the active PCIe→system-memory viewport — offset bits plus the encoded size in the low field), `misc_ctrl_hex` (the inbound-path `MISC_MISC_CTRL`, whose `SCB0_SIZE` field in bits `[31:27]` sizes the inbound SCB→memory decode window), and `pcie_status_hex` for correlation. raspberrypi/firmware #1495: `VideoCore`'s `NOTIFY_XHCI_RESET` firmware load *assumes* the `RC_BAR2` state it set at power-on, so this capture both drives bring-up's "preserve a firmware-configured `RC_BAR2`" decision and lets a metal run compare the firmware's own inbound window against the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. A faulting read renders the all-ones sentinel; always `Info`. |
 | `4121` | `keyboard_service::KernelMailboxChannel` | one-shot diagnostics from each VL805 firmware-reload mailbox exchange (`MmioMailbox::last_exchange_stats`), logged by the channel after every `exchange` whether it succeeded or failed: `timeout_stage` (`post_room` = the firmware never accepted the request; `response` = it accepted but never replied; `none` = no timeout), `posted_word_hex`, `post_room_polls_hex`/`response_reads_hex`, `foreign_channel_reads_hex`, `last_status_hex`, plus `wait_elapsed_us_hex` (the `CNTPCT_EL0`-measured wall time the exchange took) and `poll_budget_hex` (`FIRMWARE_RELOAD_POLL_BUDGET`). A bare `4108 reason=timeout` cannot tell a transport fault from `VideoCore` dropping the tag; this localises it. Always `Info`. |
 | `4116` | `keyboard_service::bring_up_keyboard_into_tree` | a one-shot **bring-up delay timing measurement**, logged once right after the VL805 bring-up chain returns. `requested_us_hex` is the total the code *asked* its `GenericTimerDelay` to wait across the whole chain (over `delay_calls_hex` calls); `counter_elapsed_us_hex` is the same span measured by `CNTPCT_EL0` against `CNTFRQ_EL0` (also echoed as `timer_hz_hex`). The metal capture read `requested_us_hex=0x57030` (≈356 ms / `0x103`=259 calls) yet `counter_elapsed_us_hex≈14.3 s` at the correct `timer_hz_hex=0x337_f980` — so ≈14 s of *real* time elapsed with only ≈356 ms of it in `busy_delay_us`: the counter is sound, the seconds are code-side. `4116` cannot split *where* in the chain they go; the per-line `[t=<ms>ms]` timestamps and `4117` do. The earlier guess that the ≈14 s was the 256 caps-readiness polls (`4109`) was **wrong**: a timestamped capture showed the caps wait is only ~0.35 s (the wall-time `wait_for_caps_ready` bound works; the master-abort returns the poison fast, not ~54 ms) and ~11 s of the pause is inside `BrcmPcieRc::bring_up` (`4117`). Always `Info`. |
-| `4117` | `usb_keyboard::bring_up_keyboard` | a one-shot per-phase wall-time split of the PCIe root-complex `bring_up`, logged right after the link-trained line: `reset_swinit_us_hex` (releasing the always-accessible `RGR1_SW_INIT_1` `0x9210` bridge `sw_init` reset the previous boot stage left asserted, run **first**; `train_link` deasserts the already-asserted `PERST#`, and that deassert edge re-triggers the `VideoCore` VL805 firmware reload), `reset_settle_us_hex` (the post-de-reset MISC settle — the gentlest no-touch-probe bring-up does **not** toggle the SerDes IDDQ or re-assert a fundamental reset, either of which could drop the resident VL805 firmware), `config_us_hex`, `linkwait_us_hex`, `link_polls_hex`, and `entry_rgr1_sw_init_hex`. The BCM2711 holds the controller core off until the RGR1 bridge `sw_init` reset is cycled, so the bring-up releases that reset **before** any MISC access (matching the BCM2711 PCIe bring-up sequence); the metal capture confirmed `reset_swinit_us`/`reset_settle_us` collapse to microseconds (the ~11 s pause is gone). `entry_rgr1_sw_init_hex` is the raw `RGR1_SW_INIT_1` register sampled at bring-up entry **before** the reset cycles it (the always-accessible RGR1 block needs no link/MISC). The metal capture read `0x3` (both `PERST#` bit 0 and the bridge `sw_init` bit set), i.e. the previous boot stage handed off with PCIe held in fundamental reset — RustOS never writes this register outside its own reset, so it is the firmware handoff state, not something RustOS asserted, and is the same cold-reset state the BCM2711 bring-up handles (so **not** itself the fault). The persistent `dead_dead`/`vl805_fw_version_hex=0` is instead explained by the root-port bridge command not latching Memory Space Enable when written pre-link (see the bridge-command section) — which blocks both our BAR reads and `VideoCore`'s firmware-load writes over the same bus — now enabled after link-up. The `*_us` spans sum to the whole bring-up; `BringUpTiming` and both the release-before-MISC ordering and the no-re-assert / `PERST#`-deassert-edge invariant are host-tested in `rustos_pcie_brcm` (`AGENTS.md` §15.7). Always `Info`. |
+| `4117` | `usb_keyboard::bring_up_keyboard` | a one-shot per-phase wall-time split of the PCIe root-complex `bring_up`, logged right after the link-trained line: `reset_swinit_us_hex` (releasing the always-accessible `RGR1_SW_INIT_1` `0x9210` bridge `sw_init` reset the previous boot stage left asserted, run **first**; `train_link` deasserts the already-asserted `PERST#`, and that deassert edge re-triggers the `VideoCore` VL805 firmware reload), `reset_settle_us_hex` (the post-de-reset MISC settle — the gentlest no-touch-probe bring-up does **not** toggle the SerDes IDDQ or re-assert a fundamental reset, either of which could drop the resident VL805 firmware), `config_us_hex`, `linkwait_us_hex`, `link_polls_hex`, and `entry_rgr1_sw_init_hex`. The BCM2711 holds the controller core off until the RGR1 bridge `sw_init` reset is cycled, so the bring-up releases that reset **before** any MISC access (matching the BCM2711 PCIe bring-up sequence); the metal capture confirmed `reset_swinit_us`/`reset_settle_us` collapse to microseconds (the ~11 s pause is gone). `entry_rgr1_sw_init_hex` is the raw `RGR1_SW_INIT_1` register sampled at bring-up entry **before** the reset cycles it (the always-accessible RGR1 block needs no link/MISC). The metal capture read `0x3` (both `PERST#` bit 0 and the bridge `sw_init` bit set), i.e. the previous boot stage handed off with PCIe held in fundamental reset — TAIRiX never writes this register outside its own reset, so it is the firmware handoff state, not something TAIRiX asserted, and is the same cold-reset state the BCM2711 bring-up handles (so **not** itself the fault). The persistent `dead_dead`/`vl805_fw_version_hex=0` is instead explained by the root-port bridge command not latching Memory Space Enable when written pre-link (see the bridge-command section) — which blocks both our BAR reads and `VideoCore`'s firmware-load writes over the same bus — now enabled after link-up. The `*_us` spans sum to the whole bring-up; `BringUpTiming` and both the release-before-MISC ordering and the no-re-assert / `PERST#`-deassert-edge invariant are host-tested in `tairix_pcie_brcm` (`AGENTS.md` §15.7). Always `Info`. |
 | `4129` | `usb_keyboard::KeyboardPumpDiagnostics` | **one-shot**, the first time the poll loop drains a non-zero event count after bring-up: the addressed keyboard's interrupt-IN endpoint is actually completing transfers and decoded edges are reaching the input arbiter. Carries `polls_hex`/`events_hex`. Its *absence* in a capture while `4131` keeps climbing localises a silent keyboard to "addressed but the controller never completes the interrupt endpoint", distinct from `4130`. `Info`. |
 | `4130` | `usb_keyboard::KeyboardPumpDiagnostics` | the poll loop's `pump_once` returned an error, logged when the error *kind* changes (capped at `MAX_ERROR_LOGS` = 16 so a wedged controller faulting every poll cannot flood the log). Carries the `err` name (e.g. `device_fault` — an unexpected event type or a slot/endpoint mismatch in `UsbDevice::next_report`), `polls_hex`, and `errors_hex`, so a capture names *why* the report path faults rather than the loop silently swallowing it. `Error`. |
 | `4131` | `usb_keyboard::KeyboardPumpDiagnostics` | a periodic liveness heartbeat of the keyboard poll loop, emitted every `HEARTBEAT_POLLS` (1024) polls and capped at `MAX_HEARTBEATS` (32) total so the log is finite though the loop runs forever. Carries cumulative `polls_hex`/`events_hex`/`errors_hex`: a capture where polls climb while events and errors stay zero proves the loop is alive and polling but the keyboard delivers no reports — the exact signal a "typing produces nothing" symptom needs. `Info`. |
@@ -1429,7 +1429,7 @@ powered, descended, and watched, with the device behind every connected
 downstream port on its own xHCI slot, each with a demand-allocated DMA
 region, bounded only by the controller's reported slot count) lives in one
 place —
-`rustos_usb::device::UsbDevice::bring_up` — so every device reached through
+`tairix_usb::device::UsbDevice::bring_up` — so every device reached through
 the Pi 4B's onboard hub is *discovered*, never a guessed port (`AGENTS.md`
 §2.2 / §18): a keyboard and a storage stick plugged in together are both
 served, neither displacing the other. The HCD calls it once at bring-up; a
@@ -1605,7 +1605,7 @@ page-aligned scratchpad pointer array plus that many page-aligned buffers
 scratchpad-requiring controller reports no page size / an unaligned
 base), and `UsbDevice::start` fills the array with each buffer's
 device-visible base and points `DCBAA[0]` at it. The engine's shared DMA
-chunk is grown from the `rustos_usb::SlabBank` sized exactly to that
+chunk is grown from the `tairix_usb::SlabBank` sized exactly to that
 reported geometry — the 31 × 4 KiB scratchpad pages plus the
 rings/contexts — and each device's region is a further chunk grown on
 attach. Host-proven by
@@ -1781,7 +1781,7 @@ BCM2711 ships its root port's type-1 bridge bus-number register
 (`PCI_PRIMARY_BUS`, config offset `0x18`) at 0, so the port forwarded no
 configuration transactions to the secondary bus and the VL805 on bus 1
 never answered a read. The root-complex bring-up
-(`rustos_drv_bus_pcie_brcm::BrcmPcieRc::bring_up`) now programs that
+(`tairix_drv_bus_pcie_brcm::BrcmPcieRc::bring_up`) now programs that
 register (primary 0, secondary 1) so configuration reaches bus 1.
 
 Enabling that forwarding, however, exposed a second defect that **wedged
@@ -1795,7 +1795,7 @@ master-aborts a request the RC itself can refuse; a *forwarded* TLP
 instead waits for a completion that never arrives, and the timeout
 manifests as a CPU external abort that hangs the boot CPU. The fix is in
 the windowed configuration accessor
-(`rustos_pci::mechanism_brcm`): the BCM2711 root port is a
+(`tairix_pci::mechanism_brcm`): the BCM2711 root port is a
 single-device link, so the accessor now forwards a configuration
 transaction **only** to `device 0` on the secondary bus and resolves
 every other downstream target to the PCI "no device" sentinel *without*
@@ -1810,7 +1810,7 @@ bring-up** (`4101` reported `err=out_of_range`, right after the two-function
 `4104` scan): the device-shared DMA carve was bounded in the wrong address
 space. `DmaSlab::phys()` is a *device-visible* (PCIe-space) address, but
 both the kernel DMA host (`keyboard_service::FrameDmaHost`) and the USB
-wiring (`rustos_drv_bus_usb::wiring::open_discovered`) compared it against
+wiring (`tairix_drv_bus_usb::wiring::open_discovered`) compared it against
 the *CPU-physical* inbound-aperture top (`dma_aperture_top` =
 `0x2_0000_0000`). The Pi 4 inbound viewport maps PCIe
 `[0x4_0000_0000, 0x6_0000_0000)` onto RAM `[0, 0x2_0000_0000)`, so every
@@ -1932,7 +1932,7 @@ the bring-up before that block is probed.
 The keyboard service wires a runtime `FirmwareReset`
 (`keyboard_service::VideoCoreFirmwareReset`): when config `0x50` reads `0`,
 `open_controller` issues exactly one `NOTIFY_XHCI_RESET` over
-`rustos_vcmailbox` as a **best-effort** fallback (`4108`/`4121`/`4122`). Its
+`tairix_vcmailbox` as a **best-effort** fallback (`4108`/`4121`/`4122`). Its
 outcome no longer gates the bring-up. A metal capture that keeps `0x50 == 0`,
 drops the reload, *and* keeps BAR reads at `dead_dead` (`4109 ready_hex=0`)
 after the no-touch sequence is a boot-firmware handoff issue and fails closed
@@ -2046,7 +2046,7 @@ bring-up was confirmed.
 ### Drive the `PERST#` cycle; reload firmware only as a fallback
 
 `0xdead_dead` is the **BCM2711 root complex's master-abort poison** (it is
-distinct from RustOS's own all-ones `0xffff_ffff` diagnostic sentinel):
+distinct from TAIRiX's own all-ones `0xffff_ffff` diagnostic sentinel):
 the RC returns it when a CPU memory access reaches the RC but no downstream
 target decodes the PCIe address. On this Pi 4 the VL805's xHCI firmware is
 loaded by the **bootloader EEPROM** (via `VideoCore`): the keyboard works
@@ -2081,7 +2081,7 @@ fundamental reset) and do not unconditionally reload:
   (config `0x50`, [`wait_for_firmware_loaded`], `4118`) to read non-zero
   **first** — the signal the vendor firmware-init sequence checks, read
   over the configuration path that works on metal while the BAR aborts. A
-  non-zero version skips any reload, so RustOS never double-loads resident
+  non-zero version skips any reload, so TAIRiX never double-loads resident
   firmware. If the bounded wait stays `0`, the service issues exactly one
   `NOTIFY_XHCI_RESET` fallback (`4108`/`4113`) after the bridge is trained,
   the BAR is assigned, and command/memory decode is enabled, then waits for
@@ -2109,7 +2109,7 @@ reads plausible controller dwords (`HCSPARAMS1=0x05000420`,
 `HCCPARAMS1=0x002841eb`, `DBOFF=0x100`, `RTSOFF=0x200`). The following
 diagnostic then localised the remaining `4101 … err=device_fault` to
 `stage=controller_ready_before_reset`, `USBCMD=0`, `USBSTS=0x805` — a halted
-controller with `CNR` plus a latched Host System Error before RustOS has reset
+controller with `CNR` plus a latched Host System Error before TAIRiX has reset
 it. That state is now handled by issuing the normal host-controller reset from
 the halted controller and enforcing `CNR` only after the reset self-clears;
 post-reset `CNR`, a stuck `HCRST`, or an unhaltable running controller still
@@ -2132,7 +2132,7 @@ firmware, redirected the search to the **outbound (CPU→PCIe) translation
 window** — the one path config reads (which take the RC's internal `EXT_CFG`
 route) do not exercise.
 
-The defect was in `rustos_drv_bus_pcie_brcm::regs`: the BCM2711
+The defect was in `tairix_drv_bus_pcie_brcm::regs`: the BCM2711
 **proprietary** `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` register (`0x4070`)
 packs the window **limit** in bits `[31:20]` and the **base** in bits
 `[15:4]`. But
@@ -2187,12 +2187,12 @@ silently dropped two things the metal-debugged scaffold relied on:
 2. **The per-stage diagnostics.** The scaffold logged `4101`/`4106`/`4126`
    per-stage records; the user-space driver exited silently with code `82`.
    Restored as a user-space one-shot structured `log_emit` record:
-   `rustos_hid::bring_up_boot_keyboard_diagnostic` returns a
+   `tairix_hid::bring_up_boot_keyboard_diagnostic` returns a
    `KeyboardBringupError` (the failing `BringupPhase` plus the `Xhci::open`
    reset sub-stage + `USBCMD`/`USBSTS`, or the enumeration
    `stage`/`completion`/`reject`/`evtype` breadcrumbs + root-port `PORTSC`),
    which `usb_kbd` emits as event `4126` (and a `4101` "controller up"
-   beacon) through `rustos_rt::LogSink`, gated on `CAP_LOG_EMIT`
+   beacon) through `tairix_rt::LogSink`, gated on `CAP_LOG_EMIT`
    (`AGENTS.md` §15.7 / §19.4). A non-I/O-coherent stall now reads
    `phase=enumerate stage_hex=2 completion_hex=0` — the historical
    DMA-not-visible signature — instead of a blind exit.
@@ -2223,9 +2223,9 @@ the CPU side outrun the controller's write-back window.
 `core::sync::atomic::fence` is **not** the fix: on AArch64 it lowers to an
 *inner*-shareable `dmb ish`, which does not order accesses against the
 outer/system-domain PCIe DMA master. The barriers live in the new
-`rustos-dma-barrier` crate (the user-space analogue of `rustos-abi-trap`'s
+`tairix-dma-barrier` crate (the user-space analogue of `tairix-abi-trap`'s
 §1 asm carve-out): `dma_wmb()` = `dmb oshst`, `dma_rmb()` = `dmb oshld`. The
-arch-neutral `rustos-usb` engine calls them at the controller-start and
+arch-neutral `tairix-usb` engine calls them at the controller-start and
 doorbell handoffs and in `poll_event` (cycle bit first, `dma_rmb`, then the
 entry body). x86_64 (`sfence`/`lfence`) and riscv64 (`fence iorw,iorw`) get
 the equivalent; host/wasm32 are a no-op. The live keyboard is the on-metal
@@ -2317,7 +2317,7 @@ set-once device-IRQ dispatcher published through
 `set_trap_dispatch`); the GIC `EOIR` handshake stays in the vector path.
 The `route_spi` register arithmetic, the `MIN_SPI_INTID` boundary, and
 the fail-closed set-once dispatch slot are host-tested; the
-`rustos-test-irq-qemu-aarch64` vertical above proves the full SPI → GIC →
+`tairix-test-irq-qemu-aarch64` vertical above proves the full SPI → GIC →
 EL1 → dispatcher → `IrqTable::fire` path end-to-end under QEMU.
 
 ## SMP secondary-core bring-up (PSCI + GICv2 IPI)
@@ -2360,7 +2360,7 @@ raises INTID 0 on the target CPU through `gic::send_sgi`, and
 `exceptions::handle_irq` dispatches an acknowledged SGI (INTID
 `< MIN_SPI_INTID`) to `preempt::on_ipi_interrupt` → the IPI callback
 installed via `preempt::set_ipi_callback`. This replaces the former
-single-CPU self-target best-effort send. The `rustos-test-ipi-smp-qemu-aarch64`
+single-CPU self-target best-effort send. The `tairix-test-ipi-smp-qemu-aarch64`
 vertical above proves the full start-core → enable-IPI → directed-SGI →
 callback path on two emulated cores.
 
@@ -2379,7 +2379,7 @@ mask-before-wake fence `GicController::mask` issues, and the host
 the publish-before-signal order.
 
 Secondary bring-up is reached through the Arch HAL `SecondaryBringup`
-slice (`rustos_arch_api::smp`, `plans/WIRING.md` Stage W14):
+slice (`tairix_arch_api::smp`, `plans/WIRING.md` Stage W14):
 `Aarch64Arch::start_secondary(cpu)` resolves the dense `CpuId` to its
 `MPIDR_EL1` affinity through the handle's map, looks up the start
 mechanism installed via `Aarch64Arch::with_secondary_start` (a missing
@@ -2403,7 +2403,7 @@ is a *discovered* board fact, not a constant. The production
 `boot_aarch64` path reads `/psci` `method` from the `x0` DTB
 (`fdt::psci_method`) when the node exists, else collects each
 `/cpus/cpu@*` node's `enable-method`/`cpu-release-addr`
-(`rustos_fdt::CpuNode::spin_table_release`, aligned to the dense ids by
+(`tairix_fdt::CpuNode::spin_table_release`, aligned to the dense ids by
 `cpu_topology::align_release_addrs`), and installs the result on the
 handle, logging `smp_start_method`; a tree that declares neither leaves
 the mechanism unset so bring-up fails closed (`SmpError::NotReady`)
@@ -2567,7 +2567,7 @@ kthread kernel stacks live so the eventual guard-page unmap (G3) never has
 to break-before-make the coarse block the CPU is currently running on or
 stacked in. The boot path reserves a **guard arena** — a 2 MiB-aligned,
 2 MiB region carved out of the discovered usable RAM window, above the
-kernel image (`rustos-kernel::mem_map`) — and marks it
+kernel image (`tairix-kernel::mem_map`) — and marks it
 `RegionKind::Reserved` so the frame allocator never hands its frames to
 another use (`AGENTS.md` §4: a guard page on shared frames would corrupt
 an unrelated allocation). `build_memory_map` now returns a
@@ -2611,7 +2611,7 @@ handler reports as PASS.
 ### Promoting the split onto the Arch HAL (G3a)
 
 The block-split primitive is now part of the architecture-neutral Arch HAL
-`AddressSpace` surface (`rustos_arch_api::mmu`, `AGENTS.md` §17.2), so the
+`AddressSpace` surface (`tairix_arch_api::mmu`, `AGENTS.md` §17.2), so the
 kernel reaches it through one vocabulary rather than naming a concrete
 port. Two members were added:
 
@@ -2660,7 +2660,7 @@ synchronous data abort under that task's `TTBR0_EL1` rather than a
 next-reschedule poison-canary detection. The pieces:
 
 - A grow-and-shrink block allocator, `stack_arena::KTHREAD_STACK_ARENA`
-  (`rustos-kernel`), hands kthread kernel stacks out of the boot-reserved
+  (`tairix-kernel`), hands kthread kernel stacks out of the boot-reserved
   arena (`mem_map`, G2). `boot_aarch64` `install`s it from the carved
   arena `(base, len)`; each `alloc` returns an `ArenaStack` — a one-page
   guard region below the usable `KTHREAD_STACK_BYTES` stack, identical in
@@ -2722,7 +2722,7 @@ heap-backed `BoxStack` falls back to.
 - installs the EL1 vectors + a `fault` handler, enables the MMU, then
   `unmap`s the guard page through the Arch HAL + `flush_page`s it — exactly
   the G3b-2 production mechanism;
-- builds the live `rustos-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`
+- builds the live `tairix-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`
   and admits a kthread on that stack through
   `kernel_core::spawn_kthread_with_stack` (the production runtime path), then
   drives the cooperative `step` loop;
@@ -2744,7 +2744,7 @@ green under QEMU on `-M virt`**. With G3c landed the guard-page fault-form
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 
 The aarch64 port implements the Arch HAL `CrossCpuTlbShootdown` slice
-(`rustos_arch_api::xtlb`, `plans/WIRING.md` Stage W13) on `Aarch64Arch`.
+(`tairix_arch_api::xtlb`, `plans/WIRING.md` Stage W13) on `Aarch64Arch`.
 It needs no IPI: `shootdown_page` issues the *inner-shareable broadcast*
 `tlbi vaae1is` + `dsb ish`/`isb`, which the hardware propagates to every
 PE in the inner-shareable domain. That broadcast is the *same* instruction
@@ -2770,7 +2770,7 @@ leaf, Arm advertises per-core capacity in the device tree: each
 `/cpus/cpu@*` node carries an optional `capacity-dmips-mhz` rating.
 
 `Aarch64Arch::classify_from_fdt` enumerates those nodes through the
-shared reader's `rustos_fdt::Fdt::each_cpu` (one device-tree parser,
+shared reader's `tairix_fdt::Fdt::each_cpu` (one device-tree parser,
 §2.2), maps each node's `reg` (its `MPIDR_EL1` affinity) to a dense
 `CpuId` through the same affinity map `current_cpu`/`send_ipi` use, and
 classifies each core's rating against the machine's peak with the pure
@@ -2787,7 +2787,7 @@ returns the performance default for an out-of-range `CpuId` (totality,
 never a panic).
 
 The classifier is pure and host-tested (`hetcore`'s unit tests), and the
-device-tree read is host-tested against the shared `rustos_fdt::fixture`
+device-tree read is host-tested against the shared `tairix_fdt::fixture`
 `big.LITTLE` builder, so `classify_from_fdt` is proven end-to-end on the
 host (`classify_from_fdt_reports_big_little_cores`); the shared HAL
 conformance vertical asserts `core_class` totality on every port.
@@ -2800,7 +2800,7 @@ The `virt` board's virtio-MMIO bus is driven end-to-end by two QEMU
 verticals, the EL1/GICv2 analogue of the riscv64 ones:
 `tests/integration/virtio_blk_mmio_aarch64` (read sector 0 and verify the
 host-planted pattern, then write and read back sector 1) and
-`tests/integration/netstack_mmio_aarch64` (the `rustos-netstack`
+`tests/integration/netstack_mmio_aarch64` (the `tairix-netstack`
 engine's ring pump over the live device against the harness-side
 `netpeer` link peer: ping in/out over v4 and v6, neighbours resolved
 both ways — `plans/NETWORK.md` N3c).
@@ -2842,7 +2842,7 @@ hands those bytes to the scenario; the virtio-MMIO transport bases and
 SPIs in that blob are the stable `virt`-board layout, independent of
 which transport slot the backing device lands on.
 
-The dump lives in one place: `rustos_itest_harness::dump_aarch64_virt_dtb`
+The dump lives in one place: `tairix_itest_harness::dump_aarch64_virt_dtb`
 (gated to the aarch64-none target) shells out to `qemu-system-aarch64 ...
 dumpdtb` so every aarch64 vertical reuses one helper rather than copying
 the invocation (`AGENTS.md` §2.2). `dumpdtb` pads the blob out to the
@@ -2850,26 +2850,26 @@ machine's 1 MiB device-tree region, so the helper trims it to the extent
 its FDT header describes (`trim_fdt_to_extent`, rewriting `totalsize`)
 before it is embedded — the few-KiB meaningful tree, not ~1 MiB of zero
 padding bloating every image. The trimmed blob is still a valid FDT
-(`rustos_fdt::Fdt::new` validates against the buffer length, not
+(`tairix_fdt::Fdt::new` validates against the buffer length, not
 `totalsize`), proven by a round-trip unit test over the shared
-`rustos_fdt::fixture` builder and by the device verticals parsing it at
+`tairix_fdt::fixture` builder and by the device verticals parsing it at
 runtime.
 
 ## Display vertical (Stage W11-B)
 
 `tests/integration/framebuffer_display_qemu_aarch64`
-(`rustos-test-framebuffer-display-qemu-aarch64`, enrolled in
+(`tairix-test-framebuffer-display-qemu-aarch64`, enrolled in
 `tools/xtask/src/commands/qemu_tests.rs` with `ramfb: true`) drives the
 framebuffer display driver end-to-end on the `virt` board — the EL1/GICv2
 + `ramfb` analogue of the riscv64 framebuffer-display vertical. It reuses
 the shared `bring_up_el1_identity_mmu` helper above and the **same**
-shared `fw_cfg` MMIO transport (`rustos-fwcfg`'s `MmioDma`) the
+shared `fw_cfg` MMIO transport (`tairix-fwcfg`'s `MmioDma`) the
 riscv64 vertical uses — the two `virt` boards expose `fw_cfg` identically,
 so there is one transport, not two (`AGENTS.md` §2.2). The vertical
 programs QEMU's `ramfb` over `fw_cfg` so a static guest-RAM surface
 becomes a real scan-out framebuffer, assembles the geometry as a
 `FramebufferConfig`, loads the signed framebuffer `.rxe` through
-`rustos_drvhost::Host`, and drives `load → use → unload → reload`,
+`tairix_drvhost::Host`, and drives `load → use → unload → reload`,
 mapping the surface through the capability-gated `KernelMmioMapper` and
 reading the presented pixels back through an independent window. It
 embeds the canonical `virt` DTB (build-time `dumpdtb`) to discover the
@@ -2879,14 +2879,14 @@ pointer.
 ## Input vertical (Stage W11-B)
 
 `tests/integration/input_virtio_mmio_qemu_aarch64`
-(`rustos-test-input-virtio-mmio-qemu-aarch64`, enrolled in
+(`tairix-test-input-virtio-mmio-qemu-aarch64`, enrolled in
 `tools/xtask/src/commands/qemu_tests.rs` with `keyboard: Some(..)`)
 drives the virtio-input driver end-to-end on the `virt` board — the
 virtio-input analogue of the x86 PS/2 vertical, completing the `input`
 row of the QEMU matrix for aarch64. It reuses the shared
 `bring_up_el1_identity_mmu` helper, builds the virtio-MMIO transport from
 the embedded `virt` DTB, arms the device's GICv2 SPI, loads the signed
-virtio-input `.rxe` through `rustos_drvhost::Host`, and drives
+virtio-input `.rxe` through `tairix_drvhost::Host`, and drives
 `load → use → unload → reload`.
 
 "Use" is a **real injected key**, the device-side analogue of the PS/2

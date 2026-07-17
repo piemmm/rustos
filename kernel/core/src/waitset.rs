@@ -35,8 +35,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, WaitSourceKind};
-use rustos_sync::SpinLock;
+use tairix_abi::{Errno, WaitSourceKind};
+use tairix_sync::SpinLock;
 
 /// One registered source of a wait-set.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -44,7 +44,7 @@ pub struct Member {
     /// The kind of resource this member observes.
     pub kind: WaitSourceKind,
     /// The resource id: an IPC call-endpoint id for [`WaitSourceKind::Endpoint`],
-    /// or an [`rustos_abi::IrqHandle`] raw value for [`WaitSourceKind::Irq`].
+    /// or an [`tairix_abi::IrqHandle`] raw value for [`WaitSourceKind::Irq`].
     pub id: u64,
     /// The caller's opaque token, reported back by a successful wait when this
     /// member is the one found ready.

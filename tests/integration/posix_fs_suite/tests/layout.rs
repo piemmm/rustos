@@ -3,7 +3,7 @@
 //! `/System/Logs` and `/System/Settings` exceptions, and the
 //! read-only-mount refusal on a driver-backed volume.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 /// Legacy POSIX top-level names. The OS never authors these, but the VFS
 /// does not refuse a user's own request to create one; a representative
@@ -64,7 +64,7 @@ fn system_logs_and_settings_are_writable() {
         &owner,
         &path("/System/Settings/hostname"),
         Mode::from_bits(0o644),
-        b"rustos".to_vec(),
+        b"tairix".to_vec(),
     )
     .expect("/System/Settings is writable");
 }

@@ -1,4 +1,4 @@
-// RustOS aarch64 secondary-core entry trampoline.
+// TAIRiX aarch64 secondary-core entry trampoline.
 //
 // A secondary core is parked in firmware (powered off) until the boot
 // core asks for it through PSCI `CPU_ON` (see `psci::cpu_on` and
@@ -33,7 +33,7 @@
 //   3. `SECONDARY_STACK_BASE`/`_STRIDE` were published (non-zero) by the
 //      boot core's `register` before any `CPU_ON`; a `CPU_ON` is refused
 //      unless a pool is registered, so this stub never reads a null base.
-//   4. `rustos_arch_aarch64_secondary_main` is `-> !` and never returns;
+//   4. `tairix_arch_aarch64_secondary_main` is `-> !` and never returns;
 //      the trailing `wfi` park is defensive.
 
 .section .text, "ax"
@@ -49,7 +49,7 @@ _start_secondary_aarch64:
     // SCTLR_EL1 is architecturally UNKNOWN at PSCI `CPU_ON` entry on
     // real silicon (QEMU resets it benignly): establish the known
     // MMU-off value — 0x30D0_0800, the ARMv8.0 RES1 bits only, i.e.
-    // `rustos_arch_aarch64::paging::SCTLR_MMU_OFF` (unit-test-pinned) —
+    // `tairix_arch_aarch64::paging::SCTLR_MMU_OFF` (unit-test-pinned) —
     // before the pool loads below, exactly as `boot.s` `.Lin_el1` does.
     mov     x0, #0x0800
     movk    x0, #0x30D0, lsl #16
@@ -73,7 +73,7 @@ _start_secondary_aarch64:
     // Hand this core's dense id to the Rust secondary entry. It does not
     // return.
     mov     x0, x19
-    bl      rustos_arch_aarch64_secondary_main
+    bl      tairix_arch_aarch64_secondary_main
 
     // Defensive park (unreachable: the Rust entry never returns).
 1:

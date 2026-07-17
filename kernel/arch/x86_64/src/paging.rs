@@ -21,8 +21,8 @@
 //!   4 KiB mapping, switch CR3.
 //!
 //! It implements the Arch HAL page-table surface
-//! ([`rustos_arch_api::mmu::AddressSpace`] +
-//! [`rustos_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives. The
+//! ([`tairix_arch_api::mmu::AddressSpace`] +
+//! [`tairix_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives. The
 //! page-table *walk* (`map_page` / `translate` / `unmap`) recovers
 //! intermediate tables through the low identity map and so is only valid
 //! on the bare-metal target; like [`AddressSpace::activate`] it is proven
@@ -33,9 +33,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::frames::{PageTableFrames, TableFrame};
-use rustos_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
-use rustos_arch_api::tlb::TlbShootdown;
+use tairix_arch_api::frames::{PageTableFrames, TableFrame};
+use tairix_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
+use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single x86_64 page-table page.
 pub const PAGE_SIZE: usize = 4096;
@@ -204,7 +204,7 @@ pub struct AddressSpace {
     pml4_phys: u64,
     pml4: &'static mut [u64; ENTRIES_PER_TABLE],
     /// The frame source the page-table walk allocates intermediate
-    /// tables from, retained so the [`rustos_arch_api::mmu::AddressSpace`]
+    /// tables from, retained so the [`tairix_arch_api::mmu::AddressSpace`]
     /// HAL impl can install mappings without the caller re-supplying it.
     /// The static [`PageTablePool`] is the boot/bootstrap source; a real
     /// per-process space is built over the `kernel/mem` frame-allocator
@@ -319,8 +319,8 @@ impl AddressSpace {
     /// 2 MiB huge page) in this hierarchy.
     ///
     /// A read-only four-level walk used by the
-    /// [`rustos_arch_api::mmu::AddressSpace`] HAL impl to report
-    /// [`rustos_arch_api::mmu::MapError::AlreadyMapped`] rather than
+    /// [`tairix_arch_api::mmu::AddressSpace`] HAL impl to report
+    /// [`tairix_arch_api::mmu::MapError::AlreadyMapped`] rather than
     /// silently clobber an existing mapping (`map_4k_inner` overwrites a
     /// PT leaf without checking, so the HAL layer must guard it here). It
     /// recovers intermediate tables from the low physical address each
@@ -769,7 +769,7 @@ fn active_root_phys() -> u64 {
 /// Paging must already be enabled, and the PML4 at `root_phys` must map the
 /// currently-executing kernel `rip`, `rsp`, and the data the code touches
 /// (the per-CPU `swapgs` TLS, the dispatcher's stack) identically to the
-/// outgoing root — every RustOS user space maps the low identity window and
+/// outgoing root — every TAIRiX user space maps the low identity window and
 /// the higher-half kernel window, so this holds for any task root, but a
 /// `root_phys` that does not faults the CPU on its next access.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -1045,7 +1045,7 @@ impl MmuAddressSpace for AddressSpace {
             // contract the caller asserts, and `self` is borrowed mutably
             // so no other reference walks the tables.
             unsafe {
-                rustos_arch_api::frames::reclaim_hierarchy(
+                tairix_arch_api::frames::reclaim_hierarchy(
                     self.pml4_phys,
                     &child_of,
                     &entries_of,
@@ -1219,7 +1219,7 @@ mod tests {
     // bit manipulation would re-implement the CPU's MMU and add nothing
     // that the architectural test does not already prove.
     //
-    // This stub exists so `cargo test -p rustos-arch-x86_64` runs cleanly
+    // This stub exists so `cargo test -p tairix-arch-x86_64` runs cleanly
     // on the host target without emitting a "no tests in module" lint.
     #[test]
     fn page_constants_are_canonical() {

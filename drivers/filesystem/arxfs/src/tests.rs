@@ -6,12 +6,12 @@
 //! in-memory [`MemBlock`] double.
 
 use super::*;
-use rustos_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
+use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite,
     NodeKind,
 };
-use rustos_fsmeta::preset;
+use tairix_fsmeta::preset;
 
 /// In-memory block device. Optionally drops writes once a budget is reached,
 /// modelling a power loss mid-commit: a dropped write simply never reaches the
@@ -91,8 +91,8 @@ impl MemBlock {
 }
 
 impl Block for MemBlock {
-    fn geometry(&self) -> Result<rustos_abi::driver::block::BlockGeometry, DriverError> {
-        Ok(rustos_abi::driver::block::BlockGeometry {
+    fn geometry(&self) -> Result<tairix_abi::driver::block::BlockGeometry, DriverError> {
+        Ok(tairix_abi::driver::block::BlockGeometry {
             block_size: self.block_size,
             block_count: self.block_count,
         })
@@ -206,8 +206,8 @@ impl SparseBlock {
 }
 
 impl Block for SparseBlock {
-    fn geometry(&self) -> Result<rustos_abi::driver::block::BlockGeometry, DriverError> {
-        Ok(rustos_abi::driver::block::BlockGeometry {
+    fn geometry(&self) -> Result<tairix_abi::driver::block::BlockGeometry, DriverError> {
+        Ok(tairix_abi::driver::block::BlockGeometry {
             block_size: self.block_size,
             block_count: self.block_count,
         })
@@ -1434,7 +1434,7 @@ fn compressible_cluster(fs: &ARXFS<MemBlock>) -> alloc::vec::Vec<u8> {
     let len = as_usize(fs.data_capacity() * COMPRESS_CLUSTER_BLOCKS);
     let mut payload = alloc::vec::Vec::new();
     while payload.len() < len {
-        payload.extend_from_slice(b"RustOS arxfs ");
+        payload.extend_from_slice(b"TAIRiX arxfs ");
     }
     payload.truncate(len);
     payload
@@ -2198,7 +2198,7 @@ fn integrity_and_compression_hold_on_a_shared_chunk() {
     // Compressible, identical content so the two files share one chunk.
     let mut body = alloc::vec::Vec::new();
     while body.len() < cap {
-        body.extend_from_slice(b"RustOS arxfs dedupe ");
+        body.extend_from_slice(b"TAIRiX arxfs dedupe ");
     }
     body.truncate(cap);
     for name in [b"a".as_slice(), b"b"] {
@@ -2292,7 +2292,7 @@ impl CacheCounts {
 /// contract (run-covering invalidation, whole-cache purge), instrumented
 /// through shared counters. Test scaffolding only: the production
 /// implementation with classification, budgets, pressure, and zeroisation
-/// lives in `rustos-kernel`.
+/// lives in `tairix-kernel`.
 struct TestClusterCache {
     counts: alloc::sync::Arc<CacheCounts>,
     entries: alloc::collections::BTreeMap<u64, (u64, alloc::vec::Vec<u8>)>,
@@ -2552,8 +2552,8 @@ fn a_wrong_sized_cache_entry_fails_closed_instead_of_stalling() {
 // Stage 8: online scrub (verify + repair, resumable).
 // ---------------------------------------------------------------------------
 
-use rustos_abi::CapabilityQuery;
-use rustos_log::{Event, Sink};
+use tairix_abi::CapabilityQuery;
+use tairix_log::{Event, Sink};
 
 /// A capability set granting every capability (the scrub gate is satisfied).
 struct GrantAll;
@@ -2587,7 +2587,7 @@ impl RecordingSink {
             ids: core::cell::RefCell::new(alloc::vec::Vec::new()),
         }
     }
-    fn saw(&self, id: rustos_log::EventId) -> bool {
+    fn saw(&self, id: tairix_log::EventId) -> bool {
         self.ids.borrow().contains(&id.0)
     }
 }
@@ -3860,7 +3860,7 @@ fn health_baseline_survives_a_crash_during_its_update() {
 // fault-injection. They add no second verifier and no second on-disk decode
 // path. (The fuzz harness for every decode path — mount, metadata, directory,
 // compression, check, rescue — lives in `tests/fuzz_mount.rs` and the
-// `rustos-compress` `fuzz_compress` harness, wired into `cargo xtask fuzz`.)
+// `tairix-compress` `fuzz_compress` harness, wired into `cargo xtask fuzz`.)
 // ---------------------------------------------------------------------------
 
 /// The crash-replay block geometry: a 4096-byte volume with room for several
@@ -5512,7 +5512,7 @@ fn attribute_grammar_and_bounds_fail_closed() {
     );
 
     // An oversize value is rejected.
-    let huge = alloc::vec![b'x'; rustos_fsmeta::VALUE_MAX + 1];
+    let huge = alloc::vec![b'x'; tairix_fsmeta::VALUE_MAX + 1];
     assert_eq!(
         fs.set_attr(node, b"user.k", &huge),
         Err(DriverError::LengthOutOfRange)
@@ -5838,7 +5838,7 @@ struct CountingBlock {
 }
 
 impl Block for CountingBlock {
-    fn geometry(&self) -> Result<rustos_abi::driver::block::BlockGeometry, DriverError> {
+    fn geometry(&self) -> Result<tairix_abi::driver::block::BlockGeometry, DriverError> {
         self.inner.geometry()
     }
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {

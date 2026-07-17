@@ -1,6 +1,6 @@
-# rustos-help
+# tairix-help
 
-Shared command-help engine for RustOS (`lib/help`, `plans/APPS.md`).
+Shared command-help engine for TAIRiX (`lib/help`, `plans/APPS.md`).
 
 Every application bundle may ship a `Help/` tree: one structured-Markdown
 document per command or topic, under one directory per BCP-47 locale with the
@@ -44,7 +44,7 @@ here once and every consumer imports them.
   the caller falls back to its own usage banner and `-h` never fails.
 - `BundleHelp` (the `rt` cargo feature) — the production `HelpSource` over
   the running command app's own `/System/Apps/<word>.app/Help/` tree via the
-  `rustos-rt` file wrappers, spelled from the shared `lib/abi` store/suffix
+  `tairix-rt` file wrappers, spelled from the shared `lib/abi` store/suffix
   constants. Enabled only by a freestanding `Run` binary; the engine itself
   stays seam-injected and performs no ambient I/O.
 - `lint_help_trees` (the `lint` cargo feature, host-only tooling) — the one
@@ -57,7 +57,7 @@ here once and every consumer imports them.
   no translation-only documents, cross-locale `OPTIONS` switch-key drift, and
   the closed content-policy screen (whole-word matching plus a substring
   screen for the unsegmented CJK languages). Pure rows-in/violations-out;
-  never linked into a RustOS program.
+  never linked into a TAIRiX program.
 
 ## Design
 
@@ -69,7 +69,7 @@ here once and every consumer imports them.
   out-of-order section, or malformed structure rejects the whole document with
   a typed `HelpError`. Section headings inside fenced code blocks stay code.
 - The renderers add no second escape vocabulary and no second width table:
-  output is `rustos_vt::Op` values, widths come from `rustos_curses`.
+  output is `tairix_vt::Op` values, widths come from `tairix_curses`.
 - Fuzzed: `tests/fuzz_help.rs` (registered with `cargo xtask fuzz`) holds the
   parser total and the rendered output control-free under hostile bytes.
 

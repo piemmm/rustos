@@ -6,7 +6,7 @@
 //! bring-up and HID-interrupt paths use are defined;
 //! the set grows with the consumers.
 
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 /// Byte length of one TRB.
 pub const TRB_LEN: usize = 16;

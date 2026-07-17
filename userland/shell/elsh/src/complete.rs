@@ -18,12 +18,12 @@
 //! * **Command position** (first non-assignment word of a simple command):
 //!   builtin names (the shared `builtin::BUILTIN_NAMES` table) and the `.app` bundles
 //!   of the shared command-search directories
-//!   ([`rustos_cmdres::command_search_dirs`] — the system app store, then the
+//!   ([`tairix_cmdres::command_search_dirs`] — the system app store, then the
 //!   `PATH` entries), so completion offers exactly the names the shell would
 //!   resolve. A word spelling a path (it contains `/`) completes as a path.
 //! * **Redirection target**: filesystem paths *and* resource references —
 //!   registered namespaces (`sys:` …) and their well-known selectors
-//!   ([`rustos_resref::KnownNamespace`]), the same registry the redirection
+//!   ([`tairix_resref::KnownNamespace`]), the same registry the redirection
 //!   classifier applies.
 //! * **Any other argument**: filesystem paths, plus resource references once
 //!   the word could begin one (a registered-namespace prefix).
@@ -36,9 +36,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_resref::KnownNamespace;
+use tairix_resref::KnownNamespace;
 
-pub use rustos_complete::{DirEntryInfo, DirLister};
+pub use tairix_complete::{DirEntryInfo, DirLister};
 
 use crate::builtin::BUILTIN_NAMES;
 use crate::lexer::{tokenize_with_spans, RedirOp, Token};
@@ -262,7 +262,7 @@ fn command_candidates(
             });
         }
     }
-    for dir in rustos_cmdres::command_search_dirs(path_var) {
+    for dir in tairix_cmdres::command_search_dirs(path_var) {
         let Ok(entries) = lister.list_dir(&dir) else {
             continue;
         };
@@ -329,8 +329,8 @@ fn resource_candidates(word: &str, offer_all: bool, out: &mut Vec<Candidate>) {
 /// shell-escaped insert, and a directory candidate ending in `/` that
 /// stays open for further completion.
 fn path_candidates(word: &str, lister: &dyn DirLister, out: &mut Vec<Candidate>) {
-    let (dir_part, _) = rustos_complete::split_path_word(word);
-    for entry in rustos_complete::path_matches(word, ".", lister) {
+    let (dir_part, _) = tairix_complete::split_path_word(word);
+    for entry in tairix_complete::path_matches(word, ".", lister) {
         let mut insert = String::from(dir_part);
         insert.push_str(&escape_word(&entry.name));
         let (display, closing) = if entry.is_dir {
@@ -352,7 +352,7 @@ mod tests {
     use super::{complete, Candidate, DirEntryInfo, DirLister};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory directory tree: `(path, entries)` pairs.
     struct MapLister {

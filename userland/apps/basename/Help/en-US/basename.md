@@ -16,7 +16,7 @@ The surgery is purely lexical — no path is resolved or touched on disk.
 With a `suffix` (the second operand, or `-s`), a trailing `suffix` is
 also removed, unless it is the whole remaining name.
 
-A root is never stripped into: `basename /` is `/`, and — the RustOS
+A root is never stripped into: `basename /` is `/`, and — the TAIRiX
 storage forest's equivalent — `basename Home:/` is `Home:/`. An alias
 root (`Home:/`, `System:/`, …) plays exactly the role `/` plays on
 POSIX systems.

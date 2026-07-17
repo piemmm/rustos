@@ -1,6 +1,6 @@
 # Kernel multitasking and the kthread runtime
 
-This page is the source of truth for how a RustOS scheduler task becomes a
+This page is the source of truth for how a TAIRiX scheduler task becomes a
 *resumable kernel thread* — a task that owns a kernel stack and can be
 parked at an arbitrary point and resumed exactly there. It records the
 design decisions behind the spawn work staged in
@@ -29,7 +29,7 @@ and the frozen-once-shipped scheduler interface (§2.4) both stay intact.
 The body the scheduler sees is a thin **shim** owned by `kernel/core`. The
 task's real work runs as a stackful coroutine on its own kernel stack,
 driven through the Arch HAL context-switch slice
-(`rustos_arch_api::ContextSwitch`, §17.2) — the same `prepare` / `switch`
+(`tairix_arch_api::ContextSwitch`, §17.2) — the same `prepare` / `switch`
 primitive every bare-metal port already implements and conformance-tests.
 
 Each kthread owns a heap-allocated control block holding two
@@ -174,7 +174,7 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
 The model is proven end to end on the aarch64 `virt` board by
 `tests/integration/spawn_el0_timeshare_qemu_aarch64`: it builds **two**
 hardware-isolated EL0 address spaces from a pure-Rust fixture program (which
-yields then exits through the `rustos_rt::yield_now` / `exit` wrappers),
+yields then exits through the `tairix_rt::yield_now` / `exit` wrappers),
 admits each as a resumable user kthread via `spawn_user_kthread`, and drives
 the cooperative `step` loop. Each task's `yield` / `exit` `svc` traps to a
 dispatch callback that calls `reschedule_current`, suspending the running
@@ -213,7 +213,7 @@ handler. When a user kthread parks *mid-handler*, the dispatcher may enter a
 **different** task whose own `enter_user` path does no `swapgs`, so that
 task's next `syscall` would observe an unbalanced GS-swap and fault. The
 arch-neutral fix is a cooperative-park hook pair on
-`rustos_arch_api::ContextSwitch` — `enter_cooperative_park` /
+`tairix_arch_api::ContextSwitch` — `enter_cooperative_park` /
 `leave_cooperative_park`, both **default no-op** — that the kthread runtime
 calls in the *syscall* suspend thunk around the suspend switch (the
 user-kthread mid-handler park path; a kernel kthread's *body* suspend

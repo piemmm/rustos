@@ -1,6 +1,6 @@
 # Stateful models for the capability core
 
-The capability check is the load-bearing security decision in RustOS:
+The capability check is the load-bearing security decision in TAIRiX:
 every IPC endpoint and syscall gate on it, and a single wrong answer is a
 privilege escalation. `AGENTS.md` §19.7 therefore requires the
 capability-critical paths — `lib/caps`, `kernel/sec`,
@@ -71,7 +71,7 @@ cargo xtask proptest --secs 5       # custom budget (local iteration / tests)
 cargo xtask proptest --seed 42      # reproduce a logged run's programs
 ```
 
-The orchestrator exports `RUSTOS_PROPTEST_BUDGET_SECS`. A model reads it
+The orchestrator exports `TAIRIX_PROPTEST_BUDGET_SECS`. A model reads it
 and, when it is positive, keeps running fresh batches until the budget
 elapses; when unset it runs the fixed sweep.
 
@@ -82,7 +82,7 @@ Mirroring the fuzz harnesses (see
 budget alone is not enough: a fixed RNG seed would make every soak replay
 the identical programs the previous one already explored, so running
 longer would find nothing new (`AGENTS.md` §2.1). The orchestrator
-therefore also exports `RUSTOS_PROPTEST_SEED` — by default a *fresh* seed
+therefore also exports `TAIRIX_PROPTEST_SEED` — by default a *fresh* seed
 per model each run (so soaks genuinely progress), or a *deterministic*
 seed derived from `--seed N` to replay a reported counterexample. Each
 run logs the seed it picked. A plain `cargo test` leaves the variable

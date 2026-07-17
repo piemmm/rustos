@@ -6,9 +6,9 @@
 //!
 //! Everything with behaviour worth testing lives in host-tested crates —
 //! the shared browser engine and its validated path spelling
-//! (`rustos_browse`), the themed listing renderer
-//! (`rustos_browse::render`), and the window
-//! channel's client half (`rustos_window`). This binary only composes
+//! (`tairix_browse`), the themed listing renderer
+//! (`tairix_browse::render`), and the window
+//! channel's client half (`tairix_window`). This binary only composes
 //! them over the live syscalls:
 //!
 //! * One `shm_create`d frame region, granted to the reserved window
@@ -38,15 +38,15 @@
 #[cfg(freestanding)]
 mod program {
 
-    use rustos_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use rustos_abi::input::{KeyInput, KeyValue, NamedKeyCode};
-    use rustos_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
-    use rustos_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
-    use rustos_browse::render::render;
-    use rustos_browse::{Browser, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH};
-    use rustos_geometry::Rect;
-    use rustos_theme::ThemeRegistry;
-    use rustos_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
+    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+    use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
+    use tairix_browse::render::render;
+    use tairix_browse::{Browser, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH};
+    use tairix_geometry::Rect;
+    use tairix_theme::ThemeRegistry;
+    use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -97,9 +97,9 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = rustos_rt::stderr(b"files: ");
-        let _ = rustos_rt::stderr(reason.as_bytes());
-        let _ = rustos_rt::stderr(b"\n");
+        let _ = tairix_rt::stderr(b"files: ");
+        let _ = tairix_rt::stderr(reason.as_bytes());
+        let _ = tairix_rt::stderr(b"\n");
         code
     }
 
@@ -111,7 +111,7 @@ mod program {
 
     impl WindowTransport for RtWindowTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            rustos_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
         }
     }
 
@@ -133,7 +133,7 @@ mod program {
         fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
-                match rustos_rt::ipc_recv(self.endpoint, event, &mut sender) {
+                match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
                     Ok(len) => {
                         // A short frame or a foreign sender is dropped,
                         // never delivered: the mailbox is open to any
@@ -154,7 +154,7 @@ mod program {
                         // Nothing queued: park until the session's next
                         // delivery wakes the wait-set — never a spin.
                         let mut token = 0u64;
-                        if rustos_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
+                        if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
                             return Err(Errno::NotFound);
                         }
                     }
@@ -172,14 +172,14 @@ mod program {
     /// the surface is one window — not a screen — so the copy is small.
     fn present_frame<S, T>(
         browser: &Browser<S>,
-        theme: &rustos_theme::Theme,
+        theme: &tairix_theme::Theme,
         client: &mut WindowClient<T>,
         window: u64,
         frame: &mut [u8],
         mode: &DisplayMode,
     ) -> Result<(), Errno>
     where
-        S: rustos_browse::DirectorySource,
+        S: tairix_browse::DirectorySource,
         T: WindowTransport,
     {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
@@ -198,7 +198,7 @@ mod program {
     /// Apply one delivered event to the browser, reporting whether the
     /// listing changed (and must re-present) and whether the app should
     /// end (the desktop asked the window to close).
-    fn apply_event<S: rustos_browse::DirectorySource>(
+    fn apply_event<S: tairix_browse::DirectorySource>(
         browser: &mut Browser<S>,
         event: &WindowEvent,
     ) -> (bool, bool) {
@@ -240,13 +240,13 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     fn main() -> i32 {
         // --- The browser over the live, capability-checked listing call.
         let source = VfsDirectorySource::new(|path: &str| {
-            rustos_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
+            tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
         });
         let Ok(mut browser) = Browser::open_root(source) else {
             return fail(EXIT_NO_LISTING, "root directory listing refused");
@@ -263,11 +263,11 @@ mod program {
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
         let mut region_id: u64 = 0;
-        let base = rustos_rt::shm_create(total, &mut region_id);
+        let base = tairix_rt::shm_create(total, &mut region_id);
         if base < 0 {
             return fail(EXIT_NO_FRAMES, "shared frame region refused");
         }
-        let grant = rustos_rt::shm_grant(region_id, WINDOW_ENDPOINT);
+        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
         if grant < 1 {
             return fail(EXIT_NO_FRAMES, "frame region grant refused");
         }
@@ -290,22 +290,22 @@ mod program {
         // construction (the shared `event_endpoint_for` naming rule: this
         // task's never-reused kernel id under a fixed tag) and never
         // reserved; the bind is refused otherwise.
-        let Ok(origin) = rustos_rt::self_origin() else {
+        let Ok(origin) = tairix_rt::self_origin() else {
             return fail(EXIT_NO_EVENTS, "own identity unavailable");
         };
-        let event_endpoint = rustos_window::event_endpoint_for(origin.pid());
-        if rustos_abi::ipc::is_reserved_endpoint(event_endpoint)
-            || rustos_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
+        let event_endpoint = tairix_window::event_endpoint_for(origin.pid());
+        if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
+            || tairix_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
         {
             return fail(EXIT_NO_EVENTS, "event mailbox bind refused");
         }
-        let set = rustos_rt::waitset_create();
+        let set = tairix_rt::waitset_create();
         if set < 0 {
             return fail(EXIT_NO_EVENTS, "wait-set refused");
         }
         #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
         let set = set as u64;
-        if rustos_rt::waitset_ctl(
+        if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
             WaitSourceKind::Port,
@@ -359,13 +359,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

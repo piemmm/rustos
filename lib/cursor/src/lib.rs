@@ -25,8 +25,8 @@
 //! and blits the resulting [`CursorImage`] so its hotspot tracks the pointer.
 //!
 //! ```
-//! use rustos_cursor::{CursorRegistry, CursorImage};
-//! use rustos_theme::CursorKind;
+//! use tairix_cursor::{CursorRegistry, CursorImage};
+//! use tairix_theme::CursorKind;
 //!
 //! let cursors = CursorRegistry::with_builtin();
 //! let arrow = cursors.active_cursor(CursorKind::Arrow);
@@ -37,7 +37,7 @@
 //! assert_eq!(hidpi.width(), native.width() * 2);
 //! ```
 //!
-//! [`CursorKind`]: rustos_theme::CursorKind
+//! [`CursorKind`]: tairix_theme::CursorKind
 
 #![no_std]
 #![forbid(unsafe_code)]

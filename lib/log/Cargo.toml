@@ -1,6 +1,6 @@
 [package]
-name = "rustos-log"
-description = "RustOS placeholder: structured logging."
+name = "tairix-log"
+description = "TAIRiX placeholder: structured logging."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,11 +15,11 @@ workspace = true
 # §19.4 hash-chained audit log. SHA-256 comes from the audited wrapper in
 # `lib/crypto` (`AGENTS.md` §2.12 / §16.4 — no hand-rolled cryptography);
 # this crate never names an upstream crypto crate directly.
-rustos-crypto = { path = "../crypto", version = "=0.0.0" }
+tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # The typed-field value model reuses the canonical ABI scalar types
 # (`Time64`/`Duration64`, the kernel error code, and the capability id) so a
 # logged value and its ABI form cannot drift apart (no duplication).
-rustos-abi = { path = "../abi", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The log-attestation key is a secret: it is scrubbed from memory on drop with
 # the audited `zeroize` crate (§4 zero-on-free; §2.12 — no hand-rolled
 # wiping, and `zeroize`'s volatile writes are not elided by the optimiser).
@@ -27,7 +27,7 @@ zeroize = { version = "1.8.1", default-features = false }
 
 [dev-dependencies]
 # The §19.6 fuzz harness for the value decoder draws its inputs through the
-# shared seed/budget seam (`rustos_fuzzseed`): one place picks the per-run
+# shared seed/budget seam (`tairix_fuzzseed`): one place picks the per-run
 # seed, logs it, and bounds the smoke/soak loop (`AGENTS.md` §2.2). Test
-# scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

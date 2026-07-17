@@ -38,8 +38,8 @@ is a tracked defect scheduled for the §17 burn-down in `PLAN.md`.
 
 That list is now empty: the layering is satisfied with no exceptions. The
 final edges were the x86_64 production binary's bring-up dependencies
-(`rustos-kernel → kernel/core`, the arch port, the driver host, and the
-boot-time bus driver). `rustos-kernel` is the image-assembly seam, not a
+(`tairix-kernel → kernel/core`, the arch port, the driver host, and the
+boot-time bus driver). `tairix-kernel` is the image-assembly seam, not a
 kernel subsystem, so it is classified as `Tooling` (outside the product
 layering) rather than grandfathered — the x86_64 analogue of the
 downstream `tests/integration/riscv64_boot` consumer, which wires the
@@ -48,8 +48,8 @@ riscv64 image together the same way.
 ## The Arch HAL (`kernel/arch/api`)
 
 The §17.2 architecture surface lives in its own crate, `kernel/arch/api`
-(`rustos-arch-api`). It is `no_std` and names a single `lib/*`
-dependency — `rustos-abi`, itself `no_std`, dependency-free, and
+(`tairix-arch-api`). It is `no_std` and names a single `lib/*`
+dependency — `tairix-abi`, itself `no_std`, dependency-free, and
 allocator-free — so the kernel can name the HAL without inheriting an
 architecture, and a port can implement the HAL without naming a concrete
 kernel crate — the two sides meet only here. Today the crate carries the
@@ -66,16 +66,16 @@ slice (`SecondaryBringup`, below). With `SecondaryBringup` landed (Stage
 W14) every architecture primitive enumerated by §17.2 now lives behind
 the HAL; the burn-down is complete.
 
-`kernel/arch/x86_64` implements `rustos_arch_api::SchedulerArch` for
+`kernel/arch/x86_64` implements `tairix_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
-re-exports the HAL trait so existing `rustos_kernel_sched_api::SchedulerArch`
+re-exports the HAL trait so existing `tairix_kernel_sched_api::SchedulerArch`
 paths resolve to the single canonical definition. `kernel/arch/riscv64`
 is likewise a pure HAL implementation: `RiscvArch` implements
 `SchedulerArch`, and the boot orchestration that used to name concrete
 kernel crates (the `BootInfo` assembly, the `KernelArch` wrapper, the
 boot-state slots, and the `IrqController` bridge over its PLIC) moved
 into the downstream Tooling crate `tests/integration/riscv64_boot` —
-the riscv64 analogue of how x86_64 keeps that pipeline in `rustos-kernel`.
+the riscv64 analogue of how x86_64 keeps that pipeline in `tairix-kernel`.
 Both ports now name only `kernel/arch/api` + `lib/*`.
 
 ### Arch HAL conformance vertical
@@ -414,8 +414,8 @@ source — that would name the instruction set outside the architecture
 ports.
 
 Instead it lives in one audited build-glue crate,
-`tests/integration/harness` (`rustos-itest-harness`). Each test crate
-calls `rustos_itest_harness::emit_target_cfg()` from its build script;
+`tests/integration/harness` (`tairix-itest-harness`). Each test crate
+calls `tairix_itest_harness::emit_target_cfg()` from its build script;
 the helper inspects the cargo target and enables custom cfgs:
 
 - `freestanding` — a bare-metal (`os = "none"`) target; compile the
@@ -430,11 +430,11 @@ the tree with no grandfather entry for it.
 
 ### Freestanding production kernel binary
 
-The `rustos-kernel` crate has the same two-form shape: a bare-metal
+The `tairix-kernel` crate has the same two-form shape: a bare-metal
 `no_std`/`no_main` kernel for `x86_64-unknown-none` and an inert host
 stub for `cargo build --workspace` / `cargo test`. Choosing between them
 is a target decision, so it lives in the crate's build glue rather than
-in the source. `kernel/rustos-kernel/build.rs` derives the bare-metal
+in the source. `kernel/tairix-kernel/build.rs` derives the bare-metal
 condition from `CARGO_CFG_TARGET_OS`/`CARGO_CFG_TARGET_ARCH` and emits a
 single custom `freestanding` cfg (declared with `rustc-check-cfg`). The
 crate gates its `#![no_std]`/`#![no_main]` attributes, the

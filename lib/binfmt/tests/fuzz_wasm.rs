@@ -1,7 +1,7 @@
 //! Deterministic fuzz harness for the `lib/binfmt` wasm module-structure
 //! view (a decoder of untrusted executable-file bytes).
 //!
-//! [`rustos_binfmt::wasm::WasmView::parse`] decodes any file a viewer is
+//! [`tairix_binfmt::wasm::WasmView::parse`] decodes any file a viewer is
 //! pointed at. The harness invariants:
 //!
 //! * parsing any byte string never panics — it returns a view or a typed
@@ -10,13 +10,13 @@
 //!   and function-body walk terminates without a panic (a hostile LEB128
 //!   length cannot cause an overrun or an unbounded loop).
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG mutates
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates
 //! a hand-assembled valid module and mixes in pure noise. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
-//! logged seed; `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to
+//! logged seed; `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to
 //! extend the loop to a wall-clock budget.
 
-use rustos_binfmt::wasm::WasmView;
+use tairix_binfmt::wasm::WasmView;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -65,10 +65,10 @@ fn exercise(bytes: &[u8]) {
 
 #[test]
 fn parse_never_panics_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = rustos_fuzzseed::start(
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut state: u64 = tairix_fuzzseed::start(
         "parse_never_panics_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -107,7 +107,7 @@ fn parse_never_panics_for_any_input() {
         exercise(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

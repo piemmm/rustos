@@ -18,7 +18,7 @@ second opérande, ou `-s`), un `suffix` final est également retiré, sauf
 s'il constitue tout le nom restant.
 
 Une racine n'est jamais entamée : `basename /` donne `/`, et —
-l'équivalent dans la forêt de stockage RustOS — `basename Home:/` donne
+l'équivalent dans la forêt de stockage TAIRiX — `basename Home:/` donne
 `Home:/`. Une racine d'alias (`Home:/`, `System:/`, …) joue exactement
 le rôle que `/` joue sur les systèmes POSIX.
 

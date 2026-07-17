@@ -14,7 +14,7 @@
 //! memory the user does not own.
 //!
 //! The byte move itself runs under the architecture port's **fault
-//! window** ([`rustos_arch_api::uaccess::copy_user_span`]): should the
+//! window** ([`tairix_arch_api::uaccess::copy_user_span`]): should the
 //! software proof above ever be violated — a kernel defect, a corrupted
 //! table, a stale direct-map window — the resulting hardware data fault
 //! resumes at the window's fix-up and the copy stops with
@@ -138,7 +138,7 @@ pub fn copy_in(
             // surfaces as the error mapped below.
             unsafe {
                 let into = dst_base.add(buf_off);
-                rustos_arch_api::uaccess::copy_user_span(into, user_ptr.cast_const(), span)
+                tairix_arch_api::uaccess::copy_user_span(into, user_ptr.cast_const(), span)
                     .map_err(|_| UaccessError::Faulted)
             }
         },
@@ -180,7 +180,7 @@ pub fn copy_out(
             // window and surfaces as the error mapped below.
             unsafe {
                 let from = src_base.add(buf_off);
-                rustos_arch_api::uaccess::copy_user_span(user_ptr, from, span)
+                tairix_arch_api::uaccess::copy_user_span(user_ptr, from, span)
                     .map_err(|_| UaccessError::Faulted)
             }
         },

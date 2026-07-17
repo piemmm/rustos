@@ -11,7 +11,7 @@ whoami — afficher le nom de compte de l'utilisateur courant
 Affiche le nom d'utilisateur associé à l'identité de ce processus,
 suivi d'un saut de ligne, et rien d'autre.
 
-RustOS n'a pas de `/etc/passwd` : l'identifiant d'utilisateur provient
+TAIRiX n'a pas de `/etc/passwd` : l'identifiant d'utilisateur provient
 de l'enregistrement que le noyau tient du processus appelant, et le nom
 de compte correspondant provient de l'annuaire public des comptes de
 l'API d'information système. Si l'annuaire ne contient aucun nom pour

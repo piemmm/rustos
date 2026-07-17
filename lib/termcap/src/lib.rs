@@ -3,19 +3,19 @@
 //! A terminal's `TERM` value names a profile of what that terminal can do —
 //! how deep its colour is, whether it can address the cursor, switch to an
 //! alternate screen, report the mouse, and so on. On a POSIX system this lives
-//! in a terminfo / termcap database read from `/usr/share` or `/etc`. RustOS
+//! in a terminfo / termcap database read from `/usr/share` or `/etc`. TAIRiX
 //! has no such paths, so the database is **compiled in**:
 //! a closed, versioned [`TermType`] set and a constant
 //! [`Capabilities`] record per terminal.
 //!
 //! # One vocabulary
 //!
-//! Every escape sequence a capability record describes is a [`rustos_vt::Op`]
+//! Every escape sequence a capability record describes is a [`tairix_vt::Op`]
 //! — the one shared vocabulary. This crate never defines a
 //! second escape-sequence table: the output capabilities are expressed as the
 //! `Op`s the terminal accepts, the recognised colours are the
-//! [`rustos_vt::Color`] models the terminal renders, and arrow-key input is the
-//! `Op` the terminal's bytes parse back to through [`rustos_vt::Parser`]. The
+//! [`tairix_vt::Color`] models the terminal renders, and arrow-key input is the
+//! `Op` the terminal's bytes parse back to through [`tairix_vt::Parser`]. The
 //! [`Capabilities::referenced_ops`] method exposes exactly that set, and the
 //! `no_record_emits_a_sequence_absent_from_vt` test round-trips every one of
 //! them through `lib/vt` to prove the database invents nothing.
@@ -29,7 +29,7 @@
 //! writes to fd 3 (`stdinfo` is reserved).
 //!
 //! ```
-//! use rustos_termcap::{from_term, ColorDepth, TermType};
+//! use tairix_termcap::{from_term, ColorDepth, TermType};
 //!
 //! assert_eq!(from_term("xterm-256color"), TermType::Xterm256Color);
 //! assert_eq!(from_term("no-such-terminal"), TermType::Dumb);

@@ -8,7 +8,7 @@
 //! `lib/raster`'s single polygon path. An asset without a
 //! declared hotspot pins it to the design-grid origin.
 
-use rustos_svg::{SvgError, SvgImage};
+use tairix_svg::{SvgError, SvgImage};
 
 use crate::vector::{Shape, VectorCursor};
 
@@ -38,7 +38,7 @@ impl VectorCursor {
 /// back to a built-in cursor rather than crashing the compositor.
 ///
 /// # Errors
-/// Propagates the [`SvgError`] from [`rustos_svg::decode`].
+/// Propagates the [`SvgError`] from [`tairix_svg::decode`].
 pub fn decode(bytes: &[u8]) -> Result<VectorCursor, SvgError> {
-    Ok(VectorCursor::from_svg(&rustos_svg::decode(bytes)?))
+    Ok(VectorCursor::from_svg(&tairix_svg::decode(bytes)?))
 }

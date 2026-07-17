@@ -4,7 +4,7 @@
 //! A sealed entry that fails authentication or decode is a
 //! security-relevant event: the page's contents are unrecoverable and
 //! the tier fails closed. Each such failure emits exactly one
-//! structured record through [`rustos_log`]. The identifiers continue
+//! structured record through [`tairix_log`]. The identifiers continue
 //! the `kernel/mem` range (`2_000..3_000`) established in
 //! [`crate::reclaim_audit`]; IDs are assigned once across the whole
 //! range and never re-used or re-numbered.
@@ -21,11 +21,11 @@
 //! (the owning task id). The fields are numeric handles only — never
 //! page contents, key material, or nonces.
 
-use rustos_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 
 /// Audit event identifiers emitted by the compressed-memory tier.
 ///
-/// The numeric values are part of the stable contract between RustOS
+/// The numeric values are part of the stable contract between TAIRiX
 /// and external log consumers; see the module-level table.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum RamzipAuditEvent {
@@ -46,7 +46,7 @@ impl RamzipAuditEvent {
     }
 
     /// Short, fixed name used as the `message` field of the emitted
-    /// [`rustos_log::Event`].
+    /// [`tairix_log::Event`].
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {

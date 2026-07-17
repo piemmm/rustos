@@ -1,5 +1,5 @@
 //! Deterministic fuzz harness for the `lib/procinfo` `info:`/`stats:` resolver
-//! ([`rustos_procinfo::resolve`]).
+//! ([`tairix_procinfo::resolve`]).
 //!
 //! The resolver takes two untrusted inputs: the resource-reference string a
 //! user or script supplied, and the reply bytes the System Information API
@@ -7,14 +7,14 @@
 //! harness's invariants are:
 //!
 //! * resolving any parsed reference against any reply never panics — it
-//!   returns a [`ResourceResponse`](rustos_procinfo::ResourceResponse) or a
-//!   typed [`ResolveInfoError`](rustos_procinfo::ResolveInfoError) (fail
+//!   returns a [`ResourceResponse`](tairix_procinfo::ResourceResponse) or a
+//!   typed [`ResolveInfoError`](tairix_procinfo::ResolveInfoError) (fail
 //!   closed);
 //! * a successful response is well-formed: the current envelope version, the
 //!   `sysinfod` producer, and every bounded field within its limit;
 //! * a reference outside `info:`/`stats:` is never resolved here.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG draws
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
 //! reference strings (mutated real templates, delimiter splices, pure noise)
 //! and drives a stand-in broker whose reply is itself PRNG-chosen between a
 //! valid record, garbage bytes, and an error. A plain `cargo test` runs the
@@ -23,19 +23,19 @@
 
 use core::cell::Cell;
 
-use rustos_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
-use rustos_abi::sysinfo::{
+use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
+use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, MemoryPressureStats, RamzipStats,
     ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
     Uptime, RECLAIM_CLASS_COUNT,
 };
-use rustos_abi::time::{Duration64, Time64};
-use rustos_abi::{Errno, LimitKind, ResourceLimit};
-use rustos_procinfo::{
+use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::{Errno, LimitKind, ResourceLimit};
+use tairix_procinfo::{
     resolve, Producer, ResponsePayload, Transport, MAX_INFO_VALUE_LEN, MAX_METRIC_NAME_LEN,
     MAX_QUERY_LEN, RESINFO_VERSION_CURRENT,
 };
-use rustos_resref::parse;
+use tairix_resref::parse;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -161,7 +161,7 @@ impl HostileBroker {
                     42,
                     ProcId::from_raw([0x5A; 16]),
                     CapabilitySummary::EMPTY,
-                    rustos_abi::ORIGIN_CONSOLE_NONE,
+                    tairix_abi::ORIGIN_CONSOLE_NONE,
                 )
                 .to_le_bytes()
                 .to_vec(),
@@ -313,10 +313,10 @@ fn exercise(input: &str, broker: &HostileBroker) {
 
 #[test]
 fn resolve_never_panics_and_stays_well_formed() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = rustos_fuzzseed::start(
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut state: u64 = tairix_fuzzseed::start(
         "resolve_never_panics_and_stays_well_formed",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -364,7 +364,7 @@ fn resolve_never_panics_and_stays_well_formed() {
         exercise(&String::from_utf8_lossy(&noise), &broker);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

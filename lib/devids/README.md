@@ -1,6 +1,6 @@
-# rustos-devids
+# tairix-devids
 
-PCI/USB ID-database engine for RustOS (`lib/devids`). Stability tier:
+PCI/USB ID-database engine for TAIRiX (`lib/devids`). Stability tier:
 **experimental**.
 
 The `lspci` and `lsusb` command apps (plans/DEVICES.md DEVICE1) name the

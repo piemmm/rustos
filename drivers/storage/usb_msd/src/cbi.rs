@@ -24,7 +24,7 @@
 //! floppy drives are single-unit devices), so any LUN other than `0` is
 //! refused.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::bot::MsdTransport;
 use crate::scsi::{CommandOutcome, DataPhase, ScsiTransport, Sense};

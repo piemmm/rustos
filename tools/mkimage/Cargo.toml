@@ -1,6 +1,6 @@
 [package]
-name = "rustos-mkimage"
-description = "Platform image builders for RustOS (AGENTS.md §12)."
+name = "tairix-mkimage"
+description = "Platform image builders for TAIRiX (AGENTS.md §12)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustos-mkimage"
+name = "tairix-mkimage"
 path = "src/main.rs"
 
 # mkimage is a host-side build tool (AGENTS.md §12): it authors the
@@ -25,20 +25,20 @@ path = "src/main.rs"
 # never drift (AGENTS.md §2.2). It mirrors how the QEMU vertical fixtures
 # (`tests/integration/{fat32,arxfs}_image`) author their backing disks.
 [dependencies]
-rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
-rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+tairix-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
+tairix-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
 # The per-installation log-attestation key file is authored through the one
-# `rustos_log::LogAttestationKey` on-disk format, so the image author and the
+# `tairix_log::LogAttestationKey` on-disk format, so the image author and the
 # journal principal that later reads it cannot drift (AGENTS.md §2.2).
-rustos-log = { path = "../../lib/log", version = "=0.0.0" }
+tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 # The system app store's Help/ trees, discovered from the command-app
 # bundles' own on-disk `Help/` sources and embedded at build time
-# (`rustos_syshelp`), so the image is planted from data — never a
+# (`tairix_syshelp`), so the image is planted from data — never a
 # hand-maintained per-bundle list here, and no help text is hardcoded into an
 # app crate (AGENTS.md §2.2, §16.5).
-rustos-syshelp = { path = "../syshelp", version = "=0.0.0" }
-rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
-rustos-users = { path = "../../lib/users", version = "=0.0.0" }
+tairix-syshelp = { path = "../syshelp", version = "=0.0.0" }
+tairix-partition = { path = "../../lib/partition", version = "=0.0.0" }
+tairix-users = { path = "../../lib/users", version = "=0.0.0" }

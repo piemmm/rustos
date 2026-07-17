@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-stack-guard-qemu-x86_64"
-description = "plans/PI.md guard-page fault-form (x86_64 G1/G2) QEMU integration test: the four-level huge-page split re-expresses a 2 MiB identity huge page as a table of 4 KiB pages, so a single guard page inside it can be unmapped and an access to it raises a synchronous, supervisor-mode page fault. The sibling of stack_guard_qemu_{aarch64,riscv64}. It boots the production rustos-kernel pipeline (so the GDT, the dedicated error-code-aware #PF entry, and the bump heap are installed) and, on AuditEvent::BootCompleted, builds a 4 GiB-identity paging::AddressSpace, split_blocks the 2 MiB block covering a dedicated guard static (reached through its low-identity physical alias), activates the space (CR3), proves the split preserved the mapping, then unmaps + flushes the guard page and reads it — the rustos_arch_x86_64::fault observer reports the not-present #PF on exactly that page as PASS."
+name = "tairix-test-stack-guard-qemu-x86_64"
+description = "plans/PI.md guard-page fault-form (x86_64 G1/G2) QEMU integration test: the four-level huge-page split re-expresses a 2 MiB identity huge page as a table of 4 KiB pages, so a single guard page inside it can be unmapped and an access to it raises a synchronous, supervisor-mode page fault. The sibling of stack_guard_qemu_{aarch64,riscv64}. It boots the production tairix-kernel pipeline (so the GDT, the dedicated error-code-aware #PF entry, and the bump heap are installed) and, on AuditEvent::BootCompleted, builds a 4 GiB-identity paging::AddressSpace, split_blocks the 2 MiB block covering a dedicated guard static (reached through its low-identity physical alias), activates the space (CR3), proves the split preserved the mapping, then unmaps + flushes the guard page and reads it — the tairix_arch_x86_64::fault observer reports the not-present #PF on exactly that page as PASS."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,11 +13,11 @@ workspace = true
 
 # This bin is the `plans/PI.md` x86_64 guard-page fault-form (G1/G2)
 # vertical — the last `BlockSplit::Pending` port brought to `Supported`,
-# the sibling of `rustos-test-stack-guard-qemu-{aarch64,riscv64}`. Unlike
+# the sibling of `tairix-test-stack-guard-qemu-{aarch64,riscv64}`. Unlike
 # the self-contained aarch64/riscv64 verticals, x86_64 long-mode bring-up
 # (GDT, TSS, the dedicated `#PF` entry, the bump heap) is the production
-# boot pipeline's job, so this test boots the real `rustos-kernel`
-# pipeline (like the sibling `rustos-test-mem-map-qemu-x86_64`) and does
+# boot pipeline's job, so this test boots the real `tairix-kernel`
+# pipeline (like the sibling `tairix-test-mem-map-qemu-x86_64`) and does
 # the split / unmap / fault work on `AuditEvent::BootCompleted`.
 #
 # The `test-hooks` feature is on by default. Release builds that enable it
@@ -29,18 +29,18 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-stack-guard-qemu-x86_64"
+name = "tairix-test-stack-guard-qemu-x86_64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 # The Arch HAL MMU / TLB surface (`AGENTS.md` §17.2): the guard page is
-# split + torn down through `rustos_arch_api::mmu::AddressSpace`
-# (`split_block` / `unmap`) + `rustos_arch_api::tlb::TlbShootdown`
+# split + torn down through `tairix_arch_api::mmu::AddressSpace`
+# (`split_block` / `unmap`) + `tairix_arch_api::tlb::TlbShootdown`
 # (`flush_page`), so the fault-form is proven *through the HAL*.
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

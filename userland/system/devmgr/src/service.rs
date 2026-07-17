@@ -19,9 +19,9 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Errno, HwNode, HwTreeHeader};
-use rustos_devmatch::DriverCandidate;
-use rustos_log::{log as log_event, Event, Level, Sink};
+use tairix_abi::{Errno, HwNode, HwTreeHeader};
+use tairix_devmatch::DriverCandidate;
+use tairix_log::{log as log_event, Event, Level, Sink};
 
 use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
 use crate::events;
@@ -276,11 +276,11 @@ mod tests {
     use alloc::vec;
     use core::cell::RefCell;
 
-    use rustos_abi::driver_store::{
+    use tairix_abi::driver_store::{
         encode_catalogue_reply, encode_load_reply, encode_unload_reply, StoreRequest,
     };
-    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
-    use rustos_abi::DriverBindKey;
+    use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
+    use tairix_abi::DriverBindKey;
 
     /// Encode `[HwTreeHeader][HwNode; n]` exactly as the kernel store does.
     fn encode(generation: u64, nodes: &[HwNode]) -> Vec<u8> {
@@ -390,7 +390,7 @@ mod tests {
 
     impl DriverStoreCall for FailingCatalogue {
         fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            rustos_abi::driver_store::encode_error_reply(reply, Errno::PermissionDenied)
+            tairix_abi::driver_store::encode_error_reply(reply, Errno::PermissionDenied)
         }
     }
 
@@ -423,7 +423,7 @@ mod tests {
         fn bind_driver(
             &mut self,
             _endpoint_id: u64,
-            _iface: &[u8; rustos_abi::net_ipc::IF_NAME_LEN],
+            _iface: &[u8; tairix_abi::net_ipc::IF_NAME_LEN],
         ) -> Result<(), Errno> {
             Ok(())
         }
@@ -475,7 +475,7 @@ mod tests {
     fn an_unmatched_node_is_left_unbound_and_never_loaded() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
         // boot); lower the threshold so the test observes it.
-        rustos_log::set_max_level(rustos_log::Level::Trace);
+        tairix_log::set_max_level(tairix_log::Level::Trace);
         let snapshot = encode(
             1,
             &[
@@ -737,7 +737,7 @@ mod tests {
     fn a_reaction_does_not_relog_an_unchanged_unbound_node() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
         // boot); lower the threshold so the test observes it.
-        rustos_log::set_max_level(rustos_log::Level::Trace);
+        tairix_log::set_max_level(tairix_log::Level::Trace);
         let unmatched = HwMatchKey::virtio(0xFFFF);
         let first = encode(
             1,
@@ -791,7 +791,7 @@ mod tests {
     fn a_failed_catalogue_fetch_is_fail_soft_and_still_observes() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
         // boot); lower the threshold so the test observes it.
-        rustos_log::set_max_level(rustos_log::Level::Trace);
+        tairix_log::set_max_level(tairix_log::Level::Trace);
         let snapshot = encode(
             1,
             &[

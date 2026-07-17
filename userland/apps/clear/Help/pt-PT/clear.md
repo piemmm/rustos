@@ -14,13 +14,13 @@ terminal indicado em `TERM`; um terminal que não sabe limpar (um `TERM`
 desconhecido degrada para a base «dumb») faz o comando falhar em vez de
 imprimir bytes que o terminal mostraria como lixo.
 
-As consolas RustOS não guardam histórico de deslocamento, pelo que não há
+As consolas TAIRiX não guardam histórico de deslocamento, pelo que não há
 histórico para limpar: `-x` (a opção GNU que preserva o histórico) é
 aceite por compatibilidade de scripts e não muda nada.
 
 ## OPTIONS
 
-- `-x` — aceite por compatibilidade com o GNU; uma consola RustOS não
+- `-x` — aceite por compatibilidade com o GNU; uma consola TAIRiX não
   guarda histórico, pelo que a saída é idêntica com e sem ela.
 - `-h, -?` — mostrar a ajuda curta deste próprio comando.
 

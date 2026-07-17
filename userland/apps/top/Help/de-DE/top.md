@@ -38,7 +38,7 @@ und die Sitzung läuft weiter.
 
 Die `%Cpu(s)`-Zeile zeigt den Anteil des letzten Intervalls, den alle
 CPUs zusammen beschäftigt (mit dem Ausführen von Tasks) und untätig
-verbracht haben. RustOS verbucht nur Beschäftigt- und Leerlaufzeit: wo
+verbracht haben. TAIRiX verbucht nur Beschäftigt- und Leerlaufzeit: wo
 GNU `top` den beschäftigten Anteil in user/system/nice/iowait
 aufschlüsselt, zeigt diese Zeile bewusst die zwei echten Werte.
 
@@ -69,7 +69,7 @@ tragen:
   Auffrischungen, in Sekunden mit optionalem Bruchteil (nur die erste
   Nachkommastelle, die Zehntel, wird behalten): `top -d 1.5` frischt
   alle 1,5 Sekunden auf. Vorgabe ist 3,0. GNU `top` akzeptiert null und
-  frischt so schnell wie möglich auf; RustOS läuft nie in einer
+  frischt so schnell wie möglich auf; TAIRiX läuft nie in einer
   Beschäftigungsschleife, daher wird null auf das Minimum von 0,1 s
   angehoben.
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen und beenden. In

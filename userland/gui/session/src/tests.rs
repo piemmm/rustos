@@ -4,16 +4,16 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::display::{DisplayFormat, DisplayMode};
-use rustos_abi::Errno;
-use rustos_cursor::CursorTheme;
-use rustos_icon::{IconKind, IconSet};
-use rustos_taskbar::{
+use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+use tairix_abi::Errno;
+use tairix_cursor::CursorTheme;
+use tairix_icon::{IconKind, IconSet};
+use tairix_taskbar::{
     ActivateOutcome, MenuAction, MenuEntryId, SessionControl, TaskId, TaskbarConfig,
     TaskbarRenderer, TaskbarResponse,
 };
-use rustos_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
-use rustos_wm::{
+use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
+use tairix_wm::{
     Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Scale, Surface,
     WindowId,
 };
@@ -1520,7 +1520,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
     const WIDTH: u32 = 1024;
     const HEIGHT: u32 = 768;
     let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(WIDTH, HEIGHT), LABEL);
-    let files_id = rustos_taskbar::LauncherId(1);
+    let files_id = tairix_taskbar::LauncherId(1);
     let _ = shell
         .session_mut()
         .taskbar_mut()
@@ -1534,7 +1534,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
     };
     let mut comp = Compositor::new(mode, Color::rgb(0, 0, 0)).expect("compositor");
 
-    let centre = |rect: rustos_wm::Rect| -> Point {
+    let centre = |rect: tairix_wm::Rect| -> Point {
         assert!(!rect.is_empty());
         #[allow(clippy::cast_possible_wrap)]
         Point::new(
@@ -1653,9 +1653,9 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 // --- The trusted file picker (plans/APPWIN.md AW5, CU6) -----------------
 
 use crate::picker::{PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN};
-use rustos_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
-use rustos_browse::render::row_height;
-use rustos_browse::{DirectorySource, Entry};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+use tairix_browse::render::row_height;
+use tairix_browse::{DirectorySource, Entry};
 
 /// An in-memory directory tree keyed by the joined component path, the
 /// picker's stand-in for the session-authority VFS listing.

@@ -7,9 +7,9 @@
 //! syscall-dispatch callback, and a fault handler. It builds one
 //! hardware-isolated U-mode address space — its own Sv39 page-table hierarchy —
 //! from the `rxe` fixture program through the production capability-checked,
-//! audited `rustos_kernel_core::spawn_image` caller, **retains it live**, and
-//! installs a `rustos_kernel_core::MemMap` producer backed by
-//! `rustos_kernel_mem::map_anonymous` / `unmap_anonymous` over that space and
+//! audited `tairix_kernel_core::spawn_image` caller, **retains it live**, and
+//! installs a `tairix_kernel_core::MemMap` producer backed by
+//! `tairix_kernel_mem::map_anonymous` / `unmap_anonymous` over that space and
 //! its frame pool. It then `sret`s into the program directly through
 //! `EnterUser::enter_user`; the dispatch callback routes the program's
 //! `mem_map` / `mem_unmap` `ecall`s through the producer.
@@ -27,7 +27,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-mem-map-qemu-riscv64: the `test-hooks` Cargo feature is a \
+    "tairix-test-mem-map-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

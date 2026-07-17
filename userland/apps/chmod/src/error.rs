@@ -1,7 +1,7 @@
 //! The outcomes of running a `chmod` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a `chmod` invocation did not complete.
 ///

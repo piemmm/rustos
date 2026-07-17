@@ -14,7 +14,7 @@ dirname — הסרת הרכיב האחרון משמות
 הוא השורש.
 
 לעולם אין מפרקים שורש: `dirname /tools` הוא `/`, ו — המקבילה ביער
-האחסון של RustOS — `dirname Home:/tools` הוא `Home:/`. שורש כינוי
+האחסון של TAIRiX — `dirname Home:/tools` הוא `Home:/`. שורש כינוי
 (`Home:/`, `System:/`, …) ממלא בדיוק את התפקיד ש-`/` ממלא במערכות
 POSIX.
 

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-bus-usb"
-description = "RustOS xHCI USB host-controller driver (HCD): owns one controller, enumerates the attached device, publishes a per-interface node, and serves the bus-agnostic URB transport to the autoloaded class driver (plans/USB.md U3b)."
+name = "tairix-drv-bus-usb"
+description = "TAIRiX xHCI USB host-controller driver (HCD): owns one controller, enumerates the attached device, publishes a per-interface node, and serves the bus-agnostic URB transport to the autoloaded class driver (plans/USB.md U3b)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,20 +16,20 @@ workspace = true
 # autoloaded HCD process). The `lib` builds on the host and the freestanding
 # targets and depends only on other `lib/*` crates so there is no
 # `drivers/*`→`drivers/*` edge. The `Run` binary links the userland
-# runtime `rustos-rt` only on the bare-metal targets it is actually built for;
+# runtime `tairix-rt` only on the bare-metal targets it is actually built for;
 # on the host it is an inert stub (`src/main.rs` / `build.rs`), mirroring
 # `drivers/input/usb_kbd`.
 
 [dependencies]
 # The frozen `abi-v1` surface (`HwNode`, `HwResource`, `DriverError`, the URB
 # transport types) the `lib` and the `Run` binary both build over.
-rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # The bus-agnostic xHCI protocol (the `XhciHost` seam, the `Xhci` controller
 # engine, the TRB/ring vocabulary, the `UsbDevice` enumeration engine, and the
 # URB transport `drive_urb`/`UrbEngine`) lives in `lib/usb` so the device-class
 # drivers consume it without depending on this bus driver crate. The HCD adds the concrete bring-up
 # orchestration and the per-interface URB-serve state machine on top of it.
-rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
+tairix-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 
 # Everything the freestanding `Run` program links beyond the `lib` is pulled in
 # only for the bare-metal targets the binary is actually built for; on the host
@@ -37,20 +37,20 @@ rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` and the URB endpoint's
 # send-cap gate are built over.
-rustos-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
+tairix-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` the bring-up consumes (`mmio_map` / `dma_alloc` /
 # `resource_grants`).
-rustos-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
+tairix-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack
 # canary, the panic handler, and the syscall wrappers the HCD event loop drives
 # (`shm_create`, `call_create`/`call_recv`/`call_reply`, `waitset_*`,
 # `irq_bind`, `hw_emit_node`/`hw_remove_node`, `LogSink`).
-rustos-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
 # The structured diagnostic event vocabulary (`Event`/`Field`/`Level`) the HCD
 # emits its one-shot bring-up / disconnect diagnostics through, routed to the
-# kernel log by `rustos_rt::LogSink`.
-rustos-log = { path = "../../../../lib/log", version = "=0.0.0" }
+# kernel log by `tairix_rt::LogSink`.
+tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
 # Fixed-buffer formatting helpers for numeric diagnostic fields, avoiding
 # allocation in the freestanding HCD.
-rustos-util = { path = "../../../../lib/util", version = "=0.0.0" }
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }

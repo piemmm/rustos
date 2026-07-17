@@ -34,14 +34,14 @@
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::driver::display::{DamageRect, DisplayMode};
-use rustos_abi::origin::ProcId;
-use rustos_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use rustos_abi::window_ipc::{
+use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::origin::ProcId;
+use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::window_ipc::{
     encode_create_reply, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
 };
-use rustos_abi::Errno;
-use rustos_display::{FrameRegion, ShmMapper};
+use tairix_abi::Errno;
+use tairix_display::{FrameRegion, ShmMapper};
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes:
 /// the create reply is the longest frame, and the status frame always

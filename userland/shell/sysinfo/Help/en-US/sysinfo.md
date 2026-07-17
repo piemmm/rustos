@@ -9,7 +9,7 @@ sysinfo — query system information
 ## DESCRIPTION
 
 Issues one typed query to the System Information API and renders the
-reply. RustOS has no `/proc` and no `/sys`: this command is the
+reply. TAIRiX has no `/proc` and no `/sys`: this command is the
 terminal face of the same versioned, capability-checked API every
 program uses, and no path bypasses the capability check.
 

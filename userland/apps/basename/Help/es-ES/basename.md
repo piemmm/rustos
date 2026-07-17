@@ -18,7 +18,7 @@ también se quita un `suffix` final, salvo que sea todo el nombre
 restante.
 
 Una raíz nunca se recorta: `basename /` es `/`, y — el equivalente en
-el bosque de almacenamiento de RustOS — `basename Home:/` es `Home:/`.
+el bosque de almacenamiento de TAIRiX — `basename Home:/` es `Home:/`.
 Una raíz de alias (`Home:/`, `System:/`, …) desempeña exactamente el
 papel que `/` desempeña en los sistemas POSIX.
 

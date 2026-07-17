@@ -15,8 +15,8 @@
 //! payload decoders above this layer (`crate::decode`) validate every
 //! field fail-closed.
 
-use rustos_abi::{Errno, FieldValue};
-use rustos_log::{Event, EventId, Field, Level, Sink};
+use tairix_abi::{Errno, FieldValue};
+use tairix_log::{Event, EventId, Field, Level, Sink};
 
 use alloc::vec::Vec;
 
@@ -141,7 +141,7 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
             Some(code) => FieldValue::SignedInt(i64::from(code)),
             None => FieldValue::Null,
         };
-        rustos_log::log(
+        tairix_log::log(
             &self.sink,
             &Event {
                 level: Level::Warn,
@@ -177,7 +177,7 @@ impl<L: Launcher, S: Sink> Drop for ParserSandbox<L, S> {
 
 /// Emit the [`EVENT_WORKER_UNAVAILABLE`] event to `sink`.
 fn log_unavailable_to<S: Sink>(sink: &S, errno: Errno) {
-    rustos_log::log(
+    tairix_log::log(
         sink,
         &Event {
             level: Level::Error,
@@ -201,8 +201,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
-    use rustos_log::{Event, EventId, Level, Sink};
+    use tairix_abi::Errno;
+    use tairix_log::{Event, EventId, Level, Sink};
 
     /// Captures `(id, level)` pairs of every logged event.
     #[derive(Clone, Default)]

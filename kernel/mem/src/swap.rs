@@ -10,7 +10,7 @@
 //!
 //! the charter requires that "the kernel refuses to activate a swap
 //! device that is not wrapped by the encrypted-swap layer, and fails closed
-//! rather than falling back to plaintext". RustOS enforces this with the
+//! rather than falling back to plaintext". TAIRiX enforces this with the
 //! type system rather than a runtime check: a [`SwapBackend`] (the raw,
 //! slot-addressed device) is *useless on its own* — it exposes only opaque
 //! fixed-size records — and the **only** way to read or write a page through
@@ -33,7 +33,7 @@
 //! ([`crate::ramzip`]) holds separate ones and neither depends on the
 //! other's key or metadata format.
 
-use rustos_crypto::aead::{self, AeadNonce, AeadTag, AEAD_NONCE_LEN, AEAD_TAG_LEN};
+use tairix_crypto::aead::{self, AeadNonce, AeadTag, AEAD_NONCE_LEN, AEAD_TAG_LEN};
 use zeroize::Zeroize;
 
 use crate::frame::PAGE_SIZE;
@@ -142,7 +142,7 @@ impl<B: SwapBackend> EncryptedSwap<B> {
     ///
     /// Draws the per-activation nonce salt from `entropy`. This is the sole
     /// constructor: a swap device cannot be used any other way, which is how
-    /// RustOS refuses plaintext swap.
+    /// TAIRiX refuses plaintext swap.
     ///
     /// # Errors
     ///

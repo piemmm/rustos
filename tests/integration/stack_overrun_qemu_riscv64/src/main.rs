@@ -4,7 +4,7 @@
 //! one-page guard is *unmapped* takes a **synchronous store page fault** the
 //! instant it overruns into that guard page, rather than the deferred
 //! next-reschedule canary detection a heap-backed
-//! `rustos_kernel_core::BoxStack` falls back to.
+//! `tairix_kernel_core::BoxStack` falls back to.
 //!
 //! ## Why this exists
 //!
@@ -16,7 +16,7 @@
 //! execution runs off the bottom of its usable kernel stack — faults
 //! **synchronously in hardware** under the live scheduler, instead of being
 //! caught only at the next reschedule by
-//! `rustos_kernel_core::KernelStack::check_guard` (the software-canary
+//! `tairix_kernel_core::KernelStack::check_guard` (the software-canary
 //! fallback the heap-backed `BoxStack` uses). This vertical closes that gap
 //! on the `virt` board and is the riscv64 sibling of
 //! `tests/integration/stack_overrun_qemu_aarch64`.
@@ -29,14 +29,14 @@
 //!    granularity (`AddressSpace::prepare_guard_arena`, G2), all while
 //!    paging is off — so the running code/stack leaf is never broken.
 //! 2. Carve one kthread stack region out of the arena, laid out exactly as
-//!    `rustos_kernel_core::BoxStack` / the production `ArenaStack`:
+//!    `tairix_kernel_core::BoxStack` / the production `ArenaStack`:
 //!    `[guard page | usable stack]`, the guard immediately *below* the
 //!    usable region so a downward overrun crosses it first.
 //! 3. Install the S-mode trap vector + a `fault` handler, turn paging on,
 //!    then `unmap` the guard page through the Arch HAL + `flush_page` it —
 //!    the production guard-page mechanism (G3b-2). The usable stack above it
 //!    stays mapped.
-//! 4. Build the live `rustos_kernel_sched_eevdf::Scheduler` over `RiscvArch`
+//! 4. Build the live `tairix_kernel_sched_eevdf::Scheduler` over `RiscvArch`
 //!    and admit a kthread on that stack via `spawn_kthread_with_stack` — the
 //!    production runtime path, not a bare function call.
 //! 5. The kthread body overruns its stack: it writes the highest byte of
@@ -64,8 +64,8 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links the `rustos-kernel-core` kthread runtime, the
-//! `rustos-arch-riscv64` port, and the default `rustos-kernel-sched-eevdf`
+//! It links the `tairix-kernel-core` kthread runtime, the
+//! `tairix-arch-riscv64` port, and the default `tairix-kernel-sched-eevdf`
 //! policy directly and supplies its own `kernel_main`. The QEMU-exit
 //! shortcut lives in this dedicated bin, never behind a Cargo feature on a
 //! library crate (fail closed).
@@ -86,19 +86,19 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use rustos_arch_api::mmu::AddressSpace as _;
-    use rustos_arch_api::tlb::TlbShootdown as _;
-    use rustos_arch_api::CpuId;
-    use rustos_arch_riscv64::context_hal::ContextSwitchHal;
-    use rustos_arch_riscv64::fdt::Fdt;
-    use rustos_arch_riscv64::paging::{AddressSpace, PageTablePool, BLOCK_2MIB, PAGE_SIZE};
-    use rustos_arch_riscv64::{
+    use tairix_arch_api::mmu::AddressSpace as _;
+    use tairix_arch_api::tlb::TlbShootdown as _;
+    use tairix_arch_api::CpuId;
+    use tairix_arch_riscv64::context_hal::ContextSwitchHal;
+    use tairix_arch_riscv64::fdt::Fdt;
+    use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool, BLOCK_2MIB, PAGE_SIZE};
+    use tairix_arch_riscv64::{
         fault, handle_panic_via_serial, qemu_exit, trap, RiscvArch, RiscvArchStorage, SERIAL_SINK,
     };
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
-    use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-    use rustos_log::{log, Event, EventId, Field, Level};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
+    use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+    use tairix_log::{log, Event, EventId, Field, Level};
 
     /// The single-hart slice runs logical CPU 0 on the boot hart.
     const BOOT_CPU: CpuId = 0;
@@ -109,7 +109,7 @@ mod kernel {
     const IDENTITY_GIB: usize = 4;
 
     /// Width of the kthread-stack guard region: one 4 KiB page, matching
-    /// `rustos_kernel_core::BoxStack` and the production `ArenaStack` (the
+    /// `tairix_kernel_core::BoxStack` and the production `ArenaStack` (the
     /// guard sits immediately *below* the usable stack).
     const STACK_GUARD_BYTES: u64 = PAGE_SIZE as u64;
 
@@ -266,7 +266,7 @@ mod kernel {
     /// Forward to the shared riscv64 panic bridge (parks the hart; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_stack_overrun_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_stack_overrun_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -284,7 +284,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_riscv64_main`).
+    /// calls (via `tairix_arch_riscv64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         note(
@@ -407,7 +407,7 @@ mod kernel {
                     "riscv64 stack-overrun test: kthread overran the guard page without faulting",
                 fields: &[Field {
                     key: "drained",
-                    value: rustos_log::FieldValue::Str(if sched.live_task_count() == 0 {
+                    value: tairix_log::FieldValue::Str(if sched.live_task_count() == 0 {
                         "yes"
                     } else {
                         "timeout"
@@ -428,7 +428,7 @@ mod kernel {
                 message: "riscv64 stack-overrun test: setup failed",
                 fields: &[Field {
                     key: "stage",
-                    value: rustos_log::FieldValue::Str(what),
+                    value: tairix_log::FieldValue::Str(what),
                 }],
             },
         );

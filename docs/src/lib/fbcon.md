@@ -1,6 +1,6 @@
-# `rustos-fbcon` — shared framebuffer text-console engine
+# `tairix-fbcon` — shared framebuffer text-console engine
 
-`rustos-fbcon` (`lib/fbcon`) is the one architecture-neutral framebuffer text
+`tairix-fbcon` (`lib/fbcon`) is the one architecture-neutral framebuffer text
 console in the tree. Every architecture port renders its display console
 through this crate, so the ANSI/VT/xterm-256color terminal emulation is defined
 exactly once instead of being re-derived per target.
@@ -8,16 +8,16 @@ exactly once instead of being re-derived per target.
 ## What it does
 
 It turns a byte stream into on-screen text by feeding it to the single shared
-`rustos_vt::Parser`, applying each parsed `rustos_vt::Op` to a retained cell
+`tairix_vt::Parser`, applying each parsed `tairix_vt::Op` to a retained cell
 grid, and repainting the dirtied cells once per write onto a borrowed 32-bit
 scan-out surface (`&mut [u32]`), rendering glyphs with the
-shared `rustos_font` Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
+shared `tairix_font` Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
 Hebrew coverage atlas: 15×28 cells with 16-level anti-aliased coverage,
 Japanese hiragana/katakana/kanji, all precomposed Hangul syllables, and
 Hebrew/Yiddish alongside the primary face's Latin/Greek/Cyrillic repertoire,
 with a U+FFFD fallback for anything the merged family does not map. Double-width
 glyphs occupy a lead plus a continuation cell (the same
-`rustos_vt::char_width` layout the curses window writer produces), and their
+`tairix_vt::char_width` layout the curses window writer produces), and their
 bitmap paints across both cells as one repaint unit. It is a full terminal:
 
 - SGR colour: the 16 base colours, the 256-colour palette (colour cube + grey
@@ -36,7 +36,7 @@ bitmap paints across both cells as one repaint unit. It is a full terminal:
 ## Design
 
 - **Retained cell grid, one repaint per write.** The engine keeps the visible
-  screen as a grid of `rustos_vt::Cell` (one glyph + its rendition per
+  screen as a grid of `tairix_vt::Cell` (one glyph + its rendition per
   position). Every operation mutates only the active grid, and the cell rect a
   write dirtied is repainted from the grid **once** at the end of the write.
   Deferring the pixels to that single repaint bounds a write's render cost: a
@@ -54,7 +54,7 @@ bitmap paints across both cells as one repaint unit. It is a full terminal:
   allocates: the two grids are passed in as `&mut [Cell]` buffers. A
   freestanding boot console with no global allocator supplies a `static`; an
   allocator-having caller leaks a heap buffer sized to the discovered geometry
-  (`Geometry::cell_count`). It depends on `rustos_vt` and `rustos_font` with
+  (`Geometry::cell_count`). It depends on `tairix_vt` and `tairix_font` with
   `default-features = false`.
 - **Host-testable.** Every operation is pure CPU pixel arithmetic over a
   borrowed slice, so the whole engine is unit-tested on the host.
@@ -75,7 +75,7 @@ bitmap paints across both cells as one repaint unit. It is a full terminal:
   cell — lifted before each batch of operations and repainted after, honouring
   DECTCEM show/hide (`CSI ? 25 h` / `l`) — so a shell prompt or editor shows a
   live insertion point on the framebuffer console.
-- `Cell` — the character cell (`rustos_vt::Cell`), re-exported so a caller can
+- `Cell` — the character cell (`tairix_vt::Cell`), re-exported so a caller can
   size and blank the grid buffers.
 - `DirtyBand` / `merge_bands` — the `(start_y, end_y)` band a render touched, so
   a freestanding consumer can clean exactly those scanlines to coherency.

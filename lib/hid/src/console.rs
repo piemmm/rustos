@@ -5,8 +5,8 @@
 //! is the second half of the producer: it tracks the held modifiers and the
 //! caps-/num-lock state and resolves each printable or named key edge into the
 //! [`Key`] a US keyboard layout produces, then emits the *device-resolved key
-//! edge* — a [`rustos_abi::input::KeyInput`] record built through the shared
-//! [`rustos_keymap::key_input`] map — leaving the encoding and routing to the
+//! edge* — a [`tairix_abi::input::KeyInput`] record built through the shared
+//! [`tairix_keymap::key_input`] map — leaving the encoding and routing to the
 //! kernel input-focus arbiter (`plans/PI.md` P11). A keyboard
 //! driver injects each record into the kernel through the `key_inject` syscall,
 //! which decides by who holds input focus whether to encode the press to a text
@@ -19,11 +19,11 @@
 //! Everything here is allocation-free and fail-closed: an
 //! unknown usage or a non-key event produces no record rather than guessing.
 
-use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
-use rustos_abi::input::KeyInput;
-use rustos_abi::DriverError;
-use rustos_input::{Key, Modifiers, NamedKey};
-use rustos_keymap::key_input;
+use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use tairix_abi::input::KeyInput;
+use tairix_abi::DriverError;
+use tairix_input::{Key, Modifiers, NamedKey};
+use tairix_keymap::key_input;
 
 /// HID usage of the Caps Lock key (HID Usage Tables, page `0x07`).
 const USAGE_CAPS_LOCK: u16 = 0x39;

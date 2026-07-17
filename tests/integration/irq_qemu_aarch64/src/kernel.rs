@@ -5,13 +5,13 @@
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use rustos_abi::IrqHandle;
-use rustos_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
-use rustos_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-use rustos_kalloc::FreeListAllocator;
-use rustos_kernel_irq::{IrqController, IrqTable, MaskError, WaitStep};
-use rustos_kernel_sec::TaskId;
-use rustos_log::{log, Event, EventId, Level};
+use tairix_abi::IrqHandle;
+use tairix_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
+use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+use tairix_kalloc::FreeListAllocator;
+use tairix_kernel_irq::{IrqController, IrqTable, MaskError, WaitStep};
+use tairix_kernel_sec::TaskId;
+use tairix_log::{log, Event, EventId, Level};
 
 /// Bump heap backing the `IrqTable` allocations (one `bind`, two
 /// per-line flag vectors). A few hundred bytes suffice; 256 KiB is
@@ -85,7 +85,7 @@ static TABLE_PTR: AtomicUsize = AtomicUsize::new(0);
 /// the charter forbids the architecture crate from depending on `kernel/irq`,
 /// so this bridge — the aarch64 analogue of x86_64's `IoApicController`
 /// `IrqController` impl — lives in the test crate (which may depend on
-/// both). `mask` delegates to the HAL [`rustos_arch_api::IrqController`]
+/// both). `mask` delegates to the HAL [`tairix_arch_api::IrqController`]
 /// `mask` (which clears the distributor enable bit and emits the
 /// `SeqCst` mask-before-wake fence); the only error the GIC controller
 /// produces is "INTID out of range", mapped to [`MaskError::OutOfRange`].
@@ -102,7 +102,7 @@ static BRIDGE: GicBridge = GicBridge {
 
 impl IrqController for GicBridge {
     fn mask(&self, line: u32) -> Result<(), MaskError> {
-        rustos_arch_api::IrqController::mask(&self.ctrl, line).map_err(|_| MaskError::OutOfRange)
+        tairix_arch_api::IrqController::mask(&self.ctrl, line).map_err(|_| MaskError::OutOfRange)
     }
 }
 
@@ -191,7 +191,7 @@ extern "C" fn rtc_dispatch(intid: u32) {
 }
 
 /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-/// calls (via `rustos_arch_aarch64_main`).
+/// calls (via `tairix_arch_aarch64_main`).
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if TEST_DRIVEN

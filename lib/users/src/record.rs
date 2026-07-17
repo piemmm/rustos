@@ -9,8 +9,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::CapabilityId;
-use rustos_caps::CapabilitySet;
+use tairix_abi::CapabilityId;
+use tairix_caps::CapabilitySet;
 
 use crate::password::{PasswordRecord, Salt, StoredPassword};
 use crate::ParseError;
@@ -488,8 +488,8 @@ mod tests {
 
     use alloc::string::String;
     use alloc::vec::Vec;
-    use rustos_abi::CapabilityId;
-    use rustos_caps::CapabilitySet;
+    use tairix_abi::CapabilityId;
+    use tairix_caps::CapabilitySet;
 
     fn caps(list: &[CapabilityId]) -> CapabilitySet {
         let mut set = CapabilitySet::empty();

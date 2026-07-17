@@ -9,7 +9,7 @@
 //! cfg-check` stays clean.
 //!
 //! The consuming vertical (`spawn_el0_timeshare_qemu_aarch64`) sets
-//! `RUSTOS_EL0_YIELDS` when it compiles this program, so a changed yield count
+//! `TAIRIX_EL0_YIELDS` when it compiles this program, so a changed yield count
 //! must force a recompile; declare that dependency here.
 
 fn main() {
@@ -18,6 +18,6 @@ fn main() {
     if target_os == "none" {
         println!("cargo:rustc-cfg=freestanding");
     }
-    println!("cargo:rerun-if-env-changed=RUSTOS_EL0_YIELDS");
+    println!("cargo:rerun-if-env-changed=TAIRIX_EL0_YIELDS");
     println!("cargo:rerun-if-changed=build.rs");
 }

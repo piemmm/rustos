@@ -143,6 +143,6 @@ fn claim_and_complete_round_trip_the_claim_register() {
 #[test]
 fn plic_controller_passes_arch_hal_irq_conformance() {
     let c = controller(31);
-    rustos_arch_api::irq::conformance::run_controller(&c, 8, 32);
-    rustos_arch_api::irq::conformance::run_entry(&c);
+    tairix_arch_api::irq::conformance::run_controller(&c, 8, 32);
+    tairix_arch_api::irq::conformance::run_entry(&c);
 }

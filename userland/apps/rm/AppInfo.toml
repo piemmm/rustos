@@ -4,7 +4,7 @@
 # bundle on the read-only /System/Apps store. The capability list is the
 # bundle's request: the launched process receives this set intersected
 # with the launching user's grants, never more.
-id = "os.rustos.rm"
+id = "os.tairix.rm"
 name = "rm"
 version = "0.1.0"
 kind = "command"

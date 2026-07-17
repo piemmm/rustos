@@ -11,8 +11,8 @@
 //! anti-aliased edges and translucent text both come out right with no
 //! colour arithmetic duplicated here.
 
-use rustos_raster::{Color, Pixel, Surface};
-use rustos_vt::{char_width, truncate_to_width as truncate_to_columns};
+use tairix_raster::{Color, Pixel, Surface};
+use tairix_vt::{char_width, truncate_to_width as truncate_to_columns};
 
 use crate::atlas;
 use crate::glyph::{lookup_or_fallback, Glyph};

@@ -1,6 +1,6 @@
 //! aarch64 timer programming ("timer programming").
 //!
-//! Implements the Arch HAL [`Timer`](rustos_arch_api::Timer) surface for
+//! Implements the Arch HAL [`Timer`](tairix_arch_api::Timer) surface for
 //! aarch64 over the EL1 physical generic timer wired in
 //! [`crate::preempt`]. The HAL handle is the architecture-neutral half
 //! of the timer path: it installs the one scheduler-tick callback and
@@ -9,14 +9,14 @@
 //! in [`crate::preempt`] — it is per-CPU system-register work with no
 //! architecture-neutral shape — and the IRQ exception
 //! path dispatches each timer interrupt through
-//! [`Timer::dispatch_tick`](rustos_arch_api::Timer::dispatch_tick),
+//! [`Timer::dispatch_tick`](tairix_arch_api::Timer::dispatch_tick),
 //! so the callback invoke lives in exactly one place.
 //!
 //! On the bare-metal target the callback lives in [`crate::preempt`]'s
 //! lock-free static (the IRQ path's source of truth), so the handle
 //! forwards to it. On the host build there is no IRQ path, so the handle
 //! backs the callback with an in-handle cell solely for the
-//! [`conformance`](rustos_arch_api::timer::conformance) vertical; it is
+//! [`conformance`](tairix_arch_api::timer::conformance) vertical; it is
 //! never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
@@ -25,7 +25,7 @@ use core::sync::atomic::AtomicUsize;
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 use core::sync::atomic::Ordering;
 
-use rustos_arch_api::{CpuId, TickFn, Timer};
+use tairix_arch_api::{CpuId, TickFn, Timer};
 
 /// aarch64 implementation of the Arch HAL timer-programming surface.
 ///
@@ -117,7 +117,7 @@ impl Timer for TimerHal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::timer::conformance;
+    use tairix_arch_api::timer::conformance;
 
     #[test]
     fn passes_timer_conformance() {

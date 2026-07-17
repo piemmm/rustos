@@ -4,10 +4,10 @@
 //! The viewer never parses a container or instruction stream in its own
 //! address space: every container summary, manifest summary, and
 //! disassembly window is produced by the sandboxed decode service
-//! (`rustos_sandbox::decode`) through the [`Decode`] seam, and every reply
+//! (`tairix_sandbox::decode`) through the [`Decode`] seam, and every reply
 //! is already validated fail-closed by the caller-side helpers there. The
 //! only in-process inspection is the magic-prefix recognition
-//! (`rustos_binfmt::detect`, a bounded byte compare) that routes a file to
+//! (`tairix_binfmt::detect`, a bounded byte compare) that routes a file to
 //! this viewer at all.
 //!
 //! Instructions are decoded per screenful from the viewed region's window
@@ -23,13 +23,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
-use rustos_abi::{CapabilityId, Errno};
-use rustos_log::Sink;
-use rustos_sandbox::decode::{
+use tairix_abi::{CapabilityId, Errno};
+use tairix_log::Sink;
+use tairix_sandbox::decode::{
     self, ContainerFormat, ContainerSummary, DecodeFailure, DisasmWindow, InsnRecord, Isa,
     ManifestInfo, Region, RegionKind, SymbolRecord, MAX_WINDOW_INSNS,
 };
-use rustos_sandbox::{Launcher, ParserSandbox, SandboxError};
+use tairix_sandbox::{Launcher, ParserSandbox, SandboxError};
 
 use crate::fs::Fs;
 use crate::view_text::JobOutcome;
@@ -1255,9 +1255,9 @@ pub fn isa_name(isa: Isa) -> &'static str {
 }
 
 /// Whether a file head is a standalone signed manifest (`RXM1`): the
-/// same shallow magic recognition `rustos_binfmt::detect` performs for
+/// same shallow magic recognition `tairix_binfmt::detect` performs for
 /// the containers — routing only, never a parse.
 #[must_use]
 pub fn is_manifest_head(head: &[u8]) -> bool {
-    head.len() >= 4 && head[0..4] == rustos_abi::MANIFEST_MAGIC.to_le_bytes()
+    head.len() >= 4 && head[0..4] == tairix_abi::MANIFEST_MAGIC.to_le_bytes()
 }

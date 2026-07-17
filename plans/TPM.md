@@ -1,7 +1,7 @@
 # TPM.md — Trusted Platform Module support (all versions) + a no-TPM boot fallback
 
 This is a staged build plan for adding **Trusted Platform Module** support to
-RustOS across **every known TPM version and transport**, plus a **fail-closed
+TAIRiX across **every known TPM version and transport**, plus a **fail-closed
 fallback for machines without a TPM** (an at-boot "enter your volume
 key/passphrase" prompt). It is **binding under `AGENTS.md`**; read `AGENTS.md`
 and `PLAN.md` first — every rule in both applies here without exception.
@@ -82,7 +82,7 @@ work is shared and done once.
   source. There is no `drivers/security/`, no `tpm` driver class in
   `lib/abi/src/driver/` (the classes are block/bus/display/dma/filesystem/
   input/mmio/msix/net/port_io/virtio*), and no `CAP_TPM_*`.
-- **No measured boot, no PCRs, no secure-boot chain.** RustOS does per-boot
+- **No measured boot, no PCRs, no secure-boot chain.** TAIRiX does per-boot
   KASLR (§19.2) but does not measure or verify its own boot stages into a
   hardware root of trust.
 - **The reusable seams that *do* exist:**

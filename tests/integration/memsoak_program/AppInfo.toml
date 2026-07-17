@@ -10,7 +10,7 @@
 # CAP_SYSINFO_KERNEL because the KERNEL_MEMORY_STATS query it samples
 # declares that capability (enforced by sysinfod against this process's
 # kernel-attested origin).
-id = "os.rustos.test.memsoak"
+id = "os.tairix.test.memsoak"
 name = "memsoak"
 version = "0.1.0"
 kind = "command"

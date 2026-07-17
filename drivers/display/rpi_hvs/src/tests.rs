@@ -11,9 +11,9 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use super::*;
-use rustos_abi::driver::display::{AccelLayer, DisplayFormat};
-use rustos_abi::driver::DriverKind;
-use rustos_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
+use tairix_abi::driver::display::{AccelLayer, DisplayFormat};
+use tairix_abi::driver::DriverKind;
+use tairix_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
 
 const SCANOUT_PHYS: u64 = 0x1000_0000;
 const DLIST_PHYS: u64 = 0x1100_0000;

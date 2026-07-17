@@ -18,7 +18,7 @@ operando, o `-s`) viene tolto anche un `suffix` finale, a meno che non
 costituisca l'intero nome rimasto.
 
 Una radice non viene mai intaccata: `basename /` è `/`, e —
-l'equivalente nella foresta di archiviazione RustOS — `basename Home:/`
+l'equivalente nella foresta di archiviazione TAIRiX — `basename Home:/`
 è `Home:/`. Una radice di alias (`Home:/`, `System:/`, …) svolge
 esattamente il ruolo che `/` svolge sui sistemi POSIX.
 

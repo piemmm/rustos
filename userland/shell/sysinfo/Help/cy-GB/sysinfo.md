@@ -9,7 +9,7 @@ sysinfo — ymholi gwybodaeth y system
 ## DESCRIPTION
 
 Mae'n cyhoeddi un ymholiad teipiedig i API Gwybodaeth y System ac yn
-rendro'r ateb. Nid oes `/proc` na `/sys` gan RustOS: y gorchymyn hwn
+rendro'r ateb. Nid oes `/proc` na `/sys` gan TAIRiX: y gorchymyn hwn
 yw wyneb terfynell yr un API fersiynedig, a wirir gan alluoedd, y mae
 pob rhaglen yn ei ddefnyddio, ac nid oes llwybr yn osgoi gwiriad y
 gallu.

@@ -3,7 +3,7 @@
 //!
 //! ## What this test asserts
 //!
-//! The x86_64 sibling (`rustos-test-abi-sys-syscall-qemu`) can drive the
+//! The x86_64 sibling (`tairix-test-abi-sys-syscall-qemu`) can drive the
 //! `abi-sys` stub straight from ring 0 because the `syscall` instruction
 //! traps into the kernel entry path identically from any privilege level.
 //! aarch64 has no such shortcut: the kernel routes only an `svc` *from
@@ -15,12 +15,12 @@
 //! ## How it asserts it
 //!
 //! Using the Stage-3 stage-1 paging primitives
-//! (`rustos_arch_aarch64::paging`) it:
+//! (`tairix_arch_aarch64::paging`) it:
 //!
 //! 1. Builds one `AddressSpace` that identity-maps the low 2 GiB (device
 //!    MMIO + RAM) so the kernel's own code/stack and the EL1 vector table
 //!    stay reachable.
-//! 2. Aliases the page(s) holding the `ros_sys_cap_query` stub at a high
+//! 2. Aliases the page(s) holding the `tairix_sys_cap_query` stub at a high
 //!    user virtual address (`USER_CODE_VA`) with EL0-executable
 //!    attributes (`el0_code_leaf_attrs`: EL0 read+execute, privileged
 //!    execute-never), and maps a small EL0 stack at `USER_STACK_VA`
@@ -45,7 +45,7 @@
 //! argument, or the `svc` resuming in EL0 at all is a distinct closed
 //! failure.
 //!
-//! ## How it differs from `rustos-test-syscall-dispatch-qemu`
+//! ## How it differs from `tairix-test-syscall-dispatch-qemu`
 //!
 //! That test drives `Dispatcher::dispatch` directly and never executes a
 //! trap instruction. This test issues the `abi-sys` stub from EL0, so the
@@ -58,7 +58,7 @@
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
 //! (no hacks; — fail closed), mirroring
-//! `rustos-test-abi-sys-syscall-qemu`.
+//! `tairix-test-abi-sys-syscall-qemu`.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -67,10 +67,10 @@
 // — test affordances must never reach a release binary.
 // `test-hooks` is on by default for this crate; a release build that
 // re-enables it is a configuration error, so we fail the build outright,
-// exactly as `rustos-test-abi-sys-syscall-qemu` does.
+// exactly as `tairix-test-abi-sys-syscall-qemu` does.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-abi-sys-syscall-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-abi-sys-syscall-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
@@ -80,18 +80,18 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
-    use rustos_arch_aarch64::paging::{
+    use tairix_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
+    use tairix_arch_aarch64::paging::{
         el0_code_leaf_attrs, el0_data_leaf_attrs, AddressSpace, PageTablePool, PAGE_SIZE,
     };
-    use rustos_arch_aarch64::{
+    use tairix_arch_aarch64::{
         exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, userentry::UserMode,
         SERIAL_SINK,
     };
-    use rustos_arch_api::{EnterUser, UserEntry};
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_arch_api::{EnterUser, UserEntry};
+    use tairix_log::{log, Event, EventId, Level};
 
-    /// Capability id `kernel_main` passes to `ros_sys_cap_query` and
+    /// Capability id `kernel_main` passes to `tairix_sys_cap_query` and
     /// [`record_and_exit`] expects to see marshalled into argument 0. Any
     /// well-known [`CapabilityId`] works — the test asserts the stub's
     /// *marshalling*, not the kernel's grant decision (the dispatch
@@ -157,7 +157,7 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_abi_sys_syscall_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_abi_sys_syscall_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -165,7 +165,7 @@ mod kernel {
     ///
     /// Reached from the EL1 vector trampoline after the EL0 stub executed
     /// `svc`. It asserts the marshalled `(number, args)` match what
-    /// `ros_sys_cap_query(EXPECTED_CAP)` should have placed in the
+    /// `tairix_sys_cap_query(EXPECTED_CAP)` should have placed in the
     /// registers, then reports PASS. It never returns to the caller (it
     /// diverges through `qemu_exit`): returning would `eret` back to EL0.
     ///
@@ -206,7 +206,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         if TEST_DRIVEN
@@ -229,7 +229,7 @@ mod kernel {
             .unwrap_or_else(|| fail_setup("identity map"));
 
         // ---- Alias the stub's page(s) into EL0 (read + execute). ----
-        let func = rustos_abi_sys::sys_cap_query as *const () as u64;
+        let func = tairix_abi_sys::sys_cap_query as *const () as u64;
         let func_page = func & !(page - 1);
         // Map the stub's page plus the following one: the stub is far
         // smaller than a page, but mapping two pages is cheap insurance
@@ -272,14 +272,14 @@ mod kernel {
         note(
             TEST_START,
             Level::Info,
-            "dropping to EL0 to issue ros_sys_cap_query",
+            "dropping to EL0 to issue tairix_sys_cap_query",
         );
 
         // ---- Drop to EL0 and issue the stub via the Arch HAL. ----
         // SAFETY: `user_entry` aliases the EL0-executable stub page and
         // `user_sp` tops the EL0 stack, both mapped above; the dispatch
         // callback and vector table are installed. The `eret` sequence is
-        // the one HAL definition (`rustos_arch_aarch64::userentry`).
+        // the one HAL definition (`tairix_arch_aarch64::userentry`).
         unsafe {
             UserMode::new().enter_user(UserEntry::new(
                 user_entry,
@@ -319,7 +319,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
 #[cfg(all(itest_aarch64, not(feature = "test-hooks")))]
 #[panic_handler]
-fn rustos_abi_sys_syscall_qemu_aarch64_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
+fn tairix_abi_sys_syscall_qemu_aarch64_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
         // SAFETY: same as above.
         unsafe {

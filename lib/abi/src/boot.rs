@@ -217,7 +217,7 @@ impl core::fmt::Debug for CpuName {
     }
 }
 
-/// The CPU architecture a RustOS kernel was built for.
+/// The CPU architecture a TAIRiX kernel was built for.
 ///
 /// A closed set: exactly the Tier-1 targets. The discriminants and the
 /// canonical [`names`](Self::name) are part of the `abi-v1` contract; a wire

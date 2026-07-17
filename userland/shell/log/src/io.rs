@@ -9,8 +9,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_log::Stream;
+use tairix_abi::Errno;
+use tairix_log::Stream;
 
 /// Reads the persisted segments of a stream, one at a time.
 ///

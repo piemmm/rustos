@@ -1,10 +1,10 @@
-# rustos-keymap
+# tairix-keymap
 
-Shared terminal key map for RustOS console-input producers (`lib/keymap`,
+Shared terminal key map for TAIRiX console-input producers (`lib/keymap`,
 `AGENTS.md` §6 / §2.2 — `plans/PI.md` P11).
 
 A directly attached keyboard driver (`drivers/input/usb_kbd`,
-`drivers/input/ps2`) decodes its device's scancodes into the `rustos_input::Key`
+`drivers/input/ps2`) decodes its device's scancodes into the `tairix_input::Key`
 vocabulary, then must turn each key press into the byte sequence a terminal
 sends down its input stream — a printable character as itself, `Ctrl-C` as
 `0x03`, the up arrow as `ESC [ A`. That translation is the **terminal key
@@ -30,8 +30,8 @@ console's read half.
   encoding produces nothing rather than guessing. It is an encoder of
   already-typed input, not a parser of untrusted bytes.
 - The escape sequences are **not** redefined here: the named-key `SS3` / `CSI …
-  ~` forms and the control bytes come from `lib/vt` (`rustos_vt::key`,
-  `rustos_vt::control`), the one canonical ANSI / VT / xterm definition (§2.2).
+  ~` forms and the control bytes come from `lib/vt` (`tairix_vt::key`,
+  `tairix_vt::control`), the one canonical ANSI / VT / xterm definition (§2.2).
   Only `lib/vt`'s `const` tables are touched, so this crate stays
   allocation-free.
 

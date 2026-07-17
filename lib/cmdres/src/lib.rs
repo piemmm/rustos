@@ -5,7 +5,7 @@
 //! entry point is its `Run` binary. A bare command word therefore resolves
 //! to bundle `Run` paths, searched in a fixed, deterministic order:
 //!
-//! 1. **The system app store** ([`rustos_abi::SYSTEM_APP_STORE`]) — the
+//! 1. **The system app store** ([`tairix_abi::SYSTEM_APP_STORE`]) — the
 //!    OS-provided, read-only, system-signed command apps. Searching it first
 //!    is a security property: a user's `PATH` can never shadow a system
 //!    command with an attacker-supplied bundle of the same name.
@@ -37,7 +37,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, USER_APP_STORE};
+use tairix_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, USER_APP_STORE};
 
 /// Compute the candidate program paths for one command word, in the order
 /// they are to be attempted. `path_var` is the value of the `PATH`
@@ -158,7 +158,7 @@ fn bundle_roots(word: &str, path_var: Option<&str>) -> Vec<String> {
 
 /// Split a `PATH` value into its entries.
 ///
-/// Entries are `:`-separated, but a RustOS alias path itself contains a `:`
+/// Entries are `:`-separated, but a TAIRiX alias path itself contains a `:`
 /// (`Home:/tools`, `plans/DRIVES.md`), so the split must tell the two
 /// apart. The rule is structural and deterministic: a `:` immediately
 /// followed by `/` whose preceding text (since the previous separator) is a

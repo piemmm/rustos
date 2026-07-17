@@ -2,7 +2,7 @@
 //!
 //! Every full-screen tool's `Run` binary needs the same channel: rendered
 //! bytes go to standard output (fd 1) and input bytes come from standard
-//! input (fd 0), both through the userland runtime `rustos-rt`. This module
+//! input (fd 0), both through the userland runtime `tairix-rt`. This module
 //! is that channel's one definition — the per-app copies it replaced were
 //! the duplication the charter forbids. A program names only its inherited
 //! descriptors, never a console device, so the same binary drives a serial
@@ -23,7 +23,7 @@ const INPUT_CHUNK: usize = 64;
 
 /// The [`Tty`] over the inherited standard streams (fd 0/1).
 ///
-/// * [`Tty::write`] sends bytes through the shared `rustos_rt::io`
+/// * [`Tty::write`] sends bytes through the shared `tairix_rt::io`
 ///   short-write loop.
 /// * [`Tty::read_blocking`] parks the task in the kernel until input
 ///   arrives; a closed stream is reported as an I/O error so the session
@@ -38,11 +38,11 @@ pub struct StreamTty;
 
 impl Tty for StreamTty {
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        use rustos_rt::io::Write as _;
+        use tairix_rt::io::Write as _;
         // `write_all` loops over short writes and fails closed (never
         // spins) if the backing stops accepting bytes, which the seam
         // reports as an I/O error.
-        rustos_rt::io::Stdout
+        tairix_rt::io::Stdout
             .write_all(bytes)
             .map_err(|_| CursesError::Io)
     }
@@ -53,12 +53,12 @@ impl Tty for StreamTty {
 
     fn read_blocking(&mut self) -> Result<Vec<u8>> {
         let mut buf = [0u8; INPUT_CHUNK];
-        // `rustos_rt::stdin` parks the task in the kernel until at least
+        // `tairix_rt::stdin` parks the task in the kernel until at least
         // one byte arrives, then returns the count read. A zero-length
         // return means the stream ended: the session's input is gone,
         // reported as an error so the tool ends loudly instead of spinning
         // on a dead channel.
-        let read = rustos_rt::stdin(&mut buf);
+        let read = tairix_rt::stdin(&mut buf);
         if read == 0 {
             return Err(CursesError::Io);
         }
@@ -72,7 +72,7 @@ impl Tty for StreamTty {
         // caller's wait. The backing parks the task until input arrives or
         // the bound elapses.
         let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX).max(1);
-        match rustos_rt::stdin_timeout(&mut buf, timeout_ns) {
+        match tairix_rt::stdin_timeout(&mut buf, timeout_ns) {
             // A successful zero-length read is the closed stream, reported
             // loudly (below an elapsed bound is Ok-with-no-bytes, so a
             // closed channel must not masquerade as a tick).
@@ -81,8 +81,8 @@ impl Tty for StreamTty {
             Err(err) => {
                 let timed_out = i32::try_from(-err)
                     .ok()
-                    .and_then(rustos_abi::Errno::from_i32)
-                    .is_some_and(|errno| errno == rustos_abi::Errno::TimedOut);
+                    .and_then(tairix_abi::Errno::from_i32)
+                    .is_some_and(|errno| errno == tairix_abi::Errno::TimedOut);
                 if timed_out {
                     // An elapsed bound is not an error: it is the caller's
                     // tick, reported as "no bytes yet".

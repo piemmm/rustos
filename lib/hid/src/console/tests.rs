@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use super::*;
 use crate::keyboard::MODIFIER_USAGE_BASE;
 use crate::{BootKeyboard, ReportSource};
-use rustos_abi::input::{KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+use tairix_abi::input::{KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
 
 /// HID usage of the `A` key (page `0x07`); letters run `0x04`..`0x1D`.
 const USAGE_A: u16 = 0x04;

@@ -22,7 +22,7 @@ extern crate std;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_arch_api::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
+use tairix_arch_api::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
 
 use crate::sched::{CpuId, SchedulerArch};
 
@@ -77,7 +77,7 @@ impl ContextSwitch for TestContextSwitch {
 ///
 /// Tests assert on this exact string to confirm that the panic handler
 /// or [`crate::kernel_main`] reached `halt`.
-pub const HALT_SENTINEL: &str = "rustos-kernel-core: TestArch::halt called";
+pub const HALT_SENTINEL: &str = "tairix-kernel-core: TestArch::halt called";
 
 /// In-memory `KernelArch` implementation used by host-side tests.
 ///
@@ -302,14 +302,14 @@ impl KernelArch for TestArch {
         self.monotonic_ns.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn arch_id(&self) -> Option<rustos_abi::Arch> {
+    fn arch_id(&self) -> Option<tairix_abi::Arch> {
         // The host test arch is not a shippable Tier-1 target: it states
         // no identity, so the boot facts stay uninstalled (fail closed)
         // rather than impersonating a real architecture.
         None
     }
 
-    fn cpu_name(&self) -> Option<rustos_abi::CpuName> {
+    fn cpu_name(&self) -> Option<tairix_abi::CpuName> {
         // The host test arch runs on whatever machine hosts the tests: it
         // discovers no CPU model, stating an honest `None` rather than
         // fabricating a name.

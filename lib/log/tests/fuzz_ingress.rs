@@ -1,5 +1,5 @@
 //! Deterministic fuzz-style integration test for the record-ingress admission
-//! path ([`rustos_log::Ingress`]).
+//! path ([`tairix_log::Ingress`]).
 //!
 //! Ingress is where an untrusted caller's *requests* (a stream, a source, a
 //! level) meet an attested [`Origin`] and become an authoritative record.
@@ -13,13 +13,13 @@
 //! whole ingress→on-disk path is exercised, not just the decision.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
-use rustos_abi::{
+use tairix_abi::{
     CapabilitySummary, Origin, ProcId, Time64, TrustDomain, WallClockReading, WallTimeState,
     ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
 };
-use rustos_log::{
+use tairix_log::{
     reserved_source_prefix, CallerContent, DictionaryBuilder, DictionaryView, Ingress, Level,
     Stream, STREAM_COUNT,
 };
@@ -161,7 +161,7 @@ fn exercise(word0: u64, word1: u64, ingress: &mut Ingress) {
         .encode(&mut buf, &mut DictionaryBuilder::new())
         .expect("admitted record always encodes");
     let mut view = DictionaryView::new();
-    let decoded = rustos_log::decode_record(&buf[..n], &mut view).expect("round-trips");
+    let decoded = tairix_log::decode_record(&buf[..n], &mut view).expect("round-trips");
     assert_eq!(decoded.effective_level(), adm.effective_level());
     assert_eq!(decoded.source_name(), adm.source().as_str());
     assert_eq!(decoded.cpu_seq(), word1);
@@ -169,15 +169,15 @@ fn exercise(word0: u64, word1: u64, ingress: &mut Ingress) {
 
 #[test]
 fn ingress_admission_never_panics_and_holds_invariants() {
-    let mut rng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "ingress_admission_never_panics_and_holds_invariants",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
     // One long-lived ingress so the per-stream append sequences advance across
     // iterations; a fresh one occasionally, to also exercise genesis.
     let mut ingress = Ingress::new();
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for i in 0..SMOKE_ITERATIONS {
             if i % 4096 == 0 {
@@ -191,7 +191,7 @@ fn ingress_admission_never_panics_and_holds_invariants() {
             }
             exercise(rng.next_u64(), rng.next_u64(), &mut ingress);
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

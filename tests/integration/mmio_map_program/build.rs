@@ -19,8 +19,8 @@ fn main() {
     if target_os == "none" {
         println!("cargo:rustc-cfg=freestanding");
     }
-    println!("cargo:rerun-if-env-changed=RUSTOS_MMIO_GRANT_HANDLE");
-    println!("cargo:rerun-if-env-changed=RUSTOS_MMIO_MAGIC");
-    println!("cargo:rerun-if-env-changed=RUSTOS_MMIO_REG_OFFSET");
+    println!("cargo:rerun-if-env-changed=TAIRIX_MMIO_GRANT_HANDLE");
+    println!("cargo:rerun-if-env-changed=TAIRIX_MMIO_MAGIC");
+    println!("cargo:rerun-if-env-changed=TAIRIX_MMIO_REG_OFFSET");
     println!("cargo:rerun-if-changed=build.rs");
 }

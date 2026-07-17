@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-syscall-resume-program"
+name = "tairix-test-syscall-resume-program"
 description = "Pure-Rust EL0 regression fixture: issue one ordinary clock_get syscall, verify its result survives a kernel-requested reschedule, and return a distinct exit status."
 version.workspace = true
 edition.workspace = true
@@ -12,8 +12,8 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-syscall-resume-program"
+name = "tairix-test-syscall-resume-program"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

@@ -1,8 +1,8 @@
-//! RustOS Raspberry Pi 4 (BCM2711) EMMC2 SD-host block driver.
+//! TAIRiX Raspberry Pi 4 (BCM2711) EMMC2 SD-host block driver.
 //!
 //! The Pi 4's EMMC2 controller is an Arasan / SDHCI-5.1 SD host. This
 //! driver brings an SD card up over the standard SDHCI register block and
-//! exposes it through [`rustos_abi::driver::block::Block`].
+//! exposes it through [`tairix_abi::driver::block::Block`].
 //!
 //! # Transfer paths
 //!
@@ -51,13 +51,13 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::dma::DmaSlab;
-use rustos_abi::driver::mmio::WindowError;
-use rustos_abi::{
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::dma::DmaSlab;
+use tairix_abi::driver::mmio::WindowError;
+use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
 };
-use rustos_dma_barrier::{dma_rmb, dma_wmb};
+use tairix_dma_barrier::{dma_rmb, dma_wmb};
 
 pub mod adma;
 pub mod command;

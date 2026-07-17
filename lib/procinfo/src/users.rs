@@ -8,8 +8,8 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::sysinfo::{SysinfoQueryId, UserDirectoryRecord, UserDirectoryRequest};
-use rustos_abi::Errno;
+use tairix_abi::sysinfo::{SysinfoQueryId, UserDirectoryRecord, UserDirectoryRequest};
+use tairix_abi::Errno;
 
 use crate::list::{walk_pages, ListError};
 use crate::request::CallError;
@@ -92,10 +92,10 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::sysinfo::{
+    use tairix_abi::sysinfo::{
         SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
     };
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory `sysinfod` stand-in answering directory queries from a
     /// fixed record set, decoding the request exactly as the real service.

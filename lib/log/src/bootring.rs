@@ -28,7 +28,7 @@
 //! CPU) and is drained once, at import, after that CPU has stopped writing to
 //! it. Callers that share one across those phases provide the ordering.
 
-use rustos_abi::{Duration64, Errno};
+use tairix_abi::{Duration64, Errno};
 
 /// Bytes of per-frame bookkeeping the ring stores ahead of each record body:
 /// a little-endian `u32` body length, a `u64` `cpu_seq`, and a

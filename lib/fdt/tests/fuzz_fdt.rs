@@ -2,32 +2,32 @@
 //! (a parser of boot-supplied, untrusted input).
 //!
 //! A flattened device tree is the hardware description firmware or a
-//! bootloader hands the kernel ([`rustos_fdt::Fdt::new`]); the aarch64 and
+//! bootloader hands the kernel ([`tairix_fdt::Fdt::new`]); the aarch64 and
 //! riscv64 ports build their platform discovery on it. Those bytes are
-//! outside RustOS's trust boundary: a malformed header, a structure-block
+//! outside TAIRiX's trust boundary: a malformed header, a structure-block
 //! offset that escapes the blob, an unterminated node name, or a property
 //! length that runs past the value must all be **rejected**, never trusted
 //! (fail closed). Per ("every parser of untrusted
 //! input ... has a fuzz target") that decode path is driven here against
 //! arbitrary device trees, with a single invariant:
 //!
-//! * feeding any byte stream to [`rustos_fdt::Fdt::new`] and draining every
-//!   public reader ([`rustos_fdt::Fdt::first_memory_region`],
+//! * feeding any byte stream to [`tairix_fdt::Fdt::new`] and draining every
+//!   public reader ([`tairix_fdt::Fdt::first_memory_region`],
 //!   `timebase_frequency`, `each_cpu`, `property`, `property_u64`, the node
 //!   and property iterators) never panics and never reads out of bounds — the
-//!   reader either returns a well-formed view or an [`rustos_fdt::FdtError`]
+//!   reader either returns a well-formed view or an [`tairix_fdt::FdtError`]
 //!   (fail closed). The run aborting *is* the failure.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random byte strings, flips bytes inside real device trees
 //! built by the shared `fixture` builder (one DTB builder,
 //! not a second one rolled here), and splices a valid 40-byte header onto a
 //! hostile structure block. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
-use rustos_fdt::fixture::{arm_with_cpus, virt_like, DtbBuilder};
-use rustos_fdt::Fdt;
+use tairix_fdt::fixture::{arm_with_cpus, virt_like, DtbBuilder};
+use tairix_fdt::Fdt;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -149,14 +149,14 @@ fn exercise_never_panics(bytes: &[u8]) {
 
 #[test]
 fn parsing_any_device_tree_never_panics() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = templates();
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
-    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "parsing_any_device_tree_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -203,7 +203,7 @@ fn parsing_any_device_tree_never_panics() {
         exercise_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

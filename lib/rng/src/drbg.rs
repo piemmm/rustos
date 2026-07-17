@@ -12,7 +12,7 @@
 //! HMAC-DRBG is the most conservative of the SP 800-90A generators: its
 //! security reduces to HMAC being a PRF (Bellare), it has no awkward
 //! block-cipher key/counter edge cases, and it is the construction
-//! [`rustos_crypto`] can already serve with zero new audit surface. It is the
+//! [`tairix_crypto`] can already serve with zero new audit surface. It is the
 //! right "best in class" core for `ARXFS` volume keys, the encrypted-swap key, and KASLR/ASLR seeds.
 //!
 //! # Backtracking and prediction resistance
@@ -24,7 +24,7 @@
 //! is provided one layer up by [`crate::CsRng`] reseeding; this type only
 //! reseeds when asked.
 
-use rustos_crypto::{hmac_sha256, hmac_sha256_parts, MacKey, MacTag};
+use tairix_crypto::{hmac_sha256, hmac_sha256_parts, MacKey, MacTag};
 use zeroize::Zeroize;
 
 /// Length, in bytes, of the DRBG's `Key` and `V` working-state words and of

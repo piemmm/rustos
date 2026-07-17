@@ -11,8 +11,8 @@
 
 use alloc::string::ToString;
 
-use rustos_abi::Errno;
-use rustos_users::UsersDb;
+use tairix_abi::Errno;
+use tairix_users::UsersDb;
 
 use crate::session::{AuthenticatedUser, Authenticator, Credentials};
 
@@ -74,9 +74,9 @@ mod tests {
     use crate::session::{Authenticator, Credentials};
 
     use alloc::vec;
-    use rustos_abi::{CapabilityId, Errno};
-    use rustos_caps::CapabilitySet;
-    use rustos_users::{
+    use tairix_abi::{CapabilityId, Errno};
+    use tairix_caps::CapabilitySet;
+    use tairix_users::{
         AccountState, Gid, Identity, StoredPassword, Uid, UserRecord, UsersDb, MIN_ITERATIONS,
     };
 

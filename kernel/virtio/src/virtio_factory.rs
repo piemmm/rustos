@@ -35,13 +35,13 @@
 use alloc::boxed::Box;
 
 use crate::kernel_host::KernelVirtioHost;
-use rustos_abi::driver::VirtioHost;
-use rustos_abi::{CapabilityId, CapabilityQuery, IrqHandle};
-use rustos_kernel_irq::{IrqTable, IrqWaiter};
-use rustos_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTable, PhysMap, VirtAddr};
-use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_log::Sink;
-use rustos_virtio::{PoolId, VirtioHostFactory};
+use tairix_abi::driver::VirtioHost;
+use tairix_abi::{CapabilityId, CapabilityQuery, IrqHandle};
+use tairix_kernel_irq::{IrqTable, IrqWaiter};
+use tairix_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, PageTable, PhysMap, VirtAddr};
+use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_log::Sink;
+use tairix_virtio::{PoolId, VirtioHostFactory};
 
 /// Borrowed kernel resources and per-device parameters a
 /// [`KernelVirtioFactory`] needs to mint a [`KernelVirtioHost`].
@@ -161,16 +161,16 @@ mod tests {
     use super::*;
 
     use alloc::vec::Vec;
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_irq::IrqWaitAbort;
-    use rustos_kernel_mem::{
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_irq::IrqWaitAbort;
+    use tairix_kernel_mem::{
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
         HostPageTable, PhysAddr, SimPhysMap, PAGE_SIZE,
     };
-    use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-    use rustos_kernel_sec::identity::UserId;
-    use rustos_log::{Event, Sink};
-    use rustos_sync::SpinLock;
+    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::identity::UserId;
+    use tairix_log::{Event, Sink};
+    use tairix_sync::SpinLock;
 
     const OWNER: TaskId = TaskId(99);
 

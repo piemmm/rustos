@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-kernel-arch-boot-wasm32"
+name = "tairix-test-kernel-arch-boot-wasm32"
 description = "Stage 3d browser-headless integration test: boot the wasm32 Arch HAL in a real browser, drive the requestAnimationFrame cooperative scheduler, and prove WASM-memory isolation."
 version.workspace = true
 edition.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 
 # The wasm32 analogue of the bare-metal `kernel_arch_boot_*` QEMU
 # verticals. Built for `wasm32-unknown-unknown` it is a `cdylib`: the
-# host loader (`kernel/arch/wasm32/web/rustos.js`) instantiates it,
+# host loader (`kernel/arch/wasm32/web/tairix.js`) instantiates it,
 # calls its boot export, and drives the cooperative scheduler through
 # `requestAnimationFrame`. The browser harness (`web/harness.mjs`,
 # launched by `cargo xtask test --wasm`) scrapes the console markers it
@@ -31,10 +31,10 @@ path = "src/lib.rs"
 # (`AGENTS.md` §2.2 — the `itest_wasm32` cfg, not a raw target predicate,
 # selects the kernel body in source).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rustos-arch-wasm32 = { path = "../../../kernel/arch/wasm32", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-arch-wasm32 = { path = "../../../kernel/arch/wasm32", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

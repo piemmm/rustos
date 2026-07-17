@@ -18,14 +18,14 @@ mod program {
     /// Issue the ordinary syscall and report whether its result survived the
     /// scheduler round trip.
     fn main() -> i32 {
-        if rustos_rt::clock_get() == EXPECTED_READING {
+        if tairix_rt::clock_get() == EXPECTED_READING {
             0
         } else {
             1
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 #[cfg(not(freestanding))]

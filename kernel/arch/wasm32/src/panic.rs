@@ -22,7 +22,7 @@ use core::panic::PanicInfo;
 /// the instance.
 pub fn handle_panic_via_console(info: &PanicInfo<'_>) -> ! {
     let mut w = ConsoleWriter;
-    let _ = writeln!(w, "[rustos-kernel] wasm32 panic: {info}");
+    let _ = writeln!(w, "[tairix-kernel] wasm32 panic: {info}");
     // `unreachable` emits the wasm `unreachable` opcode, which traps the
     // instance immediately and surfaces to the host as a `RuntimeError`.
     // It is the documented way to abort a `wasm32-unknown-unknown`

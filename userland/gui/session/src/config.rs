@@ -5,7 +5,7 @@
 //! the driver of the desktop and its observers can never drift
 //! (`plans/APPWIN.md` AW3).
 
-use rustos_taskbar::LauncherId;
+use tairix_taskbar::LauncherId;
 
 /// The start menu's light/dark appearance entry label.
 pub const APPEARANCE_LABEL: &str = "Toggle Light/Dark";

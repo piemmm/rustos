@@ -2,7 +2,7 @@
 
 use alloc::vec;
 
-use rustos_raster::Color;
+use tairix_raster::Color;
 
 use crate::glyph::{builtin_icon, IconKind};
 use crate::vector::{IconLayer, VectorIcon};

@@ -1,4 +1,4 @@
-//! RustOS `df` — report filesystem space usage (Stage 6
+//! TAIRiX `df` — report filesystem space usage (Stage 6
 //! `userland/apps/`, a `plans/APPS.md` command app).
 //!
 //! `df` reports, one row per mounted filesystem, the volume's size, the
@@ -20,7 +20,7 @@
 //! whose rows now carry each backing volume's space accounting
 //! (`VolumeStats`) as the mounted filesystem driver reports it. There is
 //! no `/proc`, no mount-table file, and no second query client: the
-//! paging walk is the shared `rustos_procinfo::for_each_mount` the
+//! paging walk is the shared `tairix_procinfo::for_each_mount` the
 //! `mount` tool uses.
 //!
 //! # What this crate is
@@ -31,11 +31,11 @@
 //! and renders the GNU-shaped table. The operations that touch the
 //! outside world are the injected seams:
 //!
-//! * [`rustos_procinfo::Transport`] — the `MOUNT_LIST` query.
+//! * [`tairix_procinfo::Transport`] — the `MOUNT_LIST` query.
 //! * [`PathProbe`] — confirm a `file` operand exists.
 //! * [`Output`] — the table on standard output, diagnostics on standard
 //!   error, and the omission advisory on fd 3.
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by
 //!   the short-help switches.
 //!
 //! # Advisory output
@@ -67,7 +67,7 @@
 //! they are authored once in the bundle's on-disk `Help/` tree, planted
 //! onto `/System` by the image builder from that source
 //! (`tools/syshelp`), and read back at runtime through the injected
-//! [`rustos_help::HelpSource`] seam. Help is never hardcoded into the
+//! [`tairix_help::HelpSource`] seam. Help is never hardcoded into the
 //! program (`plans/APPS.md`).
 //!
 //! # Layering & safety

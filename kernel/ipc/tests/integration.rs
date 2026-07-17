@@ -18,14 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use rustos_abi::{CapabilityId, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_ipc::audit::AuditEvent;
-use rustos_kernel_ipc::port::{EndpointId, Port};
-use rustos_kernel_ipc::shmem::{SharedMemory, ShmemId};
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_log::{set_max_level, Event, Level, Sink};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_ipc::audit::AuditEvent;
+use tairix_kernel_ipc::port::{EndpointId, Port};
+use tairix_kernel_ipc::shmem::{SharedMemory, ShmemId};
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_log::{set_max_level, Event, Level, Sink};
 
 /// Thread-safe recording sink: integration tests are multi-threaded
 /// where the per-crate `RecordingSink` (`RefCell`) is not.
@@ -235,7 +235,7 @@ fn end_to_end_port_shmem_and_notification() {
     )
     .unwrap();
     let shm = SharedMemory::create(ShmemId(1), &owner, CapabilitySet::empty(), 16, &sink).unwrap();
-    let channel = rustos_kernel_ipc::notify::NotificationChannel::create(
+    let channel = tairix_kernel_ipc::notify::NotificationChannel::create(
         1,
         &owner,
         CapabilitySet::empty(),
@@ -253,7 +253,7 @@ fn end_to_end_port_shmem_and_notification() {
     channel
         .signal(
             &client,
-            rustos_kernel_ipc::notify::NotificationFlags(0b1),
+            tairix_kernel_ipc::notify::NotificationFlags(0b1),
             &sink,
         )
         .unwrap();
@@ -262,7 +262,7 @@ fn end_to_end_port_shmem_and_notification() {
     assert_eq!(mapping.as_bytes().unwrap(), b"0123456789abcdef".to_vec());
     assert_eq!(
         channel.take_pending(),
-        rustos_kernel_ipc::notify::NotificationFlags(0b1)
+        tairix_kernel_ipc::notify::NotificationFlags(0b1)
     );
 
     // Tear-down: destroy + revoke; subsequent operations fail closed.

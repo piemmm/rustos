@@ -1,9 +1,9 @@
 //! wasm32 side-channel mitigations.
 //!
 //! Implements the Arch HAL
-//! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
+//! [`SideChannelMitigation`](tairix_arch_api::SideChannelMitigation)
 //! surface for the
-//! `wasm32-unknown-unknown` browser sandbox. On this target RustOS is a
+//! `wasm32-unknown-unknown` browser sandbox. On this target TAIRiX is a
 //! guest of the JavaScript host (a Chrome-class engine), and the
 //! microarchitectural defences are owned by that host, not by the
 //! kernel:
@@ -22,14 +22,14 @@
 //!   which the guest cannot and must not try to override.
 //!
 //! Every mitigation is therefore a justified
-//! [`Mitigation::NotVulnerable`](rustos_arch_api::Mitigation::NotVulnerable)
+//! [`Mitigation::NotVulnerable`](tairix_arch_api::Mitigation::NotVulnerable)
 //! no-op (a no-op is
 //! permitted where the silicon, here the sandbox, is provably not
 //! vulnerable from the guest's vantage point). The barrier primitives
 //! are empty: there is no instruction to emit and nothing the guest
 //! could do that the host has not already done.
 
-use rustos_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
+use tairix_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
 
 /// The justification shared by every wasm32 mitigation slot: the
 /// browser host owns the microarchitectural defences and the
@@ -83,7 +83,7 @@ impl SideChannelMitigation for SideChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::sidechannel::conformance;
+    use tairix_arch_api::sidechannel::conformance;
 
     #[test]
     fn passes_side_channel_conformance() {

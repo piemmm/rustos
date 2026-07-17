@@ -7,14 +7,14 @@
 //! * [`server::DisplayServer`] — the engine a display driver's `Run`
 //!   binary hosts: decode → live-lease check ([`server::SeatCheck`]) →
 //!   geometry/bounds validation → blit through the
-//!   [`Display`](rustos_abi::driver::display::Display) trait.
+//!   [`Display`](tairix_abi::driver::display::Display) trait.
 //! * [`client::DisplayClient`] / [`client::RemoteDisplay`] — the
 //!   session-side half over a [`client::DisplayTransport`]:
 //!   `RemoteDisplay` implements the existing `Display` trait over the
 //!   client's mapping of the shared frame region, so a compositor
 //!   presents through it unchanged.
 //!
-//! The wire format itself lives in `rustos_abi::display_ipc`; this crate
+//! The wire format itself lives in `tairix_abi::display_ipc`; this crate
 //! adds the behaviour. Frames travel through one `shm_grant`ed region
 //! mapped once at configure time — presents carry a frame index and a
 //! damage rectangle, never pixels.
@@ -44,7 +44,7 @@ pub use framebuffer::{Framebuffer, FramebufferConfig};
 pub use rt::{RtShmMapper, RtShmRegion};
 pub use server::{DisplayServer, FrameRegion, SeatCheck, ShmMapper, DISPLAY_REPLY_MAX};
 
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::{DriverError, Errno};
 
 /// Map a typed [`Errno`] a display-service reply carried back onto the
 /// [`DriverError`] the `Display` trait's callers expect — the inverse

@@ -1,4 +1,4 @@
-# rustos-drv-storage-volmgr
+# tairix-drv-storage-volmgr
 
 The autoloaded user-space **volume-manager policy driver**
 (`plans/DEVICES.md` D3c): the automount policy for hot-pluggable block
@@ -7,14 +7,14 @@ devices, owning volume policy the way `devmgr` owns driver policy.
 ## What it binds
 
 The per-LUN **block-service storage node** a block driver emits
-(compatible `rustos,usb-msd-lun` today; future hot-pluggable block
+(compatible `tairix,usb-msd-lun` today; future hot-pluggable block
 sources join by adding their node's compatible key to `BIND_KEYS`).
 `devmgr` loads **one instance per matched node**; the kernel spawns it
 holding exactly that node's two transport grants — the blkio call
 endpoint and the shared data window — so an instance can probe and
 publish only its own unit (no ambient authority). It knows neither the
 bus nor the vendor behind the block service: every byte arrives over the
-public `rustos_abi::blkio` protocol.
+public `tairix_abi::blkio` protocol.
 
 ## What it does
 

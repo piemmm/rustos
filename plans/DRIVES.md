@@ -1,6 +1,6 @@
-# DRIVES.md — RustOS drive, volume, alias, and path namespace brief
+# DRIVES.md — TAIRiX drive, volume, alias, and path namespace brief
 
-This file is the AI-facing design brief that seeded the RustOS storage-namespace
+This file is the AI-facing design brief that seeded the TAIRiX storage-namespace
 specification. **The binding spec has been produced: `docs/src/filesystem/
 drives.md`** (with the `AGENTS.md` §16.1 amendment it required). This brief is
 retained only as the source material behind that spec; where the two differ,
@@ -8,7 +8,7 @@ the spec in `docs/src/` wins. The remaining P4 work is the descriptor-producing
 open-a-path ABI (see `.junie/PREREQUISITES2.md`).
 
 The goal is to replace the Unix habit of making every storage device reachable
-only through one persistent root filesystem tree. RustOS should keep Unix-like
+only through one persistent root filesystem tree. TAIRiX should keep Unix-like
 `/` separators and readable paths, but storage roots must be first-class objects
 that survive independently of any one root view.
 
@@ -19,12 +19,12 @@ that survive independently of any one root view.
 Use the following prompt when generating the full spec:
 
 ```text
-You are writing a RustOS design/specification document for drive names,
+You are writing a TAIRiX design/specification document for drive names,
 volume roots, aliases, path parsing, and mount/view semantics.
 
 Read AGENTS.md and this DRIVES.md. Produce a precise spec suitable for
 `docs/src/filesystem/drives.md` plus a list of exact AGENTS.md sections that
-must be amended. The spec must be consistent with RustOS principles: Rust-only
+must be amended. The spec must be consistent with TAIRiX principles: Rust-only
 implementation, microkernel-leaning storage services, capability-checked
 filesystem operations, no ambient authority, user-space drivers where feasible,
 no `/proc` or `/sys` virtual filesystem, no POSIX legacy top-level directories,
@@ -57,7 +57,7 @@ current AGENTS.md rule it changes or preserves.
 
 ## 2. Design problem
 
-RustOS currently wants a clean filesystem layout, but the existing AGENTS.md
+TAIRiX currently wants a clean filesystem layout, but the existing AGENTS.md
 wording is still Unix-shaped in one important respect: the installed system is
 described as a single `/` tree containing `/System`, `/Users`, `/Apps`, and
 `/Storage`.
@@ -67,7 +67,7 @@ design is meant to avoid: if access to the root tree fails, every path that
 depends on that root view fails with it, even when the underlying volumes are
 healthy.
 
-RustOS should separate these concepts:
+TAIRiX should separate these concepts:
 
 - the identity of a storage root;
 - the filesystem driver used to read it;
@@ -88,10 +88,10 @@ The final spec must explicitly reconcile these charter facts.
 
 ### 3.1 Preserve
 
-RustOS remains Rust-only. No C or C++ source, hand-written headers, or C build
+TAIRiX remains Rust-only. No C or C++ source, hand-written headers, or C build
 glue may be introduced as part of this design.
 
-RustOS remains microkernel-leaning. Drivers run in user space wherever feasible.
+TAIRiX remains microkernel-leaning. Drivers run in user space wherever feasible.
 Storage and filesystem drivers should follow the existing driver model unless a
 bootstrap-floor exception is justified.
 
@@ -118,7 +118,7 @@ floor exists only to reach the store and must stay minimal.
 
 ### 3.2 Amend
 
-AGENTS.md §16.1 currently says RustOS has exactly four top-level directories:
+AGENTS.md §16.1 currently says TAIRiX has exactly four top-level directories:
 `/System`, `/Users`, `/Apps`, and `/Storage`. The new spec should replace this
 with exactly four default **view entries** in the default session root view,
 backed by first-class aliases:
@@ -133,7 +133,7 @@ backed by first-class aliases:
 The canonical storage names become aliases and IDs, not `/` paths:
 
 ```text
-System:/Kernel/rustos.rxe
+System:/Kernel/tairix.rxe
 Users:/ian/Documents/design.md
 Apps:/Example.app/Run
 Backup:/snapshots/2026-06-20
@@ -235,7 +235,7 @@ carried by `lib/abi` as a fixed-size type.
 Example:
 
 ```text
-id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Kernel/rustos.rxe
+id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Kernel/tairix.rxe
 ```
 
 ### 5.5 Alias
@@ -267,8 +267,8 @@ Examples:
 ```text
 alias::Home/Documents/file.txt
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt
-fs::arxfs/System/Kernel/rustos.rxe
-arxfs::System/Kernel/rustos.rxe
+fs::arxfs/System/Kernel/tairix.rxe
+arxfs::System/Kernel/tairix.rxe
 ```
 
 `::` names a resolver. Some resolvers are filesystem-backed; most are not.
@@ -308,7 +308,7 @@ Alias:/path/inside/root
 Examples:
 
 ```text
-System:/Kernel/rustos.rxe
+System:/Kernel/tairix.rxe
 System:/Drivers/storage/arxfs/Driver.rxe
 Users:/ian/Documents/DRIVES.md
 Home:/Documents/DRIVES.md
@@ -337,7 +337,7 @@ Examples:
 
 ```text
 alias::Home/Documents/DRIVES.md
-alias::System/Kernel/rustos.rxe
+alias::System/Kernel/tairix.rxe
 alias::Backup/snapshots/latest
 ```
 
@@ -357,7 +357,7 @@ id::<volume-id>/path/inside/root
 Examples:
 
 ```text
-id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Kernel/rustos.rxe
+id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Kernel/tairix.rxe
 id::2f5a2e1c-9a3b-4d6b-9e4e-18d76e21cafe/ian/Documents/DRIVES.md
 ```
 
@@ -381,10 +381,10 @@ Optional shorthand:
 Examples:
 
 ```text
-fs::arxfs/System/Kernel/rustos.rxe
+fs::arxfs/System/Kernel/tairix.rxe
 fs::fat32/EFI/BOOT/BOOTX64.EFI
 fs::adfs/HardDisc4/Apps/Paint
-arxfs::System/Kernel/rustos.rxe
+arxfs::System/Kernel/tairix.rxe
 fat32::EFI/BOOT/BOOTX64.EFI
 adfs::HardDisc4/Apps/Paint
 ```
@@ -422,8 +422,8 @@ paths.
 Examples:
 
 ```text
-net::nas.local/projects/RustOS/design.md
-Projects:/RustOS/design.md
+net::nas.local/projects/TAIRiX/design.md
+Projects:/TAIRiX/design.md
 ```
 
 `net::` may exist as a resolver for explicit remote roots, but ordinary users
@@ -447,7 +447,7 @@ Recommended default view:
 `/` must not be a directory stored on the System volume. It must be generated by
 the namespace manager from the process/session namespace.
 
-Native RustOS APIs should not require a path to start at `/`. A process current
+Native TAIRiX APIs should not require a path to start at `/`. A process current
 directory should be `(root_handle, directory_handle)`, not merely a string.
 
 ---
@@ -657,13 +657,13 @@ The default `/` view projects them as:
 /Storage
 ```
 
-This preserves the clean RustOS user layout while removing the root filesystem
+This preserves the clean TAIRiX user layout while removing the root filesystem
 as the dependency through which all storage must be reached.
 
 Recommended AGENTS.md amendment shape:
 
 ```text
-RustOS exposes exactly four entries in the default session root view: /System,
+TAIRiX exposes exactly four entries in the default session root view: /System,
 /Users, /Apps, and /Storage. These are synthetic view bindings backed by the
 first-class aliases System:, Users:, Apps:, and Storage:. The canonical storage
 identity is the root ID or alias path, not the / view path. Creating additional
@@ -880,7 +880,7 @@ Home:/../../System     # cannot escape Home root
 Home:/Documents/file.txt
 alias::Home/Documents/file.txt
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt
-arxfs::System/Kernel/rustos.rxe
+arxfs::System/Kernel/tairix.rxe
 /Users/ian/Documents/file.txt       # valid view path, not canonical storage ID
 ```
 
@@ -888,7 +888,7 @@ arxfs::System/Kernel/rustos.rxe
 
 ## 13. Filesystem-backed `::` resolvers
 
-Yes, RustOS should have filesystem-backed resolvers. They are useful and fit the
+Yes, TAIRiX should have filesystem-backed resolvers. They are useful and fit the
 RISC OS-inspired direction.
 
 Example:
@@ -1065,7 +1065,7 @@ creation time and how they behave when the target alias is unavailable.
 The shell prompt should display alias paths when possible:
 
 ```text
-Home:/Projects/RustOS>
+Home:/Projects/TAIRiX>
 System:/Kernel>
 Backup:/snapshots/latest>
 ```
@@ -1127,7 +1127,7 @@ If the alias changes, the file remains findable by ID.
 
 ## 18. System Information API integration
 
-Because RustOS forbids `/proc` and `/sys`, storage inventory and namespace state
+Because TAIRiX forbids `/proc` and `/sys`, storage inventory and namespace state
 must be queried through typed APIs.
 
 Suggested sysinfo queries:
@@ -1232,8 +1232,8 @@ capability API:
 - support for stable file IDs;
 - whether labels are unique, mutable, missing, or lossy.
 
-RustOS must not let a weak foreign filesystem weaken RustOS security. If a
-foreign filesystem cannot store RustOS ACLs or capabilities, the root publication
+TAIRiX must not let a weak foreign filesystem weaken TAIRiX security. If a
+foreign filesystem cannot store TAIRiX ACLs or capabilities, the root publication
 must apply a policy wrapper and default to restrictive flags.
 
 ---
@@ -1472,7 +1472,7 @@ Backup:/file.txt does not depend on /Storage/Backup existing.
 The generated full spec should use this structure:
 
 ```text
-# RustOS Storage Namespaces, Volume Roots, and Aliases
+# TAIRiX Storage Namespaces, Volume Roots, and Aliases
 
 1. Purpose and non-goals
 2. Charter relationship and AGENTS.md amendments
@@ -1509,7 +1509,7 @@ The generated full spec should use this structure:
 The central decision is:
 
 ```text
-RustOS native storage paths are alias-rooted or ID-rooted. `/` is a generated
+TAIRiX native storage paths are alias-rooted or ID-rooted. `/` is a generated
 view, not the root of storage.
 ```
 
@@ -1517,7 +1517,7 @@ The most important syntax is:
 
 ```text
 Home:/Documents/file.txt
-System:/Kernel/rustos.rxe
+System:/Kernel/tairix.rxe
 Backup:/snapshots/latest
 id::<volume-id>/snapshots/latest
 ```

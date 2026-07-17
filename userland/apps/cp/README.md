@@ -1,4 +1,4 @@
-# `rustos-cp` — copy files and directories
+# `tairix-cp` — copy files and directories
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `cp` copies each
 of its source operands to a destination. With a single source and a
@@ -11,8 +11,8 @@ error. This is the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
-depends only on the audited `rustos-abi` crate and the shared `lib/help`
-engine (plus `rustos-rt` for the freestanding `Run` binary), so it never
+depends only on the audited `tairix-abi` crate and the shared `lib/help`
+engine (plus `tairix-rt` for the freestanding `Run` binary), so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
 the copy library and the `cp` command app's `Run` binary
 (`src/run.rs`), registered as the self-contained store bundle
@@ -91,7 +91,7 @@ later operand, and there is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 
-`cargo test -p rustos-cp` drives the parser and the copy engine against
+`cargo test -p tairix-cp` drives the parser and the copy engine against
 an in-memory tree and a recording output: the command grammar (every
 option, clustered short flags, `-`/`--`, the too-few-operands and
 unknown-option paths), a single file to a new path, a file copied across

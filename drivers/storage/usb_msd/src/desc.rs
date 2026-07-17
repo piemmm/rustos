@@ -23,7 +23,7 @@
 //! length is validated, the walk is bounded by the buffer, and a stream
 //! that cannot be parsed refuses the whole device rather than guessing.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::scsi::CommandSet;
 

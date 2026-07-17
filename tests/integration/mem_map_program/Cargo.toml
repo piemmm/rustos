@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-mem-map"
+name = "tairix-test-mem-map"
 description = "SPAWN stage SP5b-2 fixture: a minimal, separately-linked pure-Rust EL0 program that maps a fresh anonymous RW region with mem_map (FIXED placement), writes and reads back a pattern to prove the pages are real read/write memory, releases it with mem_unmap, then touches the released range so the MMU raises a data abort — the fault-on-use-after-unmap the consuming vertical asserts. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
 version.workspace = true
 edition.workspace = true
@@ -12,15 +12,15 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-mem-map"
+name = "tairix-test-mem-map"
 path = "src/main.rs"
 
-# The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
-# pure-Rust userland runtime `rustos-rt` and the shared `abi-v1` types
-# (`rustos-abi`, for `MapFlags`) — never the C ABI (`crt0` + `abi-sys`), which
+# The program is a pure-Rust TAIRiX program (`AGENTS.md` §1), so it links the
+# pure-Rust userland runtime `tairix-rt` and the shared `abi-v1` types
+# (`tairix-abi`, for `MapFlags`) — never the C ABI (`crt0` + `abi-sys`), which
 # exists solely for non-Rust programs (`AGENTS.md` §16.4). Only on the three
 # native Tier-1 targets (`target_os = "none"`); on the host it is an inert stub
 # so `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

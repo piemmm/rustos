@@ -1,4 +1,4 @@
-# `rustos-false` — do nothing, unsuccessfully
+# `tairix-false` — do nothing, unsuccessfully
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/false.app/` so the shell resolves the bare word
@@ -9,11 +9,11 @@ argument and exits `1`, giving scripts a command that always fails. A
 tree through the shared `lib/help` engine, in the locale the inherited
 `LANG` variable names, falling back to the usage banner when the tree is
 unavailable. One documented divergence: a served short help exits `0`
-(the RustOS short-help convention), where GNU `false --help` exits `1`.
+(the TAIRiX short-help convention), where GNU `false --help` exits `1`.
 
 The crate is `no_std` (no `alloc` in the library), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its only dependency is the
-shared `rustos-help` crate, so it never links a kernel or driver crate.
+shared `tairix-help` crate, so it never links a kernel or driver crate.
 Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
 authorises every path per-inode under the caller's attested identity.

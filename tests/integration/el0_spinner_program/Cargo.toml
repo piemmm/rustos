@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-el0-spinner"
+name = "tairix-test-el0-spinner"
 description = "P-1 preemption fixture: a minimal, separately-linked pure-Rust EL0 program that busy-spins a fixed compile-time count WITHOUT issuing any syscall, then exits 0. The preempt_el0_qemu_aarch64 vertical spawns it as a runaway, never-yielding EL0 task and proves the production timer IRQ involuntarily preempts it (the loop cannot be left cooperatively, so any reschedule is forced). Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
 version.workspace = true
 edition.workspace = true
@@ -12,13 +12,13 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "rustos-test-el0-spinner"
+name = "tairix-test-el0-spinner"
 path = "src/main.rs"
 
-# The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
-# pure-Rust userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`),
+# The program is a pure-Rust TAIRiX program (`AGENTS.md` §1), so it links the
+# pure-Rust userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`),
 # which exists solely for non-Rust programs (`AGENTS.md` §16.4). Only on the
 # three native Tier-1 targets (`target_os = "none"`); on the host it is an inert
 # stub so `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

@@ -1,7 +1,7 @@
 //! The outcomes of running a `chown` command.
 
 use core::fmt;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Why a `chown` invocation did not complete.
 ///

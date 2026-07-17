@@ -18,8 +18,8 @@ use super::{
     INCOMPAT_FILETYPE, INODE_FLAG_EXTENTS, I_BLOCK_OFFSET, MAX_BLOCK_SIZE, ROOT_INODE,
     SUPERBLOCK_OFFSET, S_IFDIR,
 };
-use rustos_abi::driver::block::Block;
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::Block;
+use tairix_abi::DriverError;
 
 /// `s_feature_incompat`: extents are in use on this volume.
 const INCOMPAT_EXTENTS: u32 = 0x0040;

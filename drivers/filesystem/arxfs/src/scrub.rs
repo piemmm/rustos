@@ -34,7 +34,7 @@
 //! through `lib/log` with stable event IDs. It
 //! never silently mutates: a clean scrub of a clean volume changes nothing.
 
-use rustos_log::{log, Event, EventId, Level, Sink};
+use tairix_log::{log, Event, EventId, Level, Sink};
 
 /// Range start (inclusive) reserved for `arxfs` scrub event identifiers.
 pub const ARXFS_RANGE_START: u32 = 12_000;
@@ -140,8 +140,8 @@ impl ScrubReport {
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
+use tairix_abi::driver::block::Block;
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 
 use crate::dedupe::{ChunkRecord, Referrer, REVERSE_REF_CAP};
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};

@@ -1,9 +1,9 @@
 //! aarch64 side-channel mitigations.
 //!
 //! Implements the Arch HAL
-//! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
+//! [`SideChannelMitigation`](tairix_arch_api::SideChannelMitigation)
 //! surface for
-//! aarch64. The `ARMv8` cores RustOS targets (Cortex-A in the Raspberry
+//! aarch64. The `ARMv8` cores TAIRiX targets (Cortex-A in the Raspberry
 //! Pi 3/4/5 and generic `ARMv8` servers) are exposed to the speculative
 //! side-channel classes (Spectre v1/v2) but **not** to the Intel
 //! microarchitectural-data-sampling family (MDS, L1TF, MMIO stale
@@ -22,7 +22,7 @@
 //!
 //! * **Context-switch microarchitectural-buffer flush** — the MDS /
 //!   L1TF / MMIO-stale-data buffer-sampling classes are Intel
-//!   microarchitectural flaws; the `ARMv8` cores RustOS targets do not
+//!   microarchitectural flaws; the `ARMv8` cores TAIRiX targets do not
 //!   expose the affected store/fill/load buffers, so there is nothing
 //!   to flush (a no-op is permitted where the
 //!   silicon is provably not vulnerable).
@@ -41,7 +41,7 @@
 //!   yet wired, so emitting one core's sequence blindly would be wrong on
 //!   another.
 
-use rustos_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
+use tairix_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
 
 /// aarch64 implementation of the Arch HAL side-channel surface.
 ///
@@ -70,7 +70,7 @@ impl SideChannel {
             syscall_exit_barrier: Mitigation::Applied,
             context_switch_buffer_flush: Mitigation::NotVulnerable(
                 "MDS / L1TF / MMIO-stale-data are Intel store/fill/load-buffer sampling flaws; \
-                 the ARMv8 cores RustOS targets do not expose those buffers",
+                 the ARMv8 cores TAIRiX targets do not expose those buffers",
             ),
             context_switch_indirect_branch_barrier: Mitigation::Pending(
                 "the ARMv8 Spectre-v2 BHB/BTB sequence is MIDR-specific (BHB-clear loop or \
@@ -121,7 +121,7 @@ fn speculation_barrier() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::sidechannel::conformance;
+    use tairix_arch_api::sidechannel::conformance;
 
     #[test]
     fn passes_side_channel_conformance() {

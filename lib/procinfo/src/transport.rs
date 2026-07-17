@@ -7,16 +7,16 @@
 //! userland crates (`init`'s `Spawner`/`Reaper`, `login`'s `LoginView`).
 
 use alloc::vec::Vec;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Carries an encoded `sysinfo-v1` request to `sysinfod` and returns the
 /// reply.
 ///
-/// `request` is a [`SysinfoRequestHeader`](rustos_abi::sysinfo::SysinfoRequestHeader)
+/// `request` is a [`SysinfoRequestHeader`](tairix_abi::sysinfo::SysinfoRequestHeader)
 /// followed by the query's typed payload, already encoded little-endian
 /// (build it with [`encode_request`](crate::encode_request)). The returned
 /// bytes are the service's reply exactly as `sysinfod` produced them: packed
-/// [`ProcessRecord`](rustos_abi::sysinfo::ProcessRecord)s, a scalar struct's
+/// [`ProcessRecord`](tairix_abi::sysinfo::ProcessRecord)s, a scalar struct's
 /// wire image, or the hardware-tree bytes. The transport
 /// owns the reply allocation so the caller never has to guess a response
 /// buffer size.

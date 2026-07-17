@@ -7,51 +7,51 @@
 //! through the `CAP_MMIO_MAP`-gated [`KernelMmioMapper`], MSI-X routing
 //! off the boot-assigned vector, and the `sti; hlt; cli` IRQ park.
 
-use rustos_abi::CapabilityId;
-use rustos_arch_x86_64::irq::{global_routing, msi_message};
-use rustos_arch_x86_64::pio::x86_port_io;
-use rustos_arch_x86_64::qemu_exit;
-use rustos_arch_x86_64::smp::bsp_lapic_id;
-use rustos_caps::CapabilitySet;
-use rustos_drv_bus_virtio::PciTransport;
-use rustos_kernel::x86_64::arch_wrapper::{published_irq_table, published_memory_map};
-use rustos_kernel::SERIAL_SINK;
-use rustos_kernel::{KernelVirtioFactory, KernelVirtioFactoryConfig};
-use rustos_kernel_irq::{IrqWaitAbort, IrqWaiter};
-use rustos_kernel_mem::{
+use tairix_abi::CapabilityId;
+use tairix_arch_x86_64::irq::{global_routing, msi_message};
+use tairix_arch_x86_64::pio::x86_port_io;
+use tairix_arch_x86_64::qemu_exit;
+use tairix_arch_x86_64::smp::bsp_lapic_id;
+use tairix_caps::CapabilitySet;
+use tairix_drv_bus_virtio::PciTransport;
+use tairix_kernel::x86_64::arch_wrapper::{published_irq_table, published_memory_map};
+use tairix_kernel::SERIAL_SINK;
+use tairix_kernel::{KernelVirtioFactory, KernelVirtioFactoryConfig};
+use tairix_kernel_irq::{IrqWaitAbort, IrqWaiter};
+use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
 };
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
-use rustos_log::{Event, EventId, Level, Sink};
-use rustos_pci::mechanism_one;
-use rustos_virtio::{PoolId, VirtioHost, VirtioHostFactory};
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
+use tairix_log::{Event, EventId, Level, Sink};
+use tairix_pci::mechanism_one;
+use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 use crate::common::{
     carve_dma_map, drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
 };
 
 /// Re-export so the verticals can name the concrete transport for the
-/// shared device-tail turbofish without their own `rustos-drv-bus-virtio`
+/// shared device-tail turbofish without their own `tairix-drv-bus-virtio`
 /// dependency.
-pub use rustos_drv_bus_virtio::PciTransport as ScenarioTransport;
+pub use tairix_drv_bus_virtio::PciTransport as ScenarioTransport;
 
 // Re-exports the `define_boot_harness!` macro expands against via
 // `$crate::...`, so a consumer needs only this one dependency.
 // (`BOOT_COMPLETED_EVENT_ID` is re-exported at the crate root through
 // `pub use common::*`.)
 #[doc(hidden)]
-pub use rustos_kernel::{boot, handle_panic_via_kernel_core};
+pub use tairix_kernel::{boot, handle_panic_via_kernel_core};
 #[doc(hidden)]
-pub use rustos_kernel::{SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK};
+pub use tairix_kernel::{SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_SERIAL_SINK};
 #[doc(hidden)]
-pub use rustos_log::{
+pub use tairix_log::{
     Event as HarnessEvent, EventId as HarnessEventId, Level as HarnessLevel, Sink as HarnessSink,
 };
 
-use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::FreeListAllocator;
+use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::FreeListAllocator;
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
@@ -180,7 +180,7 @@ unsafe fn cli() {
 
 /// Read the timestamp counter (monotonic-ish clock for the wait loop).
 fn rdtsc() -> u64 {
-    // SAFETY: `rdtsc` is unprivileged on every x86_64 CPU RustOS supports
+    // SAFETY: `rdtsc` is unprivileged on every x86_64 CPU TAIRiX supports
     // and has no architectural side effects.
     let lo: u32;
     let hi: u32;
@@ -205,7 +205,7 @@ pub fn run_virtio_pci_scenario<F>(device_id: u16, cfg: &ScenarioConfig<'_>, body
 where
     F: FnOnce(&dyn QemuEnv, PciTransport, &dyn VirtioHost) -> Result<(), &'static str>,
 {
-    use rustos_abi::driver::msix::MsixBus;
+    use tairix_abi::driver::msix::MsixBus;
 
     let env = PciEnv;
     env.log(cfg.start_msg);
@@ -250,7 +250,7 @@ where
 
     // 4. Walk PCI, map the four virtio register windows, route MSI-X.
     //    The x86_64 architecture port supplies the `PortIo` backend the
-    //    bus driver drives through the `rustos_abi::PortIo` seam.
+    //    bus driver drives through the `tairix_abi::PortIo` seam.
     let bus = mechanism_one(x86_port_io());
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
@@ -263,7 +263,7 @@ where
     let mut transport = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
         let Ok(prov) =
-            rustos_kernel::provision_virtio_pci(&bus, device_id, &mapper, PciTransport::new)
+            tairix_kernel::provision_virtio_pci(&bus, device_id, &mapper, PciTransport::new)
         else {
             env.fail("virtio-PCI provisioning walk");
         };
@@ -346,13 +346,13 @@ macro_rules! define_boot_harness {
 
         static AUDIT_SINK: BootObserverSink = BootObserverSink;
 
-        /// Forward to the shared panic bridge in `rustos_kernel`.
+        /// Forward to the shared panic bridge in `tairix_kernel`.
         #[panic_handler]
         fn virtio_qemu_panic(info: &::core::panic::PanicInfo<'_>) -> ! {
             $crate::handle_panic_via_kernel_core(info)
         }
 
-        /// Boot entry point — the production `rustos-kernel` surface with
+        /// Boot entry point — the production `tairix-kernel` surface with
         /// the audit observer sink in place.
         #[no_mangle]
         pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {

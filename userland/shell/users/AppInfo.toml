@@ -9,7 +9,7 @@
 # CAP_FS_ACCESS exists solely so the short-help switches can read the
 # bundle's own Help/ tree through the secured VFS, which still authorises
 # every path per-inode under the caller's attested identity.
-id = "os.rustos.users"
+id = "os.tairix.users"
 name = "users"
 version = "0.1.0"
 kind = "command"

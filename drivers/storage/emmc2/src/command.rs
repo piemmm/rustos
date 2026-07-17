@@ -5,8 +5,8 @@
 //! geometry the driver reports is derived here from the card's CSD, never
 //! assumed.
 
-use rustos_abi::driver::block::BlockGeometry;
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::DriverError;
 
 use crate::regs;
 

@@ -28,7 +28,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::time::{Duration64, NANOS_PER_SEC};
+use tairix_abi::time::{Duration64, NANOS_PER_SEC};
 
 use crate::addr::IpAddr;
 

@@ -1,8 +1,8 @@
-# rustos-path
+# tairix-path
 
-Shared filesystem path-spelling parser for RustOS (`lib/path`).
+Shared filesystem path-spelling parser for TAIRiX (`lib/path`).
 
-RustOS storage is a forest of named roots, not one global Unix tree, so a path
+TAIRiX storage is a forest of named roots, not one global Unix tree, so a path
 string names its root explicitly. Several components need to turn such a string
 into a structured, validated form — the shell first (`cd`, prompt display, word
 and tilde expansion, completion), and later the file browser and file-management

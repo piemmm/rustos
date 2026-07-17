@@ -1,7 +1,7 @@
-//! elsh (Element Shell) — the default RustOS command interpreter, a POSIX-ish
+//! elsh (Element Shell) — the default TAIRiX command interpreter, a POSIX-ish
 //! shell (Stage 6, `PLAN.md`).
 //!
-//! `rustos-elsh` reads a line of text and runs it: it lexes the line with
+//! `tairix-elsh` reads a line of text and runs it: it lexes the line with
 //! full quoting and escaping, parses pipelines and `;`/`&&`/`||`/`&`
 //! connectors, expands `$`-variables, runs a small set of builtins in-process,
 //! and launches everything else through an injected process host with job
@@ -46,9 +46,9 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`); the only dependencies are the audited `lib/*`
-//! crates `rustos-abi` (for [`Errno`](rustos_abi::Errno) on the host seam),
-//! `rustos-resref` (the one resource-reference spelling parser), and
-//! `rustos-vt` (the shared read line discipline the REPL's line reader
+//! crates `tairix-abi` (for [`Errno`](tairix_abi::Errno) on the host seam),
+//! `tairix-resref` (the one resource-reference spelling parser), and
+//! `tairix-vt` (the shared read line discipline the REPL's line reader
 //! runs), so a userland program never links a kernel or driver crate.
 //! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
 

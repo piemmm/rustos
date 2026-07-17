@@ -1,8 +1,8 @@
-# `rustos-drv-fs-adfs` — Acorn ADFS filesystem driver (read/write)
+# `tairix-drv-fs-adfs` — Acorn ADFS filesystem driver (read/write)
 
 Reads and writes Acorn ADFS / RISC OS `FileCore` volumes behind any
-`rustos_abi::driver::block::Block` device and exposes them through the
-versioned `rustos_abi::driver::filesystem::FilesystemRead`,
+`tairix_abi::driver::block::Block` device and exposes them through the
+versioned `tairix_abi::driver::filesystem::FilesystemRead`,
 `FilesystemWrite`, `FilesystemTimestamps`, `FilesystemAttrs`, and
 `FilesystemStats` traits. The frozen `Filesystem` trait carries only
 `mount`/`unmount`, so each I/O surface is a versioned trait, never a
@@ -36,7 +36,7 @@ hard-disc zone counts are derived from the device size).
 
 Load/exec addresses, the 12-bit filetype, the 40-bit centisecond
 datestamp, and the `FileCore` attribute bits are surfaced as the
-canonical `acorn.*` attribute keys through the shared `rustos_fsmeta`
+canonical `acorn.*` attribute keys through the shared `tairix_fsmeta`
 Acorn preset (`acorn.loadaddr`, `acorn.execaddr`, `acorn.attr`,
 `acorn.filetype`, `acorn.datestamp`), so a copy to `ARXFS` and back is
 byte-exact. `FilesystemTimestamps` reports a typed object's stamp as
@@ -87,7 +87,7 @@ holds for the whole crate.
 
 ## Test surface
 
-`cargo test -p rustos-drv-fs-adfs` formats every variant in memory and
+`cargo test -p tairix-drv-fs-adfs` formats every variant in memory and
 exercises, per variant: format/open round-trips with remount, sorted
 listings and case-insensitive lookups, nested directories, sparse
 writes, truncate grow/shrink/zero, remove with full space reclaim,

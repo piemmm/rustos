@@ -1,8 +1,8 @@
-# rustos-resref
+# tairix-resref
 
-Shared resource-reference parser for RustOS (`lib/resref`).
+Shared resource-reference parser for TAIRiX (`lib/resref`).
 
-RustOS has no `/dev`, `/proc`, or `/sys`. Non-filesystem resources — the random
+TAIRiX has no `/dev`, `/proc`, or `/sys`. Non-filesystem resources — the random
 source, a disk, a serial port, a live metric — are named by typed *resource
 references* such as `sys:random`, `disk:backup@7K2M`, or
 `stats:net/wan/rx.pps?window=1s`. Several components need to turn such a string
@@ -20,7 +20,7 @@ path-versus-reference decision (`classify_target`, with its structural
 half `names_resource_reference` — the one rule that says `sys:random` is a
 reference while `Home:/x`, `./sys:random`, or `foo:bar` stay paths, applied
 by the shell's redirection targets and by the userland runtime's
-open-by-name path, `rustos_rt::File::open`, so every tool's file operands
+open-by-name path, `tairix_rt::File::open`, so every tool's file operands
 accept a reference without tool-side code), and the closed registry views
 (`KnownNamespace::ALL` and
 `well_known_selectors`, the display/completion data the kernel resolver's

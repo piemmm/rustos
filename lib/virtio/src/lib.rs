@@ -1,4 +1,4 @@
-//! RustOS bus-agnostic virtio split-virtqueue protocol.
+//! TAIRiX bus-agnostic virtio split-virtqueue protocol.
 //!
 //! This crate implements the **virtio 1.x split-virtqueue** protocol
 //! one level above any architecture-specific bus seam. It is the
@@ -25,8 +25,8 @@
 //! * [`PackedQueue`] — packed-virtqueue single-ring management
 //!   (virtio 1.1 §2.7).
 //! * [`VirtioHost`] — the DMA-allocation seam (re-exported from
-//!   [`rustos_abi`]); [`MockHost`] is the in-process implementation, and
-//!   `rustos_kernel_virtio::KernelVirtioHost` is the capability-checked
+//!   [`tairix_abi`]); [`MockHost`] is the in-process implementation, and
+//!   `tairix_kernel_virtio::KernelVirtioHost` is the capability-checked
 //!   production host.
 //! * [`DmaSlab`] / [`BounceBuffer`] — owned device-visible memory and
 //!   the zero-on-free staging wrapper.

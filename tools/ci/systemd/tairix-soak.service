@@ -1,0 +1,26 @@
+# systemd service — TAIRiX nightly 24 h soaks (parallel).
+#
+# Runs tools/ci/soak.sh all, which fans every §19.6 fuzz harness, §19.7
+# proptest model, and the §7 repeated-test matrix out into parallel processes
+# sharing one 24 h wall clock. Pair it with tairix-soak.timer.
+#
+# Install (user unit; see tairix-ci.service for the full sequence):
+#
+#   cp tools/ci/systemd/tairix-soak.service ~/.config/systemd/user/
+#   cp tools/ci/systemd/tairix-soak.timer   ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tairix-soak.timer
+#
+# A 24 h soak must not be killed for "taking too long": TimeoutStartSec is
+# disabled. Edit the absolute ExecStart path to match your checkout.
+
+[Unit]
+Description=TAIRiX nightly soaks (fuzz/proptest/test --soak, parallel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+Environment=TAIRIX_CI_SYNC=1
+ExecStart=%h/RustroverProjects/tairix/tools/ci/soak.sh all

@@ -15,13 +15,13 @@ Terminal, das nicht löschen kann (ein unbekanntes `TERM` fällt auf das
 Minimalprofil zurück), lässt den Befehl fehlschlagen, statt Bytes zu
 drucken, die das Terminal als Zeichenmüll darstellen würde.
 
-RustOS-Konsolen führen keinen Verlaufspuffer, es gibt also nichts
+TAIRiX-Konsolen führen keinen Verlaufspuffer, es gibt also nichts
 zurückzuscrollen: `-x` (die GNU-Option, die den Verlauf erhält) wird
 aus Skript-Kompatibilität akzeptiert und ändert nichts.
 
 ## OPTIONS
 
-- `-x` — aus GNU-Kompatibilität akzeptiert; eine RustOS-Konsole führt
+- `-x` — aus GNU-Kompatibilität akzeptiert; eine TAIRiX-Konsole führt
   keinen Verlauf, die Ausgabe ist mit und ohne identisch.
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen.
 

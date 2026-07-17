@@ -10,7 +10,7 @@
 //! the *shared* device-agnostic `load → reload → device round-trip →
 //! unload` lifecycle. Only the per-device tail differs, and even that is
 //! shared across arches: the `virtio_blk_round_trip` / `virtio_net_ping`
-//! tails are generic over the `rustos_virtio::Transport` trait
+//! tails are generic over the `tairix_virtio::Transport` trait
 //! so the PCI and MMIO verticals run identical device code.
 //!
 //! The crate is freestanding-only: every item is gated to a

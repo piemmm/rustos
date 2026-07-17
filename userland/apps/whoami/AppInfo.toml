@@ -7,7 +7,7 @@
 # the secured VFS. The identity read (`self_origin`) and the account
 # directory query it pairs the uid with are both ungated, and the tool
 # reads no input, so it requests no CAP_CONSOLE_READ and nothing else.
-id = "os.rustos.whoami"
+id = "os.tairix.whoami"
 name = "whoami"
 version = "0.1.0"
 kind = "command"

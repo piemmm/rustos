@@ -18,7 +18,7 @@ tynnir `suffix` terfynol hefyd, oni bai mai dyna'r enw cyfan sy'n
 weddill.
 
 Ni ddatgymalir gwreiddyn byth: `basename /` yw `/`, ac — union gyfateb
-fforest storio RustOS — `basename Home:/` yw `Home:/`. Mae gwreiddyn
+fforest storio TAIRiX — `basename Home:/` yw `Home:/`. Mae gwreiddyn
 alias (`Home:/`, `System:/`, …) yn chwarae'n union y rôl y mae `/` yn
 ei chwarae ar systemau POSIX.
 

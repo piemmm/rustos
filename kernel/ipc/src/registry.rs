@@ -6,7 +6,7 @@
 //! value, but nothing yet lets a *sender* or *receiver* reach it by its
 //! [`EndpointId`]. The syscall dispatcher's `ipc_send` / `ipc_recv`
 //! handlers need exactly that lookup: given the endpoint number carried
-//! in an [`rustos_abi::ipc::IpcMessageHeader`], find the kernel-owned
+//! in an [`tairix_abi::ipc::IpcMessageHeader`], find the kernel-owned
 //! [`Port`] to enqueue into or drain from. [`PortRegistry`] is that map.
 //!
 //! # Well-known names
@@ -16,7 +16,7 @@
 //! a stable name instead — the desktop's pointer/keyboard input ports, a
 //! system service — the registry also keeps a name index: an endpoint may
 //! be [`published`](PortRegistry::publish_name) under a validated
-//! [`rustos_abi::ipc::PortName`] and later
+//! [`tairix_abi::ipc::PortName`] and later
 //! [`resolved`](PortRegistry::resolve) back to its [`EndpointId`]. The
 //! index only ever points at a live binding (publishing requires the
 //! endpoint to be registered, and unregistering it withdraws its names),
@@ -25,7 +25,7 @@
 //!
 //! # No interior mutability
 //!
-//! Like [`rustos_kernel_sec::CapTable`], the registry exposes a plain
+//! Like [`tairix_kernel_sec::CapTable`], the registry exposes a plain
 //! `&self` / `&mut self` surface and owns no lock of its own; the
 //! synchronisation policy lives with the kernel's `KernelState`, which
 //! composes the registry with the scheduler and the capability table
@@ -54,7 +54,7 @@
 //! registry is a pure ownership map, mirroring how [`CapTable`] stores
 //! the output of `TaskCapabilities::derive` without re-deriving it.
 //!
-//! [`CapTable`]: rustos_kernel_sec::CapTable
+//! [`CapTable`]: tairix_kernel_sec::CapTable
 
 extern crate alloc;
 
@@ -62,10 +62,10 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use rustos_abi::ipc::PortName;
-use rustos_abi::Errno;
-use rustos_log::{Field, Sink};
-use rustos_util::fmt::format_hex_u64;
+use tairix_abi::ipc::PortName;
+use tairix_abi::Errno;
+use tairix_log::{Field, Sink};
+use tairix_util::fmt::format_hex_u64;
 
 use crate::audit::{record, AuditEvent};
 use crate::port::{EndpointId, Port};
@@ -126,7 +126,7 @@ impl PortRegistry {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "port",
-            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
 
         if self.ports.contains_key(&id) {
@@ -193,7 +193,7 @@ impl PortRegistry {
                 AuditEvent::PortNameWithdrawn,
                 &[Field {
                     key: "name",
-                    value: rustos_log::FieldValue::Str(name.as_str()),
+                    value: tairix_log::FieldValue::Str(name.as_str()),
                 }],
             );
         }
@@ -209,7 +209,7 @@ impl PortRegistry {
             AuditEvent::PortUnregistered,
             &[Field {
                 key: "port",
-                value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+                value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
             }],
         );
         Ok(())
@@ -270,11 +270,11 @@ impl PortRegistry {
         let fields = [
             Field {
                 key: "name",
-                value: rustos_log::FieldValue::Str(name.as_str()),
+                value: tairix_log::FieldValue::Str(name.as_str()),
             },
             Field {
                 key: "port",
-                value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+                value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
             },
         ];
 
@@ -341,7 +341,7 @@ impl PortRegistry {
             AuditEvent::PortNameWithdrawn,
             &[Field {
                 key: "name",
-                value: rustos_log::FieldValue::Str(name.as_str()),
+                value: tairix_log::FieldValue::Str(name.as_str()),
             }],
         );
         Ok(id)
@@ -364,11 +364,11 @@ impl PortRegistry {
 mod tests {
     use super::*;
     use crate::audit::RecordingSink;
-    use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-    use rustos_abi::CapabilityId;
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-    use rustos_kernel_sec::identity::UserId;
+    use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
+    use tairix_abi::CapabilityId;
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
         let mut s = CapabilitySet::empty();

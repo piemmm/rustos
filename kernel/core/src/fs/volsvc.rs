@@ -10,8 +10,8 @@
 //! the [`FilesystemService`](super::FilesystemService); until it is
 //! installed every attach/detach fails closed.
 
-use rustos_abi::volume::{VolumeAttachRequest, VolumeDetachRequest};
-use rustos_abi::Errno;
+use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest};
+use tairix_abi::Errno;
 
 /// The runtime volume attach/detach operations the syscall handlers
 /// delegate to.
@@ -66,7 +66,7 @@ pub static NULL_VOLUME_SERVICE: NullVolumeService = NullVolumeService;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_abi::volume::VolumeFsType;
+    use tairix_abi::volume::VolumeFsType;
 
     #[test]
     fn the_null_service_fails_closed() {

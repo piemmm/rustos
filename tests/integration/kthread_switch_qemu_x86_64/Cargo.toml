@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-kthread-switch-qemu-x86-64"
+name = "tairix-test-kthread-switch-qemu-x86-64"
 description = "SPAWN Stage SP1 QEMU integration test: two kernel-thread tasks ping-pong through the real Arch HAL ContextSwitch::switch under the live kernel/sched scheduler on x86_64. Boots the multiboot kernel, builds a real Scheduler over the production X86_64Arch on the boot CPU, spawns two kthreads via kernel_core::spawn_kthread whose bodies cooperatively yield back and forth, drives the cooperative step loop until both have run N times and exited, and PASSes — making ContextSwitch::switch a production scheduling path on x86_64."
 version.workspace = true
 edition.workspace = true
@@ -15,9 +15,9 @@ workspace = true
 # the live scheduler" integration test — the x86_64 deliverable of
 # `plans/SPAWN.md` Stage SP1, the sibling of
 # `tests/integration/kthread_switch_qemu_{aarch64,riscv64}`. It links the
-# `rustos-kernel-core` kthread runtime, the `rustos-arch-x86_64` port (the
+# `tairix-kernel-core` kthread runtime, the `tairix-arch-x86_64` port (the
 # `sched-arch` feature exposes the production `X86_64Arch` SchedulerArch
-# impl), and the default `rustos-kernel-sched-eevdf` policy (matching
+# impl), and the default `tairix-kernel-sched-eevdf` policy (matching
 # `kernel-core`'s default scheduler feature — selecting a different policy
 # would trip the §17.1 "exactly one policy" guard under feature
 # unification), then drives the cooperative `step` loop over two kthreads
@@ -28,14 +28,14 @@ workspace = true
 # any production build (`AGENTS.md` §5.4.5 — fail closed).
 
 [[bin]]
-name = "rustos-test-kthread-switch-qemu-x86-64"
+name = "tairix-test-kthread-switch-qemu-x86-64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

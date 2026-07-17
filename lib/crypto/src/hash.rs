@@ -4,7 +4,7 @@
 //! fingerprint embedded in every manifest). Streaming is exposed only as the
 //! narrow [`Sha256Stream`] below — added for the kernel's bundle content
 //! digest, which frames many on-disk files through
-//! `rustos_abi::digest_bundle_contents` and must not buffer the whole
+//! `tairix_abi::digest_bundle_contents` and must not buffer the whole
 //! framing in kernel memory — never as a re-export of the upstream
 //! `Default`/`Update`/`Finalize` traits.
 

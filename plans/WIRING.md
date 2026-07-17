@@ -1,6 +1,6 @@
 # WIRING.md — Bringing every architecture port up to x86_64 parity
 
-This is the staged build plan for completing the RustOS architecture
+This is the staged build plan for completing the TAIRiX architecture
 ports. `kernel/arch/x86_64` is the reference port; `kernel/arch/aarch64`,
 `kernel/arch/riscv64`, and `kernel/arch/wasm32` are brought up to **at
 least** the same level, target by target, in manageable increments.
@@ -128,7 +128,7 @@ the burn-down is complete.
   display vertical (W11-B), and the virtio-input vertical (W11-B) landed;
   the aarch64 QEMU matrix is now full. FDT/DTB discovery is host-tested
   via W1/W10 and the W11-A/B verticals embed the canonical `virt` DTB and
-  **parse the full ARM `virt` tree at runtime** through `rustos_fdt::Fdt`
+  **parse the full ARM `virt` tree at runtime** through `tairix_fdt::Fdt`
   (slot `reg`/`interrupts`, `fw_cfg` base) after their EL1 MMU bring-up;
   the embed is centralised and trimmed in W17. The MMU-off SMP verticals
   name the conduit by design (W17 — an FDT walk faults on Device memory
@@ -214,7 +214,7 @@ The gate everything else is measured against.
   vertical already defined in `kernel/arch/api`.
 - Each port grows a `conformance` test that instantiates the suite over
   its real `*Arch` handle (host-buildable slice).
-- **Deliverable:** `cargo test -p rustos-arch-api` runs the suite; each
+- **Deliverable:** `cargo test -p tairix-arch-api` runs the suite; each
   port's host tests run it over their handle. Document the suite in
   `docs/src/architecture/modularity.md`.
 
@@ -222,7 +222,7 @@ The gate everything else is measured against.
 
 **Landed:** `lib/abi::hwtree` (the §18.1 hardware-tree ABI: `HwDeviceClass`,
 `HwMatchKey`, `HwResource` as capability-grant requests, `HwNode`; pinned
-`WIRE_LEN` + generated `rustos_hwtree.h`). `PlatformDiscovery` + its
+`WIRE_LEN` + generated `tairix_hwtree.h`). `PlatformDiscovery` + its
 `platform::conformance` vertical live in `kernel/arch/api` and are folded
 into `conformance::run_all` (now four handles). The shared FDT parser was
 extracted to `lib/fdt` (one parser, §2.2) with a feature-gated DTB fixture;
@@ -301,7 +301,7 @@ platform pages, `AGENTS.md` §17.2, `PLAN.md`.
 
 **Landed:** `tests/integration/irq_qemu_aarch64` is the EL1/SPI analogue
 of `irq_qemu_x86_64`. It binds the PL031 RTC's GICv2 SPI (INTID 34) in a
-kernel-neutral `rustos_kernel_irq::IrqTable`, routes that SPI to CPU 0
+kernel-neutral `tairix_kernel_irq::IrqTable`, routes that SPI to CPU 0
 through the new `gic::route_spi` (`GICD_ITARGETSR`, SPI-only; SGIs/PPIs
 skipped because their target bytes are read-only/banked), installs a
 set-once device-IRQ dispatcher via the new
@@ -411,7 +411,7 @@ window (phys ≠ virt), so it is not host-runnable and its `map_page`/
 `memory_isolation_qemu_*` verticals now build their victim/attacker
 spaces through `AddressSpace::map_page` + `activate` (proven *through the
 HAL*). wasm32 is an honest **n/a** (no page table; sandboxed linear
-memory). `rustos-arch-api` became a non-optional x86_64 dep (the
+memory). `tairix-arch-api` became a non-optional x86_64 dep (the
 always-compiled `paging` slice names it; `sched-arch` now only gates which
 HAL *modules* compile). Docs:
 `docs/src/architecture/modularity.md` (MMU/page-table),
@@ -442,7 +442,7 @@ HAL *modules* compile). Docs:
   and drives one `flush_range`. Shared-memory windows map each buddy chunk
   through that batch path, avoiding one serial barrier sequence per 4 KiB
   display-buffer page. All consumer
-  generics (`kernel/{sec,virtio,core}`, `rustos-kernel`) and the six
+  generics (`kernel/{sec,virtio,core}`, `tairix-kernel`) and the six
   `{spawn,c}_program_qemu_*` integration crates renamed onto `PageTable`;
   the per-test `*UserPageTable` adapters were deleted (the ports' real
   `paging::AddressSpace` now implements the HAL traits directly).
@@ -574,7 +574,7 @@ W6 SMP/IPI primitives are reused.
   CPU, 60 s, QEMU-green): the EL1/GICv2 analogue of
   `sched_drive_qemu_riscv64`. On the `virt` board it (1) performs a real
   bidirectional `context::switch` round-trip with interrupts disabled,
-  (2) builds a real `rustos-kernel-sched-mlfq::Scheduler` over
+  (2) builds a real `tairix-kernel-sched-mlfq::Scheduler` over
   `Aarch64Arch`, publishes it, and installs both the `preempt`
   generic-timer callback and the GICv2 IPI (SGI) callback so each drives
   `Scheduler::on_timer_tick`, then (3) brings up the EL1 vectors + GICv2,
@@ -605,16 +605,16 @@ slice remains a future §17.2 decision for all three.
 - **`kernel/arch/wasm32::smp`** (new, +host tests): the wasm32 analogue
   of riscv64's SBI HSM / aarch64's PSCI bring-up. `start_worker(n)`
   range-checks `1..MAX_WORKERS`, fails closed (`StartWorkerError`), and
-  asks the host (`rustos_host_start_worker`, new `bindings` import) to
+  asks the host (`tairix_host_start_worker`, new `bindings` import) to
   spawn a real Web Worker that instantiates the same module as logical
   CPU `n`; `current_worker` recovers the running context's id. The host
   spawn is wasm-gated with a counter substitute so the range/decode logic
   is unit-tested under `cargo test`.
-- **Host loader (`web/rustos.js`) + `web/worker.js`** (new): the loader
+- **Host loader (`web/tairix.js`) + `web/worker.js`** (new): the loader
   gained shared `instantiate`/`runWorker`, a main-thread `boot` that
-  spawns module Web Workers on `rustos_host_start_worker`, and a
-  `MessageChannel` IPI hub (`rustos_host_post_ipi` → the target's
-  `rustos_arch_wasm32_on_message`; worker→worker routed via the main
+  spawns module Web Workers on `tairix_host_start_worker`, and a
+  `MessageChannel` IPI hub (`tairix_host_post_ipi` → the target's
+  `tairix_arch_wasm32_on_message`; worker→worker routed via the main
   thread). A worker has no `requestAnimationFrame`, so it drives its
   cooperative tick from `setTimeout` — the kernel `request_frame` is
   unchanged.
@@ -653,7 +653,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   applies `csdb` (Spectre-v1) and declares the MDS buffer flush
   `NotVulnerable` (Intel-only), with KPTI + the MIDR-specific Spectre-v2
   sequence `Pending`. riscv64 emits a conservative memory `fence` and is
-  release-ready: the in-order cores RustOS targets (QEMU `virt`, SiFive
+  release-ready: the in-order cores TAIRiX targets (QEMU `virt`, SiFive
   U54/U74) do not speculate past a fault or mispredict, so the Meltdown /
   MDS / Spectre-v2 controls are justified no-ops — `fence.i`/`sfence.vma`
   *speculation* sequencing is not needed on in-order silicon and is
@@ -676,8 +676,8 @@ stricter `is_release_ready` gate rejects any `Pending`.
   down where a port `enforces_uaf_in_hardware()` (no Tier-1 port does
   yet), so `Slab::new` keeps it enabled on all four targets.
 - **Deliverable met:** the §19.1 + §19.10 conformance verticals pass on
-  every port (`cargo test -p rustos-arch-{x86_64,aarch64,riscv64,wasm32}`
-  + `-p rustos-kernel-mem` green); profiles are honest. Docs:
+  every port (`cargo test -p tairix-arch-{x86_64,aarch64,riscv64,wasm32}`
+  + `-p tairix-kernel-mem` green); profiles are honest. Docs:
   `docs/src/security/side_channels.md`, `docs/src/security/memory_tagging.md`,
   platform pages, `PLAN.md` §19 items 8 & 13, this file.
 - **Carried forward (Stage-6-blocked, "[DO IMMEDIATELY ON UNBLOCK]"):**
@@ -713,7 +713,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   (`classify_from_fdt_reports_big_little_cores`) and the homogeneous
   default everywhere else; the shared HAL conformance vertical
   (`core_class_is_total`, run by every port via `run_all`) asserts
-  totality. `cargo test -p rustos-arch-aarch64 -p rustos-fdt` green.
+  totality. `cargo test -p tairix-arch-aarch64 -p tairix-fdt` green.
   Docs: `docs/src/platform/aarch64.md`, `PLAN.md`, this file.
 
 ### Stage W11 — QEMU vertical parity sweep (drivers on aarch64)
@@ -754,9 +754,9 @@ stricter `is_release_ready` gate rejects any `Pending`.
 - **Display (landed).** aarch64 now runs the `ramfb`/framebuffer display
   vertical, the EL1/GICv2 analogue of `framebuffer_display_qemu_riscv64`:
   `tests/integration/framebuffer_display_qemu_aarch64`
-  (`rustos-test-framebuffer-display-qemu-aarch64`) programs QEMU's `ramfb`
+  (`tairix-test-framebuffer-display-qemu-aarch64`) programs QEMU's `ramfb`
   over `fw_cfg`, assembles the geometry as a `FramebufferConfig`, loads
-  the signed framebuffer `.rxe` through `rustos_drvhost::Host`, and drives
+  the signed framebuffer `.rxe` through `tairix_drvhost::Host`, and drives
   `load → use → unload → reload` (mapping the surface through the
   capability-gated `KernelMmioMapper` and reading the presented pixels
   back through an independent window). QEMU-green and enrolled in
@@ -767,7 +767,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   as `AArch64QemuEnv`), reused by both the virtio scenario and the display
   vertical. The `fw_cfg` MMIO transport (`MmioDma`) is byte-identical on
   the riscv64 and aarch64 `virt` boards, so it was moved into the shared
-  `lib/fwcfg` crate (`rustos-fwcfg`) and now serves both display verticals (the
+  `lib/fwcfg` crate (`tairix-fwcfg`) and now serves both display verticals (the
   riscv64 vertical's local copy was deleted); only the x86_64 IOport
   transport stays distinct. The display driver lifecycle is the per-arch
   sibling of the riscv64/x86_64 display scenarios (the established
@@ -775,12 +775,12 @@ stricter `is_release_ready` gate rejects any `Pending`.
 - **Input (landed).** aarch64 now runs the virtio-input vertical, the
   `virt`-board analogue of the x86 PS/2 vertical, filling the `input` row
   of the §1 QEMU matrix: `tests/integration/input_virtio_mmio_qemu_aarch64`
-  (`rustos-test-input-virtio-mmio-qemu-aarch64`) reuses the same
+  (`tairix-test-input-virtio-mmio-qemu-aarch64`) reuses the same
   `bring_up_el1_identity_mmu` + embedded-DTB path, builds the virtio-MMIO
   transport, arms the GICv2 SPI, loads the signed virtio-input `.rxe`, and
   drives `load → use → unload → reload`. Enrolled with `keyboard: Some(..)`.
 - **New driver + shared tail (§2.2).** `drivers/input/virtio_input`
-  (`rustos-drv-input-virtio-input`) implements the `Input` trait over the
+  (`tairix-drv-input-virtio-input`) implements the `Input` trait over the
   bus-agnostic `lib/virtio` transport; the device round-trip tail
   `virtio_input_keypress` lives in the shared `virtio_qemu_support` crate,
   so a riscv64 MMIO sibling is a thin new bin. The driver **pre-posts a
@@ -794,7 +794,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   marker sends `sendkey` over a private-socket QEMU monitor, holding that
   connection open until the run ends (a readline monitor drops a command
   on early disconnect). A `--virtio-keyboard <marker> <key>` flag exposes
-  the same on `rustos-qemu-run`.
+  the same on `tairix-qemu-run`.
 - **Verified:** the display and input verticals exit `0` under
   `qemu-system-aarch64 -M virt` (the `cargo xtask test --qemu` enrolment
   path). Docs: `docs/src/platform/aarch64.md`, `docs/src/drivers/display.md`,
@@ -810,13 +810,13 @@ is now full.
 
 - **New vertical, thin by design (§2.2).**
   `tests/integration/input_virtio_mmio_qemu_riscv64`
-  (`rustos-test-input-virtio-mmio-qemu-riscv64`) reuses the exact
+  (`tairix-test-input-virtio-mmio-qemu-riscv64`) reuses the exact
   `imp_mmio` bring-up the riscv64 blk/net verticals run (DTB virtio-MMIO
   walk, `CAP_MMIO_MAP`-gated `MmioTransport`, PLIC source + S-mode trap
   dispatch, `KernelVirtioHost`), then loads the signed virtio-input `.rxe`
   and drives `load → use → unload → reload`. It differs from the net
   sibling only in the device id (`18`, virtio-input) and the resolver
-  binding the image to `rustos_drv_input_virtio_input::register`; the
+  binding the image to `tairix_drv_input_virtio_input::register`; the
   `virtio_input_keypress` key-decode tail is the same shared
   `virtio_qemu_support` code the aarch64 vertical runs. No new driver and
   no new shared scaffolding were needed — the W11-B work left this a thin
@@ -826,11 +826,11 @@ is now full.
   QEMU monitor held open until run end) is architecture-neutral; the only
   riscv64 runner change is the `virtio-keyboard-device` attach in the
   riscv64 argv builder (`tools/qemu/src/riscv64.rs`), with matching argv
-  unit tests. The same `rustos-qemu-run --arch riscv64 --virtio-keyboard
+  unit tests. The same `tairix-qemu-run --arch riscv64 --virtio-keyboard
   <marker> <key>` flag drives it by hand.
 - **Verified:** the bin exits `0` under `qemu-system-riscv64 -M virt`
   (the `cargo xtask test --qemu` enrolment path; also reproducible via
-  `rustos-qemu-run --arch riscv64 --virtio-keyboard "<marker>" a`). Docs:
+  `tairix-qemu-run --arch riscv64 --virtio-keyboard "<marker>" a`). Docs:
   `docs/src/platform/riscv64.md`, `docs/src/drivers/input.md`, the
   virtio-input driver `README.md`, `PLAN.md`, this file.
 
@@ -863,13 +863,13 @@ is deleted.
   `drivers/bus/mmio` (`enumerate`/`lib`/`tests`) and the verticals
   `virtio_qemu_support` (`imp_mmio` riscv64 PLIC + `imp_mmio_aarch64`
   GICv2 SPI), `fwcfg`, and `framebuffer_display_qemu_{aarch64,riscv64}`
-  now parse through `rustos_fdt::Fdt`; their `rustos-util` dependency was
-  swapped for `rustos-fdt`. `lib/util/src/dtb.rs` and `pub mod dtb` are
+  now parse through `tairix_fdt::Fdt`; their `tairix-util` dependency was
+  swapped for `tairix-fdt`. `lib/util/src/dtb.rs` and `pub mod dtb` are
   removed (`lib/util` retains only `fmt`). The aarch64 IPI/SMP vertical's
   named `hvc` conduit is unaffected — that is QEMU's no-DTB-pointer ELF
   boot, not a parser gap, and the production path already discovers the
   conduit through `lib/fdt`.
-- **Verified:** `lib/fdt` (17) and `rustos-drv-bus-mmio` (13) host tests
+- **Verified:** `lib/fdt` (17) and `tairix-drv-bus-mmio` (13) host tests
   pass; every migrated vertical compiles for `aarch64-unknown-none` and
   `riscv64gc-unknown-none-elf` (the `itest_*` cfgs under which the code is
   active). Docs: `docs/src/drivers/bus.md`, `lib/util` crate docs, `PLAN.md`,
@@ -1005,7 +1005,7 @@ the bring-up surface the tests exercise matches the one the kernel uses.
   off-trait by design, §2.4) and imports `SecondaryBringup`. No new HAL
   surface, no `lib/abi` change → no ABI / C-header drift.
 - **Verified:** `ipi_smp_qemu_{riscv64,aarch64}` exit `0` under
-  `rustos-qemu-run --cpus 2`; the wasm32 browser harness reports
+  `tairix-qemu-run --cpus 2`; the wasm32 browser harness reports
   `WORKER_OK=true IPI_RECV=true PASS`; whole-project `cargo fmt --all
   --check`, `cargo xtask ci`, `cargo xtask fuzz --secs 5`, and
   `tools/ci/soak.sh both --secs 10` are all green. Docs:
@@ -1019,9 +1019,9 @@ adds the browser analogue of `framebuffer_display_qemu_{riscv64,aarch64}`
 so every Tier-1 target now exercises the signed framebuffer-driver
 lifecycle end-to-end against a real display surface.
 
-- **New host import (`rustos_host_present_framebuffer`).** One import
+- **New host import (`tairix_host_present_framebuffer`).** One import
   added to `kernel/arch/wasm32/src/bindings.rs` (+ safe wrapper
-  `host_present_framebuffer`) and supplied by `web/rustos.js`
+  `host_present_framebuffer`) and supplied by `web/tairix.js`
   (`makeEnv` + a `boot`/`runWorker` `presentFramebuffer` ctx hook,
   defaulting to a headless no-op). It is the wasm32 scan-out analogue of
   a bare-metal port reading its framebuffer back through an independent
@@ -1031,7 +1031,7 @@ lifecycle end-to-end against a real display surface.
 - **New vertical (`tests/integration/framebuffer_display_wasm32`).** A
   `cdylib` (host build inert, like the bare-metal stubs) that, on the
   boot context: loads the build-time signed framebuffer `.rxe` through
-  `rustos_drvhost::Host` (the §8 gate) and drives `load → use → unload →
+  `tairix_drvhost::Host` (the §8 gate) and drives `load → use → unload →
   reload`. "Use" maps the surface through a capability-checked
   `WasmMmioMapper` (the wasm32 MMU-less analogue of `KernelMmioMapper` —
   a bounds- + `CAP_MMIO_MAP`-gated view of the one in-memory surface) and
@@ -1065,7 +1065,7 @@ DTB-embedding device verticals had grown.
 - **The note was stale.** W12 gave `lib/fdt` the full `virt`-tree node
   API, and the W11 device verticals (`virtio_blk/net_mmio_aarch64`,
   `framebuffer_display`, `input_virtio_mmio`) already **parse the full ARM
-  `virt` tree at runtime** through `rustos_fdt::Fdt` (e.g.
+  `virt` tree at runtime** through `tairix_fdt::Fdt` (e.g.
   `device_spi_number` walks `virtio,mmio` `reg`/`interrupts`; the display
   vertical reads the `fw_cfg` base) — after their EL1 identity-MMU
   bring-up. So runtime full-tree parsing on aarch64 is already proven;
@@ -1087,16 +1087,16 @@ DTB-embedding device verticals had grown.
   (`fdt::psci_method`) stays host-tested + conformance-gated (W1).
 - **§2.2 consolidation that did land.** The four aarch64 device build
   scripts had four byte-identical `dump_virt_dtb` copies. They now reuse a
-  single build-glue helper, `rustos_itest_harness::dump_aarch64_virt_dtb`
+  single build-glue helper, `tairix_itest_harness::dump_aarch64_virt_dtb`
   (with the unit-testable `dump_virt_dtb_args`), so the
   `qemu ... dumpdtb` invocation lives in one audited place.
 - **Trimmed embed (image size).** `dumpdtb` pads the blob to the
   machine's 1 MiB device-tree region; `trim_fdt_to_extent` now trims it to
   the extent its FDT header describes and rewrites `totalsize`, so each
   device vertical embeds the few-KiB meaningful tree instead of ~1 MiB of
-  zero padding. The trimmed blob stays a valid FDT (`rustos_fdt::Fdt::new`
+  zero padding. The trimmed blob stays a valid FDT (`tairix_fdt::Fdt::new`
   validates against the buffer length, not `totalsize`), proven by a
-  harness round-trip unit test over the shared `rustos_fdt::fixture`
+  harness round-trip unit test over the shared `tairix_fdt::fixture`
   builder and by the device verticals parsing it at runtime.
 - **Verified:** the four migrated aarch64 device verticals build
   freestanding; `framebuffer_display_qemu_aarch64` (ramfb) and
@@ -1135,7 +1135,7 @@ A single QEMU bin can be iterated directly:
 
 ```
 cargo build -p <pkg> --target <triple>
-cargo run -q -p rustos-qemu --bin rustos-qemu-run -- \
+cargo run -q -p tairix-qemu --bin tairix-qemu-run -- \
     --kernel target/<triple>/debug/<bin> --arch <arch> --cpus 2 --timeout-secs 60
 ```
 

@@ -1,7 +1,7 @@
 //! x86_64 legacy port-I/O implementation of the Arch HAL port-I/O seam.
 //!
 //! This is the single in-tree implementor of the
-//! [`rustos_abi::PortIo`](rustos_abi::driver::port_io::PortIo) seam. It encapsulates the `in`/`out`
+//! [`tairix_abi::PortIo`](tairix_abi::driver::port_io::PortIo) seam. It encapsulates the `in`/`out`
 //! instructions — the only way to reach the legacy PCI configuration
 //! ports `0xCF8`/`0xCFC` (PCI Local Bus 3.0 §3.2.2.3.2) — behind the safe
 //! trait so the `lib/pci` PCI mechanism consumes it without naming
@@ -9,7 +9,7 @@
 //! own. The bus driver receives an `X86PortIo` by value from the ring-0
 //! bring-up path and reaches it only through `&dyn PortIo`.
 
-use rustos_abi::driver::port_io::{PortIo, PortIo8};
+use tairix_abi::driver::port_io::{PortIo, PortIo8};
 
 /// Zero-sized x86_64 port-I/O backend.
 ///
@@ -21,7 +21,7 @@ pub struct X86PortIo;
 
 /// Construct the x86_64 port-I/O backend for the PCI bus driver.
 ///
-/// The result is handed to `rustos_pci::mechanism_one` so the
+/// The result is handed to `tairix_pci::mechanism_one` so the
 /// bus driver can issue PCI configuration accesses through the
 /// [`PortIo`] seam without depending on this crate.
 #[must_use]

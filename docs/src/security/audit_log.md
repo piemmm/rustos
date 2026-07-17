@@ -5,7 +5,7 @@ The append-only security log under `/System/Logs` is **tamper-evident**
 must not be able to alter, reorder, or delete an existing entry without
 the change being detectable. This page documents the cryptographic
 backbone that delivers that property — the `chain` module of
-[`rustos-log`](../lib/log.md).
+[`tairix-log`](../lib/log.md).
 
 ## Threat
 
@@ -73,14 +73,14 @@ This module is the cryptographic core only. The following §19.4
 requirements build on it and are tracked in the `PLAN.md` "§19 Threat
 Model and Hardening Burn-down":
 
-* **Persistence.** The on-disk container is implemented: `rustos_log`'s
+* **Persistence.** The on-disk container is implemented: `tairix_log`'s
   `segment` module frames chained records into self-verifying,
   optionally-sealed segments (`SegmentWriter` / `SegmentReader` /
   `verify_segment`). Wiring a userland journal service to write those
   segments to `/System/Logs` is the remaining step.
 * **Signed anchors.** Periodically signing the chain root into
   `/System/Logs/Anchors/` depends on a private-key signing API from the
-  Stage 2 capability authority (`rustos-crypto` today exposes
+  Stage 2 capability authority (`tairix-crypto` today exposes
   verification only).
 * **`CAP_LOG_WRITE` partitioning.** Partitioning write authority per
   service, and gating truncation behind `CAP_LOG_ROTATE`, depends on the

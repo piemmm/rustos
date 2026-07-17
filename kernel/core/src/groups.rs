@@ -7,17 +7,17 @@
 //! that registry: given the live [`FilesystemRead`] + [`FilesystemSecurity`]
 //! driver of the mounted root volume, it resolves [`GROUPS_DB_PATH`] through
 //! the permission-checked per-inode delegation, bounds the file against
-//! [`rustos_users::MAX_GROUPS_DB_LEN`] *before* reading it, and parses the
-//! bytes through the fail-closed [`rustos_users::GroupsDb`] parser. The
+//! [`tairix_users::MAX_GROUPS_DB_LEN`] *before* reading it, and parses the
+//! bytes through the fail-closed [`tairix_users::GroupsDb`] parser. The
 //! bounded `uid 0` read is the one shared with [`crate::users`]
 //! (`crate::fs`'s bootstrap-file reader), so neither file copies it.
 //!
 //! [`build_identity_table`] is the **merge** of the two identity halves
 //! into the in-kernel [`IdentityTable`]: the compiled-in system identity
-//! (`rustos_users::system_accounts` / `system_groups` — kernel policy,
+//! (`tairix_users::system_accounts` / `system_groups` — kernel policy,
 //! tamper-proof as the kernel text, never read from a volume) plus the
-//! on-disk human records. It pushes one [`rustos_kernel_sec::GroupRecord`]
-//! per group and one [`rustos_kernel_sec::UserRecord`] per user — carrying
+//! on-disk human records. It pushes one [`tairix_kernel_sec::GroupRecord`]
+//! per group and one [`tairix_kernel_sec::UserRecord`] per user — carrying
 //! only the `(uid, primary gid, supplementary gids, capability grants)`
 //! the kernel consults, never any password material — and runs the
 //! verifying [`IdentityTableBuilder`], which fails closed if a user
@@ -31,7 +31,7 @@
 //! band-violating record rejects the whole registry (fail closed, audited
 //! with a stable cause), so a tampered or misprovisioned volume can never
 //! shadow, widen, or displace a system identity. The verifier emits the
-//! single [`rustos_kernel_sec::AuditEvent`] outcome record.
+//! single [`tairix_kernel_sec::AuditEvent`] outcome record.
 //!
 //! [`system_identity_table`] builds the compiled halves alone — the table
 //! every boot installs before any volume exists, so spawn-as-user and
@@ -44,17 +44,17 @@
 //! read installs no identity table and the filesystem path resolves no caller
 //! groups rather than inventing them (fail closed).
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
-use rustos_abi::Errno;
-use rustos_kernel_sec::{
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
+use tairix_abi::Errno;
+use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
 };
-use rustos_log::{Field, Level, Sink};
-use rustos_users::{
+use tairix_log::{Field, Level, Sink};
+use tairix_users::{
     is_system_account_name, is_system_group_name, GroupsDb, IdRange, ParseError, UsersDb,
     MAX_GROUPS_DB_LEN, STORAGE_GID, STORAGE_GROUP,
 };
-use rustos_util::fmt::format_usize;
+use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
 use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
@@ -151,7 +151,7 @@ where
 /// the verifying [`IdentityTableBuilder`]. The verifier enforces
 /// referential integrity — a user referencing a group with no registry
 /// record fails the build — and uniqueness, and emits the single
-/// [`rustos_kernel_sec::AuditEvent`] outcome record.
+/// [`tairix_kernel_sec::AuditEvent`] outcome record.
 ///
 /// # Errors
 ///
@@ -237,8 +237,8 @@ fn system_identity_builder(audit: &dyn Sink) -> Result<IdentityTableBuilder, Err
     // tests); a failure is surfaced fail-closed as a malformed-identity
     // refusal rather than panicked over.
     let (Ok(accounts), Ok(groups)) = (
-        rustos_users::system_accounts(),
-        rustos_users::system_groups(),
+        tairix_users::system_accounts(),
+        tairix_users::system_groups(),
     ) else {
         audit_reserved(audit, AuditEvent::UsersDbRejected, "<compiled>");
         return Err(Errno::BadMagic);
@@ -274,11 +274,11 @@ fn audit_reserved(audit: &dyn Sink, event: AuditEvent, path: &'static str) {
         &[
             Field {
                 key: "path",
-                value: rustos_log::FieldValue::Str(path),
+                value: tairix_log::FieldValue::Str(path),
             },
             Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str("reserved_identity"),
+                value: tairix_log::FieldValue::Str("reserved_identity"),
             },
         ],
     );
@@ -299,11 +299,11 @@ fn audit_load(audit: &dyn Sink, records: Option<usize>, err: Option<GroupsLoadEr
             &[
                 Field {
                     key: "path",
-                    value: rustos_log::FieldValue::Str(GROUPS_DB_PATH),
+                    value: tairix_log::FieldValue::Str(GROUPS_DB_PATH),
                 },
                 Field {
                     key: "records",
-                    value: rustos_log::FieldValue::Str(records),
+                    value: tairix_log::FieldValue::Str(records),
                 },
             ],
         );
@@ -315,11 +315,11 @@ fn audit_load(audit: &dyn Sink, records: Option<usize>, err: Option<GroupsLoadEr
             &[
                 Field {
                     key: "path",
-                    value: rustos_log::FieldValue::Str(GROUPS_DB_PATH),
+                    value: tairix_log::FieldValue::Str(GROUPS_DB_PATH),
                 },
                 Field {
                     key: "cause",
-                    value: rustos_log::FieldValue::Str(err.cause()),
+                    value: tairix_log::FieldValue::Str(err.cause()),
                 },
             ],
         );

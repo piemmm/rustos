@@ -1,5 +1,5 @@
 //! `plans/APPS.md` "Immediate work" I2/I3 QEMU integration test: boot the
-//! *production* aarch64 `rustos-kernel` pipeline on the `virt` board with
+//! *production* aarch64 `tairix-kernel` pipeline on the `virt` board with
 //! the planted whole-disk encrypted-root image, log in as the seeded `root`
 //! account, and prove — with a **numeric** `KernelMemoryStats.free_bytes`
 //! comparison on the live system — that the per-cycle process footprint is
@@ -22,7 +22,7 @@
 //! requests `CAP_SYSINFO_KERNEL` for the memory query; sysinfod enforces it
 //! against the kernel-attested origin).
 //!
-//! The fixture (`rustos-test-memsoak`) then soaks the live system: warmup
+//! The fixture (`tairix-test-memsoak`) then soaks the live system: warmup
 //! cycles pay every once-per-boot cost, a baseline
 //! `KERNEL_MEMORY_STATS.free_bytes` is sampled through sysinfod, and each
 //! of the measured cycles spawns and reaps a `true.app` child (the full
@@ -31,7 +31,7 @@
 //! bound elapses (the `top -d0` refresh park), walks the self-scoped
 //! process list, and rides a live sysinfod IPC round trip. The final sample
 //! must equal the baseline **exactly**; the strict verdict is the
-//! host-tested `rustos_test_memsoak::verdict`.
+//! host-tested `tairix_test_memsoak::verdict`.
 //!
 //! ## Why the PASS keys on the fixture's exit *then* the shell's exit
 //!
@@ -78,11 +78,11 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::aarch64::boot as boot_aarch64;
-    use rustos_log::{Event, EventId, FieldValue, Sink};
-    use rustos_test_memsoak::COMMAND;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel::aarch64::boot as boot_aarch64;
+    use tairix_log::{Event, EventId, FieldValue, Sink};
+    use tairix_test_memsoak::COMMAND;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -159,12 +159,12 @@ mod kernel {
     /// finisher parks the CPU, the run times out, and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
-    fn rustos_memsoak_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_memsoak_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt`
     /// blob's address is forwarded to the production boot pipeline with the
@@ -179,8 +179,8 @@ mod kernel {
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; this observer counts it, so boot
             // with the filter lowered.
-            rustos_log::Level::Debug,
-            &rustos_kernel::hwtree_store::HW_TREE_SOURCE,
+            tairix_log::Level::Debug,
+            &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
         )
     }
 }

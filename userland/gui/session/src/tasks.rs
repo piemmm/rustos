@@ -1,7 +1,7 @@
 //! Keeping the taskbar's running-task list in step with the window stack.
 //!
 //! The taskbar models a running-task list — one
-//! [`TaskEntry`](rustos_taskbar::TaskEntry) per top-level window, with the
+//! [`TaskEntry`](tairix_taskbar::TaskEntry) per top-level window, with the
 //! click-to-activate / minimise rule — but it owns no window
 //! manager, and the window manager owns no task list. So
 //! joining the two is session glue, and [`TaskBridge`] is that glue.
@@ -32,8 +32,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_taskbar::{ActivateOutcome, TaskId, Taskbar};
-use rustos_wm::{Compositor, Point, Surface, WindowId};
+use tairix_taskbar::{ActivateOutcome, TaskId, Taskbar};
+use tairix_wm::{Compositor, Point, Surface, WindowId};
 
 use crate::input::SessionInputRouter;
 

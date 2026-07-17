@@ -14,14 +14,14 @@
 extern crate std;
 
 use super::*;
-use rustos_abi::driver::block::BlockGeometry;
-use rustos_abi::DriverKind;
+use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::DriverKind;
 
 const SECTOR_SIZE: usize = 512;
 const SECTOR_COUNT: u32 = 16;
 const IMG_LEN: usize = SECTOR_SIZE * (SECTOR_COUNT as usize);
 
-const HELLO_BODY: &[u8] = b"Hello, RustOS FAT32!\n";
+const HELLO_BODY: &[u8] = b"Hello, TAIRiX FAT32!\n";
 const DEEP_LEN: usize = 700;
 
 const CLUSTER_ROOT: u32 = 2;
@@ -968,7 +968,7 @@ mod format {
     fn format_lays_out_fsinfo_and_the_backup_boot_pair() {
         // Regression: the formatter used to leave BPB offsets 48/50 zero
         // and write no FSInfo structure at all — a format-conformance
-        // defect that also left a RustOS-formatted volume without the
+        // defect that also left a TAIRiX-formatted volume without the
         // mutation-evidence window the verified re-insert path compares
         // (`plans/DEVICES.md` D4c).
         let fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
@@ -998,7 +998,7 @@ mod format {
         // The formatted head now declares an evidence window covering the
         // boot sector through FSInfo.
         assert_eq!(
-            rustos_fsprobe::evidence_len(&image.store[..rustos_fsprobe::PROBE_HEAD_LEN]),
+            tairix_fsprobe::evidence_len(&image.store[..tairix_fsprobe::PROBE_HEAD_LEN]),
             Some(((fsinfo_sector as u64) + 1) * 512)
         );
     }
@@ -1010,7 +1010,7 @@ mod format {
             let root = fs.root();
             fs.create(root, b"Notes.txt", NodeKind::RegularFile)
                 .expect("create file");
-            fs.write_at(root, b"Notes.txt", 0, b"formatted on RustOS")
+            fs.write_at(root, b"Notes.txt", 0, b"formatted on TAIRiX")
                 .expect("write file");
             let dir = fs
                 .create(root, b"Folder", NodeKind::Directory)
@@ -1028,7 +1028,7 @@ mod format {
         let file = fs.lookup(root, b"Notes.txt").expect("file present");
         let mut buf = [0u8; 32];
         let n = fs.read_at(file, 0, &mut buf).expect("read file");
-        assert_eq!(&buf[..n], b"formatted on RustOS");
+        assert_eq!(&buf[..n], b"formatted on TAIRiX");
 
         let dir = fs.lookup(root, b"Folder").expect("dir present");
         let nested = fs.lookup(dir, b"inner.bin").expect("nested present");

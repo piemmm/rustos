@@ -4,10 +4,10 @@ use core::fmt;
 
 use alloc::string::String;
 
-use rustos_abi::Errno;
-use rustos_help::{LoadError, NameError};
-use rustos_sandbox::helpdoc::{HelpRefusal, HelpRenderFailure};
-use rustos_sandbox::host::SandboxError;
+use tairix_abi::Errno;
+use tairix_help::{LoadError, NameError};
+use tairix_sandbox::helpdoc::{HelpRefusal, HelpRenderFailure};
+use tairix_sandbox::host::SandboxError;
 
 /// Why a `man` invocation failed.
 ///

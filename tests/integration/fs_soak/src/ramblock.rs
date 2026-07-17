@@ -1,7 +1,7 @@
 //! A `Vec`-backed [`Block`] device for the in-RAM soak.
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::DriverError;
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::DriverError;
 
 use crate::SECTOR_BYTES;
 

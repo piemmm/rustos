@@ -1,4 +1,4 @@
-# `rustos-mkdir` — make directories
+# `tairix-mkdir` — make directories
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/mkdir.app/` so the shell resolves the bare
@@ -17,14 +17,14 @@ mode-set kernel work `chmod` is staged on (`plans/APPS.md` §12.1
 Stage B) — never as a stub that silently ignores its argument.
 
 The `-p` ancestor walk spells each prefix through the shared path
-grammar's own rule (`rustos_path::Path::prefix`), so an alias-rooted
+grammar's own rule (`tairix_path::Path::prefix`), so an alias-rooted
 operand (`Home:/tools/bin`) walks correctly and the tool carries no
 second path parser; an operand the grammar cannot parse is handed to the
 kernel whole, which stays the one validator.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `rustos-abi`, `rustos-path`, and `rustos-help` crates, so it never
+shared `tairix-abi`, `tairix-path`, and `tairix-help` crates, so it never
 links a kernel or driver crate. Its manifest (`AppInfo.toml`) requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every creation per-inode under the

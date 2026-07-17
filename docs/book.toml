@@ -1,7 +1,7 @@
 [book]
-title = "RustOS"
-description = "Architecture, security model, and platform reference for RustOS."
-authors = ["The RustOS Authors"]
+title = "TAIRiX"
+description = "Architecture, security model, and platform reference for TAIRiX."
+authors = ["The TAIRiX Authors"]
 src = "src"
 language = "en"
 
@@ -12,8 +12,8 @@ create-missing = false
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/rustos-project/rustos"
-edit-url-template = "https://github.com/rustos-project/rustos/edit/main/docs/{path}"
+git-repository-url = "https://github.com/tairix-project/tairix"
+edit-url-template = "https://github.com/tairix-project/tairix/edit/main/docs/{path}"
 mathjax-support = false
 
 # Link checking is performed by `cargo xtask docs-check` itself rather than

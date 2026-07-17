@@ -7,7 +7,7 @@
 //! online CPU and have each one run `invlpg` for the affected page —
 //! the classic inter-processor "TLB shootdown". This module owns that
 //! protocol; `crate::kernel_arch::X86_64Arch` implements
-//! [`rustos_arch_api::CrossCpuTlbShootdown`] over it.
+//! [`tairix_arch_api::CrossCpuTlbShootdown`] over it.
 //!
 //! # Protocol
 //!
@@ -23,7 +23,7 @@
 //! 5. spins until every interrupted CPU has acknowledged (the count
 //!    reaches zero), then releases the lock.
 //!
-//! Each interrupted CPU runs `rustos_arch_x86_64_tlb_shootdown_dispatch`
+//! Each interrupted CPU runs `tairix_arch_x86_64_tlb_shootdown_dispatch`
 //! from the ISR: it reads the published address, runs `invlpg`, writes
 //! the LAPIC end-of-interrupt, and decrements the acknowledge count.
 //!
@@ -181,7 +181,7 @@ fn invlpg(vaddr: u64) {
 /// in-service bit is set for [`TLB_SHOOTDOWN_VECTOR`].
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut SavedRegs) {
+unsafe extern "C" fn tairix_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut SavedRegs) {
     // `Acquire` pairs with the initiator's `Release` store of `pending`,
     // which is published after `vaddr`, so the address read here is the
     // current one.
@@ -209,13 +209,13 @@ unsafe extern "C" fn rustos_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut Saved
 
 // Emit the ISR stub the IDT vector points at (gated to the freestanding
 // target by the macro, exactly like the timer ISR).
-crate::define_isr!(rustos_arch_x86_64_isr_tlb_shootdown => rustos_arch_x86_64_tlb_shootdown_dispatch);
+crate::define_isr!(tairix_arch_x86_64_isr_tlb_shootdown => tairix_arch_x86_64_tlb_shootdown_dispatch);
 
 /// Linear address of the shootdown ISR stub, for IDT installation.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub fn tlb_shootdown_isr_addr() -> u64 {
-    rustos_arch_x86_64_isr_tlb_shootdown as *const () as usize as u64
+    tairix_arch_x86_64_isr_tlb_shootdown as *const () as usize as u64
 }
 
 /// Install the cross-CPU TLB-shootdown ISR in the calling CPU's per-CPU

@@ -1,11 +1,11 @@
-//! RustOS `groupadd` — create a group (Stage 6
+//! TAIRiX `groupadd` — create a group (Stage 6
 //! `userland/apps/`).
 //!
 //! `groupadd` adds a single group to the group database that persists under
 //! `/System/Security/Groups`. It names the new group
 //! and an optional numeric id (auto-allocated by the database when omitted),
 //! and hands that record to the database through an injected seam. The group
-//! id is a **decimal** value: RustOS has no name-to-id seam in this tool, so a
+//! id is a **decimal** value: TAIRiX has no name-to-id seam in this tool, so a
 //! name would be interface creep, the same choice `chown`
 //! and `useradd` make.
 //!
@@ -23,7 +23,7 @@
 //!   group record. The production implementation is [`db::GroupsAdminDb`],
 //!   the `users_admin` client over its own injected [`db::AdminChannel`]
 //!   seam.
-//! * [`rustos_help::HelpSource`] — the tool's own bundled `Help/` tree, read
+//! * [`tairix_help::HelpSource`] — the tool's own bundled `Help/` tree, read
 //!   by the `-h`/`-?` short-help switches through the shared engine.
 //! * [`Output`] — write the short help to the terminal.
 //!
@@ -51,7 +51,7 @@
 //! [`GroupaddError::BadName`]; a `-g` value that is not a decimal id is a
 //! [`GroupaddError::BadId`]; a name already present is a
 //! [`GroupaddError::Exists`]. A database that cannot be consulted surfaces the
-//! underlying [`Errno`](rustos_abi::Errno) as [`GroupaddError::Lookup`], and a
+//! underlying [`Errno`](tairix_abi::Errno) as [`GroupaddError::Lookup`], and a
 //! refused or failed creation as [`GroupaddError::Create`]. There is no panic.
 //!
 //! # Module map

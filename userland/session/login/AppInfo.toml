@@ -13,7 +13,7 @@
 # desktop-session bundle exists, which decides if the graphical option
 # is offered (plans/DISPLAY.md D7d). Credentials still flow only through
 # the gated users_db_read syscall, never the filesystem.
-id = "os.rustos.login"
+id = "os.tairix.login"
 name = "login"
 version = "0.1.0"
 kind = "service"

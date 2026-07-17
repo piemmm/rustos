@@ -1,17 +1,17 @@
 //! The request dispatcher: the one place a `sysinfo` request is decoded,
 //! capability-checked, audited, and answered.
 
-use rustos_abi::hwtree::{HwNode, HwTreeHeader};
-use rustos_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
-use rustos_abi::sysinfo::{
+use tairix_abi::hwtree::{HwNode, HwTreeHeader};
+use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
+use tairix_abi::sysinfo::{
     spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
     HardwareTreeRequest, MountListRequest, MountRecord, NetInterfaceListRequest,
     ProcessListRequest, ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
     SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
     UserDirectoryRequest,
 };
-use rustos_abi::{Errno, LimitKind};
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_abi::{Errno, LimitKind};
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::events;
 use crate::source::{Caller, ProcessScope, SysinfoSource};
@@ -494,7 +494,7 @@ fn emit(audit: &dyn Sink, level: Level, id: EventId, message: &str, fields: &[Fi
 fn query_field(name: &'static str) -> Field<'static> {
     Field {
         key: "query",
-        value: rustos_log::FieldValue::Str(name),
+        value: tairix_log::FieldValue::Str(name),
     }
 }
 
@@ -504,11 +504,11 @@ mod tests {
     use crate::events;
     use crate::source::{Caller, ProcessScope, SysinfoSource};
     use core::cell::RefCell;
-    use rustos_abi::driver::filesystem::{MountFlags, VolumeStats};
-    use rustos_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
-    use rustos_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
-    use rustos_abi::sysinfo::NetInterfaceListRequest;
-    use rustos_abi::sysinfo::{
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
+    use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
+    use tairix_abi::sysinfo::NetInterfaceListRequest;
+    use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
         KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability, MountListRequest,
         MountRecord, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
@@ -518,12 +518,12 @@ mod tests {
         RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
         SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
-    use rustos_abi::time::{Duration64, Time64};
-    use rustos_abi::{
+    use tairix_abi::time::{Duration64, Time64};
+    use tairix_abi::{
         CapabilityId, CapabilitySummary, Errno, LimitKind, Origin, ProcId, ResourceLimit,
         TrustDomain, ORIGIN_WIRE_LEN,
     };
-    use rustos_log::{Event, Level, Sink};
+    use tairix_log::{Event, Level, Sink};
 
     /// The capabilities a test caller's attested origin should summarise.
     struct Caps(&'static [CapabilityId]);
@@ -547,7 +547,7 @@ mod tests {
 
     /// Tiny fixed-capacity vector so the test sink needs no allocator.
     mod heapless_vec {
-        use rustos_log::{EventId, Level};
+        use tairix_log::{EventId, Level};
 
         pub struct Vec {
             buf: [(Level, EventId); 8],
@@ -755,7 +755,7 @@ mod tests {
             ])
         }
         fn system_identity(&self, _caller: &Caller) -> Result<SystemIdentity, Errno> {
-            SystemIdentity::new([9u8; MACHINE_ID_LEN], 1, 0, 0, b"rustos-box")
+            SystemIdentity::new([9u8; MACHINE_ID_LEN], 1, 0, 0, b"tairix-box")
         }
         fn uptime(&self, _caller: &Caller) -> Result<Uptime, Errno> {
             Ok(Uptime {
@@ -892,7 +892,7 @@ mod tests {
             10,
             ProcId::from_raw([0x10; 16]),
             summary,
-            rustos_abi::ORIGIN_CONSOLE_NONE,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
         ))
     }
 
@@ -985,7 +985,7 @@ mod tests {
     fn audited_query_emits_served_record() {
         // The served record is `Debug` (below the default `Info` filter),
         // so widen the global filter to observe it.
-        rustos_log::set_max_level(Level::Trace);
+        tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let caps = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         let sink = RecordingSink::new();
@@ -1147,7 +1147,7 @@ mod tests {
         let mut resp = [0u8; 128];
         let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         let id = SystemIdentity::from_bytes(&resp[..n]).unwrap();
-        assert_eq!(id.hostname_bytes(), b"rustos-box");
+        assert_eq!(id.hostname_bytes(), b"tairix-box");
         // Neither query is audited.
         assert!(sink.events.borrow().as_slice().is_empty());
     }
@@ -1324,11 +1324,11 @@ mod tests {
 
     /// The interface-facts record the fixture serves.
     fn fixture_net_facts() -> NetInterfaceFactsRecord {
-        let mut name = [0u8; rustos_abi::net_ipc::IF_NAME_LEN];
+        let mut name = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
         name[..3].copy_from_slice(b"wan");
         NetInterfaceFactsRecord {
             name,
-            kind: rustos_abi::net_ipc::NetIfKind::Ethernet,
+            kind: tairix_abi::net_ipc::NetIfKind::Ethernet,
             mac: [0x52, 0x54, 0, 0x12, 0x34, 0x56],
             mtu: 1500,
             offloads: 0,
@@ -1338,14 +1338,14 @@ mod tests {
 
     /// The interface-state record the fixture serves.
     fn fixture_net_state() -> NetInterfaceStateRecord {
-        let mut name = [0u8; rustos_abi::net_ipc::IF_NAME_LEN];
+        let mut name = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
         name[..3].copy_from_slice(b"wan");
         let mut addrs =
-            [NetInterfaceStateRecord::EMPTY_ADDR; rustos_abi::net_ipc::NET_IF_MAX_ADDRS];
-        addrs[0] = rustos_abi::net_ipc::NetIfAddr {
-            family: rustos_abi::net_ipc::NetAddrFamily::V4,
+            [NetInterfaceStateRecord::EMPTY_ADDR; tairix_abi::net_ipc::NET_IF_MAX_ADDRS];
+        addrs[0] = tairix_abi::net_ipc::NetIfAddr {
+            family: tairix_abi::net_ipc::NetAddrFamily::V4,
             prefix: 24,
-            state: rustos_abi::net_ipc::NetAddrState::Preferred,
+            state: tairix_abi::net_ipc::NetAddrState::Preferred,
             addr: {
                 let mut a = [0u8; 16];
                 a[..4].copy_from_slice(&[10, 0, 2, 15]);
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn net_interface_facts_is_gated_audited_and_pages() {
-        rustos_log::set_max_level(Level::Trace);
+        tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
         let nlr = NetInterfaceListRequest {
@@ -1411,7 +1411,7 @@ mod tests {
 
     #[test]
     fn net_interface_state_is_gated_audited_and_round_trips() {
-        rustos_log::set_max_level(Level::Trace);
+        tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
         let nlr = NetInterfaceListRequest {
@@ -1450,7 +1450,7 @@ mod tests {
     fn seat_list_is_gated_audited_and_pages() {
         // The served record is `Debug` (below the default `Info` filter),
         // so widen the global filter to observe it.
-        rustos_log::set_max_level(Level::Trace);
+        tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
         let slr = SeatListRequest {
@@ -1502,7 +1502,7 @@ mod tests {
 
     #[test]
     fn memory_pressure_is_gated_audited_and_round_trips() {
-        rustos_log::set_max_level(Level::Trace);
+        tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let req = request_bytes(SysinfoQueryId::MEMORY_PRESSURE, &[]);
         let mut resp = [0u8; 256];

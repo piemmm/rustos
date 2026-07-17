@@ -91,7 +91,7 @@ fn unpremultiply_transparent_is_transparent() {
 
 #[test]
 fn theme_rgba_converts_to_color_by_field_move() {
-    let rgba = rustos_theme::Rgba::new(10, 20, 30, 40);
+    let rgba = tairix_theme::Rgba::new(10, 20, 30, 40);
     assert_eq!(
         Color::from(rgba),
         Color {

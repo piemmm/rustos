@@ -1,6 +1,6 @@
 //! x86_64 timer programming ("timer programming").
 //!
-//! Implements the Arch HAL [`Timer`](rustos_arch_api::Timer) surface for
+//! Implements the Arch HAL [`Timer`](tairix_arch_api::Timer) surface for
 //! x86_64 over the LAPIC timer wired in [`crate::preempt`]. The HAL
 //! handle is the architecture-neutral half of the timer path: it
 //! installs the one scheduler-tick callback and dispatches a tick to it.
@@ -9,10 +9,10 @@
 //! LAPIC MMIO work with no architecture-neutral shape.
 //!
 //! Unlike the claim-based ports, the x86_64 timer ISR
-//! (`crate::preempt::rustos_arch_x86_64_timer_dispatch`) must read the
+//! (`crate::preempt::tairix_arch_x86_64_timer_dispatch`) must read the
 //! LAPIC ID from MMIO to derive the firing CPU and issue the LAPIC EOI
 //! write — work that has no host analogue and cannot be expressed by the
-//! architecture-neutral [`Timer::dispatch_tick`](rustos_arch_api::Timer::dispatch_tick)
+//! architecture-neutral [`Timer::dispatch_tick`](tairix_arch_api::Timer::dispatch_tick)
 //! — so the ISR keeps its
 //! own dispatch and this handle is the HAL-facing surface (callback
 //! install + the architecture-neutral dispatch the conformance vertical
@@ -20,7 +20,7 @@
 //! [`crate::preempt`]'s lock-free static (the ISR's source of truth), so
 //! the handle forwards to it; on the host build there is no ISR, so the
 //! handle backs the callback with an in-handle cell solely for the
-//! [`conformance`](rustos_arch_api::timer::conformance) vertical. It is
+//! [`conformance`](tairix_arch_api::timer::conformance) vertical. It is
 //! never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
@@ -29,7 +29,7 @@ use core::sync::atomic::AtomicUsize;
 #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
 use core::sync::atomic::Ordering;
 
-use rustos_arch_api::{CpuId, TickFn, Timer};
+use tairix_arch_api::{CpuId, TickFn, Timer};
 
 /// x86_64 implementation of the Arch HAL timer-programming surface.
 ///
@@ -121,7 +121,7 @@ impl Timer for TimerHal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::timer::conformance;
+    use tairix_arch_api::timer::conformance;
 
     #[test]
     fn passes_timer_conformance() {

@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-irq-qemu-aarch64"
+name = "tairix-test-irq-qemu-aarch64"
 description = "WIRING Stage W3-B QEMU integration test: a device IRQ (the PL031 RTC, a GICv2 SPI) routed through GICv2 SPI target-routing + the EL1 IRQ path reaches a Rust handler and drives the kernel/irq IrqTable mask-before-wake path on the aarch64 virt board."
 version.workspace = true
 edition.workspace = true
@@ -13,8 +13,8 @@ workspace = true
 
 # WIRING Stage W3-B deliverable (`plans/WIRING.md` §3): the aarch64
 # device-IRQ QEMU vertical, the EL1/GICv2-SPI analogue of
-# `tests/integration/irq_qemu_x86_64`. It links the `rustos-arch-aarch64`
-# port plus the kernel-neutral `rustos-kernel-irq` table, arms the PL031
+# `tests/integration/irq_qemu_x86_64`. It links the `tairix-arch-aarch64`
+# port plus the kernel-neutral `tairix-kernel-irq` table, arms the PL031
 # RTC (the `virt` board's GICv2 SPI 2 / INTID 34), routes that SPI to CPU 0
 # through the new `gic::route_spi` (`GICD_ITARGETSR`), and proves the
 # device interrupt reaches a Rust handler through the EL1 IRQ vector + the
@@ -31,17 +31,17 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-irq-qemu-aarch64"
+name = "tairix-test-irq-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

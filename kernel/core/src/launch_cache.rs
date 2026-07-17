@@ -1,7 +1,7 @@
 //! The semantic application-launch cache (`plans/SMARTRAM.md` SMART4,
 //! section 6.3).
 //!
-//! [`LaunchCache`] retains the [`LoadedApp`] the shared `rustos_appload`
+//! [`LaunchCache`] retains the [`LoadedApp`] the shared `tairix_appload`
 //! load gate accepted for a bundle on the immutable read-only system
 //! stores: the parsed signed manifest, the content-hash and
 //! syscall-interface-hash verdicts, the dynamic-loader library policy
@@ -61,13 +61,13 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_appload::LoadedApp;
-use rustos_kernel_mem::{
+use tairix_appload::LoadedApp;
+use tairix_kernel_mem::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
     ReclaimOwner, ReclaimRule, Sensitivity,
 };
-use rustos_log::Sink;
+use tairix_log::Sink;
 
 /// Approximate per-entry bookkeeping cost (map nodes, the LRU index
 /// slot, the fixed entry fields, the `Arc` control block) charged on

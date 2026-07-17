@@ -1,4 +1,4 @@
-# `rustos-virtio-input`
+# `tairix-virtio-input`
 
 Arch-neutral, transport-agnostic virtio-input (keyboard / pointer) device
 logic: the virtio-1.1 §5.8 open/poll/decode engine over the bus-agnostic
@@ -15,15 +15,15 @@ See `docs/src/drivers/input.md` for the full description and test surface.
 
 - `VirtioInput` — the device over a `lib/virtio` `Transport`: `open` (the
   virtio-1.1 §3.1 init sequence + event-buffer pool), `poll`
-  (`rustos_abi::driver::input::Input`, interrupt-driven drain, never a busy
+  (`tairix_abi::driver::input::Input`, interrupt-driven drain, never a busy
   spin), `close`, and `transport_mut` (in-process software-peer drive).
 - `VIRTIO_INPUT_DEVICE_ID` — the virtio device id (18) the driver crate's
   `BIND_KEYS` match key is built from (the single source of truth, §2.2).
 - `VirtioKeyboardConsole` (`console` module) — the keyboard producer half:
   `feed` turns each decoded `evdev`-keycode `Key` `InputEvent` edge into the
-  `rustos_abi::input::KeyInput` record a driver injects through `key_inject`,
+  `tairix_abi::input::KeyInput` record a driver injects through `key_inject`,
   tracking modifiers + caps/num lock and resolving the US layout through the
-  shared `rustos_keymap::key_input` map (the one `Key`→record definition the
+  shared `tairix_keymap::key_input` map (the one `Key`→record definition the
   `lib/hid` USB console producer reaches too, §2.2). Allocation-free and
   fail-closed (`AGENTS.md` §2.9).
 
@@ -42,6 +42,6 @@ exchanges are governed by `lib/abi`.
 
 ## Tests
 
-`cargo test -p rustos-virtio-input` — decode, poll-drain, and teardown unit
+`cargo test -p tairix-virtio-input` — decode, poll-drain, and teardown unit
 tests against the in-process `lib/virtio` `MockTransport` / `MockHost`, plus the
 `console` producer's keycode/modifier/lock resolution tests (`AGENTS.md` §7).

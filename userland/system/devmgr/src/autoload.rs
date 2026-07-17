@@ -3,7 +3,7 @@
 //!
 //! The device manager owns *policy*: it resolves each
 //! discovered hardware-tree node against the kernel-decoded driver
-//! catalogue with the shared [`rustos_devmatch`] policy,
+//! catalogue with the shared [`tairix_devmatch`] policy,
 //! and — for each winning node — asks the kernel to load the matched bundle
 //! for that node ([`crate::load_driver`]). The kernel keeps the *mechanism*
 //! (signature verification, bundle bytes, grant minting, spawn) in its
@@ -17,17 +17,17 @@
 //! name only and never driven. An unmatched node is left unbound and
 //! logged — never an error; a load refusal fails only
 //! that node, closed, and the walk continues. Every
-//! outcome is audited through [`rustos_log`] with the stable
+//! outcome is audited through [`tairix_log`] with the stable
 //! [`crate::events`] identifiers, so this is the IPC-loader sibling of the
 //! kernel-side `DeviceManager::autoload` walk over the same `resolve`
 //! definition.
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::HwNode;
-use rustos_devmatch::{resolve, DriverCandidate, MatchResolution};
-use rustos_log::{log as log_event, Event, EventId, Field, Level, Sink};
-use rustos_util::fmt::{format_hex_u64, format_i32};
+use tairix_abi::HwNode;
+use tairix_devmatch::{resolve, DriverCandidate, MatchResolution};
+use tairix_log::{log as log_event, Event, EventId, Field, Level, Sink};
+use tairix_util::fmt::{format_hex_u64, format_i32};
 
 use crate::events;
 use crate::store::{load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
@@ -163,7 +163,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                         id,
                         &[Field {
                             key: "priority",
-                            value: rustos_log::FieldValue::Str(priority_str),
+                            value: tairix_log::FieldValue::Str(priority_str),
                         }],
                     );
                 }
@@ -193,7 +193,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                                     id,
                                     &[Field {
                                         key: "errno",
-                                        value: rustos_log::FieldValue::Str(errno_str),
+                                        value: tairix_log::FieldValue::Str(errno_str),
                                     }],
                                 );
                             }
@@ -217,7 +217,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                         id,
                         &[Field {
                             key: "handle",
-                            value: rustos_log::FieldValue::Str(handle_str),
+                            value: tairix_log::FieldValue::Str(handle_str),
                         }],
                     );
                 }
@@ -238,7 +238,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
 /// driver is loaded afresh (re-plug works with no reboot).
 ///
 /// Idempotent and fail-soft: an unload that the kernel reports already gone
-/// ([`Errno::NotFound`](rustos_abi::Errno::NotFound)) still drops the local
+/// ([`Errno::NotFound`](tairix_abi::Errno::NotFound)) still drops the local
 /// binding; a transport failure is logged and the binding dropped so the
 /// stale driver is never re-derived. Every unload is audited
 /// ([`events::NODE_UNLOADED`]).
@@ -277,7 +277,7 @@ pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
                 node_id,
                 &[Field {
                     key: "handle",
-                    value: rustos_log::FieldValue::Str(handle_str),
+                    value: tairix_log::FieldValue::Str(handle_str),
                 }],
             ),
             Err(errno) => {
@@ -295,11 +295,11 @@ pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
                     &[
                         Field {
                             key: "handle",
-                            value: rustos_log::FieldValue::Str(handle_str),
+                            value: tairix_log::FieldValue::Str(handle_str),
                         },
                         Field {
                             key: "errno",
-                            value: rustos_log::FieldValue::Str(errno_str),
+                            value: tairix_log::FieldValue::Str(errno_str),
                         },
                     ],
                 );
@@ -324,7 +324,7 @@ fn audit_node(sink: &dyn Sink, id: EventId, level: Level, node: u32, extra: &[Fi
     let node_str = format_hex_u64(u64::from(node), &mut nbuf);
     let mut fields = [Field {
         key: "node",
-        value: rustos_log::FieldValue::Str(node_str),
+        value: tairix_log::FieldValue::Str(node_str),
     }; 3];
     let mut len = 1;
     for field in extra {
@@ -360,8 +360,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use rustos_abi::driver_store::encode_unload_reply;
-    use rustos_abi::Errno;
+    use tairix_abi::driver_store::encode_unload_reply;
+    use tairix_abi::Errno;
 
     /// A driver-store seam that records every `Unload { handle }` and frames
     /// a success reply — so the diff's teardown decisions are observable.
@@ -381,8 +381,8 @@ mod tests {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             // The diff only ever issues `Unload`; any other opcode is a test
             // bug surfaced fail-closed rather than silently ignored.
-            match rustos_abi::driver_store::StoreRequest::decode(request)? {
-                rustos_abi::driver_store::StoreRequest::Unload { handle } => {
+            match tairix_abi::driver_store::StoreRequest::decode(request)? {
+                tairix_abi::driver_store::StoreRequest::Unload { handle } => {
                     self.unloads.borrow_mut().push(handle);
                     encode_unload_reply(reply)
                 }
@@ -470,7 +470,7 @@ mod tests {
         struct AlreadyGone;
         impl DriverStoreCall for AlreadyGone {
             fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-                rustos_abi::driver_store::encode_error_reply(reply, Errno::NotFound)
+                tairix_abi::driver_store::encode_error_reply(reply, Errno::NotFound)
             }
         }
 

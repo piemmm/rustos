@@ -6,7 +6,7 @@
 # copy); CAP_FS_ACCESS is the tool's job — creating and writing its file
 # operands (and reading its own bundle's Help/ documents) through the
 # secured VFS.
-id = "os.rustos.tee"
+id = "os.tairix.tee"
 name = "tee"
 version = "0.1.0"
 kind = "command"

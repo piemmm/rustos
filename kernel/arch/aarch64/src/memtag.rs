@@ -1,7 +1,7 @@
 //! aarch64 memory tagging — Arm MTE.
 //!
 //! Implements the Arch HAL
-//! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for aarch64
+//! [`MemoryTagging`](tairix_arch_api::MemoryTagging) surface for aarch64
 //! using the **Memory Tagging Extension** (`FEAT_MTE` / `FEAT_MTE2`,
 //! ARMv8.5-A). MTE is the canonical hardware use-after-free defence: it
 //! stores a 4-bit *allocation tag* for every 16-byte granule, carries a
@@ -14,13 +14,13 @@
 //! # Tag geometry
 //!
 //! MTE's granule is **16 bytes** and its tag is **4 bits** (16 values),
-//! which is exactly the architecture-neutral [`rustos_arch_api::TAG_COUNT`]
-//! the HAL defines, so [`MemoryTagging::rotate_tag`](rustos_arch_api::MemoryTagging::rotate_tag) yields a real MTE
+//! which is exactly the architecture-neutral [`tairix_arch_api::TAG_COUNT`]
+//! the HAL defines, so [`MemoryTagging::rotate_tag`](tairix_arch_api::MemoryTagging::rotate_tag) yields a real MTE
 //! tag with no narrowing.
 //!
 //! # What is implemented
 //!
-//! * [`set_region_tag`](rustos_arch_api::MemoryTagging::set_region_tag) emits the MTE `stg` (Store
+//! * [`set_region_tag`](tairix_arch_api::MemoryTagging::set_region_tag) emits the MTE `stg` (Store
 //!   Allocation Tag) sequence over each granule of the region — the real
 //!   store-tag path, ready for the allocator to stamp a freshly-rotated
 //!   tag onto a region.
@@ -37,13 +37,13 @@
 //! attribute work (`PLAN.md` §19 burn-down). Until then the store path is
 //! gated behind a per-handle `mte_enabled` flag that defaults **off**, so
 //! the sequence is compiled and reviewed but never executed on
-//! possibly-MTE-less silicon. The profile is honestly [`Tagging::Pending`](rustos_arch_api::Tagging::Pending)
+//! possibly-MTE-less silicon. The profile is honestly [`Tagging::Pending`](tairix_arch_api::Tagging::Pending)
 //! on both slots — not release-ready — exactly as the side-channel
 //! KPTI / Spectre-v2 slots are `Pending` on this port. Use-after-free is
 //! hardened *today* by the architecture-neutral software tag check in
 //! `kernel/mem`, which shares this HAL's tag rotation.
 
-use rustos_arch_api::{MemTag, MemoryTagging, Tagging, TaggingProfile};
+use tairix_arch_api::{MemTag, MemoryTagging, Tagging, TaggingProfile};
 
 /// MTE allocation-tag granule, in bytes (Arm Architecture Reference
 /// Manual: a tag covers a 16-byte granule).
@@ -115,7 +115,7 @@ impl MemoryTagging for MemoryTags {
 
     fn tag_count(&self) -> u8 {
         // MTE's 4-bit tag == the neutral TAG_COUNT (16); no narrowing.
-        rustos_arch_api::TAG_COUNT
+        tairix_arch_api::TAG_COUNT
     }
 
     unsafe fn set_region_tag(&self, base: *mut u8, len: usize, tag: MemTag) {
@@ -176,8 +176,8 @@ unsafe fn store_allocation_tags(_base: *mut u8, _len: usize, _tag: MemTag) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::memtag::conformance;
-    use rustos_arch_api::{next_free_tag, TAG_COUNT};
+    use tairix_arch_api::memtag::conformance;
+    use tairix_arch_api::{next_free_tag, TAG_COUNT};
 
     #[test]
     fn passes_memtag_conformance() {

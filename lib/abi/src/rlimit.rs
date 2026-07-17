@@ -1,10 +1,10 @@
 //! Resource-limit ABI.
 //!
-//! RustOS sizes resource *capacities* from the hardware discovered at boot
+//! TAIRiX sizes resource *capacities* from the hardware discovered at boot
 //! and grows them on demand; it never hard-wires a `const` ceiling that caps
 //! a large machine or wastes a small one. On top of those
 //! discovered defaults a principal may *impose* a lower ceiling on itself or
-//! its children — the RustOS equivalent of POSIX `ulimit`/`rlimit`.
+//! its children — the TAIRiX equivalent of POSIX `ulimit`/`rlimit`.
 //! This module fixes the *contract* for that facility: the closed set of
 //! limited resources ([`LimitKind`]), the soft/hard pair carried for each
 //! ([`ResourceLimit`]), and its little-endian wire encoding. The kernel-side

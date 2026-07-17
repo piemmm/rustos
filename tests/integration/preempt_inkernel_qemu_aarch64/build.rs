@@ -3,7 +3,7 @@
 //!
 //! Two jobs on the freestanding `aarch64-unknown-none` target (mirroring the
 //! `irq_kthread_qemu_aarch64` build script — the shared dump helper lives in
-//! `rustos_itest_harness`, so no aarch64 build script re-rolls it):
+//! `tairix_itest_harness`, so no aarch64 build script re-rolls it):
 //!
 //! 1. Hand the test kernel the aarch64 `virt` linker script the architecture
 //!    port owns (the single per-board script).
@@ -30,7 +30,7 @@ use std::path::PathBuf;
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -49,7 +49,7 @@ fn main() {
 
         // One CPU: this is the single-core in-kernel preemption slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
     } else {
         // Inert stub for host / other targets; the kernel body that uses this

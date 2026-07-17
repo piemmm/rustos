@@ -1,4 +1,4 @@
-//! `rustos-abi-trap` — the raw `abi-v1` user→kernel syscall trap primitive.
+//! `tairix-abi-trap` — the raw `abi-v1` user→kernel syscall trap primitive.
 //!
 //! This crate is the single home of the architecture-specific syscall trap:
 //! the `syscall` (x86_64), `svc` (`AArch64`), and `ecall` (RISC-V)
@@ -9,11 +9,11 @@
 //! It exists so the trap exists **exactly once**. Two
 //! consumers build on it:
 //!
-//! * `rustos-abi-sys` — the C-callable `ros_sys_<name>` stub runtime, the
+//! * `tairix-abi-sys` — the C-callable `tairix_sys_<name>` stub runtime, the
 //!   curated *System runtime / C ABI* class a program **not** written in Rust
 //!   links.
-//! * `rustos-rt` — the pure-Rust userland runtime that first-party RustOS
-//!   programs link. RustOS code is Rust-only and never routes through the C
+//! * `tairix-rt` — the pure-Rust userland runtime that first-party TAIRiX
+//!   programs link. TAIRiX code is Rust-only and never routes through the C
 //!   ABI meant for third parties.
 //!
 //! # Not a privileged path
@@ -59,7 +59,7 @@
 #[cfg(all(not(abi_trap_native), feature = "host-seam"))]
 extern crate std;
 
-use rustos_abi::SYSCALL_MAX_ARGS;
+use tairix_abi::SYSCALL_MAX_ARGS;
 
 /// Issue the raw `abi-v1` syscall trap: place `number` and `args` in the
 /// per-architecture syscall registers, execute the user→kernel trap, and
@@ -222,8 +222,8 @@ pub unsafe fn raw_syscall(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> u64 {
 /// inspects the recorded `(number, args)`.
 #[cfg(all(not(abi_trap_native), feature = "host-seam"))]
 pub mod seam {
-    use rustos_abi::SYSCALL_MAX_ARGS;
     use std::cell::Cell;
+    use tairix_abi::SYSCALL_MAX_ARGS;
 
     std::thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };

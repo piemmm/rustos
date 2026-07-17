@@ -3,7 +3,7 @@
 use alloc::format;
 use alloc::vec;
 
-use rustos_help::{own_short_help, HelpSource};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Job, OutputError};
 use crate::error::TeeError;
@@ -27,7 +27,7 @@ const READ_CHUNK: usize = 4096;
 /// thereafter (per the mode), exactly as the GNU tool nulls a failed
 /// descriptor.
 enum Target<'a> {
-    /// The always-present copy to standard output — the RustOS analogue of
+    /// The always-present copy to standard output — the TAIRiX analogue of
     /// the GNU pipe class (see [`OutputError`]).
     Stdout,
     /// The file operand at command-line position `id`.
@@ -72,7 +72,7 @@ fn judge(mode: OutputError, pipe_class: bool) -> Verdict {
         // Diagnosed and fatal: any counted failure under an `exit` mode,
         // and the default mode's pipe-class case — the SIGPIPE analogue:
         // the consumer went away, stop — stated on the diagnostic stream
-        // (a RustOS process never ends silently).
+        // (a TAIRiX process never ends silently).
         (OutputError::Default, true)
         | (OutputError::Exit, _)
         | (OutputError::ExitNopipe, false) => Verdict {
@@ -226,8 +226,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     use super::{run, USAGE};
     use crate::command::{parse, Command};
@@ -721,7 +721,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/tee.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

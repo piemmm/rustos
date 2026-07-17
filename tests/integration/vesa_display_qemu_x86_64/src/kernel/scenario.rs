@@ -13,24 +13,24 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ptr;
 
-use rustos_abi::driver::display::Display;
-use rustos_abi::{CapabilityId, DriverHost, DriverKind, Errno, MmioMapper};
-use rustos_arch_x86_64::qemu_exit;
-use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
-use rustos_drv_display_vesa::{
+use tairix_abi::driver::display::Display;
+use tairix_abi::{CapabilityId, DriverHost, DriverKind, Errno, MmioMapper};
+use tairix_arch_x86_64::qemu_exit;
+use tairix_caps::CapabilitySet;
+use tairix_crypto::Ed25519PublicKey;
+use tairix_drv_display_vesa::{
     register as vesa_register, VesaFramebuffer, VBE_MODE_INFO_BLOCK_LEN,
 };
-use rustos_drvhost::{
+use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
-use rustos_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
-use rustos_kernel::SERIAL_SINK;
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_kernel_virtio::KernelMmioMapper;
-use rustos_log::{Event, EventId, Level, Sink};
+use tairix_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
+use tairix_kernel::SERIAL_SINK;
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_kernel_virtio::KernelMmioMapper;
+use tairix_log::{Event, EventId, Level, Sink};
 
 use super::ioport::IoPortDma;
 use crate::fixture::{SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY, VESA_IMAGE};
@@ -136,7 +136,7 @@ static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
 /// MMIO mapper translates through the low-4-GiB identity map — is its
 /// virtual address minus the higher-half base.
 fn framebuffer_phys() -> u64 {
-    (ptr::addr_of!(FRAMEBUFFER) as u64) - rustos_arch_x86_64::paging::KERNEL_VMA_BASE
+    (ptr::addr_of!(FRAMEBUFFER) as u64) - tairix_arch_x86_64::paging::KERNEL_VMA_BASE
 }
 
 // --- Logging / failure -----------------------------------------------
@@ -177,7 +177,7 @@ impl DriverSpawner for ResolveVesa {
     fn spawn_and_register(
         &self,
         ctx: &SpawnContext<'_>,
-    ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
+    ) -> Result<tairix_abi::DriverHandle, SpawnRegisterError> {
         vesa_register(ctx.host).map_err(SpawnRegisterError::Register)
     }
 }
@@ -347,7 +347,7 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
     let mut host = Host::new(HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYSCALL_TABLE_HASH,
-        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
         source: &source,
         spawner: &spawner,
         sink: &SERIAL_SINK,

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-stack-grow-qemu-x86_64"
-description = "SP11e QEMU integration test (docs/src/architecture/memory.md §7c): prove the demand-grown user stack end to end on the QEMU x86_64 machine — the twin of rustos-test-stack-grow-qemu-{aarch64,riscv64}. The build script compiles the pure-Rust four-role fixture program (tests/integration/stack_grow_program) PIE once and converts it to an rxe blob. The kernel runs the shared production board bring-up (rustos_kernel::x86_64::boot::bring_up_bsp — per-CPU tables, the dedicated #PF entry, the production dispatch callback and user-fault resolver, syscall/TSS entry), then installs the production KernelDispatchHook into the production DISPATCH_SLOT those callbacks resolve through — the production LiveMemMap producer backing both mem_map and the stack-growth fault path, a real KernelProcessWait, a ProgramRegistry carrying the three child roles with parameters derived from the one shared spawn_layout policy — and spawns the parent role through the production InitSpawnCtx::spawn_driver_process seam. The parent drives grow (recursion far past the eagerly committed stack top grows transparently and every frame's bytes survive, exit 0), limit (a ulimit-lowered StackBytes soft bound kills growth past it, exit 139), and guard (the unmapped guard page below the reserved span stays fatal, exit 139) through production spawn + wait. PASS once the chassis reaps a parent exit of 0."
+name = "tairix-test-stack-grow-qemu-x86_64"
+description = "SP11e QEMU integration test (docs/src/architecture/memory.md §7c): prove the demand-grown user stack end to end on the QEMU x86_64 machine — the twin of tairix-test-stack-grow-qemu-{aarch64,riscv64}. The build script compiles the pure-Rust four-role fixture program (tests/integration/stack_grow_program) PIE once and converts it to an rxe blob. The kernel runs the shared production board bring-up (tairix_kernel::x86_64::boot::bring_up_bsp — per-CPU tables, the dedicated #PF entry, the production dispatch callback and user-fault resolver, syscall/TSS entry), then installs the production KernelDispatchHook into the production DISPATCH_SLOT those callbacks resolve through — the production LiveMemMap producer backing both mem_map and the stack-growth fault path, a real KernelProcessWait, a ProgramRegistry carrying the three child roles with parameters derived from the one shared spawn_layout policy — and spawns the parent role through the production InitSpawnCtx::spawn_driver_process seam. The parent drives grow (recursion far past the eagerly committed stack top grows transparently and every frame's bytes survive, exit 0), limit (a ulimit-lowered StackBytes soft bound kills growth past it, exit 139), and guard (the unmapped guard page below the reserved span stays fatal, exit 139) through production spawn + wait. PASS once the chassis reaps a parent exit of 0."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,29 +27,29 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-stack-grow-qemu-x86_64"
+name = "tairix-test-stack-grow-qemu-x86_64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
 # The shared harness: the target cfg emitter and the ELF→rxe converter.
 # Host-only build glue (`AGENTS.md` §12).
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
 # The build script stamps the kernel's compiled-in syscall CFI tag into the
 # converted `rxe` so the production loader admits it (`AGENTS.md` §9).
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

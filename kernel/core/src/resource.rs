@@ -1,9 +1,9 @@
 //! Resource-reference resolution for [`resource_open`](crate::syscalls).
 //!
-//! RustOS has no `/dev`, `/proc`, or `/sys`: a typed *non-filesystem*
+//! TAIRiX has no `/dev`, `/proc`, or `/sys`: a typed *non-filesystem*
 //! resource (a random source, a null sink, a device endpoint) is named by a
 //! resource reference (`plans/ALIAS.md`), e.g. `sys:random`, not by a
-//! pseudo-file. The single shared reference parser [`rustos_resref`] turns
+//! pseudo-file. The single shared reference parser [`tairix_resref`] turns
 //! the caller's string into a typed [`ResourceRef`] (spelling only — it never
 //! resolves, opens, or capability-checks). This module is the kernel-side
 //! *resolver*: it maps a parsed reference to a concrete [`ResourceBacking`]
@@ -26,8 +26,8 @@
 //! A kernel-owned namespace (a future device endpoint) gains its resolver in
 //! place as its consumer appears — the resolver contract here does not change.
 
-use rustos_abi::{Errno, OpenFlags};
-use rustos_resref::{parse, KnownNamespace, RefError, ResourceRef};
+use tairix_abi::{Errno, OpenFlags};
+use tairix_resref::{parse, KnownNamespace, RefError, ResourceRef};
 
 /// The concrete kernel-side backing a resolved resource reference names.
 ///
@@ -385,6 +385,6 @@ mod tests {
     fn resource_ref_max_matches_the_parser_bound() {
         // The ABI wire bound and the parser's own maximum must not drift: a
         // reference the ABI accepts always fits the parser.
-        assert_eq!(rustos_abi::RESOURCE_REF_MAX, rustos_resref::MAX_REF_LEN);
+        assert_eq!(tairix_abi::RESOURCE_REF_MAX, tairix_resref::MAX_REF_LEN);
     }
 }

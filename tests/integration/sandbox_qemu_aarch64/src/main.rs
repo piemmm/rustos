@@ -6,7 +6,7 @@
 //! embedded `virt` device tree, brings up the EL1 vectors + GICv2, and
 //! installs the **production** `KernelDispatchHook` through a
 //! `DispatchCallbackSlot` — the production `LiveMemMap` producer for the
-//! `rustos-rt` heap, a real `KernelProcessWait`, and a `ProgramRegistry`
+//! `tairix-rt` heap, a real `KernelProcessWait`, and a `ProgramRegistry`
 //! carrying the fixture's three worker paths. The parent role of the
 //! fixture program (`tests/integration/sandbox_program`) is spawned through
 //! the production `InitSpawnCtx::spawn_driver_process` seam and drives the
@@ -34,7 +34,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-sandbox-qemu-aarch64: the `test-hooks` Cargo feature is a \
+    "tairix-test-sandbox-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

@@ -1,4 +1,4 @@
-//! RustOS `rm` — remove files and directories (Stage 6
+//! TAIRiX `rm` — remove files and directories (Stage 6
 //! `userland/apps/`).
 //!
 //! `rm` removes each of its operands in order. A non-directory operand (a
@@ -30,8 +30,8 @@
 //!
 //! An unknown option is a [`RmError::Usage`] that removes nothing; a directory
 //! named without `-r` is a [`RmError::IsDirectory`]; an operand that cannot be
-//! inspected surfaces the underlying [`Errno`](rustos_abi::Errno) as
-//! [`RmError::Stat`] (unless `-f` makes a [`NotFound`](rustos_abi::Errno::NotFound)
+//! inspected surfaces the underlying [`Errno`](tairix_abi::Errno) as
+//! [`RmError::Stat`] (unless `-f` makes a [`NotFound`](tairix_abi::Errno::NotFound)
 //! a no-op); a directory that cannot be enumerated is [`RmError::Read`]; a
 //! removal that fails is [`RmError::Remove`]. The first failure stops the run
 //! before any later operand, and there is no panic.

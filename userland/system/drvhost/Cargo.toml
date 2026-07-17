@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drvhost"
-description = "RustOS userland driver host: loads, verifies, and lifecycles signed `.rxe` driver modules with capability enforcement (Stage 4 — `AGENTS.md` §8)."
+name = "tairix-drvhost"
+description = "TAIRiX userland driver host: loads, verifies, and lifecycles signed `.rxe` driver modules with capability enforcement (Stage 4 — `AGENTS.md` §8)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,23 +12,23 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # The single `lib/devmatch` match-candidate definition (`AGENTS.md`
 # §2.2): the signed-store scan in `store.rs` produces canonical
 # `DriverCandidate`s so the bin-crate boot wiring feeds them straight to
 # `devmgr::DeviceManager::autoload` without re-typing. `lib/*` only, so
 # §17.4 layering holds (drvhost never links a userland or kernel crate).
-rustos-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # Home of the `VirtioHostFactory` host seam and the bus-agnostic
 # `MockHost`/`VirtioHost`. `HostConfig::virtio_host_factory` names the
 # trait, so it is a production dependency. It pulls in only `lib/*`
 # (never a driver or kernel crate), keeping a kernel-side factory impl
 # free to plug into the same seam without `kernel/virtio -> drvhost`
 # (`AGENTS.md` §17.4).
-rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 
 [dev-dependencies]
 # Pinned to match the version `lib/crypto` audits. The dev-dependency
@@ -41,4 +41,4 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # edge points the other way round (devmgr names only its `DriverLoader`
 # seam, `AGENTS.md` §17.4); the dev-dependency lives here so the signed
 # `.rxe` fixtures in `tests/fixtures/` are shared, not duplicated (§2.2).
-rustos-devmgr = { path = "../devmgr", version = "=0.0.0" }
+tairix-devmgr = { path = "../devmgr", version = "=0.0.0" }

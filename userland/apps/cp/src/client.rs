@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_help::{own_short_help, HelpSource};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::CpError;
@@ -67,7 +67,7 @@ const OWN_WORD: &str = "cp";
 ///   exists as a non-directory, or the `-t` operand is not an existing
 ///   directory.
 /// * [`CpError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](rustos_abi::Errno).
+///   underlying [`Errno`](tairix_abi::Errno).
 /// * [`CpError::Read`] — a source file or directory could not be read.
 /// * [`CpError::Create`] — a destination file or directory could not be made.
 /// * [`CpError::Write`] — writing a destination file's bytes failed.
@@ -122,7 +122,7 @@ fn copy_all(
         TargetMode::Directory => match stat(dest, fs)? {
             Some(EntryKind::Directory) => true,
             Some(EntryKind::File) => return Err(CpError::NotADirectory),
-            None => return Err(CpError::Stat(rustos_abi::Errno::NotFound)),
+            None => return Err(CpError::Stat(tairix_abi::Errno::NotFound)),
         },
         // `-T`: the destination is a normal file for exactly one source.
         TargetMode::NoDirectory => {
@@ -235,7 +235,7 @@ fn copy_file(
         // A seam reporting more than the buffer holds would index out of
         // bounds; refuse it rather than trust the count.
         if read > buf.len() {
-            return Err(CpError::Read(rustos_abi::Errno::LengthOutOfRange));
+            return Err(CpError::Read(tairix_abi::Errno::LengthOutOfRange));
         }
         fs.write(target, offset, &buf[..read])
             .map_err(CpError::Write)?;
@@ -275,7 +275,7 @@ fn read_children(path: &str, fs: &dyn FileSystem) -> Result<Vec<Entry>, CpError>
 fn stat(path: &str, fs: &dyn FileSystem) -> Result<Option<EntryKind>, CpError> {
     match fs.kind(path) {
         Ok(kind) => Ok(Some(kind)),
-        Err(rustos_abi::Errno::NotFound) => Ok(None),
+        Err(tairix_abi::Errno::NotFound) => Ok(None),
         Err(errno) => Err(CpError::Stat(errno)),
     }
 }
@@ -314,8 +314,8 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     /// A prompt no non-interactive run may ever reach.
     struct NeverAsked;

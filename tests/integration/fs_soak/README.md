@@ -1,4 +1,4 @@
-# `rustos-test-fs-soak` — in-RAM filesystem soak harness
+# `tairix-test-fs-soak` — in-RAM filesystem soak harness
 
 A host-side test crate that soak-tests the three first-party
 filesystems (`arxfs`, `ext4`, `fat32`) entirely in RAM, with no real
@@ -50,7 +50,7 @@ disk and no `mkfs` shell-out (`AGENTS.md` §12 / §2.12,
     `NotFound`, non-empty `rmdir` → `Busy`) and must not mutate state.
   The `arxfs-random` target's **start** seed is drawn from platform
   entropy (time + pid), so each launch takes a new path; set
-  `RUSTOS_FSSOAK_SEED` to pin it and replay a failure (the start seed is
+  `TAIRIX_FSSOAK_SEED` to pin it and replay a failure (the start seed is
   printed, and every error is tagged with the reproducing seed).
 - **`run_target` / `TARGETS`** — the closed registry and per-target
   runner. `TARGETS` is the single source of truth the
@@ -63,7 +63,7 @@ reproduces from its seed (printed in the error).
 
 ## Running it
 
-A plain `cargo test -p rustos-test-fs-soak` runs **one** smoke
+A plain `cargo test -p tairix-test-fs-soak` runs **one** smoke
 iteration per filesystem on a 320 MiB device (above FAT32's ~256 MiB
 floor; ext4 gets two block groups), which takes a couple of seconds.
 
@@ -71,9 +71,9 @@ The nightly soak runs it under a wall-clock budget on a full-size
 volume via the orchestrator, which sets two env seams the integration
 tests read:
 
-- `RUSTOS_FSSOAK_BUDGET_SECS` — loop each target until the budget
+- `TAIRIX_FSSOAK_BUDGET_SECS` — loop each target until the budget
   elapses (unset / `0` runs a single iteration);
-- `RUSTOS_FSSOAK_BYTES` — device size in bytes (≥ 1 GiB for the soak;
+- `TAIRIX_FSSOAK_BYTES` — device size in bytes (≥ 1 GiB for the soak;
   `MIN_DEVICE_BYTES`).
 
 ```

@@ -1,7 +1,7 @@
 //! The per-invocation elevation broker (`plans/CAPABILITY_USE.md` CU5).
 //!
 //! While a session runs, login serves its console's elevation call endpoint
-//! ([`rustos_abi::elevate`]): the session's shell forwards an
+//! ([`tairix_abi::elevate`]): the session's shell forwards an
 //! `elevate <user> <program>` request, and this module decides it —
 //! re-authenticating the target account through the **same**
 //! [`Authenticator`] the login prompt uses (timing-equalised, refusals
@@ -16,9 +16,9 @@
 //! binary owns the IPC serve loop (`call_recv` → this → `call_reply`) and
 //! the syscall-backed launcher.
 
-use rustos_abi::elevate::{ElevateReply, ElevateRequest};
-use rustos_abi::Errno;
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_abi::elevate::{ElevateReply, ElevateRequest};
+use tairix_abi::Errno;
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::decfmt::DecBuf;
 use crate::events;
@@ -137,19 +137,19 @@ fn audit_granted(sink: &dyn Sink, request: &ElevateRequest<'_>, uid: u32, exit_c
         &[
             Field {
                 key: "user",
-                value: rustos_log::FieldValue::Str(request.username),
+                value: tairix_log::FieldValue::Str(request.username),
             },
             Field {
                 key: "uid",
-                value: rustos_log::FieldValue::Str(uid_buf.format(i128::from(uid))),
+                value: tairix_log::FieldValue::Str(uid_buf.format(i128::from(uid))),
             },
             Field {
                 key: "program",
-                value: rustos_log::FieldValue::Str(request.program),
+                value: tairix_log::FieldValue::Str(request.program),
             },
             Field {
                 key: "exit_code",
-                value: rustos_log::FieldValue::Str(code_buf.format(i128::from(exit_code))),
+                value: tairix_log::FieldValue::Str(code_buf.format(i128::from(exit_code))),
             },
         ],
     );
@@ -165,15 +165,15 @@ fn audit_refused(sink: &dyn Sink, cause: &str, username: Option<&str>, err: Errn
         &[
             Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str(cause),
+                value: tairix_log::FieldValue::Str(cause),
             },
             Field {
                 key: "user",
-                value: rustos_log::FieldValue::Str(username.unwrap_or("-")),
+                value: tairix_log::FieldValue::Str(username.unwrap_or("-")),
             },
             Field {
                 key: "errno",
-                value: rustos_log::FieldValue::Str(errno_buf.format(i128::from(err.as_i32()))),
+                value: tairix_log::FieldValue::Str(errno_buf.format(i128::from(err.as_i32()))),
             },
         ],
     );
@@ -189,10 +189,10 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
-    use rustos_abi::Errno;
-    use rustos_caps::CapabilitySet;
-    use rustos_log::{Event, EventId, Sink};
+    use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
+    use tairix_abi::Errno;
+    use tairix_caps::CapabilitySet;
+    use tairix_log::{Event, EventId, Sink};
 
     /// Authenticator accepting exactly `root`/`correct` as uid 0.
     struct FixedAuth;

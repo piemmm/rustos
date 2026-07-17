@@ -126,7 +126,7 @@ mod tests {
     fn marker_is_detected_in_every_comment_spelling() {
         let sample = format!("    // {MARKER}: drafted by an assistant, awaiting review");
         let mut out = Vec::new();
-        let dir = std::env::temp_dir().join(format!("rustos-spec-review-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tairix-spec-review-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("draft.rs");
         std::fs::write(&file, format!("fn f() {{}}\n{sample}\n")).expect("write");
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn clean_source_is_accepted() {
         let mut out = Vec::new();
-        let dir = std::env::temp_dir().join(format!("rustos-spec-clean-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tairix-spec-clean-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("clean.rs");
         std::fs::write(&file, "fn ok() {}\n// a normal comment\n").expect("write");

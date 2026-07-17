@@ -1,7 +1,7 @@
 //! Shared ANSI / VT / xterm escape and attribute vocabulary (`lib/vt`).
 //!
 //! Every real terminal, terminal multiplexer, and remote Linux host speaks the
-//! ANSI / xterm escape vocabulary, so RustOS speaks it too — and it speaks it
+//! ANSI / xterm escape vocabulary, so TAIRiX speaks it too — and it speaks it
 //! from **one** definition. This crate is that definition:
 //! the control set, the SGR attributes and colour models, and the
 //! screen-control operations, expressed once as the [`Op`] vocabulary and
@@ -27,7 +27,7 @@
 //! ever writes to fd 3 (`stdinfo` is reserved).
 //!
 //! ```
-//! use rustos_vt::{encode_into, Op, Parser, Sgr, Color};
+//! use tairix_vt::{encode_into, Op, Parser, Sgr, Color};
 //!
 //! // Emit one operation into a byte sink, then parse the bytes back: identity
 //! // holds. The emitter writes into any `Extend<u8>` (here a `Vec`), so it

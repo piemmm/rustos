@@ -1,6 +1,6 @@
-//! RustOS `clear` — clear the terminal screen (`plans/APPS.md`).
+//! TAIRiX `clear` — clear the terminal screen (`plans/APPS.md`).
 //!
-//! The RustOS counterpart of the ncurses `clear` tool: it writes the byte
+//! The TAIRiX counterpart of the ncurses `clear` tool: it writes the byte
 //! sequence that moves the cursor home and erases the display, and nothing
 //! else. Which bytes those are is decided by the inherited `TERM` through
 //! the compiled-in capability database (`lib/termcap`), and the sequence is
@@ -20,7 +20,7 @@
 //! # Divergence from ncurses `clear`
 //!
 //! GNU/ncurses `clear -x` skips the scrollback-erase (`E3`) extension. A
-//! RustOS console keeps no scrollback, so there is nothing to skip: `-x` is
+//! TAIRiX console keeps no scrollback, so there is nothing to skip: `-x` is
 //! accepted for script compatibility and the output is identical with and
 //! without it. Documented in the tool's `Help/` documents.
 //!
@@ -39,8 +39,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use rustos_termcap::Capabilities;
-use rustos_vt::{encode_all_into, EraseMode, Op};
+use tairix_termcap::Capabilities;
+use tairix_vt::{encode_all_into, EraseMode, Op};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `clear`'s own Help tree is unavailable.
@@ -72,7 +72,7 @@ pub enum ClearError {
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md; they win immediately).
 /// * `-x` — accepted for GNU/ncurses compatibility ("do not clear the
-///   scrollback"); a RustOS console keeps no scrollback, so the behaviour
+///   scrollback"); a TAIRiX console keeps no scrollback, so the behaviour
 ///   is identical with and without it.
 /// * anything else — a [`ClearError::Usage`] error: the tool takes no
 ///   operands.
@@ -121,7 +121,7 @@ pub fn clear_bytes(caps: &Capabilities) -> Option<Vec<u8>> {
 mod tests {
     extern crate std;
 
-    use rustos_termcap::TermType;
+    use tairix_termcap::TermType;
 
     use super::{clear_bytes, parse, ClearError, Command};
 
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn dash_x_is_accepted_once() {
-        // `-x` is the GNU "keep the scrollback" switch; a RustOS console
+        // `-x` is the GNU "keep the scrollback" switch; a TAIRiX console
         // keeps none, so it parses to the same command.
         assert_eq!(parse(&["-x"]), Ok(Command::Run));
         // A repeated `-x` is not a valid GNU `clear` line either.
@@ -182,7 +182,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/clear.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

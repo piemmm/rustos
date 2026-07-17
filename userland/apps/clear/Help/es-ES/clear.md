@@ -15,14 +15,14 @@ puede borrar (un `TERM` desconocido degrada al perfil mínimo) hace que
 la orden falle en lugar de imprimir bytes que el terminal mostraría
 como caracteres extraños.
 
-Las consolas de RustOS no conservan historial de desplazamiento, así
+Las consolas de TAIRiX no conservan historial de desplazamiento, así
 que no hay nada que borrar en ese sentido: `-x` (la opción GNU que
 preserva el historial) se acepta por compatibilidad con scripts y no
 cambia nada.
 
 ## OPTIONS
 
-- `-x` — aceptada por compatibilidad con GNU; una consola RustOS no
+- `-x` — aceptada por compatibilidad con GNU; una consola TAIRiX no
   conserva historial, la salida es idéntica con o sin ella.
 - `-h, -?` — mostrar la ayuda breve de esta orden.
 

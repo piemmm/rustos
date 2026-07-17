@@ -10,25 +10,25 @@ extern crate alloc;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use rustos_arch_api::{EnterUser, UserEntry};
-use rustos_arch_x86_64::context_hal::ContextSwitchHal;
-use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
-use rustos_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
-use rustos_arch_x86_64::userentry::UserMode;
-use rustos_arch_x86_64::{qemu_exit, smp, syscall_entry};
-use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::{
+use tairix_abi::rxe::LoadImage;
+use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_arch_api::{EnterUser, UserEntry};
+use tairix_arch_x86_64::context_hal::ContextSwitchHal;
+use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
+use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
+use tairix_arch_x86_64::userentry::UserMode;
+use tairix_arch_x86_64::{qemu_exit, smp, syscall_entry};
+use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
-use rustos_kernel_core::{
+use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
 };
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
-use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
-use rustos_log::{log, Event, EventId, Level, Sink};
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
+use tairix_log::{log, Event, EventId, Level, Sink};
 
 // `PROGRAM_RXE: &[u8]`, `USER_BIAS: u64`, and `YIELDS_PER_TASK: u64`, generated
 // by `build.rs`.
@@ -50,7 +50,7 @@ const BOOT_CPU: u32 = 0;
 /// The two EL0 tasks the test timeshares.
 const TASK_COUNT: u64 = 2;
 
-/// User stack base (1 MiB into the high user region) and size. `rustos-rt`'s
+/// User stack base (1 MiB into the high user region) and size. `tairix-rt`'s
 /// `_start` only aligns the stack and calls, so a small stack suffices for the
 /// trivial yield-then-exit program; 256 KiB is generous headroom.
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
@@ -150,7 +150,7 @@ fn note(id: EventId, message: &'static str) {
     );
 }
 
-/// Forward to the shared bridge in `rustos_kernel`.
+/// Forward to the shared bridge in `tairix_kernel`.
 #[panic_handler]
 fn spawn_el0_timeshare_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
     handle_panic_via_kernel_core(info)
@@ -446,6 +446,6 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         multiboot_info,
         &SERIAL_SINK,
         &AUDIT_SINK,
-        rustos_log::Level::Info,
+        tairix_log::Level::Info,
     )
 }

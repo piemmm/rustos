@@ -1,4 +1,4 @@
-# `rustos-head` — output the first part of files
+# `tairix-head` — output the first part of files
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/head.app/` so the shell resolves the bare word
@@ -24,7 +24,7 @@ with the exit status reflecting the failure.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-audited `rustos-abi` vocabulary and the shared `rustos-help` engine, so
+audited `tairix-abi` vocabulary and the shared `tairix-help` engine, so
 it never links a kernel or driver crate. Its manifest (`AppInfo.toml`)
 requests `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` —
 within the session baseline — and the secured VFS still authorises every

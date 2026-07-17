@@ -1,7 +1,7 @@
 //! Map a validated `rxe` load image into an [`AddressSpace`].
 //!
 //! The load-time policy — W^X segments, mandatory PIE, the CFI
-//! type-tag, and the KASLR bias — is enforced by `rustos_abi::rxe` when a
+//! type-tag, and the KASLR bias — is enforced by `tairix_abi::rxe` when a
 //! [`LoadImage`] is parsed. This module is the kernel-side step that
 //! consumes a *already-validated* image and materialises it: every segment
 //! page is mapped at its KASLR-relocated address with the page permissions
@@ -13,7 +13,7 @@
 //! this module stays free of any particular allocator and is fully
 //! host-testable.
 
-use rustos_abi::rxe::{LoadImage, RxeError, RxePermission, RXE_PAGE_SIZE};
+use tairix_abi::rxe::{LoadImage, RxeError, RxePermission, RXE_PAGE_SIZE};
 
 use crate::frame::{Frame, PAGE_SIZE};
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
@@ -163,8 +163,8 @@ mod tests {
     use super::{map_flags_for, map_image, LoadError};
     use crate::frame::Frame;
     use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
-    use rustos_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
-    use rustos_abi::{LoadImage, ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
+    use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
+    use tairix_abi::{LoadImage, ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
 
     const TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0x33; SYSCALL_TABLE_HASH_LEN];
 

@@ -37,7 +37,7 @@
 //! caller (which already holds the serialized record bytes), keeping this
 //! module payload-format agnostic.
 
-use rustos_crypto::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
+use tairix_crypto::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
 
 /// The anchor that precedes the first entry of a chain.
 ///
@@ -131,7 +131,7 @@ impl LogChain {
     /// Start a fresh chain anchored at [`GENESIS_ANCHOR`].
     ///
     /// A stream's *first* segment instead anchors at its stream genesis
-    /// (`rustos_log::stream_genesis`); use [`Self::resume`] with sequence `0`
+    /// (`tairix_log::stream_genesis`); use [`Self::resume`] with sequence `0`
     /// and that genesis value for it.
     #[must_use]
     pub fn new() -> Self {
@@ -176,7 +176,7 @@ impl LogChain {
     /// Advances the chain head and the sequence counter. `cpu` is the
     /// record's originating CPU id, bound into the entry hash as evidence.
     /// The caller computes `payload_digest` over the serialized record bytes
-    /// it is about to persist (e.g. with [`rustos_crypto::sha256`]).
+    /// it is about to persist (e.g. with [`tairix_crypto::sha256`]).
     pub fn append(&mut self, cpu: u32, payload_digest: &Sha256Digest) -> ChainedEntry {
         let seq = self.next_seq;
         let prev_hash = self.head_hash;
@@ -276,7 +276,7 @@ mod tests {
     use super::{
         verify_chain, verify_fresh_chain, ChainError, ChainedEntry, LogChain, GENESIS_ANCHOR,
     };
-    use rustos_crypto::sha256;
+    use tairix_crypto::sha256;
 
     fn build(cpu: u32, payloads: &[&[u8]]) -> (LogChain, Vec<ChainedEntry>) {
         let mut chain = LogChain::new();

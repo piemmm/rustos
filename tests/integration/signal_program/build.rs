@@ -8,7 +8,7 @@
 //! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
 //! cfg-check` stays clean.
 //!
-//! The consuming vertical (`signal_qemu_aarch64`) sets `RUSTOS_SIGNAL_ROLE`
+//! The consuming vertical (`signal_qemu_aarch64`) sets `TAIRIX_SIGNAL_ROLE`
 //! when it compiles this program (once per role), so a changed role must force
 //! a recompile; declare that dependency here.
 
@@ -18,6 +18,6 @@ fn main() {
     if target_os == "none" {
         println!("cargo:rustc-cfg=freestanding");
     }
-    println!("cargo:rerun-if-env-changed=RUSTOS_SIGNAL_ROLE");
+    println!("cargo:rerun-if-env-changed=TAIRIX_SIGNAL_ROLE");
     println!("cargo:rerun-if-changed=build.rs");
 }

@@ -1,12 +1,12 @@
 # Driver framework overview
 
 This page is the orientation document for Stage 4 of `PLAN.md`. It
-describes the trait surface every RustOS driver implements, the
+describes the trait surface every TAIRiX driver implements, the
 lifecycle the host walks each driver through, and the capability
 model that gates every method.
 
 The traits themselves live in
-[`rustos_abi::driver`](../abi/driver_traits.md) and are part of the
+[`tairix_abi::driver`](../abi/driver_traits.md) and are part of the
 frozen `abi-v1` contract (`AGENTS.md` §9). New methods do **not**
 ship as additions to an existing trait — that would be interface
 creep, forbidden by `AGENTS.md` §2.4. Behaviour beyond what the
@@ -63,7 +63,7 @@ trait implementation (`AGENTS.md` §5.2). Three layers compose:
    the kernel-issued proof that the load-time check passed.
 
 The capability identifiers used by the trait surface are all
-defined in [`rustos_abi::CapabilityId`] and are frozen at `abi-v1`
+defined in [`tairix_abi::CapabilityId`] and are frozen at `abi-v1`
 (`AGENTS.md` §5.2).
 
 ## Lifecycle
@@ -98,7 +98,7 @@ See [hardware detection and autoload](./hardware-detection.md).
 
 [`DriverError`] is the single error type returned across the driver
 ABI. The variants are kept disjoint from
-[`rustos_abi::Errno`] so that a stray driver error cannot be
+[`tairix_abi::Errno`] so that a stray driver error cannot be
 confused with a kernel error by the dispatcher; the
 `DriverError::as_errno` mapping is used when a driver outcome is
 surfaced through a syscall.
@@ -114,5 +114,5 @@ surfaced through a syscall.
 [`DriverError`]: ../abi/driver_traits.md#drivererror
 [`DriverError::PermissionDenied`]: ../abi/driver_traits.md#drivererror
 [`DriverManifest::from_bytes`]: ../abi/driver_traits.md#drivermanifest
-[`rustos_abi::Errno`]: ../lib/abi.md
-[`rustos_abi::CapabilityId`]: ../lib/abi.md
+[`tairix_abi::Errno`]: ../lib/abi.md
+[`tairix_abi::CapabilityId`]: ../lib/abi.md

@@ -8,9 +8,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_abi::IrqHandle;
-use rustos_kernel_sec::TaskId;
-use rustos_sync::{OnceCell, RwLock};
+use tairix_abi::IrqHandle;
+use tairix_kernel_sec::TaskId;
+use tairix_sync::{OnceCell, RwLock};
 
 use crate::error::{IrqError, MaskError};
 
@@ -151,7 +151,7 @@ impl IrqController for UnsupportedController {
 
 /// Shared `'static` [`UnsupportedController`] suitable as the default
 /// controller reference handed back from
-/// `rustos_kernel_core::KernelArch::irq_routing` on architectures
+/// `tairix_kernel_core::KernelArch::irq_routing` on architectures
 /// or boot paths that have not yet installed a real controller.
 ///
 /// Exposed as a `pub static` (not a `const`) so callers can take a
@@ -160,7 +160,7 @@ impl IrqController for UnsupportedController {
 /// unit-like type has no interior mutability, so the lint does not
 /// fire here, but the `static` form keeps the address stable and
 /// allows the type-erased reference to round-trip through the
-/// `rustos_kernel_core` handover without surprise. — no global mutable state; this is an *immutable* static.
+/// `tairix_kernel_core` handover without surprise. — no global mutable state; this is an *immutable* static.
 pub static UNSUPPORTED_CONTROLLER: UnsupportedController = UnsupportedController;
 
 /// Outcome of [`IrqTable::release_for`].

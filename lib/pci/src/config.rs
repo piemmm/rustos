@@ -101,7 +101,7 @@ impl ConfigAddress {
         Some((bus << 20) | (dev << 15) | (func << 12) | reg)
     }
 
-    /// Pack into the [`rustos_abi::driver::bus::BusDevice::address`]
+    /// Pack into the [`tairix_abi::driver::bus::BusDevice::address`]
     /// slot the driver hands back to the host.
     #[must_use]
     pub const fn pack_bdf(self) -> u64 {
@@ -114,12 +114,12 @@ impl ConfigAddress {
 /// Implementations:
 ///
 /// * [`crate::mech_one::PortIoConfigSpace`] — real hardware PIO,
-///   behind the [`rustos_abi::PortIo`] seam so the unit tests can
+///   behind the [`tairix_abi::PortIo`] seam so the unit tests can
 ///   drive it without touching the actual `in`/`out` instructions
 ///   (the x86_64 backend lives in the architecture port).
 /// * [`crate::mech_ecam::EcamConfigSpace`] — memory-mapped `PCIe`
 ///   enhanced configuration access over a kernel-mapped
-///   [`rustos_abi::RegisterWindow`], the path the Pi 4 (BCM2711)
+///   [`tairix_abi::RegisterWindow`], the path the Pi 4 (BCM2711)
 ///   root complex and any other `PCIe` host bridge use.
 /// * `tests::MockConfigSpace` — table-driven fixture for the
 ///   in-crate enumeration tests.
@@ -264,23 +264,23 @@ pub const CAP_ID_VENDOR: u8 = 0x09;
 
 // The virtio `cfg_type` discriminants are the frozen `abi-v1`
 // transport-provisioning seam: the kernel walk picks
-// a `cfg_type` from `rustos_abi` and this driver resolves it, so both
+// a `cfg_type` from `tairix_abi` and this driver resolves it, so both
 // sides must agree on one definition. These aliases bind to the
-// `rustos_abi` source of truth rather than re-stating the literals,
+// `tairix_abi` source of truth rather than re-stating the literals,
 // keeping the driver free of a second copy.
 
 /// virtio `cfg_type` for the common configuration structure
 /// (virtio 1.x §4.1.4.3).
-pub const VIRTIO_CFG_COMMON: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_COMMON;
+pub const VIRTIO_CFG_COMMON: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_COMMON;
 /// virtio `cfg_type` for the notification structure (virtio 1.x §4.1.4.4).
-pub const VIRTIO_CFG_NOTIFY: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
+pub const VIRTIO_CFG_NOTIFY: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
 /// virtio `cfg_type` for the ISR-status structure (virtio 1.x §4.1.4.5).
-pub const VIRTIO_CFG_ISR: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_ISR;
+pub const VIRTIO_CFG_ISR: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_ISR;
 /// virtio `cfg_type` for the device-specific structure (virtio 1.x §4.1.4.6).
-pub const VIRTIO_CFG_DEVICE: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_DEVICE;
+pub const VIRTIO_CFG_DEVICE: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_DEVICE;
 /// virtio `cfg_type` for the PCI configuration-access window
 /// (virtio 1.x §4.1.4.7).
-pub const VIRTIO_CFG_PCI: u8 = rustos_abi::driver::virtio_pci::VIRTIO_PCI_CFG_PCI;
+pub const VIRTIO_CFG_PCI: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_PCI;
 
 #[cfg(test)]
 mod tests {

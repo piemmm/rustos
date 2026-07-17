@@ -56,7 +56,7 @@ consumidores por `%CPU` e por memória.
   automáticas, em segundos com fração opcional (só se conserva o
   primeiro dígito decimal, os décimos): `sysmon -d 1.5` atualiza a
   cada 1,5 segundos. Predefinição 3,0. O GNU `top` aceita um intervalo
-  zero e atualiza tão depressa quanto pode; o RustOS nunca roda em
+  zero e atualiza tão depressa quanto pode; o TAIRiX nunca roda em
   vazio, pelo que um zero é elevado ao mínimo de 0,1 s.
 - `-h, -?` — mostrar a ajuda curta deste comando e sair. Dentro de uma
   sessão em curso, as mesmas teclas alternam o resumo de teclas.

@@ -1,4 +1,4 @@
-//! RustOS Raspberry Pi 4 (BCM2711) VL805 xHCI USB host-controller
+//! TAIRiX Raspberry Pi 4 (BCM2711) VL805 xHCI USB host-controller
 //! device-support library.
 //!
 //! The Pi 4's USB-A ports hang off a VIA VL805 PCIe-to-USB3 xHCI host
@@ -60,10 +60,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::mailbox::MailboxChannel;
-use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::driver::mailbox::MailboxChannel;
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 
-use rustos_vcmailbox::{
+use tairix_vcmailbox::{
     decode_firmware_revision_response, decode_xhci_reset_response, encode_firmware_revision_query,
     encode_xhci_reset, MailboxError,
 };

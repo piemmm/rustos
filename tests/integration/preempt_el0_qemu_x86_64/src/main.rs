@@ -5,14 +5,14 @@
 //!
 //! Like the x86_64 `spawn_el0_timeshare` sibling, the ring-3 transition needs
 //! the GDT ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry
-//! installed, so this test boots the production `rustos-kernel` pipeline (which
+//! installed, so this test boots the production `tairix-kernel` pipeline (which
 //! also programs the periodic LAPIC timer). On `AuditEvent::BootCompleted` it
 //! enables `IA32_EFER.NXE`, builds **one** hardware-isolated ring-3 address
 //! space from the `el0_spinner` `rxe` fixture through the production
-//! capability-checked, audited `rustos_kernel_core::spawn_image` caller, and
+//! capability-checked, audited `tairix_kernel_core::spawn_image` caller, and
 //! admits it as a resumable user kthread via
-//! `rustos_kernel_core::spawn_user_kthread`. Its `pre_resume` hook reloads CR3
-//! (`rustos_arch_x86_64::paging::activate_user_root`) and repoints **both** the
+//! `tairix_kernel_core::spawn_user_kthread`. Its `pre_resume` hook reloads CR3
+//! (`tairix_arch_x86_64::paging::activate_user_root`) and repoints **both** the
 //! per-CPU `syscall` entry stack (`syscall_entry::set_kernel_rsp0`) and the
 //! `TSS.RSP0` trap stack (`percpu::install_tss_rsp0`) at the task's own kernel
 //! stack — the latter because an involuntary timer IRQ taken from ring 3 is
@@ -20,7 +20,7 @@
 //! `TSS.RSP0`.
 //!
 //! It then arms the **production** ring-3-preemption path verbatim
-//! (the same `rustos_arch_x86_64::preempt` surface the bin
+//! (the same `tairix_arch_x86_64::preempt` surface the bin
 //! crate's `install_irq_dispatch` uses): it installs a ring-3-preemption
 //! callback that suspends the running task back to the scheduler via
 //! `reschedule_current(_, Yield)`. Ring 3 already runs preemptible
@@ -43,7 +43,7 @@
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-preempt-el0-qemu-x86-64: the `test-hooks` Cargo feature is a \
+    "tairix-test-preempt-el0-qemu-x86-64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );

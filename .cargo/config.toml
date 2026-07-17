@@ -1,4 +1,4 @@
-# Per-target build settings for RustOS.
+# Per-target build settings for TAIRiX.
 #
 # Host crates (xtask, host-side tests, image builders) use the default
 # toolchain settings. The bare-metal targets opt-in to `-Z build-std` so the
@@ -20,7 +20,7 @@ rustflags = [
     "-C", "relocation-model=static",
     "-C", "force-frame-pointers=yes",
     # `curve25519-dalek` (pulled in transitively through
-    # `rustos-crypto` → `ed25519-dalek`) auto-selects the `simd`
+    # `tairix-crypto` → `ed25519-dalek`) auto-selects the `simd`
     # backend on nightly toolchains that advertise AVX2, but the
     # generated SIMD code depends on host-only LLVM intrinsics that
     # `x86_64-unknown-none` cannot lower (`rustc-LLVM ERROR: Do not
@@ -30,7 +30,7 @@ rustflags = [
     # `--cfg` carries a justifying comment.
     "--cfg", "curve25519_dalek_backend=\"serial\"",
     # `chacha20` and `poly1305` (pulled in transitively through
-    # `rustos-crypto` → `chacha20poly1305`, which backs the encrypted-swap
+    # `tairix-crypto` → `chacha20poly1305`, which backs the encrypted-swap
     # layer, `AGENTS.md` §4) unconditionally compile their AVX2/SSE2
     # intrinsics backends on `x86_64`, selecting one at runtime via
     # `cpufeatures`. `x86_64-unknown-none` is a soft-float, SSE-disabled

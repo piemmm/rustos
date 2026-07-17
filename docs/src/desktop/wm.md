@@ -1,7 +1,7 @@
 # Compositing window manager
 
-`userland/gui/wm` (`rustos-wm`) is the user-space compositor for the
-RustOS desktop (`AGENTS.md` §10). All compositing happens in user space;
+`userland/gui/wm` (`tairix-wm`) is the user-space compositor for the
+TAIRiX desktop (`AGENTS.md` §10). All compositing happens in user space;
 the kernel only ships framebuffer access through a capability, and no
 non-GUI crate depends on it (`AGENTS.md` §17.3). This page documents the
 **compositor core** and the **input router** delivered in the first
@@ -153,7 +153,7 @@ fallback rather than crashing the compositor (`AGENTS.md` §2.9).
 Pre-rasterised bitmaps may exist as a cache or fallback, never as the only
 path.
 
-## The window channel (`rustos_abi::window_ipc` + `lib/window`)
+## The window channel (`tairix_abi::window_ipc` + `lib/window`)
 
 Application windows reach the compositor over the **window channel**
 (`plans/APPWIN.md` AW2): a fixed-width, versioned IPC protocol on the
@@ -182,7 +182,7 @@ endpoint, where the app **parks** until one arrives; it never polls.
   is keyed to its creator: a `Present` or `Close` naming another client's
   window answers `NotFound`, indistinguishable from a window that never
   existed. The granted region is mapped **once** at create (the shared
-  `rustos_display::ShmMapper` seam) and validated to hold every frame;
+  `tairix_display::ShmMapper` seam) and validated to hold every frame;
   each present hands the session's compositor bridge (`WindowHost`) a
   bounds-checked frame slice and a damage rectangle validated inside the
   window's surface. A per-client window cap bounds pinned memory, a dead
@@ -191,7 +191,7 @@ endpoint, where the app **parks** until one arrives; it never polls.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
   (`ipc_call`) and `EventSource` (parked endpoint wait) seams.
 
-Every decode fails closed (`rustos_abi::window_ipc`, enrolled in the
+Every decode fails closed (`tairix_abi::window_ipc`, enrolled in the
 `fuzz_decode` harness), and the loopback suite in `lib/window/src/tests.rs`
 proves both halves against one real server: ownership isolation,
 create/present bounds, the client cap, refused-open rollback, teardown,
@@ -222,7 +222,7 @@ a path or any browsing authority of its own.
 
 ## Tests
 
-`cargo test -p rustos-wm` runs the headless suite against a virtual
+`cargo test -p tairix-wm` runs the headless suite against a virtual
 framebuffer: premultiplied-alpha correctness (fully-opaque and
 fully-transparent edge cases), per-region alpha blending, rounded-corner
 masking, z-order and raise, window move/hide/remove with damage repaint,

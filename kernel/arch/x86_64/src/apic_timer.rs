@@ -53,7 +53,7 @@ pub const LAPIC_TIMER_DIVIDE_16: u32 = 16;
 pub mod timer_mode {
     /// One-shot mode (initial-count decrements once to zero, then stops).
     ///
-    /// RustOS programs the LAPIC timer one-shot only (
+    /// TAIRiX programs the LAPIC timer one-shot only (
     /// tickless / `NO_HZ`); there is no periodic-mode constant because no
     /// path arms a fixed-frequency auto-reload (no dead code).
     pub const ONE_SHOT: u32 = 0b00 << 17;
@@ -98,7 +98,7 @@ pub trait TscReader {
 /// Production [`TscReader`]: invokes the `rdtsc` instruction.
 ///
 /// `rdtsc` is unconditionally available on every x86_64 CPU and on the
-/// host toolchain RustOS builds against; the same impl is therefore
+/// host toolchain TAIRiX builds against; the same impl is therefore
 /// reused on both `target_os = "none"` and `target_os = "linux"`
 /// builds (host unit tests of consumers that drive `calibrate` against
 /// a real CPU).
@@ -357,7 +357,7 @@ pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
 /// `vector` (the divisor and mode persist across one-shot fires, so the
 /// later `crate::preempt::arm_oneshot` only has to rewrite the
 /// initial-count), and writes an initial-count of `0` to halt the timer
-/// (SDM §11.5.4). RustOS is tickless: the scheduler
+/// (SDM §11.5.4). TAIRiX is tickless: the scheduler
 /// arms the one-shot to one quantum (`calibration.initial_count` ticks)
 /// only when a CPU is contended, and disarms otherwise — there is no
 /// periodic auto-reload. The calibration is consumed by the caller
@@ -393,7 +393,7 @@ impl PortIo for PolledPit {
         #[cfg(target_arch = "x86_64")]
         {
             // SAFETY: PIT ports 0x40-0x43 and 0x61 are architecturally
-            // present on every x86 platform RustOS targets; reading
+            // present on every x86 platform TAIRiX targets; reading
             // them has no side-effects other than the read itself. The
             // surrounding `cfg(target_arch = "x86_64")` guarantees
             // `in`/`out` are only emitted for an x86_64 code generator.

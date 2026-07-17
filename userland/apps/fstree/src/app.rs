@@ -13,10 +13,10 @@ use alloc::vec::Vec;
 
 use core::time::Duration;
 
-use rustos_abi::{Errno, FileKind};
-use rustos_curses::{Event, InputMode, Pos, Screen, Tty, Window};
-use rustos_glob::Pattern;
-use rustos_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
+use tairix_abi::{Errno, FileKind};
+use tairix_curses::{Event, InputMode, Pos, Screen, Tty, Window};
+use tairix_glob::Pattern;
+use tairix_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
 
 use crate::fs::Fs;
 use crate::info::{note_hidden_entries, Info};
@@ -807,8 +807,8 @@ struct SeamLister<'a> {
     base: &'a str,
 }
 
-impl rustos_complete::DirLister for SeamLister<'_> {
-    fn list_dir(&self, dir: &str) -> Result<Vec<rustos_complete::DirEntryInfo>, Errno> {
+impl tairix_complete::DirLister for SeamLister<'_> {
+    fn list_dir(&self, dir: &str) -> Result<Vec<tairix_complete::DirEntryInfo>, Errno> {
         let resolved = if dir.starts_with('/') {
             String::from(dir)
         } else {
@@ -817,7 +817,7 @@ impl rustos_complete::DirLister for SeamLister<'_> {
         let entries = self.fs.borrow_mut().list_dir(&resolved)?;
         Ok(entries
             .into_iter()
-            .map(|entry| rustos_complete::DirEntryInfo {
+            .map(|entry| tairix_complete::DirEntryInfo {
                 is_dir: entry.kind == FileKind::Directory,
                 name: entry.name,
             })
@@ -846,8 +846,8 @@ fn complete_destination(model: &mut Model, fs: &mut dyn Fs, prompt: &mut InputPr
         fs: core::cell::RefCell::new(fs),
         base: &base,
     };
-    let matches = rustos_complete::path_matches(&prompt.input, &base, &lister);
-    let (dir_part, _) = rustos_complete::split_path_word(&prompt.input);
+    let matches = tairix_complete::path_matches(&prompt.input, &base, &lister);
+    let (dir_part, _) = tairix_complete::split_path_word(&prompt.input);
     let completed = |name: &str, is_dir: bool| {
         let mut text = String::from(dir_part);
         text.push_str(name);
@@ -865,7 +865,7 @@ fn complete_destination(model: &mut Model, fs: &mut dyn Fs, prompt: &mut InputPr
             }
         }
         many => {
-            let common = rustos_complete::common_prefix(many.iter().map(|e| e.name.as_str()));
+            let common = tairix_complete::common_prefix(many.iter().map(|e| e.name.as_str()));
             let extended = format!("{dir_part}{common}");
             if extended.len() > prompt.input.len() && extended.len() <= INPUT_MAX {
                 prompt.input = extended;
@@ -1388,7 +1388,7 @@ fn submit_content_search(model: &mut Model, tagged: bool, typed: &str) {
                     path: item.path.clone(),
                     kind: item.kind,
                     size: item.size,
-                    modified: rustos_abi::time::Time64::UNIX_EPOCH,
+                    modified: tairix_abi::time::Time64::UNIX_EPOCH,
                     note: None,
                 });
             }
@@ -1663,7 +1663,7 @@ fn open_viewer(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, path
         }
     };
     let head = &buf[..read];
-    if rustos_binfmt::detect(head).is_some() || is_manifest_head(head) {
+    if tairix_binfmt::detect(head).is_some() || is_manifest_head(head) {
         open_disasm(model, fs, decode, path, size);
         return;
     }
@@ -1788,7 +1788,7 @@ fn force_disasm(
         }
     };
     let head = &buf[..read];
-    if rustos_binfmt::detect(head).is_some() || is_manifest_head(head) {
+    if tairix_binfmt::detect(head).is_some() || is_manifest_head(head) {
         open_disasm(model, fs, decode, path, size);
         return;
     }

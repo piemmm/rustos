@@ -1,4 +1,4 @@
-//! RustOS `xHCI` USB host-controller driver (HCD) — shared library.
+//! TAIRiX `xHCI` USB host-controller driver (HCD) — shared library.
 //!
 //! The Pi 4 reaches its USB-A ports through a `VL805` `PCIe` `xHCI`
 //! controller (`plans/PI.md` P10). This crate is the loadable
@@ -14,8 +14,8 @@
 //! machine — so they are proven host-side over mocks; the `Run` binary
 //! composes them with the live kernel seams (`shm_create`, `call_create`,
 //! `hw_emit_node`, the wait-set event loop). The bus-agnostic `xHCI`
-//! *protocol* engine (the [`Xhci`](rustos_usb::Xhci) controller, the TRB/ring
-//! vocabulary, and the [`UsbDevice`](rustos_usb::device::UsbDevice)
+//! *protocol* engine (the [`Xhci`](tairix_usb::Xhci) controller, the TRB/ring
+//! vocabulary, and the [`UsbDevice`](tairix_usb::device::UsbDevice)
 //! enumeration engine) lives in `lib/usb` so this driver and the class drivers
 //! both consume it without depending on each other (`drivers/* → lib/*` only).
 //!
@@ -34,8 +34,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::{DriverBindKey, HwMatchKey};
-use rustos_usb::XHCI_COMPATIBLE;
+use tairix_abi::{DriverBindKey, HwMatchKey};
+use tairix_usb::XHCI_COMPATIBLE;
 
 pub mod bringup;
 pub mod serve;

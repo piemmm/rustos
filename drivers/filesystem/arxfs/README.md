@@ -1,10 +1,10 @@
-# `rustos-drv-fs-arxfs` — native RustOS filesystem driver
+# `tairix-drv-fs-arxfs` — native TAIRiX filesystem driver
 
-`arxfs` is the **native RustOS filesystem**: a block-backed, copy-on-write
+`arxfs` is the **native TAIRiX filesystem**: a block-backed, copy-on-write
 filesystem that stores full POSIX metadata plus an inline access-control
 list and an optional capability gate **per inode** (`AGENTS.md` §5.3). It
-sits behind any `rustos_abi::driver::block::Block` device and is exposed
-through the versioned `rustos_abi::driver::filesystem::FilesystemRead`,
+sits behind any `tairix_abi::driver::block::Block` device and is exposed
+through the versioned `tairix_abi::driver::filesystem::FilesystemRead`,
 `FilesystemWrite`, `FilesystemSecurity`, and `FilesystemTimestamps` traits.
 
 There is exactly **one** on-disk version. `arxfs` is built up internally
@@ -361,7 +361,7 @@ permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
 
 ## Test surface
 
-`cargo test -p rustos-drv-fs-arxfs` runs the block-header decode-rejection
+`cargo test -p tairix-drv-fs-arxfs` runs the block-header decode-rejection
 tests (wrong magic / type / address / UUID / flipped checksum) and host
 tests over an in-memory device: format/open (and unformatted-device
 rejection), nested create/lookup/listing, read/write across block

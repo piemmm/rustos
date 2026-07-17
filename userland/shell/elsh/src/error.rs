@@ -10,7 +10,7 @@
 //! is not found, a permission denial, a redirection target that cannot be
 //! opened — is not a `ParseError`. It is an ordinary non-zero exit status
 //! (carried back from the [`ProcessHost`](crate::ProcessHost) as an
-//! [`Errno`](rustos_abi::Errno)), so that `;`, `&&`, and `||` keep working
+//! [`Errno`](tairix_abi::Errno)), so that `;`, `&&`, and `||` keep working
 //! across a failed command exactly as a POSIX shell requires. Neither path
 //! ever panics.
 
@@ -61,7 +61,7 @@ pub enum ParseError {
     /// ordinary word would run a different command than the user wrote.
     UnsupportedCompound,
     /// A process substitution (`<(...)`, `>(...)`, `=(...)`). `=(...)` is
-    /// permanently unsupported (RustOS has no scratch filesystem to back it);
+    /// permanently unsupported (TAIRiX has no scratch filesystem to back it);
     /// the stream forms await the launch plumbing. All three fail closed so
     /// the parenthesised command is never misread as a filename.
     UnsupportedProcessSubstitution,

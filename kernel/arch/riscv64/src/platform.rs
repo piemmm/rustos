@@ -1,14 +1,14 @@
 //! riscv64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
-//! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
+//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice by
 //! normalising the
-//! flattened device tree the `virt` board hands the kernel (FDT → hardware tree) into [`rustos_abi::hwtree`] nodes. This is
+//! flattened device tree the `virt` board hands the kernel (FDT → hardware tree) into [`tairix_abi::hwtree`] nodes. This is
 //! a tracked *move* of the facts the [`crate::fdt`] reader already extracts
 //! behind the common HAL trait, not a new parser: the
 //! boot path used to consume the `/memory` region and the
 //! `timebase-frequency` directly; it now reaches them as a
-//! [`rustos_abi::HwNode`] tree
+//! [`tairix_abi::HwNode`] tree
 //! through the same trait every port implements.
 //!
 //! The emitted tree is intentionally shallow — exactly what the current
@@ -18,8 +18,8 @@
 //! trait.
 
 use crate::fdt::Fdt;
-use rustos_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
-use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
+use tairix_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// Builds the hardware tree from a borrowed flattened device tree.
 ///
@@ -73,8 +73,8 @@ mod tests {
     use super::FdtDiscovery;
     use crate::fdt::tests::virt_like;
     use crate::fdt::Fdt;
-    use rustos_abi::{HwDeviceClass, HwNode};
-    use rustos_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
+    use tairix_abi::{HwDeviceClass, HwNode};
+    use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
 
     #[test]
     fn passes_platform_discovery_conformance() {

@@ -12,12 +12,12 @@ pub const DEFAULT_DELAY_TENTHS: u32 = 30;
 
 /// The smallest accepted refresh delay, in tenths of a second.
 ///
-/// GNU `top` accepts a zero delay and spins as fast as it can; RustOS never
+/// GNU `top` accepts a zero delay and spins as fast as it can; TAIRiX never
 /// busy-loops, so a requested delay below one tenth of a second is clamped
 /// to it — a deliberate, documented divergence in the tool's Help. The
 /// grammar (and this clamp) is the shared full-screen-viewer delay grammar
 /// in `lib/curses`, so `top` and `sysmon` can never drift apart.
-pub use rustos_curses::MIN_DELAY_TENTHS;
+pub use tairix_curses::MIN_DELAY_TENTHS;
 
 /// The largest refresh delay the in-session `+` key can reach, in tenths
 /// of a second (60 s). Bounds the interval so a stray key can never park
@@ -90,7 +90,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysmonError> {
 }
 
 /// Parse a `secs[.tenths…]` delay through the shared full-screen-viewer
-/// grammar ([`rustos_curses::parse_delay_tenths`]), mapping its fail-closed
+/// grammar ([`tairix_curses::parse_delay_tenths`]), mapping its fail-closed
 /// `None` onto this tool's usage error.
 ///
 /// # Errors
@@ -98,5 +98,5 @@ pub fn parse(args: &[&str]) -> Result<Command, SysmonError> {
 /// [`SysmonError::Usage`] when the value is empty, carries a non-digit, has
 /// more than one decimal point, or overflows the tenths counter.
 fn parse_delay_tenths(value: &str) -> Result<u32, SysmonError> {
-    rustos_curses::parse_delay_tenths(value).ok_or(SysmonError::Usage)
+    tairix_curses::parse_delay_tenths(value).ok_or(SysmonError::Usage)
 }

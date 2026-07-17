@@ -13,16 +13,16 @@
 //!    its type's volumes on the probed device;
 //! 3. a name the kernel reports already in use gets the volume-identity
 //!    **fingerprint** appended (`plans/ALIAS.md` §3.8, rendered by
-//!    `rustos_fsprobe::fingerprint`), lengthened on each further
+//!    `tairix_fsprobe::fingerprint`), lengthened on each further
 //!    collision — distinct identities have distinct full fingerprints, so
 //!    the sequence terminates deterministically, never by coin-flip.
 //!
 //! Every produced candidate satisfies the structural volume-name grammar
-//! (`rustos_abi::volume::validate_volume_name`) by construction; the
+//! (`tairix_abi::volume::validate_volume_name`) by construction; the
 //! kernel still re-validates it (never a trusted caller).
 
-use rustos_abi::volume::{VolumeFsType, VOLUME_NAME_MAX};
-use rustos_fsprobe::{fingerprint, FINGERPRINT_CHARS};
+use tairix_abi::volume::{VolumeFsType, VOLUME_NAME_MAX};
+use tairix_fsprobe::{fingerprint, FINGERPRINT_CHARS};
 
 /// A catalog name candidate: a short ASCII string in the volume-name
 /// grammar, held inline (the policy is allocation-free).
@@ -169,7 +169,7 @@ pub fn candidate(base: &VolumeName, identity: &[u8; 16], attempt: usize) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use rustos_abi::volume::validate_volume_name;
+    use tairix_abi::volume::validate_volume_name;
 
     use super::*;
 

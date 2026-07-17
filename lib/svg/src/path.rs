@@ -16,7 +16,7 @@
 //! integers in the design grid; a fractional or exponent literal is an
 //! [`SvgError::InvalidNumber`] rejection.
 //!
-//! [`fill_polygon`]: rustos_raster::Surface::fill_polygon
+//! [`fill_polygon`]: tairix_raster::Surface::fill_polygon
 
 use alloc::vec::Vec;
 

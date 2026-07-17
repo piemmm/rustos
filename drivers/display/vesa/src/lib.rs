@@ -1,6 +1,6 @@
-//! RustOS VESA (VBE) linear-framebuffer display driver.
+//! TAIRiX VESA (VBE) linear-framebuffer display driver.
 //!
-//! Implements [`rustos_abi::driver::display::Display`] over the linear
+//! Implements [`tairix_abi::driver::display::Display`] over the linear
 //! framebuffer a VESA BIOS Extensions (VBE) mode exposes on a legacy
 //! x86_64 PC. On those machines the kernel cannot re-enter real mode to
 //! issue VBE BIOS calls itself, so mode selection happens in the
@@ -13,7 +13,7 @@
 //! presents fully-rendered frames into it.
 //!
 //! This is what distinguishes the VESA driver from the generic
-//! linear-surface engine (`rustos_display::Framebuffer`, hosted by the
+//! linear-surface engine (`tairix_display::Framebuffer`, hosted by the
 //! `drivers/display/framebuffer` service process): that engine consumes
 //! an already-parsed geometry record from firmware that hands off a
 //! surface directly (UEFI GOP, the Pi mailbox,
@@ -49,9 +49,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::display::{Display, DisplayFormat, DisplayMode, SeatGate};
-use rustos_abi::driver::mmio::{MmioMapError, WindowError};
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
+use tairix_abi::driver::display::{Display, DisplayFormat, DisplayMode, SeatGate};
+use tairix_abi::driver::mmio::{MmioMapError, WindowError};
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
 
 #[cfg(test)]
 mod tests;

@@ -1,9 +1,9 @@
 # Pointer cursors
 
-RustOS pointer cursors are **vectorised, colourful, scalable, and
+TAIRiX pointer cursors are **vectorised, colourful, scalable, and
 replaceable** — richer than a one-bit fill mask (`AGENTS.md` §6 / §10,
 `PLAN.md` Stage 7). They live in the shared `lib/cursor` crate
-(`rustos-cursor`) so the window manager and the default apps use them without
+(`tairix-cursor`) so the window manager and the default apps use them without
 depending on one another (`AGENTS.md` §17.4). The crate is `no_std`,
 `#![forbid(unsafe_code)]`, and owns no colour arithmetic of its own.
 
@@ -36,7 +36,7 @@ Degenerate cursors and scales fail closed with `None` rather than panicking
 
 ## Cursor sets
 
-A `CursorTheme` binds one `VectorCursor` to each `rustos_theme::CursorKind`
+A `CursorTheme` binds one `VectorCursor` to each `tairix_theme::CursorKind`
 (`Arrow`, `Text`, `Pointer`, `Move`, `Busy`). The fields are fixed, so a
 lookup can never miss (`AGENTS.md` §2.11). The built-in set
 (`CursorTheme::builtin`) draws each cursor as a light body over a darker
@@ -55,8 +55,8 @@ On-disk cursor sets follow the desktop's **SVG-first** asset rule
 (`AGENTS.md` §10): a replaceable set under `/System/Graphics` is authored as
 SVG and decoded — through the curated §16.4 image-decoding library (`lib/svg`)
 in a §19.5 parser sandbox — into the in-memory `VectorCursor`/`CursorTheme`
-form shown here. `rustos_cursor::decode_svg(bytes)` (built on
-`rustos_svg::decode` and `VectorCursor::from_svg`) performs that conversion,
+form shown here. `tairix_cursor::decode_svg(bytes)` (built on
+`tairix_svg::decode` and `VectorCursor::from_svg`) performs that conversion,
 preserving the asset's `data-hotspot-x`/`data-hotspot-y` hotspot; a malformed
 or out-of-subset asset fails closed, so the caller keeps the built-in cursor
 rather than crashing (`AGENTS.md` §2.9). See
@@ -99,7 +99,7 @@ coded per window action. The window manager's `select` module
   controller then fails closed, leaving the current pointer untouched rather
   than blanking it (`AGENTS.md` §2.9).
 - The controller rasterises each kind at most once per scale and cursor set: a
-  `rustos-raster` `RasterCache` keyed by `CursorKind` within a
+  `tairix-raster` `RasterCache` keyed by `CursorKind` within a
   `(scale, cursor-set)` epoch keeps the converted `CursorImage`, so toggling
   back to a previously-shown kind reuses its image and only a scale change or a
   set swap re-rasterises (the SVG-first "convert once, re-render only on a scale

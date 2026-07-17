@@ -1,4 +1,4 @@
-// RustOS aarch64 boot trampoline. Board-independent: it serves both the
+// TAIRiX aarch64 boot trampoline. Board-independent: it serves both the
 // QEMU `virt` board and the Raspberry Pi 4 (BCM2711). Only the load
 // address differs between boards, and that lives in the per-board linker
 // script (`aarch64-virt.ld` / `aarch64-rpi4.ld`) — the `AGENTS.md` §1
@@ -60,7 +60,7 @@
 //   4. The stack top and `.bss` bounds come from the active linker script
 //      (`aarch64-virt.ld` / `aarch64-rpi4.ld`); `__bss_start`/`__bss_end`
 //      are 16-byte aligned so the `stp` clear loop is exact.
-//   5. `rustos_arch_aarch64_main` is `-> !` and never returns; the trailing
+//   5. `tairix_arch_aarch64_main` is `-> !` and never returns; the trailing
 //      `wfi` park is unreachable under QEMU but is the correct conservative
 //      behaviour on bare metal.
 
@@ -145,7 +145,7 @@ _start:
     // is exercised (QEMU resets the register benignly, masking this).
     // Establish the known MMU-off value before the first EL1 data
     // access: 0x30D0_0800 = the ARMv8.0 RES1 bits only, i.e.
-    // `rustos_arch_aarch64::paging::SCTLR_MMU_OFF` (a unit test there
+    // `tairix_arch_aarch64::paging::SCTLR_MMU_OFF` (a unit test there
     // pins this hard-coded value).
     mov     x0, #0x0800
     movk    x0, #0x30D0, lsl #16
@@ -171,7 +171,7 @@ _start:
 
     // Hand the DTB pointer to the Rust entry. It does not return.
     mov     x0, x19
-    bl      rustos_arch_aarch64_main
+    bl      tairix_arch_aarch64_main
 
     // Defensive park (unreachable: the Rust entry never returns).
 3:
@@ -193,7 +193,7 @@ _start:
 // entry on real silicon (the Pi firmware stub sets only SCTLR_EL2 and
 // CPUECTLR_EL1.SMPEN); QEMU resets them to benign zeroes, masking any
 // residue. Each is therefore *written whole* with its known hand-off
-// value (`rustos_arch_aarch64::el2`, unit-test-pinned) — an `orr` into
+// value (`tairix_arch_aarch64::el2`, unit-test-pinned) — an `orr` into
 // the live register would carry UNKNOWN bits (HCR_EL2.TVM traps EL1's
 // first MAIR/TCR/TTBR/SCTLR write into vector-less EL2: the silent Pi 4
 // MMU-switch hang).

@@ -1,4 +1,4 @@
-# `rustos-seq` — print a sequence of numbers
+# `tairix-seq` — print a sequence of numbers
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/seq.app/` so the shell resolves the bare word
@@ -18,7 +18,7 @@ in the locale the inherited `LANG` variable names, falling back to the
 usage banner when the tree is unavailable.
 
 One deliberate platform divergence: GNU `seq`'s floating-point path
-computes in C `long double`, RustOS computes in `f64` — only non-integer
+computes in C `long double`, TAIRiX computes in `f64` — only non-integer
 sequences whose operands need more than 53 bits of significand can print
 differently from a glibc build on x86; the exact decimal path is
 unaffected. The printf-equivalent renderer implements C-locale `%e`,
@@ -30,7 +30,7 @@ normalisation prints the same value as `0xcp-3`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its only dependency is
-the shared `rustos-help` crate, so it never links a kernel or driver
+the shared `tairix-help` crate, so it never links a kernel or driver
 crate. Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
 authorises every path per-inode under the caller's attested identity.

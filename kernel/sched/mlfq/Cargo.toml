@@ -1,6 +1,6 @@
 [package]
-name = "rustos-kernel-sched-mlfq"
-description = "RustOS MLFQ scheduler policy: per-CPU run queues, work-stealing, MLFQ priority + fairness, IPI-driven preemption. Implements rustos-kernel-sched-api::SchedulerPolicy."
+name = "tairix-kernel-sched-mlfq"
+description = "TAIRiX MLFQ scheduler policy: per-CPU run queues, work-stealing, MLFQ priority + fairness, IPI-driven preemption. Implements tairix-kernel-sched-api::SchedulerPolicy."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,30 +15,30 @@ workspace = true
 # `test-arch` re-exports the host-only `TestArch` mock from the scheduler
 # API. It is intentionally not in the default feature set so production
 # (`no_std`) builds never link the mock (`AGENTS.md` §1 — no hacks).
-test-arch = ["rustos-kernel-sched-api/test-arch"]
+test-arch = ["tairix-kernel-sched-api/test-arch"]
 
 [dependencies]
 # The scheduler contract (`SchedulerPolicy`, the lifecycle vocabulary, the
 # re-exported Arch HAL surface). This is a `kernel/sched/<impl>` crate per
 # §17.4 and so may name `kernel/sched/api`, `kernel/arch/api`, and `lib/*`
 # only.
-rustos-kernel-sched-api = { path = "../api", version = "=0.0.0" }
+tairix-kernel-sched-api = { path = "../api", version = "=0.0.0" }
 
 # The scheduler-facing Arch HAL surface (`CpuId`, `SchedulerArch`) — named
 # directly so the dispatch types can bound on `SchedulerArch` without
 # routing every reference through the API re-export.
-rustos-arch-api = { path = "../../arch/api", version = "=0.0.0" }
+tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }
 
 # Synchronisation primitives (run-queue registry `RwLock`, overflow
 # `SpinLock`, the loom compatibility convention). These live in `lib/sync`
 # (`AGENTS.md` §6 / §17.4), reachable by a `SchedImpl` crate.
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 # The single project-wide source of randomness (`AGENTS.md` §1 / §2.2 —
 # no second PRNG). Work-stealing victim selection is a non-cryptographic
 # "scheduler decision", so it draws from `lib/rng`'s fast xoshiro256++
 # `FastRng` rather than a hand-rolled generator.
-rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 
 # `loom` is pulled in only when the consumer explicitly opts in with
 # `RUSTFLAGS="--cfg loom" cargo test ...`. Mirrors the convention
@@ -51,5 +51,5 @@ loom = "0.7"
 # never links them under `cargo build` or `cargo doc` without the feature
 # being explicitly requested.
 [dev-dependencies]
-rustos-kernel-sched-mlfq = { path = ".", version = "=0.0.0", features = ["test-arch"] }
-rustos-kernel-sched-api = { path = "../api", version = "=0.0.0", features = ["conformance"] }
+tairix-kernel-sched-mlfq = { path = ".", version = "=0.0.0", features = ["test-arch"] }
+tairix-kernel-sched-api = { path = "../api", version = "=0.0.0", features = ["conformance"] }

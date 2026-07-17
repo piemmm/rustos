@@ -1,9 +1,9 @@
 //! The request dispatcher: the one place a seat-administration request is
 //! decoded, capability-checked, audited, and forwarded to the kernel.
 
-use rustos_abi::seat::SeatAdminRequest;
-use rustos_abi::{CapabilityId, Errno, Origin};
-use rustos_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_abi::seat::SeatAdminRequest;
+use tairix_abi::{CapabilityId, Errno, Origin};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 
 use crate::events;
 
@@ -149,11 +149,11 @@ mod tests {
     use super::{serve, SeatAdmin};
     use crate::events;
     use core::cell::RefCell;
-    use rustos_abi::seat::SeatAdminRequest;
-    use rustos_abi::{
+    use tairix_abi::seat::SeatAdminRequest;
+    use tairix_abi::{
         CapabilityId, CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
     };
-    use rustos_log::{Event, EventId, Level, Sink};
+    use tairix_log::{Event, EventId, Level, Sink};
 
     /// Records every event it receives so tests can assert on audit output.
     struct RecordingSink {

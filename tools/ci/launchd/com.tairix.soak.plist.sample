@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent — TAIRiX nightly 24 h soaks (parallel).
+
+  Runs tools/ci/soak.sh all, which fans every §19.6 fuzz harness, §19.7
+  proptest model, and the §7 repeated-test matrix out into parallel
+  processes. Install with:
+
+    cp tools/ci/launchd/com.tairix.soak.plist.sample \
+       ~/Library/LaunchAgents/com.tairix.soak.plist
+    # edit the absolute paths below to match your checkout / user, then:
+    launchctl load ~/Library/LaunchAgents/com.tairix.soak.plist
+
+  StartCalendarInterval fires once a day at 02:00 local time. RunAtLoad is
+  deliberately absent so loading the agent does not kick off a 24 h job.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tairix.soak</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ianhawkins/RustroverProjects/tairix/tools/ci/soak.sh</string>
+        <string>all</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TAIRIX_CI_SYNC</key>
+        <string>1</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/ianhawkins/ci-logs/tairix/launchd-soak.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/ianhawkins/ci-logs/tairix/launchd-soak.err.log</string>
+</dict>
+</plist>

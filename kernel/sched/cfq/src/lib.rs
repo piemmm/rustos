@@ -1,4 +1,4 @@
-//! RustOS CFQ scheduler policy.
+//! TAIRiX CFQ scheduler policy.
 //!
 //! This `kernel/sched/cfq` crate is one concrete implementation of the
 //! [`SchedulerPolicy`] contract defined in `kernel/sched/api`. It is a
@@ -20,7 +20,7 @@
 //!   heavier task's `vruntime` rises more slowly for the same elapsed
 //!   service — proportional share, with no band ever starved (every
 //!   `vruntime` advances monotonically).
-//! * **Non-tickless — the tickless carve-out.** RustOS is otherwise a
+//! * **Non-tickless — the tickless carve-out.** TAIRiX is otherwise a
 //!   tickless (`NO_HZ`) kernel: a policy arms its preemption one-shot only
 //!   when a CPU is *contended* and disarms for a sole runnable task, so a
 //!   quiet core takes no timer interrupts. **CFQ is the one scheduler
@@ -70,14 +70,14 @@ mod scheduler;
 mod task;
 
 // Re-export the contract vocabulary so call sites
-// (`rustos_kernel_sched_cfq::{Scheduler, Priority, …}`) resolve to the
+// (`tairix_kernel_sched_cfq::{Scheduler, Priority, …}`) resolve to the
 // single canonical definitions in `kernel/sched/api` (no duplication).
-pub use rustos_kernel_sched_api::{
+pub use tairix_kernel_sched_api::{
     CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
     SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
 };
 
 #[cfg(any(test, feature = "test-arch"))]
-pub use rustos_kernel_sched_api::TestArch;
+pub use tairix_kernel_sched_api::TestArch;
 
 pub use scheduler::Scheduler;

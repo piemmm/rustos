@@ -22,17 +22,17 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::sysinfo::{
+use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
     ProcessRecord, ProcessState, ReclaimClassRecord, ResourceLimitRecord, SystemIdentity, Uptime,
     UserDirectoryRecord, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
-use rustos_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
-use rustos_kernel_mem::pressure::PressureBand;
-use rustos_kernel_mem::reclaim::ReclaimClass;
-use rustos_kernel_mem::PAGE_SIZE;
-use rustos_kernel_sched_api::{SchedulerPolicy, TaskId, TaskState};
-use rustos_kernel_sec::TaskId as SecTaskId;
+use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
+use tairix_kernel_mem::pressure::PressureBand;
+use tairix_kernel_mem::reclaim::ReclaimClass;
+use tairix_kernel_mem::PAGE_SIZE;
+use tairix_kernel_sched_api::{SchedulerPolicy, TaskId, TaskState};
+use tairix_kernel_sec::TaskId as SecTaskId;
 
 use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
@@ -110,7 +110,7 @@ pub struct KernelIntrospectSource<A: KernelArch + 'static> {
     /// Committed size of the kernel heap region in bytes, reported as
     /// `KernelMemoryStats::kernel_heap_bytes` (the heap is committed at this
     /// fixed size at boot; the value is threaded from the binding kernel's
-    /// `rustos_kalloc::HEAP_BYTES`).
+    /// `tairix_kalloc::HEAP_BYTES`).
     kernel_heap_bytes: u64,
     /// The kernel-held user database the account directory is derived
     /// from. Only the uid + username pairing is ever exposed; credential
@@ -487,7 +487,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             let id = caps
                 .iter()
                 .find(|record| record.proc_id() == proc_id)
-                .map(rustos_kernel_sec::TaskCapabilities::task);
+                .map(tairix_kernel_sec::TaskCapabilities::task);
             id
         };
         let task_id = found.ok_or(Errno::NotFound)?;
@@ -555,7 +555,7 @@ fn user_directory_page(
     let humans = users_db.text().ok().and_then(|text| {
         core::str::from_utf8(&text)
             .ok()
-            .and_then(|text| rustos_users::UsersDb::parse(text).ok())
+            .and_then(|text| tairix_users::UsersDb::parse(text).ok())
     });
     // Page across the concatenation with shared skip/take counters: the
     // two halves borrow with different lifetimes, so a single chained
@@ -563,7 +563,7 @@ fn user_directory_page(
     let mut skip = usize::try_from(offset).unwrap_or(usize::MAX);
     let mut remaining = max_records;
     let mut out = Vec::new();
-    for (uid, username) in rustos_users::system_account_directory() {
+    for (uid, username) in tairix_users::system_account_directory() {
         if skip > 0 {
             skip -= 1;
             continue;
@@ -595,9 +595,9 @@ fn user_directory_page(
 #[cfg(test)]
 mod tests {
     use super::counts_toward_load;
-    use rustos_abi::sysinfo::{PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT};
-    use rustos_kernel_mem::reclaim::ReclaimClass;
-    use rustos_kernel_sched_api::TaskState;
+    use tairix_abi::sysinfo::{PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT};
+    use tairix_kernel_mem::reclaim::ReclaimClass;
+    use tairix_kernel_sched_api::TaskState;
 
     /// The wire class ids the reclaim export emits are the kernel
     /// taxonomy's own indexes; the two closed sets must stay the same
@@ -615,7 +615,7 @@ mod tests {
     /// five-band set.
     #[test]
     fn pressure_bands_match_the_abi_count() {
-        use rustos_kernel_mem::pressure::PressureBand;
+        use tairix_kernel_mem::pressure::PressureBand;
         for depth in 0..PRESSURE_BAND_COUNT {
             let band = PressureBand::from_depth(u8::try_from(depth).unwrap());
             assert_eq!(usize::from(band.depth()), depth);
@@ -652,7 +652,7 @@ mod tests {
     use crate::users::{HeldUsersDbSource, LateUsersDb, NullUsersDbSource};
     use alloc::string::String;
     use alloc::vec::Vec;
-    use rustos_abi::sysinfo::UserDirectoryRecord;
+    use tairix_abi::sysinfo::UserDirectoryRecord;
 
     /// Decode a page's packed records into owned `(uid, name)` rows.
     fn rows(bytes: &[u8]) -> Vec<(u32, String)> {
@@ -672,24 +672,24 @@ mod tests {
     /// A users cell holding one human account, mirroring the unlock's
     /// install of the on-disk half.
     fn human_db() -> LateUsersDb {
-        let record = rustos_users::UserRecord::with_password(
-            rustos_users::Identity {
+        let record = tairix_users::UserRecord::with_password(
+            tairix_users::Identity {
                 username: "root",
-                uid: rustos_users::Uid(1000),
-                primary_gid: rustos_users::Gid(1000),
+                uid: tairix_users::Uid(1000),
+                primary_gid: tairix_users::Gid(1000),
                 supplementary_gids: &[],
                 display_name: "",
                 home: Some("/Users/root"),
                 shell: Some("/System/Apps/elsh.app/Run"),
-                capabilities: rustos_caps::CapabilitySet::empty(),
-                state: rustos_users::AccountState::Active,
+                capabilities: tairix_caps::CapabilitySet::empty(),
+                state: tairix_users::AccountState::Active,
             },
             b"pw",
             [0x42; 16],
-            rustos_users::MIN_ITERATIONS,
+            tairix_users::MIN_ITERATIONS,
         )
         .expect("valid record");
-        let db = rustos_users::UsersDb::new(alloc::vec![record]).expect("valid db");
+        let db = tairix_users::UsersDb::new(alloc::vec![record]).expect("valid db");
         let cell = LateUsersDb::new();
         cell.install(HeldUsersDbSource::new(db.serialise().into_bytes()))
             .expect("fresh cell installs");
@@ -703,7 +703,7 @@ mod tests {
         // first boot, and nothing is fabricated beyond it.
         let page = user_directory_page(&NullUsersDbSource, 0, 64).expect("page encodes");
         let rows = rows(&page);
-        let expected: Vec<(u32, String)> = rustos_users::system_account_directory()
+        let expected: Vec<(u32, String)> = tairix_users::system_account_directory()
             .map(|(uid, name)| (uid, String::from(name)))
             .collect();
         assert_eq!(rows, expected);
@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(
             seam,
             alloc::vec![
-                (rustos_users::NETSTACK_UID.0, String::from("netstack")),
+                (tairix_users::NETSTACK_UID.0, String::from("netstack")),
                 (1000, String::from("root")),
             ]
         );

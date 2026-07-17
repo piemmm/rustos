@@ -1,6 +1,6 @@
-# rustos-svg
+# tairix-svg
 
-Shared SVG image-decoding library for the RustOS desktop (`lib/svg`,
+Shared SVG image-decoding library for the TAIRiX desktop (`lib/svg`,
 `AGENTS.md` §6 / §16.4 — `PLAN.md` Stage 7).
 
 SVG is the canonical, scalable **source** format for every WM/desktop
@@ -25,7 +25,7 @@ That is exactly the vector form `lib/cursor`'s `VectorCursor` and `lib/icon`'s
 `VectorIcon` already rasterise through `lib/raster`'s single supersampled
 polygon path, so the pipeline converts an asset **once** into this fast-draw
 form and never re-parses SVG on the hot compositing path (`AGENTS.md` §10,
-§2.2). `rustos_cursor::decode_svg` and `rustos_icon::decode_svg` wrap this
+§2.2). `tairix_cursor::decode_svg` and `tairix_icon::decode_svg` wrap this
 decoder for their respective vector forms.
 
 ## Untrusted input

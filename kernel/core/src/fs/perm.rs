@@ -20,10 +20,10 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{NodeSecurity, SecuritySubject};
-use rustos_abi::CapabilityId;
-use rustos_abi::CapabilityQuery;
-use rustos_kernel_sec::{GroupId, UserId};
+use tairix_abi::driver::filesystem::{NodeSecurity, SecuritySubject};
+use tairix_abi::CapabilityId;
+use tairix_abi::CapabilityQuery;
+use tairix_kernel_sec::{GroupId, UserId};
 
 use super::VfsError;
 
@@ -123,7 +123,7 @@ pub struct AclEntry {
 /// The caller's security identity, as seen by the VFS.
 ///
 /// Borrows the capability query rather than owning it: the live set lives
-/// in the task's [`rustos_kernel_sec::TaskCapabilities`], which the VFS
+/// in the task's [`tairix_kernel_sec::TaskCapabilities`], which the VFS
 /// never copies.
 #[derive(Copy, Clone)]
 pub struct Credentials<'a> {
@@ -275,7 +275,7 @@ impl Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_caps::CapabilitySet;
+    use tairix_caps::CapabilitySet;
 
     fn creds<'a>(
         uid: u32,
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn from_node_security_carries_owner_mode_cap_and_acl() {
-        use rustos_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
+        use tairix_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
 
         let mut sec = NodeSecurity::new(0o600, 7, 3);
         sec.required_cap = Some(CapabilityId::AUDIT_READ);

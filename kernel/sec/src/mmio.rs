@@ -5,7 +5,7 @@
 //! [`crate::dma::alloc_dma`]'s pool, takes no view on *who* may do so. This module supplies the companion check.
 //!
 //! [`map_mmio`] / [`unmap_mmio`] are the only blessed entry points for
-//! a bus driver that wants a [`RegisterWindow`](rustos_abi::RegisterWindow)
+//! a bus driver that wants a [`RegisterWindow`](tairix_abi::RegisterWindow)
 //! over a device's registers:
 //!
 //! 1. Verify the caller holds [`CapabilityId::MMIO_MAP`]. Refused
@@ -19,9 +19,9 @@
 //!
 //! No `unsafe`, no `unwrap`, no `panic!`.
 
-use rustos_abi::{CapabilityId, Errno};
-use rustos_kernel_mem::{MmioError, MmioMap, MmioRegion, PageTable};
-use rustos_log::{Field, Sink};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_kernel_mem::{MmioError, MmioMap, MmioRegion, PageTable};
+use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 use crate::captable::TaskCapabilities;
@@ -108,19 +108,19 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
             &[
                 Field {
                     key: "task",
-                    value: rustos_log::FieldValue::Str(task_str),
+                    value: tairix_log::FieldValue::Str(task_str),
                 },
                 Field {
                     key: "uid",
-                    value: rustos_log::FieldValue::Str(uid_str),
+                    value: tairix_log::FieldValue::Str(uid_str),
                 },
                 Field {
                     key: "phys",
-                    value: rustos_log::FieldValue::Str(phys_str),
+                    value: tairix_log::FieldValue::Str(phys_str),
                 },
                 Field {
                     key: "len",
-                    value: rustos_log::FieldValue::Str(len_str),
+                    value: tairix_log::FieldValue::Str(len_str),
                 },
             ],
         );
@@ -139,15 +139,15 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
         &[
             Field {
                 key: "task",
-                value: rustos_log::FieldValue::Str(task_str),
+                value: tairix_log::FieldValue::Str(task_str),
             },
             Field {
                 key: "phys",
-                value: rustos_log::FieldValue::Str(phys_str),
+                value: tairix_log::FieldValue::Str(phys_str),
             },
             Field {
                 key: "len",
-                value: rustos_log::FieldValue::Str(len_str),
+                value: tairix_log::FieldValue::Str(len_str),
             },
         ],
     );
@@ -179,7 +179,7 @@ pub fn unmap_mmio<P: PageTable, S: Sink + ?Sized>(
             AuditEvent::MmioMapDenied,
             &[Field {
                 key: "task",
-                value: rustos_log::FieldValue::Str(task_str),
+                value: tairix_log::FieldValue::Str(task_str),
             }],
         );
         return Err(MmioGateError::CapabilityMissing);

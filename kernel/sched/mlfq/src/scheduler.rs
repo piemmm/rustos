@@ -9,8 +9,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_rng::{FastRng, RandU64};
-use rustos_sync::{RwLock, SpinLock};
+use tairix_rng::{FastRng, RandU64};
+use tairix_sync::{RwLock, SpinLock};
 
 use crate::loom_compat::{fence, AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
@@ -153,7 +153,7 @@ pub struct Scheduler<A: SchedulerArch> {
     /// running on one CPU is parked or exited by another CPU.
     ///
     /// The slot is the publication point read by the syscall entry
-    /// path (`kernel/rustos-kernel::dispatch::production_dispatch`,
+    /// path (`kernel/tairix-kernel::dispatch::production_dispatch`,
     /// Stage 2.7 follow-up (f5)). Per the `kernel/sync::RwLock`
     /// process-context rule, readers must run in
     /// process context on the issuing CPU — which is how syscall

@@ -14,12 +14,12 @@
 //! request that cannot mean what it says is answered with an in-band error
 //! completion, never a partial application.
 
-use rustos_abi::blkio::{
+use tairix_abi::blkio::{
     encode_error_completion, BlkCompletion, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
     BLK_FLAG_READ_ONLY,
 };
-use rustos_abi::driver::block::Block;
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::driver::block::Block;
+use tairix_abi::{DriverError, Errno};
 
 use crate::scsi::{Flush, MAX_LUNS};
 
@@ -147,8 +147,8 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use rustos_abi::blkio::{decode_completion, BLK_DATA_LEN, BLK_REQUEST_LEN};
-    use rustos_abi::driver::block::BlockGeometry;
+    use tairix_abi::blkio::{decode_completion, BLK_DATA_LEN, BLK_REQUEST_LEN};
+    use tairix_abi::driver::block::BlockGeometry;
 
     #[test]
     fn blk_blocks_derived_from_distinct_grants_never_overlap() {

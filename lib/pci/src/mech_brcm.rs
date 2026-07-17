@@ -24,7 +24,7 @@
 //! [`crate::mechanism_brcm`].
 //!
 //! The window is a kernel-mapped [`RegisterWindow`] obtained from the
-//! MMIO-map facility after a [`CapabilityId`](rustos_abi::CapabilityId)
+//! MMIO-map facility after a [`CapabilityId`](tairix_abi::CapabilityId)
 //! check; the driver never synthesises a pointer. An
 //! access that lands outside the mapped window — or a config access to a
 //! device behind the bridge before the index write fits the window —
@@ -37,7 +37,7 @@
 // covers every helper directly.
 #![allow(dead_code)]
 
-use rustos_abi::RegisterWindow;
+use tairix_abi::RegisterWindow;
 
 use crate::config::{ConfigAddress, ConfigSpace};
 

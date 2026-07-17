@@ -1,4 +1,4 @@
-//! RustOS `tee` — read from standard input and write to standard output
+//! TAIRiX `tee` — read from standard input and write to standard output
 //! and files (`plans/APPS.md` §12.1 Stage C).
 //!
 //! The GNU coreutils `tee`: copy standard input to standard output and to
@@ -20,7 +20,7 @@
 //!   the file operands.
 //! * [`Output`] — write to standard output, and diagnostics to standard
 //!   error.
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by
 //!   the short-help switches.
 //!
 //! The binary that ships as `tee` wires the real syscall-backed
@@ -28,7 +28,7 @@
 //! fixtures. This is the seam discipline of the other userland crates
 //! (`head`'s and `wc`'s `FileSource`/`Input`/`Output`).
 //!
-//! # RustOS has no `SIGPIPE`
+//! # TAIRiX has no `SIGPIPE`
 //!
 //! GNU `tee`'s pipe handling keys on `EPIPE`/`SIGPIPE`. Here a consumer
 //! going away surfaces as a write error on standard output — the one
@@ -58,7 +58,7 @@
 //! The bundle's `Help/` documents are **not** embedded in this crate: they
 //! are authored once in the bundle's on-disk `Help/` tree, planted onto
 //! `/System` by the image builder from that source (`tools/syshelp`), and
-//! read back at runtime through the injected [`rustos_help::HelpSource`]
+//! read back at runtime through the injected [`tairix_help::HelpSource`]
 //! seam. Help is never hardcoded into the program (`plans/APPS.md`).
 //!
 //! # Layering & safety

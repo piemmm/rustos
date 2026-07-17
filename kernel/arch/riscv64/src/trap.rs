@@ -4,7 +4,7 @@
 //! the architecture-specific surface for taking a supervisor-mode trap
 //! on the QEMU `virt` board:
 //!
-//! * The `stvec` trap vector (`rustos_riscv64_trap_vector`, published
+//! * The `stvec` trap vector (`tairix_riscv64_trap_vector`, published
 //!   by the `global_asm!` block below) that saves the interrupted
 //!   context's caller-saved registers, calls the Rust handler, restores,
 //!   and `sret`s.
@@ -15,7 +15,7 @@
 //!   the Rust handler invokes on a supervisor *external* interrupt. The
 //!   callback is responsible for claiming the pending source from the
 //!   [`crate::plic::PlicController`], forwarding it to
-//!   `rustos_kernel_irq::IrqTable::fire` (which masks the source before
+//!   `tairix_kernel_irq::IrqTable::fire` (which masks the source before
 //!   the waiter observes `ready`), and completing the claim.
 //!
 //! # Mask-before-wake
@@ -33,7 +33,7 @@
 //! The dispatch slot is set-once at boot, backed by an atomic so the
 //! trap path reads it without a lock; a second publish fails closed.
 //!
-//! (`rustos_riscv64_trap_vector`, `init_traps`, and the Rust handler are
+//! (`tairix_riscv64_trap_vector`, `init_traps`, and the Rust handler are
 //! gated to the freestanding riscv64 target, so they are plain text on
 //! host doc builds; the dispatch slot and `scause` decode build on the
 //! host so their unit tests run under `cargo test`.)
@@ -41,7 +41,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Caller-saved integer registers plus the return-state CSRs saved by
-/// `rustos_riscv64_trap_vector` before it calls the Rust handler, laid
+/// `tairix_riscv64_trap_vector` before it calls the Rust handler, laid
 /// out to match the store/load offsets in `trap.s` exactly.
 ///
 /// The asm reserves a 160-byte frame and stores `ra`, `t0`–`t6`,
@@ -146,7 +146,7 @@ pub const fn is_supervisor_external_interrupt(scause: u64) -> bool {
 /// Invoked from the trap handler with interrupts disabled (the trap
 /// entered with `sstatus.SIE` cleared by hardware). The dispatcher must
 /// claim the pending PLIC source, forward it to
-/// `rustos_kernel_irq::IrqTable::fire`, and complete the claim. It must
+/// `tairix_kernel_irq::IrqTable::fire`, and complete the claim. It must
 /// not allocate, block, or re-enter the scheduler.
 pub type TrapDispatchFn = extern "C" fn();
 
@@ -198,7 +198,7 @@ extern "C" {
     /// S-mode trap vector published by `trap.s`. Installed into `stvec`
     /// by [`install_trap_vector`] (and thus by [`init_traps`]); never
     /// called from Rust.
-    fn rustos_riscv64_trap_vector();
+    fn tairix_riscv64_trap_vector();
 }
 
 /// Point `stvec` at the trap vector (direct mode) **without** enabling
@@ -208,7 +208,7 @@ extern "C" {
 /// vector and the `sscratch == 0` S-mode invariant the vector relies on,
 /// so a synchronous trap (a `ecall`, a page fault) is taken to the
 /// handler, but leaves `sie`/`sstatus.SIE` untouched. The production
-/// boot pipeline (`rustos_kernel::riscv64::boot`, `plans/PI.md` RV-P2)
+/// boot pipeline (`tairix_kernel::riscv64::boot`, `plans/PI.md` RV-P2)
 /// uses it to catch a fault during the paged bring-up and to route the
 /// `ecall` syscall path, mirroring the aarch64 port's vector-only
 /// `exceptions::init_vectors`. A consumer that also wants to take
@@ -232,7 +232,7 @@ pub unsafe fn install_trap_vector() {
     if crate::uaccess::install().is_err() {
         crate::kernel_arch::halt_current_hart();
     }
-    let base = rustos_riscv64_trap_vector as *const () as usize;
+    let base = tairix_riscv64_trap_vector as *const () as usize;
     // SAFETY: `base` is the 4-byte-aligned address of the asm trap
     // vector (direct mode encodes mode 0 in the low two bits, which are
     // zero by the `.align 2`). Writing `stvec` and clearing `sscratch`
@@ -277,11 +277,11 @@ pub unsafe fn init_traps() {
 /// taking on the calling hart by toggling `sstatus.SIE`.
 ///
 /// This is the riscv64 backing of
-/// `rustos_kernel_core::KernelArch::set_device_irqs`: the scheduler
+/// `tairix_kernel_core::KernelArch::set_device_irqs`: the scheduler
 /// dispatch loop enables S-mode interrupts so it runs every in-kernel
 /// task/kthread preemptively, and masks them only
 /// around the idle park and before halt. Enabling `sstatus.SIE` in S-mode
-/// is safe because [`rustos_riscv64_trap_handler`] gates preemption on the
+/// is safe because [`tairix_riscv64_trap_handler`] gates preemption on the
 /// saved `SPP` — a timer tick taken in S-mode runs its (lock-free)
 /// accounting but never reschedules the kernel, and a supervisor
 /// external interrupt forwards to the lock-free PLIC dispatcher.
@@ -360,13 +360,13 @@ pub unsafe fn wait_for_interrupt() {
 ///
 /// # Safety
 ///
-/// Only callable from `rustos_riscv64_trap_vector`, which has saved the
+/// Only callable from `tairix_riscv64_trap_vector`, which has saved the
 /// interrupted context's caller-saved registers and passes `sp` as
 /// `frame`. `frame` therefore points at a valid [`TrapFrame`] live for
 /// the duration of the call.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
+unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
     let scause: u64;
     // SAFETY: reading `scause` has no side effects.
     unsafe {

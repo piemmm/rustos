@@ -2,10 +2,10 @@
 
 extern crate alloc;
 
-use rustos_abi::driver::display::{
+use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayFormat, DisplayMode,
 };
-use rustos_abi::DriverError;
+use tairix_abi::DriverError;
 
 use crate::color::Color;
 use crate::corner::Corners;
@@ -14,7 +14,7 @@ use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
 use crate::{Compositor, WindowId};
 
-use rustos_theme::{ThemeId, ThemeRegistry};
+use tairix_theme::{ThemeId, ThemeRegistry};
 
 fn mode(w: u32, h: u32) -> DisplayMode {
     DisplayMode {
@@ -796,8 +796,8 @@ fn pointer_position_tracks_motion() {
 
 /// A solid opaque `size`×`size` cursor image in `color`, hotspot at the
 /// top-left, built through the shared cursor library.
-fn solid_cursor(size: u32, color: Color) -> rustos_cursor::CursorImage {
-    use rustos_cursor::{Shape, VectorCursor, Vertex};
+fn solid_cursor(size: u32, color: Color) -> tairix_cursor::CursorImage {
+    use tairix_cursor::{Shape, VectorCursor, Vertex};
     let s = i32::try_from(size).expect("small");
     let shape = Shape::new(
         color,
@@ -888,9 +888,9 @@ fn replacing_the_cursor_image_marks_both_footprints_dirty() {
 // ---- cursor selection from interaction state -------------------------
 
 use crate::select::{desired_cursor, CursorController};
-use rustos_cursor::{CursorRegistry, CursorSetId, CursorTheme};
-use rustos_geometry::Scale;
-use rustos_theme::CursorKind;
+use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
+use tairix_geometry::Scale;
+use tairix_theme::CursorKind;
 
 #[test]
 fn window_cursor_hint_round_trips_and_unknown_id_fails_closed() {

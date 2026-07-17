@@ -1,9 +1,9 @@
 //! Stable audit-log event IDs and the writer used by `kernel/sec`.
 //!
 //! Every security-relevant decision taken by this crate emits exactly one
-//! structured log record through [`rustos_log`]. The numeric identifiers
+//! structured log record through [`tairix_log`]. The numeric identifiers
 //! are part of the audit contract with external log consumers and may not be re-used or re-numbered. They live
-//! in the `kernel/sec` range reserved by [`rustos_log::EventId`]
+//! in the `kernel/sec` range reserved by [`tairix_log::EventId`]
 //! conventions: `1_000..2_000`.
 //!
 //! # Event catalogue
@@ -30,11 +30,11 @@
 //! file and appending a row to the table in
 //! `docs/src/architecture/security.md`.
 
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 /// Audit log event identifiers used by `kernel/sec`.
 ///
-/// The associated numeric values are part of the ABI between RustOS and
+/// The associated numeric values are part of the ABI between TAIRiX and
 /// external log consumers and may not be re-used or re-numbered. See the
 /// module-level table for the meaning of each ID.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -155,7 +155,7 @@ impl AuditEvent {
 
 /// Emit `event` to `sink` with the supplied structured fields.
 ///
-/// Returns whatever [`rustos_log::log`] returns: `true` if the event made
+/// Returns whatever [`tairix_log::log`] returns: `true` if the event made
 /// it past the global level filter, `false` if it was dropped. Callers in
 /// this crate ignore the return value because the audit trail's
 /// configuration — not the call site — decides whether the record reaches
@@ -185,8 +185,8 @@ pub(crate) mod test_support {
 
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use rustos_log::{set_max_level, Event, Level, Sink};
     use std::cell::RefCell;
+    use tairix_log::{set_max_level, Event, Level, Sink};
 
     /// Single-threaded recording sink used by every `kernel/sec` test.
     ///
@@ -235,7 +235,7 @@ pub(crate) use test_support::RecordingSink;
 #[cfg(test)]
 mod tests {
     use super::{record, AuditEvent, RecordingSink};
-    use rustos_log::{EventId, Field};
+    use tairix_log::{EventId, Field};
 
     #[test]
     fn ids_are_frozen() {
@@ -273,7 +273,7 @@ mod tests {
         let sink = RecordingSink::new();
         let fields = [Field {
             key: "uid",
-            value: rustos_log::FieldValue::Str("42"),
+            value: tairix_log::FieldValue::Str("42"),
         }];
         record(&sink, AuditEvent::TaskCapabilitiesDerived, &fields);
         assert_eq!(sink.len(), 1);
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn ids_fall_within_kernel_sec_reserved_range() {
-        // `rustos_log::EventId` reserves `1_000..2_000` for `kernel/sec`.
+        // `tairix_log::EventId` reserves `1_000..2_000` for `kernel/sec`.
         for ev in [
             AuditEvent::IdentityTableLoaded,
             AuditEvent::IdentityTableRejected,

@@ -13,17 +13,17 @@
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    signal_program`) **three times** — as the `child`, `parent`, and
 //!    `intake` roles — position-independent for the freestanding aarch64 target
-//!    (its own `program.ld` roots `rustos-rt`'s `_start`), into two private
+//!    (its own `program.ld` roots `tairix-rt`'s `_start`), into two private
 //!    target directories under `OUT_DIR`, selecting the role through the
-//!    `RUSTOS_SIGNAL_ROLE` environment variable so this script is its single
+//!    `TAIRIX_SIGNAL_ROLE` environment variable so this script is its single
 //!    source of truth. Unlike the `wait` vertical the child's PID is threaded
 //!    at *runtime* (the kernel writes it into the parent's startup arguments
 //!    once the scheduler assigns it), so no build-time code is pinned.
 //! 3. Convert each linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the three blobs
+//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
+//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the three blobs
 //!    and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -51,7 +51,7 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -76,7 +76,7 @@ fn main() {
 
         // One CPU: this is the single-core live-scheduler slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
         let child = build_and_convert_program(manifest_dir, &out_dir, &program_dir, "child");
@@ -113,11 +113,11 @@ fn build_and_convert_program(
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
+    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
     // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
+    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
     // `#[global_allocator]`, so the program names `alloc`.
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
@@ -130,7 +130,7 @@ fn build_and_convert_program(
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         // Select the role (the single source of truth for which build this is).
-        .env("RUSTOS_SIGNAL_ROLE", role)
+        .env("TAIRIX_SIGNAL_ROLE", role)
         .env(
             "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
@@ -138,7 +138,7 @@ fn build_and_convert_program(
         .args([
             "build",
             "-p",
-            "rustos-test-signal",
+            "tairix-test-signal",
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -153,12 +153,12 @@ fn build_and_convert_program(
         "building the signal fixture program ({role}) failed"
     );
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-test-signal");
+    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-signal");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .unwrap_or_else(|_| panic!("convert the signal fixture program ELF ({role}) into an rxe image"))

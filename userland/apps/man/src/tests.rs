@@ -8,12 +8,12 @@ use core::cell::RefCell;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_log::{Event, Sink};
-use rustos_sandbox::helpdoc::{HelpRenderFailure, HelpService};
-use rustos_sandbox::host::ParserSandbox;
-use rustos_sandbox::loopback::LoopbackLauncher;
-use rustos_sandbox::worker::Service;
+use tairix_abi::Errno;
+use tairix_log::{Event, Sink};
+use tairix_sandbox::helpdoc::{HelpRenderFailure, HelpService};
+use tairix_sandbox::host::ParserSandbox;
+use tairix_sandbox::loopback::LoopbackLauncher;
+use tairix_sandbox::worker::Service;
 
 use crate::client::{Request, USAGE};
 use crate::command::Command;

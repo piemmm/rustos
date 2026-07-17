@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-signal-qemu-aarch64"
-description = "SPAWN stage SP7b QEMU integration test: prove a parent process can deliver a control signal (Signal::Terminate) to its own child under the live scheduler on the aarch64 virt board. The build script compiles a pure-Rust EL0 program (tests/integration/signal_program) twice (child + parent roles) PIE and converts each to an rxe blob; the kernel materialises two hardware-isolated EL0 address spaces with rustos_kernel_core::spawn_image, admits the child (whose PID it threads into the parent's startup arguments), registers the parent/child link with a KernelProcessWait producer, installs a KernelProcessSignal producer over the same bookkeeping + the live scheduler, and drains the cooperative step loop while a dispatch callback routes signal/wait/exit/yield through the producers and reschedule_current — PASS once the parent terminated the child with a signal, reaped it, verified the 128+n termination status, and exited 0."
+name = "tairix-test-signal-qemu-aarch64"
+description = "SPAWN stage SP7b QEMU integration test: prove a parent process can deliver a control signal (Signal::Terminate) to its own child under the live scheduler on the aarch64 virt board. The build script compiles a pure-Rust EL0 program (tests/integration/signal_program) twice (child + parent roles) PIE and converts each to an rxe blob; the kernel materialises two hardware-isolated EL0 address spaces with tairix_kernel_core::spawn_image, admits the child (whose PID it threads into the parent's startup arguments), registers the parent/child link with a KernelProcessWait producer, installs a KernelProcessSignal producer over the same bookkeeping + the live scheduler, and drains the cooperative step loop while a dispatch callback routes signal/wait/exit/yield through the producers and reschedule_current — PASS once the parent terminated the child with a signal, reaped it, verified the 128+n termination status, and exited 0."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,12 +12,12 @@ publish = false
 workspace = true
 
 # This bin is the `plans/SPAWN.md` stage SP7b aarch64 `signal`-delivery
-# vertical. The fixture program (`rustos-test-signal`) is built
+# vertical. The fixture program (`tairix-test-signal`) is built
 # position-independent by `build.rs` in two roles (child + parent) and
-# converted to `rxe` blobs (`rustos_itest_harness::elf2rxe`) carrying the
+# converted to `rxe` blobs (`tairix_itest_harness::elf2rxe`) carrying the
 # kernel's compiled-in syscall CFI tag. On boot the test reads the GICv2 base +
 # timer rate from the embedded `virt` DTB, brings up the EL1 vectors + GICv2,
-# builds two isolated EL0 address spaces via `rustos_kernel_core::spawn_image`
+# builds two isolated EL0 address spaces via `tairix_kernel_core::spawn_image`
 # (capability-checked + audited), admits the child, threads its PID into the
 # parent's startup arguments, registers the parent/child link with the
 # `KernelProcessWait` producer, installs a `KernelProcessSignal` producer over
@@ -37,23 +37,23 @@ default = ["test-hooks"]
 test-hooks = []
 
 [[bin]]
-name = "rustos-test-signal-qemu-aarch64"
+name = "tairix-test-signal-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
-rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
-rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
-rustos-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
-rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

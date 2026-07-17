@@ -1,4 +1,4 @@
-# `rustos-elsh` — elsh (Element Shell), the default RustOS shell
+# `tairix-elsh` — elsh (Element Shell), the default TAIRiX shell
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/shell/`). elsh (Element
 Shell) is a POSIX-ish
@@ -24,20 +24,20 @@ pipe, a script) keeps the plain line reader, byte-identical.
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
 only dependencies are the audited `lib/*` crates
-[`rustos-abi`](../../../lib/abi) (the stable `Errno` on the host seam),
-[`rustos-cmdres`](../../../lib/cmdres) (the one command-word search policy,
-which completion enumerates), [`rustos-complete`](../../../lib/complete)
+[`tairix-abi`](../../../lib/abi) (the stable `Errno` on the host seam),
+[`tairix-cmdres`](../../../lib/cmdres) (the one command-word search policy,
+which completion enumerates), [`tairix-complete`](../../../lib/complete)
 (the one path-candidate completion policy, which the shell dresses in its
-escaping and candidate classes), [`rustos-curses`](../../../lib/curses)
-(the shared key-event decoder), [`rustos-resref`](../../../lib/resref)
+escaping and candidate classes), [`tairix-curses`](../../../lib/curses)
+(the shared key-event decoder), [`tairix-resref`](../../../lib/resref)
 (the one resource-reference spelling parser and registry), and
-[`rustos-vt`](../../../lib/vt) (the shared terminal vocabulary the editor
+[`tairix-vt`](../../../lib/vt) (the shared terminal vocabulary the editor
 renders through and the plain reader's line discipline), so the shell
 never links a kernel or driver crate (`AGENTS.md` §17.4).
 
 ## A pure interpreter
 
-`rustos-elsh` decides *what* to run and *with what arguments*; it never
+`tairix-elsh` decides *what* to run and *with what arguments*; it never
 itself touches the kernel or a terminal. The two operations that reach
 the outside world are injected seams:
 
@@ -48,7 +48,7 @@ the outside world are injected seams:
 - `Console` — write stdout / stderr.
 - `LimitStore` — read / impose the calling process's resource limits, the
   seam the `ulimit` builtin drives (`AGENTS.md` §24.3). Backed by
-  `rustos_rt::rlimit_get`/`rlimit_set` on a running kernel; a shell built
+  `tairix_rt::rlimit_get`/`rlimit_set` on a running kernel; a shell built
   without one fails closed (`ulimit` reports `NotImplemented`).
 
 On a running kernel these are syscall-backed; in tests they are in-memory
@@ -118,7 +118,7 @@ a command that resolved but cannot run (a permission or capability denial).
 ## Command resolution
 
 A command word resolves through the pure candidate policy
-`rustos_cmdres::resolution_candidates` (`lib/cmdres`, shared with the `man`
+`tairix_cmdres::resolution_candidates` (`lib/cmdres`, shared with the `man`
 command's bundle lookup and owned by `plans/APPS.md` §8–§9):
 an explicit path (containing `/`) bypasses the search, a trailing `.app`
 names the bundle and runs its `Run` binary, and a bare word searches the
@@ -145,7 +145,7 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
 ## Tests
 
-`cargo test -p rustos-elsh` drives the interpreter against in-memory
+`cargo test -p tairix-elsh` drives the interpreter against in-memory
 `Console`/`ProcessHost` fixtures, covering the lexer's quoting and escape
 rules, the parser's pipelines/redirections/connectors and its fail-closed
 grammar errors, `$`-expansion, here-document collection (quoting, `<<-`

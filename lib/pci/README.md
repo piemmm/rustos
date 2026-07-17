@@ -1,4 +1,4 @@
-# `rustos-pci`
+# `tairix-pci`
 
 **Stability tier: stable.** The public surface is the three
 `mechanism_*` constructors, the frozen `abi-v1` bus/transport seams
@@ -23,11 +23,11 @@ Configuration space is reached through one of three access mechanisms,
 selected at construction by the caller:
 
 - **Mechanism #1** (`0xCF8` / `0xCFC`, x86_64) — the legacy I/O-port
-  bridge (`mechanism_one`), behind the `rustos_abi::PortIo` seam.
+  bridge (`mechanism_one`), behind the `tairix_abi::PortIo` seam.
 - **ECAM / MMCONFIG** (`mechanism_ecam`) — PCIe enhanced configuration
   access: configuration space is mapped flat into MMIO, one 4 KiB
   block per `(bus, device, function)`, reached through a
-  capability-checked `rustos_abi::RegisterWindow`.
+  capability-checked `tairix_abi::RegisterWindow`.
 - **BCM2711 windowed** (`mechanism_brcm`) — the Raspberry Pi 4 root
   complex's index/data window pair inside the controller's own register
   block, used to reach its VL805 USB host controller after the link is
@@ -59,7 +59,7 @@ same core through the [`Bus`] trait.
 
 The library requests no capability of its own and holds no ambient
 authority (`AGENTS.md` §4). It reads or writes I/O ports / MMIO only
-through the `rustos_abi::PortIo` / `rustos_abi::MmioMapper` seams its
+through the `tairix_abi::PortIo` / `tairix_abi::MmioMapper` seams its
 caller supplies, and a BAR or MSI-X window is mapped only by routing the
 request through the kernel MMIO-map facility, which enforces
 `CAP_MMIO_MAP` (`AGENTS.md` §4 — the library never synthesises a
@@ -83,10 +83,10 @@ pointer).
   The table write goes through the kernel MMIO-map facility — the
   driver never synthesises a pointer (`AGENTS.md` §4). The message
   itself is built by the architecture layer (e.g.
-  `rustos_arch_x86_64::irq::msi_message`); the bus driver copies it
+  `tairix_arch_x86_64::irq::msi_message`); the bus driver copies it
   verbatim. Legacy MSI and INTx routing are not implemented.
   Ring 0 reaches `route_msix` through the frozen `abi-v1`
-  `rustos_abi::MsixBus` seam.
+  `tairix_abi::MsixBus` seam.
 - The library holds no global state: all state lives in the `Pci<C>`
   instance a `mechanism_*` constructor returns and the composing host
   owns, so it is freely reused across the kernel, a user-space bus
@@ -94,7 +94,7 @@ pointer).
 
 ## Tests
 
-`cargo test -p rustos-pci` runs:
+`cargo test -p tairix-pci` runs:
 
 - The PIO-bridge round-trip test against a recording mock, and the
   ECAM offset-encoding + round-trip / out-of-window sentinel tests.
@@ -117,5 +117,5 @@ pointer).
 
 ## License
 
-GPL-2.0-or-later, with the `RustOS-syscall-note` syscall / ABI exception
+GPL-2.0-or-later, with the `TAIRiX-syscall-note` syscall / ABI exception
 (see the repository-root `LICENSE`).

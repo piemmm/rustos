@@ -36,8 +36,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::net::{DeviceFacts, LinkState, MacAddress};
-use rustos_abi::time::Duration64;
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress};
+use tairix_abi::time::Duration64;
 
 use crate::addr::{
     is_unicast_link_local, solicited_node_multicast, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES,

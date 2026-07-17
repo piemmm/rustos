@@ -14,15 +14,15 @@
 //! saturates and [`Surface::fill_rect`] clips, so a degenerate layout paints
 //! nothing rather than panicking. A label is truncated to
 //! the characters that fit its region so text never spills into a neighbour.
-//! Each notification slot draws a scalable, themeable [`rustos_icon`] vector
+//! Each notification slot draws a scalable, themeable [`tairix_icon`] vector
 //! glyph resolved from the icon's asset id, rasterised to the slot size and
 //! composited through `lib/raster`'s single blit path.
 
-use rustos_font::BitmapFont;
-use rustos_geometry::{Point, Rect, Scale};
-use rustos_icon::{IconKind, IconSet};
-use rustos_raster::{Color, RasterCache, Surface};
-use rustos_theme::{Palette, Theme};
+use tairix_font::BitmapFont;
+use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::{IconKind, IconSet};
+use tairix_raster::{Color, RasterCache, Surface};
+use tairix_theme::{Palette, Theme};
 
 use crate::layout::{BarLayout, MenuLayout};
 use crate::menu::StartMenu;
@@ -317,7 +317,7 @@ fn draw_label(
 }
 
 /// Draw a notification icon's glyph centred in its screen-space `rect`,
-/// tinted with `color`. The glyph is a scalable [`rustos_icon`] vector icon
+/// tinted with `color`. The glyph is a scalable [`tairix_icon`] vector icon
 /// resolved from the asset id and rasterised to the slot size at this scale,
 /// then composited onto the bar-local surface through the shared blit path. The rasterised glyph is taken from `icons`, which keeps
 /// it across frames so it is converted only once per tint and size and

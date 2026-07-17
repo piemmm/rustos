@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — командна оболонка RustOS
+elsh — командна оболонка TAIRiX
 
 ## SYNOPSIS
 

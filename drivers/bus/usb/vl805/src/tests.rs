@@ -6,10 +6,10 @@
 //! protocol-faithful `lib/vcmailbox` mock firmware behind a test channel; the live doorbell is the on-metal acceptance
 //! item (`plans/PI.md` Increment C).
 
-use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
-use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey};
+use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey};
 
-use rustos_vcmailbox::mock::MockFirmware;
+use tairix_vcmailbox::mock::MockFirmware;
 
 use super::{
     probe_firmware_revision, register, reload_firmware, FirmwareResetFailure, FirmwareResetOutcome,

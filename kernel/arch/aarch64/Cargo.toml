@@ -1,6 +1,6 @@
 [package]
-name = "rustos-arch-aarch64"
-description = "RustOS architecture port: aarch64 (Arch HAL implementation + QEMU virt-board boot / generic-timer / GIC primitives)."
+name = "tairix-arch-aarch64"
+description = "TAIRiX architecture port: aarch64 (Arch HAL implementation + QEMU virt-board boot / generic-timer / GIC primitives)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # Like `kernel/arch/x86_64` and `kernel/arch/riscv64`, this crate is a
 # pure Arch HAL implementation (`AGENTS.md` §17.2 / §17.4): it names only
 # the Arch HAL (`kernel/arch/api`) and `lib/*`, never a concrete kernel
-# subsystem. `Aarch64Arch` implements `rustos_arch_api::SchedulerArch`;
+# subsystem. `Aarch64Arch` implements `tairix_arch_api::SchedulerArch`;
 # the downstream boot consumer wraps it in its own `KernelArch` type.
 #
 # The boot / console / panic / exception / timer / GIC modules are gated
@@ -27,16 +27,16 @@ path = "src/lib.rs"
 # encoding, the `Aarch64Arch` struct) build on the host so their unit
 # tests run under `cargo test`.
 [dependencies]
-rustos-arch-api = { path = "../api", version = "=0.0.0" }
-rustos-rng = { path = "../../../lib/rng", version = "=0.0.0" }
-# `rustos-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
+tairix-arch-api = { path = "../api", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # `svc` entry path marshals user arguments into — the same dependency
 # the x86_64 and riscv64 ports take. It is a `lib/*` crate, so this edge
 # is permitted by `AGENTS.md` §17.4.
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The flattened-device-tree parser is architecture-neutral and shared
 # (`AGENTS.md` §2.2); this port builds its `fdt`/`platform` discovery on it.
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 # The shared, architecture-neutral framebuffer text-console engine
 # (`AGENTS.md` §2.2 / §2.20 / §2.21): the full ANSI/VT/xterm-256color
 # terminal (`Geometry`/`TextConsole`/`DirtyBand`, palette, glyph blit,
@@ -44,23 +44,23 @@ rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 # this port supplies only the board-specific surface discovery below. It is
 # allocator-free, so the freestanding QEMU test bins link it with no global
 # allocator.
-rustos-fbcon = { path = "../../../lib/fbcon", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-fbcon = { path = "../../../lib/fbcon", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The shared VideoCore firmware mailbox protocol (`AGENTS.md` §2.2):
 # the framebuffer boot console's display probe + surface allocation,
 # also spoken by drivers/display/rpi_hvs.
-rustos-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
+tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
 # The shared QEMU fw_cfg DMA client (`AGENTS.md` §2.2): the framebuffer
 # boot console's `virt`-board ramfb fallback programs the scan-out
 # through it, the same protocol definition the display verticals use.
-rustos-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
+tairix-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
 
 [dev-dependencies]
 # Enable the shared DTB builder for this port's `fdt`/`platform` host
 # tests (off in production builds — `[dev-dependencies]` only).
-rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
 # The protocol-faithful mock firmware for the video boot-console host
 # tests (QEMU does not model the VideoCore, `AGENTS.md` §2.1).
-rustos-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [
+tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [
     "mock-firmware",
 ] }

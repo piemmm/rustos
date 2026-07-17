@@ -11,7 +11,7 @@
 //! URB transport. This driver binds the HID boot-mouse interface node, maps
 //! the shared URB data buffer it was granted, submits interrupt-IN URBs to
 //! read reports, decodes each boot report through the arch-neutral
-//! `rustos_hid` composition, and injects the decoded pointer records through
+//! `tairix_hid` composition, and injects the decoded pointer records through
 //! `pointer_inject` — the same shared device→seat mapping
 //! (`PointerInput::from_device_event`) the virtio pointer driver uses, so the
 //! two can never diverge. It knows neither the controller type nor the bus —
@@ -43,12 +43,12 @@
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
-// The driver's identity — its [`BIND_KEYS`](rustos_drv_input_usb_mouse::BIND_KEYS)
+// The driver's identity — its [`BIND_KEYS`](tairix_drv_input_usb_mouse::BIND_KEYS)
 // bind table — lives in the crate's `lib` target so the host image builder can
 // author the signed manifest from it; this binary is the `Run` entry point.
 
 #[cfg(any(test, freestanding))]
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::{DriverError, Errno};
 
 #[cfg(any(test, freestanding))]
 fn pump_error_limit_reached(consecutive_errors: &mut u8, limit: u8) -> bool {
@@ -68,16 +68,16 @@ fn transport_error(err: Errno) -> DriverError {
 #[cfg(freestanding)]
 mod program {
     use super::pump_error_limit_reached;
-    use rustos_abi::driver::input::{Input, InputEvent, InputEventKind, ReportSource};
-    use rustos_abi::input::PointerInput;
-    use rustos_abi::{CapabilityId, DriverError, Errno};
-    use rustos_caps::CapabilitySet;
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_hid::{BootMouse, REPORT_BUF_LEN};
-    use rustos_log::{log, Event, EventId, Level};
-    use rustos_rt::LogSink;
-    use rustos_usb::transport::{UrbCall, UrbClient};
-    use rustos_util::fmt::format_hex_u64;
+    use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, ReportSource};
+    use tairix_abi::input::PointerInput;
+    use tairix_abi::{CapabilityId, DriverError, Errno};
+    use tairix_caps::CapabilitySet;
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_hid::{BootMouse, REPORT_BUF_LEN};
+    use tairix_log::{log, Event, EventId, Level};
+    use tairix_rt::LogSink;
+    use tairix_usb::transport::{UrbCall, UrbClient};
+    use tairix_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
@@ -160,9 +160,9 @@ mod program {
                 level,
                 id,
                 message,
-                fields: &[rustos_log::Field {
+                fields: &[tairix_log::Field {
                     key,
-                    value: rustos_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
                 }],
             },
         );
@@ -172,7 +172,7 @@ mod program {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             // The call blocks in the kernel until the HCD replies (when the
             // report arrives), so this driver parks rather than busy-polling.
-            match rustos_rt::ipc_call(self.endpoint, request, reply) {
+            match tairix_rt::ipc_call(self.endpoint, request, reply) {
                 Ok(len) => Ok(len),
                 Err(neg) => {
                     let errno = Errno::from_i32(i32::try_from(-neg).unwrap_or(0))
@@ -240,7 +240,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     ///
     /// On success this never returns: the report pump runs for the life of the
@@ -316,7 +316,7 @@ mod program {
                         let Some(record) = PointerInput::from_device_event(event) else {
                             continue;
                         };
-                        if rustos_rt::pointer_inject(rustos_abi::seat::SEAT_PRIMARY, &record) < 0 {
+                        if tairix_rt::pointer_inject(tairix_abi::seat::SEAT_PRIMARY, &record) < 0 {
                             log_hex_event(
                                 USB_MOUSE_INJECT_ERROR,
                                 Level::Warn,
@@ -364,7 +364,7 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
@@ -379,7 +379,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{pump_error_limit_reached, transport_error};
-    use rustos_abi::{DriverError, Errno};
+    use tairix_abi::{DriverError, Errno};
 
     #[test]
     fn pump_error_limit_fails_closed_without_wrapping() {

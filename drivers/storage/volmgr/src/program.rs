@@ -2,18 +2,18 @@
 //! grant resolution, the blkio probe, and the attach loop
 //! (`plans/DEVICES.md` D3c).
 
-use rustos_abi::blkio::BLK_DATA_LEN;
-use rustos_abi::hwtree::HwResourceKind;
-use rustos_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
-use rustos_abi::{CapabilityId, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_drv_storage_volmgr::blk::{BlkCall, RemoteBlock};
-use rustos_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
-use rustos_drv_storage_volmgr::plan::{plan_volumes, VolumePlan};
-use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-use rustos_log::{log, Event, EventId, Field, FieldValue, Level};
-use rustos_rt::LogSink;
-use rustos_util::fmt::format_hex_u64;
+use tairix_abi::blkio::BLK_DATA_LEN;
+use tairix_abi::hwtree::HwResourceKind;
+use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_drv_storage_volmgr::blk::{BlkCall, RemoteBlock};
+use tairix_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
+use tairix_drv_storage_volmgr::plan::{plan_volumes, VolumePlan};
+use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
+use tairix_rt::LogSink;
+use tairix_util::fmt::format_hex_u64;
 
 /// Exit code when the rt-backed driver host could not be built from the
 /// kernel-delivered grants. A reserved, fail-closed value.
@@ -75,7 +75,7 @@ impl BlkCall for RtBlkCall {
         reply: &mut [u8],
         _window: &mut [u8],
     ) -> Result<usize, Errno> {
-        rustos_rt::ipc_call(self.endpoint, request, reply).map_err(|neg| {
+        tairix_rt::ipc_call(self.endpoint, request, reply).map_err(|neg| {
             Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
         })
     }
@@ -118,7 +118,7 @@ fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<(), Errn
         };
         let mut frame = [0u8; VOLUME_ATTACH_MAX_LEN];
         let len = request.encode(&mut frame)?;
-        let ret = rustos_rt::volume_attach(&frame[..len]);
+        let ret = tairix_rt::volume_attach(&frame[..len]);
         if ret == 0 {
             return Ok(());
         }
@@ -132,7 +132,7 @@ fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<(), Errn
     Err(last)
 }
 
-/// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+/// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
 /// is set up and routes its return value through the `exit` syscall.
 ///
 /// Run-to-completion: probe, attach, report, exit `0`. The kernel owns
@@ -154,7 +154,7 @@ fn main() -> i32 {
     let Some(window_id) = host
         .resources()
         .find(|resource| resource.kind() == Some(HwResourceKind::Shared))
-        .map(rustos_abi::hwtree::HwResource::base)
+        .map(tairix_abi::hwtree::HwResource::base)
     else {
         return EXIT_NO_TRANSPORT;
     };
@@ -255,4 +255,4 @@ fn main() -> i32 {
     0
 }
 
-rustos_rt::entry!(main);
+tairix_rt::entry!(main);

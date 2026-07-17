@@ -28,17 +28,17 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
-use rustos_abi::hwtree::HwResource;
-use rustos_abi::{BootFacts, DescriptorTable, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_ipc::PortRegistry;
-use rustos_kernel_irq::{IrqController, IrqTable};
-use rustos_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
-use rustos_kernel_sched_api::{Priority, StepOutcome};
-use rustos_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
-use rustos_log::{set_max_level, Field, Level, Sink};
-use rustos_sync::RwLock;
-use rustos_util::fmt::format_hex_u64;
+use tairix_abi::hwtree::HwResource;
+use tairix_abi::{BootFacts, DescriptorTable, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_ipc::PortRegistry;
+use tairix_kernel_irq::{IrqController, IrqTable};
+use tairix_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
+use tairix_kernel_sched_api::{Priority, StepOutcome};
+use tairix_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
+use tairix_log::{set_max_level, Field, Level, Sink};
+use tairix_sync::RwLock;
+use tairix_util::fmt::format_hex_u64;
 
 use crate::aspace::AddressSpaceRegistry;
 use crate::audit::{emit, AuditEvent};
@@ -68,7 +68,7 @@ pub enum Phase {
     /// Build the SMP scheduler.
     Sched,
     /// Consult the architecture port's [`crate::KernelArch::irq_routing`]
-    /// and construct the kernel-wide [`rustos_kernel_irq::IrqTable`].
+    /// and construct the kernel-wide [`tairix_kernel_irq::IrqTable`].
     ///
     /// Phase 4.D Item 2-tail.2 — inserted between [`Phase::Sched`] and
     /// [`Phase::Syscall`] so the IRQ table is wired with a
@@ -137,7 +137,7 @@ pub enum InitError {
     /// The compiled-in system identity table was rejected by the
     /// `kernel/sec` verifier or could not be installed into the boot
     /// path's identity cell.
-    Sec(rustos_abi::Errno),
+    Sec(tairix_abi::Errno),
     /// `kernel/sched` rejected the scheduler configuration.
     Sched(SchedError),
     /// The scheduler reported zero CPUs while installing per-CPU state.
@@ -251,7 +251,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         AuditEvent::BootStarted,
         &[Field {
             key: "phase_count",
-            value: rustos_log::FieldValue::Str("7"),
+            value: tairix_log::FieldValue::Str("7"),
         }],
     );
 
@@ -287,11 +287,11 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
                 &[
                     Field {
                         key: "phase",
-                        value: rustos_log::FieldValue::Str(phase.as_str()),
+                        value: tairix_log::FieldValue::Str(phase.as_str()),
                     },
                     Field {
                         key: "cause",
-                        value: rustos_log::FieldValue::Str(cause),
+                        value: tairix_log::FieldValue::Str(cause),
                     },
                 ],
             );
@@ -305,7 +305,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         AuditEvent::BootCompleted,
         &[Field {
             key: "next",
-            value: rustos_log::FieldValue::Str("spawn_init"),
+            value: tairix_log::FieldValue::Str("spawn_init"),
         }],
     );
 
@@ -375,7 +375,7 @@ struct SchedWaitQueueArch<A: KernelArch + 'static> {
 }
 
 impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch<A> {
-    fn unpark(&self, id: rustos_kernel_sched_api::TaskId) {
+    fn unpark(&self, id: tairix_kernel_sched_api::TaskId) {
         // Cancellation-safe: `unpark` of a not-yet-parked task records a
         // wake-pending token rather than erroring, so a wake racing the
         // park is never lost. A vanished task is a
@@ -394,15 +394,15 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
 
     fn current_task(
         &self,
-        cpu: rustos_kernel_sched_api::CpuId,
-    ) -> Option<rustos_kernel_sched_api::TaskId> {
+        cpu: tairix_kernel_sched_api::CpuId,
+    ) -> Option<tairix_kernel_sched_api::TaskId> {
         // The live scheduler's per-CPU current-task slot — the same slot the
         // dispatch hook reads to identify a syscall caller. A console-read backing parks the *current* task without
         // being handed its id, so it resolves it here.
         self.scheduler.current_task(cpu)
     }
 
-    fn current_cpu(&self) -> Option<rustos_kernel_sched_api::CpuId> {
+    fn current_cpu(&self) -> Option<tairix_kernel_sched_api::CpuId> {
         // The arch port's per-CPU identity — the same value the scheduler
         // and timed-wake paths read. A blocking primitive reached without a
         // caller context (a `SleepLock` contended acquire) resolves the
@@ -451,7 +451,7 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
     // The same leaked adapter answers the preempt path's "is there a
     // runnable competitor on this CPU?" query, so a fired quantum tick
     // reschedules only when a switch would change what runs (the tick
-    // still fires for a lone task — RustOS stays non-tickless under CFQ —
+    // still fires for a lone task — TAIRiX stays non-tickless under CFQ —
     // but does not needlessly switch away from it, avoiding the
     // per-quantum address-space/TLB churn that path would otherwise incur).
     crate::preempt::install_competitor_gate(wait_arch);
@@ -542,7 +542,7 @@ fn start_secondaries<A: KernelArch + 'static>(
             AuditEvent::SecondaryCpuStartFailed,
             &[Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str("no_bringup_surface"),
+                value: tairix_log::FieldValue::Str("no_bringup_surface"),
             }],
         );
         return;
@@ -575,7 +575,7 @@ fn start_secondaries<A: KernelArch + 'static>(
             AuditEvent::SecondaryCpuStartFailed,
             &[Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str("dispatch_already_published"),
+                value: tairix_log::FieldValue::Str("dispatch_already_published"),
             }],
         );
         return;
@@ -596,7 +596,7 @@ fn start_secondaries<A: KernelArch + 'static>(
             continue;
         }
         let mut cpu_buf = [0u8; 12];
-        let cpu_str = rustos_util::fmt::format_usize(cpu as usize, &mut cpu_buf);
+        let cpu_str = tairix_util::fmt::format_usize(cpu as usize, &mut cpu_buf);
         // SAFETY: the `KernelArch::secondary_bringup` contract obliges a
         // port returning `Some` to have installed its secondary entry
         // and stack pool before handing over a multi-CPU `BootInfo`;
@@ -610,7 +610,7 @@ fn start_secondaries<A: KernelArch + 'static>(
                     AuditEvent::SecondaryCpuStarted,
                     &[Field {
                         key: "cpu",
-                        value: rustos_log::FieldValue::Str(cpu_str),
+                        value: tairix_log::FieldValue::Str(cpu_str),
                     }],
                 );
                 // The core signals arrival from `run_secondary`
@@ -625,11 +625,11 @@ fn start_secondaries<A: KernelArch + 'static>(
                         &[
                             Field {
                                 key: "cpu",
-                                value: rustos_log::FieldValue::Str(cpu_str),
+                                value: tairix_log::FieldValue::Str(cpu_str),
                             },
                             Field {
                                 key: "cause",
-                                value: rustos_log::FieldValue::Str("no_online_ack"),
+                                value: tairix_log::FieldValue::Str("no_online_ack"),
                             },
                         ],
                     );
@@ -642,11 +642,11 @@ fn start_secondaries<A: KernelArch + 'static>(
                 &[
                     Field {
                         key: "cpu",
-                        value: rustos_log::FieldValue::Str(cpu_str),
+                        value: tairix_log::FieldValue::Str(cpu_str),
                     },
                     Field {
                         key: "cause",
-                        value: rustos_log::FieldValue::Str(err.as_str()),
+                        value: tairix_log::FieldValue::Str(err.as_str()),
                     },
                 ],
             ),
@@ -698,7 +698,7 @@ fn wait_secondary_online<A: KernelArch + 'static>(
 /// [`crate::random::SeededReserve`] is installed and `random_get` begins
 /// serving cryptographic output; otherwise the reserve is left unseeded so
 /// every draw keeps failing closed with
-/// [`rustos_abi::Errno::EntropyNotReady`] — never weakened to predictable
+/// [`tairix_abi::Errno::EntropyNotReady`] — never weakened to predictable
 /// bytes. There is no panic and no busy-wait: a momentarily-underfull source
 /// is the port's bounded-retry concern, and a hard failure simply leaves the
 /// reserve unseeded.
@@ -706,7 +706,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
     use crate::random::{
         ArchEntropy, ArchTicks, IrqEntropyObserver, SeededReserve, IRQ_ENTROPY_POOL,
     };
-    use rustos_rng::{EntropySource, InterruptPoolSource, JitterSource, MixedPair};
+    use tairix_rng::{EntropySource, InterruptPoolSource, JitterSource, MixedPair};
 
     let Some(source) = state.arch.platform_entropy() else {
         emit(
@@ -715,7 +715,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
             AuditEvent::EntropyReserveUnseeded,
             &[Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str("no_source"),
+                value: tairix_log::FieldValue::Str("no_source"),
             }],
         );
         return;
@@ -730,7 +730,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
             AuditEvent::EntropyReserveUnseeded,
             &[Field {
                 key: "cause",
-                value: rustos_log::FieldValue::Str("source_pending"),
+                value: tairix_log::FieldValue::Str("source_pending"),
             }],
         );
         return;
@@ -781,7 +781,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                 AuditEvent::EntropyReserveSeeded,
                 &[Field {
                     key: "sources",
-                    value: rustos_log::FieldValue::Str(sources),
+                    value: tairix_log::FieldValue::Str(sources),
                 }],
             );
         }
@@ -794,7 +794,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                 AuditEvent::EntropyReserveUnseeded,
                 &[Field {
                     key: "cause",
-                    value: rustos_log::FieldValue::Str("draw_failed"),
+                    value: tairix_log::FieldValue::Str("draw_failed"),
                 }],
             );
         }
@@ -941,7 +941,7 @@ fn service_between_dispatches<A: KernelArch>(arch: &A) {
 /// The kernel dispatch loop — the one definition every CPU runs, boot
 /// and secondary alike (`role` decides only who may end it).
 ///
-/// Runs with device IRQs **enabled** so RustOS is fully preemptive:
+/// Runs with device IRQs **enabled** so TAIRiX is fully preemptive:
 /// every in-kernel task and kthread the loop dispatches executes with
 /// interrupts deliverable, so a long in-kernel operation (a slow MMIO
 /// bring-up read, a busy driver poll) can no longer mask interrupts for
@@ -1039,8 +1039,8 @@ mod dispatch_loop_tests {
     use crate::test_arch::TestArch;
     use crate::KernelArch;
     use alloc::sync::Arc;
-    use rustos_kernel_sched_api::{Priority, StepOutcome, TaskAction};
     use std::thread;
+    use tairix_kernel_sched_api::{Priority, StepOutcome, TaskAction};
 
     /// A task may suspend the dispatcher from an exception context whose
     /// architecture mask still blocks device interrupts. Once the scheduler
@@ -1146,7 +1146,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         stack_span: crate::aspace::StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
-        live: Option<Box<dyn rustos_kernel_mem::LiveUserSpace + Send>>,
+        live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
         mut enter: Box<dyn FnMut() + Send>,
     ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
@@ -1303,7 +1303,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
     fn spawn_kernel_service(
         &self,
         mut body: crate::kthread::KernelServiceBody,
-    ) -> Option<rustos_kernel_sched_api::TaskId> {
+    ) -> Option<tairix_kernel_sched_api::TaskId> {
         // Admit the service as a kernel-only resumable kthread on the boot
         // CPU's run queue (`plans/SPAWN.md` SP1). It must be admitted
         // **before** `admit_init` drives the dispatch loop, so the loop
@@ -1487,7 +1487,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             AuditEvent::DriverUnloaded,
             &[Field {
                 key: "handle",
-                value: rustos_log::FieldValue::Str(format_hex_u64(handle, &mut handle_buf)),
+                value: tairix_log::FieldValue::Str(format_hex_u64(handle, &mut handle_buf)),
             }],
         );
         Ok(())
@@ -1600,7 +1600,7 @@ fn run_phases<A: KernelArch>(
         // published a table before the sec phase ran — a re-entry logic
         // error surfaced fail-closed rather than silently kept.
         cell.install(table)
-            .map_err(|_| InitError::Sec(rustos_abi::Errno::AlreadyExists))?;
+            .map_err(|_| InitError::Sec(tairix_abi::Errno::AlreadyExists))?;
     }
     phase_ready(log_sink, Phase::Sec);
 
@@ -1825,7 +1825,7 @@ fn run_phases<A: KernelArch>(
         state
             .frame_allocator
             .usable_frames()
-            .saturating_mul(rustos_kernel_mem::PAGE_SIZE),
+            .saturating_mul(tairix_kernel_mem::PAGE_SIZE),
     );
 
     // The production wall clock, named so it backs *both* the
@@ -1974,7 +1974,7 @@ fn run_phases<A: KernelArch>(
             cpu_name: state
                 .arch
                 .cpu_name()
-                .unwrap_or(rustos_abi::CpuName::UNKNOWN),
+                .unwrap_or(tairix_abi::CpuName::UNKNOWN),
             cpu_count,
             memory_bytes: installed_memory_bytes,
         }),
@@ -2105,16 +2105,16 @@ pub(crate) struct KernelState<A: KernelArch> {
     pub(crate) ipc: RwLock<PortRegistry>,
     /// Per-task address-space registry backing the kernel's
     /// `copy_from_user` / `copy_to_user` boundary.
-    /// Maps a task's [`rustos_kernel_sec::TaskId`] to its user
-    /// [`rustos_kernel_mem::AddressSpace`] and the [`PhysMap`] that
+    /// Maps a task's [`tairix_kernel_sec::TaskId`] to its user
+    /// [`tairix_kernel_mem::AddressSpace`] and the [`PhysMap`] that
     /// backs it, so a syscall handler can resolve the caller's task id
-    /// to the pair [`rustos_kernel_mem::uaccess`] walks. Wrapped in the
+    /// to the pair [`tairix_kernel_mem::uaccess`] walks. Wrapped in the
     /// same reader-preferring `RwLock` as `caps` / `ipc` so the syscall
     /// hot path takes only a shared lock and the kernel composes every
     /// registry under one lock-ordering policy (the
     /// registry owns no lock of its own).
     ///
-    /// [`PhysMap`]: rustos_kernel_mem::PhysMap
+    /// [`PhysMap`]: tairix_kernel_mem::PhysMap
     //
     // Increment C (`PLAN.md` Stage 7) threads this registry into the
     // `KernelDispatchHook` / `KernelSyscallHandlers` below, where
@@ -2128,7 +2128,7 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// `random_get` draws CSPRNG output from it before copying the
     /// bytes into the caller's buffer. It boots **unseeded** over the
     /// [`NullEntropy`](crate::random::NullEntropy) source, so a draw fails closed with
-    /// [`rustos_abi::Errno::EntropyNotReady`] until the platform-RNG
+    /// [`tairix_abi::Errno::EntropyNotReady`] until the platform-RNG
     /// entropy seam re-seeds the boxed reserve in
     /// place. Held type-erased behind a `Box<dyn RandomReserve>` and
     /// wrapped in the same reader-preferring `RwLock` as `caps` / `ipc`
@@ -2144,7 +2144,7 @@ pub(crate) struct KernelState<A: KernelArch> {
     pub(crate) audit_sink: &'static (dyn Sink + Sync),
     /// Kernel IRQ table backing the `irq_bind` / `irq_wait`
     /// syscalls. The `irq_bind` handler binds against the calling
-    /// task's [`rustos_kernel_sec::TaskId`]; the `irq_wait` handler
+    /// task's [`tairix_kernel_sec::TaskId`]; the `irq_wait` handler
     /// runs a yield-cycle on [`IrqTable::try_wait_step`]; the
     /// `exit` handler calls [`IrqTable::release_for`] to evict
     /// every binding the exiting task held.
@@ -2155,8 +2155,8 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// Sourced from the architecture port's
     /// [`crate::KernelArch::irq_routing`] hook during [`Phase::Irq`].
     /// The default is the kernel/irq
-    /// [`rustos_kernel_irq::UNSUPPORTED_CONTROLLER`] (every `mask`
-    /// returns [`rustos_kernel_irq::MaskError::Unsupported`]); ports
+    /// [`tairix_kernel_irq::UNSUPPORTED_CONTROLLER`] (every `mask`
+    /// returns [`tairix_kernel_irq::MaskError::Unsupported`]); ports
     /// with a programmable controller (x86_64's `IoApicController`)
     /// override the trait method and return a real instance.
     ///
@@ -2174,7 +2174,7 @@ fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {
         AuditEvent::PhaseStarted,
         &[Field {
             key: "phase",
-            value: rustos_log::FieldValue::Str(phase.as_str()),
+            value: tairix_log::FieldValue::Str(phase.as_str()),
         }],
     );
 }
@@ -2186,7 +2186,7 @@ fn phase_ready(sink: &(dyn Sink + Sync), phase: Phase) {
         AuditEvent::PhaseReady,
         &[Field {
             key: "phase",
-            value: rustos_log::FieldValue::Str(phase.as_str()),
+            value: tairix_log::FieldValue::Str(phase.as_str()),
         }],
     );
 }
@@ -2199,8 +2199,8 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
-    use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
-    use rustos_log::Level;
+    use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
+    use tairix_log::Level;
 
     fn make_memory_map() -> BootMemoryMap {
         let mut map = BootMemoryMap::new();
@@ -2263,14 +2263,14 @@ mod tests {
         // human uid (no on-disk half yet) fails closed.
         assert!(cell.is_installed());
         let (gid, sups, ceiling) = cell
-            .resolve_credential(rustos_users::DEVMGR_UID.0)
+            .resolve_credential(tairix_users::DEVMGR_UID.0)
             .expect("the devmgr service account resolves");
-        assert_eq!(gid.0, rustos_users::SERVICES_GID.0);
+        assert_eq!(gid.0, tairix_users::SERVICES_GID.0);
         assert!(sups.is_empty());
-        assert!(ceiling.contains(rustos_abi::CapabilityId::DRV_LOAD));
+        assert!(ceiling.contains(tairix_abi::CapabilityId::DRV_LOAD));
         assert!(matches!(
             cell.resolve_credential(1000),
-            Err(rustos_abi::Errno::PermissionDenied)
+            Err(tairix_abi::Errno::PermissionDenied)
         ));
     }
 
@@ -2397,7 +2397,7 @@ mod tests {
             .expect("scheduler builds");
         scheduler
             .spawn(CPU, Priority::Normal, |_| {
-                rustos_kernel_sched_api::TaskAction::Exit
+                tairix_kernel_sched_api::TaskAction::Exit
             })
             .expect("task admitted");
 
@@ -2431,7 +2431,7 @@ mod tests {
         ) -> Result<u64, Errno> {
             *self.recorded.write() = Some((
                 rxe.to_vec(),
-                caps.contains(rustos_abi::CapabilityId::DRV_LOAD),
+                caps.contains(tairix_abi::CapabilityId::DRV_LOAD),
                 args.len(),
             ));
             Ok(self.pid)
@@ -2466,7 +2466,7 @@ mod tests {
             pid: 0x4242,
         };
         let mut caps = CapabilitySet::empty();
-        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let rxe = b"driver-image-bytes";
         let args: [&[u8]; 1] = [b"reply-endpoint"];
 
@@ -2507,7 +2507,7 @@ mod tests {
             _args: &[&[u8]],
             _env: &[&[u8]],
         ) -> Result<u64, Errno> {
-            use rustos_kernel_mem::{
+            use tairix_kernel_mem::{
                 AddressSpace, Frame, HostPageTable, MapFlags, Page, SimPhysMap, VirtAddr,
             };
             let mut space = AddressSpace::new(HostPageTable::new());
@@ -2566,7 +2566,7 @@ mod tests {
         );
 
         let mut caps = CapabilitySet::empty();
-        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let pid = ctx
             .spawn_driver_process(
                 &AdmittingSpawn,
@@ -2594,7 +2594,7 @@ mod tests {
         // point is the generic `Run` leaf. The owning driver directory
         // names the process, never `Run`.
         let mut caps = CapabilitySet::empty();
-        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let pid = ctx
             .spawn_driver_process(
                 &AdmittingSpawn,
@@ -2651,7 +2651,7 @@ mod tests {
         let handle = 0x4242u64;
         let sec = SecTaskId(handle);
         let mut caps = CapabilitySet::empty();
-        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let record = TaskCapabilities::derive(sec, UserId(0), caps, caps, audit_sink);
         state.caps.write().insert(record);
         assert!(state.caps.read().caps_for(sec).is_some());
@@ -2759,7 +2759,7 @@ mod tests {
         let started_id = AuditEvent::PhaseStarted.id();
         let ready_id = AuditEvent::PhaseReady.id();
         let events = log_sink.snapshot();
-        let pos = |id: rustos_log::EventId, name: &str| -> usize {
+        let pos = |id: tairix_log::EventId, name: &str| -> usize {
             events
                 .iter()
                 .position(|e| e.id == id && e.fields[0].1 == name)
@@ -2789,7 +2789,7 @@ mod tests {
     #[test]
     fn run_phases_fails_under_syscall_when_slot_already_installed() {
         use crate::dispatch_slot::{DispatchHook, DispatchOutcome};
-        use rustos_kernel_syscall::RawArgs;
+        use tairix_kernel_syscall::RawArgs;
 
         struct Dummy;
         impl DispatchHook for Dummy {

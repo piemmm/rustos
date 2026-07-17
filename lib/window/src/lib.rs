@@ -14,7 +14,7 @@
 //!   [`client::EventSource`], so an app creates, presents, closes, and
 //!   waits for events without ever polling.
 //!
-//! The wire format itself lives in `rustos_abi::window_ipc`; this crate
+//! The wire format itself lives in `tairix_abi::window_ipc`; this crate
 //! adds the behaviour. Window frames travel through one `shm_grant`ed
 //! region mapped once at create time — presents carry a frame index and
 //! a damage rectangle, never pixels — and every window is keyed to the

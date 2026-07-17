@@ -32,8 +32,8 @@
 //! New crashing inputs, when found, are appended to [`corpus`] with a name and
 //! a dedicated verdict test (`tests/SECURITY.md`).
 
-use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
-use rustos_abi::{
+use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
+use tairix_abi::{
     LoadHeader, LoadImage, NeededLibrary, RxeError, RxePermission, Segment, ABI_VERSION_CURRENT,
     LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, RXE_PAGE_SIZE, SYSCALL_TABLE_HASH_LEN,
 };
@@ -97,13 +97,13 @@ fn load_image(needed: &[&str]) -> Vec<u8> {
 }
 
 /// A valid program startup vector (`argv = ["prog", "42"]`, empty `envp`),
-/// built through the production [`rustos_abi::process::write_into`] writer.
+/// built through the production [`tairix_abi::process::write_into`] writer.
 fn startup_vector() -> Vec<u8> {
     let args: &[&[u8]] = &[b"prog", b"42"];
     let env: &[&[u8]] = &[];
-    let len = rustos_abi::process::encoded_len(args, env).expect("within abi-v1 limits");
+    let len = tairix_abi::process::encoded_len(args, env).expect("within abi-v1 limits");
     let mut buf = vec![0u8; len];
-    let written = rustos_abi::process::write_into(&mut buf, args, env, CANARY).expect("fits");
+    let written = tairix_abi::process::write_into(&mut buf, args, env, CANARY).expect("fits");
     assert_eq!(written, len);
     buf
 }

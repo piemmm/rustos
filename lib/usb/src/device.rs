@@ -6,10 +6,10 @@
 //! Device, `GET_DESCRIPTOR(device)`, `SET_PROTOCOL(boot)`, Configure
 //! Endpoint, and on-demand interrupt-IN transfer arming, per device. Each
 //! served device's [`DeviceEngine`] view implements the `ReportSource` seam
-//! from `rustos_abi::driver::input`, so the host-controller driver serves
+//! from `tairix_abi::driver::input`, so the host-controller driver serves
 //! reports straight off the transfer ring over the URB transport to a class
 //! driver
-//! (`drivers/input/usb_kbd`), whose `rustos_hid` decoders consume them.
+//! (`drivers/input/usb_kbd`), whose `tairix_hid` decoders consume them.
 //!
 //! # Memory seam
 //!
@@ -28,7 +28,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
+use tairix_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
@@ -2142,7 +2142,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// * [`DriverError::DeviceFault`] if the controller does not
     ///   start within `budget` polls.
     ///
-    /// [`DmaHost`]: rustos_abi::driver::dma::DmaHost
+    /// [`DmaHost`]: tairix_abi::driver::dma::DmaHost
     pub fn start(
         xhci: Xhci<H>,
         dma: M,
@@ -2544,8 +2544,8 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // barrier, so the first snapshot's body bytes may predate the cycle
         // bit (a torn read pairing a fresh cycle with a stale TRB pointer —
         // the metal `REJECT_ADDRESS_MISMATCH` this fixes). Order the body read
-        // after the cycle observation, then re-read and consume (see `rustos_dma_barrier`).
-        rustos_dma_barrier::dma_rmb();
+        // after the cycle observation, then re-read and consume (see `tairix_dma_barrier`).
+        tairix_dma_barrier::dma_rmb();
         let trbs = self.read_event_segment()?;
         // Re-confirm ownership on the post-barrier snapshot, then verify the
         // entry has actually landed before consuming it. The read barrier
@@ -5865,7 +5865,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// assumed — so `devmgr` resolves a class driver's signed bind table
     /// against it. Its [`HwDeviceClass`] is derived from the interface
     /// class, the match key mirroring the PCI child node
-    /// [`PciBus::describe_function`](rustos_abi::driver::pci::PciBus::describe_function)
+    /// [`PciBus::describe_function`](tairix_abi::driver::pci::PciBus::describe_function)
     /// emits for the controller above it. The node's device address is the
     /// device's xHCI slot id, so every interface node of one composite
     /// device carries the same non-zero address (a slot is never `0` while
@@ -6492,7 +6492,7 @@ pub struct DeviceEngine<'a, 'w, H: XhciHost, M: DmaBank> {
     index: usize,
 }
 
-impl<H: XhciHost, M: DmaBank> rustos_abi::driver::input::ReportSource
+impl<H: XhciHost, M: DmaBank> tairix_abi::driver::input::ReportSource
     for DeviceEngine<'_, '_, H, M>
 {
     fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {

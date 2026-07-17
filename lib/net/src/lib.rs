@@ -1,4 +1,4 @@
-//! RustOS network protocol engine (`lib/net`).
+//! TAIRiX network protocol engine (`lib/net`).
 //!
 //! This crate is the single home of the wire protocols the user-space
 //! network stack speaks (`plans/NETWORK.md`). It is deliberately pure: no

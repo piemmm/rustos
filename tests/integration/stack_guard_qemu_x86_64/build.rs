@@ -5,9 +5,9 @@
 //!
 //! 1. Declare/enable the freestanding conditional-compilation flags
 //!    (`itest_x86_64` on the `x86_64-unknown-none` target, nothing on a
-//!    host build) via [`rustos_itest_harness::emit_target_cfg`].
+//!    host build) via [`tairix_itest_harness::emit_target_cfg`].
 //! 2. On the freestanding x86_64 target, hand the production x86_64 kernel
-//!    linker script to the test kernel (it boots the real `rustos-kernel`
+//!    linker script to the test kernel (it boots the real `tairix-kernel`
 //!    pipeline, so it links exactly like the other freestanding x86_64
 //!    integration binaries).
 //!
@@ -21,7 +21,7 @@ use std::env;
 const X86_64_TARGET: &str = "x86_64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
@@ -29,7 +29,7 @@ fn main() {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let manifest_dir = manifest_dir.trim_end_matches('/');
         // The single per-arch script the architecture port owns;
-        // mirrors `kernel/rustos-kernel/build.rs` and the sibling x86_64
+        // mirrors `kernel/tairix-kernel/build.rs` and the sibling x86_64
         // integration binaries.
         let linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");
         println!("cargo:rerun-if-changed={linker}");

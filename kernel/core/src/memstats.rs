@@ -24,17 +24,17 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_abi::sysinfo::RamzipStats;
-use rustos_kernel_mem::pressure::FreeMemorySource;
-use rustos_kernel_mem::reclaim::{CacheAccounting, ReclaimClass, ReclaimClassStats};
-use rustos_kernel_mem::MemoryPressure;
-use rustos_sync::RwLock;
+use tairix_abi::sysinfo::RamzipStats;
+use tairix_kernel_mem::pressure::FreeMemorySource;
+use tairix_kernel_mem::reclaim::{CacheAccounting, ReclaimClass, ReclaimClassStats};
+use tairix_kernel_mem::MemoryPressure;
+use tairix_sync::RwLock;
 
 /// Discovered physical-RAM size, in bytes, published once at boot — the
 /// backing every reclaimable cache derives its byte budget from
 /// (`CacheBudget::from_backing`). `0` means "not yet published".
 ///
-/// The kernel heap is now growable, so `rustos_kalloc::HEAP_BYTES` is only
+/// The kernel heap is now growable, so `tairix_kalloc::HEAP_BYTES` is only
 /// the *bootstrap* size, no longer the memory a cache should size itself
 /// against; a cache sized to the bootstrap slab would be a fixed ceiling
 /// that wastes RAM on a large machine and over-commits a small one. This
@@ -59,7 +59,7 @@ pub fn set_cache_backing_bytes(bytes: usize) {
 #[must_use]
 pub fn cache_backing_bytes() -> usize {
     match CACHE_BACKING_BYTES.load(Ordering::Acquire) {
-        0 => rustos_kalloc::HEAP_BYTES,
+        0 => tairix_kalloc::HEAP_BYTES,
         bytes => bytes,
     }
 }

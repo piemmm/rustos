@@ -1,6 +1,6 @@
 [package]
-name = "rustos-desktop-session"
-description = "RustOS desktop session glue: owns the shared theme registry and the taskbar model, performs the runtime light/dark switch, and relays the active theme to the window manager, taskbar, and apps (§10 — PLAN.md Stage 7)."
+name = "tairix-desktop-session"
+description = "TAIRiX desktop session glue: owns the shared theme registry and the taskbar model, performs the runtime light/dark switch, and relays the active theme to the window manager, taskbar, and apps (§10 — PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,41 +13,41 @@ publish.workspace = true
 # `ThemeRegistry`, performs the light/dark switch on it, and hands the active
 # theme out to the rest of the desktop. `lib/theme` is the one definition the
 # window manager, taskbar, and apps all read (§6, §17.4).
-rustos-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The taskbar model (§10): the session owns it so it can re-theme the bar in
 # place on a runtime switch and resolve the taskbar's abstract menu actions
 # (e.g. the appearance toggle) against the theme registry the taskbar cannot
 # see. Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
-rustos-taskbar = { path = "../taskbar", version = "=0.0.0" }
+tairix-taskbar = { path = "../taskbar", version = "=0.0.0" }
 # The compositing window manager (§10): the session presents the taskbar bar
 # and its start-menu popup as compositor windows, placed and rounded through
 # the window manager's single anti-aliased rounded-corner path (§2.2).
 # Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
-rustos-wm = { path = "../wm", version = "=0.0.0" }
+tairix-wm = { path = "../wm", version = "=0.0.0" }
 # The cursor and icon set builders (§10): the session reads the desktop's
 # on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
 # `IconSet` for the window manager and taskbar. The decode/fallback logic
 # lives in these `lib/*` crates; the session only owns the filesystem
 # capability to read the bytes (§17.4 / §19.5).
-rustos-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
-rustos-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+tairix-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The kernel-boundary `Errno` returned by the filesystem-read seam (§5.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The window-channel protocol engine (plans/APPWIN.md AW2/AW3): the session
 # composes `WindowServer` over the `WindowHost` bridge in `src/windows.rs`,
 # serving app windows from the reserved WINDOW_ENDPOINT into the compositor.
-rustos-window = { path = "../../../lib/window", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The one shared directory-browser engine (plans/APPWIN.md AW5): the trusted
 # file picker in `src/picker.rs` composes the same `Browser`/`render` the
 # files app drives, so the picker and the file manager can never diverge in
 # navigation semantics, listing policy, or look (§2.2, §6).
-rustos-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared help engine's required-locale registry: the `cli` module's
 # pin test verifies every locale's `OPTIONS` section documents exactly the
 # switches the parser accepts (plans/APPS.md).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 
 # The package is both the desktop-session glue library (above) and the `Run`
 # entry-point binary of the desktop session service (`plans/DISPLAY.md` D7c):
@@ -59,7 +59,7 @@ rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
 # on the native Tier-1 targets and an inert host stub elsewhere
 # (see `src/run.rs` / `build.rs`).
 [[bin]]
-name = "rustos-desktop-session-run"
+name = "tairix-desktop-session-run"
 path = "src/run.rs"
 
 # Everything only the freestanding `Run` binary links is pulled in for the
@@ -70,20 +70,20 @@ path = "src/run.rs"
 # (query/configure/present over the `DisplayTransport` seam) and
 # `RemoteDisplay` (the `Display` trait over the client's own frame mapping,
 # with the per-frame stale-damage double-buffer bookkeeping).
-rustos-display = { path = "../../../lib/display", version = "=0.0.0", features = ["rt"] }
+tairix-display = { path = "../../../lib/display", version = "=0.0.0", features = ["rt"] }
 # The `CapabilitySet` wire images the reserved window-endpoint bind
 # marshals (empty sender/receiver sets: the engine attests every caller).
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The pure-Rust userland runtime (`AGENTS.md` §1): `_start`, the stack
 # canary, the panic handler, the allocator, and the syscall wrappers
 # (`display_acquire`, `pointer_read`/`keyboard_read`, `shm_create`/
-# `shm_grant`, `ipc_call`, `waitset_*`). RustOS is Rust-only, so the session
+# `shm_grant`, `ipc_call`, `waitset_*`). TAIRiX is Rust-only, so the session
 # links this runtime, never the C ABI (`AGENTS.md` §16.4).
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The one help engine: the syscall-backed own-bundle `HelpSource`
 # (`BundleHelp`) and the shared short-help render the `-h`/`-?` switches
 # use, exactly as every other command app (plans/APPS.md).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
 
 [lints]
 workspace = true

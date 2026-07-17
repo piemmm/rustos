@@ -7,10 +7,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
 };
-use rustos_abi::driver::DriverError;
+use tairix_abi::driver::DriverError;
 
 use crate::driver_store::{
     enumerate_driver_store, DriverImageError, DriverImageReader, DRIVER_STORE_PATH,
@@ -18,7 +18,7 @@ use crate::driver_store::{
 };
 use crate::fs::VfsError;
 use crate::test_sink::TestSink;
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 const ROOT_ID: u64 = 1;
 
@@ -220,7 +220,7 @@ impl FilesystemRead for MockStore {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(child_id),
             info,
-            modified: rustos_abi::time::Time64::UNIX_EPOCH,
+            modified: tairix_abi::time::Time64::UNIX_EPOCH,
             name_len,
             next_cursor: cursor + 1,
         }))

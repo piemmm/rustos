@@ -15,7 +15,7 @@ pipeline. Chaque fichier est créé s'il n'existe pas et écrasé, sauf si
 ou à écrire est signalé et l'exécution continue avec les sorties
 restantes, selon le mode `--output-error` choisi.
 
-RustOS n'a pas de `SIGPIPE` : la disparition d'un consommateur se
+TAIRiX n'a pas de `SIGPIPE` : la disparition d'un consommateur se
 manifeste par une erreur d'écriture sur la sortie standard — la seule
 sortie de cette commande pouvant être un tube — le « tube » des modes
 GNU désigne donc exactement cette sortie ici. Sans `--output-error`,
@@ -23,7 +23,7 @@ une sortie standard défaillante arrête l'exécution (l'équivalent de
 l'outil GNU tué par `SIGPIPE`, la raison étant indiquée sur l'erreur
 standard) ; avec un mode `-nopipe`, elle est tolérée en silence.
 
-GNU `tee -i` (ignorer les interruptions) n'est pas disponible : RustOS
+GNU `tee -i` (ignorer les interruptions) n'est pas disponible : TAIRiX
 n'a pas de disposition de signal par processus à régler. Ce commutateur
 arrivera avec ce travail noyau plutôt que d'être accepté et ignoré.
 

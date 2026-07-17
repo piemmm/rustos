@@ -1,4 +1,4 @@
-//! RustOS `log` — the terminal reader, renderer, and verifier of the system
+//! TAIRiX `log` — the terminal reader, renderer, and verifier of the system
 //! log (SYSLOG §14).
 //!
 //! The system log is a set of immutable, append-only, hash-chained segment
@@ -6,7 +6,7 @@
 //! command-line tool that reads those files and turns them into readable
 //! output — or checks their integrity. It never reads `/proc`, `/sys`, or a
 //! device path (there are none); the authoritative data is the segment files
-//! and the RustOS APIs (SYSLOG §14).
+//! and the TAIRiX APIs (SYSLOG §14).
 //!
 //! # What this crate is
 //!

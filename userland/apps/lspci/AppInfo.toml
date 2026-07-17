@@ -8,7 +8,7 @@
 # HARDWARE_TREE query the listing is rendered from — the tool's whole
 # purpose, so a refusal is reported on stderr and the tool exits rather
 # than fabricating an empty list. It reads no standard input.
-id = "os.rustos.lspci"
+id = "os.tairix.lspci"
 name = "lspci"
 version = "0.1.0"
 kind = "command"

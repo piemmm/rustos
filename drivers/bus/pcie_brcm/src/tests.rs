@@ -13,8 +13,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 
-use rustos_abi::driver::mmio::MmioMapError;
-use rustos_abi::{
+use tairix_abi::driver::mmio::MmioMapError;
+use tairix_abi::{
     CapabilityId, DriverError, DriverHandle, DriverHost, DriverKind, MmioMapper, RegisterWindow,
 };
 
@@ -697,7 +697,7 @@ fn open_discovered_reaches_the_root_port_check_over_an_inert_window() {
 
 #[test]
 fn bind_table_matches_the_pi4_pcie_node() {
-    use rustos_abi::HwMatchKey;
+    use tairix_abi::HwMatchKey;
     // Exactly one key: the BCM2711 PCIe root-complex `compatible`, at the
     // declared priority. It matches a discovered node carrying that key
     // and nothing else (e.g. the EMMC2 node).
@@ -711,7 +711,7 @@ fn bind_table_matches_the_pi4_pcie_node() {
 
 // --- Discovered-node parsing & autonomous floor entry ---------------------
 
-use rustos_abi::{HwDeviceClass, HwNode, HwResource};
+use tairix_abi::{HwDeviceClass, HwNode, HwResource};
 
 /// The Pi 4 discovered values: controller `reg`, inbound `dma-ranges`
 /// (PCIe base 0, 3 GiB), outbound `ranges` (CPU `0x6_0000_0000` → PCIe
@@ -890,10 +890,10 @@ fn bring_up_from_node_reaches_the_root_port_check_over_a_mapped_window() {
 // the node — is host-testable against a mock bus.
 
 use core::cell::RefCell;
-use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::driver::pci::PciBus;
-use rustos_abi::{HwMatchKey, HwResourceKind};
-use rustos_pci::USB_CONTROLLER_CLASS;
+use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::driver::pci::PciBus;
+use tairix_abi::{HwMatchKey, HwResourceKind};
+use tairix_pci::USB_CONTROLLER_CLASS;
 
 /// Bus-local address of the lone USB function the [`StubPciBus`] reports.
 const USB_BDF: u64 = 0x0001_0000;
@@ -977,7 +977,7 @@ impl PciBus for StubPciBus {
         Ok(0)
     }
 
-    fn route_msi(&self, _bdf: u64, _message: rustos_abi::MsiMessage) -> Result<(), DriverError> {
+    fn route_msi(&self, _bdf: u64, _message: tairix_abi::MsiMessage) -> Result<(), DriverError> {
         self.calls.borrow_mut().push("route_msi");
         if self.route_msi_ok {
             Ok(())
@@ -989,7 +989,7 @@ impl PciBus for StubPciBus {
     fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
         // Identity is unassigned (the kernel sets it on publish, D5b.2a); the
         // node carries the VL805's `vendor:device:class` match key.
-        let mut node = HwNode::new(0, rustos_abi::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
+        let mut node = HwNode::new(0, tairix_abi::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
         node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_30))
             .map_err(|_| DriverError::DeviceFault)?;
         Ok(node)
@@ -1042,9 +1042,9 @@ impl DriverHost for RecordingHost {
         Ok(())
     }
 
-    fn alloc_msi(&self) -> Result<rustos_abi::MsiAllocation, DriverError> {
+    fn alloc_msi(&self) -> Result<tairix_abi::MsiAllocation, DriverError> {
         match self.msi_line {
-            Some(line) => Ok(rustos_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, line)),
+            Some(line) => Ok(tairix_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, line)),
             None => Err(DriverError::Unsupported),
         }
     }

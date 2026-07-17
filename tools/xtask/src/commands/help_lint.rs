@@ -4,9 +4,9 @@
 //! formed, translation-consistent, and content-clean before it can reach an
 //! image:
 //!
-//! 1. **The shared lint** (`rustos_help::lint_help_trees`, the one judgement
+//! 1. **The shared lint** (`tairix_help::lint_help_trees`, the one judgement
 //!    the `tools/syshelp` aggregator tests also run) over every discovered
-//!    help document (`rustos_syshelp::HELP_FILES` — the same build-discovered
+//!    help document (`tairix_syshelp::HELP_FILES` — the same build-discovered
 //!    rows the image planters plant, so the linted set and the shipped set
 //!    cannot drift): locale/document spellings, the fail-closed structural
 //!    bounds, canonical `en-US/` presence, required-locale completeness, no
@@ -27,9 +27,9 @@
 
 use std::collections::BTreeSet;
 
-use rustos_help::{lint_help_trees, LintDoc, DEFAULT_LOCALE};
-use rustos_itest_harness::app_image::{discover_app_manifests, AppKind};
-use rustos_syshelp::HELP_FILES;
+use tairix_help::{lint_help_trees, LintDoc, DEFAULT_LOCALE};
+use tairix_itest_harness::app_image::{discover_app_manifests, AppKind};
+use tairix_syshelp::HELP_FILES;
 
 use crate::Context;
 

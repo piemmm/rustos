@@ -24,7 +24,7 @@
 //! decision — launch fan-out, pid→console accounting, per-console budgets,
 //! exhaustion, error propagation — is host-tested without a kernel,
 //! mirroring the `startup` config parser's split. The freestanding `run`
-//! binary backs the seam with the real `rustos-rt` syscall wrappers; PID 1
+//! binary backs the seam with the real `tairix-rt` syscall wrappers; PID 1
 //! performs **no allocation** here (fixed slot array), because the
 //! userland heap's production producer is staged (`plans/SPAWN.md` `SP5b`).
 
@@ -64,7 +64,7 @@ pub const MAX_SUPERVISED_SERVICES: usize = 4;
 
 /// The syscalls the supervisor drives, as a seam so the policy is
 /// host-testable (`plans/PI.md` P11; the `Spawner`/`Reaper` split's
-/// shape). The freestanding binary backs it with `rustos-rt`.
+/// shape). The freestanding binary backs it with `tairix-rt`.
 pub trait Sessions {
     /// `console_count`: how many text consoles are installed
     /// (non-negative), or `-errno`.

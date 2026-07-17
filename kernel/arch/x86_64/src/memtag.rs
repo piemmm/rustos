@@ -1,7 +1,7 @@
 //! x86_64 memory tagging.
 //!
 //! Implements the Arch HAL
-//! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for x86_64.
+//! [`MemoryTagging`](tairix_arch_api::MemoryTagging) surface for x86_64.
 //!
 //! Mainstream x86_64 silicon has **no per-granule memory tagging** of the
 //! Arm-MTE / SPARC-ADI kind: there is no architectural store-tag
@@ -11,15 +11,15 @@
 //! store a matching tag per memory granule and does **not** fault on a
 //! mismatch — they are address-masking features, not memory tagging.
 //!
-//! So both features are an honest [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported). On
+//! So both features are an honest [`Tagging::Unsupported`](tairix_arch_api::Tagging::Unsupported). On
 //! x86_64 use-after-free is hardened by the architecture-neutral
 //! *software* tag check in `kernel/mem` (which uses the same
-//! [`rustos_arch_api::next_free_tag`] rotation this HAL defines) layered
+//! [`tairix_arch_api::next_free_tag`] rotation this HAL defines) layered
 //! on the slab guard pages and W^X. The granule
 //! is therefore the trivial one byte and the tag space collapses to the
 //! single tag `0`.
 
-use rustos_arch_api::{MemoryTagging, Tagging, TaggingProfile};
+use tairix_arch_api::{MemoryTagging, Tagging, TaggingProfile};
 
 /// x86_64 implementation of the Arch HAL memory-tagging surface.
 ///
@@ -67,7 +67,7 @@ impl MemoryTagging for MemoryTags {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::memtag::conformance;
+    use tairix_arch_api::memtag::conformance;
 
     #[test]
     fn passes_memtag_conformance() {

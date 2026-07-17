@@ -19,7 +19,7 @@
 //!
 //! * [`IrqController`] — the line-masking surface every port with a
 //!   programmable controller implements. It is the HAL-level companion
-//!   of the consumer-side `rustos_kernel_irq::IrqController` (which the
+//!   of the consumer-side `tairix_kernel_irq::IrqController` (which the
 //!   IRQ table calls through during a wake): a port implements this HAL
 //!   trait over its real controller, and the kernel binary bridges the
 //!   two (the arch port owns no `kernel/irq`

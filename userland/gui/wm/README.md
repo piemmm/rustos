@@ -1,9 +1,9 @@
-# rustos-wm
+# tairix-wm
 
-The RustOS compositing window manager (`userland/gui/wm`, `AGENTS.md`
+The TAIRiX compositing window manager (`userland/gui/wm`, `AGENTS.md`
 §10). It composes per-window surfaces into a single scan-out frame and
 presents it through a capability-gated
-`rustos_abi::driver::display::Display` driver. All compositing happens in
+`tairix_abi::driver::display::Display` driver. All compositing happens in
 user space; no non-GUI crate depends on this crate (`AGENTS.md` §17.3).
 
 ## Status
@@ -33,13 +33,13 @@ router**:
   window has since gone, is ignored and the stale focus dropped, `AGENTS.md`
   §2.9). The device-level `PointerButton`/`InputEvent` vocabulary it consumes —
   including the `Key`/`NamedKey`/`Modifiers` keyboard types — lives in the
-  shared `rustos-input` crate (re-exported here) so the taskbar routes the same
+  shared `tairix-input` crate (re-exported here) so the taskbar routes the same
   events without depending on the window manager (`AGENTS.md` §17.4).
 - Pointer cursor overlay (`cursor`): a scalable, colourful, replaceable
-  `rustos_cursor::CursorImage` composited as the top-most layer so its
+  `tairix_cursor::CursorImage` composited as the top-most layer so its
   hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4).
 - Cursor selection (`select`): `desired_cursor` chooses the
-  `rustos_theme::CursorKind` from live interaction state — a window
+  `tairix_theme::CursorKind` from live interaction state — a window
   move-grab shows the move cursor, otherwise the pointer takes the
   per-window `cursor_hint` of the window under it (set with
   `Compositor::set_window_cursor`), and the desktop background shows the
@@ -50,7 +50,7 @@ router**:
   it reads `Compositor::scale` when it rasterises, and `refresh` re-renders the
   pointer when the kind, the cursor set, **or** the output scale changes
   (`AGENTS.md` §10 / §2.2). It rasterises each `CursorKind` at most once per
-  scale and cursor set: a shared `rustos-raster` `RasterCache` keyed by kind
+  scale and cursor set: a shared `tairix-raster` `RasterCache` keyed by kind
   keeps the converted image so re-showing a kind reuses it and only a scale or
   set change re-rasterises (the SVG-first "convert once" rule, `AGENTS.md`
   §10) — the same cache the taskbar uses for its notification glyphs
@@ -67,8 +67,8 @@ Stage 7 increments.
 ## Properties
 
 - `no_std` (+ `alloc`); depends only on the shared `lib/*` crates
-  (`rustos-abi`, `rustos-raster`, `rustos-geometry`, `rustos-input`,
-  `rustos-theme`, `rustos-cursor`) — never on a sibling userland crate
+  (`tairix-abi`, `tairix-raster`, `tairix-geometry`, `tairix-input`,
+  `tairix-theme`, `tairix-cursor`) — never on a sibling userland crate
   (`AGENTS.md` §17.4).
 - No `unsafe`; no `unwrap`/`expect`/`panic!` in production paths — every
   fallible entry point returns a `Result`/`Option` (`AGENTS.md` §2.9).
@@ -76,7 +76,7 @@ Stage 7 increments.
 ## Tests
 
 ```
-cargo test -p rustos-wm
+cargo test -p tairix-wm
 ```
 
 Headless tests against a virtual framebuffer cover premultiplied-alpha

@@ -16,10 +16,10 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::DriverHandle;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::PressureBand;
-use rustos_kernel_sec::{GroupId, UserId};
+use tairix_abi::driver::DriverHandle;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::PressureBand;
+use tairix_kernel_sec::{GroupId, UserId};
 
 /// A driver wrapper counting every structural call, so a test can prove
 /// a cache hit never reached the device.

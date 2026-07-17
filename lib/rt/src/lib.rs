@@ -1,18 +1,18 @@
-//! `rustos-rt` — the pure-Rust userland runtime.
+//! `tairix-rt` — the pure-Rust userland runtime.
 //!
-//! This is the runtime a **first-party RustOS program written in Rust** links:
+//! This is the runtime a **first-party TAIRiX program written in Rust** links:
 //! it provides the program's `_start` entry trampoline, idiomatic `abi-v1`
 //! syscall wrappers, the [`entry!`] macro that names the program's `main`, and
-//! the panic handler. RustOS is Rust-only, so its own
+//! the panic handler. TAIRiX is Rust-only, so its own
 //! programs use this runtime and never the C ABI.
 //!
 //! # Relationship to the C ABI (`crt0` + `abi-sys`)
 //!
-//! `rustos-crt0` and `rustos-abi-sys` are the curated *System runtime / C ABI*
+//! `tairix-crt0` and `tairix-abi-sys` are the curated *System runtime / C ABI*
 //! class: a libc-equivalent that exists **solely** so
 //! a program **not** written in Rust (C, …) can call `abi-v1`. They are not
-//! for RustOS's own code. `rustos-rt` is the Rust counterpart; both build on
-//! the one shared syscall trap (`rustos-abi-trap`), so the
+//! for TAIRiX's own code. `tairix-rt` is the Rust counterpart; both build on
+//! the one shared syscall trap (`tairix-abi-trap`), so the
 //! trap assembly is not duplicated.
 //!
 //! # Not a privileged path
@@ -30,14 +30,14 @@
 //! #![no_main]
 //!
 //! fn main() -> i32 {
-//!     rustos_rt::stream_write(b"hello\n");
+//!     tairix_rt::stream_write(b"hello\n");
 //!     0
 //! }
 //!
-//! rustos_rt::entry!(main);
+//! tairix_rt::entry!(main);
 //! ```
 //!
-//! `rustos-rt` provides `_start`, which validates the kernel-supplied
+//! `tairix-rt` provides `_start`, which validates the kernel-supplied
 //! startup vector, installs the per-process stack canary,
 //! calls `main`, and routes its return value through the `exit` syscall.
 //!
@@ -56,15 +56,15 @@
 
 extern crate alloc;
 
-use rustos_abi::input::{KeyInput, PointerInput};
-use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
-use rustos_abi::{
+use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::{
     BootFacts, BootId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags, Origin,
     RandomFlags, ResourceLimit, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64,
     WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
     ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
-use rustos_abi_trap::raw_syscall;
+use tairix_abi_trap::raw_syscall;
 
 #[cfg(rt_native)]
 mod start;
@@ -470,7 +470,7 @@ pub fn stdin(buf: &mut [u8]) -> usize {
 /// # Errors
 ///
 /// Returns the raw negative kernel result (`-errno`) on failure —
-/// [`rustos_abi::Errno::TimedOut`] when the bound elapsed with no input,
+/// [`tairix_abi::Errno::TimedOut`] when the bound elapsed with no input,
 /// or the same refusals [`stdin`] folds to a zero-length read (fd 0 not a
 /// readable stream, a faulted buffer, no console backing). Surfacing the
 /// errno lets the caller tell a refresh tick from a dead console.
@@ -776,7 +776,7 @@ pub fn pointer_read(seat: u64, buf: &mut [u8]) -> i64 {
 /// Enumerate the device-resource grants the kernel minted for the calling
 /// driver task into `buf` (`SyscallNumber::RESOURCE_GRANTS`, `plans/PI.md` P10 chunk 5d-2), returning the raw signed
 /// register: the total number of bytes written — consecutive
-/// [`rustos_abi::hwtree::GrantedResource`] records — when non-negative, else
+/// [`tairix_abi::hwtree::GrantedResource`] records — when non-negative, else
 /// `-errno`.
 ///
 /// A driver process calls this once at start-up to learn the unforgeable
@@ -799,15 +799,15 @@ pub fn resource_grants(buf: &mut [u8]) -> i64 {
 
 /// Allocate a message-signalled interrupt (MSI) vector for a PCI function
 /// (`SyscallNumber::MSI_ALLOC`), returning the
-/// [`rustos_abi::MsiAllocation`] the kernel minted — the virtual interrupt
+/// [`tairix_abi::MsiAllocation`] the kernel minted — the virtual interrupt
 /// line plus the doorbell `(address, data)` to program into the function's
 /// MSI capability.
 ///
 /// A user-space **bus** driver wiring a PCI function for MSI calls this; it
-/// is gated by [`rustos_abi::CapabilityId::IRQ_BIND`] (the same privilege the
+/// is gated by [`tairix_abi::CapabilityId::IRQ_BIND`] (the same privilege the
 /// driver needs to `irq_bind` the returned line). The kernel grants the
 /// caller a device resource for the line, so it may both `irq_bind` it and
-/// forward it as an [`rustos_abi::hwtree::HwResource::irq`] onto a child node
+/// forward it as an [`tairix_abi::hwtree::HwResource::irq`] onto a child node
 /// it publishes — never ambient authority.
 ///
 /// # Errors
@@ -816,8 +816,8 @@ pub fn resource_grants(buf: &mut [u8]) -> i64 {
 /// commonly `NotImplemented` on a platform with no MSI controller, or
 /// `OutOfRange` when the vector space is exhausted — and treats a malformed
 /// short reply as a fail-closed error rather than a usable value.
-pub fn msi_alloc() -> Result<rustos_abi::MsiAllocation, i64> {
-    let mut buf = [0u8; rustos_abi::MsiAllocation::WIRE_LEN];
+pub fn msi_alloc() -> Result<tairix_abi::MsiAllocation, i64> {
+    let mut buf = [0u8; tairix_abi::MsiAllocation::WIRE_LEN];
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_IRQ_BIND` and the `(buf, len)` pair against the caller's address
@@ -833,10 +833,10 @@ pub fn msi_alloc() -> Result<rustos_abi::MsiAllocation, i64> {
     // fail closed rather than decode a partial doorbell. `ret` is
     // non-negative here, so the `try_from` only rejects an impossible value.
     match usize::try_from(ret) {
-        Ok(written) if written >= rustos_abi::MsiAllocation::WIRE_LEN => {}
-        _ => return Err(-(rustos_abi::Errno::BufferTooSmall as i64)),
+        Ok(written) if written >= tairix_abi::MsiAllocation::WIRE_LEN => {}
+        _ => return Err(-(tairix_abi::Errno::BufferTooSmall as i64)),
     }
-    rustos_abi::MsiAllocation::from_bytes(&buf).map_err(|e| -(e as i64))
+    tairix_abi::MsiAllocation::from_bytes(&buf).map_err(|e| -(e as i64))
 }
 
 /// Publish a discovered child device `node` into the live hardware tree
@@ -853,8 +853,8 @@ pub fn msi_alloc() -> Result<rustos_abi::MsiAllocation, i64> {
 /// once per device it enumerates, so the device manager autoloads the
 /// matching driver in turn — recursive, data-driven discovery, never a
 /// compiled-in list. It is gated by
-/// [`rustos_abi::CapabilityId::HW_EMIT`], and the kernel admits the node only
-/// when every [`rustos_abi::hwtree::HwResource`] it requests is covered by one
+/// [`tairix_abi::CapabilityId::HW_EMIT`], and the kernel admits the node only
+/// when every [`tairix_abi::hwtree::HwResource`] it requests is covered by one
 /// of the calling driver's own minted grants, so a child can never carry more
 /// authority than its emitter (no ambient authority). A
 /// malformed node, an unknown parent, or an out-of-grant resource fails closed
@@ -881,7 +881,7 @@ pub fn hw_emit_node(node: &HwNode) -> i64 {
 /// that published a device with [`hw_emit_node`] calls this when the device
 /// goes away (a USB port-down, a PCIe hot-remove), so the device manager
 /// unloads the driver bound to the vanished node. It is
-/// gated by the same [`rustos_abi::CapabilityId::HW_EMIT`], and the kernel
+/// gated by the same [`tairix_abi::CapabilityId::HW_EMIT`], and the kernel
 /// retires `node_id` **only** when its parent is the calling driver's own
 /// matched node — a child the caller itself published — together with every
 /// descendant, so a driver can never remove a node it does not own
@@ -923,13 +923,13 @@ pub fn yield_now() {
 /// whose epoch is unspecified — only differences between readings are
 /// meaningful. It requires no capability (`clock_get` is callable by every
 /// task); a caller without [`CapabilityId::TIME_HIRES`] reads it floored to
-/// [`rustos_abi::time::COARSE_CLOCK_GRANULARITY_NS`] (one microsecond), since
+/// [`tairix_abi::time::COARSE_CLOCK_GRANULARITY_NS`] (one microsecond), since
 /// a sub-microsecond timer is a side-channel primitive the kernel withholds
 /// from untrusted callers. The wrapper performs no
 /// coarsening of its own — the value it returns is exactly what the kernel
 /// handed back.
 ///
-/// [`CapabilityId::TIME_HIRES`]: rustos_abi::CapabilityId::TIME_HIRES
+/// [`CapabilityId::TIME_HIRES`]: tairix_abi::CapabilityId::TIME_HIRES
 #[must_use]
 pub fn clock_get() -> u64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
@@ -940,7 +940,7 @@ pub fn clock_get() -> u64 {
 }
 
 /// Yield-loop until `now()` reaches `deadline_ns` — the **degraded
-/// fallback** of [`ClockDelay`]'s [`delay_us`](rustos_abi::Delay::delay_us),
+/// fallback** of [`ClockDelay`]'s [`delay_us`](tairix_abi::Delay::delay_us),
 /// used only when the kernel refuses the sleep wait-set ([`sleep_waitset`])
 /// so a timed park is unavailable: it reads the monotonic clock through
 /// `now` and surrenders the CPU through `yield_fn` between reads, keeping
@@ -955,7 +955,7 @@ fn spin_until_ns(deadline_ns: u64, mut now: impl FnMut() -> u64, mut yield_fn: i
 
 /// Park, off-CPU, until `now()` reaches `deadline_ns`.
 ///
-/// The core of [`ClockDelay`]'s [`delay_us`](rustos_abi::Delay::delay_us):
+/// The core of [`ClockDelay`]'s [`delay_us`](tairix_abi::Delay::delay_us):
 /// between clock reads it blocks through `park` (a kernel timed park for
 /// the remaining nanoseconds), so the task sleeps instead of yielding in a
 /// loop. A spurious early wake re-parks for the remainder; a deadline
@@ -1001,17 +1001,17 @@ fn sleep_waitset() -> Option<u64> {
 /// Nanoseconds in one microsecond — the [`ClockDelay`] conversion factor.
 const NANOS_PER_MICRO: u64 = 1_000;
 
-/// The userland [`Delay`](rustos_abi::Delay) implementation: timed waits and
+/// The userland [`Delay`](tairix_abi::Delay) implementation: timed waits and
 /// a monotonic clock backed by the [`clock_get`] syscall.
 ///
 /// A driver process (or any program) that must honour a hardware-dictated
 /// settle window — a PCIe link train, a USB hub power-on-good / reset-recovery
 /// window — hands one of these to the bring-up code that takes a
-/// [`Delay`](rustos_abi::Delay). It lives here, in the one userland runtime,
+/// [`Delay`](tairix_abi::Delay). It lives here, in the one userland runtime,
 /// so every driver process shares a single clock-backed `Delay` rather than
 /// each rolling its own over [`clock_get`].
 ///
-/// The wait genuinely sleeps: [`delay_us`](rustos_abi::Delay::delay_us)
+/// The wait genuinely sleeps: [`delay_us`](tairix_abi::Delay::delay_us)
 /// parks the task on the process's memberless sleep wait-set
 /// (`sleep_waitset`) with the remaining window as the `waitset_wait`
 /// deadline, so the kernel's one-shot timer wakes it — no yield loop, no
@@ -1030,7 +1030,7 @@ impl ClockDelay {
     }
 }
 
-impl rustos_abi::Delay for ClockDelay {
+impl tairix_abi::Delay for ClockDelay {
     fn delay_us(&self, us: u32) {
         // Compute the deadline from the clock the wait re-checks, saturating
         // so a reading near `u64::MAX` can never wrap the deadline below
@@ -1074,7 +1074,7 @@ impl rustos_abi::Delay for ClockDelay {
 /// `exec`-style hand-off).
 ///
 /// The child's standard streams attach to the **caller's own** console
-/// ([`rustos_abi::CONSOLE_INHERIT`]): a spawned session
+/// ([`tairix_abi::CONSOLE_INHERIT`]): a spawned session
 /// member (login's shell, a shell's job) stays on the console its parent
 /// was driving. To start a process on a *different* installed console —
 /// PID 1 launching one login per console (`plans/PI.md` P11) — use
@@ -1082,7 +1082,7 @@ impl rustos_abi::Delay for ClockDelay {
 ///
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the new PID, and a
-/// negative value is `-errno` (recover the [`rustos_abi::Errno`]
+/// negative value is `-errno` (recover the [`tairix_abi::Errno`]
 /// discriminant as `-ret`). The wrapper surfaces that raw signed value so
 /// the caller decides how to react to a failed spawn — it adds no authority
 /// and hides no error.
@@ -1099,7 +1099,7 @@ pub fn spawn(path: &[u8]) -> i64 {
 /// vector `args` and environment `env` the caller chose
 /// (`SyscallNumber::SPAWN`, `plans/APPS.md` §8 — the shell's launch form).
 ///
-/// The strings are encoded into one `rustos_abi::process` startup-vector
+/// The strings are encoded into one `tairix_abi::process` startup-vector
 /// block (the `PSV1` format the kernel writes into the child's image) and
 /// handed to the kernel, which bounds, stages, and re-validates the block
 /// before building the child's own copy — the strings are data and carry
@@ -1110,8 +1110,8 @@ pub fn spawn(path: &[u8]) -> i64 {
 /// Environment entries follow the conventional `NAME=value` byte spelling
 /// ([`env_var`] splits at the first `=`).
 ///
-/// `console` is [`rustos_abi::CONSOLE_INHERIT`] or an installed console
-/// index; `target_uid` is [`rustos_abi::SPAWN_UID_INHERIT`] or a concrete
+/// `console` is [`tairix_abi::CONSOLE_INHERIT`] or an installed console
+/// index; `target_uid` is [`tairix_abi::SPAWN_UID_INHERIT`] or a concrete
 /// uid to switch to (kernel-gated on `CAP_SPAWN_AS_USER`), exactly as for
 /// [`spawn_at`] and [`spawn_as`]. Over-long or over-many strings fail
 /// closed with `-errno` from the shared encoder before the kernel is ever
@@ -1124,21 +1124,21 @@ pub fn spawn_with(
     args: &[&[u8]],
     env: &[&[u8]],
 ) -> i64 {
-    let len = match rustos_abi::process_start_encoded_len(args, env) {
+    let len = match tairix_abi::process_start_encoded_len(args, env) {
         Ok(len) => len,
         Err(err) => return -i64::from(err.as_i32()),
     };
     let mut block = alloc::vec![0u8; len];
     // The canary field is the kernel's to mint for the child; the encoder
     // requires a value, so carry zero and the kernel ignores it.
-    if let Err(err) = rustos_abi::process_start_write_into(&mut block, args, env, 0) {
+    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0) {
         return -i64::from(err.as_i32());
     }
     spawn_raw(path, console, target_uid, &block)
 }
 
 /// Spawn the embedded program at `path` with an explicit
-/// [`rustos_abi::SpawnAttach`]
+/// [`tairix_abi::SpawnAttach`]
 /// block — the child's credential, base console, and per-descriptor wires
 /// — plus the argument vector and environment the caller chose
 /// (`SyscallNumber::SPAWN`, `plans/SPAWN.md` SP10: the shell's redirection
@@ -1153,18 +1153,18 @@ pub fn spawn_with(
 #[must_use]
 pub fn spawn_attached(
     path: &[u8],
-    attach: &rustos_abi::SpawnAttach,
+    attach: &tairix_abi::SpawnAttach,
     args: &[&[u8]],
     env: &[&[u8]],
 ) -> i64 {
-    let len = match rustos_abi::process_start_encoded_len(args, env) {
+    let len = match tairix_abi::process_start_encoded_len(args, env) {
         Ok(len) => len,
         Err(err) => return -i64::from(err.as_i32()),
     };
     let mut block = alloc::vec![0u8; len];
     // The canary field is the kernel's to mint for the child; the encoder
     // requires a value, so carry zero and the kernel ignores it.
-    if let Err(err) = rustos_abi::process_start_write_into(&mut block, args, env, 0) {
+    if let Err(err) = tairix_abi::process_start_write_into(&mut block, args, env, 0) {
         return -i64::from(err.as_i32());
     }
     spawn_encoded(path, &attach.to_le_bytes(), &block)
@@ -1175,8 +1175,8 @@ pub fn spawn_attached(
 /// one raw call site so the argument layout is defined once (the attach
 /// block in slots 2/3, the optional startup-strings block in slots 4/5).
 ///
-/// `console` is [`rustos_abi::CONSOLE_INHERIT`] or an installed console index;
-/// `target_uid` is [`rustos_abi::SPAWN_UID_INHERIT`] (start under the caller's
+/// `console` is [`tairix_abi::CONSOLE_INHERIT`] or an installed console index;
+/// `target_uid` is [`tairix_abi::SPAWN_UID_INHERIT`] (start under the caller's
 /// own credential) or a concrete uid to switch to (which the kernel gates on
 /// `CAP_SPAWN_AS_USER`). The pair is carried in an all-`Inherit` attach
 /// block (`plans/SPAWN.md` SP10); an empty `strings` slice means "no
@@ -1186,10 +1186,10 @@ pub fn spawn_attached(
 /// `-errno`.
 #[must_use]
 fn spawn_raw(path: &[u8], console: u64, target_uid: u32, strings: &[u8]) -> i64 {
-    let attach = rustos_abi::SpawnAttach {
+    let attach = tairix_abi::SpawnAttach {
         target_uid,
         console,
-        ..rustos_abi::SpawnAttach::INHERIT
+        ..tairix_abi::SpawnAttach::INHERIT
     };
     spawn_encoded(path, &attach.to_le_bytes(), strings)
 }
@@ -1236,14 +1236,14 @@ fn spawn_encoded(path: &[u8], attach: &[u8], strings: &[u8]) -> i64 {
 /// empty pipe blocks until bytes arrive or every write end is closed (then
 /// end-of-stream, `0`); a write to a full pipe blocks until space frees,
 /// and a write with no reader left fails with
-/// [`rustos_abi::Errno::BrokenPipe`]. An end is handed to a spawned child
-/// through a [`rustos_abi::FdWire::Handle`] wire in [`spawn_attached`]'s
+/// [`tairix_abi::Errno::BrokenPipe`]. An end is handed to a spawned child
+/// through a [`tairix_abi::FdWire::Handle`] wire in [`spawn_attached`]'s
 /// attach block. Unprivileged: a pipe reaches only the caller's own table.
 ///
 /// # Errors
 ///
 /// The raw negative `-errno` register on refusal (recover the
-/// [`rustos_abi::Errno`] as `-ret`).
+/// [`tairix_abi::Errno`] as `-ret`).
 pub fn pipe_create() -> Result<(u32, u32), i64> {
     let mut fds = [0u32; 2];
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
@@ -1275,7 +1275,7 @@ pub fn pipe_create() -> Result<(u32, u32), i64> {
 /// (`PermissionDenied`) otherwise, or when `target_uid` names no account. Its
 /// intended caller is `login`, which authenticates a user and then starts
 /// their shell under the authenticated uid. Pass
-/// [`rustos_abi::CONSOLE_INHERIT`] for `console` to keep the child on the
+/// [`tairix_abi::CONSOLE_INHERIT`] for `console` to keep the child on the
 /// caller's own console. A running process can never change its *own*
 /// identity (there is no setuid-self).
 #[must_use]
@@ -1333,8 +1333,8 @@ pub fn console_count() -> i64 {
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the base address
 /// of the new region, and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`) — a frame exhaustion is
-/// reported as [`rustos_abi::Errno::OutOfMemory`] (deterministic OOM, never a panic). The wrapper surfaces that raw signed
+/// [`tairix_abi::Errno`] discriminant as `-ret`) — a frame exhaustion is
+/// reported as [`tairix_abi::Errno::OutOfMemory`] (deterministic OOM, never a panic). The wrapper surfaces that raw signed
 /// value so the caller decides how to react; it adds no authority and hides
 /// no error.
 #[must_use]
@@ -1360,7 +1360,7 @@ pub fn mem_map(len: usize, flags: MapFlags, addr_hint: u64) -> i64 {
 /// The kernel zeroes the frames it reclaims (secret
 /// hygiene) and fails closed when `(base, len)` does not name a region the
 /// caller mapped. Returns `0` on success or `-errno`
-/// (recover the [`rustos_abi::Errno`] discriminant as `-ret`), following the
+/// (recover the [`tairix_abi::Errno`] discriminant as `-ret`), following the
 /// standard `abi-v1` signed-result convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mem_unmap-result encoding (0, else -errno).
@@ -1419,7 +1419,7 @@ pub fn mem_unpin() -> i64 {
 /// termination-request signal (`Interrupt`/`Terminate`) delivered to the
 /// process is recorded as one pending observable event instead of
 /// terminating it; the process parks on a wait-set member of kind
-/// [`rustos_abi::WaitSourceKind::Signal`] ([`waitset_ctl`], id `0`) and
+/// [`tairix_abi::WaitSourceKind::Signal`] ([`waitset_ctl`], id `0`) and
 /// drains with [`SignalIntakeOp::Take`], which returns the drained
 /// signal's wire discriminant. `Kill` stays unconditionally fatal, and a
 /// second termination request while one is pending undrained escalates to
@@ -1427,7 +1427,7 @@ pub fn mem_unpin() -> i64 {
 /// audited per call.
 ///
 /// Returns the non-negative op result (`0`, or `Take`'s drained
-/// discriminant) or `-errno` (recover the [`rustos_abi::Errno`]
+/// discriminant) or `-errno` (recover the [`tairix_abi::Errno`]
 /// discriminant as `-ret`): `WouldBlock` for a `Take` with nothing
 /// pending or a `Disable` with an undrained observation, `NotFound` for a
 /// `Take` without the opt-in. The wrapper hides no error.
@@ -1459,7 +1459,7 @@ pub fn signal_intake(op: SignalIntakeOp) -> i64 {
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the base address
 /// of the new region and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces
+/// [`tairix_abi::Errno`] discriminant as `-ret`). The wrapper surfaces
 /// that raw signed value; it adds no authority and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 file_map-result encoding (base ≥ 0, else -errno).
@@ -1479,7 +1479,7 @@ pub fn file_map(fd: u32, offset: u64, len: u64) -> i64 {
 /// Only the exact whole region can be released; pages never touched were
 /// never backed and cost nothing, and the kernel zeroes the frames it
 /// reclaims (secret hygiene). Returns `0` on success or `-errno` (recover
-/// the [`rustos_abi::Errno`] discriminant as `-ret`), following the
+/// the [`tairix_abi::Errno`] discriminant as `-ret`), following the
 /// standard `abi-v1` signed-result convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 file_unmap-result encoding (0, else -errno).
@@ -1494,12 +1494,12 @@ pub fn file_unmap(base: u64, len: u64) -> i64 {
 /// Attach a filesystem driver to a runtime block source and publish the
 /// volume's root (`SyscallNumber::VOLUME_ATTACH`, `plans/DEVICES.md` D3b).
 ///
-/// `request` is an encoded [`rustos_abi::volume::VolumeAttachRequest`]
+/// `request` is an encoded [`tairix_abi::volume::VolumeAttachRequest`]
 /// naming the block-service endpoint + shared data window the caller holds
 /// as grants, the probed partition extent, the filesystem type, and the
 /// catalog name. Requires `CAP_FS_MOUNT`; the kernel re-validates every
 /// field against live state and fails closed. Returns `0` on success or
-/// `-errno` (recover the [`rustos_abi::Errno`] discriminant as `-ret`).
+/// `-errno` (recover the [`tairix_abi::Errno`] discriminant as `-ret`).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn volume_attach(request: &[u8]) -> i64 {
@@ -1516,7 +1516,7 @@ pub fn volume_attach(request: &[u8]) -> i64 {
 /// unpublish its root (`SyscallNumber::VOLUME_DETACH`, `plans/DEVICES.md`
 /// D3b).
 ///
-/// `request` is an encoded [`rustos_abi::volume::VolumeDetachRequest`]
+/// `request` is an encoded [`tairix_abi::volume::VolumeDetachRequest`]
 /// (the volume's stable 16-byte identity plus the force byte). Requires
 /// `CAP_FS_MOUNT`; only a volume attached through [`volume_attach`] can be
 /// detached. A plain detach fails closed on a flush error (or an
@@ -1555,7 +1555,7 @@ pub fn volume_detach(request: &[u8]) -> i64 {
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the base virtual address of
 /// the newly mapped sub-region, and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces that
+/// [`tairix_abi::Errno`] discriminant as `-ret`). The wrapper surfaces that
 /// raw signed value so the caller decides how to react; it adds no authority
 /// and hides no error.
 #[must_use]
@@ -1588,7 +1588,7 @@ pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the buffer's base virtual
 /// address, and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`) — `device_out` is left
+/// [`tairix_abi::Errno`] discriminant as `-ret`) — `device_out` is left
 /// untouched on a negative result. The wrapper surfaces that raw signed
 /// value so the caller decides how to react; it adds no authority and hides
 /// no error.
@@ -1622,7 +1622,7 @@ pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
 /// releasing anything. The call carries `CAP_MEM_DMA` (enforced by the kernel
 /// before any state is touched).
 ///
-/// Returns `0` on success, or `-errno` (recover the [`rustos_abi::Errno`]
+/// Returns `0` on success, or `-errno` (recover the [`tairix_abi::Errno`]
 /// discriminant as `-ret`). The wrapper surfaces the raw signed value and
 /// hides no error.
 #[must_use]
@@ -1637,10 +1637,10 @@ pub fn dma_free(handle: u64, cpu_va: u64) -> i64 {
 }
 
 /// Bind interrupt `line` to the calling task, minting an unforgeable
-/// [`rustos_abi::IrqHandle`] (`SyscallNumber::IRQ_BIND`).
+/// [`tairix_abi::IrqHandle`] (`SyscallNumber::IRQ_BIND`).
 ///
 /// `line` is the architecture interrupt-line identifier the driver received
-/// as an [`HwResourceKind::Irq`](rustos_abi::hwtree::HwResourceKind) grant on
+/// as an [`HwResourceKind::Irq`](tairix_abi::hwtree::HwResourceKind) grant on
 /// its matched node — a discovered value, never a board
 /// constant. The call carries `CAP_IRQ_BIND` (enforced by the kernel before
 /// any state is touched); the minted handle is re-keyed to the calling task,
@@ -1648,7 +1648,7 @@ pub fn dma_free(handle: u64, cpu_va: u64) -> i64 {
 ///
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the raw `IrqHandle`, and a
-/// negative value is `-errno` (recover the [`rustos_abi::Errno`] discriminant
+/// negative value is `-errno` (recover the [`tairix_abi::Errno`] discriminant
 /// as `-ret`). The wrapper surfaces that raw signed value; it adds no
 /// authority and hides no error.
 #[must_use]
@@ -1666,7 +1666,7 @@ pub fn irq_bind(line: u32) -> i64 {
 /// `timeout_ns` deadline elapses, or the binding disappears
 /// (`SyscallNumber::IRQ_WAIT`).
 ///
-/// `handle` is the [`rustos_abi::IrqHandle`] a prior [`irq_bind`] minted for
+/// `handle` is the [`tairix_abi::IrqHandle`] a prior [`irq_bind`] minted for
 /// this task; the kernel re-checks the binding owner-side on every call and parks the task off the run queue between polls (no
 /// busy-wait). Pass `u64::MAX` for an effectively unbounded
 /// wait. The kernel re-arms the bound line on the driver's behalf across the
@@ -1692,9 +1692,9 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
 /// Wait for a child-process event, reading back the typed status record
 /// (`SyscallNumber::WAIT`, `plans/SPAWN.md` SP6/SP9).
 ///
-/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`] to
+/// `pid` is either a specific child's PID or [`tairix_abi::WAIT_PID_ANY`] to
 /// wait for whichever of the caller's children reports next. On success the
-/// kernel writes a [`rustos_abi::WaitStatusRecord`] — decoded here into the
+/// kernel writes a [`tairix_abi::WaitStatusRecord`] — decoded here into the
 /// typed [`WaitStatus`] (`Exited` for a reaped child, `Stopped` for a child
 /// halted by [`Signal::Stop`] when `flags` carries
 /// [`WaitFlags::STOPPED`]) — and returns the reported child's PID. A
@@ -1704,7 +1704,7 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the reported
 /// child's PID, and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`) — `status` is left
+/// [`tairix_abi::Errno`] discriminant as `-ret`) — `status` is left
 /// untouched on a negative result. A record the kernel wrote but this
 /// wrapper cannot decode is refused as `-OutOfRange` rather than guessed
 /// at (fail closed). The wrapper surfaces the raw signed value so the
@@ -1712,7 +1712,7 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 wait-result encoding (PID ≥ 0, else -errno).
 pub fn wait(pid: i32, status: &mut WaitStatus, flags: WaitFlags) -> i64 {
-    let mut record = rustos_abi::WaitStatusRecord::default();
+    let mut record = tairix_abi::WaitStatusRecord::default();
     let ptr = core::ptr::addr_of_mut!(record) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `status` pointer against the caller's address space before
@@ -1741,15 +1741,15 @@ pub fn wait(pid: i32, status: &mut WaitStatus, flags: WaitFlags) -> i64 {
 /// This is the reap a shell's job control performs to report finished
 /// background jobs before the next prompt, and PID 1 `init` uses to reap the
 /// session without parking. `pid` is a specific child's PID or
-/// [`rustos_abi::WAIT_PID_ANY`]. If a matching child has already exited it is
+/// [`tairix_abi::WAIT_PID_ANY`]. If a matching child has already exited it is
 /// reaped: its exit code is written into `status` and its PID returned. If a
 /// matching child is still running the kernel does **not** block; it returns
-/// the raw negative encoding of [`rustos_abi::Errno::WouldBlock`] and leaves
+/// the raw negative encoding of [`tairix_abi::Errno::WouldBlock`] and leaves
 /// `status` untouched.
 ///
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the reaped child's PID, and a
-/// negative value is `-errno` (recover the [`rustos_abi::Errno`] discriminant
+/// negative value is `-errno` (recover the [`tairix_abi::Errno`] discriminant
 /// as `-ret`) — `Errno::WouldBlock` means "no child ready yet", any other
 /// negative value is a genuine failure (e.g. `NotFound`, no such child). The
 /// wrapper surfaces that raw signed value so the caller decides how to react;
@@ -1776,7 +1776,7 @@ pub fn wait_exit(pid: i32, code: &mut i32) -> i64 {
             WaitStatus::Exited(exit_code) => *code = exit_code,
             // Unreachable without the STOPPED flag; refuse rather than
             // fabricate an exit code from a stop report.
-            WaitStatus::Stopped(_) => return -i64::from(rustos_abi::Errno::OutOfRange.as_i32()),
+            WaitStatus::Stopped(_) => return -i64::from(tairix_abi::Errno::OutOfRange.as_i32()),
         }
     }
     ret
@@ -1793,7 +1793,7 @@ pub fn wait_exit(pid: i32, code: &mut i32) -> i64 {
 ///
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: `0` on success, and a negative value is `-errno`
-/// (recover the [`rustos_abi::Errno`] discriminant as `-ret`) —
+/// (recover the [`tairix_abi::Errno`] discriminant as `-ret`) —
 /// `Errno::NotFound` when `pid` is not a child of the caller, and
 /// `Errno::NotImplemented` until the kernel's signal producer is installed.
 /// The wrapper surfaces that raw signed value; it adds no authority and hides
@@ -1820,7 +1820,7 @@ pub fn signal(pid: i32, signal: Signal) -> i64 {
 /// `plans/DISPLAY.md` D5 — the `tcsetpgrp` analogue).
 ///
 /// `fd` is a readable inherited standard-stream descriptor naming the
-/// console (the shell passes [`rustos_abi::STDIN`]); `pid` is a live child
+/// console (the shell passes [`tairix_abi::STDIN`]); `pid` is a live child
 /// of the caller to make the owner, or `0` to release. While an owner is
 /// recorded, only it may `stream_read` or `stream_input_mode` that
 /// console — every other task sees `Errno::NotForeground`. The kernel
@@ -1890,8 +1890,8 @@ pub fn rlimit_get(kind: LimitKind) -> Result<ResourceLimit, i64> {
 ///
 /// The wrapper encodes `value` into a local buffer the kernel reads. A
 /// process may freely *lower* a bound, but *raising* a hard bound above the
-/// inherited ceiling requires [`rustos_abi::CapabilityId::RLIMIT_RAISE`]. Returns `0` on success or `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
+/// inherited ceiling requires [`tairix_abi::CapabilityId::RLIMIT_RAISE`]. Returns `0` on success or `-errno` (recover the
+/// [`tairix_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
 /// signed-result convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
@@ -1911,11 +1911,11 @@ pub fn rlimit_set(kind: LimitKind, value: ResourceLimit) -> i64 {
 /// `plans/PI.md` P11), returning the number of bytes copied.
 ///
 /// The copied bytes are the database's exact `users-v1` text, which the
-/// caller parses with the fail-closed `rustos-users` parser. Gated
-/// kernel-side on [`rustos_abi::CapabilityId::USERS_READ`] — only the
+/// caller parses with the fail-closed `tairix-users` parser. Gated
+/// kernel-side on [`tairix_abi::CapabilityId::USERS_READ`] — only the
 /// authentication principal (login) holds it; the wrapper adds no
 /// authority. Sizing `buf` at the format's own
-/// 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always suffices: a
+/// 64 KiB maximum (`tairix-users` `MAX_DB_LEN`) always suffices: a
 /// buffer smaller than the database is refused whole — a credential
 /// database is never truncated.
 ///
@@ -1952,11 +1952,11 @@ pub fn users_db_read(buf: &mut [u8]) -> Result<usize, i64> {
 /// mutating operation).
 ///
 /// `req` carries one encoded
-/// [`rustos_abi::users_admin::UsersAdminRequest`] record (built with
+/// [`tairix_abi::users_admin::UsersAdminRequest`] record (built with
 /// its `encode_into`, so both sides share one layout definition); a
 /// list operation's response is written into `out` and decoded with
 /// the matching `decode_user_list` / `decode_group_list`. Gated
-/// kernel-side on [`rustos_abi::CapabilityId::USER_ADMIN`] — the
+/// kernel-side on [`tairix_abi::CapabilityId::USER_ADMIN`] — the
 /// account-administration authority — with the finer never-widen /
 /// last-administrator / format rules enforced in the kernel engine;
 /// the wrapper adds no authority.
@@ -2003,7 +2003,7 @@ pub fn users_admin(req: &[u8], out: &mut [u8]) -> Result<usize, i64> {
 /// `register()` outcome back to the driver host on the reply endpoint
 /// handed to it through its startup args (`PLAN.md` Stage 4.HW).
 ///
-/// Returns `0` on success or `-errno` (recover the [`rustos_abi::Errno`]
+/// Returns `0` on success or `-errno` (recover the [`tairix_abi::Errno`]
 /// discriminant as `-ret`), the standard `abi-v1` signed-result
 /// convention; the wrapper hides no error.
 #[must_use]
@@ -2022,7 +2022,7 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
 /// (`SyscallNumber::PORT_BIND`) — the receive half of
 /// [`ipc_send`]/[`ipc_recv`]: an app binds its window-event mailbox here,
 /// then parks on it through a wait-set member of kind
-/// [`rustos_abi::WaitSourceKind::Port`].
+/// [`tairix_abi::WaitSourceKind::Port`].
 ///
 /// The kernel bounds `max_payload` and `capacity` (fail-closed memory
 /// bounds), requires `CAP_IPC_BIND_PRIVILEGED` for a reserved well-known
@@ -2031,7 +2031,7 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
 /// owner — the only task that may receive from it — and tears the port
 /// down when that owner exits. The wrapper adds no authority.
 ///
-/// Returns `0` on success or `-errno` (recover the [`rustos_abi::Errno`]
+/// Returns `0` on success or `-errno` (recover the [`tairix_abi::Errno`]
 /// discriminant as `-ret`), the standard `abi-v1` signed-result
 /// convention; the wrapper hides no error.
 #[must_use]
@@ -2050,10 +2050,10 @@ pub fn port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i64 {
 
 /// Receive the oldest delivered message from a port this task bound
 /// (`SyscallNumber::IPC_RECV`), copying the payload into `buf` and the
-/// sender's kernel-attested [`rustos_abi::Origin`] wire image —
+/// sender's kernel-attested [`tairix_abi::Origin`] wire image —
 /// snapshotted at send time, never the sender's claim — into
 /// `sender_out`, so the caller authenticates each message's principal
-/// fail-closed (decode with [`rustos_abi::Origin::from_bytes`]).
+/// fail-closed (decode with [`tairix_abi::Origin::from_bytes`]).
 ///
 /// Only the port's owner may receive; the kernel owner-gates every drain.
 /// Returns the payload length on success. An empty mailbox is the
@@ -2068,7 +2068,7 @@ pub fn port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i64 {
 pub fn ipc_recv(
     endpoint: u64,
     buf: &mut [u8],
-    sender_out: &mut [u8; rustos_abi::ORIGIN_WIRE_LEN],
+    sender_out: &mut [u8; tairix_abi::ORIGIN_WIRE_LEN],
 ) -> Result<usize, i64> {
     let ptr = buf.as_mut_ptr() as usize as u64;
     let sender_ptr = sender_out.as_mut_ptr() as usize as u64;
@@ -2089,7 +2089,7 @@ pub fn ipc_recv(
     }
     // A count the address width cannot hold is refused, never truncated
     // into a shorter, decodable-looking record.
-    usize::try_from(signed).map_err(|_| -i64::from(rustos_abi::Errno::LengthOutOfRange as i32))
+    usize::try_from(signed).map_err(|_| -i64::from(tairix_abi::Errno::LengthOutOfRange as i32))
 }
 
 /// Resolve a published port name to its live IPC endpoint id
@@ -2116,12 +2116,12 @@ pub fn port_resolve(name: &[u8]) -> i64 {
 /// (`SyscallNumber::HW_TREE_READ`),
 /// returning the number of bytes copied.
 ///
-/// The copied bytes are a [`rustos_abi::HwTreeHeader`] (the store's
+/// The copied bytes are a [`tairix_abi::HwTreeHeader`] (the store's
 /// current generation and the node count) followed by that many
-/// [`rustos_abi::HwNode`] records, which the caller decodes with the
+/// [`tairix_abi::HwNode`] records, which the caller decodes with the
 /// fail-closed `from_bytes` parsers. The generation in the header is the
 /// value to pass to [`hw_tree_wait`] to block until the tree next changes.
-/// Gated kernel-side on [`rustos_abi::CapabilityId::SYSINFO_HW`] — the
+/// Gated kernel-side on [`tairix_abi::CapabilityId::SYSINFO_HW`] — the
 /// privileged global hardware view; the
 /// wrapper adds no authority.
 ///
@@ -2165,11 +2165,11 @@ pub fn hw_tree_read(buf: &mut [u8]) -> Result<usize, i64> {
 /// caller cooperatively until the store's generation differs — a node was
 /// seeded, appended, or removed — then returns `0`, so the caller
 /// re-reads the tree and re-matches. Gated kernel-side on
-/// [`rustos_abi::CapabilityId::SYSINFO_HW`], the same privilege as reading
+/// [`tairix_abi::CapabilityId::SYSINFO_HW`], the same privilege as reading
 /// the tree; the wrapper adds no authority.
 ///
 /// Returns `0` once the tree has changed, or `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`): `-TimedOut` if the
+/// [`tairix_abi::Errno`] discriminant as `-ret`): `-TimedOut` if the
 /// deadline elapses first, or `-NotImplemented` if no hardware-tree store
 /// is wired. The wrapper hides no error.
 #[must_use]
@@ -2232,11 +2232,11 @@ pub fn random_get(buf: &mut [u8], flags: RandomFlags) -> Result<usize, i64> {
 /// installed, or the unlock gives up), so the next [`users_db_read`] returns
 /// the database or the inert `NotImplemented`. `timeout_ns` bounds the wait
 /// (`u64::MAX` for an effectively unbounded block). Gated kernel-side on
-/// [`rustos_abi::CapabilityId::USERS_READ`], the same privilege as reading
+/// [`tairix_abi::CapabilityId::USERS_READ`], the same privilege as reading
 /// the database; the wrapper adds no authority.
 ///
 /// Returns `0` once the database is no longer pending (the caller re-reads
-/// and re-classifies it), or `-errno` (recover the [`rustos_abi::Errno`]
+/// and re-classifies it), or `-errno` (recover the [`tairix_abi::Errno`]
 /// discriminant as `-ret`): `-TimedOut` if the deadline elapses first. The
 /// wrapper hides no error.
 #[must_use]
@@ -2259,7 +2259,7 @@ pub fn users_db_wait(timeout_ns: u64) -> i64 {
 /// `request` in and the reply out through the validated boundary, and blocks
 /// the caller cooperatively until the reply arrives, never busy-spinning. The first consumer is the reactive device manager
 /// reading the read-only `/System` driver store over
-/// [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`].
+/// [`tairix_abi::driver_store::DRIVER_STORE_ENDPOINT`].
 ///
 /// # Errors
 ///
@@ -2300,7 +2300,7 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
     Ok((ret as usize).min(reply.len()))
 }
 
-/// Emit one pre-encoded diagnostic [`rustos_abi::LogRecordRef`] wire image to
+/// Emit one pre-encoded diagnostic [`tairix_abi::LogRecordRef`] wire image to
 /// the kernel's diagnostic log sink (`SyscallNumber::LOG_EMIT`).
 ///
 /// Most callers use the higher-level [`LogSink`] rather than this raw form.
@@ -2341,10 +2341,10 @@ fn clamp_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// A [`rustos_log::Sink`] that marshals each structured event to the kernel's
+/// A [`tairix_log::Sink`] that marshals each structured event to the kernel's
 /// diagnostic log sink through [`log_emit`].
 ///
-/// This is how a first-party service routes its `rustos_log` diagnostics to
+/// This is how a first-party service routes its `tairix_log` diagnostics to
 /// the system log — the serial UART on a debug build — instead of writing
 /// them to `stderr` (fd 2), which on a framebuffer-console board lands on the
 /// screen rather than the captured serial line. The
@@ -2353,35 +2353,35 @@ fn clamp_utf8(s: &str, max: usize) -> &str {
 ///
 /// A message or field that exceeds the `abi-v1` record bounds is clamped to
 /// the largest valid prefix and excess fields past
-/// [`rustos_abi::LOG_FIELDS_MAX`] are dropped, so an over-long record still
+/// [`tairix_abi::LOG_FIELDS_MAX`] are dropped, so an over-long record still
 /// reaches the log rather than being discarded whole.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct LogSink;
 
-impl rustos_log::Sink for LogSink {
-    fn write_event(&self, event: &rustos_log::Event<'_>) {
+impl tairix_log::Sink for LogSink {
+    fn write_event(&self, event: &tairix_log::Event<'_>) {
         // Marshal the borrowed fields into the `(key, value)` pairs the
         // encoder takes, clamping keys/strings to their bound and dropping any
         // field past `LOG_FIELDS_MAX` (best-effort). A `Str` value longer than
         // the per-field encoded bound is trimmed so the record still encodes
         // rather than being dropped whole; non-string values are fixed-size.
-        let mut pairs: [(&str, rustos_abi::FieldValue<'_>); rustos_abi::LOG_FIELDS_MAX] =
-            [("", rustos_abi::FieldValue::Null); rustos_abi::LOG_FIELDS_MAX];
-        let field_count = event.fields.len().min(rustos_abi::LOG_FIELDS_MAX);
+        let mut pairs: [(&str, tairix_abi::FieldValue<'_>); tairix_abi::LOG_FIELDS_MAX] =
+            [("", tairix_abi::FieldValue::Null); tairix_abi::LOG_FIELDS_MAX];
+        let field_count = event.fields.len().min(tairix_abi::LOG_FIELDS_MAX);
         for (slot, field) in pairs.iter_mut().zip(event.fields.iter()).take(field_count) {
             let value = match field.value {
                 // Leave room for the value's tag + length prefix.
-                rustos_abi::FieldValue::Str(s) => {
-                    rustos_abi::FieldValue::Str(clamp_utf8(s, rustos_abi::LOG_FIELD_VALUE_MAX - 3))
+                tairix_abi::FieldValue::Str(s) => {
+                    tairix_abi::FieldValue::Str(clamp_utf8(s, tairix_abi::LOG_FIELD_VALUE_MAX - 3))
                 }
                 other => other,
             };
-            *slot = (clamp_utf8(field.key, rustos_abi::LOG_FIELD_KEY_MAX), value);
+            *slot = (clamp_utf8(field.key, tairix_abi::LOG_FIELD_KEY_MAX), value);
         }
-        let message = clamp_utf8(event.message, rustos_abi::LOG_MESSAGE_MAX);
+        let message = clamp_utf8(event.message, tairix_abi::LOG_MESSAGE_MAX);
 
-        let mut buf = [0u8; rustos_abi::LOG_RECORD_MAX];
-        if let Ok(len) = rustos_abi::encode_log_record(
+        let mut buf = [0u8; tairix_abi::LOG_RECORD_MAX];
+        if let Ok(len) = tairix_abi::encode_log_record(
             &mut buf,
             event.level.as_u8(),
             event.id.0,
@@ -2404,7 +2404,7 @@ impl rustos_log::Sink for LogSink {
 /// capability this task must hold to [`call_recv`]/[`call_reply`];
 /// `max_request`/`max_reply`/`capacity` bound the endpoint. Binding a
 /// restricted-sender endpoint (non-empty `send_caps`) — or any **reserved**
-/// well-known service id ([`rustos_abi::ipc::is_reserved_endpoint`], which a
+/// well-known service id ([`tairix_abi::ipc::is_reserved_endpoint`], which a
 /// squatter could otherwise claim ahead of the service) — requires
 /// `CAP_IPC_BIND_PRIVILEGED`, enforced kernel-side.
 ///
@@ -2417,8 +2417,8 @@ impl rustos_log::Sink for LogSink {
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn call_create(
     endpoint: u64,
-    send_caps: &rustos_caps::CapabilitySet,
-    recv_caps: &rustos_caps::CapabilitySet,
+    send_caps: &tairix_caps::CapabilitySet,
+    recv_caps: &tairix_caps::CapabilitySet,
     max_request: usize,
     max_reply: usize,
     capacity: usize,
@@ -2470,13 +2470,13 @@ pub fn call_recv(endpoint: u64, buf: &mut [u8], ticket_out: &mut u64) -> Result<
         endpoint,
         buf,
         ticket_out,
-        rustos_abi::CallRecvFlags::empty(),
+        tairix_abi::CallRecvFlags::empty(),
     )
 }
 
 /// Receive the next request posted to a call endpoint this task owns,
 /// **without blocking** (`SyscallNumber::CALL_RECV` with
-/// [`rustos_abi::CallRecvFlags::NON_BLOCKING`]).
+/// [`tairix_abi::CallRecvFlags::NON_BLOCKING`]).
 ///
 /// The mode a wait-set-driven event loop uses after a member endpoint
 /// reported ready: the readiness peek is not a guarantee — the queued call
@@ -2501,7 +2501,7 @@ pub fn call_recv_nonblock(
         endpoint,
         buf,
         ticket_out,
-        rustos_abi::CallRecvFlags::NON_BLOCKING,
+        tairix_abi::CallRecvFlags::NON_BLOCKING,
     )
 }
 
@@ -2510,7 +2510,7 @@ fn call_recv_with_flags(
     endpoint: u64,
     buf: &mut [u8],
     ticket_out: &mut u64,
-    flags: rustos_abi::CallRecvFlags,
+    flags: tairix_abi::CallRecvFlags,
 ) -> Result<usize, i64> {
     let buf_ptr = buf.as_mut_ptr() as usize as u64;
     let ticket_ptr = (ticket_out as *mut u64) as usize as u64;
@@ -2569,21 +2569,21 @@ pub fn call_reply(endpoint: u64, ticket: u64, reply: &[u8]) -> i64 {
     ret as i64
 }
 
-/// Read the kernel-attested [`rustos_abi::Origin`] of the caller whose
+/// Read the kernel-attested [`tairix_abi::Origin`] of the caller whose
 /// in-service call this server is currently handling
 /// (`SyscallNumber::CALL_PEER_ORIGIN`; P-C).
 ///
 /// `endpoint` is a call endpoint this task owns; `ticket` is the value a prior
 /// [`call_recv`] returned for a call still in service. On success the caller's
 /// attested origin wire image is copied into `out` and its byte length
-/// returned; decode it with [`rustos_abi::Origin::from_bytes`]. The origin is
+/// returned; decode it with [`tairix_abi::Origin::from_bytes`]. The origin is
 /// filled by the kernel from the posting task's own state, so a caller cannot
 /// forge it.
 ///
 /// # Errors
 ///
 /// Returns the raw negative kernel result (`-errno`): a buffer shorter than
-/// [`rustos_abi::ORIGIN_WIRE_LEN`] (`BufferTooSmall`), a missing receive
+/// [`tairix_abi::ORIGIN_WIRE_LEN`] (`BufferTooSmall`), a missing receive
 /// capability or a foreign endpoint (`PermissionDenied`), or an unknown
 /// endpoint or a ticket not in service (`NotFound`). The wrapper hides no
 /// error.
@@ -2750,7 +2750,7 @@ pub fn boot_facts() -> Result<BootFacts, i64> {
 /// (`SyscallNumber::SELF_ORIGIN`).
 ///
 /// Returns the caller's own [`Origin`] — trust domain, owning uid/gid, task
-/// id, process-instance [`rustos_abi::ProcId`], and the non-secret
+/// id, process-instance [`tairix_abi::ProcId`], and the non-secret
 /// effective-capability summary. This is the self-directed twin of
 /// [`call_peer_origin`]: where that lets a server learn the identity of the
 /// *peer* it is servicing, this lets a task learn its *own*. Every field is
@@ -2785,14 +2785,14 @@ pub fn self_origin() -> Result<Origin, i64> {
 /// Read the **unfiltered, global** kernel introspection view
 /// (`SyscallNumber::SYSINFO_INTROSPECT`; P-C).
 ///
-/// `domain` is a [`rustos_abi::IntrospectDomain`] discriminant; `arg` is the
+/// `domain` is a [`tairix_abi::IntrospectDomain`] discriminant; `arg` is the
 /// domain-specific selector (a record offset for the paged domains, unused
 /// otherwise); `buf` receives the encoded records and returns the byte count
 /// written. For the per-task-limits domain the target task's 128-bit
-/// [`rustos_abi::ProcId`] is written into `buf` on entry (a `u64` `arg` cannot
+/// [`tairix_abi::ProcId`] is written into `buf` on entry (a `u64` `arg` cannot
 /// carry it).
 ///
-/// Gated kernel-side on [`rustos_abi::CapabilityId::SYSINFO_INTROSPECT`],
+/// Gated kernel-side on [`tairix_abi::CapabilityId::SYSINFO_INTROSPECT`],
 /// held only by the `sysinfod` broker — the kernel returns the whole system's
 /// state and never narrows by principal; the wrapper adds no authority. The
 /// whole answer or none: an undersized buffer is refused with `BufferTooSmall`
@@ -2877,7 +2877,7 @@ pub fn terminal_size(fd: u32) -> Result<TerminalSize, i64> {
 /// physically-contiguous, zeroed region, maps it cacheable `RW`/non-exec,
 /// guard-bracketed, into the caller's own address space, records the caller
 /// as its owner, and mints the owner the matching per-region
-/// [`HwResourceKind::Shared`](rustos_abi::hwtree::HwResourceKind) grant so it
+/// [`HwResourceKind::Shared`](tairix_abi::hwtree::HwResourceKind) grant so it
 /// may forward the region onto a node it emits. The region id is written to
 /// `id_out`. The call carries `CAP_SHM` (enforced kernel-side before any
 /// state is touched).
@@ -2885,7 +2885,7 @@ pub fn terminal_size(fd: u32) -> Result<TerminalSize, i64> {
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the base virtual address of
 /// the newly mapped region, and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`) — `id_out` is left untouched
+/// [`tairix_abi::Errno`] discriminant as `-ret`) — `id_out` is left untouched
 /// on a negative result. The wrapper surfaces that raw signed value; it adds
 /// no authority and hides no error.
 #[must_use]
@@ -2918,7 +2918,7 @@ pub fn shm_create(len: usize, id_out: &mut u64) -> i64 {
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the base virtual address of
 /// the mapping, and a negative value is `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`) — `len_out` is left untouched
+/// [`tairix_abi::Errno`] discriminant as `-ret`) — `len_out` is left untouched
 /// on a negative result. The wrapper surfaces that raw signed value; it adds
 /// no authority and hides no error.
 #[must_use]
@@ -3079,9 +3079,9 @@ pub fn waitset_create() -> i64 {
 /// `set` is the handle [`waitset_create`] minted. `op` is [`WaitSetOp::Add`]
 /// or [`WaitSetOp::Del`]; `kind` selects whether `id` names an IPC call
 /// endpoint the caller serves ([`WaitSourceKind::Endpoint`]), an
-/// [`IrqHandle`](rustos_abi::IrqHandle) the caller bound
+/// [`IrqHandle`](tairix_abi::IrqHandle) the caller bound
 /// ([`WaitSourceKind::Irq`]), a child of the caller awaiting reap — a
-/// PID or [`rustos_abi::waitset::WAITSET_CHILD_ANY`]
+/// PID or [`tairix_abi::waitset::WAITSET_CHILD_ANY`]
 /// ([`WaitSourceKind::Child`]), a seat whose live lease the caller holds
 /// via `display_acquire` ([`WaitSourceKind::SeatInput`], ready on queued
 /// keyboard/pointer input *and* on losing the lease, so a revocation is
@@ -3209,13 +3209,13 @@ fn count_result(ret: u64, cap: usize) -> Result<usize, i64> {
 /// the caller's kernel-attested identity, applying the
 /// create/exclusive/truncate/directory semantics [`OpenFlags`] encodes and
 /// every per-inode owner/mode/ACL/capability and mount-flag check; the entry
-/// itself is gated on [`rustos_abi::CapabilityId::FS_ACCESS`]. A refused open
+/// itself is gated on [`tairix_abi::CapabilityId::FS_ACCESS`]. A refused open
 /// never produces a descriptor. This is the descriptor-producing primitive
 /// the higher-level [`File`] / [`Dir`] wrappers build on; a program names a
 /// descriptor, never a device.
 ///
 /// Returns the descriptor (≥ 0) or `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
+/// [`tairix_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
 /// signed-result convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 fd-result encoding (fd ≥ 0, else -errno).
@@ -3251,7 +3251,7 @@ pub fn fs_open(path: &[u8], flags: OpenFlags) -> i64 {
 /// malformed, unknown, or unauthorised reference never produces a descriptor.
 ///
 /// Returns the descriptor (≥ 0) or `-errno` (recover the
-/// [`rustos_abi::Errno`] discriminant as `-ret`).
+/// [`tairix_abi::Errno`] discriminant as `-ret`).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 fd-result encoding (fd ≥ 0, else -errno).
 pub fn resource_open(reference: &[u8], flags: OpenFlags) -> i64 {
@@ -3294,7 +3294,7 @@ pub fn fs_close(fd: u32) -> i64 {
 /// `offset` into `buf` (`SyscallNumber::FS_READ`), returning the number read
 /// (`0` at end of file).
 ///
-/// A single syscall transfers at most [`rustos_abi::FS_IO_MAX`] bytes; a
+/// A single syscall transfers at most [`tairix_abi::FS_IO_MAX`] bytes; a
 /// larger `buf` is split across successive calls by [`File::read_at`]. The
 /// kernel resolves `fd` against the caller's own descriptor table (a forged
 /// or foreign number fails closed), enforces the handle was opened for
@@ -3325,7 +3325,7 @@ pub fn fs_read(fd: u32, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
 ///
 /// If the handle was opened with [`OpenFlags::APPEND`] the kernel ignores
 /// `offset` and appends at the current end of file. A single syscall
-/// transfers at most [`rustos_abi::FS_IO_MAX`] bytes; a larger `data` is split
+/// transfers at most [`tairix_abi::FS_IO_MAX`] bytes; a larger `data` is split
 /// across successive calls by [`File::write_at`]. The kernel resolves `fd`
 /// against the caller's own table, enforces the handle was opened for
 /// writing, honours the mount's `ro` flag, and validates the `(buf, len)`
@@ -3352,13 +3352,13 @@ pub fn fs_write(fd: u32, offset: u64, data: &[u8]) -> Result<usize, i64> {
 
 /// Read the directory listing of the open directory descriptor `fd` into
 /// `buf` (`SyscallNumber::FS_READDIR`), returning the number of bytes the
-/// packed [`rustos_abi::DirEntry`] stream occupies.
+/// packed [`tairix_abi::DirEntry`] stream occupies.
 ///
 /// The whole listing is delivered or none: a buffer smaller than the packed
 /// stream is refused with `BufferTooSmall` rather than truncated, so the
 /// caller grows `buf` and retries (the entry count is a discovered capacity,
 /// not a fixed ceiling). Walk the returned prefix with
-/// [`rustos_abi::DirEntry::decode`] — or use [`Dir::read`], which owns the
+/// [`tairix_abi::DirEntry::decode`] — or use [`Dir::read`], which owns the
 /// buffer.
 ///
 /// # Errors
@@ -3452,11 +3452,11 @@ pub fn fs_mkdir(path: &[u8]) -> i64 {
 /// Remove the file or empty directory at the absolute `path`
 /// (`SyscallNumber::FS_UNLINK`).
 ///
-/// With [`UnlinkFlags::DIRECTORY`](rustos_abi::UnlinkFlags::DIRECTORY) the
+/// With [`UnlinkFlags::DIRECTORY`](tairix_abi::UnlinkFlags::DIRECTORY) the
 /// removal succeeds only when the name is an (empty) directory — the atomic
 /// `rmdir` posture, decided by the filesystem under its own lock; a
 /// non-directory is refused with the dedicated `Errno::NotADirectory`.
-/// [`UnlinkFlags::empty`](rustos_abi::UnlinkFlags::empty) removes the named
+/// [`UnlinkFlags::empty`](tairix_abi::UnlinkFlags::empty) removes the named
 /// file or (empty) directory.
 ///
 /// The kernel authorises the removal through the secured VFS under the
@@ -3465,7 +3465,7 @@ pub fn fs_mkdir(path: &[u8]) -> i64 {
 /// success or `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_unlink(path: &[u8], flags: rustos_abi::UnlinkFlags) -> i64 {
+pub fn fs_unlink(path: &[u8], flags: tairix_abi::UnlinkFlags) -> i64 {
     let ptr = path.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
     // `(ptr, len)` pair against the caller's address space before reading it.
@@ -3509,7 +3509,7 @@ pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {
 /// Set the permission bits of the file or directory at the absolute `path`
 /// to `mode` (`SyscallNumber::FS_SET_MODE`, the `chmod(2)` shape).
 ///
-/// `mode` carries at most [`rustos_abi::FS_MODE_MASK`] (the
+/// `mode` carries at most [`tairix_abi::FS_MODE_MASK`] (the
 /// owner/group/other `rwx` triads plus the setuid/setgid/sticky bits); any
 /// higher bit is refused at dispatch with `Errno::OutOfRange` — never
 /// silently masked. The kernel authorises the change through the secured
@@ -3538,7 +3538,7 @@ pub fn fs_set_mode(path: &[u8], mode: u32) -> i64 {
 /// `getxattr(2)` shape).
 ///
 /// `key` is a `lib/fsmeta`-grammar `namespace.rest` key of
-/// `1..=`[`rustos_abi::FS_ATTR_KEY_MAX`] bytes. Returns the value's byte
+/// `1..=`[`tairix_abi::FS_ATTR_KEY_MAX`] bytes. Returns the value's byte
 /// count (a value may be empty), or `-errno`: `Errno::NoData` when the node
 /// carries no such attribute, `Errno::BufferTooSmall` when the value does
 /// not fit `value_out` (never truncated), `Errno::NotSupported` on a mount
@@ -3571,7 +3571,7 @@ pub fn fs_attr_get(path: &[u8], key: &[u8], value_out: &mut [u8]) -> i64 {
 /// directory at the absolute `path` to `value`
 /// (`SyscallNumber::FS_ATTR_SET`, the `setxattr(2)` shape).
 ///
-/// `value` carries at most [`rustos_abi::FS_ATTR_VALUE_MAX`] opaque bytes;
+/// `value` carries at most [`tairix_abi::FS_ATTR_VALUE_MAX`] opaque bytes;
 /// a larger payload is refused at dispatch with `Errno::LengthOutOfRange`.
 /// The write is one copy-on-write transaction. Returns `0` on success or
 /// `-errno` (`Errno::NoSpace` at the per-inode bounds,
@@ -3662,7 +3662,7 @@ pub fn fs_attr_remove(path: &[u8], key: &[u8]) -> i64 {
 /// working directory (against which later relative [`fs_open`] paths
 /// resolve). A path that is not a searchable directory fails closed and
 /// leaves the working directory unchanged. Gated on
-/// [`rustos_abi::CapabilityId::FS_ACCESS`]. Returns `0` on success or
+/// [`tairix_abi::CapabilityId::FS_ACCESS`]. Returns `0` on success or
 /// `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
@@ -3714,7 +3714,7 @@ impl File {
     /// Open the named `target` with `flags`, returning the owned handle.
     ///
     /// The one shared spelling rule
-    /// ([`rustos_resref::names_resource_reference`]) decides which world the
+    /// ([`tairix_resref::names_resource_reference`]) decides which world the
     /// name belongs to *before* any lookup: a filesystem path (absolute,
     /// dot-relative, an `Alias:/path` alias form, or any unregistered
     /// prefix) opens through [`fs_open`], while a resource reference
@@ -3737,7 +3737,7 @@ impl File {
     /// The raw negative kernel result (`-errno`) the [`fs_open`] or
     /// [`resource_open`] syscall returns on any refusal.
     pub fn open(target: &[u8], flags: OpenFlags) -> Result<Self, i64> {
-        if core::str::from_utf8(target).is_ok_and(rustos_resref::names_resource_reference) {
+        if core::str::from_utf8(target).is_ok_and(tairix_resref::names_resource_reference) {
             return Self::open_resource(target, flags);
         }
         Self::from_open_result(fs_open(target, flags))
@@ -3776,7 +3776,7 @@ impl File {
             return Err(ret);
         }
         let fd =
-            u32::try_from(ret).map_err(|_| -i64::from(rustos_abi::Errno::OutOfRange.as_i32()))?;
+            u32::try_from(ret).map_err(|_| -i64::from(tairix_abi::Errno::OutOfRange.as_i32()))?;
         Ok(Self { fd })
     }
 
@@ -3787,7 +3787,7 @@ impl File {
     }
 
     /// Read into the whole of `buf` starting at byte `offset`, splitting the
-    /// transfer into [`rustos_abi::FS_IO_MAX`]-sized syscalls, and return the
+    /// transfer into [`tairix_abi::FS_IO_MAX`]-sized syscalls, and return the
     /// number of bytes read (short of `buf.len()` at end of file).
     ///
     /// # Errors
@@ -3808,7 +3808,7 @@ impl File {
 
     /// Write the whole of `data` starting at byte `offset` (or appending, if
     /// the handle was opened with [`OpenFlags::APPEND`]), splitting the
-    /// transfer into [`rustos_abi::FS_IO_MAX`]-sized syscalls, and return the
+    /// transfer into [`tairix_abi::FS_IO_MAX`]-sized syscalls, and return the
     /// number of bytes written.
     ///
     /// Stops early — returning the partial count — if a [`fs_write`] makes no
@@ -3835,13 +3835,13 @@ impl File {
     /// # Errors
     ///
     /// The raw negative kernel result (`-errno`) of the [`fs_stat_raw`]
-    /// syscall, or [`rustos_abi::Errno::BufferTooSmall`] encoded as `-errno`
+    /// syscall, or [`tairix_abi::Errno::BufferTooSmall`] encoded as `-errno`
     /// if the kernel returns a short record.
     pub fn stat(&self) -> Result<FileStat, i64> {
         let mut buf = [0u8; FileStat::WIRE_LEN];
         let n = fs_stat_raw(self.fd, &mut buf)?;
         if n < FileStat::WIRE_LEN {
-            return Err(-i64::from(rustos_abi::Errno::BufferTooSmall.as_i32()));
+            return Err(-i64::from(tairix_abi::Errno::BufferTooSmall.as_i32()));
         }
         FileStat::decode(&buf).map_err(|e| -i64::from(e.as_i32()))
     }
@@ -3888,8 +3888,8 @@ impl Drop for File {
 /// An open directory handle wrapping a [`File`] opened with
 /// [`OpenFlags::DIRECTORY`].
 ///
-/// [`Dir::read`] reads the packed [`rustos_abi::DirEntry`] stream into the
-/// caller's buffer; walk it with [`rustos_abi::DirEntry::decode`].
+/// [`Dir::read`] reads the packed [`tairix_abi::DirEntry`] stream into the
+/// caller's buffer; walk it with [`tairix_abi::DirEntry::decode`].
 #[derive(Debug)]
 pub struct Dir {
     file: File,
@@ -3903,7 +3903,7 @@ impl Dir {
     }
 
     /// Read the whole directory listing into `buf` as a packed
-    /// [`rustos_abi::DirEntry`] stream, returning the number of bytes it
+    /// [`tairix_abi::DirEntry`] stream, returning the number of bytes it
     /// occupies.
     ///
     /// # Errors
@@ -3977,13 +3977,13 @@ pub fn read_all_growing(
     max: usize,
     mut read: impl FnMut(&mut [u8]) -> Result<usize, i64>,
 ) -> Result<alloc::vec::Vec<u8>, i64> {
-    let too_small = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+    let too_small = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
     let mut buf = alloc::vec![0u8; initial.min(max).max(1)];
     loop {
         match read(&mut buf) {
             Ok(used) => {
                 if used > buf.len() {
-                    return Err(-i64::from(rustos_abi::Errno::OutOfRange.as_i32()));
+                    return Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()));
                 }
                 buf.truncate(used);
                 return Ok(buf);
@@ -3998,13 +3998,13 @@ pub fn read_all_growing(
 }
 
 /// Read the whole directory listing at the absolute `path`, returning the
-/// packed [`rustos_abi::DirEntry`] stream sized to its exact byte length —
-/// walk it with [`rustos_abi::fs::DirEntries`].
+/// packed [`tairix_abi::DirEntry`] stream sized to its exact byte length —
+/// walk it with [`tairix_abi::fs::DirEntries`].
 ///
 /// The one directory-listing call every tool shares (`ls`, the filesystem
 /// browser): an [`open_dir`] resolve-and-authorise, then the
 /// [`read_all_growing`] retry policy against the kernel's own per-transfer
-/// staging cap ([`rustos_abi::fs::FS_IO_MAX`]), so no consumer re-derives
+/// staging cap ([`tairix_abi::fs::FS_IO_MAX`]), so no consumer re-derives
 /// the grow loop.
 ///
 /// # Errors
@@ -4013,7 +4013,7 @@ pub fn read_all_growing(
 /// `fs_readdir` syscall.
 pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
     let dir = open_dir(path)?;
-    read_all_growing(DIR_STREAM_INITIAL, rustos_abi::fs::FS_IO_MAX, |buf| {
+    read_all_growing(DIR_STREAM_INITIAL, tairix_abi::fs::FS_IO_MAX, |buf| {
         dir.read(buf)
     })
 }
@@ -4021,7 +4021,7 @@ pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
-/// `__rustos_rt_main` symbol (which `_start` calls) so it invokes `$entry` and
+/// `__tairix_rt_main` symbol (which `_start` calls) so it invokes `$entry` and
 /// hands its return value to the runtime, which routes it through `exit`.
 /// Invoke it exactly once, at the crate root of a `#![no_main]` program.
 #[macro_export]
@@ -4031,7 +4031,7 @@ macro_rules! entry {
         // is private (no `pub`) so it needs no rustdoc and exports nothing to
         // the program's own namespace beyond the symbol the runtime links.
         #[no_mangle]
-        fn __rustos_rt_main() -> i32 {
+        fn __tairix_rt_main() -> i32 {
             // Bind through a `fn() -> i32` so a mis-typed entry is a clear
             // compile error here rather than a link-time mismatch.
             let entry: fn() -> i32 = $entry;
@@ -4043,10 +4043,10 @@ macro_rules! entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The trap seam lives in `rustos-abi-trap` (the single trap home) and is reached here through the `host-seam`
+    // The trap seam lives in `tairix-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
-    use rustos_abi::SYSCALL_MAX_ARGS;
-    use rustos_abi_trap::seam;
+    use tairix_abi::SYSCALL_MAX_ARGS;
+    use tairix_abi_trap::seam;
 
     /// Run `call` with the seam armed to return `ret`, returning the recorded
     /// `(number, args)`.
@@ -4101,7 +4101,7 @@ mod tests {
         // that would slice out of bounds in a `write_all` loop.
         let buffer = [0u8; 16];
         let neg = u64::from_ne_bytes(
-            (-i64::from(rustos_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
+            (-i64::from(tairix_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
         );
         let (_, _) = capture(neg, || {
             assert_eq!(stdout(&buffer), 0);
@@ -4140,7 +4140,7 @@ mod tests {
         // `NotFound` (unbound endpoint) is encoded as the two's-complement
         // negation; the wrapper hands that signed value back unchanged.
         let payload = [0u8; 4];
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(ipc_send(7, &payload), want);
@@ -4163,7 +4163,7 @@ mod tests {
     fn port_bind_surfaces_negative_errno_encoding() {
         // `AlreadyExists` (a clashing id) is encoded as the two's-complement
         // negation; the wrapper hands that signed value back unchanged.
-        let want = -i64::from(rustos_abi::Errno::AlreadyExists.as_i32());
+        let want = -i64::from(tairix_abi::Errno::AlreadyExists.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(port_bind(0x5EAD_0001, 40, 8), want);
@@ -4173,7 +4173,7 @@ mod tests {
     #[test]
     fn ipc_recv_marshals_endpoint_buffers_and_sender_out() {
         let mut buf = [0u8; 40];
-        let mut sender = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
+        let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
         let buf_ptr = buf.as_mut_ptr() as usize as u64;
         let sender_ptr = sender.as_mut_ptr() as usize as u64;
         let (number, args) = capture(12, || {
@@ -4192,8 +4192,8 @@ mod tests {
         // `WouldBlock` (an empty mailbox) is the retryable signal the
         // caller parks on; the wrapper hands the signed value back.
         let mut buf = [0u8; 8];
-        let mut sender = [0u8; rustos_abi::ORIGIN_WIRE_LEN];
-        let want = -i64::from(rustos_abi::Errno::WouldBlock.as_i32());
+        let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
+        let want = -i64::from(tairix_abi::Errno::WouldBlock.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(ipc_recv(9, &mut buf, &mut sender), Err(want));
@@ -4217,7 +4217,7 @@ mod tests {
         // `NotFound` (nothing published under the name) comes back as the
         // two's-complement negation; the wrapper hands it back unchanged.
         let name = *b"desktop.pointer";
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(port_resolve(&name), want);
@@ -4254,7 +4254,7 @@ mod tests {
         // count that would slice out of bounds.
         let mut buffer = [0u8; 16];
         let neg =
-            u64::from_ne_bytes((-i64::from(rustos_abi::Errno::NotFound.as_i32())).to_ne_bytes());
+            u64::from_ne_bytes((-i64::from(tairix_abi::Errno::NotFound.as_i32())).to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(stdin(&mut buffer), 0);
         });
@@ -4284,23 +4284,23 @@ mod tests {
         // bytes are freed when the wrapper returns (the seam records only
         // the registers); content fidelity — the plain `spawn` carrying
         // both inherit sentinels — is the `SpawnAttach` codec's contract,
-        // covered by its `rustos_abi` round-trip tests.
+        // covered by its `tairix_abi` round-trip tests.
         assert_ne!(args[2], 0);
-        assert_eq!(args[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
+        assert_eq!(args[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
         assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
     fn spawn_attached_marshals_the_attach_and_strings_blocks() {
         let path = *b"/System/Apps/wc.app/Run";
-        let attach = rustos_abi::SpawnAttach {
+        let attach = tairix_abi::SpawnAttach {
             wires: [
-                rustos_abi::FdWire::Handle(4),
-                rustos_abi::FdWire::Inherit,
-                rustos_abi::FdWire::Inherit,
-                rustos_abi::FdWire::Inherit,
+                tairix_abi::FdWire::Handle(4),
+                tairix_abi::FdWire::Inherit,
+                tairix_abi::FdWire::Inherit,
+                tairix_abi::FdWire::Inherit,
             ],
-            ..rustos_abi::SpawnAttach::INHERIT
+            ..tairix_abi::SpawnAttach::INHERIT
         };
         let args: [&[u8]; 1] = [b"wc"];
         let (number, raw) = capture(21, || {
@@ -4310,9 +4310,9 @@ mod tests {
         assert_eq!(raw[0], path.as_ptr() as usize as u64);
         assert_eq!(raw[1], path.len() as u64);
         assert_ne!(raw[2], 0);
-        assert_eq!(raw[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
+        assert_eq!(raw[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
         assert_ne!(raw[4], 0);
-        let expected_len = rustos_abi::process_start_encoded_len(&args, &[]).expect("sized") as u64;
+        let expected_len = tairix_abi::process_start_encoded_len(&args, &[]).expect("sized") as u64;
         assert_eq!(raw[5], expected_len);
     }
 
@@ -4329,11 +4329,11 @@ mod tests {
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
         // A refusal surfaces the negative errno register verbatim.
         let neg =
-            u64::from_ne_bytes((-i64::from(rustos_abi::Errno::BadAddress.as_i32())).to_ne_bytes());
+            u64::from_ne_bytes((-i64::from(tairix_abi::Errno::BadAddress.as_i32())).to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(
                 pipe_create(),
-                Err(-i64::from(rustos_abi::Errno::BadAddress.as_i32()))
+                Err(-i64::from(tairix_abi::Errno::BadAddress.as_i32()))
             );
         });
     }
@@ -4353,17 +4353,17 @@ mod tests {
         assert_eq!(raw[0], path.as_ptr() as usize as u64);
         assert_eq!(raw[1], path.len() as u64);
         assert_ne!(raw[2], 0);
-        assert_eq!(raw[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
+        assert_eq!(raw[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
         // Slots 4/5 carry the encoded `PSV1` block: a live (non-null)
         // pointer whose length is exactly what the one shared encoder
         // computes for these strings. The block's own bytes are freed when
         // `spawn_with` returns (the seam records only the registers), so
         // content fidelity is the encoder's contract, covered by the
-        // `rustos_abi::process` round-trip tests — asserting the marshalled
+        // `tairix_abi::process` round-trip tests — asserting the marshalled
         // shape here is the wrapper's whole obligation.
         assert_ne!(raw[4], 0);
         let expected_len =
-            rustos_abi::process_start_encoded_len(&args, &envs).expect("sized") as u64;
+            tairix_abi::process_start_encoded_len(&args, &envs).expect("sized") as u64;
         assert_eq!(raw[5], expected_len);
     }
 
@@ -4380,7 +4380,7 @@ mod tests {
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_ne!(args[2], 0);
-        assert_eq!(args[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
+        assert_eq!(args[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
         assert_eq!(&args[4..], &[0, 0]);
     }
 
@@ -4395,7 +4395,7 @@ mod tests {
         assert_eq!(args[1], path.len() as u64);
         // The console index travels inside the attach block.
         assert_ne!(args[2], 0);
-        assert_eq!(args[3], rustos_abi::SPAWN_ATTACH_LEN as u64);
+        assert_eq!(args[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
         assert_eq!(&args[4..], &[0, 0]);
     }
 
@@ -4424,7 +4424,7 @@ mod tests {
 
     #[test]
     fn key_inject_marshals_the_seat_record_pointer_and_len() {
-        use rustos_abi::input::{KeyValue, Modifiers};
+        use tairix_abi::input::{KeyValue, Modifiers};
         let record = KeyInput::Pressed {
             key: KeyValue::Char('a'),
             modifiers: Modifiers::default(),
@@ -4444,14 +4444,14 @@ mod tests {
 
     #[test]
     fn key_inject_surfaces_negative_errno_encoding() {
-        use rustos_abi::input::{KeyValue, Modifiers};
+        use tairix_abi::input::{KeyValue, Modifiers};
         // An unwired arbiter refuses the inject with `NotImplemented`; the
         // wrapper surfaces the raw `-errno` register.
         let record = KeyInput::Pressed {
             key: KeyValue::Char('x'),
             modifiers: Modifiers::default(),
         };
-        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(key_inject(0, &record), want);
@@ -4489,7 +4489,7 @@ mod tests {
         assert_eq!(args, [0; 6]);
 
         // The wrapper surfaces the raw `-errno` register unchanged.
-        let want = -i64::from(rustos_abi::Errno::SeatNotOwner.as_i32());
+        let want = -i64::from(tairix_abi::Errno::SeatNotOwner.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(seat_revoke(0), want);
@@ -4545,7 +4545,7 @@ mod tests {
         // A non-owner's drain is refused with `SeatNotOwner`; the wrapper
         // surfaces the raw `-errno` register unchanged.
         let mut buf = [0u8; PointerInput::WIRE_LEN];
-        let want = -i64::from(rustos_abi::Errno::SeatNotOwner.as_i32());
+        let want = -i64::from(tairix_abi::Errno::SeatNotOwner.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(pointer_read(0, &mut buf), want);
@@ -4567,7 +4567,7 @@ mod tests {
     fn shm_grant_surfaces_negative_errno_encoding() {
         // A region the caller does not hold is refused with `NotFound`; the
         // wrapper surfaces the raw `-errno` register unchanged.
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(shm_grant(42, 0xD15_1001), want);
@@ -4592,7 +4592,7 @@ mod tests {
         // `SeatRevoked`; the wrapper surfaces the raw `-errno` register
         // unchanged so the service can refuse the present with the typed
         // cause.
-        let want = -i64::from(rustos_abi::Errno::SeatRevoked.as_i32());
+        let want = -i64::from(tairix_abi::Errno::SeatRevoked.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(call_peer_seat(0xD15_1001, 9, 0), want);
@@ -4604,7 +4604,7 @@ mod tests {
         // A console-less build refuses the mode change with
         // `NotImplemented`; the wrapper surfaces the raw `-errno` register
         // unchanged.
-        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(set_input_mode(InputMode::Cooked), want);
@@ -4617,7 +4617,7 @@ mod tests {
         // negation; the wrapper hands that signed value back unchanged. The
         // register carries the raw bit pattern, so reinterpret rather than
         // sign-loss-cast it.
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(spawn(b"/nope"), want);
@@ -4651,7 +4651,7 @@ mod tests {
     fn mem_map_surfaces_negative_errno_encoding() {
         // `OutOfMemory` is encoded by the kernel as the two's-complement
         // negation; the wrapper hands that signed value back unchanged.
-        let want = -i64::from(rustos_abi::Errno::OutOfMemory.as_i32());
+        let want = -i64::from(tairix_abi::Errno::OutOfMemory.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(mem_map(0x1000, MapFlags::empty(), 0), want);
@@ -4699,7 +4699,7 @@ mod tests {
     fn signal_intake_surfaces_negative_errno_encoding() {
         // An empty intake's `Take` surfaces the typed non-blocking answer
         // unchanged so the caller parks on its wait-set, never a poll loop.
-        let want = -i64::from(rustos_abi::Errno::WouldBlock.as_i32());
+        let want = -i64::from(tairix_abi::Errno::WouldBlock.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(signal_intake(SignalIntakeOp::Take), want);
@@ -4710,7 +4710,7 @@ mod tests {
     fn mem_pin_surfaces_negative_errno_encoding() {
         // A refused pin (no capability, or over the pinned-memory bound)
         // surfaces unchanged so the caller can degrade gracefully.
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(mem_pin(), want);
@@ -4751,7 +4751,7 @@ mod tests {
         assert_eq!(args[1], 0x4001);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
 
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(file_unmap(base, 0x4001), want);
@@ -4760,7 +4760,7 @@ mod tests {
 
     #[test]
     fn mem_unmap_surfaces_negative_errno_encoding() {
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(mem_unmap(0x10_0100_0000, 0x1000), want);
@@ -4771,7 +4771,7 @@ mod tests {
     /// writes nothing) claims success but the local record is undecodable —
     /// the fail-closed decode path a mocked success always takes.
     fn undecodable_record() -> i64 {
-        -i64::from(rustos_abi::Errno::OutOfRange.as_i32())
+        -i64::from(tairix_abi::Errno::OutOfRange.as_i32())
     }
 
     #[test]
@@ -4802,7 +4802,7 @@ mod tests {
         let mut status = WaitStatus::Exited(0);
         let (number, args) = capture(3, || {
             assert_eq!(
-                wait(rustos_abi::WAIT_PID_ANY, &mut status, WaitFlags::empty()),
+                wait(tairix_abi::WAIT_PID_ANY, &mut status, WaitFlags::empty()),
                 undecodable_record()
             );
         });
@@ -4819,7 +4819,7 @@ mod tests {
         // negation; the wrapper hands that signed value back unchanged and
         // leaves `status` untouched.
         let mut status = WaitStatus::Exited(7);
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(wait(9, &mut status, WaitFlags::empty()), want);
@@ -4848,7 +4848,7 @@ mod tests {
         // of `WouldBlock`; the wrapper hands that signed value back unchanged
         // so the caller can retry rather than treating it as a hard failure.
         let mut status = WaitStatus::Exited(0);
-        let want = -i64::from(rustos_abi::Errno::WouldBlock.as_i32());
+        let want = -i64::from(tairix_abi::Errno::WouldBlock.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(try_wait(9, &mut status), want);
@@ -4875,7 +4875,7 @@ mod tests {
     fn console_foreground_surfaces_negative_errno_encoding() {
         // A non-child target is refused with `NotFound`; the wrapper hands
         // the signed encoding back unchanged.
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(console_foreground(STDIN, 9), want);
@@ -4897,7 +4897,7 @@ mod tests {
     fn signal_surfaces_negative_errno_encoding() {
         // `NotImplemented` (no producer installed yet) is encoded as the
         // two's-complement negation; the wrapper hands it back unchanged.
-        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(signal(9, Signal::Kill), want);
@@ -4922,7 +4922,7 @@ mod tests {
 
     #[test]
     fn rlimit_get_surfaces_negative_errno_encoding() {
-        let want = -i64::from(rustos_abi::Errno::OutOfRange.as_i32());
+        let want = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(rlimit_get(LimitKind::OpenStreams), Err(want));
@@ -4943,7 +4943,7 @@ mod tests {
 
     #[test]
     fn rlimit_set_surfaces_negative_errno_encoding() {
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(
@@ -4974,7 +4974,7 @@ mod tests {
 
     #[test]
     fn clock_delay_now_us_floors_nanoseconds_to_microseconds() {
-        use rustos_abi::Delay;
+        use tairix_abi::Delay;
         // 1_999 ns floors to 1 µs — never rounds up past the true reading.
         let (number, _) = capture(1_999, || {
             assert_eq!(ClockDelay::new().now_us(), 1);
@@ -5068,7 +5068,7 @@ mod tests {
         // `BufferTooSmall` is encoded as the two's-complement negation; the
         // wrapper hands that signed value back unchanged.
         let mut buf = [0u8; 4];
-        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let want = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(hw_tree_read(&mut buf), Err(want));
@@ -5091,7 +5091,7 @@ mod tests {
     fn hw_tree_wait_surfaces_negative_errno_encoding() {
         // `TimedOut` is encoded as the two's-complement negation; the
         // wrapper hands that signed value back unchanged.
-        let want = -i64::from(rustos_abi::Errno::TimedOut.as_i32());
+        let want = -i64::from(tairix_abi::Errno::TimedOut.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(hw_tree_wait(3, 0), want);
@@ -5121,7 +5121,7 @@ mod tests {
         // `EntropyNotReady` (a non-blocking draw before the RNG is seeded)
         // is encoded as the two's-complement negation; hand it back.
         let mut buf = [0u8; 8];
-        let want = -i64::from(rustos_abi::Errno::EntropyNotReady.as_i32());
+        let want = -i64::from(tairix_abi::Errno::EntropyNotReady.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(random_get(&mut buf, RandomFlags::NON_BLOCKING), Err(want));
@@ -5157,7 +5157,7 @@ mod tests {
         assert_eq!(&args[4..], &[0, 0]);
 
         // A refusal surfaces the raw negative errno unchanged.
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         #[allow(clippy::cast_sign_loss)]
         let (_, _) = capture(want as u64, || {
             assert_eq!(users_admin(&req, &mut out), Err(want));
@@ -5173,7 +5173,7 @@ mod tests {
     fn users_db_wait_surfaces_negative_errno_encoding() {
         // `TimedOut` is encoded as the two's-complement negation; the
         // wrapper hands that signed value back unchanged.
-        let want = -i64::from(rustos_abi::Errno::TimedOut.as_i32());
+        let want = -i64::from(tairix_abi::Errno::TimedOut.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(users_db_wait(0), want);
@@ -5187,7 +5187,7 @@ mod tests {
         let (number, args) = capture(12, || {
             assert_eq!(
                 ipc_call(
-                    rustos_abi::driver_store::DRIVER_STORE_ENDPOINT,
+                    tairix_abi::driver_store::DRIVER_STORE_ENDPOINT,
                     &request,
                     &mut reply
                 ),
@@ -5195,7 +5195,7 @@ mod tests {
             );
         });
         assert_eq!(number, NUM_IPC_CALL);
-        assert_eq!(args[0], rustos_abi::driver_store::DRIVER_STORE_ENDPOINT);
+        assert_eq!(args[0], tairix_abi::driver_store::DRIVER_STORE_ENDPOINT);
         assert_ne!(args[1], 0); // request pointer
         assert_eq!(args[2], 5); // request len
         assert_ne!(args[3], 0); // reply pointer
@@ -5214,7 +5214,7 @@ mod tests {
     #[test]
     fn ipc_call_surfaces_negative_errno_encoding() {
         let mut reply = [0u8; 4];
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(ipc_call(1, &[1, 2], &mut reply), Err(want));
@@ -5236,7 +5236,7 @@ mod tests {
     #[test]
     fn shm_create_surfaces_negative_errno_encoding() {
         let mut id = 0u64;
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(shm_create(0x1000, &mut id), want);
@@ -5309,7 +5309,7 @@ mod tests {
     #[test]
     fn waitset_wait_surfaces_negative_errno_encoding() {
         let mut token = 0u64;
-        let want = -i64::from(rustos_abi::Errno::TimedOut.as_i32());
+        let want = -i64::from(tairix_abi::Errno::TimedOut.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(waitset_wait(5, 0, &mut token), want);
@@ -5334,7 +5334,7 @@ mod tests {
 
     #[test]
     fn fs_open_surfaces_negative_errno_encoding() {
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(fs_open(b"/x", OpenFlags::READ), want);
@@ -5357,7 +5357,7 @@ mod tests {
 
     #[test]
     fn resource_open_surfaces_negative_errno_encoding() {
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(resource_open(b"sys:nope", OpenFlags::READ), want);
@@ -5414,7 +5414,7 @@ mod tests {
         // reference still goes to the resource resolver, whose refusal
         // stands — a typo can never fall back to a filesystem lookup.
         // The kernel maps a malformed reference to `OutOfRange`.
-        let want = -i64::from(rustos_abi::Errno::OutOfRange.as_i32());
+        let want = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (number, _) = capture(neg, || {
             assert_eq!(File::open(b"sys:null@", OpenFlags::READ).unwrap_err(), want);
@@ -5469,7 +5469,7 @@ mod tests {
     #[test]
     fn fs_read_surfaces_negative_errno_encoding() {
         let mut buf = [0u8; 4];
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(fs_read(4, 0, &mut buf), Err(want));
@@ -5507,7 +5507,7 @@ mod tests {
     #[test]
     fn fs_readdir_surfaces_buffer_too_small() {
         let mut buf = [0u8; 4];
-        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let want = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(fs_readdir(6, &mut buf), Err(want));
@@ -5565,7 +5565,7 @@ mod tests {
     fn fs_unlink_marshals_path_pointer_and_len() {
         let path = b"/System/Logs/old";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_unlink(path, rustos_abi::UnlinkFlags::empty()), 0);
+            assert_eq!(fs_unlink(path, tairix_abi::UnlinkFlags::empty()), 0);
         });
         assert_eq!(number, NUM_FS_UNLINK);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
@@ -5633,14 +5633,14 @@ mod tests {
     fn fs_unlink_marshals_the_directory_flag() {
         let path = b"/Users/me/empty";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_unlink(path, rustos_abi::UnlinkFlags::DIRECTORY), 0);
+            assert_eq!(fs_unlink(path, tairix_abi::UnlinkFlags::DIRECTORY), 0);
         });
         assert_eq!(number, NUM_FS_UNLINK);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
         assert_eq!(
             args[2],
-            u64::from(rustos_abi::UnlinkFlags::DIRECTORY.bits())
+            u64::from(tairix_abi::UnlinkFlags::DIRECTORY.bits())
         );
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
@@ -5674,7 +5674,7 @@ mod tests {
 
     #[test]
     fn fs_chdir_surfaces_negative_errno_encoding() {
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(fs_chdir(b"/nope"), want);
@@ -5697,7 +5697,7 @@ mod tests {
     #[test]
     fn fs_getcwd_surfaces_buffer_too_small() {
         let mut buf = [0u8; 2];
-        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let want = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(fs_getcwd(&mut buf), Err(want));
@@ -5718,7 +5718,7 @@ mod tests {
 
     #[test]
     fn file_open_surfaces_the_negative_errno() {
-        let want = -i64::from(rustos_abi::Errno::NotFound.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         seam::arm(neg);
         assert_eq!(File::open(b"/missing", OpenFlags::READ).err(), Some(want));
@@ -5741,7 +5741,7 @@ mod tests {
     #[test]
     fn file_stat_decodes_the_record() {
         let stat = FileStat {
-            kind: rustos_abi::FileKind::Regular,
+            kind: tairix_abi::FileKind::Regular,
             size: 1234,
             allocated: 4096,
             mode: 0o644,
@@ -5755,14 +5755,14 @@ mod tests {
         // records, it does not write), so prove the short-record guard instead.
         let file = File { fd: 9 };
         seam::arm(0); // a zero-length stat result trips the short-record guard
-        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let want = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
         assert_eq!(file.stat(), Err(want));
         core::mem::forget(file);
     }
 
     #[test]
     fn create_requests_write_create_truncate() {
-        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (number, args) = capture(neg, || {
             assert_eq!(create(b"/System/Logs/seg").err(), Some(want));
@@ -5777,7 +5777,7 @@ mod tests {
 
     #[test]
     fn open_dir_requests_the_directory_flag() {
-        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (number, args) = capture(neg, || {
             assert_eq!(open_dir(b"/System/Logs").map(|_| ()), Err(want));
@@ -5800,7 +5800,7 @@ mod tests {
 
     #[test]
     fn read_all_growing_doubles_until_the_listing_fits() {
-        let too_small = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let too_small = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
         let mut sizes = alloc::vec::Vec::new();
         let got = read_all_growing(4, 64, |buf| {
             sizes.push(buf.len());
@@ -5817,7 +5817,7 @@ mod tests {
 
     #[test]
     fn read_all_growing_gives_up_at_the_ceiling() {
-        let too_small = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let too_small = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
         let mut calls = 0;
         let got = read_all_growing(4, 16, |_| {
             calls += 1;
@@ -5830,7 +5830,7 @@ mod tests {
 
     #[test]
     fn read_all_growing_surfaces_other_errors_unchanged() {
-        let denied = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let denied = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let mut calls = 0;
         let got = read_all_growing(4, 64, |_| {
             calls += 1;
@@ -5842,7 +5842,7 @@ mod tests {
 
     #[test]
     fn read_all_growing_refuses_an_over_reporting_reader() {
-        let want = -i64::from(rustos_abi::Errno::OutOfRange.as_i32());
+        let want = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
         assert_eq!(read_all_growing(4, 64, |buf| Ok(buf.len() + 1)), Err(want));
     }
 
@@ -5861,7 +5861,7 @@ mod tests {
 
     #[test]
     fn read_dir_all_propagates_the_open_refusal() {
-        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (number, _) = capture(neg, || {
             assert_eq!(read_dir_all(b"/System/Security").err(), Some(want));

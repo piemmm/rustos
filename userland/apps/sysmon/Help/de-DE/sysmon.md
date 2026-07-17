@@ -58,7 +58,7 @@ Verbraucher nach `%CPU` und Speicher.
   Auffrischungen, in Sekunden mit optionalem Bruchteil (nur die erste
   Nachkommastelle, Zehntel, wird behalten): `sysmon -d 1.5` frischt
   alle 1,5 Sekunden auf. Vorgabe 3,0. GNU `top` erlaubt ein Intervall
-  von null und frischt so schnell wie möglich auf; RustOS läuft nie in
+  von null und frischt so schnell wie möglich auf; TAIRiX läuft nie in
   einer Auslastungsschleife, daher wird null auf das Minimum von 0,1 s
   angehoben.
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen und beenden.

@@ -1,4 +1,4 @@
-# `rustos-abi`
+# `tairix-abi`
 
 Defines the frozen `abi-v1` interface between the kernel and user space.
 

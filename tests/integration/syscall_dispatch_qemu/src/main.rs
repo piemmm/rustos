@@ -5,8 +5,8 @@
 //!
 //! ## What this test asserts
 //!
-//! The production `rustos-kernel` boot pipeline runs through
-//! `rustos_kernel::boot` until `AuditEvent::BootCompleted`
+//! The production `tairix-kernel` boot pipeline runs through
+//! `tairix_kernel::boot` until `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) fires. The audit Sink that observes that event
 //! then **synthesises** a Scheduler/CapTable/KernelSyscallHandlers/
 //! Dispatcher quartet — independent of the production `KernelState`,
@@ -34,25 +34,25 @@
 //! then registers the run as `Outcome::Fail` with the serial log
 //! attached.
 //!
-//! ## How it differs from the production `rustos-kernel` binary
+//! ## How it differs from the production `tairix-kernel` binary
 //!
 //! The boot pipeline is unchanged: this bin reuses
-//! `rustos_kernel::boot` verbatim. The audit Sink the bin installs
+//! `tairix_kernel::boot` verbatim. The audit Sink the bin installs
 //! is the only divergence, and the dispatcher invocations happen
 //! **after** `BootCompleted` — they never collide with the production
 //! syscall path, which fail-closes when no caller context is available
 //! (Stage 2.7 follow-up (f5), see
-//! `kernel/rustos-kernel/src/dispatch.rs`'s `production_dispatch`).
+//! `kernel/tairix-kernel/src/dispatch.rs`'s `production_dispatch`).
 //!
 //! ## `test-hooks` Cargo feature
 //!
 //! The synthesised quartet only compiles under
 //! `#[cfg(feature = "test-hooks")]`. The feature is on by default for
-//! this crate so `cargo build -p rustos-test-syscall-dispatch-qemu`
+//! this crate so `cargo build -p tairix-test-syscall-dispatch-qemu`
 //! and `cargo xtask test --qemu` do the obvious thing; release builds
 //! that enable it are rejected by the `compile_error!` guard below
 //! (no hacks; — fail closed). `cargo deny check`
-//! additionally forbids the production `rustos-kernel` crate from
+//! additionally forbids the production `tairix-kernel` crate from
 //! ever growing a `test-hooks` feature (see `deny.toml`).
 
 #![cfg_attr(itest_x86_64, no_std)]
@@ -62,7 +62,7 @@
 // The bin crate's freestanding configuration needs `alloc::sync::Arc`
 // to construct the synthesised `BinArch` handle (mirrors the
 // production bin's allocator-backed `Arc<BinArch>` in
-// `kernel/rustos-kernel/src/boot.rs`). Pulling `extern crate alloc`
+// `kernel/tairix-kernel/src/boot.rs`). Pulling `extern crate alloc`
 // in at the crate root is the documented way to expose it under
 // `#![no_std]` (the `unused_extern_crates`
 // warning on the host build is justified: the synthesised quartet is
@@ -76,15 +76,15 @@ extern crate alloc;
 // `test-hooks` is on by default for this crate (see `Cargo.toml`);
 // release builds re-running with the feature on are a configuration
 // error rather than a soundness failure, but we belt-and-brace by
-// failing the build outright. `cargo build --release -p rustos-test-
+// failing the build outright. `cargo build --release -p tairix-test-
 // syscall-dispatch-qemu --features test-hooks` therefore fails at
 // compile time with the message below; the `cargo deny check` rule
 // in `deny.toml` enforces the same posture for the production
-// `rustos-kernel` crate, which is forbidden from ever growing a
+// `tairix-kernel` crate, which is forbidden from ever growing a
 // `test-hooks` feature.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
-    "rustos-test-syscall-dispatch-qemu: the `test-hooks` Cargo feature is a \
+    "tairix-test-syscall-dispatch-qemu: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
@@ -97,30 +97,30 @@ mod kernel {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     use alloc::boxed::Box;
-    use rustos_abi::{CapabilityId, SyscallNumber};
-    use rustos_arch_x86_64::qemu_exit;
-    use rustos_caps::CapabilitySet;
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_abi::{CapabilityId, SyscallNumber};
+    use tairix_arch_x86_64::qemu_exit;
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, BinArch, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
 
-    use rustos_kernel_core::{
+    use tairix_kernel_core::{
         AddressSpaceRegistry, BootReserve, IrqRouting, KernelSyscallHandlers, RandomReserve,
     };
-    use rustos_kernel_ipc::PortRegistry;
-    use rustos_kernel_irq::{IrqTable, UnsupportedController};
-    use rustos_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
-    use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
-    use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs};
-    use rustos_log::{Event, EventId, Sink};
-    use rustos_sync::RwLock;
+    use tairix_kernel_ipc::PortRegistry;
+    use tairix_kernel_irq::{IrqTable, UnsupportedController};
+    use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
+    use tairix_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
+    use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs};
+    use tairix_log::{Event, EventId, Sink};
+    use tairix_sync::RwLock;
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
     //
-    // Mirrors the production `rustos-kernel` bin's allocator
+    // Mirrors the production `tairix-kernel` bin's allocator
     // declaration (`#[global_allocator]` is a per-binary attribute,
-    // see `kernel/rustos-kernel/Cargo.toml`'s top-level rationale).
+    // see `kernel/tairix-kernel/Cargo.toml`'s top-level rationale).
 
     /// Static heap for the bump allocator.
     ///
@@ -182,7 +182,7 @@ mod kernel {
         }
     }
 
-    /// Outer audit sink installed via [`rustos_kernel::boot`].
+    /// Outer audit sink installed via [`tairix_kernel::boot`].
     ///
     /// Forwards every event through the serial sink, and on observing
     /// [`BOOT_COMPLETED_EVENT_ID`] drives [`run_synthesised_test`]
@@ -236,8 +236,8 @@ mod kernel {
         //    that records the BSP triple without touching MSRs) is
         //    sound and is the cleanest way to keep the test isolated
         //    from `KernelState`'s borrows.
-        use rustos_arch_x86_64::apic_timer::Calibration;
-        use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
+        use tairix_arch_x86_64::apic_timer::Calibration;
+        use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 
         // The BSP LAPIC id is recorded during `boot::try_boot` step 5;
         // we don't need its exact value here — `X86_64Arch::new`
@@ -274,7 +274,7 @@ mod kernel {
         // dispatched syscalls (cap_query / exit) touch the IRQ path,
         // and a real routing would require a live `IoApicController`
         // we deliberately do not stand up in this test. The host
-        // tests in `kernel/rustos-kernel::arch_wrapper` cover the
+        // tests in `kernel/tairix-kernel::arch_wrapper` cover the
         // `IrqRouting::unsupported` shape.
         let arch = alloc::sync::Arc::new(BinArch::new(
             arch_inner,
@@ -413,7 +413,7 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
+    /// Forward to the shared bridge in `tairix_kernel::x86_64::panic_ctx`.
     ///
     /// A panic anywhere in the boot path (including inside the
     /// synthesised quartet) routes through `SERIAL_SINK` for the
@@ -422,7 +422,7 @@ mod kernel {
     /// documented fail-loud behaviour for (no flaky
     /// tests).
     #[panic_handler]
-    fn rustos_test_syscall_dispatch_qemu_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_test_syscall_dispatch_qemu_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
@@ -430,7 +430,7 @@ mod kernel {
 
     /// The symbol the arch crate's boot trampoline calls.
     ///
-    /// Forwards to [`rustos_kernel::boot`] with the production COM1
+    /// Forwards to [`tairix_kernel::boot`] with the production COM1
     /// log sink and our audit-observer sink.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
@@ -441,7 +441,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Debug,
+            tairix_log::Level::Debug,
         )
     }
 }
@@ -451,7 +451,7 @@ mod kernel {
 // The synthesised quartet only compiles when `feature = "test-hooks"`
 // is on. Disabling it leaves the bin as a no-op host stub so a layout
 // sanity check (`cargo build --no-default-features -p
-// rustos-test-syscall-dispatch-qemu`) still builds
+// tairix-test-syscall-dispatch-qemu`) still builds
 // (no hacks: a disabled test must compile cleanly).
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[no_mangle]
@@ -473,7 +473,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[panic_handler]
-fn rustos_test_syscall_dispatch_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
+fn tairix_test_syscall_dispatch_qemu_panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {
         // SAFETY: same as above.
         unsafe {

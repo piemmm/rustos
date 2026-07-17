@@ -1,4 +1,4 @@
-# `rustos-tee` — read from standard input and write to standard output and files
+# `tairix-tee` — read from standard input and write to standard output and files
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
 store bundle `/System/Apps/tee.app/` so the shell resolves the bare word
@@ -15,7 +15,7 @@ render the tool's own short help from its bundled `Help/` tree through the
 shared `lib/help` engine, in the locale the inherited `LANG` variable
 names, falling back to the usage banner when the tree is unavailable.
 
-Two deliberate, documented divergences follow from RustOS having no
+Two deliberate, documented divergences follow from TAIRiX having no
 `SIGPIPE` and no per-process signal disposition:
 
 - The "pipe" class of the GNU modes maps to the standard-output copy —
@@ -36,7 +36,7 @@ failed output is diagnosed and handled per the selected mode, exactly as
 GNU `tee.c` nulls a failed descriptor; a failed diagnostic write is
 fatal. The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-audited `lib/abi` vocabulary and the shared `rustos-help` crate, so it
+audited `lib/abi` vocabulary and the shared `tairix-help` crate, so it
 never links a kernel or driver crate. Its manifest (`AppInfo.toml`)
 requests `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` —
 within the session baseline — and the secured VFS still authorises every

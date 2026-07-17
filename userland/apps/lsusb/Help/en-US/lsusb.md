@@ -23,7 +23,7 @@ the number of such devices is noted on the standard information stream
 listing degrades to bare ids with the reason on standard error — the
 inventory itself is still listed.
 
-RustOS has no Linux bus/device-number registry: bus and device numbers
+TAIRiX has no Linux bus/device-number registry: bus and device numbers
 are small 1-based orderings of the current inventory (buses in
 discovery order, devices in listing order on each bus), stable while
 the topology is unchanged, and `-s` selects those rendered numbers (a

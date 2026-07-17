@@ -2,8 +2,8 @@
 //! process-list query, page through the reply, and render one row per
 //! process.
 
-use rustos_help::{own_short_help, HelpSource};
-use rustos_procinfo::{
+use tairix_help::{own_short_help, HelpSource};
+use tairix_procinfo::{
     emit_self_scope_omission, for_each_process, render_process, Output, Transport, PROCESS_HEADER,
 };
 
@@ -31,7 +31,7 @@ const OWN_WORD: &str = "ps";
 /// The page walk and row rendering are the shared helpers from
 /// `lib/procinfo`; `ps` only supplies the column header and the per-row sink. The capability gate lives in `sysinfod`, not here: a
 /// denied global listing comes back as
-/// [`Errno::PermissionDenied`](rustos_abi::Errno::PermissionDenied), which
+/// [`Errno::PermissionDenied`](tairix_abi::Errno::PermissionDenied), which
 /// the tool renders honestly as [`PsError::PermissionDenied`].
 ///
 /// # Errors
@@ -101,12 +101,12 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::sysinfo::{
+    use tairix_abi::sysinfo::{
         ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use rustos_abi::{Errno, ProcId};
-    use rustos_help::{HelpSource, SourceError};
-    use rustos_procinfo::{Output, Transport};
+    use tairix_abi::{Errno, ProcId};
+    use tairix_help::{HelpSource, SourceError};
+    use tairix_procinfo::{Output, Transport};
 
     /// A Help tree with no documents at all: the short-help fallback path.
     struct NoHelp;

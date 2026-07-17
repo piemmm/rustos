@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — a shell de comandos do RustOS
+elsh — a shell de comandos do TAIRiX
 
 ## SYNOPSIS
 

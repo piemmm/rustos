@@ -693,7 +693,7 @@ pub trait FilesystemTimestamps {
 /// # The key grammar and bounds live in `lib/fsmeta`
 ///
 /// A `key` is a namespaced, byte-for-byte case-sensitive
-/// `rustos_fsmeta`-grammar key (`namespace.rest`, e.g. `acorn.filetype`). The
+/// `tairix_fsmeta`-grammar key (`namespace.rest`, e.g. `acorn.filetype`). The
 /// driver validates every key and value against that shared grammar and the
 /// fixed security bounds and **fails closed** on any violation — an unknown
 /// namespace, a malformed key, or an oversize value is rejected, never stored.
@@ -704,7 +704,7 @@ pub trait FilesystemTimestamps {
 /// As with the sibling traits, the driver makes **no** permission decision:
 /// the VFS authorises every attribute operation against the model before
 /// calling here. A key's *namespace* decides its access class — the `user`,
-/// `acorn`, `amiga`, `atari`, `mac`, and `rustos` namespaces are ordinary file
+/// `acorn`, `amiga`, `atari`, `mac`, and `tairix` namespaces are ordinary file
 /// metadata governed by the file's own owner/mode/ACL, while the `system` and
 /// `trusted` namespaces guard a security boundary the VFS gates with a
 /// capability before delegating. A caller not permitted a namespace never

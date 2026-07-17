@@ -20,10 +20,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
-use rustos_cursor::{CursorAssetSource, CursorTheme, CURSOR_KINDS};
-use rustos_icon::{IconAssetSource, IconKind, IconSet, ICON_KINDS};
-use rustos_theme::{CursorKind, CursorSet};
+use tairix_abi::Errno;
+use tairix_cursor::{CursorAssetSource, CursorTheme, CURSOR_KINDS};
+use tairix_icon::{IconAssetSource, IconKind, IconSet, ICON_KINDS};
+use tairix_theme::{CursorKind, CursorSet};
 
 /// The directory the desktop's SVG graphics assets live under.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";

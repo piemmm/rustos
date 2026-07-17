@@ -33,14 +33,14 @@
 //! adds no authority, and the kernel owns the published node's identity.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
-//! runtime `rustos-rt` (`_start`, the stack canary, the panic handler,
+//! runtime `tairix-rt` (`_start`, the stack canary, the panic handler,
 //! the syscall wrappers, the clock-backed `ClockDelay`, and `park_forever`),
 //! never the C ABI, which exists solely for non-Rust programs. It carves no DMA itself, so it supplies no architecture-specific
 //! cache-maintenance shim and names no board detail beyond the discovered
 //! grants (`coherency = None`, keeping the program platform-neutral).
 //!
 //! After publishing the node `main` parks off the run queue for the life of
-//! the system (`rustos_rt::park_forever`) while this driver stays resident
+//! the system (`tairix_rt::park_forever`) while this driver stays resident
 //! holding the trained root complex — a real park consuming no CPU, never a
 //! yield loop. A bring-up failure exits with a reserved fail-closed code,
 //! leaving the bus unbrought-up rather than wedged; the
@@ -63,11 +63,11 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::CapabilityId;
-    use rustos_caps::CapabilitySet;
-    use rustos_drv_bus_pcie_brcm::wiring::{emit_vl805_node, pcie_bringup_from_resources};
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_rt::ClockDelay;
+    use tairix_abi::CapabilityId;
+    use tairix_caps::CapabilitySet;
+    use tairix_drv_bus_pcie_brcm::wiring::{emit_vl805_node, pcie_bringup_from_resources};
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_rt::ClockDelay;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
@@ -111,7 +111,7 @@ mod program {
         caps
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// On success this never returns: the driver stays resident holding the
@@ -138,17 +138,17 @@ mod program {
         // The root complex must stay trained and this driver resident for
         // the life of the system: park off the run queue for good. A failed
         // park exits fail-loud rather than degrading into a yield spin.
-        let _ = rustos_rt::park_forever();
+        let _ = tairix_rt::park_forever();
         EXIT_PARK_FAILED
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
+// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // performs no I/O.
 #[cfg(not(freestanding))]

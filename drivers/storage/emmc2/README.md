@@ -1,6 +1,6 @@
-# `rustos-drv-storage-emmc2` — Raspberry Pi 4 EMMC2 SD-host driver
+# `tairix-drv-storage-emmc2` — Raspberry Pi 4 EMMC2 SD-host driver
 
-`plans/PI.md` P8 deliverable. Implements `rustos_abi::driver::block::Block`
+`plans/PI.md` P8 deliverable. Implements `tairix_abi::driver::block::Block`
 for the Raspberry Pi 4 (BCM2711) EMMC2 controller, an Arasan /
 SDHCI-5.1 SD host.
 
@@ -141,7 +141,7 @@ the §8 `DriverError` drops the stage with `?` / `DriverError::from`
 | `brcm,bcm2711-emmc2`  | Pi 4    | ADMA2 DMA + PIO read/write (host-tested); metal pending |
 
 The aarch64 `FdtDiscovery` walk emits the `brcm,bcm2711-emmc2` node into
-`rustos_abi::hwtree` (Storage class, translated MMIO window) from a
+`tairix_abi::hwtree` (Storage class, translated MMIO window) from a
 Pi-shaped device tree. The driver publishes a canonical `BIND_KEYS` table
 (`AGENTS.md` §18.3) with one entry matching `compatible =
 "brcm,bcm2711-emmc2"`; the discovered node is resolved against it and the
@@ -187,7 +187,7 @@ wakes the parked task (`crate::aarch64::root_unlock::emmc2_unlock`).
 
 ## Test surface
 
-`cargo test -p rustos-drv-storage-emmc2` exercises:
+`cargo test -p tairix-drv-storage-emmc2` exercises:
 
 - `CMDTM` command-word encoding and CSD-v2 capacity decode at the real
   right-aligned register positions, including that a structure value placed

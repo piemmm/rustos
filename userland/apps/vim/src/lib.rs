@@ -1,4 +1,4 @@
-//! RustOS `vim` — the modal text editor (`plans/VIM.md`).
+//! TAIRiX `vim` — the modal text editor (`plans/VIM.md`).
 //!
 //! The vim core, drawn with the OS curses library: normal, insert,
 //! replace, visual (character and line), and command-line modes; counts,
@@ -38,8 +38,8 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`). It links only `lib/*` crates — the audited
-//! `rustos-abi` and the OS-provided `rustos-curses`/`rustos-termcap`/
-//! `rustos-vt` — never a kernel or driver crate. No `unsafe`, and no
+//! `tairix-abi` and the OS-provided `tairix-curses`/`tairix-termcap`/
+//! `tairix-vt` — never a kernel or driver crate. No `unsafe`, and no
 //! `unwrap`/`expect`/`panic!` in production paths; hostile input (files,
 //! patterns, keys) fails closed. Nothing writes to fd 3 (`stdinfo`).
 
@@ -70,4 +70,4 @@ pub use editor::{Editor, Mode};
 pub use error::VimError;
 pub use fileio::FileIo;
 pub use render::render;
-pub use rustos_curses::{Screen, Tty};
+pub use tairix_curses::{Screen, Tty};

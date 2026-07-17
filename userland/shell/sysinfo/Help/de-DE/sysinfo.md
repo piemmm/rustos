@@ -9,7 +9,7 @@ sysinfo — Systeminformationen abfragen
 ## DESCRIPTION
 
 Stellt eine typisierte Abfrage an die Systeminformations-API und gibt
-die Antwort aus. RustOS hat kein `/proc` und kein `/sys`: dieser Befehl
+die Antwort aus. TAIRiX hat kein `/proc` und kein `/sys`: dieser Befehl
 ist das Terminal-Gesicht derselben versionierten, durch Capabilities
 geprüften API, die jedes Programm benutzt, und kein Pfad umgeht die
 Capability-Prüfung.

@@ -75,7 +75,7 @@ pub enum MenuAction {
     ///
     /// The taskbar holds no theme registry; activating this entry reports the
     /// action and the session glue performs the switch on the shared
-    /// `rustos_theme::ThemeRegistry`.
+    /// `tairix_theme::ThemeRegistry`.
     ToggleAppearance,
 }
 

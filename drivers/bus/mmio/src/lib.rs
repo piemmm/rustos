@@ -1,11 +1,11 @@
-//! RustOS memory-mapped-IO bus driver.
+//! TAIRiX memory-mapped-IO bus driver.
 //!
 //! Enumerates virtio-MMIO transport slots on `virt`-style platforms
 //! (QEMU's `aarch64 -M virt` and `riscv64 -M virt` machines). The
 //! flat device-tree blob — handed to the driver host by the kernel
 //! boot capability — is the single source of truth for slot
 //! addresses; the parser used to walk it is the shared
-//! [`rustos_fdt`] reader every architecture port and QEMU vertical
+//! [`tairix_fdt`] reader every architecture port and QEMU vertical
 //! discovers the `virt` tree through, so there is exactly one
 //! device-tree parser in the workspace.
 //!
@@ -19,8 +19,8 @@
 //! # Capabilities
 //!
 //! [`register`] requires the host already grant
-//! [`rustos_abi::CapabilityId::DRV_LOAD`]; enumeration through
-//! [`rustos_abi::driver::bus::Bus::enumerate`] inherits the gate
+//! [`tairix_abi::CapabilityId::DRV_LOAD`]; enumeration through
+//! [`tairix_abi::driver::bus::Bus::enumerate`] inherits the gate
 //! through the driver handle issued at load time.
 //!
 //! # Safety
@@ -36,10 +36,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
-use rustos_fdt::Fdt;
+use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
+use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
+use tairix_fdt::Fdt;
 
 pub(crate) mod enumerate;
 pub(crate) mod transport;
@@ -150,7 +150,7 @@ fn virtio_mmio_aperture(dtb: &Fdt<'_>) -> Result<Option<(u64, u64)>, DriverError
 /// crate-private — so the ring-0
 /// `provision_virtio_mmio` walk can drive it as `&dyn VirtioMmioBus`.
 ///
-/// This is the MMIO analogue of `rustos_pci::mechanism_one`:
+/// This is the MMIO analogue of `tairix_pci::mechanism_one`:
 /// it is the sanctioned way for a `virt`-board boot pipeline to obtain
 /// the bus without naming the driver's internals.
 ///

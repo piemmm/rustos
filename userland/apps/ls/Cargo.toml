@@ -1,6 +1,6 @@
 [package]
-name = "rustos-ls"
-description = "RustOS `ls` CLI: list directory contents (§3 `userland/apps/` — a plans/APPS.md command app)."
+name = "tairix-ls"
+description = "TAIRiX `ls` CLI: list directory contents (§3 `userland/apps/` — a plans/APPS.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,40 +11,40 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-ps` and
-# `rustos-man`. `cargo build -p rustos-ls` builds the tool program with it;
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-ps` and
+# `tairix-man`. `cargo build -p tairix-ls` builds the tool program with it;
 # host tooling builds only the listing *library*, so the host test build never
 # pulls the userland runtime's `_start` / `#[global_allocator]` / panic
 # handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-ls` listing library (below) and the `Run`
+# The package is both the `tairix-ls` listing library (below) and the `Run`
 # entry-point binary of the `ls` tool. The binary is a freestanding pure-Rust
 # program on the native Tier-1 targets and an inert host stub elsewhere (see
 # `src/run.rs`).
 [[bin]]
-name = "rustos-ls-run"
+name = "tairix-ls-run"
 path = "src/run.rs"
 
 [dependencies]
 # The frozen `Errno`, the VFS `FileKind` vocabulary, and the `stdinfo` record
 # types for the hidden-entries advisory; `ls` invents no parallel error or
 # kind set (§2.2) and never links a kernel or driver crate (§17.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md §4, §6).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the `fs_*` file
 # wrappers, and the standard-stream I/O). Pulled in only for the bare-metal
 # targets the program is actually built for; on the host it is not linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
 # own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

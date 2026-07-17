@@ -43,7 +43,7 @@ use std::path::Path;
 use std::process::Command as Process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustos_devids::{textdb, DbKind};
+use tairix_devids::{textdb, DbKind};
 
 use crate::Context;
 
@@ -173,7 +173,7 @@ fn run_fetch(ctx: &Context) -> Result<(), String> {
     let today = utc_date_today()?;
     for db in DATABASES {
         let raw = download(db)?;
-        let digest = rustos_crypto::sha256(&raw);
+        let digest = tairix_crypto::sha256(&raw);
         let (text, repaired) = promote_latin1(&raw);
         let parsed = textdb::parse(db.kind, text.as_bytes())
             .map_err(|e| format!("devids: fetched {} fails vetting: {e}", db.name))?;
@@ -190,7 +190,7 @@ fn run_fetch(ctx: &Context) -> Result<(), String> {
         let mut snapshot = String::new();
         let _ = write!(
             snapshot,
-            "# RustOS vetted snapshot of the public {name} database.\n\
+            "# TAIRiX vetted snapshot of the public {name} database.\n\
              # Imported by `cargo xtask devids --fetch`; do not hand-edit — refetch\n\
              # and re-review instead. The compact lookup table is generated from\n\
              # this file by\n\
@@ -310,7 +310,7 @@ fn utc_date_today() -> Result<String, String> {
         .as_secs();
     let days =
         i64::try_from(secs / 86_400).map_err(|e| format!("devids: system clock overflow: {e}"))?;
-    let (y, m, d) = rustos_fsmeta::calendar::civil_from_days(days);
+    let (y, m, d) = tairix_fsmeta::calendar::civil_from_days(days);
     Ok(format!("{y:04}-{m:02}-{d:02}"))
 }
 

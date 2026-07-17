@@ -11,9 +11,9 @@
 // Same `dead_code` rationale as `config.rs` / `mech_one.rs`.
 #![allow(dead_code)]
 
-use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::hwtree::HW_NODE_ROOT;
-use rustos_abi::{
+use tairix_abi::driver::bus::BusDevice;
+use tairix_abi::hwtree::HW_NODE_ROOT;
+use tairix_abi::{
     DriverError, HwDeviceClass, HwMatchKey, HwNode, MmioMapError, MmioMapper, MsiMessage,
     RegisterWindow, WindowError,
 };
@@ -74,7 +74,7 @@ const MSI_CTRL_ENABLE: u32 = 1 << 16;
 
 /// MSI Message Control "Multiple Message Enable" field (MC bits 6:4 →
 /// dword bits 22:20): the log2 of how many vectors the function may use.
-/// Cleared to request exactly one vector — RustOS routes a single MSI per
+/// Cleared to request exactly one vector — TAIRiX routes a single MSI per
 /// function, so a device must not spread interrupts across vectors the
 /// kernel did not allocate.
 const MSI_CTRL_MME_MASK: u32 = 0x7 << 20;
@@ -104,7 +104,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// Returns the number of entries written. If `out.len()` is
     /// smaller than the number of devices discovered, the method
     /// fills `out` and returns [`DriverError::BufferTooSmall`] —
-    /// matching the [`Bus::enumerate`](rustos_abi::driver::bus::Bus)
+    /// matching the [`Bus::enumerate`](tairix_abi::driver::bus::Bus)
     /// contract exactly.
     pub fn enumerate_into(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
         let mut count = 0usize;
@@ -317,13 +317,13 @@ impl<C: ConfigSpace> Pci<C> {
     /// * [`DriverError::LengthOutOfRange`] — the BAR size does not fit
     ///   in `usize` on this target.
     /// * [`DriverError::PermissionDenied`] — the caller does not hold
-    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
     ///   (propagated from the mapper).
     ///
     /// # Capabilities
     ///
     /// The `mapper` enforces
-    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP).
     pub fn map_bar_window(
         &self,
         bdf: u64,
@@ -357,7 +357,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// share one definition.
     ///
     /// The in-tree [`ConfigSpace`] backends' accesses are infallible,
-    /// so this cannot fail; the [`PciBus`](rustos_abi::driver::pci::PciBus)
+    /// so this cannot fail; the [`PciBus`](tairix_abi::driver::pci::PciBus)
     /// trait method wraps the result in `Ok` and reserves the error
     /// arm for a future fallible transport.
     pub fn enable_bus_master(&self, bdf: u64) {
@@ -381,7 +381,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// just-assigned BAR, an enabled command register, a programmed
     /// bridge window). The in-tree [`ConfigSpace`] backends are
     /// infallible, so this never errors; the
-    /// [`PciBus`](rustos_abi::driver::pci::PciBus) trait method reserves
+    /// [`PciBus`](tairix_abi::driver::pci::PciBus) trait method reserves
     /// the error arm for a future fallible transport.
     #[must_use]
     pub fn read_config(&self, bdf: u64, offset: u16) -> u32 {
@@ -563,13 +563,13 @@ impl<C: ConfigSpace> Pci<C> {
     /// * [`DriverError::LengthOutOfRange`] — the region length does not
     ///   fit in `usize` on this target.
     /// * [`DriverError::PermissionDenied`] — the caller does not hold
-    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
     ///   (propagated from the mapper).
     ///
     /// # Capabilities
     ///
     /// The `mapper` enforces
-    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP).
     pub fn map_virtio_window(
         &self,
         bdf: u64,
@@ -652,7 +652,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// * [`DriverError::LengthOutOfRange`] — the region length does not
     ///   fit in `usize` on this target (propagated from the mapper).
     /// * [`DriverError::PermissionDenied`] — the caller does not hold
-    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
     ///   (propagated from the mapper).
     /// * [`DriverError::BufferTooSmall`] / [`DriverError::DeviceFault`]
     ///   — propagated from the capability-list walk.
@@ -660,7 +660,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// # Capabilities
     ///
     /// The `mapper` enforces
-    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP).
     pub fn route_msix(
         &self,
         bdf: u64,

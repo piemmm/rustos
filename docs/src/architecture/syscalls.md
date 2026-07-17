@@ -1,9 +1,9 @@
 # Kernel syscall subsystem
 
-This page documents the architecture-neutral half of the RustOS syscall
+This page documents the architecture-neutral half of the TAIRiX syscall
 ABI delivered by Stage 2.7 of `PLAN.md`: the frozen `abi-v1` table in
-`rustos_abi::syscalls` and the generated kernel dispatcher in
-`rustos_kernel_syscall::table`. The full rustdoc for those modules is
+`tairix_abi::syscalls` and the generated kernel dispatcher in
+`tairix_kernel_syscall::table`. The full rustdoc for those modules is
 published alongside this book; refer to the `cargo doc --no-deps` output
 in `target/doc/` for the per-item documentation.
 
@@ -34,9 +34,9 @@ change to the table re-derives the fingerprint on the next build.
 
 The kernel re-checks the value at boot (`verify_table_hash`), and
 `cargo xtask abi-check` recomputes the SHA-256 of `ENCODED_TABLE` and
-demands that the linked `rustos_kernel_syscall::SYSCALL_TABLE_HASH`
+demands that the linked `tairix_kernel_syscall::SYSCALL_TABLE_HASH`
 matches it (catching stale `target/` caches or a mismatched
-`rustos-abi`). A test in `tools/xtask/src/commands/abi_check.rs`
+`tairix-abi`). A test in `tools/xtask/src/commands/abi_check.rs`
 asserts the linked, build-derived constant equals a freshly computed
 digest.
 
@@ -44,7 +44,7 @@ digest.
 
 The table **grows by appending**: existing entries are never re-numbered,
 removed, or re-typed, and a new syscall takes the next free number. While
-`abi-v1` is unfrozen (RustOS has not shipped a release, `AGENTS.md` §9 /
+`abi-v1` is unfrozen (TAIRiX has not shipped a release, `AGENTS.md` §9 /
 §2.13) a new row also requires regenerating the C header
 (`cargo xtask c-header --write`); `SYSCALL_TABLE_HASH` needs no manual
 step — it is re-derived from `ENCODED_TABLE` by the build script. The
@@ -187,7 +187,7 @@ The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the
 most `FS_ATTR_VALUE_MAX` (3072) opaque bytes; both bounds are refused at
 dispatch with `LengthOutOfRange` before any user memory beyond them is read.
 The secured VFS makes every decision: the ordinary namespaces (`user`, the
-foreign presets, `rustos`) follow the node's own read/write permissions
+foreign presets, `tairix`) follow the node's own read/write permissions
 (`required_cap` included), while the privileged namespaces (`system`,
 `trusted`) are reserved — refused on every call, and omitted from the listing
 without leaving an index gap — until the service that holds their dedicated
@@ -237,9 +237,9 @@ non-owner (even one holding the capability) is refused with
 stream. Both are unaudited per event like the other high-volume stream
 calls; the first delivered event of each input kind emits that kind's
 one-shot `INPUT_DELIVERED` liveness witness (`kind=key` / `kind=pointer`,
-at most one each). Wrappers: `rustos_rt::pointer_inject` /
-`rustos_rt::pointer_read`; C stubs `ros_sys_pointer_inject` /
-`ros_sys_pointer_read`.
+at most one each). Wrappers: `tairix_rt::pointer_inject` /
+`tairix_rt::pointer_read`; C stubs `tairix_sys_pointer_inject` /
+`tairix_sys_pointer_read`.
 
 `resource_open` (no. 67) is the resource-reference analogue of `fs_open`
 (`plans/ALIAS.md`, `.junie/PREREQUISITES2.md` P5). A resource reference
@@ -308,7 +308,7 @@ calling driver's own address space (`plans/PI.md` P10 chunk 5d-0 — the
 `DriverHost` MMIO/DMA surface reachable over IPC). A user-space driver does
 not pass a raw physical address: its `handle` argument is an unforgeable,
 kernel-issued device-resource grant it received for the hardware-tree node
-it binds (one grant per `rustos_abi::hwtree::HwResource` the node requested,
+it binds (one grant per `tairix_abi::hwtree::HwResource` the node requested,
 `AGENTS.md` §18.3), and its `offset` / `len` arguments name the sub-region
 *within* that grant to map. The handler resolves the handle **against the
 calling task** through the per-task device-resource grant table that lives in
@@ -374,7 +374,7 @@ grant of hardware-reachable memory); the carve mechanism defaults to a
 fail-closed NULL producer (`NULL_DMA_ALLOC_FACILITY` → `NotImplemented`),
 so a kernel without the `kernel/mem` live producer denies rather than
 carving (`AGENTS.md` §2.9). The first-party Rust wrapper is
-`rustos_rt::dma_alloc`.
+`tairix_rt::dma_alloc`.
 
 `dma_free` (no. 56) is the **symmetric free** for `dma_alloc`: a driver that
 issues many transfers must reclaim each request's bounce buffers, or it leaks
@@ -393,7 +393,7 @@ fails closed (covering a stale, double, or cross-task free) without releasing
 anything (§5.4 — fail closed). Like `dma_alloc` it is gated on
 **`CAP_MEM_DMA`** and audited, and the mechanism defaults to the fail-closed
 NULL producer (`NotImplemented`). The first-party Rust wrapper is
-`rustos_rt::dma_free`; the user-space driver host (`rustos_drvrt`) mints each
+`tairix_rt::dma_free`; the user-space driver host (`tairix_drvrt`) mints each
 carve's `DmaSlab` so its `Drop` issues `dma_free` automatically — a driver's
 per-request slabs reclaim themselves at scope end, never leaking. (Frames a
 driver never frees are still reclaimed wholesale when its live space is
@@ -406,7 +406,7 @@ passes to `mmio_map` / `dma_alloc` (`plans/PI.md` P10 chunk 5d-2 — handing a
 spawned driver process the handles for its matched node). The handler
 serialises the **calling task's** grant set (`caller.task_id` is
 kernel-trusted, §5.4) from the same per-task `AddressSpaceRegistry` grant
-table as consecutive `rustos_abi::hwtree::GrantedResource` records (handle +
+table as consecutive `tairix_abi::hwtree::GrantedResource` records (handle +
 `HwResource`, `GrantedResource::WIRE_LEN` = 40 bytes each, in ascending
 handle order), copies them out through the validated boundary, and returns
 the total byte count — `0` for a task with no grants (an unbound driver is
@@ -419,16 +419,16 @@ grants, which confers no authority — the handles are useless without the
 re-checks ownership when they are presented (the §16.6 / §24.3 own-process
 baseline). It is unaudited per call — the device manager's one-time driver
 load is the audited security decision (§5.4.4 / §18.3). The first-party Rust
-wrapper is `rustos_rt::resource_grants` (the user-space driver host
-`rustos_drvrt::RtDriverHost::from_grants_query` builds its grant table from
-it); the C stub is `ros_sys_resource_grants`.
+wrapper is `tairix_rt::resource_grants` (the user-space driver host
+`tairix_drvrt::RtDriverHost::from_grants_query` builds its grant table from
+it); the C stub is `tairix_sys_resource_grants`.
 
 `hw_tree_read` (no. 29) and `hw_tree_wait` (no. 30) expose the discovered
 hardware tree the kernel built at boot (`AGENTS.md` §16.6 / §18.1 / §18.4) —
 the read side of the user-space device manager. `hw_tree_read` copies the
 current snapshot into the caller's `(buf, len)` buffer: a
-`rustos_abi::HwTreeHeader` (the store's current **generation** and node count)
-followed by that many `rustos_abi::HwNode` records, returning the byte count.
+`tairix_abi::HwTreeHeader` (the store's current **generation** and node count)
+followed by that many `tairix_abi::HwNode` records, returning the byte count.
 The whole inventory is copied or none — an undersized buffer is refused with
 `BufferTooSmall`, never truncated, so the caller grows its buffer and retries
 (the node count is a discovered capacity, not a fixed ceiling, §24.1).
@@ -443,22 +443,22 @@ driver load (§5.4.4 / §18.3). Both serve the `kernel/core` `HwTreeSource` seam
 the boot path installs through `BootInfo::with_hw_tree` (the
 `hwtree_store::HW_TREE` store); until one is installed they fail closed with
 `NotImplemented` through `NULL_HW_TREE` (`AGENTS.md` §2.9). The first-party
-Rust wrappers are `rustos_rt::hw_tree_read` / `hw_tree_wait`; the C stubs are
-`ros_sys_hw_tree_read` / `ros_sys_hw_tree_wait`. The device manager
+Rust wrappers are `tairix_rt::hw_tree_read` / `hw_tree_wait`; the C stubs are
+`tairix_sys_hw_tree_read` / `tairix_sys_hw_tree_wait`. The device manager
 (`userland/system/devmgr`) reads the tree, then waits and re-reads on every
-change — the reactive observe loop behind the `rustos_devmgr::HwTreeService`
+change — the reactive observe loop behind the `tairix_devmgr::HwTreeService`
 seam.
 
 `hw_emit_node` (no. 37) is the **write** side of the same hardware tree:
 recursive, user-space hardware discovery (`AGENTS.md` §18.1 / §18.3). A
 user-space **bus** driver (a PCIe root complex, a USB host) enumerates the
 devices behind it and calls this once per device to publish a discovered
-child `rustos_abi::HwNode`, so the device manager autoloads the matching
+child `tairix_abi::HwNode`, so the device manager autoloads the matching
 driver in turn — discovery is data-driven, never a compiled-in list (§18).
 The handler copies the encoded node in (rejecting any `len` that is not
 exactly `HwNode::WIRE_LEN` before copying, so a hostile length drives no
 large copy), decodes it fail-closed, and then enforces the keystone security
-rule: it admits the node **only** when every `rustos_abi::hwtree::HwResource`
+rule: it admits the node **only** when every `tairix_abi::hwtree::HwResource`
 the node requests is wholly covered by one of the **calling task's** own
 minted device-resource grants (`HwResource::covers`, checked against the same
 per-task `AddressSpaceRegistry` grant table `resource_grants` reads). A bus
@@ -482,9 +482,9 @@ autoloaded bus driver, never an ordinary task — and **audited** per call
 low-volume, security-relevant event, §5.4.4 / §18.6). It serves the same
 `kernel/core` `HwTreeSource` seam (`HwTreeSource::publish`); until a store is
 installed it fails closed with `NotImplemented` through `NULL_HW_TREE`. The
-first-party Rust wrapper is `rustos_rt::hw_emit_node` (the user-space driver
-host `rustos_drvrt::RtDriverHost` forwards `DriverHost::emit_node` to it); the
-C stub is `ros_sys_hw_emit_node`.
+first-party Rust wrapper is `tairix_rt::hw_emit_node` (the user-space driver
+host `tairix_drvrt::RtDriverHost` forwards `DriverHost::emit_node` to it); the
+C stub is `tairix_sys_hw_emit_node`.
 
 `hw_remove_node` (no. 38) is the exact **mirror** of `hw_emit_node`: hotplug
 removal (`AGENTS.md` §18.4). When a device a bus driver published goes away
@@ -506,7 +506,7 @@ policy/mechanism split, §4). It is **audited** per call (a low-volume,
 security-relevant event that drives an unload). It serves the
 `HwTreeSource::remove` seam; until a store is installed it fails closed with
 `NotImplemented` through `NULL_HW_TREE`. The first-party Rust wrapper is
-`rustos_rt::hw_remove_node`; the C stub is `ros_sys_hw_remove_node`.
+`tairix_rt::hw_remove_node`; the C stub is `tairix_sys_hw_remove_node`.
 
 `ipc_call` (no. 31), `call_create` (no. 32), `call_recv` (no. 33), and
 `call_reply` (no. 34) are the two halves of the **synchronous** request/reply
@@ -527,8 +527,8 @@ selects the mode — `NON_BLOCKING` answers an empty queue with `WouldBlock`
 instead of parking, the mode a wait-set-driven event loop uses because a
 queued call the readiness peek reported may have been cancelled by its
 poster's exit; reserved flag bits are refused `OutOfRange`, and the
-first-party wrappers are `rustos_rt::call_recv` /
-`rustos_rt::call_recv_nonblock`. `call_reply` completes a received
+first-party wrappers are `tairix_rt::call_recv` /
+`tairix_rt::call_recv_nonblock`. `call_reply` completes a received
 ticket and wakes the blocked caller. Both server calls resolve the endpoint
 and gate the caller against its `recv_caps` **and** owner identity before
 touching state (`AGENTS.md` §5.4); a server that exits has its endpoints torn
@@ -543,14 +543,14 @@ The kernel-resident driver-store file service is one `ipc_call` callee
 (`lib/abi::driver_store`); the server trio lets an ordinary user-space service
 be the callee — the autoloaded `vcmailbox` mailbox service (Design D D3) is
 its production consumer. The first-party Rust wrappers are
-`rustos_rt::{ipc_call, call_create, call_recv, call_reply}`; the C stubs are
-`ros_sys_ipc_call` / `ros_sys_call_create` / `ros_sys_call_recv` /
-`ros_sys_call_reply`.
+`tairix_rt::{ipc_call, call_create, call_recv, call_reply}`; the C stubs are
+`tairix_sys_ipc_call` / `tairix_sys_call_create` / `tairix_sys_call_recv` /
+`tairix_sys_call_reply`.
 
 `call_peer_origin` (no. 58) lets a server read the **kernel-attested
 identity** of the caller whose in-service call it is handling (P-C). After a
 `call_recv` hands the server a ticket, `call_peer_origin` returns the
-`rustos_abi::Origin` the kernel captured from the *posting* task's own state
+`tairix_abi::Origin` the kernel captured from the *posting* task's own state
 at `ipc_call` time — its trust domain, uid, reusable pid, the unforgeable
 `ProcId` that distinguishes process instances across PID reuse, and a
 non-secret capability *summary* (a membership bitmap, never any capability
@@ -561,18 +561,18 @@ capability changes or PID reuse. Like `call_recv`/`call_reply` it is
 dispatcher-ungated but resolves the endpoint and checks the reader's
 `recv_caps` **and** owner identity before exposing anything; a foreign
 endpoint, an unknown or not-in-service ticket, or a buffer shorter than
-`rustos_abi::ORIGIN_WIRE_LEN` fails closed, and it is unaudited (a server's
+`tairix_abi::ORIGIN_WIRE_LEN` fails closed, and it is unaudited (a server's
 high-volume serve path; refusals are audited by the dispatcher regardless).
 It is the foundation a capability-gated user-space service builds on to learn
 who called it — its first consumer is `sysinfod`'s self-scoped
 `PROCESS_IDENTITY` query (`AGENTS.md` §16.6). The first-party Rust wrapper is
-`rustos_rt::call_peer_origin`; the C stub is `ros_sys_call_peer_origin`.
+`tairix_rt::call_peer_origin`; the C stub is `tairix_sys_call_peer_origin`.
 
 `wall_time_get` (no. 59) and `wall_time_set` (no. 60) are the wall-clock
 pair (`PREREQUISITES.md` P-D). The kernel keeps an absolute wall-clock time
 beside the per-CPU monotonic clock: `wall_time_get` returns a
-`rustos_abi::WallClockReading` — a `Time64` instant plus a
-`rustos_abi::WallTimeState` byte (`Unset` / `Firmware` / `Trusted` /
+`tairix_abi::WallClockReading` — a `Time64` instant plus a
+`tairix_abi::WallTimeState` byte (`Unset` / `Firmware` / `Trusted` /
 `Adjusted`) saying how trustworthy that time is. It is **ungated** and
 unaudited, the same unprivileged observer baseline as `clock_get`; before a
 trusted source sets the clock the reading is the Unix epoch tagged `Unset`.
@@ -587,12 +587,12 @@ relevant — and **audited**; a malformed instant, a short buffer, or a
 non-settable `state` (`Unset`, or any undefined discriminant) fails closed,
 and the kernel attests the state itself so a caller cannot mislabel it. The
 clock boots `Unset`; until a trusted time source drives it, `wall_time_get`
-reports the epoch. The first-party Rust wrappers are `rustos_rt::wall_time` /
-`rustos_rt::wall_time_set`; the C stubs are `ros_sys_wall_time_get` /
-`ros_sys_wall_time_set`.
+reports the epoch. The first-party Rust wrappers are `tairix_rt::wall_time` /
+`tairix_rt::wall_time_set`; the C stubs are `tairix_sys_wall_time_get` /
+`tairix_sys_wall_time_set`.
 
 `boot_id_get` (no. 61) copies the kernel's per-boot identifier — a 128-bit
-`rustos_abi::BootId` — out to the caller's `(out, len)` buffer and returns
+`tairix_abi::BootId` — out to the caller's `(out, len)` buffer and returns
 its byte count (`PREREQUISITES.md` P-E). The boot id is a public per-boot
 nonce: it is stable for the lifetime of a boot, fresh across boots, and user
 space can neither supply nor influence it. It is **ungated** and unaudited,
@@ -605,13 +605,13 @@ seeded; a buffer shorter than `BOOT_ID_LEN` (16) fails closed with
 `BufferTooSmall`, and a boot whose random subsystem could not be seeded in
 time has no id — the call fails closed with `EntropyNotReady` rather than
 return the all-zero `BootId::UNSET` sentinel as if it were real. The
-first-party Rust wrapper is `rustos_rt::boot_id`; the C stub is
-`ros_sys_boot_id_get`.
+first-party Rust wrapper is `tairix_rt::boot_id`; the C stub is
+`tairix_sys_boot_id_get`.
 
 `boot_facts_get` (no. 89) copies the kernel's boot-static machine summary —
-the 64-byte `rustos_abi::BootFacts` wire record: the CPU architecture
-(`rustos_abi::Arch`, a closed Tier-1 set), the boot CPU's discovered model
-name (`rustos_abi::CpuName`, a bounded NUL-padded string; the all-zero
+the 64-byte `tairix_abi::BootFacts` wire record: the CPU architecture
+(`tairix_abi::Arch`, a closed Tier-1 set), the boot CPU's discovered model
+name (`tairix_abi::CpuName`, a bounded NUL-padded string; the all-zero
 `UNKNOWN` when the port derived none), the number of processor cores
 brought under the scheduler, and the installed physical memory the boot
 path discovered — out to the caller's `(out, len)` buffer and returns its
@@ -628,8 +628,8 @@ API. A buffer shorter than `BOOT_FACTS_WIRE_LEN` (64) fails closed with
 test arch states no Tier-1 identity, and a boot path may not learn its
 installed total) fails closed with `NotImplemented` rather than fabricate a
 machine shape. PID 1 renders its startup banner from this record. The
-first-party Rust wrapper is `rustos_rt::boot_facts`; the C stub is
-`ros_sys_boot_facts_get`.
+first-party Rust wrapper is `tairix_rt::boot_facts`; the C stub is
+`tairix_sys_boot_facts_get`.
 
 `call_peer_seat` (no. 83) is the seat-holding twin of `call_peer_origin`
 (`plans/DISPLAY.md` D7a): while a call is in service (between `call_recv`
@@ -640,8 +640,8 @@ refusal. It is the display service's per-present gate: the check is fresh
 at call time (a revocation between two frames refuses the very next
 present), and it discloses seat facts only about a task the server is
 actively servicing — seat ownership is never enumerable (`SEAT_LIST`
-stays behind `CAP_SYSINFO_HW`). Wrapper `rustos_rt::call_peer_seat`; C
-stub `ros_sys_call_peer_seat`. Not audited per call — it is the per-frame
+stays behind `CAP_SYSINFO_HW`). Wrapper `tairix_rt::call_peer_seat`; C
+stub `tairix_sys_call_peer_seat`. Not audited per call — it is the per-frame
 hot path, exactly like the kernel-side present gate.
 
 `shm_grant` (no. 82) is the endpoint-directed delegation of a shared
@@ -658,8 +658,8 @@ buffer to the display service with zero frame bytes crossing the IPC.
 pointer and, alongside the mapped base it returns, writes the region's
 byte length — the kernel's own record of the region, never the granting
 task's claim — so a server sizes its view of the shared bytes from the
-kernel's answer (`plans/DISPLAY.md` D7b). Wrapper `rustos_rt::shm_map`;
-C stub `ros_sys_shm_map`.
+kernel's answer (`plans/DISPLAY.md` D7b). Wrapper `tairix_rt::shm_map`;
+C stub `tairix_sys_shm_map`.
 
 `fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
 user-mediated **file** delegation (`plans/CAPABILITY_USE.md` CU6,
@@ -683,8 +683,8 @@ through the secured VFS under the **grantor's** captured identity, so a
 permission change against the grantor revokes the delegation's reach
 too; every other operation on the descriptor refuses, and an exited
 recipient's unredeemed grants are reclaimed with its records. Wrappers
-`rustos_rt::fd_grant` / `rustos_rt::fd_redeem`; C stubs
-`ros_sys_fd_grant` / `ros_sys_fd_redeem`.
+`tairix_rt::fd_grant` / `tairix_rt::fd_redeem`; C stubs
+`tairix_sys_fd_grant` / `tairix_sys_fd_redeem`.
 
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the
@@ -739,11 +739,11 @@ own identity, like `boot_id_get`) and not audited, and fails closed
 service (`journald`) uses it to stamp the trusted records it authors itself
 (the segment self-events and the `security` spoof-notes) with its own attested
 origin rather than a fabricated one. The Rust wrapper is
-`rustos_rt::self_origin`; the C stub is `ros_sys_self_origin`.
+`tairix_rt::self_origin`; the C stub is `tairix_sys_self_origin`.
 
 `terminal_size` (no. 63) reports the character-cell grid of the text console
 backing a caller's standard stream — `fd` (typically `STDOUT`), then the
-`(out, len)` buffer the encoded `rustos_abi::TerminalSize` (rows, then columns,
+`(out, len)` buffer the encoded `tairix_abi::TerminalSize` (rows, then columns,
 two little-endian `u16`s) is written to — so a full-screen terminal program
 (`top`) draws to the real display extents (`PREREQUISITES.md` P-C). It is
 **ungated** and unaudited, the same unprivileged observer baseline as
@@ -759,8 +759,8 @@ kernel: the call fails closed with `NotImplemented` and the client terminal
 library applies the conventional 80×24 fallback — the size policy lives in the
 client, and the kernel never fabricates a size (`AGENTS.md` §5.4). A buffer
 shorter than the wire length fails closed with `BufferTooSmall`. The
-first-party Rust wrapper is `rustos_rt::terminal_size`; the C stub is
-`ros_sys_terminal_size`.
+first-party Rust wrapper is `tairix_rt::terminal_size`; the C stub is
+`tairix_sys_terminal_size`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with
@@ -787,20 +787,20 @@ process-scoped state in the per-task registry: never inherited across
 cleared on exit. Pinning grants no residency promise beyond "never enters
 a swap tier": pages still fault in lazily, zero-on-free and encryption
 guarantees are unchanged, and the process stays killable. First-party
-Rust wrappers are `rustos_rt::mem_pin` / `rustos_rt::mem_unpin`; C stubs
-`ros_sys_mem_pin` / `ros_sys_mem_unpin`.
+Rust wrappers are `tairix_rt::mem_pin` / `tairix_rt::mem_unpin`; C stubs
+`tairix_sys_mem_pin` / `tairix_sys_mem_unpin`.
 
 `wait` (no. 16) is likewise **ungated**: a process may only wait on its
 *own* children, so reaping one grants no authority over any other
 principal (the same §16.6 baseline). It is, however, *audited* — reaping a
 child is a process-lifecycle state change (a principal disappears), exactly
 as `spawn` and `exit` are audited (`AGENTS.md` §5.4.4). `pid` is either
-a specific child's PID or `rustos_abi::WAIT_PID_ANY` (`-1`, wait for any child);
+a specific child's PID or `tairix_abi::WAIT_PID_ANY` (`-1`, wait for any child);
 `status` is a non-null user pointer the kernel writes the typed
-`rustos_abi::WaitStatusRecord` to (`kind` exited or stopped plus the exit
+`tairix_abi::WaitStatusRecord` to (`kind` exited or stopped plus the exit
 code or stopping signal — decoded fail-closed by
-`rustos_abi::WaitStatusRecord::decode`, never a bit-packed POSIX status
-word); `flags` is a `rustos_abi::WaitFlags` set. The handler reaches
+`tairix_abi::WaitStatusRecord::decode`, never a bit-packed POSIX status
+word); `flags` is a `tairix_abi::WaitFlags` set. The handler reaches
 the scheduler-side reaper through the
 `kernel/core::procwait::ProcessWait` seam, which is installed at boot like
 the `spawn` / `mem_map` producers. The boot path installs the real
@@ -811,7 +811,7 @@ the `exit` handler, and the parent's `wait` cooperatively parks (via the
 scheduler reschedule path) until a matching child is reapable, then reaps
 it. A `wait` issued before that install (or by a non-parkable task) fails
 closed with `NotImplemented` through the default `NULL_PROCESS_WAIT`
-(`AGENTS.md` §2.9). The first-party Rust wrapper is `rustos_rt::wait`.
+(`AGENTS.md` §2.9). The first-party Rust wrapper is `tairix_rt::wait`.
 
 With `WaitFlags::NONBLOCK` set the call **polls** instead of blocking — the
 reap the shell's job control performs to report finished background jobs
@@ -825,9 +825,9 @@ primitive the blocking loop uses, so the two can never diverge, and a
 poll that finds nothing reapable is audited as the benign
 `SYSCALL_HANDLER_WOULD_BLOCK` (Debug), not an ERROR — so a polling
 job-control loop never floods the log (`AGENTS.md` §2.1 / §19.4). The
-first-party Rust wrapper is `rustos_rt::try_wait`; the C stub `ros_sys_wait`
-takes the flags argument and the header defines `ROS_WAIT_FLAG_NONBLOCK`,
-`ROS_WAIT_FLAG_STOPPED`, and the `ros_wait_status_t` record.
+first-party Rust wrapper is `tairix_rt::try_wait`; the C stub `tairix_sys_wait`
+takes the flags argument and the header defines `TAIRIX_WAIT_FLAG_NONBLOCK`,
+`TAIRIX_WAIT_FLAG_STOPPED`, and the `tairix_wait_status_t` record.
 
 With `WaitFlags::STOPPED` set the call also reports a child freshly
 **stopped** by `Signal::Stop` (`plans/SPAWN.md` SP9 — the `WUNTRACED`
@@ -837,7 +837,7 @@ tracked and resumable through `Signal::Continue`. Each stop is reported
 exactly once (edge-triggered; a `Continue` clears an unobserved stop so a
 stale report never follows a resume, and an exit supersedes one). With the
 bit clear a stopped child is invisible to `wait`, exactly as before. The
-simple wrapper for a parent with no job control is `rustos_rt::wait_exit`.
+simple wrapper for a parent with no job control is `tairix_rt::wait_exit`.
 
 `signal` (no. 64) delivers a control signal to a child of the calling
 process (`plans/SPAWN.md` SP7) — the job-control primitive the shell's
@@ -846,7 +846,7 @@ only its *own* children, so the parent/child relationship is the authority
 and no capability is required (the §16.6 own-process baseline). It **is**
 audited — delivering a signal is a process-lifecycle decision, exactly as
 `spawn`/`wait`/`exit` are audited (`AGENTS.md` §5.4.4). `pid` names a child
-the caller spawned; `signal` is a closed `rustos_abi::Signal` discriminant
+the caller spawned; `signal` is a closed `tairix_abi::Signal` discriminant
 (`Continue` = 1, `Terminate` = 2, `Kill` = 3, `Interrupt` = 4, `Stop` = 5),
 and the reserved `0` or any
 other value fails closed with `OutOfRange` before dispatch (validate every
@@ -878,9 +878,9 @@ broadcast waitq wake can otherwise make a parked task runnable; the kthread
 dispatch shim re-parks an overlay-held task, so only `Continue` genuinely
 resumes it) and records the stop for a `WaitFlags::STOPPED` wait. The
 first-party Rust wrapper is
-`rustos_rt::signal`; the C stub is `ros_sys_signal` and the header defines
-`ROS_SIGNAL_CONTINUE` / `ROS_SIGNAL_TERMINATE` / `ROS_SIGNAL_KILL` /
-`ROS_SIGNAL_INTERRUPT` / `ROS_SIGNAL_STOP`.
+`tairix_rt::signal`; the C stub is `tairix_sys_signal` and the header defines
+`TAIRIX_SIGNAL_CONTINUE` / `TAIRIX_SIGNAL_TERMINATE` / `TAIRIX_SIGNAL_KILL` /
+`TAIRIX_SIGNAL_INTERRUPT` / `TAIRIX_SIGNAL_STOP`.
 
 A termination never lands **inside** a syscall. A child currently between
 syscall entry and return may hold kernel state only its own unwind can
@@ -906,10 +906,10 @@ recorded, typically a few block-I/O milliseconds later at worst.
 
 `signal_intake` (no. 94) operates on the calling process's own **signal
 intake** — the fail-closed signal-observation opt-in (`plans/STRESSTEST.md`
-ST3). RustOS deliberately ships **no** user-installed signal handlers: a
+ST3). TAIRiX deliberately ships **no** user-installed signal handlers: a
 handler trampoline (asynchronous user-mode re-entry) has no other consumer
 and a large attack surface, so observation is event-shaped instead. `op`
-is a closed `rustos_abi::SignalIntakeOp` discriminant (`Enable` = 0,
+is a closed `tairix_abi::SignalIntakeOp` discriminant (`Enable` = 0,
 `Disable` = 1, `Take` = 2); any other value fails closed with `OutOfRange`
 before dispatch. `Enable` opts the caller's termination-request signals —
 `Interrupt` (the console `^C`) and `Terminate`, **only** — out of
@@ -936,11 +936,11 @@ itself, so the trail carries the opt-in, the opt-out, and each observed
 delivery's drain — and both delivery routes into the intake are already
 audited at their source (the sender's audited `signal` call; the console
 line discipline acting on the terminal owner's standing foreground
-instruction). The first-party Rust wrapper is `rustos_rt::signal_intake`;
-the C stub is `ros_sys_signal_intake` and the header defines
-`ROS_SIGNAL_INTAKE_OP_ENABLE` / `ROS_SIGNAL_INTAKE_OP_DISABLE` /
-`ROS_SIGNAL_INTAKE_OP_TAKE` beside the `ROS_WAITSET_OP_*` and
-`ROS_WAIT_SOURCE_*` member vocabulary.
+instruction). The first-party Rust wrapper is `tairix_rt::signal_intake`;
+the C stub is `tairix_sys_signal_intake` and the header defines
+`TAIRIX_SIGNAL_INTAKE_OP_ENABLE` / `TAIRIX_SIGNAL_INTAKE_OP_DISABLE` /
+`TAIRIX_SIGNAL_INTAKE_OP_TAKE` beside the `TAIRIX_WAITSET_OP_*` and
+`TAIRIX_WAIT_SOURCE_*` member vocabulary.
 
 `console_foreground` (no. 72) grants (or releases, `pid = 0`) the
 **controlling ownership** of the console behind readable descriptor `fd`
@@ -979,13 +979,13 @@ path releases the ownership immediately, and the read gate clears a
 recorded owner the process bookkeeping proves dead (task ids are never
 reused). The shell (`elsh`) marks its foreground child around every
 blocking `wait` and releases the slot at its prompt. The first-party Rust
-wrapper is `rustos_rt::console_foreground`; the C stub is
-`ros_sys_console_foreground`.
+wrapper is `tairix_rt::console_foreground`; the C stub is
+`tairix_sys_console_foreground`.
 
 `rlimit_get` (no. 17) and `rlimit_set` (no. 18) are the settable
 `ulimit`/`rlimit`-equivalent (`AGENTS.md` §24.3). Both name a closed
-`rustos_abi::LimitKind` resource via a `u32 kind` and carry a
-`rustos_abi::ResourceLimit` (`{ soft, hard }`, `RLIMIT_INFINITY` =
+`tairix_abi::LimitKind` resource via a `u32 kind` and carry a
+`tairix_abi::ResourceLimit` (`{ soft, hard }`, `RLIMIT_INFINITY` =
 "no limit") through a 16-byte user buffer. Both are **ungated at the
 dispatcher**: reading one's own limit and *lowering* a bound need no
 capability (the §16.6 own-process baseline). `rlimit_set` performs the
@@ -994,7 +994,7 @@ the inherited ceiling is refused with `PermissionDenied` unless the caller
 holds `CAP_RLIMIT_RAISE`, mirroring the §5.2 "never widen on delegation"
 rule. `rlimit_get` is unaudited (a pure observer); `rlimit_set` **is**
 audited — it changes enforced policy (`AGENTS.md` §5.4.4). The first-party
-Rust wrappers are `rustos_rt::rlimit_get` / `rlimit_set`; the §24 policy,
+Rust wrappers are `tairix_rt::rlimit_get` / `rlimit_set`; the §24 policy,
 the discovered-hardware defaults, and the kernel enforcement are detailed
 in [`resource-limits.md`](./resource-limits.md).
 
@@ -1002,7 +1002,7 @@ in [`resource-limits.md`](./resource-limits.md).
 (`/System/Security/Users`, `AGENTS.md` §5.1) the kernel loaded off the
 mounted root volume at boot out to the caller's `(buf, len)` buffer and
 returns the byte count — the exact `users-v1` text, which the caller
-re-parses with the same fail-closed `rustos-users` parser the kernel used
+re-parses with the same fail-closed `tairix-users` parser the kernel used
 (`plans/PI.md` P11). It is gated on **`CAP_USERS_READ`**: the text carries
 every account's salted password record, so only the authentication
 principal (login) holds the capability, and every call is **audited**
@@ -1021,9 +1021,9 @@ the concurrent `ARXFS passphrase:` prompt; once the unlock resolves the
 read returns the installed database, or `NotImplemented` if the unlock
 produced none (the deny-all prompt then runs). An undersized buffer is refused whole with `BufferTooSmall` (a
 credential database is never truncated, `AGENTS.md` §2.9); a buffer sized
-at the format's 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always
-suffices. The first-party Rust wrapper is `rustos_rt::users_db_read`; the
-C stub is `ros_sys_users_db_read`.
+at the format's 64 KiB maximum (`tairix-users` `MAX_DB_LEN`) always
+suffices. The first-party Rust wrapper is `tairix_rt::users_db_read`; the
+C stub is `tairix_sys_users_db_read`.
 
 `users_db_wait` (no. 35) is the **blocking** companion to `users_db_read`:
 it parks the caller while the database is in that `WouldBlock` *pending*
@@ -1045,7 +1045,7 @@ it is a blocking wait, not a state change, and the capability denial is
 audited by the dispatcher regardless. A build with no users-database
 service wired is never pending, so the wait returns `0` immediately and the
 following read fails closed (`AGENTS.md` §2.9). The first-party Rust wrapper
-is `rustos_rt::users_db_wait`; the C stub is `ros_sys_users_db_wait`.
+is `tairix_rt::users_db_wait`; the C stub is `tairix_sys_users_db_wait`.
 
 `console_count` (no. 20) reports how many system text consoles the boot
 path installed (`AGENTS.md` §20, `plans/PI.md` P11) — the index space
@@ -1055,8 +1055,8 @@ active the aarch64 list is `[video, uart]`, otherwise `[uart]`. Gated on
 `CAP_CONSOLE_WRITE` (console topology belongs to the principals that
 drive consoles) and unaudited (a pure observer). PID 1 `init` uses it to
 start one login session per discovered console. The first-party Rust
-wrapper is `rustos_rt::console_count`; the C stub is
-`ros_sys_console_count`.
+wrapper is `tairix_rt::console_count`; the C stub is
+`tairix_sys_console_count`.
 
 `stream_input_mode` (no. 21) sets the read line discipline of one of the
 caller's inherited input streams (`AGENTS.md` §20, `plans/PI.md` P11).
@@ -1078,16 +1078,16 @@ separate `CAP_CONSOLE_WRITE` — `stream_input_mode` shares `stream_read`'s
 unaudited. The line discipline also handles **erase** (rub-out): a
 Backspace or Delete — the single-byte controls (the one `lib/vt`
 `control::is_line_erase` definition, §2.2) or the Delete key's `CSI 3 ~`
-escape sequence (the shared `rustos_vt::line::EraseSeq` recogniser, held
+escape sequence (the shared `tairix_vt::line::EraseSeq` recogniser, held
 across split reads) — is not echoed as stray control glyphs but rubs out
 the previous character with a `BS SP BS` sequence, bounded by a
 per-console column so an erase at the start of the input line never walks
 back over the prompt. The reader's line buffer applies the matching erase
-to the bytes it keeps (`rustos_vt::line::LineEditor`), so screen and
+to the bytes it keeps (`tairix_vt::line::LineEditor`), so screen and
 buffer stay in step.
 
 The **secret** mode also arms the console's secret-entry feedback
-(`rustos_vt::secret`, hosted as the kernel `SecretFeedback`): after the
+(`tairix_vt::secret`, hosted as the kernel `SecretFeedback`): after the
 first typed character of a password read the console
 shows the `[input active...]` marker, its dots cycling `.` → `..` → `...`
 on a one-second cadence. The animation is **bounded**: it runs for at
@@ -1116,8 +1116,8 @@ console (`console_foreground`, no. 72), any other task's
 program's echo or raw mode under it. An
 `fd` that is not a readable inherited stream fails closed with `NotFound`;
 a console-less build fails closed with `NotImplemented`. The first-party
-Rust wrapper is `rustos_rt::set_input_mode`; the C stub is
-`ros_sys_stream_input_mode`.
+Rust wrapper is `tairix_rt::set_input_mode`; the C stub is
+`tairix_sys_stream_input_mode`.
 
 `console_input` (no. 22) injects decoded keystroke bytes into an
 installed console's kernel-side input queue — the producer counterpart of
@@ -1142,8 +1142,8 @@ accepts no injected input (a UART reading its own hardware FIFO), fails
 closed with `NotImplemented` (`AGENTS.md` §2.9). The queue zeroes each
 byte as the consumer drains it — a typed password transits it, so the
 buffer retains no cleartext (`AGENTS.md` §4 / §23.1). The first-party Rust
-wrapper is `rustos_rt::console_input`; the C stub is
-`ros_sys_console_input`.
+wrapper is `tairix_rt::console_input`; the C stub is
+`tairix_sys_console_input`.
 
 ## Standard streams (fd 0/1/2/3)
 
@@ -1155,7 +1155,7 @@ standard descriptors, never over a kernel-discovered device (`AGENTS.md`
 works whatever the spawner backed the stream with.
 
 The per-process **descriptor table** is part of the process model
-(`rustos_abi::DescriptorTable`, `lib/abi/src/process.rs`): a fixed table
+(`tairix_abi::DescriptorTable`, `lib/abi/src/process.rs`): a fixed table
 of four entries, one per standard descriptor, each recording its
 `StreamMode` (`Closed` / `Read` / `Write`) **and the installed-console
 index backing it**. The spawner establishes it when it admits a process
@@ -1190,7 +1190,7 @@ where the console is reached (a pipe- or file-wired stream needs no
 console authority), on
 top of the fd-level descriptor gate. A descriptor naming an index with no
 installed console fails closed with `NotImplemented`. The first-party
-Rust wrappers are `rustos_rt::stdout` / `stderr` / `stdinfo` / `stdin`; a
+Rust wrappers are `tairix_rt::stdout` / `stderr` / `stdinfo` / `stdin`; a
 program never names `console_*` or a device (`AGENTS.md` §20, §2.2).
 
 ## Argument validation
@@ -1253,7 +1253,7 @@ table.
 
 The dispatcher trait `SyscallHandlers` is implemented in `kernel/core`
 by `KernelSyscallHandlers<'a, A>` (see
-`rustos_kernel_core::syscalls`). The struct borrows kernel state and
+`tairix_kernel_core::syscalls`). The struct borrows kernel state and
 forwards every call to the owning subsystem; nothing in this layer
 re-validates arguments — the dispatcher does that first.
 
@@ -1269,10 +1269,10 @@ re-validates arguments — the dispatcher does that first.
 | `clock_get`     | `KernelArch::monotonic_ns(arch.current_cpu())`, coarsened unless the caller holds `CAP_TIME_HIRES`            | —                                                                         |
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
-| `random_get`    | draws CSPRNG output from `KernelState.rng` (the `rustos_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
+| `random_get`    | draws CSPRNG output from `KernelState.rng` (the `tairix_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
 | `stream_write` | routes a **wired** standard descriptor (a spawn attach block placed a file, resource, or pipe end behind fd 0–3, `plans/SPAWN.md` SP10) to its open entry first — the entry's own `OpenFlags` gate the direction, a path-backed stream writes at the shared open-file-description cursor (honouring `APPEND`), a pipe end parks while full with a live reader and fails closed with `BrokenPipe` once none remains, and **no console capability applies** — otherwise resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the in-handler `CAP_CONSOLE_WRITE` check, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's output line discipline (`ConsoleDevice::write_output`), which cooks a bare line feed to CR-LF (the ONLCR output translation, the counterpart to the input echo half) so a program that writes `\n` has the cursor return to column zero as it drops a line, then writes to the `ConsoleWrite` device | An **unattached** `stdinfo` (fd 3 `Closed`) → `Ok(len)` with the bytes discarded (advisory best-effort, `AGENTS.md` §20.1 — never a device fallback). Any other `fd` not a writable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_WRITE` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(input_bytes_consumed)` — the input count, not the larger device count a cooked newline expands to. |
 | `stream_read` | routes a **wired** standard descriptor to its open entry first (as `stream_write`: the entry's flags gate the direction; a pipe end parks on `PIPE_WAITQ` while empty with a live writer, honours the `timeout_ns` bound, and reports end-of-stream once no writer remains; **no console capability applies**), otherwise resolves `fd` against the caller's per-process descriptor table — direction first, then the in-handler `CAP_CONSOLE_READ` check, then the descriptor's console index against the installed console list — then reads from that console's `ConsoleRead` device, wrapped by the init pipeline in kernel-core's `BlockingConsoleRead`, which parks the caller on the scheduler (`reschedule_current`, the `wait`-syscall poll-and-park loop) until the device yields input (`AGENTS.md` §20 — the backing owns blocking; each console's input is its own — the UART never feeds the video console's session, `plans/PI.md` P11) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user`. A non-zero `timeout_ns` (arg 3) bounds the park: the reader registers a one-shot deadline on the console wait queue (tickless — an unbounded read still arms no timer at all) and an elapsed bound surfaces as `TimedOut`, so a full-screen program refreshes a clock or status figure without a busy poll | `fd` not a readable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_READ` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. No input pending → blocks until input arrives (an unparkable caller → `NotImplemented`); a non-zero `timeout_ns` elapsing with no input → `TimedOut`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read ≥ 1)`. |
-| `spawn`         | stages and parses the optional `SpawnAttach` block fail-closed (`stage_spawn_attach`; a zero pointer = full inherit, `plans/SPAWN.md` SP10), resolves its console selector first (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), applies the per-descriptor wires onto that base — `InheritSlot`/`Closed` reshape the console table, and every `Handle` wire resolves owner-checked against the caller's own open table into a cloned entry (direction-checked for its slot) installed at the child's fd 0–3 with its console slot closed, so exactly one authority backs each descriptor and a pipe-end clone registers one more live end — copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry` (the x86_64/riscv64 §18.6 boot floor) or — for an absolute `…/<Name>.app/Run` store-bundle path with an installed `AppStore` — loads and verifies the on-disk bundle through the shared `rustos_appload` gate (signature against the embedded app trust anchor, content hash, ABI/syscall hash), the bundle read running through the secured VFS under the caller's kernel-attested identity and a spawn racing the boot mount parking on the store's readiness latch (`plans/APPS.md` deliverable 8), then resolves the child's kernel-attested **credential** from the block's `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user, `PREREQUISITES.md` P-C), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table, wired entries, and credential) through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Malformed / wrong-length attach block → `LengthOutOfRange` / `BadMagic` / `OutOfRange`. Console index with no installed console → `NotFound`. A `Handle` wire naming no descriptor of the caller → `NotFound`; one whose direction cannot serve its slot → `PermissionDenied`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
+| `spawn`         | stages and parses the optional `SpawnAttach` block fail-closed (`stage_spawn_attach`; a zero pointer = full inherit, `plans/SPAWN.md` SP10), resolves its console selector first (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), applies the per-descriptor wires onto that base — `InheritSlot`/`Closed` reshape the console table, and every `Handle` wire resolves owner-checked against the caller's own open table into a cloned entry (direction-checked for its slot) installed at the child's fd 0–3 with its console slot closed, so exactly one authority backs each descriptor and a pipe-end clone registers one more live end — copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry` (the x86_64/riscv64 §18.6 boot floor) or — for an absolute `…/<Name>.app/Run` store-bundle path with an installed `AppStore` — loads and verifies the on-disk bundle through the shared `tairix_appload` gate (signature against the embedded app trust anchor, content hash, ABI/syscall hash), the bundle read running through the secured VFS under the caller's kernel-attested identity and a spawn racing the boot mount parking on the store's readiness latch (`plans/APPS.md` deliverable 8), then resolves the child's kernel-attested **credential** from the block's `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user, `PREREQUISITES.md` P-C), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table, wired entries, and credential) through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Malformed / wrong-length attach block → `LengthOutOfRange` / `BadMagic` / `OutOfRange`. Console index with no installed console → `NotFound`. A `Handle` wire naming no descriptor of the caller → `NotFound`; one whose direction cannot serve its slot → `PermissionDenied`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
 | `mem_pin`       | checks the caller's pinned footprint (mapped address space + committed stack, the one shared accounting) against its effective `pinned-memory-bytes` soft bound under one registry write guard, then stores the pin mark against the kernel-trusted caller id — idempotent: an already-pinned caller is in the requested state | Footprint past the soft bound → `OutOfRange`. Otherwise `Ok(0)`. |
@@ -1335,9 +1335,9 @@ contract the `irq_wait` timeout loop relies on. Tightening or relaxing
 the granularity changes only that one constant (`AGENTS.md` §5.7 —
 security by default).
 
-The first-party Rust wrapper is `rustos_rt::clock_get` (the raw
+The first-party Rust wrapper is `tairix_rt::clock_get` (the raw
 nanosecond reading, no coarsening of its own). Userland code that needs
-a *timed wait* rather than a bare reading uses `rustos_rt::ClockDelay`,
+a *timed wait* rather than a bare reading uses `tairix_rt::ClockDelay`,
 the one userland [`Delay`](../abi/driver_traits.md) implementation
 (`delay_us` parks cooperatively via `clock_get` + `yield`, never a hard
 spin, `AGENTS.md` §2.1; `now_us` floors the reading to whole
@@ -1358,19 +1358,19 @@ pipeline audits it.
 copy path, `PLAN.md` Stage 7). For a bound endpoint it bounds `len`
 against the port's `max_payload`, stages the payload through the
 validated `copy_from_user` boundary
-([`rustos_kernel_mem::copy_in`](./memory.md#3a-user-memory-copy-uaccess),
+([`tairix_kernel_mem::copy_in`](./memory.md#3a-user-memory-copy-uaccess),
 reached via `with_caller_aspace`), and hands it to `Port::send`, which
 applies the per-send capability check (`AGENTS.md` §5.2). A faulting
 user pointer — or a caller with no registered address space (a kernel
 task, or one withdrawn on `exit`) — fails closed with `BadAddress`, the
-RustOS `EFAULT`; the kernel returns that one code for every
+TAIRiX `EFAULT`; the kernel returns that one code for every
 faulting-pointer reason so it cannot be used as a memory-layout oracle
 (`AGENTS.md` §19.1). A failed send enqueues nothing. The first-party
-Rust wrapper is `rustos_rt::ipc_send`; a spawned driver process uses it
+Rust wrapper is `tairix_rt::ipc_send`; a spawned driver process uses it
 to report its `register()` outcome — a
 [`DriverRegisterReply`](../abi/driver_traits.md#driverregisterreply) —
 to the reply endpoint its host handed it through its startup arguments
-(`rustos_rt::arg`, `PLAN.md` Stage 4.HW).
+(`tairix_rt::arg`, `PLAN.md` Stage 4.HW).
 
 `ipc_recv` is now **fully wired** (increment D.2 of the staged
 user-memory copy path, `PLAN.md` Stage 7). For a bound endpoint it
@@ -1378,12 +1378,12 @@ delivers the head `Port` message through a **peek/commit**:
 `Port::recv_with` holds the mailbox lock while the handler copies the
 payload into the caller's buffer over the validated `copy_to_user`
 boundary
-([`rustos_kernel_mem::copy_out`](./memory.md#3a-user-memory-copy-uaccess),
+([`tairix_kernel_mem::copy_out`](./memory.md#3a-user-memory-copy-uaccess),
 reached via `with_caller_aspace`) and dequeues the message **only** when
 that copy succeeds, so a faulting pointer or an undersized buffer leaves
 the message queued for a retry rather than dropping it (`AGENTS.md`
 §5.4, fail closed). A bound but momentarily empty endpoint returns
-`WouldBlock` (the RustOS `EAGAIN`) — retryable and distinct from the
+`WouldBlock` (the TAIRiX `EAGAIN`) — retryable and distinct from the
 `NotFound` an unbound endpoint returns; a buffer smaller than the
 message returns `BufferTooSmall`; a faulting buffer, or a caller with no
 registered address space, fails closed with the same `BadAddress`
@@ -1436,7 +1436,7 @@ threaded into `KernelDispatchHook` / `KernelSyscallHandlers`, and the
 new `KernelSyscallHandlers::with_caller_aspace(caller, f)` accessor
 resolves `caller.task_id` to the borrowed
 `(&dyn UserAddressSpace, &dyn PhysMap)` pair the
-[`rustos_kernel_mem::uaccess`](./memory.md#3a-user-memory-copy-uaccess)
+[`tairix_kernel_mem::uaccess`](./memory.md#3a-user-memory-copy-uaccess)
 copy path walks, running `f` under the registry's read guard and
 failing closed to `None` for a caller with no registered space. The
 bridge lives in `kernel/core`, so the decoupled dispatcher
@@ -1444,13 +1444,13 @@ bridge lives in `kernel/core`, so the decoupled dispatcher
 §17.4). Increment D wires `ipc_send` / `ipc_recv` / `cap_delegate` /
 `random_get` through this accessor and retires their
 `user_memory_copyin` deferral audits; D.1 landed `ipc_send`, D.2 landed
-`ipc_recv` (both map a faulting copy to `BadAddress`, the RustOS
+`ipc_recv` (both map a faulting copy to `BadAddress`, the TAIRiX
 `EFAULT`; an empty mailbox is `WouldBlock`), and D.3 landed
 `cap_delegate` — it copies the 32-byte `CapabilitySet` in (a faulting
 pointer or absent address space maps to `BadAddress`) and runs the
 `CapTable` delegate path (`AGENTS.md` §5.2: a widening request is
 `DelegationWiden`, an unknown target is `NotFound`). **D.4 landed
-`random_get`**: it draws CSPRNG output from the `rustos_rng::OutputReserve`
+`random_get`**: it draws CSPRNG output from the `tairix_rng::OutputReserve`
 composed into `KernelState` (`rng: RwLock<Box<dyn RandomReserve + Send +
 Sync>>`) and copies it into the caller's buffer through the same
 `copy_to_user` boundary, fixed-staging-buffer chunk at a time. Before the
@@ -1490,7 +1490,7 @@ stub; Stage 3b/3c/3d will add the remaining Tier-1 ports.
 
 | Arch | Module | Instruction | Argument registers |
 | --- | --- | --- | --- |
-| x86_64 | `rustos_arch_x86_64::syscall_entry` | `syscall` / `sysretq` (`IA32_LSTAR`) | `%rdi`, `%rsi`, `%rdx`, `%r10`, `%r8`, `%r9` (number in `%rax`) |
+| x86_64 | `tairix_arch_x86_64::syscall_entry` | `syscall` / `sysretq` (`IA32_LSTAR`) | `%rdi`, `%rsi`, `%rdx`, `%r10`, `%r8`, `%r9` (number in `%rax`) |
 | aarch64 | — (Stage 3b) | `svc #0` | `x0`..=`x5` (number in `x8`) |
 | riscv64 | — (Stage 3c) | `ecall` | `a0`..=`a5` (number in `a7`) |
 | wasm32 | — (Stage 3d) | host-imported function | first six i64 arguments |

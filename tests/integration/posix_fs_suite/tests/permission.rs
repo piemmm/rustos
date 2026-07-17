@@ -8,7 +8,7 @@
 //! The decision never branches on `uid == 0`: an owning user is
 //! granted by its owner triad, not by being uid 0.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 const OWNER_UID: u32 = 1000;
 const OWNER_GID: u32 = 1000;

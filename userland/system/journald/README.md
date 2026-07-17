@@ -1,10 +1,10 @@
-# rustos-journald — journal service dispatch core
+# tairix-journald — journal service dispatch core
 
 Stability tier: **experimental**
 
-`rustos-journald` is the architecture-neutral **dispatch core** of the RustOS
+`tairix-journald` is the architecture-neutral **dispatch core** of the TAIRiX
 journal service. It is the policy layer that turns one framed
-`rustos_abi::log_ingress::LogIngressRequest`, plus the caller's
+`tairix_abi::log_ingress::LogIngressRequest`, plus the caller's
 kernel-attested `Origin`, into an admitted, committed system-log record.
 
 ## What it does
@@ -15,7 +15,7 @@ kernel-attested `Origin`, into an admitted, committed system-log record.
   field set (rejecting any name outside the strict `FieldName` grammar, which
   structurally forbids reserved prefixes), admit the record under the attested
   origin — never a caller claim — commit it to the injected
-  `rustos_log::Journal`, and author a trusted `security` record for any spoof
+  `tairix_log::Journal`, and author a trusted `security` record for any spoof
   attempt (a privileged-stream or reserved-source request), preserving the
   exact claim. Every path fails closed.
 - `store` — the pure segment placement derivation the production filesystem
@@ -25,14 +25,14 @@ kernel-attested `Origin`, into an admitted, committed system-log record.
   Host-tested independently of any syscall.
 
 The persistence engine (`Journal`/`SegmentStore`), the record model, the
-stream/level vocabulary, and the admission authority all live in `rustos-log`;
+stream/level vocabulary, and the admission authority all live in `tairix-log`;
 this crate is the thin, exhaustively-testable broker over them.
 
 ## The `Run` binary
 
 The package is also the freestanding `Run` binary (`src/run.rs`,
-`rustos-journald-run`) installed at `/System/Services/journald`. It links the
-pure-Rust userland runtime `rustos-rt`, and at startup:
+`tairix-journald-run`) installed at `/System/Services/journald`. It links the
+pure-Rust userland runtime `tairix-rt`, and at startup:
 
 - reads its installation identity — the non-secret machine-id
   (`/System/Security/MachineId`) and the optional log-attestation key
@@ -61,5 +61,5 @@ service under `init` and posts live ingress requests over IPC.
 
 ## Layering
 
-`no_std` + `alloc`; depends only on the audited `lib/*` crates `rustos-abi`
-and `rustos-log`. It never links a kernel or driver crate.
+`no_std` + `alloc`; depends only on the audited `lib/*` crates `tairix-abi`
+and `tairix-log`. It never links a kernel or driver crate.

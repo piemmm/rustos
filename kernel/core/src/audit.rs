@@ -2,7 +2,7 @@
 //!
 //! Every architecture-neutral init-time and panic-time decision taken
 //! by the kernel entry crate emits exactly one structured log record
-//! through [`rustos_log`]. The numeric identifiers are part of the
+//! through [`tairix_log`]. The numeric identifiers are part of the
 //! audit contract with external log consumers and
 //! may not be re-used or re-numbered.
 //!
@@ -48,11 +48,11 @@
 //! this file and updating the table in
 //! `docs/src/architecture/kernel.md`.
 
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 /// Audit event identifiers emitted by `kernel/core`.
 ///
-/// The numeric values are part of the stable ABI between RustOS and
+/// The numeric values are part of the stable ABI between TAIRiX and
 /// external log consumers; see the module-level table for the meaning
 /// of each ID.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -112,7 +112,7 @@ pub enum AuditEvent {
     /// A spawn was authorised but building the process image failed.
     ///
     /// Emitted by [`crate::spawn::spawn_and_enter`] when
-    /// [`rustos_kernel_mem::build_process_image`] returns an error (a
+    /// [`tairix_kernel_mem::build_process_image`] returns an error (a
     /// malformed image, an out-of-range segment, or frame exhaustion).
     /// The partially built address space is discarded by the caller
     /// (fail closed).
@@ -125,7 +125,7 @@ pub enum AuditEvent {
     /// when the device manager unloads a driver whose hardware-tree node
     /// vanished. The record carries the torn-down driver `handle`. Tearing
     /// an already-gone handle down is a benign
-    /// [`rustos_abi::Errno::NotFound`] and emits no record (idempotent).
+    /// [`tairix_abi::Errno::NotFound`] and emits no record (idempotent).
     DriverUnloaded,
     /// A task was killed by an unresolvable user-mode fault: the fault
     /// resolver could not back the access, so the task's crash exit
@@ -237,7 +237,7 @@ pub enum AuditEvent {
     /// point on.
     SeatDestroyed,
     /// The kernel CSPRNG output reserve was seeded from the platform
-    /// entropy source ([`rustos_arch_api::PlatformEntropy`]).
+    /// entropy source ([`tairix_arch_api::PlatformEntropy`]).
     ///
     /// Emitted once at boot by [`crate::init`] when the arch port's
     /// hardware entropy source produced enough bytes to seed the reserve.
@@ -255,7 +255,7 @@ pub enum AuditEvent {
     /// kernel never weakens to predictable output; it fails closed. The
     /// record carries a `cause` field naming why.
     EntropyReserveUnseeded,
-    /// The kernel minted the per-boot identifier ([`rustos_abi::BootId`])
+    /// The kernel minted the per-boot identifier ([`tairix_abi::BootId`])
     /// from the seeded CSPRNG output reserve (`PREREQUISITES.md` P-E).
     ///
     /// Emitted once at boot by [`crate::init`] after the reserve is seeded.
@@ -265,7 +265,7 @@ pub enum AuditEvent {
     BootIdMinted,
     /// The kernel could **not** mint the per-boot identifier: the CSPRNG
     /// output reserve was not seeded in time, so the boot id stays
-    /// [`rustos_abi::BootId::UNSET`] and `boot_id_get` fails closed with
+    /// [`tairix_abi::BootId::UNSET`] and `boot_id_get` fails closed with
     /// `EntropyNotReady` (`PREREQUISITES.md` P-E).
     ///
     /// Emitted once at boot by [`crate::init`] on a port whose entropy source
@@ -341,7 +341,7 @@ impl AuditEvent {
     }
 
     /// Short, fixed name used as the `message` field of the emitted
-    /// [`rustos_log::Event`]. Kept under the 120-character convention
+    /// [`tairix_log::Event`]. Kept under the 120-character convention
     /// described in `lib/log` so a single record fits one terminal line.
     #[must_use]
     pub const fn message(self) -> &'static str {

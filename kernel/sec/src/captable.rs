@@ -23,10 +23,10 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use rustos_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE};
-use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
-use rustos_crypto::Ed25519PublicKey;
-use rustos_log::{Field, Sink};
+use tairix_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE};
+use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
+use tairix_crypto::Ed25519PublicKey;
+use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 use crate::identity::{format_hex_u64, format_i32, GroupId, UserId};
@@ -42,10 +42,10 @@ pub struct TaskId(pub u64);
 
 /// Maximum length, in bytes, of a kernel-attested process name.
 ///
-/// Reuses the one process-name bound `rustos_abi` already defines for the
+/// Reuses the one process-name bound `tairix_abi` already defines for the
 /// System Information process record, so the attested audit name and any
 /// reported process name can never disagree on length — a single definition.
-pub const PROC_NAME_MAX: usize = rustos_abi::sysinfo::PROCESS_NAME_MAX;
+pub const PROC_NAME_MAX: usize = tairix_abi::sysinfo::PROCESS_NAME_MAX;
 
 /// A kernel-attested, bounded process name.
 ///
@@ -100,9 +100,9 @@ impl ProcName {
     /// kernel-side (the `spawn` syscall, the driver-store spawn seam):
     ///
     /// * The generic bundle entry point (a final `Run` component,
-    ///   [`rustos_abi::BundleEntry::Run`]) never names a process — every
+    ///   [`tairix_abi::BundleEntry::Run`]) never names a process — every
     ///   bundle shares that leaf. The owning bundle directory's stem names
-    ///   it instead, with a [`rustos_abi::BUNDLE_SUFFIX`] (`.app`) suffix
+    ///   it instead, with a [`tairix_abi::BUNDLE_SUFFIX`] (`.app`) suffix
     ///   stripped, so `/Apps/Example.app/Run` attests `Example` and a
     ///   driver bundle `/System/Drivers/input/usb_kbd/Run` attests
     ///   `usb_kbd`.
@@ -119,13 +119,13 @@ impl ProcName {
         let Some(last) = components.next() else {
             return Self::from_bytes_truncating(path);
         };
-        if last != rustos_abi::BundleEntry::Run.as_str().as_bytes() {
+        if last != tairix_abi::BundleEntry::Run.as_str().as_bytes() {
             return Self::from_bytes_truncating(last);
         }
         match components.next() {
             Some(parent) => {
                 let stem = parent
-                    .strip_suffix(rustos_abi::BUNDLE_SUFFIX.as_bytes())
+                    .strip_suffix(tairix_abi::BUNDLE_SUFFIX.as_bytes())
                     .filter(|stem| !stem.is_empty())
                     .unwrap_or(parent);
                 Self::from_bytes_truncating(stem)
@@ -239,7 +239,7 @@ pub struct TaskCapabilities {
     name: ProcName,
     /// Kernel-attested program path — the exact registry or store-bundle
     /// path the `spawn` handler resolved and admitted this process from,
-    /// recorded so the reserved self-spawn token (`rustos_abi::SPAWN_SELF`)
+    /// recorded so the reserved self-spawn token (`tairix_abi::SPAWN_SELF`)
     /// can re-spawn *this same program* as a parser-sandbox worker without
     /// trusting any caller-supplied spelling (`argv[0]` is data, not
     /// authority). Empty for a process no spawnable path admitted (kernel
@@ -299,15 +299,15 @@ impl TaskCapabilities {
             &[
                 Field {
                     key: "task",
-                    value: rustos_log::FieldValue::Str(task_field),
+                    value: tairix_log::FieldValue::Str(task_field),
                 },
                 Field {
                     key: "uid",
-                    value: rustos_log::FieldValue::Str(uid_field),
+                    value: tairix_log::FieldValue::Str(uid_field),
                 },
                 Field {
                     key: "caps",
-                    value: rustos_log::FieldValue::Str(len_field),
+                    value: tairix_log::FieldValue::Str(len_field),
                 },
             ],
         );
@@ -641,7 +641,7 @@ impl TaskCapabilities {
     /// IPC/syscall site takes after consulting this predicate is the
     /// thing recorded — that lives in the dispatch layer (Stage 2.5).
     #[must_use]
-    pub fn has(&self, cap: rustos_abi::CapabilityId) -> bool {
+    pub fn has(&self, cap: tairix_abi::CapabilityId) -> bool {
         self.effective.contains(cap)
     }
 
@@ -672,7 +672,7 @@ impl TaskCapabilities {
                 AuditEvent::TaskCapabilitiesDelegateWiden,
                 &[Field {
                     key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                 }],
             );
             return Err(Errno::PermissionDenied);
@@ -686,7 +686,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegated,
                     &[Field {
                         key: "task",
-                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Ok(())
@@ -698,7 +698,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegateWiden,
                     &[Field {
                         key: "task",
-                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Err(err)
@@ -743,7 +743,7 @@ impl TaskCapabilities {
                 AuditEvent::TaskCapabilitiesDelegateWiden,
                 &[Field {
                     key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                 }],
             );
             return Err(Errno::PermissionDenied);
@@ -757,7 +757,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegated,
                     &[Field {
                         key: "task",
-                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Ok(())
@@ -769,7 +769,7 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegateWiden,
                     &[Field {
                         key: "task",
-                        value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
                     }],
                 );
                 Err(err)
@@ -782,7 +782,7 @@ impl TaskCapabilities {
     /// Idempotent; if the capability was not held, the call is still
     /// audited (the *attempt* is the security event) but `false` is
     /// returned. Emits one [`AuditEvent::TaskCapabilitiesRevoked`].
-    pub fn revoke<S: Sink + ?Sized>(&mut self, cap: rustos_abi::CapabilityId, audit: &S) -> bool {
+    pub fn revoke<S: Sink + ?Sized>(&mut self, cap: tairix_abi::CapabilityId, audit: &S) -> bool {
         let was_present = self.effective.revoke(cap);
         let mut task_buf = [0u8; 16];
         let mut cap_buf = [0u8; 12];
@@ -792,11 +792,11 @@ impl TaskCapabilities {
             &[
                 Field {
                     key: "task",
-                    value: rustos_log::FieldValue::Str(format_hex_u64(self.task.0, &mut task_buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut task_buf)),
                 },
                 Field {
                     key: "cap",
-                    value: rustos_log::FieldValue::Str(format_i32(
+                    value: tairix_log::FieldValue::Str(format_i32(
                         i32::from(cap.as_u16()),
                         &mut cap_buf,
                     )),
@@ -927,8 +927,8 @@ mod tests {
     use super::*;
     use crate::audit::RecordingSink;
     use ed25519_dalek::{Signer, SigningKey};
-    use rustos_abi::{CapabilityId, ABI_VERSION_CURRENT};
-    use rustos_crypto::Ed25519Signature;
+    use tairix_abi::{CapabilityId, ABI_VERSION_CURRENT};
+    use tairix_crypto::Ed25519Signature;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
         let mut s = CapabilitySet::empty();
@@ -958,7 +958,7 @@ mod tests {
 
     #[test]
     fn proc_id_defaults_to_kernel_sentinel_and_with_proc_id_attaches() {
-        use rustos_abi::ProcId;
+        use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
         let base = TaskCapabilities::derive(TaskId(7), UserId(1000), grant, grant, &sink);
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn parent_proc_id_defaults_to_kernel_sentinel_and_with_parent_attaches() {
-        use rustos_abi::ProcId;
+        use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
         let base = TaskCapabilities::derive(TaskId(9), UserId(1000), grant, grant, &sink);
@@ -1149,7 +1149,7 @@ mod tests {
 
     #[test]
     fn attest_origin_carries_the_attested_primary_gid() {
-        use rustos_abi::ProcId;
+        use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
         let proc = TaskCapabilities::derive(TaskId(44), UserId(1000), grant, grant, &sink)
@@ -1160,7 +1160,7 @@ mod tests {
 
     #[test]
     fn attest_origin_is_built_from_kernel_state() {
-        use rustos_abi::{ProcId, TrustDomain};
+        use tairix_abi::{ProcId, TrustDomain};
         let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
         // A kernel-domain record (no minted proc_id) attests as Kernel.
@@ -1455,7 +1455,7 @@ mod tests {
     // Stage 2.7 follow-up (f2): per-task CapTable registry.
     // ---------------------------------------------------------------
 
-    fn make_caps(task: u64, caps: &[rustos_abi::CapabilityId]) -> TaskCapabilities {
+    fn make_caps(task: u64, caps: &[tairix_abi::CapabilityId]) -> TaskCapabilities {
         let grant = caps_of(caps);
         let sink = RecordingSink::new();
         TaskCapabilities::derive(TaskId(task), UserId(1000), grant, grant, &sink)
@@ -1472,18 +1472,18 @@ mod tests {
     #[test]
     fn captable_insert_then_lookup_returns_record() {
         let mut table = CapTable::new();
-        let caps = make_caps(7, &[rustos_abi::CapabilityId::FS_MOUNT]);
+        let caps = make_caps(7, &[tairix_abi::CapabilityId::FS_MOUNT]);
         assert!(table.insert(caps).is_none());
         assert_eq!(table.len(), 1);
         let got = table.caps_for(TaskId(7)).expect("registered");
-        assert!(got.has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert!(got.has(tairix_abi::CapabilityId::FS_MOUNT));
         assert_eq!(got.task(), TaskId(7));
     }
 
     #[test]
     fn captable_lookup_miss_returns_none() {
         let mut table = CapTable::new();
-        let caps = make_caps(1, &[rustos_abi::CapabilityId::FS_MOUNT]);
+        let caps = make_caps(1, &[tairix_abi::CapabilityId::FS_MOUNT]);
         table.insert(caps);
         assert!(table.caps_for(TaskId(2)).is_none());
     }
@@ -1494,23 +1494,23 @@ mod tests {
         // insert is a real anomaly. Surface it via the return value so
         // a caller can audit / refuse rather than silently lose state.
         let mut table = CapTable::new();
-        table.insert(make_caps(3, &[rustos_abi::CapabilityId::FS_MOUNT]));
-        let displaced = table.insert(make_caps(3, &[rustos_abi::CapabilityId::NET_RAW]));
+        table.insert(make_caps(3, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        let displaced = table.insert(make_caps(3, &[tairix_abi::CapabilityId::NET_RAW]));
         let prior = displaced.expect("first record returned");
-        assert!(prior.has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert!(prior.has(tairix_abi::CapabilityId::FS_MOUNT));
         // The registry now reflects the second insert only.
         assert_eq!(table.len(), 1);
         let current = table.caps_for(TaskId(3)).expect("present");
-        assert!(current.has(rustos_abi::CapabilityId::NET_RAW));
-        assert!(!current.has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert!(current.has(tairix_abi::CapabilityId::NET_RAW));
+        assert!(!current.has(tairix_abi::CapabilityId::FS_MOUNT));
     }
 
     #[test]
     fn captable_remove_returns_and_evicts_record() {
         let mut table = CapTable::new();
-        table.insert(make_caps(9, &[rustos_abi::CapabilityId::FS_MOUNT]));
+        table.insert(make_caps(9, &[tairix_abi::CapabilityId::FS_MOUNT]));
         let evicted = table.remove(TaskId(9)).expect("present before remove");
-        assert!(evicted.has(rustos_abi::CapabilityId::FS_MOUNT));
+        assert!(evicted.has(tairix_abi::CapabilityId::FS_MOUNT));
         assert!(table.is_empty());
         assert!(table.caps_for(TaskId(9)).is_none());
         // Idempotent: a second remove returns None and leaves the
@@ -1529,37 +1529,37 @@ mod tests {
         table.insert(make_caps(
             11,
             &[
-                rustos_abi::CapabilityId::FS_MOUNT,
-                rustos_abi::CapabilityId::NET_RAW,
+                tairix_abi::CapabilityId::FS_MOUNT,
+                tairix_abi::CapabilityId::NET_RAW,
             ],
         ));
         let sink = RecordingSink::new();
         let entry = table.caps_for_mut(TaskId(11)).expect("present");
-        assert!(entry.revoke(rustos_abi::CapabilityId::FS_MOUNT, &sink));
+        assert!(entry.revoke(tairix_abi::CapabilityId::FS_MOUNT, &sink));
         let after = table.caps_for(TaskId(11)).expect("still present");
-        assert!(!after.has(rustos_abi::CapabilityId::FS_MOUNT));
-        assert!(after.has(rustos_abi::CapabilityId::NET_RAW));
+        assert!(!after.has(tairix_abi::CapabilityId::FS_MOUNT));
+        assert!(after.has(tairix_abi::CapabilityId::NET_RAW));
     }
 
     #[test]
     fn captable_stores_multiple_tasks_independently() {
         let mut table = CapTable::new();
-        table.insert(make_caps(1, &[rustos_abi::CapabilityId::FS_MOUNT]));
-        table.insert(make_caps(2, &[rustos_abi::CapabilityId::NET_RAW]));
-        table.insert(make_caps(3, &[rustos_abi::CapabilityId::DRV_LOAD]));
+        table.insert(make_caps(1, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table.insert(make_caps(2, &[tairix_abi::CapabilityId::NET_RAW]));
+        table.insert(make_caps(3, &[tairix_abi::CapabilityId::DRV_LOAD]));
         assert_eq!(table.len(), 3);
         assert!(table
             .caps_for(TaskId(1))
             .expect("1")
-            .has(rustos_abi::CapabilityId::FS_MOUNT));
+            .has(tairix_abi::CapabilityId::FS_MOUNT));
         assert!(table
             .caps_for(TaskId(2))
             .expect("2")
-            .has(rustos_abi::CapabilityId::NET_RAW));
+            .has(tairix_abi::CapabilityId::NET_RAW));
         assert!(table
             .caps_for(TaskId(3))
             .expect("3")
-            .has(rustos_abi::CapabilityId::DRV_LOAD));
+            .has(tairix_abi::CapabilityId::DRV_LOAD));
         // Removing one leaves the others intact (no aliasing).
         table.remove(TaskId(2));
         assert_eq!(table.len(), 2);

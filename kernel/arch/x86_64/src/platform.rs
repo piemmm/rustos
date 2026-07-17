@@ -1,14 +1,14 @@
 //! x86_64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
-//! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
+//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice by
 //! normalising the
 //! ACPI MADT (Multiple APIC Description Table) the firmware exposes into
-//! [`rustos_abi::hwtree`] nodes. This is a tracked *move* of the facts the
+//! [`tairix_abi::hwtree`] nodes. This is a tracked *move* of the facts the
 //! [`crate::acpi`] parser already extracts for SMP bring-up behind the
 //! common HAL trait, not a new parser: the boot path
 //! used to enumerate the Local APIC ids directly; it now also surfaces
-//! them — and the I/O APICs — as a [`rustos_abi::HwNode`] tree.
+//! them — and the I/O APICs — as a [`tairix_abi::HwNode`] tree.
 //!
 //! The MADT is pure byte-slice input ([`crate::acpi::Madt::parse`]), so
 //! discovery is host-testable without a bare-metal target. Locating the
@@ -18,8 +18,8 @@
 //! already-located table bytes.
 
 use crate::acpi::{Madt, MadtEntry};
-use rustos_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
-use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
+use tairix_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// The MMIO window size of an I/O APIC register block (one 4 KiB page:
 /// the index/data register pair lives in the first few bytes, but the
@@ -83,9 +83,9 @@ mod tests {
     extern crate std;
     use super::AcpiDiscovery;
     use crate::acpi::tests::build_madt;
-    use rustos_abi::{HwDeviceClass, HwNode};
-    use rustos_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
     use std::vec::Vec;
+    use tairix_abi::{HwDeviceClass, HwNode};
+    use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
 
     /// One enabled Local APIC (a CPU) and one I/O APIC.
     fn sample_madt() -> Vec<u8> {

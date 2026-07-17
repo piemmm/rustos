@@ -1,9 +1,9 @@
-//! `rustos-cc` — an audited, version-pinned, checksummed C toolchain wrapper.
+//! `tairix-cc` — an audited, version-pinned, checksummed C toolchain wrapper.
 //!
-//! RustOS is a Rust-only OS; this crate does **not** add C to
+//! TAIRiX is a Rust-only OS; this crate does **not** add C to
 //! the codebase. It is host-only build glue that lets a
 //! single QEMU integration test *host* a small C program to prove the
-//! generated `abi-v1` C header, the `ros_sys_*` syscall stub runtime
+//! generated `abi-v1` C header, the `tairix_sys_*` syscall stub runtime
 //! (`lib/abi-sys`), and the crt0 startup object (`lib/crt0`) agree with the
 //! Rust side end to end (`plans/CCOMPAT.md` stage CC5). Hosting a C program is
 //! a different thing from authoring the OS in C.
@@ -22,7 +22,7 @@
 //! * **Checksummed.** Every resolved binary is SHA-256-hashed with the audited
 //!   `lib/crypto`. The digest is recorded for the audit
 //!   trail and, when the caller pins an expected digest (via the
-//!   `RUSTOS_CC_CLANG_SHA256` / `RUSTOS_CC_LLD_SHA256` environment variables),
+//!   `TAIRIX_CC_CLANG_SHA256` / `TAIRIX_CC_LLD_SHA256` environment variables),
 //!   verified — a mismatch fails closed.
 //!
 //! # Targets
@@ -46,7 +46,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rustos_crypto::Sha256Digest;
+use tairix_crypto::Sha256Digest;
 
 /// The exact `clang` version the wrapper accepts. Bumping it is a deliberate,
 /// reviewed change.
@@ -81,16 +81,16 @@ impl Tool {
     /// Environment variable that overrides the binary path.
     fn path_env(self) -> &'static str {
         match self {
-            Tool::Clang => "RUSTOS_CC_CLANG",
-            Tool::Lld => "RUSTOS_CC_LLD",
+            Tool::Clang => "TAIRIX_CC_CLANG",
+            Tool::Lld => "TAIRIX_CC_LLD",
         }
     }
 
     /// Environment variable carrying an optional pinned SHA-256 (hex).
     fn sha_env(self) -> &'static str {
         match self {
-            Tool::Clang => "RUSTOS_CC_CLANG_SHA256",
-            Tool::Lld => "RUSTOS_CC_LLD_SHA256",
+            Tool::Clang => "TAIRIX_CC_CLANG_SHA256",
+            Tool::Lld => "TAIRIX_CC_LLD_SHA256",
         }
     }
 
@@ -194,7 +194,7 @@ impl Toolchain {
     /// Discover, version-check, and checksum `clang` and `ld.lld`.
     ///
     /// Each tool is resolved from its override environment variable
-    /// (`RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD`) or `PATH`, hashed, and checked
+    /// (`TAIRIX_CC_CLANG` / `TAIRIX_CC_LLD`) or `PATH`, hashed, and checked
     /// against the pinned version; if an expected digest is pinned in the
     /// environment it is also verified. The first failure is returned as a
     /// [`CcError`].
@@ -282,7 +282,7 @@ fn resolve_tool(tool: Tool) -> Result<ToolRecord, CcError> {
 /// Resolution order — the "priming" that lets a plain `cargo xtask ci` find the
 /// pinned toolchain with no manual configuration:
 ///
-/// 1. The explicit override (`RUSTOS_CC_CLANG` / `RUSTOS_CC_LLD`). It is
+/// 1. The explicit override (`TAIRIX_CC_CLANG` / `TAIRIX_CC_LLD`). It is
 ///    **authoritative**: if it does not point at a file, or points at the wrong
 ///    version, resolution fails closed rather than silently searching elsewhere
 ///    — an override exists precisely to be obeyed.
@@ -546,10 +546,10 @@ impl fmt::Display for CcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CcError::ToolNotFound { tool, hint } => {
-                write!(f, "rustos-cc: {tool} not found: {hint}")
+                write!(f, "tairix-cc: {tool} not found: {hint}")
             }
             CcError::VersionQuery { tool, message } => {
-                write!(f, "rustos-cc: {tool} version query failed: {message}")
+                write!(f, "tairix-cc: {tool} version query failed: {message}")
             }
             CcError::VersionMismatch {
                 tool,
@@ -557,7 +557,7 @@ impl fmt::Display for CcError {
                 found,
             } => write!(
                 f,
-                "rustos-cc: {tool} version {found} is not the pinned {expected} \
+                "tairix-cc: {tool} version {found} is not the pinned {expected} \
                  (AGENTS.md §12); install the pinned version or update the pin"
             ),
             CcError::ChecksumMismatch {
@@ -566,16 +566,16 @@ impl fmt::Display for CcError {
                 found,
             } => write!(
                 f,
-                "rustos-cc: {tool} SHA-256 {found} does not match the pinned {expected}"
+                "tairix-cc: {tool} SHA-256 {found} does not match the pinned {expected}"
             ),
             CcError::Compile { status, stderr } => {
-                write!(f, "rustos-cc: clang failed ({status:?}):\n{stderr}")
+                write!(f, "tairix-cc: clang failed ({status:?}):\n{stderr}")
             }
             CcError::Link { status, stderr } => {
-                write!(f, "rustos-cc: ld.lld failed ({status:?}):\n{stderr}")
+                write!(f, "tairix-cc: ld.lld failed ({status:?}):\n{stderr}")
             }
             CcError::Io { context, source } => {
-                write!(f, "rustos-cc: I/O error {context}: {source}")
+                write!(f, "tairix-cc: I/O error {context}: {source}")
             }
         }
     }
@@ -604,10 +604,10 @@ mod tests {
 
     #[test]
     fn tool_env_var_names_are_namespaced() {
-        assert_eq!(Tool::Clang.path_env(), "RUSTOS_CC_CLANG");
-        assert_eq!(Tool::Lld.path_env(), "RUSTOS_CC_LLD");
-        assert_eq!(Tool::Clang.sha_env(), "RUSTOS_CC_CLANG_SHA256");
-        assert_eq!(Tool::Lld.sha_env(), "RUSTOS_CC_LLD_SHA256");
+        assert_eq!(Tool::Clang.path_env(), "TAIRIX_CC_CLANG");
+        assert_eq!(Tool::Lld.path_env(), "TAIRIX_CC_LLD");
+        assert_eq!(Tool::Clang.sha_env(), "TAIRIX_CC_CLANG_SHA256");
+        assert_eq!(Tool::Lld.sha_env(), "TAIRIX_CC_LLD_SHA256");
     }
 
     #[test]
@@ -628,9 +628,9 @@ mod tests {
     fn missing_tool_when_path_override_is_bogus() {
         // This is the only test that touches this variable, so the
         // set/remove pair cannot race another test's expectations.
-        std::env::set_var("RUSTOS_CC_CLANG", "/definitely/not/a/real/clang");
+        std::env::set_var("TAIRIX_CC_CLANG", "/definitely/not/a/real/clang");
         let err = select_path(Tool::Clang).expect_err("bogus override must fail");
-        std::env::remove_var("RUSTOS_CC_CLANG");
+        std::env::remove_var("TAIRIX_CC_CLANG");
         assert!(matches!(err, CcError::ToolNotFound { .. }));
     }
 
@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn release_bin_dirs_find_only_the_pinned_version() {
         let base =
-            std::env::temp_dir().join(format!("rustos-cc-release-bin-dirs-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tairix-cc-release-bin-dirs-{}", std::process::id()));
         std::fs::create_dir_all(base.join("LLVM-22.1.8-Linux-X64/bin")).unwrap();
         std::fs::create_dir_all(base.join("LLVM-21.1.0-Linux-X64/bin")).unwrap();
 
@@ -754,7 +754,7 @@ mod tests {
         assert!(hint.contains("/usr/bin/clang"));
         assert!(hint.contains("brew install llvm"));
         assert!(hint.contains("apt install clang-22"));
-        assert!(hint.contains("RUSTOS_CC_CLANG"));
+        assert!(hint.contains("TAIRIX_CC_CLANG"));
 
         let lld_hint = Tool::Lld.install_hint(&[]);
         assert!(lld_hint.contains("brew install lld"));

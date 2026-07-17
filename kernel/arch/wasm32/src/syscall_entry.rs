@@ -8,7 +8,7 @@
 //! owns the architecture-specific slice of that path:
 //!
 //! * Marshalling the argument words into the architecture-neutral
-//!   `rustos_abi` `[u64; SYSCALL_MAX_ARGS]` layout — the same layout the
+//!   `tairix_abi` `[u64; SYSCALL_MAX_ARGS]` layout — the same layout the
 //!   bare-metal ports build (one ABI, no duplication).
 //! * The dispatch callback the entry forwards each syscall to, mirroring
 //!   the bare-metal ports' design. The architecture-neutral validation /
@@ -23,9 +23,9 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use rustos_abi::SYSCALL_MAX_ARGS;
+use tairix_abi::SYSCALL_MAX_ARGS;
 
-/// Pack the syscall argument words into the canonical `rustos_abi`
+/// Pack the syscall argument words into the canonical `tairix_abi`
 /// layout. The order matches the ABI definition pinned in
 /// `lib/abi/src/syscalls.rs`, identical to the bare-metal ports'
 /// `pack_raw_args` (one ABI).
@@ -80,7 +80,7 @@ fn clear_dispatch_for_tests() {
 
 /// Dispatch a syscall to the installed callback.
 ///
-/// Packs `args` into the canonical `rustos_abi` layout and forwards them
+/// Packs `args` into the canonical `tairix_abi` layout and forwards them
 /// with `number` to the dispatch callback, returning its result. Returns
 /// `None` when no callback is installed — the entry treats that as a
 /// fail-closed condition, exactly as the bare-metal

@@ -1,6 +1,6 @@
 //! Authenticated encryption with associated data (AEAD).
 //!
-//! The single AEAD exposed by RustOS is ChaCha20-Poly1305 (RFC 8439). It
+//! The single AEAD exposed by TAIRiX is ChaCha20-Poly1305 (RFC 8439). It
 //! backs the kernel's encrypted-swap layer: any page of
 //! anonymous, stack, or capability-bearing memory the kernel writes to a
 //! swap device is sealed here first, so a swap device read back off the
@@ -70,7 +70,7 @@ pub enum AeadError {
 ///
 /// Returns [`AeadError::Authentication`] only if the upstream cipher
 /// rejects the inputs (e.g. a message longer than the cipher's
-/// `64 GiB`-per-nonce limit). For the page-sized buffers RustOS seals this
+/// `64 GiB`-per-nonce limit). For the page-sized buffers TAIRiX seals this
 /// cannot occur in practice, but the path is fallible rather than panicking.
 pub fn seal(
     key: &AeadKey,

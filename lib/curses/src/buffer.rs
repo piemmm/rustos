@@ -12,7 +12,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_vt::Cell;
+use tairix_vt::Cell;
 
 use crate::geom::{Pos, Size};
 

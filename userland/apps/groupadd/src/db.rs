@@ -6,15 +6,15 @@
 //! transport seam, so every decision is host-tested and the freestanding
 //! `Run` binary adds only the raw syscall. The auto-allocated gid comes
 //! from the one `lib/users` policy definition
-//! ([`rustos_users::next_id`], interactive-user range), never a private
+//! ([`tairix_users::next_id`], interactive-user range), never a private
 //! copy.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::users_admin::{decode_group_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST};
-use rustos_abi::Errno;
-use rustos_users::{next_id, IdRange, MAX_GROUPS_DB_LEN};
+use tairix_abi::users_admin::{decode_group_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST};
+use tairix_abi::Errno;
+use tairix_users::{next_id, IdRange, MAX_GROUPS_DB_LEN};
 
 use crate::io::{GroupDb, GroupSpec};
 
@@ -94,10 +94,10 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::users_admin::{
+    use tairix_abi::users_admin::{
         GroupEntry, ListResponseBuilder, UsersAdminRequest, USERS_ADMIN_VERSION,
     };
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     /// An in-memory `users_admin` endpoint: serves `ListGroups` from a
     /// `(name, gid)` table and records every decoded `CreateGroup`.

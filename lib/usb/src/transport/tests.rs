@@ -18,10 +18,10 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::{drive_urb, frame_completion, UrbCall, UrbClient, UrbEngine};
-use rustos_abi::usb_urb::{
+use tairix_abi::usb_urb::{
     UrbRequest, UsbDirection, UsbTransferType, URB_COMPLETION_LEN, URB_REQUEST_LEN,
 };
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::{DriverError, Errno};
 
 /// An arbitrary shared-buffer handle the URB names; the in-process transport
 /// ignores it and uses its own shared buffer (it stands in for the mapped
@@ -189,7 +189,7 @@ fn serve_one(urb: &UrbRequest, buffer_len: usize, engine: &mut MockEngine) -> Re
         Err(err) => Err(err),
     };
     let len = frame_completion(&mut reply, result).expect("frames a reply");
-    rustos_abi::usb_urb::decode_completion(&reply[..len])
+    tairix_abi::usb_urb::decode_completion(&reply[..len])
 }
 
 #[test]
@@ -495,7 +495,7 @@ fn malformed_request_is_framed_in_band() {
     };
     let len = frame_completion(&mut reply, result).expect("frames a reply");
     assert_eq!(
-        rustos_abi::usb_urb::decode_completion(&reply[..len]),
+        tairix_abi::usb_urb::decode_completion(&reply[..len]),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(engine.control_calls, 0);

@@ -38,7 +38,7 @@ le cifre di memoria in MiB. La riga della memoria richiede
 sessione continua.
 
 La riga `%Cpu(s)` mostra la quota dell'ultimo intervallo che tutte le
-CPU insieme hanno trascorso occupate (eseguendo task) e inattive. RustOS
+CPU insieme hanno trascorso occupate (eseguendo task) e inattive. TAIRiX
 contabilizza solo tempo occupato e inattivo: dove il `top` GNU scompone
 la quota occupata in user/system/nice/iowait, questa riga mostra
 deliberatamente le due cifre reali.
@@ -70,7 +70,7 @@ riportano:
   automatici, in secondi con frazione facoltativa (si conserva solo la
   prima cifra decimale, i decimi): `top -d 1.5` aggiorna ogni
   1,5 secondi. Predefinito 3,0. Il `top` GNU accetta un ritardo zero e
-  aggiorna il più velocemente possibile; RustOS non gira mai a vuoto,
+  aggiorna il più velocemente possibile; TAIRiX non gira mai a vuoto,
   quindi uno zero è portato al minimo di 0,1 s.
 - `-h, -?` — mostrare la guida breve di questo comando e uscire. In una
   sessione in corso, gli stessi tasti alternano invece il riepilogo dei

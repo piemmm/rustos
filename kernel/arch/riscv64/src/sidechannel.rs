@@ -1,9 +1,9 @@
 //! riscv64 side-channel mitigations.
 //!
 //! Implements the Arch HAL
-//! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
+//! [`SideChannelMitigation`](tairix_arch_api::SideChannelMitigation)
 //! surface for
-//! riscv64. The RISC-V cores RustOS targets — the QEMU `virt` board and
+//! riscv64. The RISC-V cores TAIRiX targets — the QEMU `virt` board and
 //! the SiFive U-series (U54 / U74) — execute strictly **in order**: they
 //! do not continue past a faulting load or a mispredicted branch, so the
 //! transient-execution side channels that drive Meltdown, Spectre, MDS,
@@ -22,23 +22,23 @@
 //!
 //! * **Kernel/user address-space isolation (KPTI)** — Meltdown requires
 //!   speculation past a faulting privileged load; the in-order cores
-//!   RustOS targets never do, so there is no Meltdown-class leak.
+//!   TAIRiX targets never do, so there is no Meltdown-class leak.
 //!   Kernel/user separation is still enforced by ordinary page-table
 //!   permissions (the `U` bit), which is not the KPTI control.
 //! * **Context-switch microarchitectural-buffer flush** — MDS / L1TF /
 //!   MMIO-stale-data are Intel store/fill/load-buffer sampling flaws; the
-//!   RISC-V cores RustOS targets do not expose those buffers.
+//!   RISC-V cores TAIRiX targets do not expose those buffers.
 //! * **Context-switch indirect-branch-predictor barrier** — exploiting a
 //!   poisoned branch predictor needs transient execution past the
-//!   mispredict; the in-order cores RustOS targets do not provide that
+//!   mispredict; the in-order cores TAIRiX targets do not provide that
 //!   window.
 //!
-//! Were RustOS to add an out-of-order RISC-V core (a future Tier-2
+//! Were TAIRiX to add an out-of-order RISC-V core (a future Tier-2
 //! target), this profile must be revisited per that core's errata
 //! (a no-op is permitted only where the silicon is
 //! provably not vulnerable).
 
-use rustos_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
+use tairix_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
 
 /// riscv64 implementation of the Arch HAL side-channel surface.
 ///
@@ -59,18 +59,18 @@ impl SideChannel {
         MitigationProfile {
             address_space_isolation: Mitigation::NotVulnerable(
                 "Meltdown needs speculation past a faulting load; the in-order RISC-V cores \
-                 RustOS targets (QEMU virt, SiFive U54/U74) never do, and page-permission \
+                 TAIRiX targets (QEMU virt, SiFive U54/U74) never do, and page-permission \
                  isolation still applies",
             ),
             syscall_entry_barrier: Mitigation::Applied,
             syscall_exit_barrier: Mitigation::Applied,
             context_switch_buffer_flush: Mitigation::NotVulnerable(
                 "MDS / L1TF / MMIO-stale-data are Intel store/fill/load-buffer sampling flaws; \
-                 the RISC-V cores RustOS targets do not expose those buffers",
+                 the RISC-V cores TAIRiX targets do not expose those buffers",
             ),
             context_switch_indirect_branch_barrier: Mitigation::NotVulnerable(
                 "exploiting a poisoned branch predictor needs transient execution past the \
-                 mispredict; the in-order RISC-V cores RustOS targets provide no such window",
+                 mispredict; the in-order RISC-V cores TAIRiX targets provide no such window",
             ),
         }
     }
@@ -91,7 +91,7 @@ impl SideChannelMitigation for SideChannel {
 
     fn context_switch_barrier(&self) {
         // The buffer flush and the indirect-branch barrier are justified
-        // no-ops on the in-order RISC-V cores RustOS targets (see the
+        // no-ops on the in-order RISC-V cores TAIRiX targets (see the
         // module docs); the ordering fence is still emitted so the switch
         // boundary is serialised.
         ordering_fence();
@@ -118,7 +118,7 @@ fn ordering_fence() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_arch_api::sidechannel::conformance;
+    use tairix_arch_api::sidechannel::conformance;
 
     #[test]
     fn passes_side_channel_conformance() {
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(profile.syscall_exit_barrier, Mitigation::Applied);
 
         // Every other slot is a justified no-op on the in-order cores
-        // RustOS targets — so the riscv64 port has no outstanding
+        // TAIRiX targets — so the riscv64 port has no outstanding
         // side-channel gap and is release-ready.
         assert!(matches!(
             profile.address_space_isolation,

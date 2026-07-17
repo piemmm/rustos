@@ -11,13 +11,13 @@
 //! EL1/GICv2 analogue of `sched_drive_qemu_riscv64`:
 //!
 //! 1. **Real context switch.** With interrupts still disabled, it seeds a
-//!    second `rustos_arch_aarch64::context::TaskCtx` over a private stack
+//!    second `tairix_arch_aarch64::context::TaskCtx` over a private stack
 //!    and `switch`es into it; the inbound task records that it ran and
 //!    `switch`es straight back, proving a bidirectional bare-metal task
 //!    switch round-trips.
 //! 2. **Live scheduler.** It builds a real
-//!    `rustos_kernel_sched_mlfq::Scheduler` over the arch port's
-//!    `rustos_arch_aarch64::Aarch64Arch`, publishes it, and installs the
+//!    `tairix_kernel_sched_mlfq::Scheduler` over the arch port's
+//!    `tairix_arch_aarch64::Aarch64Arch`, publishes it, and installs the
 //!    `preempt` generic-timer callback **and** the GICv2 IPI (SGI)
 //!    callback so both drive `Scheduler::on_timer_tick`.
 //! 3. **Timer + IPI + dispatch.** It installs the EL1 vector table and
@@ -52,8 +52,8 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links the `rustos-arch-aarch64` port and the
-//! `rustos-kernel-sched-mlfq` policy directly and supplies its own
+//! It links the `tairix-arch-aarch64` port and the
+//! `tairix-kernel-sched-mlfq` policy directly and supplies its own
 //! `kernel_main`, so the wiring is exercised without the full
 //! `kernel_core::kernel_main` init pipeline (which halts after boot and
 //! keeps its scheduler private). The QEMU-exit shortcut lives in this
@@ -77,17 +77,17 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use rustos_arch_aarch64::context::TaskCtx;
-    use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
-    use rustos_arch_aarch64::{
+    use tairix_arch_aarch64::context::TaskCtx;
+    use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
+    use tairix_arch_aarch64::{
         context, enable_fp_el1, exceptions, gic, halt_current_cpu, handle_panic_via_serial,
         preempt, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
-    use rustos_arch_api::{CpuId, SchedulerArch};
-    use rustos_fdt::Fdt;
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
-    use rustos_log::{log, Event, EventId, Level};
+    use tairix_arch_api::{CpuId, SchedulerArch};
+    use tairix_fdt::Fdt;
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
+    use tairix_log::{log, Event, EventId, Level};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`): the GICv2 base and the timer frequency are read
@@ -223,7 +223,7 @@ mod kernel {
     /// The generic-timer scheduler-tick callback. Drives the live
     /// scheduler's per-CPU preemption counter through
     /// [`Scheduler::on_timer_tick`]. ISR-safe: `on_timer_tick` is wait-free
-    /// (one bounds check + one `fetch_add`). RustOS is tickless: the one-shot does not auto-reload, so the
+    /// (one bounds check + one `fetch_add`). TAIRiX is tickless: the one-shot does not auto-reload, so the
     /// callback re-arms the next one-shot itself (standing in for the
     /// scheduler's `set_preemption`) so the timer keeps driving the live
     /// scheduler while this CPU idles in `wfi` below.
@@ -263,7 +263,7 @@ mod kernel {
     /// Forward to the shared aarch64 panic bridge (parks the core; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_sched_drive_aarch64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_sched_drive_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -281,7 +281,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_aarch64_main`).
+    /// calls (via `tairix_arch_aarch64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         // SAFETY: this is the boot CPU's first Rust action, before logging
@@ -344,8 +344,8 @@ mod kernel {
         // 2. Build the live scheduler over the arch port and publish it for
         //    the IRQ-path callbacks.
         // Per-CPU bookkeeping backing for this single-CPU vertical.
-        static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
-            rustos_arch_aarch64::Aarch64ArchStorage::new();
+        static ARCH_STORAGE: tairix_arch_aarch64::Aarch64ArchStorage<1> =
+            tairix_arch_aarch64::Aarch64ArchStorage::new();
         let arch = Arc::new(Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz));
         let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), Arc::clone(&arch)) else {
             qemu_exit::exit_failure(FAIL_SCHED_NEW);

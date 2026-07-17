@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use rustos_devids::{textdb, DbKind, DevIds};
+use tairix_devids::{textdb, DbKind, DevIds};
 
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

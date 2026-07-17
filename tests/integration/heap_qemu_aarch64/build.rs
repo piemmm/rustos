@@ -13,15 +13,15 @@
 //!    re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    heap_program`) **position-independent** for the freestanding aarch64
-//!    target (its own `program.ld` roots `rustos-rt`'s `_start`), into a private
+//!    target (its own `program.ld` roots `tairix-rt`'s `_start`), into a private
 //!    target directory under `OUT_DIR`. The fixture needs no region pinning: the
-//!    `rustos-rt` heap owns its own arena layout, so the program only uses
+//!    `tairix-rt` heap owns its own arena layout, so the program only uses
 //!    `alloc` types and the allocator issues the `mem_map`/`mem_unmap` syscalls.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
+//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
+//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -48,7 +48,7 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -73,7 +73,7 @@ fn main() {
 
         // One CPU: this is the single-core live-scheduler slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
         let rxe = build_and_convert_program(manifest_dir, &out_dir, &program_dir);
@@ -102,7 +102,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
+    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
     // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
@@ -125,7 +125,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-heap",
+            "tairix-test-heap",
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -137,12 +137,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .expect("spawn cargo to build the heap fixture program");
     assert!(status.success(), "building the heap fixture program failed");
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-test-heap");
+    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-heap");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert the heap fixture program ELF into an rxe image")

@@ -6,7 +6,7 @@
 
 use crate::capabilities::Capabilities;
 
-/// A terminal RustOS recognises by its `TERM` value.
+/// A terminal TAIRiX recognises by its `TERM` value.
 ///
 /// [`TermType::Dumb`] and [`TermType::Vt100`] are the fail-closed fallbacks
 /// (`plans/CURSES.md` §1): an unknown or missing `TERM` degrades to `Dumb`, and

@@ -8,8 +8,8 @@
 //! the administrator configured `os.loginType graphical` *and* a graphical
 //! session is available.
 
-use rustos_abi::Errno;
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_abi::Errno;
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::decfmt::DecBuf;
 use crate::error::LoginError;
@@ -198,7 +198,7 @@ impl<'a> Login<'a> {
             events::AUTH_FAILED,
             &[Field {
                 key: "user",
-                value: rustos_log::FieldValue::Str(username),
+                value: tairix_log::FieldValue::Str(username),
             }],
         );
     }
@@ -210,7 +210,7 @@ impl<'a> Login<'a> {
             events::LOCKED_OUT,
             &[Field {
                 key: "attempts",
-                value: rustos_log::FieldValue::Str(
+                value: tairix_log::FieldValue::Str(
                     attempts.format(i128::from(self.cfg.max_attempts)),
                 ),
             }],
@@ -226,19 +226,19 @@ impl<'a> Login<'a> {
             &[
                 Field {
                     key: "user",
-                    value: rustos_log::FieldValue::Str(username),
+                    value: tairix_log::FieldValue::Str(username),
                 },
                 Field {
                     key: "uid",
-                    value: rustos_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
+                    value: tairix_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
                 },
                 Field {
                     key: "session",
-                    value: rustos_log::FieldValue::Str(kind.label()),
+                    value: tairix_log::FieldValue::Str(kind.label()),
                 },
                 Field {
                     key: "granted_caps",
-                    value: rustos_log::FieldValue::Str(
+                    value: tairix_log::FieldValue::Str(
                         caps.format(i128::from(user.capabilities.len())),
                     ),
                 },
@@ -260,19 +260,19 @@ impl<'a> Login<'a> {
             &[
                 Field {
                     key: "user",
-                    value: rustos_log::FieldValue::Str(username),
+                    value: tairix_log::FieldValue::Str(username),
                 },
                 Field {
                     key: "uid",
-                    value: rustos_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
+                    value: tairix_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
                 },
                 Field {
                     key: "session",
-                    value: rustos_log::FieldValue::Str(outcome.kind.label()),
+                    value: tairix_log::FieldValue::Str(outcome.kind.label()),
                 },
                 Field {
                     key: "exit_code",
-                    value: rustos_log::FieldValue::Str(code.format(i128::from(outcome.exit_code))),
+                    value: tairix_log::FieldValue::Str(code.format(i128::from(outcome.exit_code))),
                 },
             ],
         );
@@ -286,15 +286,15 @@ impl<'a> Login<'a> {
             &[
                 Field {
                     key: "user",
-                    value: rustos_log::FieldValue::Str(username),
+                    value: tairix_log::FieldValue::Str(username),
                 },
                 Field {
                     key: "uid",
-                    value: rustos_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
+                    value: tairix_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
                 },
                 Field {
                     key: "session",
-                    value: rustos_log::FieldValue::Str(kind.label()),
+                    value: tairix_log::FieldValue::Str(kind.label()),
                 },
             ],
         );
@@ -306,7 +306,7 @@ impl<'a> Login<'a> {
             events::CONSOLE_ERROR,
             &[Field {
                 key: "stage",
-                value: rustos_log::FieldValue::Str(stage),
+                value: tairix_log::FieldValue::Str(stage),
             }],
         );
     }
@@ -338,9 +338,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::Cell;
     use core::cell::RefCell;
-    use rustos_abi::{CapabilityId, Errno};
-    use rustos_caps::CapabilitySet;
-    use rustos_log::{Event, EventId, Level, Sink};
+    use tairix_abi::{CapabilityId, Errno};
+    use tairix_caps::CapabilitySet;
+    use tairix_log::{Event, EventId, Level, Sink};
 
     /// View that replays scripted input lines and records the semantic
     /// calls the machine makes (rounds begun, failures noted, hand-offs).

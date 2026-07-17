@@ -105,7 +105,7 @@ space. It owns a page-table object and serialises `map` / `unmap` /
 
 The architecture boundary is the Arch HAL page-table surface, not a
 `kernel/mem`-local trait: [`PageTable`] is merely the bound alias
-`rustos_arch_api::mmu::AddressSpace + rustos_arch_api::tlb::TlbShootdown`,
+`tairix_arch_api::mmu::AddressSpace + tairix_arch_api::tlb::TlbShootdown`,
 so `kernel/mem` names only the HAL vocabulary (`AGENTS.md` §2.2,
 `plans/WIRING.md` Stage W5b-2). The HAL surface the façade drives:
 
@@ -130,7 +130,7 @@ physically contiguous buddy chunk, so a display frame containing hundreds of
 The system-wide
 counterpart — invalidating a stale translation on every other online CPU
 after a shared mapping is torn down — is a sibling Arch HAL slice,
-`rustos_arch_api::xtlb::CrossCpuTlbShootdown`, implemented on each port's
+`tairix_arch_api::xtlb::CrossCpuTlbShootdown`, implemented on each port's
 `SchedulerArch` handle rather than on the page-table object (see
 [the modularity page](./modularity.md) and `plans/WIRING.md` Stage W13).
 
@@ -149,7 +149,7 @@ these into native page-table bits during Stage 3.
 **Backing a port's page tables with the frame allocator
 (`FrameTableSource`).** A port's `AddressSpace` is built from 4 KiB
 page-table frames it draws through the Arch HAL `PageTableFrames` seam
-(`rustos_arch_api::frames`). The boot/bootstrap source is the static
+(`tairix_arch_api::frames`). The boot/bootstrap source is the static
 `PageTablePool` each port ships; the production source is
 [`FrameTableSource`], which draws a physical frame from the
 `FrameAllocator`, maps it to a CPU view through the direct
@@ -188,7 +188,7 @@ unmapped, its frame **zeroed** through the direct map so a dead
 process's bytes are never recycled readable, and freed — and (3) hands
 the page-table hierarchy itself back post-order (children before
 parents, the root last) through the one shared
-`rustos_arch_api::frames::reclaim_hierarchy` walk each port's
+`tairix_arch_api::frames::reclaim_hierarchy` walk each port's
 `reclaim_table_frames` drives, so every stage-1 table frame returns to
 the `FrameTableSource` for reuse. Teardown is SMP-safe by an invariant
 the dispatcher maintains: after every switch-back from a user task the
@@ -251,7 +251,7 @@ round-trip, and every fail-closed branch are exercised with
 `HostPageTable` + `SimPhysMap`.
 
 **The byte move itself runs under the architecture port's hardware
-fault window** (`rustos_arch_api::uaccess`, the `copy_from_user`
+fault window** (`tairix_arch_api::uaccess`, the `copy_from_user`
 page-fault fix-up of `tests/SECURITY.md` §5). Each MMU port publishes a
 fault-windowed span-copy routine into a set-once Arch HAL slot at its
 trap-vector install chokepoint (riscv64 `trap::install_trap_vector`,
@@ -274,7 +274,7 @@ riscv64 (a misaligned `ld`/`sd` may trap on real silicon, so the window
 only ever absorbs page faults). Three QEMU verticals
 (`tests/integration/uaccess_fault_qemu_{riscv64,aarch64,x86_64}`) take
 real in-window faults on both the read and write side through the one
-shared `rustos_arch_api::uaccess::conformance` checks and PASS only
+shared `tairix_arch_api::uaccess::conformance` checks and PASS only
 when each surfaces as an error with the CPU still running.
 
 This module is the foundational primitive of the staged user-memory
@@ -283,9 +283,9 @@ work: the per-task address-space registry, the syscall wiring of
 per-architecture page-fault fix-up above all build on it (see
 `PLAN.md`).
 
-[`uaccess`]: ../../rustos_kernel_mem/uaccess/index.html
-[`copy_in`]: ../../rustos_kernel_mem/uaccess/fn.copy_in.html
-[`copy_out`]: ../../rustos_kernel_mem/uaccess/fn.copy_out.html
+[`uaccess`]: ../../tairix_kernel_mem/uaccess/index.html
+[`copy_in`]: ../../tairix_kernel_mem/uaccess/fn.copy_in.html
+[`copy_out`]: ../../tairix_kernel_mem/uaccess/fn.copy_out.html
 
 ## 3b. Per-task address-space registry
 
@@ -335,13 +335,13 @@ accessor in `kernel/core` is deliberate: the decoupled dispatcher
 `kernel/mem` (`AGENTS.md` §17.4). The handler-side copies that consume
 it (`ipc_send` / `ipc_recv` / `cap_delegate` / `random_get` through
 `copy_in` / `copy_out`) are increment D, now **fully landed** (D.1–D.4;
-`random_get` draws from the `rustos_rng::OutputReserve` composed into
+`random_get` draws from the `tairix_rng::OutputReserve` composed into
 `KernelState` and copies it out, see `PLAN.md`). Because the
 copy entry points already accept `&dyn UserAddressSpace`, the pair that
 `with_caller_aspace` yields drives them directly, with no concrete
 `AddressSpace<P>` re-erasure at the boundary.
 
-[`UserAddressSpace`]: ../../rustos_kernel_mem/vmm/trait.UserAddressSpace.html
+[`UserAddressSpace`]: ../../tairix_kernel_mem/vmm/trait.UserAddressSpace.html
 
 ## 4. Sensitive-region API
 
@@ -418,11 +418,11 @@ A future syscall wrapper maps gate failures to `Errno` via
 | `Pool(Alloc)` / `Pool(SizeUnsupported)` | `LengthOutOfRange` |
 | Other internal pool failures | `OutOfRange` |
 
-[`AuditEvent::DmaAllocated`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated
-[`AuditEvent::DmaAllocDenied`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied
-[DmaPool]: ../../rustos_kernel_mem/dma/struct.DmaPool.html
-[DmaWindowMap]: ../../rustos_kernel_mem/dma/struct.DmaWindowMap.html
-[CapabilityId::MEM_DMA]: ../../rustos_abi/capability/struct.CapabilityId.html#associatedconstant.MEM_DMA
+[`AuditEvent::DmaAllocated`]: ../../tairix_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated
+[`AuditEvent::DmaAllocDenied`]: ../../tairix_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied
+[DmaPool]: ../../tairix_kernel_mem/dma/struct.DmaPool.html
+[DmaWindowMap]: ../../tairix_kernel_mem/dma/struct.DmaWindowMap.html
+[CapabilityId::MEM_DMA]: ../../tairix_abi/capability/struct.CapabilityId.html#associatedconstant.MEM_DMA
 
 The guarded carve itself lives in the borrowed-space
 [`DmaWindowMap`][DmaWindowMap] (its virtual-window base, slot bitmap, and
@@ -492,7 +492,7 @@ The mapper is **capability-agnostic**; the gate is
 [Security audit catalogue](./security.md)). `MmioGateError::as_errno`
 maps refusals to `Errno` exactly as the DMA gate does.
 
-[CapabilityId::MMIO_MAP]: ../../rustos_abi/capability/struct.CapabilityId.html#associatedconstant.MMIO_MAP
+[CapabilityId::MMIO_MAP]: ../../tairix_abi/capability/struct.CapabilityId.html#associatedconstant.MMIO_MAP
 
 ## 6. Result-returning OOM contract
 
@@ -531,7 +531,7 @@ in `kernel/arch/x86_64`:
   `no_alloc`.
 - `bootmemory` bridges those typed entries into
   `MemoryRegionDescriptor`s with a `RegionKind` mirror that is locked
-  to `rustos_kernel_mem::RegionKind` by a host-side dev-dep
+  to `tairix_kernel_mem::RegionKind` by a host-side dev-dep
   round-trip test (`AGENTS.md` §2.2 — no duplication).
 
 The kernel binary (which links against `kernel/mem`) is responsible
@@ -552,7 +552,7 @@ reaches the device (`AGENTS.md` §4).
 
 **Fail-closed by construction.** `AGENTS.md` §4 requires that the kernel
 "refuses to activate a swap device that is not wrapped by the
-encrypted-swap layer". RustOS enforces this in the type system rather
+encrypted-swap layer". TAIRiX enforces this in the type system rather
 than with a runtime flag: a [`SwapBackend`] (the raw, slot-addressed
 device) exposes only opaque [`SWAP_RECORD_LEN`]-byte records and makes
 no cryptographic decision, and the **only** way to read or write a page
@@ -588,25 +588,25 @@ The pager that calls `store` / `load`, and the capability gate on
 *activating* a swap device, are Stage 8 work; this module is the
 cryptographic layer they are required to route through.
 
-[`SwapBackend`]: ../../rustos_kernel_mem/swap/trait.SwapBackend.html
-[`EncryptedSwap`]: ../../rustos_kernel_mem/swap/struct.EncryptedSwap.html
-[`EncryptedSwap::activate`]: ../../rustos_kernel_mem/swap/struct.EncryptedSwap.html#method.activate
-[`SealKey`]: ../../rustos_kernel_mem/seal/struct.SealKey.html
-[`EntropySource`]: ../../rustos_kernel_mem/seal/trait.EntropySource.html
-[`NonceSequence`]: ../../rustos_kernel_mem/seal/struct.NonceSequence.html
-[`SwapError::NonceExhausted`]: ../../rustos_kernel_mem/swap/enum.SwapError.html#variant.NonceExhausted
-[`SWAP_RECORD_LEN`]: ../../rustos_kernel_mem/swap/constant.SWAP_RECORD_LEN.html
+[`SwapBackend`]: ../../tairix_kernel_mem/swap/trait.SwapBackend.html
+[`EncryptedSwap`]: ../../tairix_kernel_mem/swap/struct.EncryptedSwap.html
+[`EncryptedSwap::activate`]: ../../tairix_kernel_mem/swap/struct.EncryptedSwap.html#method.activate
+[`SealKey`]: ../../tairix_kernel_mem/seal/struct.SealKey.html
+[`EntropySource`]: ../../tairix_kernel_mem/seal/trait.EntropySource.html
+[`NonceSequence`]: ../../tairix_kernel_mem/seal/struct.NonceSequence.html
+[`SwapError::NonceExhausted`]: ../../tairix_kernel_mem/swap/enum.SwapError.html#variant.NonceExhausted
+[`SWAP_RECORD_LEN`]: ../../tairix_kernel_mem/swap/constant.SWAP_RECORD_LEN.html
 
 ## 7c. Anonymous user memory (`mem_map` / `mem_unmap`)
 
 A spawned process boots with exactly its spawn-time image: code/data/bss
 plus a user stack and the startup-vector block, placed above the image's
 mapped top with an unmapped guard page between each region
-(`rustos_kernel_mem::derive_user_layout`, bound to the shared policy in
+(`tairix_kernel_mem::derive_user_layout`, bound to the shared policy in
 `spawn_layout::user_layout` — the placement scales with the image instead
 of capping it at a fixed slot; `plans/SPAWN.md` SP2/SP3). The stack is a
 *reserved span* (`USER_STACK_RESERVE_PAGES`, 8 MiB — derived from the one
-default stack policy value, `rustos_kernel_core::DEFAULT_STACK_LIMIT_BYTES`,
+default stack policy value, `tairix_kernel_core::DEFAULT_STACK_LIMIT_BYTES`,
 which `LimitSet::DEFAULT` also carries as the `StackBytes` bound, so the
 settable default and the structural span can never silently diverge)
 whose top `USER_STACK_COMMIT_PAGES` (128 KiB) are eagerly mapped: a
@@ -637,14 +637,14 @@ frame exhaustion stays fatal, and the audited kill names the class
 over the one `stack_grow_program` fixture) prove growth, the
 `ulimit`-lowered bound kill, and the below-span guard kill end to end on
 all three MMU ports — the x86_64 twin composes the shared production
-board bring-up (`rustos_kernel::x86_64::boot::bring_up_bsp`) with the
+board bring-up (`tairix_kernel::x86_64::boot::bring_up_bsp`) with the
 production hook in the production `DISPATCH_SLOT` — and wasm32's
 linear-memory model is an honest n/a. The
 `mem_map` (`abi-v1` no. 14) / `mem_unmap` (no. 15) syscalls are the one
 mechanism by which a process obtains and releases *additional* memory at
 runtime — the foundation the `lib/rt` userland heap allocator (§7d) layers its
-`malloc` / `free` over. The ABI shape is fixed in `rustos_abi::memory`
-(`MapFlags`) and `rustos_abi::syscall`; the syscall-layer contract is the
+`malloc` / `free` over. The ABI shape is fixed in `tairix_abi::memory`
+(`MapFlags`) and `tairix_abi::syscall`; the syscall-layer contract is the
 `mem_map` / `mem_unmap` rows of [the syscall page](./syscalls.md).
 
 **Anonymous memory is demand-paged, exactly like the user stack above.**
@@ -681,8 +681,8 @@ This is staged (`plans/SPAWN.md` SP5):
 
 - **SP5a (landed).** The `abi-v1` surface (`MapFlags`, the two syscall
   numbers, the `Errno::OutOfMemory` variant), the C-callable stubs
-  (`ros_sys_mem_map` / `ros_sys_mem_unmap`) and generated header
-  (`include/rustos/rustos_memory.h`), the dispatcher arms, and an
+  (`tairix_sys_mem_map` / `tairix_sys_mem_unmap`) and generated header
+  (`include/tairix/tairix_memory.h`), the dispatcher arms, and an
   arch-neutral fail-closed seam in `kernel/core` (`MemMap`, defaulting to
   `NULL_MEM_MAP` → `Errno::NotImplemented`, installed through
   `KernelSyscallHandlers::with_mem_map`, mirroring the console and spawn
@@ -712,7 +712,7 @@ This is staged (`plans/SPAWN.md` SP5):
   (`tests/integration/mem_map_program`) `mem_map`s a region (FIXED), writes
   and reads back a pattern (proving the pages are real `RW` memory),
   `mem_unmap`s it, then touches the released range — the data abort the
-  fault handler reports as PASS. The `rustos_rt::mem_map` / `mem_unmap`
+  fault handler reports as PASS. The `tairix_rt::mem_map` / `mem_unmap`
   wrappers are the program's interface. The **riscv64 sibling**
   (`tests/integration/mem_map_qemu_riscv64`) is now landed too: it reuses the
   same pure-Rust `mem_map_program` fixture and the same `kernel/mem` producer
@@ -754,7 +754,7 @@ mutate a task's **retained live** address space, the single live-space
 mutation path (§7e) rather than a second parallel address-space model
 (`AGENTS.md` §2.2).
 
-## 7d. Userland heap allocator (`rustos-rt`)
+## 7d. Userland heap allocator (`tairix-rt`)
 
 The `mem_map` / `mem_unmap` pair is a page-granularity primitive; ordinary
 `alloc` types (`Box`, `Vec`, `String`) need a byte-granularity `malloc` /
@@ -1048,9 +1048,9 @@ with it, once per *cluster*.
 
 - **A driver seam, a kernel implementation.** The ARXFS driver stays
   kernel-independent: it exposes the `ClusterCache` trait
-  (`rustos_drv_fs_arxfs::ClusterCache`) and consults an injected
+  (`tairix_drv_fs_arxfs::ClusterCache`) and consults an injected
   implementation only in its serving read path. The production
-  implementation is `rustos_kernel::transform_cache::TransformClusterCache`,
+  implementation is `tairix_kernel::transform_cache::TransformClusterCache`,
   installed by the boot path on both mounted volumes (`system_mount`
   for the read-only `/System` volume, the unlock path for the writable
   root) via `ARXFS::with_cluster_cache`. A volume without a cache
@@ -1100,7 +1100,7 @@ entry-point image — one `LoadedApp` per bundle. Without it, every launch
 of a system command re-reads and re-hashes the whole bundle tree and
 re-verifies its Ed25519 signature; with it, once per boot.
 
-- **The cache is `rustos_kernel_core::launch_cache::LaunchCache`,**
+- **The cache is `tairix_kernel_core::launch_cache::LaunchCache`,**
   held by the `AppStore` behind the `/System`-mount readiness latch. The
   boot path that publishes the mount installs the cache's budget and the
   system pressure gauge (`AppStore::install_reclaim`, called by
@@ -1225,7 +1225,7 @@ plan binds, over **one** shared gauge:
   zero rebuilds by the hysteresis plus outside-normal admission
   refusal, with no new mechanism.
 - **The layered stack** is proven in
-  `kernel/rustos-kernel/src/transform_cache_tests.rs`: `CachedFs`
+  `kernel/tairix-kernel/src/transform_cache_tests.rs`: `CachedFs`
   wrapping a real ARXFS volume whose read path consults the installed
   `TransformClusterCache`, both on one gauge — a filesystem-cache hit
   never reaches the transform layer, and moderate pressure drains both
@@ -1251,7 +1251,7 @@ allocator reading is already soaked.
 
 ## 7m. The whole-disk block cache (SMART11)
 
-`kernel/rustos-kernel/src/block_cache.rs` is the block-level LRU cache
+`kernel/tairix-kernel/src/block_cache.rs` is the block-level LRU cache
 under the entire mounted storage stack (`plans/SMARTRAM.md` SMART11):
 the boot path wraps the one brought-up disk in a `BlockCache` **before**
 the block-sharing layer (`shared_block::SharedBlock`), so every window
@@ -1299,7 +1299,7 @@ calling task across a completion interrupt.
   emits `RECLAIM_CACHE_REFUSED` (2000), and a detected ledger/index
   defect emits `RECLAIM_CACHE_POISONED` (2001) exactly once.
 
-The host suite (`kernel/rustos-kernel/src/block_cache_tests.rs`)
+The host suite (`kernel/tairix-kernel/src/block_cache_tests.rs`)
 proves classification, hit/miss/insertion accounting (a hit is shown
 never to reach the device by corrupting the backing store),
 write-through coherence, failed-write and discard invalidation,
@@ -1536,6 +1536,6 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   allocation, gated on `RUSTFLAGS="--cfg loom"` exactly like
   `lib/sync`.
 
-[`BootMemoryMap`]: ../../rustos_kernel_mem/struct.BootMemoryMap.html
-[`AddressSpace<P: PageTable>`]: ../../rustos_kernel_mem/struct.AddressSpace.html
-[`PageTable`]: ../../rustos_kernel_mem/trait.PageTable.html
+[`BootMemoryMap`]: ../../tairix_kernel_mem/struct.BootMemoryMap.html
+[`AddressSpace<P: PageTable>`]: ../../tairix_kernel_mem/struct.AddressSpace.html
+[`PageTable`]: ../../tairix_kernel_mem/trait.PageTable.html

@@ -40,7 +40,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-riscv64` port and supplies its own
+//! It links only the `tairix-arch-riscv64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
 //! never behind a Cargo feature on the arch crate (fail closed).
 
@@ -53,11 +53,11 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use rustos_arch_api::mmu::AddressSpace as _;
-    use rustos_arch_api::tlb::TlbShootdown as _;
-    use rustos_arch_riscv64::paging::{AddressSpace, PageTablePool, PAGE_SIZE};
-    use rustos_arch_riscv64::{fault, handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
-    use rustos_log::{log, Event, EventId, Field, Level};
+    use tairix_arch_api::mmu::AddressSpace as _;
+    use tairix_arch_api::tlb::TlbShootdown as _;
+    use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool, PAGE_SIZE};
+    use tairix_arch_riscv64::{fault, handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
+    use tairix_log::{log, Event, EventId, Field, Level};
 
     /// Gigapages of identity map the space installs: `[0, 4 GiB)` covers
     /// the `virt` board's low MMIO and the 2 GiB RAM base at `0x8000_0000`
@@ -151,7 +151,7 @@ mod kernel {
     /// Forward to the shared riscv64 panic bridge (parks the hart; the run
     /// then times out and the harness reports the failure).
     #[panic_handler]
-    fn rustos_stack_guard_riscv64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_stack_guard_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)
     }
 
@@ -165,7 +165,7 @@ mod kernel {
                 message: "riscv64 stack-guard test: setup failed",
                 fields: &[Field {
                     key: "stage",
-                    value: rustos_log::FieldValue::Str(what),
+                    value: tairix_log::FieldValue::Str(what),
                 }],
             },
         );
@@ -173,7 +173,7 @@ mod kernel {
     }
 
     /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `rustos_arch_riscv64_main`).
+    /// calls (via `tairix_arch_riscv64_main`).
     #[no_mangle]
     pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
         note(
@@ -260,7 +260,7 @@ mod kernel {
                 message: "riscv64 stack-guard test: read the unmapped guard page (no fault)",
                 fields: &[Field {
                     key: "observed",
-                    value: rustos_log::FieldValue::Str(if observed == SENTINEL {
+                    value: tairix_log::FieldValue::Str(if observed == SENTINEL {
                         "sentinel"
                     } else {
                         "other"

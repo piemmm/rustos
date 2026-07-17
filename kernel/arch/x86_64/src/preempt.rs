@@ -5,7 +5,7 @@
 //! * The IDT vector the timer LVT fires on ([`TIMER_VECTOR`]).
 //! * The ISR stub emitted by [`crate::define_isr`] that captures the
 //!   GPRs and trampolines into a Rust dispatcher.
-//! * The Rust dispatcher itself (`rustos_arch_x86_64_timer_dispatch`)
+//! * The Rust dispatcher itself (`tairix_arch_x86_64_timer_dispatch`)
 //!   which forwards into the user-installed callback and then issues
 //!   the LAPIC end-of-interrupt write.
 //! * A per-CPU init helper (`init_local_preempt`) that installs the
@@ -184,7 +184,7 @@ static PREEMPT_WAKEUP_ABS_TSC: AtomicU64 = AtomicU64::new(NO_DEADLINE);
 /// Install the per-CPU timer callback.
 ///
 /// The callback is invoked from the timer ISR on every tick with the
-/// calling CPU's `rustos_arch_api::CpuId` (the LAPIC ID as
+/// calling CPU's `tairix_arch_api::CpuId` (the LAPIC ID as
 /// determined by the `id` register read at install time of the BSP's
 /// scheduler, mapped to a dense `CpuId` by the binary; the callback
 /// receives the `CpuId` directly because the ISR cannot afford to
@@ -287,7 +287,7 @@ pub const fn cs_is_ring3(cs: u64) -> bool {
 
 // --- Per-CPU ID hook ------------------------------------------------
 
-/// Per-CPU mapping from LAPIC ID to dense `rustos_arch_api::CpuId`.
+/// Per-CPU mapping from LAPIC ID to dense `tairix_arch_api::CpuId`.
 ///
 /// The scheduler addresses CPUs with a dense `0..config.cpus` range;
 /// the LAPIC ID on QEMU is sparse (`0`, `1`, `2`, …) but on real
@@ -315,7 +315,7 @@ static LAPIC_TO_CPU_ID: [core::sync::atomic::AtomicU32; 256] = {
     [ZERO; 256]
 };
 
-/// Record the dense `rustos_arch_api::CpuId` this `lapic_id` maps to.
+/// Record the dense `tairix_arch_api::CpuId` this `lapic_id` maps to.
 ///
 /// Called from each CPU's bring-up path *before* it enables interrupts.
 /// `u32::MAX` is reserved as the "unmapped" sentinel; passing it is
@@ -381,7 +381,7 @@ pub fn cpu_id_for_lapic(lapic_id: u8) -> u32 {
 /// `regs`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
+unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     let cpu_id = current_cpu_id_from_lapic();
 
     // The LAPIC one-shot fired, so the quantum (if one was armed) is
@@ -517,14 +517,14 @@ pub(crate) unsafe fn preempt_ring3_if_pending(regs: *mut SavedRegs, cpu_id: u32)
 // `unsafe(naked)` attribute is gated to the freestanding target, so
 // the symbol only exists when `interrupts.s` does — host builds carry
 // neither.
-crate::define_isr!(rustos_arch_x86_64_isr_timer => rustos_arch_x86_64_timer_dispatch);
+crate::define_isr!(tairix_arch_x86_64_isr_timer => tairix_arch_x86_64_timer_dispatch);
 
 /// Return the linear address of the timer ISR stub for IDT
 /// installation. Only meaningful on the freestanding target.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub fn timer_isr_addr() -> u64 {
-    rustos_arch_x86_64_isr_timer as *const () as usize as u64
+    tairix_arch_x86_64_isr_timer as *const () as usize as u64
 }
 
 // --- One-shot arming (scheduler-context, raw-pointer LAPIC writes) --
@@ -653,7 +653,7 @@ pub fn record_wakeup_deadline(deadline: Option<u64>) {
 /// pending event).
 ///
 /// The earliest-of selection is the shared, host-tested
-/// [`rustos_arch_api::wakeup`] helper. The chosen relative TSC duration is
+/// [`tairix_arch_api::wakeup`] helper. The chosen relative TSC duration is
 /// rebased onto the LAPIC clock (`rel_tsc * lapic_hz / tsc_hz`) to obtain
 /// the initial-count the LAPIC one-shot counts down — the x86_64 analogue
 /// of the aarch64/riscv64 "arm the same counter the deadline is in", made
@@ -663,11 +663,11 @@ pub fn record_wakeup_deadline(deadline: Option<u64>) {
 fn reprogram() {
     let quantum = slot_deadline(PREEMPT_QUANTUM_ABS_TSC.load(Ordering::Relaxed));
     let wakeup = slot_deadline(PREEMPT_WAKEUP_ABS_TSC.load(Ordering::Relaxed));
-    let Some(target) = rustos_arch_api::wakeup::earliest(quantum, wakeup) else {
+    let Some(target) = tairix_arch_api::wakeup::earliest(quantum, wakeup) else {
         disarm();
         return;
     };
-    let rel_tsc = rustos_arch_api::wakeup::ticks_from_now(target, read_tsc());
+    let rel_tsc = tairix_arch_api::wakeup::ticks_from_now(target, read_tsc());
     let tsc_hz = PREEMPT_TSC_HZ.load(Ordering::Relaxed);
     let lapic_hz = PREEMPT_LAPIC_HZ.load(Ordering::Relaxed);
     if tsc_hz == 0 || lapic_hz == 0 {

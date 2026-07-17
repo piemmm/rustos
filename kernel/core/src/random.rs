@@ -1,8 +1,8 @@
 //! The kernel random output reserve, composed into `KernelState`.
 //!
-//! RustOS has exactly one kernel cryptographic random subsystem. The
+//! TAIRiX has exactly one kernel cryptographic random subsystem. The
 //! `random_get` syscall (`abi-v1` syscall 8) serves bytes from a bounded
-//! reserve of CSPRNG **output** — `rustos_rng::OutputReserve` — refilled on
+//! reserve of CSPRNG **output** — `tairix_rng::OutputReserve` — refilled on
 //! demand and never weakened to a low-quality fallback.
 //! This module is the thin seam that lets `KernelState` *hold* that reserve
 //! without naming a concrete entropy source, and that maps a reserve failure
@@ -30,10 +30,10 @@
 
 use alloc::sync::Arc;
 
-use rustos_abi::Errno;
-use rustos_arch_api::SchedulerArch;
-use rustos_kernel_irq::IrqDispatchObserver;
-use rustos_rng::{
+use tairix_abi::Errno;
+use tairix_arch_api::SchedulerArch;
+use tairix_kernel_irq::IrqDispatchObserver;
+use tairix_rng::{
     EntropyError, EntropySource, InterruptEntropyPool, InterruptPoolSource, JitterSource,
     MixedPair, OutputReserve, ReserveError, TimeSource,
 };
@@ -113,13 +113,13 @@ pub type BootReserve = OutputReserve<NullEntropy>;
 /// unavailable does the seed fail closed and the reserve stay unseeded —
 /// never weakened to predictable bytes.
 pub struct ArchEntropy {
-    source: &'static dyn rustos_arch_api::PlatformEntropy,
+    source: &'static dyn tairix_arch_api::PlatformEntropy,
 }
 
 impl ArchEntropy {
     /// Wrap a platform-entropy handle as an entropy source.
     #[must_use]
-    pub fn new(source: &'static dyn rustos_arch_api::PlatformEntropy) -> Self {
+    pub fn new(source: &'static dyn tairix_arch_api::PlatformEntropy) -> Self {
         Self { source }
     }
 }
@@ -136,7 +136,7 @@ impl EntropySource for ArchEntropy {
 /// A [`TimeSource`] over the Arch HAL's monotonic high-resolution counter
 /// ([`SchedulerArch::ticks_now`] — x86 `RDTSC`, aarch64 `CNTPCT_EL0`, riscv64
 /// `time`), driving the kernel's CPU-timing-jitter entropy source
-/// ([`rustos_rng::JitterSource`]).
+/// ([`tairix_rng::JitterSource`]).
 ///
 /// Holds an [`Arc`] of the arch handle (which lives for the whole kernel) so
 /// the jitter source — owned by the reseeding reserve — can read the counter
@@ -241,8 +241,8 @@ pub fn reserve_errno(_err: ReserveError) -> Errno {
 #[cfg(test)]
 mod tests {
     use super::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
-    use rustos_abi::Errno;
-    use rustos_rng::{EntropyError, EntropySource, OutputReserve, ReserveError};
+    use tairix_abi::Errno;
+    use tairix_rng::{EntropyError, EntropySource, OutputReserve, ReserveError};
 
     /// Deterministic stand-in for a seeded entropy source (not real entropy):
     /// a counter so the reserve's drawing behaviour is reproducible in tests.
@@ -310,15 +310,15 @@ mod tests {
         fills: bool,
     }
 
-    impl rustos_arch_api::PlatformEntropy for StubPort {
-        fn profile(&self) -> rustos_arch_api::EntropyProfile {
-            rustos_arch_api::EntropyProfile {
-                hardware_rng: rustos_arch_api::EntropySupport::Supported,
+    impl tairix_arch_api::PlatformEntropy for StubPort {
+        fn profile(&self) -> tairix_arch_api::EntropyProfile {
+            tairix_arch_api::EntropyProfile {
+                hardware_rng: tairix_arch_api::EntropySupport::Supported,
             }
         }
     }
 
-    impl rustos_rng::HardwareRng for StubPort {
+    impl tairix_rng::HardwareRng for StubPort {
         fn try_fill(&self, out: &mut [u8]) -> Result<(), EntropyError> {
             if self.fills {
                 // Deterministic non-zero pattern via a wrapping `u8` counter
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn mixed_reserve_seeds_from_hardware_when_jitter_is_unavailable() {
         use super::ArchEntropy;
-        use rustos_rng::{JitterSource, MixedPair, OutputReserve};
+        use tairix_rng::{JitterSource, MixedPair, OutputReserve};
 
         // Hardware works, jitter is dead (lockstep clock): the mix must still
         // seed from the hardware source alone — the fail-fallback direction.
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn mixed_reserve_seeds_from_jitter_when_hardware_is_dead() {
         use super::ArchEntropy;
-        use rustos_rng::{JitterSource, MixedPair, OutputReserve};
+        use tairix_rng::{JitterSource, MixedPair, OutputReserve};
 
         // Hardware is dead, jitter is healthy (varying clock): the mix must
         // still seed from the independent jitter source alone — this is the
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn mixed_reserve_fails_closed_when_both_sources_are_dead() {
         use super::ArchEntropy;
-        use rustos_rng::{JitterSource, MixedPair, OutputReserve};
+        use tairix_rng::{JitterSource, MixedPair, OutputReserve};
 
         // Neither source can supply bytes: the seed fails closed and the
         // reserve stays unseeded (never weakened to predictable bytes).
@@ -429,7 +429,7 @@ mod tests {
         // seeds the reserve — the third independent source pulling its weight
         // in the "never trust one source" mix.
         use super::ArchEntropy;
-        use rustos_rng::{
+        use tairix_rng::{
             InterruptEntropyPool, InterruptPoolSource, JitterSource, MixedPair, OutputReserve,
         };
 
@@ -461,7 +461,7 @@ mod tests {
         // Hardware dead, jitter dead, and the interrupt pool empty (no fresh
         // samples): the seed must fail closed and the reserve stay unseeded.
         use super::ArchEntropy;
-        use rustos_rng::{
+        use tairix_rng::{
             InterruptEntropyPool, InterruptPoolSource, JitterSource, MixedPair, OutputReserve,
         };
 

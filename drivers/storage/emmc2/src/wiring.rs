@@ -1,7 +1,7 @@
 //! Driver-host wiring: discovered EMMC2 register window → [`Emmc2`].
 //!
 //! The aarch64 `FdtDiscovery` emits the `brcm,bcm2711-emmc2` node into
-//! `rustos_abi::hwtree` as a Storage-class device whose one resource is
+//! `tairix_abi::hwtree` as a Storage-class device whose one resource is
 //! the SDHCI register window (base and length read from the device tree's
 //! `reg`, translated through ancestor-bus `ranges` — never a compiled-in
 //! constant / `plans/PI.md` P8). `devmgr` matches the
@@ -12,15 +12,15 @@
 //! [`CapabilityId::MMIO_MAP`], maps the window through the host's
 //! [`MmioMapper`] (never a pointer the driver synthesises), and — when the
 //! host exposes a DMA facility — allocates one device-shared staging slab
-//! through the host's [`DmaHost`](rustos_abi::driver::dma::DmaHost) so the
+//! through the host's [`DmaHost`](tairix_abi::driver::dma::DmaHost) so the
 //! card runs on the fast ADMA2 transfer path; a host with no DMA facility
 //! falls back to programmed I/O. It then brings the card up over the
 //! register seam. Everything below — the SDHCI command/response and
 //! block-transfer state machine — is the host-provable [`Emmc2`] engine
 //! driven over that seam.
 
-use rustos_abi::driver::mmio::MmioMapError;
-use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
+use tairix_abi::driver::mmio::MmioMapError;
+use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
 
 use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci, DMA_REGION_BYTES};
 
@@ -31,7 +31,7 @@ use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci, D
 /// mapped read/write under [`CapabilityId::MMIO_MAP`] and handed to
 /// [`Emmc2::open`], which runs the SD identification sequence.
 ///
-/// If the host exposes a [`DmaHost`](rustos_abi::driver::dma::DmaHost),
+/// If the host exposes a [`DmaHost`](tairix_abi::driver::dma::DmaHost),
 /// this allocates one [`crate::DMA_REGION_BYTES`] staging slab and drives
 /// the card by ADMA2; if it does not, or the DMA carve is refused, the
 /// engine uses programmed I/O (DMA where possible).

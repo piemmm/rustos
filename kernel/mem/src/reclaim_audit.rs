@@ -2,7 +2,7 @@
 //! (`plans/SMARTRAM.md` SMART9).
 //!
 //! Security-relevant reclaimable-cache failures emit exactly one
-//! structured record through [`rustos_log`]. The numeric identifiers
+//! structured record through [`tairix_log`]. The numeric identifiers
 //! are part of the audit contract with external log consumers and may
 //! not be re-used or re-numbered. Per the range convention established
 //! in `lib/log` (subsystems pick ranges of `1_000`), `kernel/mem` owns
@@ -28,14 +28,14 @@
 //! (2002, 2003) live in [`crate::ramzip::RamzipAuditEvent`] — and
 //! updating the tables in `docs/src/architecture/memory.md`.
 
-use rustos_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 
 use crate::reclaim::{AdmissionRefusal, ReclaimOwner};
 
 /// Audit event identifiers emitted for the reclaimable-cache
 /// subsystem.
 ///
-/// The numeric values are part of the stable contract between RustOS
+/// The numeric values are part of the stable contract between TAIRiX
 /// and external log consumers; see the module-level table for the
 /// meaning of each ID.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -59,7 +59,7 @@ impl ReclaimAuditEvent {
     }
 
     /// Short, fixed name used as the `message` field of the emitted
-    /// [`rustos_log::Event`]. Kept under the 120-character convention
+    /// [`tairix_log::Event`]. Kept under the 120-character convention
     /// described in `lib/log` so a single record fits one terminal
     /// line.
     #[must_use]
@@ -159,7 +159,7 @@ mod tests {
     use std::string::{String, ToString};
     use std::vec::Vec;
 
-    use rustos_log::{Event, FieldValue, Sink};
+    use tairix_log::{Event, FieldValue, Sink};
 
     use super::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
     use crate::reclaim::{AdmissionRefusal, ReclaimOwner};

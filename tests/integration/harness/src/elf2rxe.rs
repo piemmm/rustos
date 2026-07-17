@@ -1,8 +1,8 @@
 //! Build-time ELF -> `rxe` converter for the CCOMPAT spawn round-trips.
 //!
 //! The CC3 fixture program (`tests/integration/cc3_program`) is compiled as a
-//! separate, position-independent C-ABI executable (crt0 + `ros_sys_*` stubs).
-//! The kernel-side spawn path consumes an [`rustos_abi::rxe`] load image, not a
+//! separate, position-independent C-ABI executable (crt0 + `tairix_sys_*` stubs).
+//! The kernel-side spawn path consumes an [`tairix_abi::rxe`] load image, not a
 //! raw ELF, so the consuming test's build script converts the freshly linked
 //! program ELF into an `rxe` blob with [`elf_to_rxe`] and embeds the bytes.
 //!
@@ -22,25 +22,25 @@
 //! Relocations are applied for a caller-chosen **load bias**: each
 //! `R_*_RELATIVE` target is patched to `addend + load_bias`, and the emitted
 //! segment virtual addresses are left at the ELF link addresses. The kernel
-//! spawn path (`rustos_kernel_mem::build_process_image`) maps each segment
+//! spawn path (`tairix_kernel_mem::build_process_image`) maps each segment
 //! at `vaddr + bias` and relocates the entry point the same way, so passing
 //! the *same* bias to both keeps the in-memory pointers consistent with where
 //! the image is mapped. A zero bias maps the image at its link addresses (the
 //! simplest case); a non-zero bias places it at a high virtual base that does
 //! not collide with the kernel's identity map. The emitted image still
-//! declares [`rustos_abi::rxe::LOAD_FLAG_PIE`]; baking the relocations in for a
+//! declares [`tairix_abi::rxe::LOAD_FLAG_PIE`]; baking the relocations in for a
 //! fixed bias is what lets the kernel map the validated image directly without
 //! a runtime relocator, while the load-time policy in
-//! [`rustos_abi::rxe::LoadImage`] still enforces every invariant.
+//! [`tairix_abi::rxe::LoadImage`] still enforces every invariant.
 //!
 //! The `rxe` wire format itself is never re-encoded here: the header and
-//! segment records come from [`rustos_abi::rxe`]'s own encoders.
+//! segment records come from [`tairix_abi::rxe`]'s own encoders.
 
-use rustos_abi::rxe::{
+use tairix_abi::rxe::{
     LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE,
 };
-use rustos_abi::syscall::SYSCALL_TABLE_HASH_LEN;
-use rustos_abi::ABI_VERSION_CURRENT;
+use tairix_abi::syscall::SYSCALL_TABLE_HASH_LEN;
+use tairix_abi::ABI_VERSION_CURRENT;
 
 /// Why an ELF image could not be converted to an `rxe` load image.
 ///
@@ -159,7 +159,7 @@ struct LoadSeg {
 /// Convert a linked PIE ELF image into an `rxe` load-image blob.
 ///
 /// `cfi_tag` is the syscall-interface hash the emitted image declares; it must
-/// match the kernel's compiled-in hash, or [`rustos_abi::rxe::LoadImage::parse`]
+/// match the kernel's compiled-in hash, or [`tairix_abi::rxe::LoadImage::parse`]
 /// will reject the image. `load_bias` is the virtual base the
 /// image will be mapped at: every `R_*_RELATIVE` target is patched to
 /// `addend + load_bias`, so the caller must map each segment at `vaddr +
@@ -478,7 +478,7 @@ fn usize_of(value: u64) -> Result<usize, Elf2RxeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_abi::rxe::LoadImage;
+    use tairix_abi::rxe::LoadImage;
 
     const TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0x5A; SYSCALL_TABLE_HASH_LEN];
 

@@ -143,7 +143,7 @@ impl Pixel {
     }
 }
 
-impl From<rustos_theme::Rgba> for Color {
+impl From<tairix_theme::Rgba> for Color {
     /// Adopt a theme colour token as a straight-alpha rasteriser colour.
     ///
     /// The theme owns the authored colour *data*; the rasteriser owns the
@@ -151,7 +151,7 @@ impl From<rustos_theme::Rgba> for Color {
     /// meet, so the colour algebra is never duplicated into the theme
     /// crate. The channel layout is identical, so the
     /// conversion is a field move.
-    fn from(rgba: rustos_theme::Rgba) -> Self {
+    fn from(rgba: tairix_theme::Rgba) -> Self {
         Self {
             r: rgba.r,
             g: rgba.g,

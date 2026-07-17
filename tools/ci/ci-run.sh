@@ -35,7 +35,7 @@ stamp="$(ci_stamp)"
 # Build a filesystem-safe label from the subcommand line ("build --headless
 # --target x86_64-unknown-none" -> "build_--headless_--target_x86_64...").
 label="$(printf '%s' "$*" | tr ' /' '__')"
-log="$RUSTOS_CI_LOGDIR/${label}-${stamp}.log"
+log="$TAIRIX_CI_LOGDIR/${label}-${stamp}.log"
 
 echo "ci-run: cargo xtask $* -> $log"
 

@@ -4,12 +4,12 @@
 //!
 //! The vertical brings the `virt`-board PE up to a translated, FP-enabled
 //! state (FP enable + 2 GiB identity MMU + EL1 vectors, shared from
-//! `rustos_test_virtio_qemu_support`), synthesises a genuine framebuffer
+//! `tairix_test_virtio_qemu_support`), synthesises a genuine framebuffer
 //! device with QEMU's `ramfb` — a scan-out surface in guest RAM whose
 //! geometry is programmed into the device over the shared `fw_cfg` MMIO
 //! DMA interface (`src/kernel.rs`) — assembles the geometry as a
-//! `rustos_display::FramebufferConfig`, then loads the
-//! signed framebuffer display `.rxe` through `rustos_drvhost::Host` and
+//! `tairix_display::FramebufferConfig`, then loads the
+//! signed framebuffer display `.rxe` through `tairix_drvhost::Host` and
 //! drives it through `load -> use -> unload -> reload`: "use" maps the
 //! surface through the capability-gated `KernelMmioMapper` and `present`s
 //! a frame, which a second independently-mapped window reads back to

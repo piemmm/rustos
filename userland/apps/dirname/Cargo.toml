@@ -1,6 +1,6 @@
 [package]
-name = "rustos-dirname"
-description = "RustOS `dirname` CLI: strip the last component from names (`plans/APPS.md` §12.1 Stage C)."
+name = "tairix-dirname"
+description = "TAIRiX `dirname` CLI: strip the last component from names (`plans/APPS.md` §12.1 Stage C)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,41 +11,41 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`rustos-rt`) is an
-# optional, on-by-default build feature, mirroring `rustos-basename` and
-# `rustos-clear`. `cargo build -p rustos-dirname` builds the tool program
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-basename` and
+# `tairix-clear`. `cargo build -p tairix-dirname` builds the tool program
 # with it; host tooling builds only the pure *library*, so the host test
 # build never pulls the userland runtime's `_start` / `#[global_allocator]`
 # / panic handler.
 [features]
 default = ["program"]
-program = ["dep:rustos-rt"]
+program = ["dep:tairix-rt"]
 
-# The package is both the `rustos-dirname` library (the pure parse + name
+# The package is both the `tairix-dirname` library (the pure parse + name
 # surgery below) and the `Run` entry-point binary of the `dirname` tool.
 # The binary is a freestanding pure-Rust program on the native Tier-1
 # targets and an inert host stub elsewhere (see `src/run.rs`).
 [[bin]]
-name = "rustos-dirname-run"
+name = "tairix-dirname-run"
 path = "src/run.rs"
 
 [dependencies]
 # The one path-spelling grammar: `alias_root_len` decides where a
 # `Name:/` alias root ends, so this tool treats an alias root the way
 # POSIX treats `/` without a second path parser.
-rustos-path = { path = "../../../lib/path", version = "=0.0.0" }
+tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md).
-rustos-help = { path = "../../../lib/help", version = "=0.0.0" }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 
-# For the freestanding `Run` binary only: the userland runtime `rustos-rt`
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, and the
 # standard-stream I/O). Pulled in only for the bare-metal targets the
 # program is actually built for; on the host it is not linked.
 [target.'cfg(target_os = "none")'.dependencies]
-rustos-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's
 # syscall-backed own-bundle `HelpSource` (`BundleHelp`), shared by every
 # command app.
-rustos-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

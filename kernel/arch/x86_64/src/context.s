@@ -1,6 +1,6 @@
 // x86_64 context-switch primitive (Stage 3a (c1)).
 //
-// extern "C" fn rustos_arch_x86_64_switch(prev: *mut TaskCtx,
+// extern "C" fn tairix_arch_x86_64_switch(prev: *mut TaskCtx,
 //                                          next: *mut TaskCtx);
 //
 // Calling convention: System V AMD64. %rdi = prev, %rsi = next.
@@ -27,10 +27,10 @@
 //      the call) if it needs the switch to be uninterruptible.
 
 .section .text
-.global rustos_arch_x86_64_switch
-.type   rustos_arch_x86_64_switch, @function
+.global tairix_arch_x86_64_switch
+.type   tairix_arch_x86_64_switch, @function
 
-rustos_arch_x86_64_switch:
+tairix_arch_x86_64_switch:
     // --- Suspend half ---
     // Push callee-saved registers onto the *outgoing* task's stack so a
     // popq sequence later restores them. Stack grows downward and `rdi`
@@ -91,8 +91,8 @@ rustos_arch_x86_64_switch:
 
     // `ret` pops the return address the *inbound* task left on its
     // stack — either a synthesised `entry` (first run) or the address
-    // immediately after the suspend's `call rustos_arch_x86_64_switch`
+    // immediately after the suspend's `call tairix_arch_x86_64_switch`
     // (resumed run).
     ret
 
-.size rustos_arch_x86_64_switch, . - rustos_arch_x86_64_switch
+.size tairix_arch_x86_64_switch, . - tairix_arch_x86_64_switch

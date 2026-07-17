@@ -1,4 +1,4 @@
-# `rustos-seatmgr` — seat-manager service
+# `tairix-seatmgr` — seat-manager service
 
 `plans/DISPLAY.md` Stage D3 deliverable. The user-space service that holds
 `CAP_SEAT_ADMIN` — the seat-multiplexing authority (the `chvt`/`logind`
@@ -16,7 +16,7 @@ The **dispatcher** — the policy layer. It owns no seat state of its own
 registry). For each request `serve` performs, in order, failing closed at
 the first problem:
 
-1. Decode the `SeatAdminRequest` (`rustos_abi::seat`, `seatmgr-v1`).
+1. Decode the `SeatAdminRequest` (`tairix_abi::seat`, `seatmgr-v1`).
 2. Require the requester's kernel-attested `Origin` to carry
    `CAP_SEAT_ADMIN` **before** touching any state. The broker never
    launders its own capability onto an unprivileged caller, and the
@@ -40,14 +40,14 @@ revoke record carrying the evicted owner's task id.
 
 ## Endpoint
 
-The reserved rendezvous `SEATMGR_ENDPOINT` (`rustos_abi::seat`) is
+The reserved rendezvous `SEATMGR_ENDPOINT` (`tairix_abi::seat`) is
 squat-protected: binding it requires `CAP_IPC_BIND_PRIVILEGED`
-(`rustos_abi::ipc::is_reserved_endpoint`). Replies are the 4-byte status
+(`tairix_abi::ipc::is_reserved_endpoint`). Replies are the 4-byte status
 frame (`0` or a negative `Errno`).
 
 ## Testing
 
-`cargo test -p rustos-seatmgr` drives `serve` against in-memory fixtures:
+`cargo test -p tairix-seatmgr` drives `serve` against in-memory fixtures:
 authorised switch/revoke forwarding + audit, unprivileged denial before
 any state, kernel-refusal pass-through, malformed-request rejection, and
 the event-id range/uniqueness pins.

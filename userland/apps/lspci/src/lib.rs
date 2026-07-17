@@ -1,4 +1,4 @@
-//! RustOS `lspci`: list the discovered PCI/PCIe devices
+//! TAIRiX `lspci`: list the discovered PCI/PCIe devices
 //! (`plans/DEVICES.md` DEVICE1 V2).
 //!
 //! The listing is rendered from the hardware tree — the single
@@ -12,18 +12,18 @@
 //! the listing to numeric ids with the reason on standard error — the
 //! inventory itself is never withheld over a naming aid.
 //!
-//! The option surface follows `pciutils` `lspci` over what the RustOS
+//! The option surface follows `pciutils` `lspci` over what the TAIRiX
 //! model actually carries: `-n` / `-nn` numeric modes,
 //! `-v` declared resources, `-t` topology, `-d` / `-s` filters. Where the
 //! model genuinely differs the tool diverges deliberately and documents
-//! it: a function's address is its stable hardware-tree node id (RustOS
+//! it: a function's address is its stable hardware-tree node id (TAIRiX
 //! records no PCI bus/device/function triple), and `-s` selects that node
 //! id. The kernel-binding view (`lspci -k`) awaits the driver-binding
 //! records query and is not offered until it can be served honestly.
 //!
 //! This crate is the pure engine — decode, select, render — over injected
-//! seams (`rustos_procinfo::Transport`, [`io::Output`],
-//! `rustos_help::HelpSource`), host-tested with no kernel. The
+//! seams (`tairix_procinfo::Transport`, [`io::Output`],
+//! `tairix_help::HelpSource`), host-tested with no kernel. The
 //! freestanding `Run` binary in `src/run.rs` binds the production seams.
 
 #![no_std]

@@ -9,7 +9,7 @@
 //! or malformed field is the typed [`WireError`], never a panic and never
 //! a partial trust of later bytes.
 //!
-//! Scalars are little-endian, like every RustOS wire format.
+//! Scalars are little-endian, like every TAIRiX wire format.
 
 use alloc::string::String;
 use alloc::vec::Vec;

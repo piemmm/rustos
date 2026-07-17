@@ -12,23 +12,23 @@
 //!   else — and a volume that mounts is walked (directories, lookups,
 //!   attributes, stats) without panicking either.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG draws
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
 //! pseudo-random images, and a structured sweep flips bytes of real
 //! formatted images — one per map flavour (old map, new map, big
 //! directories) — to hammer the checksum and structural validation.
 //! A plain `cargo test` runs a quick seed-driven smoke sample; the
-//! time-limited soak (`RUSTOS_FUZZ_BUDGET_SECS`) sweeps byte positions
+//! time-limited soak (`TAIRIX_FUZZ_BUDGET_SECS`) sweeps byte positions
 //! in a seeded full-coverage order until the wall-clock budget elapses
 //! (the nightly budget flips every byte of every base image) and runs
 //! the PRNG stream to the same budget.
 
-use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::filesystem::{
+use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemTimestamps, FilesystemWrite,
     NodeKind,
 };
-use rustos_abi::DriverError;
-use rustos_drv_fs_adfs::{Adfs, AdfsVariant};
+use tairix_abi::DriverError;
+use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
 
 const BLOCK_SIZE: u32 = 512;
 
@@ -186,11 +186,11 @@ fn formatted_image(variant: AdfsVariant, bytes: usize) -> Vec<u8> {
 
 #[test]
 fn fuzz_adfs_mount() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
     // Draw and log the seed up front so every sampled byte position and
     // every PRNG image below replays exactly from the logged value.
-    let mut state: u64 = rustos_fuzzseed::start("fuzz_adfs_mount", rustos_fuzzseed::FUZZ_SEED_ENV);
+    let mut state: u64 = tairix_fuzzseed::start("fuzz_adfs_mount", tairix_fuzzseed::FUZZ_SEED_ENV);
     let mut next = || {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -207,7 +207,7 @@ fn fuzz_adfs_mount() {
         // budget probes a reproducible spread on time — while the smoke pass
         // samples a fixed number of positions.
         if let Some(deadline) = deadline {
-            rustos_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
+            tairix_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
                 let mut image = base.clone();
                 image[i] ^= 0xFF;
                 exercise(&image);
@@ -239,7 +239,7 @@ fn fuzz_adfs_mount() {
             }
 
             iteration += 1;
-            if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+            if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
                 break;
             }
         }

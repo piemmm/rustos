@@ -1,7 +1,7 @@
 //! The seams through which `unmount` touches the outside world.
 //!
 //! The mount table arrives through the shared
-//! [`Transport`](rustos_procinfo::Transport) seam (the `sysinfo-v1`
+//! [`Transport`](tairix_procinfo::Transport) seam (the `sysinfo-v1`
 //! `MOUNT_LIST` paging walk `mount` and `df` use too); only the
 //! privileged detach and the output streams need seams of their own.
 //! Keeping them behind object-safe traits lets the engine in
@@ -9,8 +9,8 @@
 //! mirroring the seam discipline of the other userland tools (`mount`'s
 //! `Mounter`, `df`'s `PathProbe`).
 
-use rustos_abi::volume::VOLUME_ID_LEN;
-use rustos_abi::Errno;
+use tairix_abi::volume::VOLUME_ID_LEN;
+use tairix_abi::Errno;
 
 /// Performs the privileged volume detach.
 ///

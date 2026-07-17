@@ -5,11 +5,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use rustos_abi::users_admin::{
+use tairix_abi::users_admin::{
     gid_list_into, grant_list_into, GroupEntry, ListResponseBuilder, UserEntry, UsersAdminRequest,
 };
-use rustos_abi::{CapabilityId, Errno};
-use rustos_users::{PasswordRecord, SESSION_BASELINE};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_users::{PasswordRecord, SESSION_BASELINE};
 
 use super::{run_session, AdminChannel, SaltSource, SessionConfig, ToolIo};
 
@@ -98,14 +98,14 @@ impl AdminChannel for RecordingChannel {
 struct FixedSalt;
 
 impl SaltSource for FixedSalt {
-    fn salt(&mut self) -> Option<rustos_users::Salt> {
-        Some([0x42; rustos_users::SALT_LEN])
+    fn salt(&mut self) -> Option<tairix_users::Salt> {
+        Some([0x42; tairix_users::SALT_LEN])
     }
 }
 
 fn config() -> SessionConfig {
     SessionConfig {
-        iterations: rustos_users::MIN_ITERATIONS,
+        iterations: tairix_users::MIN_ITERATIONS,
     }
 }
 
@@ -127,7 +127,7 @@ fn user_list_response() -> Vec<u8> {
             home: "/Users/ada",
             shell: "/System/Apps/elsh.app/Run",
             grants,
-            state: rustos_abi::users_admin::AccountStateCode::Active,
+            state: tairix_abi::users_admin::AccountStateCode::Active,
         })
         .expect("entry fits");
     let len = builder.finish();

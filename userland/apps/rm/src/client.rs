@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_help::{own_short_help, HelpSource};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Interactive, Options};
 use crate::error::RmError;
@@ -59,8 +59,8 @@ const OWN_WORD: &str = "rm";
 ///   `-d`).
 /// * [`RmError::PreserveRoot`] — the operand `/` under `--preserve-root`.
 /// * [`RmError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](rustos_abi::Errno) (suppressed for
-///   [`NotFound`](rustos_abi::Errno::NotFound) when `-f` is set).
+///   underlying [`Errno`](tairix_abi::Errno) (suppressed for
+///   [`NotFound`](tairix_abi::Errno::NotFound) when `-f` is set).
 /// * [`RmError::Read`] — a directory's entries could not be read.
 /// * [`RmError::Remove`] — unlinking a file or directory failed.
 /// * [`RmError::Prompt`] — a confirmation could not be read (never treated
@@ -127,7 +127,7 @@ fn remove_operand(
     }
     let kind = match fs.kind(path) {
         Ok(kind) => kind,
-        Err(rustos_abi::Errno::NotFound) if options.force => return Ok(()),
+        Err(tairix_abi::Errno::NotFound) if options.force => return Ok(()),
         Err(errno) => return Err(RmError::Stat(errno)),
     };
     remove_known(path, kind, options, fs, prompt, out)
@@ -238,8 +238,8 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     /// A prompt no non-interactive run may ever reach.
     struct NeverAsked;

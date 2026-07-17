@@ -1,6 +1,6 @@
-# rustos-usb
+# tairix-usb
 
-Bus-agnostic xHCI USB host-controller protocol for RustOS (`lib/usb`,
+Bus-agnostic xHCI USB host-controller protocol for TAIRiX (`lib/usb`,
 `AGENTS.md` §6 / §2.2 — `plans/PI.md` P10).
 
 The USB protocol is identical on every architecture, so the host-provable,
@@ -21,7 +21,7 @@ other (§17.4 — `drivers/* → lib/*` only).
   `ring_doorbell` / `ack_event` drive the root hub and rings.
 - `device::UsbDevice` — the single-device HID enumeration engine (Enable Slot →
   Address Device → descriptors → `SET_PROTOCOL(boot)` → Configure Endpoint →
-  primed interrupt-IN ring), implementing the `rustos_abi::driver::input`
+  primed interrupt-IN ring), implementing the `tairix_abi::driver::input`
   `ReportSource` seam so the `lib/hid` decoders (composed by the `usb_kbd`/`usb_mouse` class drivers) read reports
   straight off the transfer ring.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies.

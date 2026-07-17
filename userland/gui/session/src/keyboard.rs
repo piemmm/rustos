@@ -18,12 +18,12 @@
 //! [`pump`](crate::DesktopShell::pump) stops without misinterpreting the bytes.
 //!
 //! [`InputSource`]: crate::InputSource
-//! [`InputEvent`]: rustos_wm::InputEvent
+//! [`InputEvent`]: tairix_wm::InputEvent
 //! [`DeviceInputSource`]: crate::DeviceInputSource
 
-use rustos_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
-use rustos_abi::Errno;
-use rustos_wm::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+use tairix_abi::Errno;
+use tairix_wm::{InputEvent, Key, Modifiers, NamedKey};
 
 use crate::shell::InputSource;
 
@@ -184,9 +184,9 @@ mod tests {
     use super::{KeyInputChannel, KeyboardInputSource};
     use crate::InputSource;
     use alloc::collections::VecDeque;
-    use rustos_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
-    use rustos_abi::Errno;
-    use rustos_wm::{InputEvent, Key, Modifiers, NamedKey};
+    use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+    use tairix_abi::Errno;
+    use tairix_wm::{InputEvent, Key, Modifiers, NamedKey};
 
     /// An in-memory channel that yields queued records, optionally faulting.
     struct QueueChannel {

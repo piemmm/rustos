@@ -1,21 +1,21 @@
 //! Deterministic fuzz harness for the SVG decoder
 //! (the desktop's untrusted image-decoding parser).
 //!
-//! [`rustos_svg::decode`] parses on-disk `/System/Graphics` assets that, on a
+//! [`tairix_svg::decode`] parses on-disk `/System/Graphics` assets that, on a
 //! real system, may have been written or corrupted by anything. Per that
 //! decode path is driven by a fuzz harness whose single invariant is:
 //!
 //! * `decode` never panics for any input — it returns `Ok` for a document in
 //!   the supported subset and `Err` (fail closed) for everything else.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random byte strings, mutates real SVG templates, and
 //! assembles structured-but-hostile documents. A plain `cargo test` runs the
 //! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
 //! fuzz --soak` exports
-//! `RUSTOS_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
+//! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
-use rustos_svg::decode;
+use tairix_svg::decode;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -50,13 +50,13 @@ fn decode_never_panics(bytes: &[u8]) {
 
 #[test]
 fn decode_never_panics_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh
-    // per run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "decode_never_panics_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -96,7 +96,7 @@ fn decode_never_panics_for_any_input() {
         decode_never_panics(&noise);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

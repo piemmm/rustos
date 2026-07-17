@@ -26,11 +26,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::input::{KeyInput, KeyValue, NamedKeyCode};
-use rustos_abi::Errno;
-use rustos_browse::render::{entry_index_at, render};
-use rustos_browse::{vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
-use rustos_wm::{Compositor, Point, Rect, WindowId};
+use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::Errno;
+use tairix_browse::render::{entry_index_at, render};
+use tairix_browse::{vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
+use tairix_wm::{Compositor, Point, Rect, WindowId};
 
 use crate::shell::DesktopShell;
 
@@ -181,7 +181,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// `local`.
     ///
     /// A click on an entry row resolves through the shared hit-test
-    /// (`rustos_browse::render::entry_index_at` — exactly the rows the
+    /// (`tairix_browse::render::entry_index_at` — exactly the rows the
     /// renderer drew): a directory row descends, a regular-file row
     /// chooses that file. A click on the path bar, past the listing, or
     /// on an unresolvable coordinate changes nothing.
@@ -316,7 +316,7 @@ fn open_or_choose<S: DirectorySource>(browser: &mut Browser<S>, index: usize) ->
 fn render_surface<S: DirectorySource>(
     browser: &Browser<S>,
     shell: &DesktopShell,
-) -> Option<rustos_wm::Surface> {
+) -> Option<tairix_wm::Surface> {
     render(
         browser,
         shell.session().active_theme(),

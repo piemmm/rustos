@@ -3,14 +3,14 @@
 //! surface owner).
 //!
 //! A **seat** is one physical display plus the keyboard and pointer attached
-//! to it. This module hosts the kernel's seat: the [`rustos_seat::SeatState`]
+//! to it. This module hosts the kernel's seat: the [`tairix_seat::SeatState`]
 //! owner/lease/routing state machine (the one definition shared with the
 //! future user-space seat manager) under the registry's own lock, plus the
 //! two input sinks that state machine routes between:
 //!
 //! * **Text foreground** (the default, an unowned seat): a key *press* is
 //!   encoded to the console (tty) bytes a terminal sends — through the one
-//!   shared [`rustos_keymap::encode_key_input`] map, never a second copy —
+//!   shared [`tairix_keymap::encode_key_input`] map, never a second copy —
 //!   and enqueued on the seat's text sink, where a login/shell `stream_read`
 //!   drains it.
 //! * **Desktop foreground** (a held seat): the whole record is routed to the
@@ -37,14 +37,14 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_abi::driver::display::SeatGate;
-use rustos_abi::input::{KeyInput, PointerInput};
-use rustos_abi::seat::{SeatLease, SEAT_PRIMARY};
-use rustos_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
-use rustos_abi::{DriverError, Errno};
-use rustos_keymap::{encode_key_input, MAX_KEY_BYTES};
-use rustos_seat::{ConsoleIndex, Lease, Route, SeatError, SeatOwner, SeatState};
-use rustos_sync::SpinLock;
+use tairix_abi::driver::display::SeatGate;
+use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
+use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
+use tairix_abi::{DriverError, Errno};
+use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
+use tairix_seat::{ConsoleIndex, Lease, Route, SeatError, SeatOwner, SeatState};
+use tairix_sync::SpinLock;
 use zeroize::Zeroize;
 
 use crate::console::{ConsoleInput, NULL_CONSOLE_INPUT};
@@ -786,7 +786,7 @@ impl SeatRegistry {
 /// seat's handle is refused the instant the seat is destroyed. The bound
 /// handle carries the mint-time generation, which is what makes a stale
 /// pre-revoke handle refusable even after its owner reacquired the seat
-/// ([`rustos_seat::SeatState::verify`], the one definition of the check).
+/// ([`tairix_seat::SeatState::verify`], the one definition of the check).
 pub struct PresentGate<'r> {
     registry: &'r SeatRegistry,
     lease: SeatLease,
@@ -828,7 +828,7 @@ mod tests {
     use super::*;
     use crate::console::{ConsoleInputQueue, ConsoleRead};
     use alloc::boxed::Box;
-    use rustos_abi::input::{KeyValue, Modifiers, NamedKeyCode};
+    use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
 
     const WM: SeatOwner = SeatOwner(7);
     const INTRUDER: SeatOwner = SeatOwner(9);

@@ -19,7 +19,7 @@
 //!   `None`. This is the racing-with-mapper invariant the tests
 //!   exercise.
 //!
-//! The backing storage uses [`rustos_kernel_mem::SensitiveBuffer`] —
+//! The backing storage uses [`tairix_kernel_mem::SensitiveBuffer`] —
 //! the audited, zero-on-free allocator from `kernel/mem` — so that
 //! any credential or capability-token bytes ever carried through
 //! shared memory are wiped at revocation.
@@ -28,14 +28,14 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use rustos_abi::Errno;
-use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::sensitive::alloc_sensitive;
-use rustos_kernel_mem::SensitiveBuffer;
-use rustos_kernel_sec::captable::TaskCapabilities;
-use rustos_log::{Field, Sink};
-use rustos_sync::RwLock;
-use rustos_util::fmt::{format_hex_u64, format_usize};
+use tairix_abi::Errno;
+use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::sensitive::alloc_sensitive;
+use tairix_kernel_mem::SensitiveBuffer;
+use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_log::{Field, Sink};
+use tairix_sync::RwLock;
+use tairix_util::fmt::{format_hex_u64, format_usize};
 
 use crate::audit::{record, AuditEvent};
 
@@ -105,11 +105,11 @@ impl SharedMemory {
         let mut len_buf = [0u8; 12];
         let id_field = Field {
             key: "shmem",
-            value: rustos_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
         };
         let len_field = Field {
             key: "len",
-            value: rustos_log::FieldValue::Str(format_usize(len, &mut len_buf)),
+            value: tairix_log::FieldValue::Str(format_usize(len, &mut len_buf)),
         };
 
         if len == 0 || len > SHMEM_MAX_BYTES {
@@ -182,11 +182,11 @@ impl SharedMemory {
         let mut recv_buf = [0u8; 16];
         let id_field = Field {
             key: "shmem",
-            value: rustos_log::FieldValue::Str(format_hex_u64(self.inner.id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(self.inner.id.0, &mut id_buf)),
         };
         let recv_field = Field {
             key: "recipient",
-            value: rustos_log::FieldValue::Str(format_hex_u64(recipient.task().0, &mut recv_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(recipient.task().0, &mut recv_buf)),
         };
 
         if !self.inner.required_caps.is_subset_of(recipient.effective()) {
@@ -214,7 +214,7 @@ impl SharedMemory {
         let mut id_buf = [0u8; 16];
         let id_field = Field {
             key: "shmem",
-            value: rustos_log::FieldValue::Str(format_hex_u64(self.inner.id.0, &mut id_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(self.inner.id.0, &mut id_buf)),
         };
         {
             let mut s = self.inner.state.write();
@@ -286,9 +286,9 @@ impl ShmemMapping {
 mod tests {
     use super::*;
     use crate::audit::RecordingSink;
-    use rustos_abi::CapabilityId;
-    use rustos_kernel_sec::captable::TaskId;
-    use rustos_kernel_sec::identity::UserId;
+    use tairix_abi::CapabilityId;
+    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
         let mut s = CapabilitySet::empty();

@@ -4,8 +4,8 @@
 //! The device-agnostic EL1 bring-up (FP enable + 2 GiB identity MMU +
 //! vectors), the `AArch64QemuEnv` serial/semihosting seam, and the
 //! one-shot boot harness all live in the shared
-//! `rustos-test-virtio-qemu-support` crate; the
-//! `fw_cfg`/`ramfb` DMA client lives in `rustos-fwcfg`. This module
+//! `tairix-test-virtio-qemu-support` crate; the
+//! `fw_cfg`/`ramfb` DMA client lives in `tairix-fwcfg`. This module
 //! supplies only what is unique to the aarch64 display vertical: programming
 //! `ramfb` from the embedded `virt` DTB and driving the framebuffer
 //! driver through `load -> use -> unload -> reload`, reading the presented
@@ -30,26 +30,26 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ptr;
 
-use rustos_abi::driver::display::{Display, DisplayFormat, SeatGate};
-use rustos_abi::input::{KeyInput, KeyValue, Modifiers};
-use rustos_abi::seat::{SeatLease, SEAT_PRIMARY};
-use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
-use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
-use rustos_display::{Framebuffer, FramebufferConfig};
-use rustos_drvhost::{
+use tairix_abi::driver::display::{Display, DisplayFormat, SeatGate};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers};
+use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
+use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
+use tairix_caps::CapabilitySet;
+use tairix_crypto::Ed25519PublicKey;
+use tairix_display::{Framebuffer, FramebufferConfig};
+use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
-use rustos_fdt::Fdt;
-use rustos_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
-use rustos_kernel_core::console::NULL_CONSOLE_INPUT;
-use rustos_kernel_core::SeatRegistry;
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
-use rustos_kernel_sec::identity::UserId;
-use rustos_kernel_virtio::KernelMmioMapper;
-use rustos_seat::SeatOwner;
-use rustos_test_virtio_qemu_support::{
+use tairix_fdt::Fdt;
+use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+use tairix_kernel_core::console::NULL_CONSOLE_INPUT;
+use tairix_kernel_core::SeatRegistry;
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
+use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::identity::UserId;
+use tairix_kernel_virtio::KernelMmioMapper;
+use tairix_seat::SeatOwner;
+use tairix_test_virtio_qemu_support::{
     bring_up_el1_identity_mmu, define_mmio_boot_harness_aarch64, AArch64QemuEnv, QemuEnv,
 };
 
@@ -134,11 +134,11 @@ impl DriverSpawner for ResolveFramebuffer {
     fn spawn_and_register(
         &self,
         ctx: &SpawnContext<'_>,
-    ) -> Result<rustos_abi::DriverHandle, SpawnRegisterError> {
+    ) -> Result<tairix_abi::DriverHandle, SpawnRegisterError> {
         if !ctx.host.has_capability(CapabilityId::DRV_LOAD) {
             return Err(SpawnRegisterError::Register(DriverError::PermissionDenied));
         }
-        rustos_abi::DriverHandle::from_raw(FB_HANDLE_MARKER).map_err(SpawnRegisterError::Register)
+        tairix_abi::DriverHandle::from_raw(FB_HANDLE_MARKER).map_err(SpawnRegisterError::Register)
     }
 }
 
@@ -302,7 +302,7 @@ fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
     let mut host = Host::new(HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: SYSCALL_TABLE_HASH,
-        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
         source: &source,
         spawner: &spawner,
         sink: audit,

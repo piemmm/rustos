@@ -18,8 +18,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use rustos_termcap::{Capabilities, TermType};
-use rustos_vt::{encode_all_into, Attributes, Color, EraseMode, MouseMode, Op};
+use tairix_termcap::{Capabilities, TermType};
+use tairix_vt::{encode_all_into, Attributes, Color, EraseMode, MouseMode, Op};
 
 use crate::buffer::Buffer;
 use crate::color::{ColorPairs, DEFAULT_PAIR};
@@ -159,7 +159,7 @@ impl<T: Tty> Screen<T> {
     /// # Errors
     ///
     /// [`CursesError::BadColorPair`](crate::CursesError::BadColorPair) for a reserved or out-of-range id.
-    pub fn init_pair(&mut self, id: u16, fg: rustos_vt::Color, bg: rustos_vt::Color) -> Result<()> {
+    pub fn init_pair(&mut self, id: u16, fg: tairix_vt::Color, bg: tairix_vt::Color) -> Result<()> {
         self.pairs.init_pair(id, fg, bg)
     }
 
@@ -171,7 +171,7 @@ impl<T: Tty> Screen<T> {
     ///
     /// [`CursesError::BadColorPair`](crate::CursesError::BadColorPair) if the
     /// pair is new and the table is full.
-    pub fn alloc_pair(&mut self, fg: rustos_vt::Color, bg: rustos_vt::Color) -> Result<u16> {
+    pub fn alloc_pair(&mut self, fg: tairix_vt::Color, bg: tairix_vt::Color) -> Result<u16> {
         self.pairs.alloc_pair(fg, bg)
     }
 

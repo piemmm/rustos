@@ -15,14 +15,14 @@ cancellare (un `TERM` sconosciuto degrada al profilo minimo) fa fallire
 il comando invece di stampare byte che il terminale mostrerebbe come
 caratteri spuri.
 
-Le console RustOS non conservano alcuna cronologia di scorrimento,
+Le console TAIRiX non conservano alcuna cronologia di scorrimento,
 quindi non c'è nulla da cancellare in quel senso: `-x` (l'opzione GNU
 che preserva la cronologia) è accettata per compatibilità con gli
 script e non cambia nulla.
 
 ## OPTIONS
 
-- `-x` — accettata per compatibilità GNU; una console RustOS non
+- `-x` — accettata per compatibilità GNU; una console TAIRiX non
   conserva cronologia, l'output è identico con o senza.
 - `-h, -?` — mostrare la guida breve di questo comando.
 

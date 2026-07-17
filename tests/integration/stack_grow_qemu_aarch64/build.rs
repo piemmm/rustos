@@ -15,11 +15,11 @@
 //!    are selected at runtime from the registry argument vector —
 //!    position-independent for the freestanding aarch64 target.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for
 //!    the [`USER_BIAS`] the production spawn producer maps every image at
 //!    and stamping the kernel's compiled-in syscall CFI tag
-//!    (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the blob and
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the blob and
 //!    the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it
@@ -44,7 +44,7 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -69,7 +69,7 @@ fn main() {
 
         // One CPU: this is the single-core live-scheduler slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
         let rxe = build_and_convert_program(manifest_dir, &out_dir, &program_dir);
@@ -97,11 +97,11 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
+    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
     // position-independent. Scope the PIE link flags to the aarch64 target
     // so the program's own host build script is unaffected, and build
     // `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
+    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
     // `#[global_allocator]`, so the program names `alloc`.
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
@@ -122,7 +122,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-stack-grow",
+            "tairix-test-stack-grow",
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -138,12 +138,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         "building the stack-grow fixture program failed"
     );
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-test-stack-grow");
+    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-stack-grow");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .unwrap_or_else(|_| panic!("convert the stack-grow fixture program ELF into an rxe image"))

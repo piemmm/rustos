@@ -3,16 +3,16 @@
 use core::cell::Cell;
 use core::ptr::NonNull;
 
-use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
-use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
-use rustos_abi::driver::virtio::VirtioHost;
-use rustos_abi::hwtree::{HwResource, HwResourceKind};
-use rustos_abi::mailbox_ipc;
-use rustos_abi::{
+use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
+use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+use tairix_abi::driver::virtio::VirtioHost;
+use tairix_abi::hwtree::{HwResource, HwResourceKind};
+use tairix_abi::mailbox_ipc;
+use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
     RegisterWindow,
 };
-use rustos_caps::CapabilitySet;
+use tairix_caps::CapabilitySet;
 
 use crate::syscalls::GrantSyscalls;
 
@@ -32,10 +32,10 @@ pub const MAX_GRANTS: usize = 8;
 /// resource its matched node requested) and learns them
 /// through the `resource_grants` syscall; [`RtDriverHost::from_grants_query`]
 /// builds the host's grant table from that delivery. The single wire/owning
-/// definition lives in `lib/abi` ([`rustos_abi::hwtree::GrantedResource`]) —
+/// definition lives in `lib/abi` ([`tairix_abi::hwtree::GrantedResource`]) —
 /// the kernel serialises it and this host decodes it, one type for both ends — and is re-exported here so a driver names it through
 /// its host crate.
-pub use rustos_abi::hwtree::GrantedResource;
+pub use tairix_abi::hwtree::GrantedResource;
 
 /// A grant the host can map, plus the lazily-cached `(offset, base_va)` of
 /// the sub-region last mapped from it.
@@ -69,10 +69,10 @@ pub struct RtDriverHost<S: GrantSyscalls> {
     dma_pool: PoolId,
     next_slot: Cell<usize>,
     coherency: Option<SlabCoherencyFn>,
-    /// The kernel-issued [`rustos_abi::IrqHandle`] for this driver's granted
+    /// The kernel-issued [`tairix_abi::IrqHandle`] for this driver's granted
     /// interrupt line, bound lazily on the first [`VirtioHost::notify_wait`]
     /// and cached so the line is bound at most once. `0`
-    /// ([`rustos_abi::IrqHandle::INVALID`]) is the unbound sentinel — a real
+    /// ([`tairix_abi::IrqHandle::INVALID`]) is the unbound sentinel — a real
     /// handle is always `≥ 1` (no repeated bind syscall).
     irq_handle: Cell<u64>,
 }
@@ -502,7 +502,7 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
 ///
 /// # Safety
 ///
-/// Mirrors the [`SlabFreeFn`](rustos_abi::driver::dma::SlabFreeFn) contract:
+/// Mirrors the [`SlabFreeFn`](tairix_abi::driver::dma::SlabFreeFn) contract:
 /// `pool` must be the `*const ()` produced by
 /// [`RtDriverHost::alloc_dma_zeroed`] casting `&RtDriverHost<S>`, and the
 /// originating host must still be live (the host outlives every slab it
@@ -618,7 +618,7 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         Some(self)
     }
 
-    fn emit_node(&self, node: rustos_abi::HwNode) -> Result<(), DriverError> {
+    fn emit_node(&self, node: tairix_abi::HwNode) -> Result<(), DriverError> {
         // Publish the enumerated child through the `hw_emit_node` syscall so
         // the device manager autoloads its driver in turn. The host adds no authority: the kernel gates the call by
         // `CAP_HW_EMIT` and admits the node only when every resource it
@@ -630,7 +630,7 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         Ok(())
     }
 
-    fn alloc_msi(&self) -> Result<rustos_abi::MsiAllocation, DriverError> {
+    fn alloc_msi(&self) -> Result<tairix_abi::MsiAllocation, DriverError> {
         // Allocate an MSI vector through `msi_alloc`: the kernel mints a
         // vector, grants this task a device resource for the resulting line
         // (so it may forward it as an `HwResource::irq` on the node it

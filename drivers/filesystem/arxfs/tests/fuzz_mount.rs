@@ -24,7 +24,7 @@
 //! re-walk, and the read-only `rescue` root scan. Each shares the same
 //! invariant: it returns a `Result`, never panics, and fails closed.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random images, and a structured sweep flips bytes of a real
 //! formatted image to hammer the block-identity checks (magic, type,
 //! address, keyed authenticator). Stage 3 added the keyed metadata
@@ -41,19 +41,19 @@
 //! [`SMOKE_FLIP_SAMPLES`] sample of the single-byte sweep plus
 //! [`SMOKE_ITERATIONS`] PRNG images, all from a fresh, logged seed. The
 //! time-limited GitHub soak (`cargo xtask fuzz`) exports
-//! `RUSTOS_FUZZ_BUDGET_SECS`, which switches the harness to its budgeted
+//! `TAIRIX_FUZZ_BUDGET_SECS`, which switches the harness to its budgeted
 //! coverage — byte positions are swept in a seeded full-coverage order until
 //! the wall-clock budget elapses (the nightly budget flips every byte of the
 //! image) and the PRNG loop runs to the same budget. The cheap, deterministic
 //! both-copies-bad sweep runs in either mode.
 
-use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
-use rustos_drv_fs_arxfs::{
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
+use tairix_drv_fs_arxfs::{
     EntropySource, RescueSink, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
 };
-use rustos_log::{Event, Sink};
+use tairix_log::{Event, Sink};
 
 /// Capability set granting the scrub gate (`CAP_FS_MOUNT`).
 struct AllCaps;
@@ -336,15 +336,15 @@ fn formatted_image() -> Vec<u8> {
 
 #[test]
 fn open_never_panics_on_arbitrary_images() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let base = formatted_image();
 
     // Draw and log the seed up front so every sampled byte position and every
     // PRNG image below replays exactly from the logged value:
     // fresh per run, fresh per soak run under `cargo xtask fuzz`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    let mut state: u64 = tairix_fuzzseed::start(
         "open_never_panics_on_arbitrary_images",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -362,7 +362,7 @@ fn open_never_panics_on_arbitrary_images() {
     // `exercise` is a full encrypted mount + re-check, far heavier than a
     // byte decoder.
     if let Some(deadline) = deadline {
-        rustos_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
+        tairix_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
             let mut image = base.clone();
             image[i] ^= 0xff;
             exercise(&image);
@@ -417,7 +417,7 @@ fn open_never_panics_on_arbitrary_images() {
         }
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

@@ -1,4 +1,4 @@
-//! RustOS bus-agnostic `xHCI` USB host-controller protocol.
+//! TAIRiX bus-agnostic `xHCI` USB host-controller protocol.
 //!
 //! This `lib/*` crate carries the host-provable, **bus-agnostic** `xHCI`
 //! layers: the register vocabulary
@@ -44,8 +44,8 @@
 // error, never a panic).
 extern crate alloc;
 
-use rustos_abi::driver::mmio::WindowError;
-use rustos_abi::{DriverError, RegisterWindow};
+use tairix_abi::driver::mmio::WindowError;
+use tairix_abi::{DriverError, RegisterWindow};
 
 pub mod bank;
 pub mod device;
@@ -86,7 +86,7 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// A bus driver that brings an xHCI controller up publishes the controller
 /// into the hardware tree under this `compatible` string, and the
 /// controller's driver binds it with a matching
-/// [`HwMatchKey::compatible`](rustos_abi::HwMatchKey::compatible) bind key.
+/// [`HwMatchKey::compatible`](tairix_abi::HwMatchKey::compatible) bind key.
 /// It is an xHCI-protocol identity (the controller class), not a board or
 /// vendor name, so it lives here beside the controller engine as the single
 /// definition both the emitting bus driver (`drivers/bus/usb/vl805`) and the
@@ -665,8 +665,8 @@ impl<H: XhciHost> Xhci<H> {
         // the controller at. Order those Normal-Non-Cacheable writes ahead of
         // the register stores below so the controller — a separate,
         // possibly non-coherent bus master — never reads stale structures
-        // once `RUN` is set (see `rustos_dma_barrier`).
-        rustos_dma_barrier::dma_wmb();
+        // once `RUN` is set (see `tairix_dma_barrier`).
+        tairix_dma_barrier::dma_wmb();
         self.write_op(regs::CONFIG, u32::from(self.max_slots))?;
         self.write_op(regs::DCBAAP, low_dword(prog.dcbaap))?;
         self.write_op(regs::DCBAAP + 4, high_dword(prog.dcbaap))?;
@@ -882,8 +882,8 @@ impl<H: XhciHost> Xhci<H> {
         // doorbell store that hands them to the controller. Without this the
         // controller can observe the doorbell before the just-written TRBs on
         // non-coherent DMA memory and act on stale ring contents — the metal
-        // failure this fixes (see `rustos_dma_barrier`).
-        rustos_dma_barrier::dma_wmb();
+        // failure this fixes (see `tairix_dma_barrier`).
+        tairix_dma_barrier::dma_wmb();
         self.host
             .write32(self.db_base + usize::from(index) * 4, target)
     }

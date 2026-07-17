@@ -26,12 +26,12 @@
 //!
 //! Both decoders fail conservative: any value that is not an encoding
 //! the vendor has actually published is treated as
-//! [`rustos_arch_api::CoreClass::Performance`], the safe homogeneous
+//! [`tairix_arch_api::CoreClass::Performance`], the safe homogeneous
 //! default the Arch HAL mandates for
-//! [`rustos_arch_api::SchedulerArch::core_class`]. They never guess a
+//! [`tairix_arch_api::SchedulerArch::core_class`]. They never guess a
 //! class from family/model heuristics or frequency tables.
 
-use rustos_arch_api::CoreClass;
+use tairix_arch_api::CoreClass;
 
 /// CPUID leaf that enumerates an Intel core's hybrid type.
 ///
@@ -97,7 +97,7 @@ const MAX_TOPOLOGY_SUBLEAF: u32 = 7;
 /// value — including `0`, which leaf 0x1A reports on a non-hybrid part —
 /// is also treated as a performance core, the safe homogeneous default
 /// the Arch HAL mandates for
-/// [`rustos_arch_api::SchedulerArch::core_class`].
+/// [`tairix_arch_api::SchedulerArch::core_class`].
 #[must_use]
 pub const fn classify_core_type(leaf_1a_eax: u32) -> CoreClass {
     match leaf_1a_eax >> 24 {

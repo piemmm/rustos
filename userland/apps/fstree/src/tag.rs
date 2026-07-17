@@ -14,9 +14,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use rustos_abi::time::Time64;
-use rustos_abi::FileKind;
-use rustos_fsmeta::calendar::{civil_from_days, days_from_civil};
+use tairix_abi::time::Time64;
+use tairix_abi::FileKind;
+use tairix_fsmeta::calendar::{civil_from_days, days_from_civil};
 
 use crate::fs::Fs;
 use crate::ops::{plan_target, Conflict, Decision, FileOp, OpError, OpKind, OpProgress};

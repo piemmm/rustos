@@ -31,7 +31,7 @@ must not use a spin lock: a second contender on the same CPU would deadlock,
 and on another CPU it would busy-spin on a sleeping holder (forbidden
 busy-waiting, `AGENTS.md` §2.23).
 
-For that case the kernel provides `rustos_kernel_core::SleepLock<T>`: a
+For that case the kernel provides `tairix_kernel_core::SleepLock<T>`: a
 scheduler-blocking mutex whose contenders **park off the run queue** and are
 woken on release. It cannot live in `lib/sync` because parking/waking is the
 scheduler's job and the layering forbids a `lib/*` crate from depending on the
@@ -121,7 +121,7 @@ non-sleeping critical sections.
 
   ```text
   RUSTFLAGS="--cfg loom" cargo test --test loom \
-      -p rustos-kernel-sync --release
+      -p tairix-kernel-sync --release
   ```
 
 - `cargo xtask test` runs everything except the loom suite on the

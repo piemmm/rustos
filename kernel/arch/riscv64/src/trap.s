@@ -1,11 +1,11 @@
-# RustOS riscv64 S-mode trap vector for the QEMU `virt` board.
+# TAIRiX riscv64 S-mode trap vector for the QEMU `virt` board.
 #
 # Installed into `stvec` (direct mode) by `trap::init_traps`. Every
 # S-mode trap — synchronous exception or interrupt — enters here with
 # `sstatus.SIE` cleared by hardware. The vector swaps to a kernel stack,
 # saves the interrupted context's caller-saved integer registers plus the
 # return-state CSRs (`sepc`, `sstatus`, and the interrupted `sp`), calls
-# the Rust handler (`rustos_riscv64_trap_handler`, which preserves
+# the Rust handler (`tairix_riscv64_trap_handler`, which preserves
 # callee-saved registers per the C ABI and may advance the saved `sepc`),
 # restores, and returns with `sret`.
 #
@@ -96,8 +96,8 @@
 
 .section .text
 .align 2
-.global rustos_riscv64_trap_vector
-rustos_riscv64_trap_vector:
+.global tairix_riscv64_trap_vector
+tairix_riscv64_trap_vector:
     # Swap `sp` with `sscratch`. From U-mode `sp` now holds the kernel
     # stack top (non-zero) and `sscratch` holds the user `sp`; from
     # S-mode `sp` holds 0 (the S-mode invariant) and `sscratch` holds the
@@ -132,7 +132,7 @@ rustos_riscv64_trap_vector:
     # syscall return value back into the saved a0 slot, and advance the
     # saved `sepc` past the `ecall`.
     mv      a0, sp
-    call    rustos_riscv64_trap_handler
+    call    tairix_riscv64_trap_handler
 
     # Restore the return-state CSRs the handler may have updated.
     ld      t0, OFF_SSTATUS(sp)

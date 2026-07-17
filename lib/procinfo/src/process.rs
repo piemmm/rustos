@@ -8,9 +8,9 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use rustos_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
-use rustos_abi::Errno;
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
+use tairix_abi::Errno;
 
 use crate::list::{field_lossy, walk_pages, ListError};
 use crate::request::CallError;
@@ -98,7 +98,7 @@ pub fn render_process(record: &ProcessRecord) -> String {
 /// A single-letter process-state code, following the GNU `ps`/`top`
 /// convention where the states correspond: a blocked task awaits an event
 /// (IPC, IRQ, timer) exactly as a sleeping POSIX process does, so it reads
-/// `S`; `Z` and `T` keep their coreutils meaning. RustOS distinguishes
+/// `S`; `Z` and `T` keep their coreutils meaning. TAIRiX distinguishes
 /// running-on-a-CPU (`R`) from runnable-but-waiting (`r`), a split GNU
 /// folds into one `R` — the lowercase form keeps that extra truth without
 /// stealing a GNU letter.
@@ -194,10 +194,10 @@ mod tests {
     use crate::transport::{Output, Transport};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::sysinfo::{
+    use tairix_abi::sysinfo::{
         ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
     };
-    use rustos_abi::{Errno, ProcId};
+    use tairix_abi::{Errno, ProcId};
 
     /// An in-memory `sysinfod` stand-in answering process-list queries from a
     /// fixed record set, decoding the request exactly as the real service.

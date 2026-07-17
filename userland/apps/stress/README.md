@@ -11,7 +11,7 @@ alongside (`--monitor`).
 
 ## Shape
 
-The crate is both the `rustos-stress` load library and the `Run`
+The crate is both the `tairix-stress` load library and the `Run`
 entry-point binary of the `stress.app` bundle:
 
 - `src/command.rs` — the closed §7.3 option grammar with GNU `stress`

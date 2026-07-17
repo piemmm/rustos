@@ -6,13 +6,13 @@
 //! than index blindly. That plumbing lives here once so the two encoders and
 //! decoders cannot drift apart.
 //!
-//! This is deliberately distinct from `rustos_abi`'s offset-indexed
-//! [`le`](rustos_abi) helpers: those take a caller-checked fixed offset and
+//! This is deliberately distinct from `tairix_abi`'s offset-indexed
+//! [`le`](tairix_abi) helpers: those take a caller-checked fixed offset and
 //! never advance or bounds-check, which suits fixed-`WIRE_LEN` ABI structs.
 //! The record layer instead streams variable-length fields, so it needs the
 //! advancing, self-checking form below.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// Append `src` at `*pos`, advancing it. Fails closed if `out` is too small.
 pub(crate) fn put_bytes(out: &mut [u8], pos: &mut usize, src: &[u8]) -> Result<(), Errno> {

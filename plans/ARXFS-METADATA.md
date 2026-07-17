@@ -20,7 +20,7 @@ The goal has two parts:
    (ADFS) filetype (e.g. `&FFF` = Text), and the equivalent Amiga, Atari, and
    classic-Mac metadata — and to round-trip it back out when copying to a
    filesystem that understands it. This is interoperability with foreign
-   systems' data (charter §2.13), not RustOS self-compatibility.
+   systems' data (charter §2.13), not TAIRiX self-compatibility.
 
 ---
 
@@ -33,11 +33,11 @@ per-file metadata that has no POSIX equivalent: ADFS load/exec addresses and a
 12-bit filetype, Amiga protection bits and a file comment, Mac type/creator
 four-character codes and a resource fork, and so on. Copying such a file onto a
 filesystem with no place to keep that metadata silently destroys it. When
-RustOS later gains ADFS/AmigaDOS/etc. read-write support, a copy *off* ARXFS
+TAIRiX later gains ADFS/AmigaDOS/etc. read-write support, a copy *off* ARXFS
 back onto the native filesystem must be able to restore the original metadata.
 
 ARXFS therefore needs a lossless, general place to keep arbitrary foreign and
-RustOS-native per-file metadata, plus a normalised vocabulary so the *same*
+TAIRiX-native per-file metadata, plus a normalised vocabulary so the *same*
 logical attribute (e.g. "this is a text file") is stored under the *same* key no
 matter which tool wrote it.
 
@@ -47,7 +47,7 @@ In scope: the on-disk extended-attribute model, the namespaced key grammar, the
 ABI/VFS/driver surface to get/set/list/remove attributes, value size and count
 limits, capability and security rules, the cross-filesystem preservation
 contract (copy, move, archive, snapshot send/receive), the **preset registry**
-of well-known foreign-metadata keys (Acorn/ADFS, Amiga, Atari, Mac, and RustOS
+of well-known foreign-metadata keys (Acorn/ADFS, Amiga, Atari, Mac, and TAIRiX
 native), and tests.
 
 Out of scope (named so they are not assumed): implementing the ADFS/Amiga/Atari
@@ -126,7 +126,7 @@ fork-style data is stored without bloating the inline attribute set.
 
 A key is `namespace "." rest`, byte-for-byte case-sensitive (matching ARXFS
 directory-name comparison, arxfs-spec §13), e.g. `acorn.filetype`,
-`amiga.protection`, `mac.type`, `user.comment`, `rustos.origin`. Reserved
+`amiga.protection`, `mac.type`, `user.comment`, `tairix.origin`. Reserved
 namespaces and their meaning/capability:
 
 ```text
@@ -137,12 +137,12 @@ acorn       Acorn / RISC OS (ADFS) preset metadata     none beyond file r/w perm
 amiga       AmigaDOS preset metadata                   none beyond file r/w perms
 atari       Atari GEMDOS/TOS preset metadata           none beyond file r/w perms
 mac         classic Mac OS / HFS preset metadata       none beyond file r/w perms
-rustos      RustOS-native extended metadata            none beyond file r/w perms
+tairix      TAIRiX-native extended metadata            none beyond file r/w perms
 system      security-sensitive (ACL-adjacent) metadata a dedicated capability (§5)
 trusted     metadata only privileged services may set  a dedicated capability (§5)
 ```
 
-The foreign-FS namespaces (`acorn`, `amiga`, `atari`, `mac`) and `user`/`rustos`
+The foreign-FS namespaces (`acorn`, `amiga`, `atari`, `mac`) and `user`/`tairix`
 are ordinary file metadata: reading/writing them needs only the file's own
 read/write permission (the per-inode owner/mode/ACL model, charter §5.3). The
 `system` and `trusted` namespaces guard a real security boundary and require a
@@ -168,7 +168,7 @@ fork, an icon, a thumbnail) is stored as a **named stream**: a secondary data
 stream attached to the inode, stored exactly like file data (COW extents,
 checksummed, compressed, encrypted, dedupable, sparse-capable — arxfs-spec §6,
 §7, §8, §9, §10, §19). The primary (unnamed) stream is the file's normal
-contents; named streams are addressed by a `rustos`/`mac`-namespaced key (e.g.
+contents; named streams are addressed by a `tairix`/`mac`-namespaced key (e.g.
 `mac.resourcefork`). This keeps large forks out of the inline attribute set
 while reusing the entire data pipeline (charter §2.2 — no second data path).
 
@@ -176,7 +176,7 @@ while reusing the entire data pipeline (charter §2.2 — no second data path).
 
 ## 5. Capabilities and security
 
-- Reading/writing `user`, `acorn`, `amiga`, `atari`, `mac`, `rustos` attributes
+- Reading/writing `user`, `acorn`, `amiga`, `atari`, `mac`, `tairix` attributes
   requires only the file's existing read/write permission — no new capability
   (charter §5.2: do not add a capability where the per-inode model suffices).
 - `system.*` (security-sensitive, ACL-adjacent) and `trusted.*` (privileged
@@ -233,7 +233,7 @@ dest driver    -> store natively if it understands them, else keep as ARXFS
 ### 6.2 Copy semantics (cp / mv / desktop)
 
 - `cp`/`mv` and the desktop copy default to **preserve all representable
-  metadata** (the foreign-FS namespaces, `user`, `rustos`), like `cp
+  metadata** (the foreign-FS namespaces, `user`, `tairix`), like `cp
   --preserve` does for mode/timestamps. Document the flag surface in
   `userland/shell/` and the desktop.
 - `mv` within one filesystem preserves attributes trivially (same inode or a
@@ -311,15 +311,15 @@ mac.finderflags    Finder flags bitset.
 mac.resourcefork   the resource fork, stored as a named stream (§4.4).
 ```
 
-### 7.5 RustOS native
+### 7.5 TAIRiX native
 
 ```text
-rustos.origin      provenance: source filesystem family + volume id, set on
+tairix.origin      provenance: source filesystem family + volume id, set on
                    import so a later export knows where the metadata came from.
-rustos.mime        optional MIME type hint (advisory; never a security decision).
+tairix.mime        optional MIME type hint (advisory; never a security decision).
 ```
 
-The registry also defines, per foreign family, **which native field a RustOS
+The registry also defines, per foreign family, **which native field a TAIRiX
 file's attribute maps to on export**, so the round-trip in §6.1 is symmetric and
 checked.
 
@@ -397,7 +397,7 @@ The generated spec must explicitly identify these charter touch-points:
 
 - **`AGENTS.md` §3** — add the shared `lib/fsmeta` crate and note the ARXFS
   `attr`/metadata module if the charter enumerates ARXFS internals.
-- **`AGENTS.md` §5.2 / §5.3** — `user`/foreign/`rustos` attributes use the
+- **`AGENTS.md` §5.2 / §5.3** — `user`/foreign/`tairix` attributes use the
   existing per-inode permission model (no new capability); `system`/`trusted`
   namespaces add a justified capability with its enforcement point. Record the
   decision.
@@ -408,7 +408,7 @@ The generated spec must explicitly identify these charter touch-points:
   and from foreign formats with checked Time64 conversions; no silent
   truncation.
 - **`AGENTS.md` §2.13** — foreign-metadata preservation is *interoperability
-  with foreign systems' data*, explicitly allowed and distinct from RustOS
+  with foreign systems' data*, explicitly allowed and distinct from TAIRiX
   self-compatibility; state this so it is not mistaken for a compat shim.
 - **`PLAN.md`** — add a ARXFS extended-metadata stage (alongside/after the
   snapshot stage) and a one-line "Charter Amendments" rationale for any new

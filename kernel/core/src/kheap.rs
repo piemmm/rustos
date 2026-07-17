@@ -1,6 +1,6 @@
 //! Growable kernel heap wiring.
 //!
-//! The kernel `#[global_allocator]` is a [`rustos_kalloc::FreeListAllocator`]
+//! The kernel `#[global_allocator]` is a [`tairix_kalloc::FreeListAllocator`]
 //! living in the bin crate over a small `.bss` bootstrap region. That
 //! bootstrap covers early boot, before a physical frame allocator exists;
 //! once one does, the boot path installs a growth source here so the heap
@@ -29,8 +29,8 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use rustos_kalloc::{FreeListAllocator, HeapSource};
-use rustos_kernel_mem::{Frame, FrameAllocator, PhysMap, MAX_ORDER, PAGE_SIZE};
+use tairix_kalloc::{FreeListAllocator, HeapSource};
+use tairix_kernel_mem::{Frame, FrameAllocator, PhysMap, MAX_ORDER, PAGE_SIZE};
 
 /// Minimum growth granule, expressed as a frame order: 2^4 frames = 64 KiB.
 ///
@@ -145,7 +145,7 @@ pub fn install_frame_heap_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, SimPhysMap};
+    use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, SimPhysMap};
 
     /// Round-trips growth and shrink through the real allocator stack: a
     /// tiny bootstrap heap backed by a [`FrameHeapSource`] over a

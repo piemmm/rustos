@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p rustos-kernel-sync --release
+//!     -p tairix-kernel-sync --release
 //! ```
 //!
 //! When the `loom` cfg is *not* enabled the file compiles to an empty
@@ -21,7 +21,7 @@
 use loom::sync::Arc;
 use loom::thread;
 
-use rustos_sync::{Epoch, McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
+use tairix_sync::{Epoch, McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
 
 #[test]
 fn loom_spinlock_mutual_exclusion() {

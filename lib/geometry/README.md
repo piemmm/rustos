@@ -1,6 +1,6 @@
-# rustos-geometry
+# tairix-geometry
 
-The single shared **integer screen geometry** for the RustOS desktop
+The single shared **integer screen geometry** for the TAIRiX desktop
 (`AGENTS.md` §6, §17.4 — `PLAN.md` Stage 7): the `Point` and `Rect` types
 used by the compositing window manager (`userland/gui/wm`), the taskbar
 (`userland/gui/taskbar`), and the default graphical apps.

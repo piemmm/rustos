@@ -1,9 +1,9 @@
-# rustos-test-posix-fs-suite
+# tairix-test-posix-fs-suite
 
 The `pjdfstest`-equivalent POSIX filesystem conformance suite — the final
 `PLAN.md` Stage 5 test deliverable.
 
-It drives the **real** `arxfs` driver (`rustos_drv_fs_arxfs::ARXFS`)
+It drives the **real** `arxfs` driver (`tairix_drv_fs_arxfs::ARXFS`)
 through the **real** `kernel/core::fs::Vfs` policy layer and asserts the
 return values and error codes of every filesystem operation the system
 exposes. It re-implements no filesystem semantics of its own
@@ -45,5 +45,5 @@ the permission cases require.
 ## Running
 
 ```
-cargo test -p rustos-test-posix-fs-suite
+cargo test -p tairix-test-posix-fs-suite
 ```

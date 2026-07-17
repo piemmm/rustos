@@ -20,8 +20,8 @@ use crate::test_sink::TestSink;
 
 use alloc::boxed::Box;
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
-use rustos_kernel_mem::{
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use tairix_kernel_mem::{
     escalation, ramzip_handoff, CacheBudget, EscalationStep, MemoryPressure, PressureBand,
     RamzipHandoff, ReclaimClass, ReclaimOwner,
 };

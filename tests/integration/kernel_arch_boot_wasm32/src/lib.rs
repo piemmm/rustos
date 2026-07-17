@@ -14,7 +14,7 @@
 //!   linear memory — faults on this context's bytes, printing
 //!   `ISOLATION_OK`.
 //! * **Live `kernel/sched` scheduler driven by the frame tick.** CPU 0
-//!   builds a real `rustos_kernel_sched_mlfq::Scheduler` over
+//!   builds a real `tairix_kernel_sched_mlfq::Scheduler` over
 //!   `WasmArch`, installs the `preempt` tick callback so each
 //!   `requestAnimationFrame` frame drives `Scheduler::on_timer_tick` and
 //!   dispatches a task via `step`, and prints `TICK` per frame.
@@ -44,12 +44,12 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
-    use rustos_arch_wasm32::console::write_line;
-    use rustos_arch_wasm32::isolation::{live_memory_region, AddressSpace, MemoryRegion};
-    use rustos_arch_wasm32::{handle_panic_via_console, preempt, smp, WasmArch};
-    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
+    use tairix_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
+    use tairix_arch_wasm32::console::write_line;
+    use tairix_arch_wasm32::isolation::{live_memory_region, AddressSpace, MemoryRegion};
+    use tairix_arch_wasm32::{handle_panic_via_console, preempt, smp, WasmArch};
+    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
 
     /// The main browser thread is logical CPU 0; the spawned worker is 1.
     const BOOT_CPU: CpuId = 0;
@@ -179,7 +179,7 @@ mod kernel {
         }
     }
 
-    /// Boot body the arch crate's exported `rustos_arch_wasm32_main`
+    /// Boot body the arch crate's exported `tairix_arch_wasm32_main`
     /// trampoline (`kernel/arch/wasm32::entry`) forwards to once the host
     /// has instantiated the module — in the main thread and in every
     /// spawned worker. It branches on this context's logical CPU id.
@@ -225,7 +225,7 @@ mod kernel {
         // (no retry-until-it-works).
         //
         // SAFETY: a wasm32 secondary is a fresh module instance entered
-        // through the fixed `rustos_arch_wasm32_main` export (no settable
+        // through the fixed `tairix_arch_wasm32_main` export (no settable
         // entry to install), and `WORKER_CPU` maps to a real, distinct
         // worker slot in the handle's topology, distinct from CPU 0.
         if unsafe { arch.start_secondary(WORKER_CPU) }.is_err() {

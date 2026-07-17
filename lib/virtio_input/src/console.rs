@@ -7,8 +7,8 @@
 //! module is the producer half: it tracks the held modifiers and the
 //! caps-/num-lock state and resolves each printable or named key edge into
 //! the [`Key`] a US keyboard layout produces, then emits the *device-resolved
-//! key edge* — a [`rustos_abi::input::KeyInput`] record built through the
-//! shared [`rustos_keymap::key_input`] map — leaving the encoding and routing
+//! key edge* — a [`tairix_abi::input::KeyInput`] record built through the
+//! shared [`tairix_keymap::key_input`] map — leaving the encoding and routing
 //! to the kernel input-focus arbiter. A keyboard driver
 //! injects each record into the kernel through the `key_inject` syscall, which
 //! decides by who holds focus whether to encode the press to a text console's
@@ -23,10 +23,10 @@
 //! Everything here is allocation-free and fail-closed: an
 //! unknown keycode or a non-key event produces no record rather than guessing.
 
-use rustos_abi::driver::input::{InputEvent, InputEventKind};
-use rustos_abi::input::KeyInput;
-use rustos_input::{Key, Modifiers, NamedKey};
-use rustos_keymap::key_input;
+use tairix_abi::driver::input::{InputEvent, InputEventKind};
+use tairix_abi::input::KeyInput;
+use tairix_input::{Key, Modifiers, NamedKey};
+use tairix_keymap::key_input;
 
 /// Linux `evdev` keycodes this producer recognises (`input-event-codes.h`).
 /// Only the constants the resolver and the modifier/lock tracking name are

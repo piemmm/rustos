@@ -34,7 +34,7 @@
 
 use core::fmt::{self, Write};
 
-use rustos_abi::{Duration64, FieldValue};
+use tairix_abi::{Duration64, FieldValue};
 
 use crate::record::LogRecordRef;
 use crate::Level;
@@ -167,7 +167,7 @@ mod tests {
 
     use alloc::string::String;
 
-    use rustos_abi::{
+    use tairix_abi::{
         CapabilitySummary, Duration64, FieldName, FieldValue, IpAddr, Origin, ProcId, TrustDomain,
         WallClockReading, ORIGIN_CONSOLE_NONE,
     };
@@ -241,7 +241,7 @@ mod tests {
             ),
             (
                 FieldName::new("errno").unwrap(),
-                FieldValue::Error(rustos_abi::Errno::PermissionDenied),
+                FieldValue::Error(tairix_abi::Errno::PermissionDenied),
             ),
         ];
         let mut record = base("service.backup", Level::Warn, "file skipped");

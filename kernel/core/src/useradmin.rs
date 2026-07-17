@@ -30,18 +30,18 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::users_admin::{
+use tairix_abi::users_admin::{
     gid_list_into, grant_list_into, AccountStateCode, GroupEntry, ListResponseBuilder, UserEntry,
     UsersAdminRequest,
 };
-use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_log::{Field, FieldValue, Level, Sink};
-use rustos_users::{
+use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_log::{Field, FieldValue, Level, Sink};
+use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, PasswordRecord, StoredPassword,
     Uid, UserRecord, UsersDb, MAX_DB_LEN, MAX_GROUPS_DB_LEN, NO_PATH_MARKER,
 };
-use rustos_util::fmt::format_usize;
+use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
 use crate::fs::LateIdentity;
@@ -111,7 +111,7 @@ pub struct UsersAdminAlreadyInstalled;
 /// [`Errno::NotImplemented`], and the install is set-once so no later
 /// code path can swap the live engine.
 pub struct LateUsersAdmin {
-    engine: rustos_sync::OnceCell<UserAdminEngine>,
+    engine: tairix_sync::OnceCell<UserAdminEngine>,
 }
 
 impl LateUsersAdmin {
@@ -120,7 +120,7 @@ impl LateUsersAdmin {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            engine: rustos_sync::OnceCell::new(),
+            engine: tairix_sync::OnceCell::new(),
         }
     }
 
@@ -166,7 +166,7 @@ impl UsersAdmin for LateUsersAdmin {
 /// The storage the engine commits through: the root-volume writes only
 /// the disk-owning boot path can perform.
 ///
-/// Implemented by `rustos-kernel` over the mounted root volume's
+/// Implemented by `tairix-kernel` over the mounted root volume's
 /// concrete driver; kernel/core stays driver-agnostic. Both methods run
 /// under the engine's operation lock, so implementations need no
 /// ordering of their own.
@@ -195,7 +195,7 @@ pub trait UserAdminBacking: Sync {
 /// Upper bound, in bytes, on any `users_admin` list response the kernel
 /// will build (validation bound — a defence, not a capacity).
 ///
-/// A [`UsersAdminOp::ListUsers`](rustos_abi::users_admin::UsersAdminOp)
+/// A [`UsersAdminOp::ListUsers`](tairix_abi::users_admin::UsersAdminOp)
 /// response re-encodes the account records without their password
 /// fields, so it is comfortably bounded by twice the on-disk database
 /// maximum; the groups response is far smaller. The handler clamps its
@@ -375,7 +375,7 @@ impl UserAdminEngine {
     fn create_user(
         &self,
         caller_caps: &dyn CapabilityQuery,
-        req: &rustos_abi::users_admin::CreateUser<'_>,
+        req: &tairix_abi::users_admin::CreateUser<'_>,
         state: &mut AdminState,
     ) -> Result<(), Errno> {
         let grants = capability_set(req.grants.iter());
@@ -412,7 +412,7 @@ impl UserAdminEngine {
 
     fn modify_user(
         &self,
-        req: &rustos_abi::users_admin::ModifyUser<'_>,
+        req: &tairix_abi::users_admin::ModifyUser<'_>,
         state: &mut AdminState,
     ) -> Result<(), Errno> {
         let index = Self::find_user(&state.users, req.username)?;

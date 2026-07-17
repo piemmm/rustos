@@ -1,6 +1,6 @@
 [package]
-name = "rustos-test-ps2-qemu-x86-64"
-description = "Stage 4 QEMU integration test: boot the rustos-kernel pipeline, load the signed PS/2 input driver through `rustos-drvhost::Host`, mint the x86_64 `PortIo8` backend, bind the keyboard line (ISA IRQ-1 -> GSI 1) in the production IrqTable, inject a deterministic i8042 scancode and wait on `IrqTable::try_wait_step` for the real interrupt before draining via the driver's poll, drive it through load -> use -> unload -> reload, and signal QEMU success."
+name = "tairix-test-ps2-qemu-x86-64"
+description = "Stage 4 QEMU integration test: boot the tairix-kernel pipeline, load the signed PS/2 input driver through `tairix-drvhost::Host`, mint the x86_64 `PortIo8` backend, bind the keyboard line (ISA IRQ-1 -> GSI 1) in the production IrqTable, inject a deterministic i8042 scancode and wait on `IrqTable::try_wait_step` for the real interrupt before draining via the driver's poll, drive it through load -> use -> unload -> reload, and signal QEMU success."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,15 +13,15 @@ workspace = true
 
 # Stage 4 QEMU integration test for the first input-class driver
 # (`drivers/input/ps2`). The binary reuses the production boot pipeline
-# from `rustos-kernel`'s library half and replaces only the audit sink
+# from `tairix-kernel`'s library half and replaces only the audit sink
 # so that on observing `AuditEvent::BootCompleted` (`EventId(4004)`) it:
 #
-#   1. loads the signed PS/2 driver `.rxe` through `rustos_drvhost::Host`
+#   1. loads the signed PS/2 driver `.rxe` through `tairix_drvhost::Host`
 #      (exercising the §8 load gate against the real
-#      `rustos_drv_input_ps2::register` entry point), then
-#   2. mints the x86_64 `PortIo8` backend (`rustos_arch_x86_64::pio`),
+#      `tairix_drv_input_ps2::register` entry point), then
+#   2. mints the x86_64 `PortIo8` backend (`tairix_arch_x86_64::pio`),
 #      binds the keyboard line (ISA IRQ-1 -> GSI 1) in the production
-#      `rustos_kernel_irq::IrqTable`, enables the i8042 keyboard-interrupt
+#      `tairix_kernel_irq::IrqTable`, enables the i8042 keyboard-interrupt
 #      config bit, masks the legacy PIC, and unmasks GSI 1 at the
 #      IO-APIC, then injects a deterministic scancode via the controller's
 #      `0xD2` "write keyboard output buffer" command, waits on
@@ -36,22 +36,22 @@ workspace = true
 # itself stays `no_std` + `no_main`.
 
 [[bin]]
-name = "rustos-test-ps2-qemu-x86-64"
+name = "tairix-test-ps2-qemu-x86-64"
 path = "src/main.rs"
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
-rustos-drv-input-ps2 = { path = "../../../drivers/input/ps2", version = "=0.0.0" }
-rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
-rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
-rustos-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
-rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
-rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+tairix-drv-input-ps2 = { path = "../../../drivers/input/ps2", version = "=0.0.0" }
+tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

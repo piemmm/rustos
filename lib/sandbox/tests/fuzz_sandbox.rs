@@ -7,7 +7,7 @@
 //! together:
 //!
 //! * **Hostile input files** — mutated container/help-document templates
-//!   and pure noise fed to [`rustos_sandbox::decode::container_summary`] /
+//!   and pure noise fed to [`tairix_sandbox::decode::container_summary`] /
 //!   [`manifest_summary`] / [`disassemble`] / [`render_help`] over the
 //!   in-process loopback worker: every outcome must be a typed result,
 //!   never a panic.
@@ -15,22 +15,22 @@
 //!   its reply: the caller-side fail-closed reply decoders must refuse or
 //!   accept typed, never panic, and the seam must survive.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG drives
-//! the mutations through the shared `rustos_fuzzseed` seam. A plain
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG drives
+//! the mutations through the shared `tairix_fuzzseed` seam. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
-//! logged seed; `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to
+//! logged seed; `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to
 //! extend the loop to a wall-clock budget.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rustos_sandbox::decode::{
+use tairix_sandbox::decode::{
     container_summary, disassemble, manifest_summary, DecodeService, Isa,
 };
-use rustos_sandbox::helpdoc::{render_help, HelpService, RenderMode};
-use rustos_sandbox::host::{Launcher, ParserSandbox};
-use rustos_sandbox::loopback::LoopbackLauncher;
-use rustos_sandbox::proto::Channel;
+use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode};
+use tairix_sandbox::host::{Launcher, ParserSandbox};
+use tairix_sandbox::loopback::LoopbackLauncher;
+use tairix_sandbox::proto::Channel;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -52,8 +52,8 @@ fn bounded(x: u64, max: usize) -> usize {
 /// Discards every logged event.
 struct SilentSink;
 
-impl rustos_log::Sink for SilentSink {
-    fn write_event(&self, _event: &rustos_log::Event<'_>) {}
+impl tairix_log::Sink for SilentSink {
+    fn write_event(&self, _event: &tairix_log::Event<'_>) {}
 }
 
 /// A minimal valid wasm module with two function bodies.
@@ -69,20 +69,20 @@ fn wasm_template() -> Vec<u8> {
 
 /// A minimal valid rxe image (one RX segment, PIE, current ABI).
 fn rxe_template() -> Vec<u8> {
-    let segment = rustos_abi::Segment {
-        vaddr: rustos_abi::RXE_PAGE_SIZE,
+    let segment = tairix_abi::Segment {
+        vaddr: tairix_abi::RXE_PAGE_SIZE,
         file_offset: 0,
         file_size: 32,
-        mem_size: rustos_abi::RXE_PAGE_SIZE,
-        permission: rustos_abi::RxePermission::ReadExecute,
+        mem_size: tairix_abi::RXE_PAGE_SIZE,
+        permission: tairix_abi::RxePermission::ReadExecute,
     };
-    let header = rustos_abi::LoadHeader {
-        magic: rustos_abi::LOAD_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
-        flags: rustos_abi::LOAD_FLAG_PIE,
+    let header = tairix_abi::LoadHeader {
+        magic: tairix_abi::LOAD_MAGIC,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
+        flags: tairix_abi::LOAD_FLAG_PIE,
         segment_count: 1,
         needed_count: 0,
-        entry: rustos_abi::RXE_PAGE_SIZE,
+        entry: tairix_abi::RXE_PAGE_SIZE,
         cfi_tag: [0x5A; 32],
     };
     let mut bytes = Vec::new();
@@ -106,7 +106,7 @@ struct HostileChannel {
 }
 
 impl Channel for HostileChannel {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, tairix_abi::Errno> {
         if self.at == self.pending.len() || buf.is_empty() {
             return Ok(0);
         }
@@ -116,7 +116,7 @@ impl Channel for HostileChannel {
         Ok(take)
     }
 
-    fn write(&mut self, buf: &[u8]) -> Result<usize, rustos_abi::Errno> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, tairix_abi::Errno> {
         Ok(buf.len())
     }
 }
@@ -129,7 +129,7 @@ struct HostileLauncher {
 impl Launcher for HostileLauncher {
     type Channel = HostileChannel;
 
-    fn launch(&mut self) -> Result<HostileChannel, rustos_abi::Errno> {
+    fn launch(&mut self) -> Result<HostileChannel, tairix_abi::Errno> {
         let mut state = self.state.borrow_mut();
         let mut next = || {
             *state = state
@@ -155,10 +155,10 @@ impl Launcher for HostileLauncher {
 
 #[test]
 fn decode_surface_never_panics_for_any_input_or_reply() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = rustos_fuzzseed::start(
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut state: u64 = tairix_fuzzseed::start(
         "decode_surface_never_panics_for_any_input_or_reply",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = move || {
         state = state
@@ -245,7 +245,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = render_help(&mut hostile, mode, HELP_TEMPLATE);
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

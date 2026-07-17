@@ -1,6 +1,6 @@
 //! Ergonomic userland I/O over the `abi-v1` descriptor table.
 //!
-//! This is the RustOS counterpart of `std::io`: one fd-generic
+//! This is the TAIRiX counterpart of `std::io`: one fd-generic
 //! [`Read`]/[`Write`] trait pair, the buffering ([`BufReader`], [`BufWriter`])
 //! and formatting built on them, and the four well-known standard streams
 //! ([`Stdin`], [`Stdout`], [`Stderr`], [`StdInfo`]). It is a pure-Rust layer
@@ -11,7 +11,7 @@
 //!
 //! # One vocabulary, no duplication
 //!
-//! Every text program in RustOS moves bytes through this one definition, so no
+//! Every text program in TAIRiX moves bytes through this one definition, so no
 //! program re-implements the short-write loop or "read until newline" logic.
 //! The standard streams and any pipe / tty / file / resource-reference fd a
 //! sibling subsystem later opens are read and written through the **same**
@@ -42,7 +42,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rustos_abi::{STDERR, STDIN, STDINFO, STDOUT};
+use tairix_abi::{STDERR, STDIN, STDINFO, STDOUT};
 
 /// The error type for this layer. Small and fail-closed; `abi-v1` is not
 /// frozen, so it is extended in place as real callers need distinctions.
@@ -535,7 +535,7 @@ impl<R: Read, const CAP: usize> Iterator for Lines<R, CAP> {
 mod tests {
     use super::*;
     use core::fmt;
-    use rustos_abi_trap::seam;
+    use tairix_abi_trap::seam;
 
     /// A [`Write`] that records everything written but accepts at most `max`
     /// bytes per call, so the short-write loop in [`Write::write_all`] is
@@ -759,7 +759,7 @@ mod tests {
         // the raw negative register became a huge count and `&buf[n..]`
         // panicked here, turning a panic report into a panic storm.
         let neg = u64::from_ne_bytes(
-            (-i64::from(rustos_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
+            (-i64::from(tairix_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
         );
         seam::arm(neg);
         assert_eq!(Stderr.write_all(b"report"), Err(Error::WriteZero));

@@ -11,7 +11,7 @@ man — mostrar el documento de ayuda de una orden
 Muestra el documento de ayuda que incluye el paquete de aplicación de una
 orden, en su idioma cuando existe una traducción.
 
-Cada programa de RustOS es un paquete de aplicación con un árbol `Help/`:
+Cada programa de TAIRiX es un paquete de aplicación con un árbol `Help/`:
 un documento estructurado por orden o tema, por idioma. `man` resuelve
 `<command>` exactamente como el intérprete de órdenes — primero la tienda
 de aplicaciones del sistema y después los directorios de `PATH` — de modo

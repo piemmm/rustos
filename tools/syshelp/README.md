@@ -1,10 +1,10 @@
-# rustos-syshelp
+# tairix-syshelp
 
 Build-discovered **system app-store Help payload** for image authoring.
 
 Stability tier: **experimental** (host build tooling).
 
-RustOS ships each command app's internationalised command help as a
+TAIRiX ships each command app's internationalised command help as a
 structured-Markdown `Help/` tree on the read-only `/System` volume, at
 `/System/Apps/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`). The image
 builder (`tools/mkimage`) and the QEMU image fixture must plant that tree onto

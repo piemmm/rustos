@@ -1,6 +1,6 @@
-# rustos-sandbox
+# tairix-sandbox
 
-The parser-sandbox seam for RustOS (`lib/sandbox`).
+The parser-sandbox seam for TAIRiX (`lib/sandbox`).
 
 Every parser of untrusted input runs in a minimum-capability sandbox
 process (`docs/src/security/sandbox.md`). The kernel primitive — the
@@ -28,14 +28,14 @@ imports this seam; a second per-app copy is forbidden.
   and the event is logged with a stable `EventId` (this crate owns the
   `6000..7000` range). A parser crash never takes down the calling program.
 - **The decode service** (`decode`): the first consumers behind the seam —
-  executable-container summaries through `rustos-binfmt` and per-window
-  instruction disassembly through `rustos-disasm`, with a bounded,
+  executable-container summaries through `tairix-binfmt` and per-window
+  instruction disassembly through `tairix-disasm`, with a bounded,
   fail-closed reply vocabulary. The caller-side helpers decode every reply
   fail-closed: a compromised worker can lie about bytes, never break the
   caller.
 - **The help-render service** (`helpdoc`): a foreign bundle's help document
-  is parsed and rendered inside the worker (`rustos-help`), and the
-  caller-side `render_help` re-parses the reply through the `rustos-vt`
+  is parsed and rendered inside the worker (`tairix-help`), and the
+  caller-side `render_help` re-parses the reply through the `tairix-vt`
   streaming parser, admitting only the closed render-op set (printable
   text, line feeds, the bold/underline SGR pairs) and re-encoding it
   canonically — a forbidden escape, colour, OSC string, or truncated

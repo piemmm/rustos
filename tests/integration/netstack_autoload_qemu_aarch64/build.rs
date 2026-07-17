@@ -27,7 +27,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR set by cargo");
@@ -44,7 +44,7 @@ fn main() {
         // One CPU: PID 1, the unlock kthread, the autoloaded driver processes,
         // the netstack service, and the devmgr service all run in the same
         // cooperative drain loop on the boot CPU.
-        rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
+        tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
     } else {
         // Host builds compile the bin to a no-op `main`; no DTB needed.
         Vec::new()

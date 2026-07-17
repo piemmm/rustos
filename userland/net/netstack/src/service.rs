@@ -1,10 +1,10 @@
 //! The request dispatcher: the one place a `netstack-v1` request is
 //! decoded, capability-checked, audited, and answered.
 
-use rustos_abi::net_ipc::{encode_counters_reply, encode_page_reply, NetstackRequest, IF_NAME_LEN};
-use rustos_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use rustos_abi::{CapabilityId, CapabilityQuery, Duration64, Errno, Origin};
-use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_abi::net_ipc::{encode_counters_reply, encode_page_reply, NetstackRequest, IF_NAME_LEN};
+use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, Errno, Origin};
+use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::events;
 use crate::iface::Netstack;
@@ -143,7 +143,7 @@ pub fn serve(
             let records: alloc::vec::Vec<_> = stack
                 .facts_records(offset, limit)
                 .iter()
-                .map(rustos_abi::net_ipc::NetInterfaceFactsRecord::to_le_bytes)
+                .map(tairix_abi::net_ipc::NetInterfaceFactsRecord::to_le_bytes)
                 .collect();
             encode_page_reply(&records, response)
         }
@@ -151,7 +151,7 @@ pub fn serve(
             let records: alloc::vec::Vec<_> = stack
                 .state_records(offset, limit)
                 .iter()
-                .map(rustos_abi::net_ipc::NetInterfaceStateRecord::to_le_bytes)
+                .map(tairix_abi::net_ipc::NetInterfaceStateRecord::to_le_bytes)
                 .collect();
             encode_page_reply(&records, response)
         }
@@ -205,7 +205,7 @@ fn audit_mutation(
 fn iface_field(name: &str) -> Field<'_> {
     Field {
         key: "iface",
-        value: rustos_log::FieldValue::Str(name),
+        value: tairix_log::FieldValue::Str(name),
     }
 }
 
@@ -231,7 +231,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
     };
     Field {
         key: "op",
-        value: rustos_log::FieldValue::Str(op),
+        value: tairix_log::FieldValue::Str(op),
     }
 }
 

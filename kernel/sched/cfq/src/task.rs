@@ -16,7 +16,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use alloc::boxed::Box;
-use rustos_sync::SpinLock;
+use tairix_sync::SpinLock;
 
 use crate::{CpuId, Priority, TaskAction, TaskContext, TaskId, TaskState};
 

@@ -3,7 +3,7 @@
 //!
 //! The consuming verticals (`tests/integration/file_map_qemu_aarch64` /
 //! `…_riscv64`) register this one `rxe` under four registry paths, each with
-//! a distinct role argument (`rustos_rt::arg(1)`), and spawn the **parent**
+//! a distinct role argument (`tairix_rt::arg(1)`), and spawn the **parent**
 //! role through the production spawn path
 //! (`docs/src/architecture/memory.md` §7o):
 //!
@@ -29,11 +29,11 @@
 //! The consuming vertical's build script is the single source of truth for
 //! the fixture geometry: it computes the fixture bytes once and pins the
 //! file length, path, probe offsets, and expected probe bytes into this
-//! build through the `RUSTOS_FM_*` environment variables, so the program
+//! build through the `TAIRIX_FM_*` environment variables, so the program
 //! and the kernel-side filesystem double can never disagree.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland runtime
-//! `rustos-rt` (`_start`, stack canary, panic handler, syscall wrappers),
+//! `tairix-rt` (`_start`, stack canary, panic handler, syscall wrappers),
 //! never the C ABI. Built position-independent and converted to an `rxe`
 //! blob by the consuming test's build script. On the host it is an inert
 //! stub so `cargo build --workspace`, clippy, and fmt still cover the crate.
@@ -45,7 +45,7 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::OpenFlags;
+    use tairix_abi::OpenFlags;
 
     /// Page size shared by every Tier-1 MMU target this fixture runs on.
     const PAGE: u64 = 4096;
@@ -55,27 +55,27 @@ mod program {
     const FAULT_EXIT_CODE: i32 = 139;
 
     /// Fixture file length in bytes, pinned by the consuming build script.
-    const FILE_LEN: u64 = parse_u64(req_env(option_env!("RUSTOS_FM_FILE_LEN")));
+    const FILE_LEN: u64 = parse_u64(req_env(option_env!("TAIRIX_FM_FILE_LEN")));
 
     /// Absolute path the filesystem double serves the fixture file under.
-    const FILE_PATH: &[u8] = req_env(option_env!("RUSTOS_FM_PATH"));
+    const FILE_PATH: &[u8] = req_env(option_env!("TAIRIX_FM_PATH"));
 
     /// Byte offset of the copy of [`FILE_PATH`] inside the fixture content
     /// (page-aligned, so the whole string lives in one untouched page).
-    const PATH_OFFSET: u64 = parse_u64(req_env(option_env!("RUSTOS_FM_PATH_OFFSET")));
+    const PATH_OFFSET: u64 = parse_u64(req_env(option_env!("TAIRIX_FM_PATH_OFFSET")));
 
     /// Interior-page probe offset (inside a page that is neither the first
     /// nor the end-of-file straddle page).
-    const INTERIOR_OFFSET: u64 = parse_u64(req_env(option_env!("RUSTOS_FM_INTERIOR_OFFSET")));
+    const INTERIOR_OFFSET: u64 = parse_u64(req_env(option_env!("TAIRIX_FM_INTERIOR_OFFSET")));
 
     /// Expected fixture byte at offset `0`.
-    const BYTE_FIRST: u8 = parse_u64(req_env(option_env!("RUSTOS_FM_BYTE_FIRST"))) as u8;
+    const BYTE_FIRST: u8 = parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_FIRST"))) as u8;
 
     /// Expected fixture byte at [`INTERIOR_OFFSET`].
-    const BYTE_INTERIOR: u8 = parse_u64(req_env(option_env!("RUSTOS_FM_BYTE_INTERIOR"))) as u8;
+    const BYTE_INTERIOR: u8 = parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_INTERIOR"))) as u8;
 
     /// Expected fixture byte at `FILE_LEN - 1` (the straddle page).
-    const BYTE_LAST: u8 = parse_u64(req_env(option_env!("RUSTOS_FM_BYTE_LAST"))) as u8;
+    const BYTE_LAST: u8 = parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_LAST"))) as u8;
 
     /// The pinned environment variable's bytes. An absent variable is a
     /// build wiring defect — the consuming vertical's build script is the
@@ -85,7 +85,7 @@ mod program {
     const fn req_env(value: Option<&'static str>) -> &'static [u8] {
         match value {
             Some(s) => s.as_bytes(),
-            None => panic!("RUSTOS_FM_* geometry must be pinned by the consuming build script"),
+            None => panic!("TAIRIX_FM_* geometry must be pinned by the consuming build script"),
         }
     }
 
@@ -93,18 +93,18 @@ mod program {
     /// non-digit byte, empty string, or overflow is a build wiring defect;
     /// fail the build loudly rather than bake a wrong geometry.
     const fn parse_u64(bytes: &[u8]) -> u64 {
-        assert!(!bytes.is_empty(), "RUSTOS_FM_* value must be non-empty");
+        assert!(!bytes.is_empty(), "TAIRIX_FM_* value must be non-empty");
         let mut acc: u64 = 0;
         let mut i = 0usize;
         while i < bytes.len() {
             let b = bytes[i];
-            assert!(b >= b'0' && b <= b'9', "RUSTOS_FM_* value must be decimal");
+            assert!(b >= b'0' && b <= b'9', "TAIRIX_FM_* value must be decimal");
             acc = match acc.checked_mul(10) {
                 Some(v) => match v.checked_add((b - b'0') as u64) {
                     Some(v) => v,
-                    None => panic!("RUSTOS_FM_* value overflows u64"),
+                    None => panic!("TAIRIX_FM_* value overflows u64"),
                 },
-                None => panic!("RUSTOS_FM_* value overflows u64"),
+                None => panic!("TAIRIX_FM_* value overflows u64"),
             };
             i += 1;
         }
@@ -127,13 +127,13 @@ mod program {
     /// The `verify` role body. Returns `0` on success or a distinct
     /// diagnostic exit code per failure site.
     fn verify() -> i32 {
-        let fd = rustos_rt::fs_open(FILE_PATH, OpenFlags::READ);
+        let fd = tairix_rt::fs_open(FILE_PATH, OpenFlags::READ);
         if fd < 0 {
             return 20;
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let fd = fd as u32;
-        let base = rustos_rt::file_map(fd, 0, FILE_LEN);
+        let base = tairix_rt::file_map(fd, 0, FILE_LEN);
         if base <= 0 {
             return 21;
         }
@@ -141,7 +141,7 @@ mod program {
         let base = base as u64;
         // The mapping's identity snapshot must survive the descriptor: close
         // it before any page is faulted in.
-        if rustos_rt::fs_close(fd) != 0 {
+        if tairix_rt::fs_close(fd) != 0 {
             return 22;
         }
         // First byte (the region's first page).
@@ -180,15 +180,15 @@ mod program {
             // page has not been touched, so the kernel copy-in takes the
             // fault this probe exists to prove resolvable.
             unsafe { core::slice::from_raw_parts((base + PATH_OFFSET) as *const u8, FILE_PATH.len()) };
-        let fd2 = rustos_rt::fs_open(path_in_map, OpenFlags::READ);
+        let fd2 = tairix_rt::fs_open(path_in_map, OpenFlags::READ);
         if fd2 < 0 {
             return 27;
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        if rustos_rt::fs_close(fd2 as u32) != 0 {
+        if tairix_rt::fs_close(fd2 as u32) != 0 {
             return 28;
         }
-        if rustos_rt::file_unmap(base, FILE_LEN) != 0 {
+        if tairix_rt::file_unmap(base, FILE_LEN) != 0 {
             return 29;
         }
         0
@@ -198,18 +198,18 @@ mod program {
     /// read must fault-kill the task (exit 139); every return here is a
     /// distinct failure the parent will surface.
     fn wild() -> i32 {
-        let fd = rustos_rt::fs_open(FILE_PATH, OpenFlags::READ);
+        let fd = tairix_rt::fs_open(FILE_PATH, OpenFlags::READ);
         if fd < 0 {
             return 40;
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let base = rustos_rt::file_map(fd as u32, 0, FILE_LEN);
+        let base = tairix_rt::file_map(fd as u32, 0, FILE_LEN);
         if base <= 0 {
             return 41;
         }
         #[allow(clippy::cast_sign_loss)]
         let base = base as u64;
-        if rustos_rt::file_unmap(base, FILE_LEN) != 0 {
+        if tairix_rt::file_unmap(base, FILE_LEN) != 0 {
             return 42;
         }
         // SAFETY contract deliberately violated: the region was just
@@ -224,12 +224,12 @@ mod program {
     /// to it. File mappings are read-only, so the write must fault-kill the
     /// task (exit 139) — never resolve, and never spin retrying.
     fn store() -> i32 {
-        let fd = rustos_rt::fs_open(FILE_PATH, OpenFlags::READ);
+        let fd = tairix_rt::fs_open(FILE_PATH, OpenFlags::READ);
         if fd < 0 {
             return 50;
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let base = rustos_rt::file_map(fd as u32, 0, FILE_LEN);
+        let base = tairix_rt::file_map(fd as u32, 0, FILE_LEN);
         if base <= 0 {
             return 51;
         }
@@ -253,14 +253,14 @@ mod program {
     /// with `expected`. Returns `0` on success or `fail_code` on any
     /// mismatch or syscall failure.
     fn run_child(path: &[u8], expected: i32, fail_code: i32) -> i32 {
-        let pid = rustos_rt::spawn(path);
+        let pid = tairix_rt::spawn(path);
         if pid <= 0 {
             return fail_code;
         }
         #[allow(clippy::cast_possible_truncation)]
         let pid = pid as i32;
         let mut code = 0i32;
-        if rustos_rt::wait_exit(pid, &mut code) < 0 {
+        if tairix_rt::wait_exit(pid, &mut code) < 0 {
             return fail_code + 1;
         }
         if code != expected {
@@ -291,7 +291,7 @@ mod program {
     /// pinned (`arg(1)`). An absent or unknown role is a wiring defect and a
     /// distinct failure code (fail closed, never a default role).
     fn main() -> i32 {
-        match rustos_rt::arg(1) {
+        match tairix_rt::arg(1) {
             Some(b"parent") => parent(),
             Some(b"verify") => verify(),
             Some(b"wild") => wild(),
@@ -300,13 +300,13 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the
 // crate building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

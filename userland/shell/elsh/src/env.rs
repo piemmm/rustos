@@ -37,7 +37,7 @@ pub const DEFAULT_PROMPT: &str = "\\u@\\h \\w% ";
 /// (the system hostname is still unprovisioned). A fixed, honest default —
 /// the analogue of a POSIX system's `localhost` — not a guess at the real
 /// name.
-pub const DEFAULT_HOSTNAME: &str = "rustos";
+pub const DEFAULT_HOSTNAME: &str = "tairix";
 
 /// The user name the prompt shows when the session exported no `USER`.
 const DEFAULT_USER: &str = "user";
@@ -413,9 +413,9 @@ mod tests {
     #[test]
     fn expands_set_and_unset_variables() {
         let mut env = Environment::new();
-        env.set("NAME", "rustos");
-        assert_eq!(env.expand_word(&expandable("$NAME")).unwrap(), "rustos");
-        assert_eq!(env.expand_word(&expandable("${NAME}!")).unwrap(), "rustos!");
+        env.set("NAME", "tairix");
+        assert_eq!(env.expand_word(&expandable("$NAME")).unwrap(), "tairix");
+        assert_eq!(env.expand_word(&expandable("${NAME}!")).unwrap(), "tairix!");
         // Unset expands to empty.
         assert_eq!(env.expand_word(&expandable("[$MISSING]")).unwrap(), "[]");
     }

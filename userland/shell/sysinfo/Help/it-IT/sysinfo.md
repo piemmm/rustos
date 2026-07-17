@@ -9,7 +9,7 @@ sysinfo — interrogare le informazioni di sistema
 ## DESCRIPTION
 
 Invia un'interrogazione tipizzata all'API di informazioni di sistema e
-ne mostra la risposta. RustOS non ha `/proc` né `/sys`: questo comando
+ne mostra la risposta. TAIRiX non ha `/proc` né `/sys`: questo comando
 è il volto da terminale della stessa API versionata e controllata da
 capacità che ogni programma usa, e nessun percorso elude il controllo
 di capacità.

@@ -1,6 +1,6 @@
 //! Deterministic fuzz-style integration test for the ingress rate limiter.
 //!
-//! A [`rustos_log::RateLimiter`] gates the two rate-limitable streams
+//! A [`tairix_log::RateLimiter`] gates the two rate-limitable streams
 //! (`runtime`/`debug`) and must never panic, never lose a drop silently, and
 //! never touch a system-authority stream. This harness drives a random stream
 //! of `admit` / `take_due_report` operations at non-decreasing monotonic times
@@ -18,10 +18,10 @@
 //! * the limiter never panics on any operation ordering.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
-//! the shared `rustos_fuzzseed` seam (one definition).
+//! the shared `tairix_fuzzseed` seam (one definition).
 
-use rustos_abi::Duration64;
-use rustos_log::{RateDecision, RateLimit, RateLimiter, Stream};
+use tairix_abi::Duration64;
+use tairix_log::{RateDecision, RateLimit, RateLimiter, Stream};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -47,12 +47,12 @@ fn gated_index(stream: Stream) -> Option<usize> {
 
 #[test]
 fn rate_limiter_accounts_every_drop_and_never_panics() {
-    let mut prng = rustos_fuzzseed::Lcg::new(rustos_fuzzseed::start(
+    let mut prng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
         "rate_limiter_accounts_every_drop_and_never_panics",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             // Draw a policy: rate 1..=4096/s, burst 1..=256, report interval
@@ -126,7 +126,7 @@ fn rate_limiter_accounts_every_drop_and_never_panics() {
             }
             assert!(!rl.has_pending_drops(), "the drain reported all drops");
         }
-        if !rustos_fuzzseed::within_budget(deadline) {
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

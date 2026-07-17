@@ -17,7 +17,7 @@
 //! announces itself rather than pretending a mapping succeeded, exactly as
 //! [`NULL_MEM_MAP`](crate::memmap::NULL_MEM_MAP) does.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// The kernel-side producer of demand-paged, read-only file-backed user
 /// memory.

@@ -24,32 +24,32 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use rustos_abi::driver::block::Block;
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
-use rustos_abi::driver::net::Net;
-use rustos_abi::driver::net_ring::{FrameRings, RingGeometry};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
-use rustos_abi::Duration64;
-use rustos_abi::{CapabilityId, DriverHandle, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
-use rustos_drv_fs_arxfs::ARXFS;
-use rustos_drv_fs_fat32::Fat32;
-use rustos_drv_network_virtio_net::VirtioNet;
-use rustos_drv_storage_virtio_blk::VirtioBlk;
-use rustos_drvhost::{
+use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use tairix_abi::driver::net::Net;
+use tairix_abi::driver::net_ring::{FrameRings, RingGeometry};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
+use tairix_abi::Duration64;
+use tairix_abi::{CapabilityId, DriverHandle, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_crypto::Ed25519PublicKey;
+use tairix_drv_fs_arxfs::ARXFS;
+use tairix_drv_fs_fat32::Fat32;
+use tairix_drv_network_virtio_net::VirtioNet;
+use tairix_drv_storage_virtio_blk::VirtioBlk;
+use tairix_drvhost::{
     DriverEntry, DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
-use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-use rustos_kernel_mem::{PhysAddr, PAGE_SIZE};
-use rustos_net::addr::IpAddr;
-use rustos_net::stack::StackEvent;
-use rustos_netstack::{FrameService, LocalFrameService, Netstack};
-use rustos_test_netstack_wire as wire;
-use rustos_virtio::{Transport, VirtioHost, VirtioHostFactory};
-use rustos_virtio_input::VirtioInput;
+use tairix_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
+use tairix_kernel_mem::{PhysAddr, PAGE_SIZE};
+use tairix_net::addr::IpAddr;
+use tairix_net::stack::StackEvent;
+use tairix_netstack::{FrameService, LocalFrameService, Netstack};
+use tairix_test_netstack_wire as wire;
+use tairix_virtio::{Transport, VirtioHost, VirtioHostFactory};
+use tairix_virtio_input::VirtioInput;
 
 /// Upper bound of the boot identity map both arches build
 /// (`DirectPhysMap::identity(IDENTITY_LIMIT)`): the bottom 4 GiB. Every
@@ -60,7 +60,7 @@ pub const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
 /// `EventId(4004)` — `AuditEvent::BootCompleted`. The arch boot harness
 /// drives its scenario once on observing this event.
-pub const BOOT_COMPLETED_EVENT_ID: rustos_log::EventId = rustos_log::EventId(4004);
+pub const BOOT_COMPLETED_EVENT_ID: tairix_log::EventId = tairix_log::EventId(4004);
 
 /// Fixed driver path fed to `Host::load`. The image bytes come from the
 /// in-memory [`BakedSource`] regardless of path, so the concrete string
@@ -85,7 +85,7 @@ pub trait QemuEnv {
 
     /// The `&'static` serial sink the driver host audits through (the
     /// same sink [`log`](Self::log) writes breadcrumbs to).
-    fn audit_sink(&self) -> &'static dyn rustos_log::Sink;
+    fn audit_sink(&self) -> &'static dyn tairix_log::Sink;
 }
 
 /// Image source returning the baked-in signed `.rxe` bytes regardless of
@@ -157,7 +157,7 @@ where
     let mut host = Host::new(HostConfig {
         trusted_signers: &trusted,
         syscall_table_hash: cfg.syscall_table_hash,
-        accepted_abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
         source: &source,
         spawner: cfg.spawner,
         sink: env.audit_sink(),
@@ -233,7 +233,7 @@ impl DriverSpawner for FixedSpawner {
 ///
 /// The carved sub-region sits at the very top of RAM, away from the low
 /// frames the boot pipeline and kernel heap consume, so the per-device
-/// [`FrameAllocator`](rustos_kernel_mem::FrameAllocator) never hands out
+/// [`FrameAllocator`](tairix_kernel_mem::FrameAllocator) never hands out
 /// a frame the live kernel is using. It is bounded below
 /// [`IDENTITY_LIMIT`] so every frame it yields is reachable through the
 /// identity map. Both arch scenarios carve identically.
@@ -343,13 +343,13 @@ pub fn virtio_blk_round_trip<Tr: Transport>(
 
 /// FAT32-over-virtio-blk device tail: open the device over `transport`,
 /// mount the planted FAT32 volume through the real
-/// [`Fat32`](rustos_drv_fs_fat32::Fat32) driver, verify the planted
+/// [`Fat32`](tairix_drv_fs_fat32::Fat32) driver, verify the planted
 /// file reads back its known contents, then create and write a fresh
 /// file and read it back. Generic over the transport so the PCI and
 /// MMIO verticals run identical code.
 ///
 /// The on-disk layout and the planted/written file names and contents
-/// come from the shared [`rustos_test_fat32_image`] fixture — the same
+/// come from the shared [`tairix_test_fat32_image`] fixture — the same
 /// source of truth the host harness plants the backing image from, so
 /// the two sides cannot drift.
 pub fn fat32_round_trip<Tr: Transport>(
@@ -357,7 +357,7 @@ pub fn fat32_round_trip<Tr: Transport>(
     transport: Tr,
     vhost: &dyn VirtioHost,
 ) -> Result<(), &'static str> {
-    use rustos_test_fat32_image as image;
+    use tairix_test_fat32_image as image;
 
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
     let mut fs = Fat32::open(blk).map_err(|_| "fat32 mount")?;
@@ -401,13 +401,13 @@ pub fn fat32_round_trip<Tr: Transport>(
 
 /// arxfs-over-virtio-blk device tail: open the device over `transport`,
 /// mount the planted arxfs volume through the real
-/// [`ARXFS`](rustos_drv_fs_arxfs::ARXFS) driver, verify the planted
+/// [`ARXFS`](tairix_drv_fs_arxfs::ARXFS) driver, verify the planted
 /// file reads back its known contents, then create and write a fresh
 /// file and read it back. Generic over the transport so the PCI and
 /// MMIO verticals run identical code.
 ///
 /// The on-disk layout and the planted/written file names and contents
-/// come from the shared [`rustos_test_arxfs_image`] fixture — the same
+/// come from the shared [`tairix_test_arxfs_image`] fixture — the same
 /// source of truth the host harness plants the backing image from (and
 /// which the real driver itself authored), so the two sides cannot drift.
 pub fn arxfs_round_trip<Tr: Transport>(
@@ -415,7 +415,7 @@ pub fn arxfs_round_trip<Tr: Transport>(
     transport: Tr,
     vhost: &dyn VirtioHost,
 ) -> Result<(), &'static str> {
-    use rustos_test_arxfs_image as image;
+    use tairix_test_arxfs_image as image;
 
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
     let geo = blk.geometry().map_err(|_| "arxfs geometry")?;
@@ -463,16 +463,16 @@ pub fn arxfs_round_trip<Tr: Transport>(
 
 /// users-root device tail: open the device over `transport`, mount the
 /// planted users-root volume through the real
-/// [`ARXFS`](rustos_drv_fs_arxfs::ARXFS) driver, then drive the
+/// [`ARXFS`](tairix_drv_fs_arxfs::ARXFS) driver, then drive the
 /// kernel's boot-time users-database load
-/// ([`rustos_kernel_core::load_users_db`]) against the mounted root —
+/// ([`tairix_kernel_core::load_users_db`]) against the mounted root —
 /// the `plans/PI.md` P11 root-volume read path, end to end on a live
 /// (emulated) board. The parsed database must authenticate the planted
 /// account and refuse a wrong password, proving the loaded database is
 /// usable by the login path.
 ///
 /// The on-disk layout and the planted account come from the shared
-/// [`rustos_test_arxfs_image`] users-root fixture — the same source of
+/// [`tairix_test_arxfs_image`] users-root fixture — the same source of
 /// truth the host harness plants the backing image from (authored by
 /// the real driver), so the two sides cannot drift.
 pub fn users_db_load<Tr: Transport>(
@@ -480,17 +480,17 @@ pub fn users_db_load<Tr: Transport>(
     transport: Tr,
     vhost: &dyn VirtioHost,
 ) -> Result<(), &'static str> {
-    use rustos_test_arxfs_image as image;
+    use tairix_test_arxfs_image as image;
 
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
     let mut fs = ARXFS::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "users-root mount")?;
     env.log("virtio-qemu: users-root volume mounted");
 
-    let db = rustos_kernel_core::load_users_db(&mut fs, env.audit_sink())
+    let db = tairix_kernel_core::load_users_db(&mut fs, env.audit_sink())
         .map_err(|_| "users database load")?;
     // Exactly the planted interactive fixture account: the on-disk
     // database holds human accounts only — the system/service identity is
-    // compiled into the kernel (`rustos_users::system_accounts`), never
+    // compiled into the kernel (`tairix_users::system_accounts`), never
     // seeded to disk.
     if db.records().len() != 1 {
         return Err("users database record count mismatch");
@@ -544,14 +544,14 @@ fn pump_now(tick: u64) -> Duration64 {
 
 /// Map a ring-pump refusal onto a distinct breadcrumb so a failing run
 /// names the concrete fault.
-fn pump_error(err: rustos_abi::Errno) -> &'static str {
+fn pump_error(err: tairix_abi::Errno) -> &'static str {
     match err {
-        rustos_abi::Errno::NotFound => "ring pump: unknown interface",
-        rustos_abi::Errno::DeviceFault => "ring pump: driver fault",
-        rustos_abi::Errno::BadMagic => "ring pump: ring corrupt",
-        rustos_abi::Errno::NoSpace => "ring pump: no space",
-        rustos_abi::Errno::LengthOutOfRange => "ring pump: length out of range",
-        rustos_abi::Errno::BufferTooSmall => "ring pump: buffer too small",
+        tairix_abi::Errno::NotFound => "ring pump: unknown interface",
+        tairix_abi::Errno::DeviceFault => "ring pump: driver fault",
+        tairix_abi::Errno::BadMagic => "ring pump: ring corrupt",
+        tairix_abi::Errno::NoSpace => "ring pump: no space",
+        tairix_abi::Errno::LengthOutOfRange => "ring pump: length out of range",
+        tairix_abi::Errno::BufferTooSmall => "ring pump: buffer too small",
         _ => "ring pump: other",
     }
 }
@@ -600,10 +600,10 @@ fn send_echo<F: FrameService>(
 }
 
 /// virtio-net device tail (`plans/NETWORK.md` N3c): open the device over
-/// `transport`, then drive the `rustos-netstack` engine's ring pump over
+/// `transport`, then drive the `tairix-netstack` engine's ring pump over
 /// it against the harness-side peer stack on the other end of the QEMU
 /// dgram netdev. The choreography lives in the shared
-/// [`rustos_test_netstack_wire`] fixture: first the guest answers the
+/// [`tairix_test_netstack_wire`] fixture: first the guest answers the
 /// peer's ARP/NS resolution and v4+v6 echo campaign (observed through
 /// the engine's `EchoRequestServed` events), then it resolves and pings
 /// the peer over both families and requires both replies. Generic over

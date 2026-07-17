@@ -1,27 +1,27 @@
-# SYSLOG.md - RustOS System Log Specification
+# SYSLOG.md - TAIRiX System Log Specification
 
 Status: draft, live pre-release specification  
 Owner: `lib/log` and `/System/Logs` implementers  
-Scope: RustOS-native logging, boot log rendering, log search, retention, and audit-log integrity
+Scope: TAIRiX-native logging, boot log rendering, log search, retention, and audit-log integrity
 
 ## Assumptions
 
 - This is a standalone design artifact named `SYSLOG.md` for review. If it is
-  imported into the RustOS repository, it must either live in an allowed docs or
+  imported into the TAIRiX repository, it must either live in an allowed docs or
   plans path, or the repository layout and staged plan must be updated before it
   is accepted.
-- RustOS has not shipped this log format. The single living definition can be
+- TAIRiX has not shipped this log format. The single living definition can be
   edited in place until the first release rather than carrying compatibility
   shims.
 - This document specifies behaviour and invariants. It does not implement code,
   add ABI items, or create generated artifacts.
 
-`SYSLOG` in this document means the RustOS system log. It is not the Unix syslog
+`SYSLOG` in this document means the TAIRiX system log. It is not the Unix syslog
 protocol, not a syslog compatibility layer, and not a text-file log format.
 
 ## 1. Design goals
 
-RustOS logging exists to record facts with system-attested provenance while
+TAIRiX logging exists to record facts with system-attested provenance while
 keeping boot output readable and the runtime cost low.
 
 The system log MUST:
@@ -56,7 +56,7 @@ A log record has two different classes of data:
    journal service.
 2. **Caller content**, supplied by the emitting component and treated as
    untrusted text or untrusted structured data unless the caller is a trusted
-   RustOS component writing through an explicitly privileged path.
+   TAIRiX component writing through an explicitly privileged path.
 
 The caller may describe what it believes happened. The system records who said
 it, where it came from, when it was accepted, which authority it carried, and
@@ -912,7 +912,7 @@ stderr, and optional command metadata to stdinfo. Security and audit events go
 through `lib/log`, not stdinfo.
 
 The tools MUST NOT read `/proc`, `/sys`, or device-specific paths. Runtime
-system data comes from RustOS APIs and the log files under `/System/Logs`.
+system data comes from TAIRiX APIs and the log files under `/System/Logs`.
 
 ## 15. Implementation placement
 
@@ -975,4 +975,4 @@ The system log is not:
 - a substitute for the System Information API.
 
 Compatibility exporters may be added later as separate tools, but exporters do
-not define the authoritative RustOS log format.
+not define the authoritative TAIRiX log format.

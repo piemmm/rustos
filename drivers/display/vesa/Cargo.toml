@@ -1,6 +1,6 @@
 [package]
-name = "rustos-drv-display-vesa"
-description = "RustOS VESA (VBE) linear-framebuffer display driver (x86_64 BIOS)."
+name = "tairix-drv-display-vesa"
+description = "TAIRiX VESA (VBE) linear-framebuffer display driver (x86_64 BIOS)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 [lints]
 workspace = true

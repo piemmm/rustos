@@ -1,9 +1,9 @@
-# `rustos-vt`
+# `tairix-vt`
 
 The canonical ANSI / VT / xterm escape and attribute **vocabulary** for
-RustOS's text stack, and the first stage of the `plans/CURSES.md` build plan.
+TAIRiX's text stack, and the first stage of the `plans/CURSES.md` build plan.
 Every real terminal, multiplexer, and remote Linux host speaks this
-vocabulary, so RustOS speaks it too — from **one** definition (`AGENTS.md`
+vocabulary, so TAIRiX speaks it too — from **one** definition (`AGENTS.md`
 §2.2). The terminal emulator (the *consumer*) and the future curses renderer
 (the *emitter*) share this crate rather than each carrying their own
 escape-sequence tables.
@@ -33,7 +33,7 @@ emitter's output reproduces the original operation. This is the §2.2 "one
 vocabulary" guarantee made testable:
 
 ```rust
-use rustos_vt::{encode, BasicColor, Color, Op, Parser, Sgr};
+use tairix_vt::{encode, BasicColor, Color, Op, Parser, Sgr};
 
 fn main() {
     let op = Op::Sgr(Sgr::Foreground(Color::Basic(BasicColor::Green)));

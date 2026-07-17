@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 use crate::fs::Fs;
 use crate::search::Needle;
@@ -437,7 +437,7 @@ fn push_visible(text: &mut String, col: &mut usize, ch: char) {
         *col += 1;
     } else {
         text.push(ch);
-        *col += usize::from(rustos_vt::char_width(ch));
+        *col += usize::from(tairix_vt::char_width(ch));
     }
 }
 
@@ -663,7 +663,7 @@ fn wrap_segments(text: &str, cols: usize) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut rest = text;
     loop {
-        let piece = rustos_vt::truncate_to_width(rest, cols);
+        let piece = tairix_vt::truncate_to_width(rest, cols);
         // A double-width glyph wider than the budget cannot make
         // progress; take one character rather than loop forever.
         let taken = if piece.is_empty() && !rest.is_empty() {

@@ -28,7 +28,7 @@ members = [
     # `[[bin]]`: the library half ships the architecture-neutral boot
     # pipeline reused by both the production binary and the QEMU
     # integration test (`tests/integration/kernel_arch_boot`).
-    "kernel/rustos-kernel",
+    "kernel/tairix-kernel",
 
     # Shared libraries
     "lib/abi",
@@ -205,7 +205,7 @@ members = [
     # Shared host test-support: the per-run PRNG seed / start-of-test seed
     # logging / smoke-iteration + soak-budget seam used by the fuzz (§19.6),
     # proptest (§19.7), and filesystem-soak harnesses (AGENTS.md §2.2). A
-    # dev-dependency of those harness crates only; never in a RustOS build.
+    # dev-dependency of those harness crates only; never in a TAIRiX build.
     "tests/fuzzseed",
 
     # QEMU integration tests (Stage 2 deliverable; each is a freestanding
@@ -362,7 +362,7 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/rustos-project/rustos"
+repository = "https://github.com/tairix-project/tairix"
 publish = false
 
 [workspace.lints.rust]

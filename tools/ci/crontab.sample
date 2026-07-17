@@ -1,4 +1,4 @@
-# RustOS CI/build-host crontab — sample.
+# TAIRiX CI/build-host crontab — sample.
 #
 # Works on any cron-based host (Linux cronie/Vixie, *BSD, macOS). On systemd
 # Linux distros prefer the user units in tools/ci/systemd/ instead.
@@ -9,27 +9,27 @@
 # REPO if your checkout is elsewhere (on Linux this is typically
 # /home/<user>/... rather than the /Users/<user>/... shown here).
 #
-# A dedicated builder should track the branch tip: RUSTOS_CI_SYNC=1 makes each
+# A dedicated builder should track the branch tip: TAIRIX_CI_SYNC=1 makes each
 # job `git fetch && git reset --hard origin/<branch>` before running. Drop it
 # on a developer laptop where you do not want the working tree reset.
 #
-# Logs land outside the repo (default ~/ci-logs/rustos); override with
-# RUSTOS_CI_LOGDIR. See tools/ci/README.md.
+# Logs land outside the repo (default ~/ci-logs/tairix); override with
+# TAIRIX_CI_LOGDIR. See tools/ci/README.md.
 
-# On Linux change this to e.g. /home/<user>/RustroverProjects/rustos.
-REPO=/Users/ianhawkins/RustroverProjects/rustos
+# On Linux change this to e.g. /home/<user>/RustroverProjects/tairix.
+REPO=/Users/ianhawkins/RustroverProjects/tairix
 SHELL=/bin/bash
 
 # Full per-PR gate (AGENTS.md §7) every 30 minutes.
-*/30 * * * *  RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh ci
+*/30 * * * *  TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh ci
 
 # Nightly 24 h soaks — every §19.6 fuzz harness, §19.7 proptest model, and the
 # §7 repeated-test matrix in parallel. One invocation; soak.sh fans them out.
-0 2 * * *     RUSTOS_CI_SYNC=1 $REPO/tools/ci/soak.sh all
+0 2 * * *     TAIRIX_CI_SYNC=1 $REPO/tools/ci/soak.sh all
 
 # Nightly headless Tier-1 builds (AGENTS.md §17.5) — the headless image must
 # keep building for every Tier-1 target.
-0  4 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target x86_64-unknown-none
-20 4 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target aarch64-unknown-none
-40 4 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target riscv64gc-unknown-none-elf
-0  5 * * *    RUSTOS_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target wasm32-unknown-unknown
+0  4 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target x86_64-unknown-none
+20 4 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target aarch64-unknown-none
+40 4 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target riscv64gc-unknown-none-elf
+0  5 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target wasm32-unknown-unknown

@@ -13,7 +13,7 @@ espíritu de las herramientas establecidas `stress`/`stress-ng`: bucles
 de CPU (`--cpu`), trabajadores de memoria asignar-y-tocar (`--vm`),
 escritura/sincronización de búferes pequeños (`--io`), escritores de
 disco secuenciales grandes (`--hdd`) y relectores que agitan las cachés
-(`--cache`, una adición de RustOS). Cada trabajador es su propio
+(`--cache`, una adición de TAIRiX). Cada trabajador es su propio
 proceso paginable; el proceso controlador fija su propia memoria
 (`mem_pin`, requiere `CAP_MEM_PIN`) para seguir respondiendo bajo la
 presión que él mismo crea, y observa `Ctrl-C`/`Terminate`, de modo que
@@ -47,7 +47,7 @@ flujo de información estándar consultivo (fd 3).
 
 - `--cpu N`, `--io N`, `--vm N`, `--hdd N` — lanzar `N` trabajadores
   del tipo nombrado, con el significado de GNU `stress`.
-- `--cache N` — lanzar `N` agitadores de caché (solo RustOS: paseos
+- `--cache N` — lanzar `N` agitadores de caché (solo TAIRiX: paseos
   fríos repetidos por directorios y relecturas mueven los registros
   de cachés recuperables del núcleo).
 - `--all N` — `N` trabajadores de cada tipo.

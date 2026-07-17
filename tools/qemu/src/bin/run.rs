@@ -1,4 +1,4 @@
-//! Thin CLI wrapper around [`rustos_qemu::Runner`].
+//! Thin CLI wrapper around [`tairix_qemu::Runner`].
 //!
 //! Intended for manual debugging — `cargo xtask test --qemu` drives the
 //! library directly and never shells out to this binary. Keeping the wrapper
@@ -7,7 +7,7 @@
 //!
 //! Usage:
 //! ```text
-//! cargo run -p rustos-qemu --bin rustos-qemu-run -- \
+//! cargo run -p tairix-qemu --bin tairix-qemu-run -- \
 //!     --kernel path/to/kernel.elf [--arch x86_64|riscv64|aarch64] [--cpus N] \
 //!     [--timeout-secs S] [--virtio-blk path/to/disk.img ...] \
 //!     [--virtio-net-dgram <qemu-sock> <peer-sock> <capture.pcap>] [--ramfb] \
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use rustos_qemu::{Arch, Outcome, Runner, Spec};
+use tairix_qemu::{Arch, Outcome, Runner, Spec};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -126,30 +126,30 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
     match result {
         Ok(Outcome::Pass) => ExitCode::SUCCESS,
         Ok(Outcome::Fail { status, serial }) => {
-            eprintln!("rustos-qemu-run: FAIL (qemu status {status})");
+            eprintln!("tairix-qemu-run: FAIL (qemu status {status})");
             eprint!("{serial}");
             ExitCode::from(1)
         }
         Ok(Outcome::Timeout { budget, serial }) => {
-            eprintln!("rustos-qemu-run: TIMEOUT after {budget:?}");
+            eprintln!("tairix-qemu-run: TIMEOUT after {budget:?}");
             eprint!("{serial}");
             ExitCode::from(2)
         }
         Err(e) => {
-            eprintln!("rustos-qemu-run: could not spawn QEMU: {e}");
+            eprintln!("tairix-qemu-run: could not spawn QEMU: {e}");
             ExitCode::from(3)
         }
     }
 }
 
 fn usage() -> &'static str {
-    "usage: rustos-qemu-run --kernel <path> [--arch x86_64|riscv64|aarch64] [--cpus N] \
+    "usage: tairix-qemu-run --kernel <path> [--arch x86_64|riscv64|aarch64] [--cpus N] \
 [--timeout-secs S] [--virtio-blk <image> ...] \
 [--virtio-net-dgram <qemu-sock> <peer-sock> <pcap>] [--ramfb] \
 [--virtio-keyboard <ready-marker> <qkeycode>]"
 }
 
 fn usage_err(msg: &str) -> ExitCode {
-    eprintln!("rustos-qemu-run: {msg}\n{}", usage());
+    eprintln!("tairix-qemu-run: {msg}\n{}", usage());
     ExitCode::from(2)
 }

@@ -1,6 +1,6 @@
 [package]
-name = "rustos-chown"
-description = "RustOS `chown` CLI: change file owner and group (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+name = "tairix-chown"
+description = "TAIRiX `chown` CLI: change file owner and group (§3 `userland/apps/` — `PLAN.md` Stage 6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,4 +16,4 @@ workspace = true
 # tool changes a path's owner through an injected filesystem seam that speaks
 # the frozen `Errno`, so it invents no parallel error set (§2.2) and never
 # links a kernel or driver crate (§17.4).
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

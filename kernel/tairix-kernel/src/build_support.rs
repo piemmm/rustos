@@ -1,0 +1,306 @@
+//! Pure build-support logic shared by the `tairix-kernel` build script.
+//!
+//! This file is pulled in by `build.rs` as a `#[path]` module (so the
+//! build script has no dependency to pull in) and is *also* compiled
+//! into the crate's host test build as a module, so the same rules are
+//! unit tested rather than only exercised implicitly by a cross-compile
+//! (tests are part of the change).
+//!
+//! It holds two kinds of build-time fact: the target-selection logic
+//! (which instruction set / boot linker script a build is for) and the
+//! [`KERNEL_DRIVER_SIGNING_SEED`] — the single source of the driver-load
+//! trust-anchor seed. Because a `#[path]` include carries no dependency,
+//! every build that must sign a driver manifest with the *same* key the
+//! kernel trusts — the kernel's own `build.rs` and any out-of-tree fixture
+//! or image build that lays a kernel-trusted bundle into the driver store —
+//! reads the seed from here rather than carrying its own copy.
+//!
+//! Every decision the build script makes about *which* instruction set
+//! the production kernel is being built for, and *which* per-board boot
+//! linker script to hand `rustc`, lives here as a pure function of the
+//! Cargo-provided target strings. Keeping it target-string-driven — not
+//! a target-conditional `cfg` predicate — is what lets the build script
+//! (the build-glue carve-out) make the instruction-set
+//! choice in one audited place instead of leaking that predicate into
+//! the crate body, which `cargo xtask cfg-check` forbids outside the
+//! architecture ports and the build glue.
+
+/// The freestanding bare-metal target triples the production kernel
+/// builds for, paired with the per-board boot linker script (a path
+/// relative to `CARGO_MANIFEST_DIR`) the boot-stub carve-out pins for
+/// that board.
+///
+/// The aarch64 production image targets the Raspberry Pi 4 (load address
+/// `0x8_0000`, `aarch64-rpi4.ld`); the QEMU `virt` board's
+/// `aarch64-virt.ld` is used only by the per-test bins under
+/// `tests/integration/*`, which supply their own build scripts.
+const FREESTANDING_TARGETS: &[(&str, &str)] = &[
+    ("x86_64-unknown-none", "../arch/x86_64/linker.ld"),
+    (
+        "aarch64-unknown-none",
+        "../arch/aarch64/link/aarch64-rpi4.ld",
+    ),
+    // The riscv64 production image targets the QEMU `virt` / SiFive
+    // board (its only Tier-1 board), so it reuses the arch port's
+    // `riscv64-virt.ld` (load `0x8020_0000` above the OpenSBI firmware
+    // region) rather than a separate per-board script (there is no Pi-equivalent second riscv64 board yet).
+    (
+        "riscv64gc-unknown-none-elf",
+        "../arch/riscv64/link/riscv64-virt.ld",
+    ),
+];
+
+/// The boot linker script (relative to `CARGO_MANIFEST_DIR`) for a
+/// freestanding target triple and board request, or `None` for any
+/// other triple (the host build, which links no kernel image).
+///
+/// `board` is the `TAIRIX_KERNEL_BOARD` build-glue request: `None` (or
+/// `Some("rpi4")`) selects each target's default board script;
+/// `Some("virt")` selects the aarch64 QEMU `virt` script
+/// (`aarch64-virt.ld`, load `0x4020_0000`) the interactive `cargo xtask
+/// run` kernel links — the other targets have a single Tier-1 board, so
+/// any non-default board request for them fails closed as `Err`.
+///
+/// # Errors
+///
+/// An unknown board name (or a board request the target has no script
+/// for) is a build defect reported as [`UnknownBoard`], never a silent
+/// default.
+pub fn linker_script_for<'a>(
+    target: &'a str,
+    board: Option<&'a str>,
+) -> Result<Option<&'static str>, UnknownBoard<'a>> {
+    let default = FREESTANDING_TARGETS
+        .iter()
+        .find(|(triple, _)| *triple == target)
+        .map(|(_, script)| *script);
+    match board {
+        None | Some("rpi4") => Ok(default),
+        Some("virt") if target == "aarch64-unknown-none" => {
+            Ok(Some("../arch/aarch64/link/aarch64-virt.ld"))
+        }
+        Some(other) => Err(UnknownBoard {
+            board: other,
+            target,
+        }),
+    }
+}
+
+/// A board request [`linker_script_for`] rejected: an unknown
+/// `TAIRIX_KERNEL_BOARD` name, or a board the target has no boot script
+/// for. Alloc-free so the shared source compiles in both the `no_std`
+/// crate's host test build and the `std` build script (which formats
+/// the loud build error from it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownBoard<'a> {
+    /// The rejected board name.
+    pub board: &'a str,
+    /// The build's target triple.
+    pub target: &'a str,
+}
+
+/// The `kernel_isa` conditional-compilation value for a target
+/// instruction set, or `None` if the crate ships no production kernel
+/// for it.
+///
+/// Emitted by the build script for *every* build (host included) so the
+/// crate body can gate each architecture's modules on the chosen
+/// instruction set without naming `target_arch` inline.
+#[must_use]
+pub fn kernel_isa(target_arch: &str) -> Option<&'static str> {
+    match target_arch {
+        "x86_64" => Some("x86_64"),
+        "aarch64" => Some("aarch64"),
+        "riscv64" => Some("riscv64"),
+        _ => None,
+    }
+}
+
+/// True when the crate is being built as the bare-metal production
+/// kernel: a supported instruction set with no host operating system.
+#[must_use]
+pub fn is_freestanding(target_os: &str, target_arch: &str) -> bool {
+    target_os == "none" && kernel_isa(target_arch).is_some()
+}
+
+/// Deterministic Ed25519 seed the build signs every driver manifest with
+/// (`plans/PI.md` P10 5c-ii).
+///
+/// The kernel's driver-load trust anchor is *this
+/// build's own key*: the kernel trusts the drivers its build signed and
+/// statically linked, nothing else. Because the chain drivers are baked
+/// into the kernel image from the same source tree, secrecy of the key
+/// buys nothing — the security boundary is "did this exact, reproducible
+/// source build produce this image" (reproducible
+/// builds + source-hash pinning + a signed SBOM), not a hidden authority.
+/// A deterministic seed keeps the baked signatures bit-reproducible; a random per-build key would defeat that. A
+/// third-party / userland signing authority is a later concern
+/// (`plans/PI.md` P10 5d).
+///
+/// This is the **single source** of the seed. The
+/// kernel's `build.rs` signs the embedded in-kernel chain manifests with
+/// it, and any fixture or image build that lays a *kernel-trusted* driver
+/// bundle into `/System/Drivers/` (the `-M virt` autoload vertical, the
+/// `tools/mkimage` signed bundle — `plans/PI.md` P10 5d-2-ii) signs from
+/// this same definition so the bundle verifies against the kernel's
+/// embedded trust anchor.
+pub const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"tairix-kernel-driver-signing/v1!";
+
+/// Deterministic Ed25519 seed the build signs every system app bundle's
+/// `AppInfo` manifest with (`plans/APPS.md` deliverable 8).
+///
+/// The same trust model as [`KERNEL_DRIVER_SIGNING_SEED`] — the kernel
+/// trusts the app bundles its own reproducible build signed and planted on
+/// the read-only `/System` store, nothing else — but a **distinct trust
+/// domain**: an authority to sign an application bundle must never also be
+/// an authority to sign a driver (a driver runs with device grants an app
+/// can never request), so the two seeds and the two derived trust anchors
+/// are separate values, checked at separate gates. This is the single
+/// source of the app seed: the image build (`tools/mkimage`'s caller) and
+/// every fixture that plants a kernel-trusted bundle onto the
+/// `/System/Apps` or `/System/Services` store signs from this definition.
+pub const SYSTEM_APP_SIGNING_SEED: [u8; 32] = *b"tairix-system-app-signing/v1!\0\0\0";
+
+/// Parse a `SOURCE_DATE_EPOCH` value into whole seconds, or `None` when it is
+/// absent/malformed so the build script falls back to the current wall-clock
+/// second.
+///
+/// `SOURCE_DATE_EPOCH` is the standard reproducible-build input: when a pinned build sets it, the build provenance id's epoch is
+/// this fixed value, so two reproducible builds stamp an identical id (and
+/// hence a byte-identical image); otherwise the id carries the real build
+/// second, the freshness signal an operator reads off the UART to confirm a
+/// reflash actually changed. Surrounding whitespace is tolerated; a negative,
+/// empty, or non-numeric value is rejected (`None`) rather than guessed
+/// (fail closed to the wall-clock fallback). Alloc-free so
+/// it compiles both into the `no_std` crate's host test build and into the
+/// `std` build script.
+#[must_use]
+pub fn parse_source_date_epoch(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x86_64_freestanding_selects_the_x86_64_linker_script() {
+        assert_eq!(
+            linker_script_for("x86_64-unknown-none", None),
+            Ok(Some("../arch/x86_64/linker.ld"))
+        );
+        assert!(is_freestanding("none", "x86_64"));
+        assert_eq!(kernel_isa("x86_64"), Some("x86_64"));
+    }
+
+    #[test]
+    fn aarch64_freestanding_selects_the_rpi4_linker_script() {
+        assert_eq!(
+            linker_script_for("aarch64-unknown-none", None),
+            Ok(Some("../arch/aarch64/link/aarch64-rpi4.ld"))
+        );
+        assert!(is_freestanding("none", "aarch64"));
+        assert_eq!(kernel_isa("aarch64"), Some("aarch64"));
+    }
+
+    #[test]
+    fn aarch64_virt_board_selects_the_virt_linker_script() {
+        // The interactive `cargo xtask run` form: same production crate,
+        // QEMU `virt` load layout.
+        assert_eq!(
+            linker_script_for("aarch64-unknown-none", Some("virt")),
+            Ok(Some("../arch/aarch64/link/aarch64-virt.ld"))
+        );
+        // The explicit default board spelling matches the default.
+        assert_eq!(
+            linker_script_for("aarch64-unknown-none", Some("rpi4")),
+            Ok(Some("../arch/aarch64/link/aarch64-rpi4.ld"))
+        );
+    }
+
+    #[test]
+    fn unknown_or_mistargeted_boards_fail_closed() {
+        // A typo'd board, or `virt` on a target with a single board, is a
+        // build defect reported loudly — never a silently defaulted script.
+        assert!(linker_script_for("aarch64-unknown-none", Some("virt2")).is_err());
+        assert!(linker_script_for("x86_64-unknown-none", Some("virt")).is_err());
+        assert!(linker_script_for("riscv64gc-unknown-none-elf", Some("virt")).is_err());
+    }
+
+    #[test]
+    fn host_targets_link_no_kernel_script_but_still_pick_an_isa() {
+        // A host build (an OS present) is never freestanding, links no
+        // kernel image, yet still reports its instruction set so the
+        // crate's host test build compiles the right architecture's
+        // modules.
+        assert_eq!(
+            linker_script_for("x86_64-unknown-linux-gnu", None),
+            Ok(None)
+        );
+        assert!(!is_freestanding("linux", "x86_64"));
+        assert_eq!(kernel_isa("x86_64"), Some("x86_64"));
+    }
+
+    #[test]
+    fn riscv64_freestanding_selects_the_virt_linker_script() {
+        assert_eq!(
+            linker_script_for("riscv64gc-unknown-none-elf", None),
+            Ok(Some("../arch/riscv64/link/riscv64-virt.ld"))
+        );
+        assert!(is_freestanding("none", "riscv64"));
+        assert_eq!(kernel_isa("riscv64"), Some("riscv64"));
+    }
+
+    #[test]
+    fn unsupported_instruction_sets_have_no_kernel() {
+        assert_eq!(kernel_isa("wasm32"), None);
+        assert!(!is_freestanding("none", "wasm32"));
+        assert_eq!(linker_script_for("wasm32-unknown-unknown", None), Ok(None));
+    }
+
+    #[test]
+    fn source_date_epoch_is_honoured_when_well_formed_and_rejected_otherwise() {
+        // A pinned reproducible build: the exact second is
+        // used, surrounding whitespace tolerated.
+        assert_eq!(parse_source_date_epoch("1782181959"), Some(1_782_181_959));
+        assert_eq!(
+            parse_source_date_epoch("  1782181959\n"),
+            Some(1_782_181_959)
+        );
+        assert_eq!(parse_source_date_epoch("0"), Some(0));
+        // Malformed / empty / negative values fall back (None) rather than
+        // being guessed, so the id carries the real wall-clock second instead
+        // of a wrong fixed one (fail closed).
+        assert_eq!(parse_source_date_epoch(""), None);
+        assert_eq!(parse_source_date_epoch("not-a-number"), None);
+        assert_eq!(parse_source_date_epoch("-1"), None);
+        assert_eq!(parse_source_date_epoch("12.5"), None);
+    }
+
+    #[test]
+    fn the_driver_signing_seed_is_the_pinned_single_source_value() {
+        // The seed is the single source every kernel-trusted driver
+        // signature derives from; pinning its exact
+        // bytes guards against a silent edit that would desynchronise the
+        // kernel's embedded trust anchor from a fixture/image build that
+        // signs a bundle with it.
+        assert_eq!(
+            KERNEL_DRIVER_SIGNING_SEED,
+            *b"tairix-kernel-driver-signing/v1!"
+        );
+        assert_eq!(KERNEL_DRIVER_SIGNING_SEED.len(), 32);
+    }
+
+    #[test]
+    fn the_app_signing_seed_is_pinned_and_distinct_from_the_driver_seed() {
+        // Same rationale as the driver seed pin, plus the trust-domain
+        // separation: an app-signing authority must never verify as a
+        // driver-signing authority, so the two seeds may never converge.
+        assert_eq!(
+            SYSTEM_APP_SIGNING_SEED,
+            *b"tairix-system-app-signing/v1!\0\0\0"
+        );
+        assert_eq!(SYSTEM_APP_SIGNING_SEED.len(), 32);
+        assert_ne!(SYSTEM_APP_SIGNING_SEED, KERNEL_DRIVER_SIGNING_SEED);
+    }
+}

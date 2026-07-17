@@ -47,7 +47,7 @@ Status: **U1–U4 done**.
      is readable. Storing service identity there would deadlock the
      boot; compiling it in resolves the ordering with no waiting at all.
    - The kernel's `sec` boot phase builds and verifies the compiled
-     table (`rustos_kernel_core::system_identity_table`) and installs it
+     table (`tairix_kernel_core::system_identity_table`) and installs it
      into the port's identity cell (`BootInfo::with_spawn_identity`,
      wired by every port boot), so spawn-as-user and filesystem group
      resolution for system accounts work before any volume exists.
@@ -56,7 +56,7 @@ Status: **U1–U4 done**.
    band — enforced fail-closed at the identity merge.** The
    encrypted-root unlock replaces the boot table with the merge of the
    compiled half and the loaded `/System/Security/{Users,Groups}`
-   records (`rustos_kernel_core::build_identity_table`, also the
+   records (`tairix_kernel_core::build_identity_table`, also the
    `users_admin` engine's re-verification path). The merge refuses any
    on-disk user outside `IdRange::User` (uid ≥ `FIRST_USER_UID` = 1000)
    or carrying a reserved account name, and any on-disk group outside
@@ -96,14 +96,14 @@ Status: **U1–U4 done**.
    with a concrete `target_uid`.** The startup config names each
    entry's account (`service <path> <account>` / `session <path>
    <account>`); the parser resolves the name through the pure,
-   allocation-free `rustos_users::system_account_uid()` and rejects the
+   allocation-free `tairix_users::system_account_uid()` and rejects the
    whole config on an unknown or missing account
    (`ConfigError::UnknownAccount` / `MissingAccount`) — nothing spawns
    from a config whose identities cannot all be resolved. No syscall,
    no waiting, no compiled-in kernel table of services: the account
    name lives in the same config that names the service's path. `init`
    holds `CAP_SPAWN_AS_USER` (its manifest:
-   `kernel/rustos-kernel/src/program_manifests.rs::INIT_MANIFEST`), and
+   `kernel/tairix-kernel/src/program_manifests.rs::INIT_MANIFEST`), and
    the kernel resolves each switch's group set and capability ceiling
    from the boot-installed identity table, failing closed on an
    unresolvable uid (`resolve_spawn_credential`). The login *session*
@@ -114,7 +114,7 @@ Status: **U1–U4 done**.
 
 8. **The user directory lists both halves.** The ungated
    `USER_DIRECTORY` introspection serves the compiled `(uid, username)`
-   rows first (`rustos_users::system_account_directory()`), then the
+   rows first (`tairix_users::system_account_directory()`), then the
    on-disk human records, so `ls -l`/`ps`/`top` render system-account
    names with no volume mounted and nothing is fabricated beyond the
    two real halves. The `users_admin` `ListUsers` view remains the

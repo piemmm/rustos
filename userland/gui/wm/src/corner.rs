@@ -32,7 +32,7 @@ impl Corners {
     ///
     /// A radius of `0` is the square opt-out; any other radius rounds.
     /// This lets a window or the taskbar take its corner radius straight
-    /// from the active theme's [`Metrics`](rustos_theme::Metrics) without
+    /// from the active theme's [`Metrics`](tairix_theme::Metrics) without
     /// the caller re-deciding what "no rounding" means.
     #[must_use]
     pub const fn from_radius(radius: u32) -> Self {

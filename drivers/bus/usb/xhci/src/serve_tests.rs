@@ -13,12 +13,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{attach_transport_grants, UrbOutcome, UrbService};
-use rustos_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
-use rustos_abi::usb_urb::{
+use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
+use tairix_abi::usb_urb::{
     decode_completion, UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN,
 };
-use rustos_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode};
-use rustos_usb::transport::UrbEngine;
+use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode};
+use tairix_usb::transport::UrbEngine;
 
 /// An arbitrary shared-buffer handle the URB names; the state machine uses the
 /// `shm` slice it is handed, not this value.
@@ -70,7 +70,7 @@ impl UrbEngine for MockEngine {
     fn control_no_data(&mut self, _setup: [u8; 8]) -> Result<(), DriverError> {
         // No serve-level test drives a no-data control-OUT through this
         // double yet; the seam-level round-trip lives in
-        // `rustos_usb::transport::tests`.
+        // `tairix_usb::transport::tests`.
         Err(DriverError::NotFound)
     }
 
@@ -114,7 +114,7 @@ impl UrbEngine for MockEngine {
 
     fn bulk_out(&mut self, _endpoint: u8, _data: &[u8]) -> Result<Option<usize>, DriverError> {
         // No serve-level test drives bulk-OUT through this double yet; the
-        // seam-level round-trip lives in `rustos_usb::transport::tests`.
+        // seam-level round-trip lives in `tairix_usb::transport::tests`.
         Err(DriverError::NotFound)
     }
 }
@@ -391,7 +391,7 @@ fn attach_transport_grants_adds_the_endpoint_and_shared_resources() {
     let kinds: Vec<Option<HwResourceKind>> = node
         .resources()
         .iter()
-        .map(rustos_abi::HwResource::kind)
+        .map(tairix_abi::HwResource::kind)
         .collect();
     assert!(kinds.contains(&Some(HwResourceKind::Endpoint)));
     assert!(kinds.contains(&Some(HwResourceKind::Shared)));

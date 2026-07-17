@@ -17,7 +17,7 @@
 # startup (mem_pin) so it never stalls on its own page fault-in under the
 # very pressure it observes; a refused pin is reported on the status line
 # and the session continues unpinned — the pin is incidental, never fatal.
-id = "os.rustos.sysmon"
+id = "os.tairix.sysmon"
 name = "sysmon"
 version = "0.1.0"
 kind = "command"

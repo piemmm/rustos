@@ -7,7 +7,7 @@
 //! row, and the unit options (`-k`, `-h`, `-H`/`--si`, `-B <size>`)
 //! select the reporting scale, the later selection winning as in the
 //! GNU tool. `-l` restricts the report to local filesystems (every
-//! RustOS mount today — the option filters nothing away, exactly as on
+//! TAIRiX mount today — the option filters nothing away, exactly as on
 //! an all-local Linux machine). Short help is the reserved `-?`/`--help`
 //! pair (plans/APPS.md §4); `-h` keeps its GNU meaning
 //! (human-readable), exactly as `ls` and `du`.
@@ -17,7 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use rustos_util::size::{parse_block_size, SizeScale};
+use tairix_util::size::{parse_block_size, SizeScale};
 
 /// A parsed `df` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn local_is_accepted_and_filters_nothing() {
-        // Every RustOS mount is local, so `-l`/`--local` is the identity
+        // Every TAIRiX mount is local, so `-l`/`--local` is the identity
         // filter — accepted for GNU script compatibility.
         assert_eq!(report(&["-l"]), Options::default());
         assert_eq!(report(&["--local"]), Options::default());

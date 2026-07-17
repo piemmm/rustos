@@ -10,7 +10,7 @@
 # needs and nothing more. The mount table it resolves names against
 # comes from the ungated sysinfo-v1 MOUNT_LIST query served by
 # sysinfod. It reads no standard input.
-id = "os.rustos.unmount"
+id = "os.tairix.unmount"
 name = "unmount"
 version = "0.1.0"
 kind = "command"

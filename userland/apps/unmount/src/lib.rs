@@ -1,4 +1,4 @@
-//! RustOS `unmount` — detach a runtime-attached volume (Stage 6
+//! TAIRiX `unmount` — detach a runtime-attached volume (Stage 6
 //! `userland/apps/`, `plans/DEVICES.md` D4b).
 //!
 //! `unmount NAME` takes the volume mounted under `NAME` (its catalog

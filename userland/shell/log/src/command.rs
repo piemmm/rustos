@@ -1,6 +1,6 @@
 //! The parsed shape of a `log` command line.
 
-use rustos_log::Stream;
+use tairix_log::Stream;
 
 use crate::error::LogError;
 
@@ -10,13 +10,13 @@ use crate::error::LogError;
 /// rendering never changes the log.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
-    /// One flat readable boot-console line per record ([`rustos_log::render_line`]).
+    /// One flat readable boot-console line per record ([`tairix_log::render_line`]).
     Line,
-    /// One JSON object per record, JSONL-framed ([`rustos_log::render_json`]).
+    /// One JSON object per record, JSONL-framed ([`tairix_log::render_json`]).
     Json,
-    /// A Markdown fragment per record ([`rustos_log::render_markdown`]).
+    /// A Markdown fragment per record ([`tairix_log::render_markdown`]).
     Markdown,
-    /// An aligned terminal table ([`rustos_log::render_table_row`]).
+    /// An aligned terminal table ([`tairix_log::render_table_row`]).
     Table,
 }
 
@@ -171,7 +171,7 @@ fn no_more(args: &[&str]) -> Result<(), LogError> {
 mod tests {
     use super::{parse, Command, Format};
     use crate::error::LogError;
-    use rustos_log::Stream;
+    use tairix_log::Stream;
 
     #[test]
     fn no_arguments_is_help() {

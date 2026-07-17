@@ -11,7 +11,7 @@
 # baseline, armed only when the launching account's ceiling carries it (an
 # administrator) and refused with a stated reason for everyone else while
 # the self-scoped listing still works.
-id = "os.rustos.ps"
+id = "os.tairix.ps"
 name = "ps"
 version = "0.1.0"
 kind = "command"

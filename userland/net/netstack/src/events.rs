@@ -1,4 +1,4 @@
-//! Stable [`rustos_log::EventId`] constants emitted by `netstack`.
+//! Stable [`tairix_log::EventId`] constants emitted by `netstack`.
 //!
 //! Per `lib/log` convention every subsystem owns a 1 000-wide reserved
 //! range. The network-stack service occupies `16000..17000` (adjacent to
@@ -6,7 +6,7 @@
 //! must never be re-used or re-numbered — external audit-log consumers
 //! rely on them.
 
-use rustos_log::EventId;
+use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `netstack` event identifiers.
 ///

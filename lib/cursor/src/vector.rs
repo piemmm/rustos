@@ -16,7 +16,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_raster::Color;
+use tairix_raster::Color;
 
 /// A vertex in a cursor's design grid.
 ///

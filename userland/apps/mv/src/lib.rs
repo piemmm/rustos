@@ -1,4 +1,4 @@
-//! RustOS `mv` — move (rename) files and directories (Stage 6 `userland/apps/`).
+//! TAIRiX `mv` — move (rename) files and directories (Stage 6 `userland/apps/`).
 //!
 //! `mv` relocates each of its source operands to a destination. With a single
 //! source and a destination that does not name a directory, the source is
@@ -36,7 +36,7 @@
 //! An unknown option, a missing operand, or more than one source aimed at a
 //! non-directory destination is a [`MvError::Usage`] that moves nothing; an
 //! operand that cannot be inspected surfaces the underlying
-//! [`Errno`](rustos_abi::Errno) as [`MvError::Stat`]; a rename that fails for
+//! [`Errno`](tairix_abi::Errno) as [`MvError::Stat`]; a rename that fails for
 //! any reason other than crossing a filesystem boundary is
 //! [`MvError::Rename`]; during a cross-device relocation an unreadable source
 //! is [`MvError::Read`], an uncreatable destination is [`MvError::Create`], a

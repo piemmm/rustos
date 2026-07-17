@@ -1,9 +1,9 @@
 # Bus drivers
 
-RustOS bus drivers enumerate the devices attached to a transport
+TAIRiX bus drivers enumerate the devices attached to a transport
 (PCI, MMIO, virtio) and surface them to the userland driver host as
 `BusDevice` records. They implement the single class trait
-[`rustos_abi::driver::bus::Bus`] and nothing else — every other type
+[`tairix_abi::driver::bus::Bus`] and nothing else — every other type
 is `pub(crate)` per `AGENTS.md` §8.
 
 ## Stage-4 drivers in this class
@@ -59,7 +59,7 @@ PCI Local Bus 3.0 §3.2.2.3.2:
 | `0xCFC` | 32-bit configuration data    |
 
 The crate splits the `in`/`out` instructions behind the
-`rustos_abi::PortIo` seam so the in-crate unit tests can exercise the
+`tairix_abi::PortIo` seam so the in-crate unit tests can exercise the
 bridge against a recording mock without touching real I/O ports; the
 only real `PortIo` implementation lives in the x86_64 architecture
 port. `ConfigAddress::to_cf8` is the single defensive gate — an
@@ -81,7 +81,7 @@ dword is a naturally-aligned access at the computed byte offset
 ```
 
 `EcamConfigSpace` reads and writes through a kernel-mapped
-`rustos_abi::RegisterWindow` over the host bridge's configuration
+`tairix_abi::RegisterWindow` over the host bridge's configuration
 region — obtained from the MMIO-map facility after a `CAP_MMIO_MAP`
 check, so the driver never synthesises a pointer (`AGENTS.md` §4).
 An access past the window's length, or a malformed address, resolves
@@ -321,7 +321,7 @@ USB, so the live enumerate→emit→autoload chain is the metal acceptance item
 
 ### DTB iterator
 
-The boot DTB is parsed once through `rustos_fdt::Fdt`. This is the
+The boot DTB is parsed once through `tairix_fdt::Fdt`. This is the
 single shared device-tree parser in the workspace (`AGENTS.md`
 §2.2): the architecture ports' platform discovery, the QEMU
 verticals, and this driver all walk the `virt` tree through it. It
@@ -359,7 +359,7 @@ transports.
 The Pi 4 reaches its USB-A ports through a VL805 PCIe xHCI controller
 (`plans/PI.md` P10). The bus-agnostic xHCI protocol layers and the
 multi-device enumeration engine live in the `lib/usb`
-(`rustos-usb`) crate — the USB analogue of `lib/virtio` — so this driver
+(`tairix-usb`) crate — the USB analogue of `lib/virtio` — so this driver
 and an arch-neutral user-space keyboard driver can both build on the same
 engine without depending on each other (`AGENTS.md` §17.4). This driver
 crate adds the §8 `register` entry, the §18.3 `BIND_KEYS` bind table, and
@@ -379,7 +379,7 @@ register-level mock in tests (the `emmc2` `SdhciHost` shape, `AGENTS.md`
 `MaxSlots`/`MaxPorts`/`DBOFF`/`RTSOFF` — the absent-controller
 all-ones read fails here), halts a running controller, then issues the
 self-clearing Host Controller Reset. Before asserting `HCRST`, it clears
-only the stale write-1-to-clear `USBSTS` latches RustOS has observed on
+only the stale write-1-to-clear `USBSTS` latches TAIRiX has observed on
 firmware handoff (`HSE|PCD`); `Controller Not Ready` is enforced after
 that reset, not treated as an unrecoverable pre-reset state. A halted
 controller handed over with stale `CNR|HSE|PCD` may need those latches
@@ -579,7 +579,7 @@ issued, an undecodable completion code, an unexpected event type, or a
 stalled request is a `DeviceFault`, and every wait is bounded by the
 engine's poll budget (`AGENTS.md` §2.1 / §2.9).
 
-`UsbDevice` implements the `rustos_abi::driver::input::ReportSource`
+`UsbDevice` implements the `tairix_abi::driver::input::ReportSource`
 seam (hoisted into `lib/abi` because its consumer,
 `drivers/input/usb_kbd` (and its mouse sibling), is a sibling driver and drivers depend only
 on `lib/*`, `AGENTS.md` §17.4): when no interrupt-IN transfer is in flight,
@@ -610,7 +610,7 @@ reload; keeping the three separate is the correct modular shape
 The firmware policy and the controller-node wiring live **in the driver
 crate** `drivers/bus/usb/vl805`, as a host-testable `lib` target
 (`src/lib.rs` + `src/wiring.rs`) that the crate's freestanding `Run` binary
-(`src/main.rs`, which links the userland runtime `rustos-rt`) links. The
+(`src/main.rs`, which links the userland runtime `tairix-rt`) links. The
 logic is co-located here, not in a `lib/*` device-support crate: a VL805
 USB driver sits above the §18.6 bootstrap floor and so has no charter-legal
 non-driver consumer for the §2.20 carve-out (`AGENTS.md` §2.22). Putting it
@@ -622,7 +622,7 @@ resident firmware: the `VideoCore` loads it at power-on and a PCIe
 `PERST#` drops it, so only `VideoCore` can reload it over a
 `NOTIFY_XHCI_RESET` firmware-property request. The driver may know the
 VL805/BCM2711 — but it reaches the firmware mailbox **only** through the
-board-neutral `rustos_abi::driver::mailbox::MailboxChannel` seam, never a
+board-neutral `tairix_abi::driver::mailbox::MailboxChannel` seam, never a
 doorbell address or a `kernel/*` dependency (`AGENTS.md` §17.4). Its
 public surface is the §8 `register` entry, the §18.3 `BIND_KEYS` bind
 table (exact PCI `1106:3483`, ranked above the generic class-wildcard
@@ -638,14 +638,14 @@ xHCI driver), two firmware-policy functions composed over a
 
 and the `wiring` composition the bin runs: `build_xhci_node` publishes
 the controller as `node B`, an `usb,xhci` hardware-tree node (the shared
-`rustos_usb::XHCI_COMPATIBLE` identity) **forwarding** the register BAR +
+`tairix_usb::XHCI_COMPATIBLE` identity) **forwarding** the register BAR +
 DMA grants the bin received on the VL805 PCI node (`node A`), and
 `reload_firmware_and_publish` reloads the firmware then emits node B —
 so firmware-before-bring-up holds by construction (node B does not exist
 until the reload runs). The bin holds only `CAP_MAILBOX` + `CAP_HW_EMIT`:
 it forwards the BAR/DMA grants without ever mapping them (`AGENTS.md` §4
 — least privilege), and `drivers/input/usb_kbd` binds node B
-(`rustos_hid::KEYBOARD_BIND_KEYS`) to bring the controller up.
+(`tairix_hid::KEYBOARD_BIND_KEYS`) to bring the controller up.
 
 The property-message *layout* lives once in `lib/vcmailbox`
 (`encode_xhci_reset` / `decode_xhci_reset_response` and the
@@ -754,7 +754,7 @@ These hand-offs are `pub(crate)` on the concrete `Pci` type, because a
 driver crate's only public surface is `register` (`AGENTS.md` §8). Ring
 0 therefore reaches them through a frozen ABI seam rather than the
 concrete type: `Pci<C>` implements
-`rustos_abi::driver::virtio_pci::VirtioPciBus` (a supertrait of `Bus`),
+`tairix_abi::driver::virtio_pci::VirtioPciBus` (a supertrait of `Bus`),
 whose `map_virtio_window` / `notify_off_multiplier` methods forward to
 the inherent ones. The kernel's `provision_virtio_pci(bus, device_id,
 mapper, build)` (in `kernel/virtio/src/virtio_pci_walk.rs`) takes a
@@ -770,7 +770,7 @@ never on the `drivers/bus/virtio` crate (`AGENTS.md` §17.4:
 `drivers/bus/*` type and holds no ambient authority — the capability
 check lives in the mapper, and every failure is a typed
 `VirtioPciWalkError` rather than a panic (`AGENTS.md` §2.9).
-The constants live once in `rustos_abi`; the driver's `VIRTIO_CFG_*`
+The constants live once in `tairix_abi`; the driver's `VIRTIO_CFG_*`
 names bind to them rather than re-stating the literals (`AGENTS.md`
 §2.2).
 
@@ -783,7 +783,7 @@ pair the MMIO bus driver reads from its `virtio,mmio` device-tree node;
 the `CAP_MMIO_MAP`-gated `MmioMapper`. As with PCI, this hand-off is
 `pub(crate)` on the concrete `Mmio` type, so ring 0 reaches it through
 a frozen ABI seam: `Mmio<'_, T>` implements
-`rustos_abi::driver::virtio_mmio::VirtioMmioBus` (a supertrait of
+`tairix_abi::driver::virtio_mmio::VirtioMmioBus` (a supertrait of
 `Bus`), whose `map_slot_window` forwards to the inherent one. The
 kernel's `provision_virtio_mmio(bus, device_id, mapper, build)` (in
 `kernel/virtio/src/virtio_mmio_walk.rs`) takes a `&dyn
@@ -802,7 +802,7 @@ panic (`AGENTS.md` §2.9).
 `provision_virtio_pci` yields the transport its `build` closure
 constructs, but a virtio-class driver also needs a per-process DMA host
 and a driver host to run its signed
-`.rxe`. `kernel/rustos-kernel/src/virtio_boot.rs` joins the three:
+`.rxe`. `kernel/tairix-kernel/src/virtio_boot.rs` joins the three:
 `provision_and_run(config, make_table, body)` takes a
 `VirtioBootConfig` bundling the bus (reached through both the
 `VirtioPciBus` and `MsixBus` seams), the per-driver `MmioMap`, the DMA
@@ -846,7 +846,7 @@ synthesises a pointer.
 
 The `MsiMessage` (address + data) is **opaque** to the bus driver: only
 the architecture layer knows how to address its interrupt controller.
-On x86, `rustos_arch_x86_64::irq::msi_message(vector, destination)`
+On x86, `tairix_arch_x86_64::irq::msi_message(vector, destination)`
 encodes the local-APIC message format (physical destination, fixed
 delivery, edge trigger; Intel SDM Vol 3A §11.11) — the `0xFEE`-prefixed
 address selecting the destination CPU and the data carrying the chosen
@@ -855,7 +855,7 @@ different pair; the bus driver copies whichever it is given verbatim.
 
 As with the virtio-window hand-off, ring 0 reaches `route_msix` through
 a frozen ABI seam rather than the concrete type: `Pci<C>` implements
-`rustos_abi::driver::msix::MsixBus` (a supertrait of `Bus`), so the
+`tairix_abi::driver::msix::MsixBus` (a supertrait of `Bus`), so the
 boot path can route a device's interrupt through a single `&dyn
 MsixBus` without naming a concrete `drivers/bus/*` type
 (`AGENTS.md` §8). `provision_and_run` calls it once per device — after
@@ -871,7 +871,7 @@ A non-virtio PCI device — the Raspberry Pi 4's VL805 `PCIe` xHCI USB
 host controller (`plans/PI.md` P10) — exposes its registers as a whole
 BAR, not the virtio capability tuples, and drives DMA without MSI-X.
 Its driver needs a smaller surface than `VirtioPciBus`: map one BAR,
-and turn on bus mastering. `rustos_abi::driver::pci::PciBus` (a
+and turn on bus mastering. `tairix_abi::driver::pci::PciBus` (a
 supertrait of `Bus`) is that seam:
 
 - `map_bar_window(bdf, bar_index, mapper)` resolves the memory BAR's
@@ -914,7 +914,7 @@ supertrait of `Bus`) is that seam:
 (`AGENTS.md` §17.4).
 
 The xHCI host-controller driver consumes it in
-`rustos_drv_bus_usb::bringup`. The board bus drivers assign the
+`tairix_drv_bus_usb::bringup`. The board bus drivers assign the
 controller's BAR and publish the enumerated controller as the
 `usb,xhci` node carrying the BAR + DMA + IRQ grants
 (`drivers/bus/pcie_brcm` trains the link and enumerates the VL805;
@@ -961,10 +961,10 @@ the load gate. This is the PCI half of `plans/PI.md` Stage 4.HW item 5b.
 The user-space BCM2711 PCIe bus driver (`drivers/bus/pcie_brcm`) drives
 this seam end to end: it binds the discovered `brcm,bcm2711-pcie` node,
 trains the link, locates the VL805 with the shared
-`rustos_pci::find_function_by_class` scan, assigns/enables/maps its BAR
-with `rustos_pci::assign_and_map_bar` (the one primitive the xHCI driver
+`tairix_pci::find_function_by_class` scan, assigns/enables/maps its BAR
+with `tairix_pci::assign_and_map_bar` (the one primitive the xHCI driver
 also uses, `AGENTS.md` §2.2), resolves the BAR to its CPU-physical address
-with `rustos_pci::bus_to_cpu_phys`, and publishes the controller as an
+with `tairix_pci::bus_to_cpu_phys`, and publishes the controller as an
 xHCI `HwNode` carrying that BAR (an `Mmio` window inside the bridge's
 outbound `BusWindow` grant, so the kernel's grant-coverage check admits
 it) and a DMA constraint. The composition lives — and is host-tested
@@ -1012,21 +1012,21 @@ P10 D5d): the whole chain is now autoloaded user-space drivers.
 ## Constructing the real-hardware bus
 
 The boot pipeline reaches PCI through a single public constructor,
-`rustos_pci::mechanism_one(pio)`. It builds the bus over
+`tairix_pci::mechanism_one(pio)`. It builds the bus over
 configuration **mechanism #1** — the `0xCF8` address word / `0xCFC`
 data word port pair (PCI Local Bus 3.0 §3.2.2.3.2) — and returns it as
 `impl VirtioPciBus + MsixBus + PciBus`. All three traits have `Bus` as
 a supertrait, so the value also coerces to `&dyn Bus`; the concrete
 `Pci` type stays crate-private (`AGENTS.md` §8). The constructor is
 architecture-neutral and carries no `cfg(target_arch …)` gate: the
-`pio` argument is a `rustos_abi::PortIo` backend, and the only `in`/
+`pio` argument is a `tairix_abi::PortIo` backend, and the only `in`/
 `out` instructions live inside the architecture port that supplies it
-(for x86_64, `rustos_arch_x86_64::pio::x86_port_io()`). This keeps the
+(for x86_64, `tairix_arch_x86_64::pio::x86_port_io()`). This keeps the
 driver free of inline assembly and target gates (`AGENTS.md` §17.2 /
 §17.4). Construction performs no I/O — it only stores the supplied
 backend — so it is sound to call before the host bridge has been
 probed; configuration access happens lazily on the trait methods. Ring
-0 hands the result to `rustos_kernel::provision_virtio_pci` /
+0 hands the result to `tairix_kernel::provision_virtio_pci` /
 `provision_and_run` as the `&dyn VirtioPciBus` + `&dyn MsixBus` device
 bus. Non-x86 architectures reach PCIe through memory-mapped ECAM via
 `mechanism_ecam(window)`, which performs no port I/O and exposes the

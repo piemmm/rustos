@@ -1,0 +1,17 @@
+# systemd timer — fire tairix-ci.service every 30 minutes.
+#
+# The Linux counterpart of StartInterval=1800 in the launchd CI agent.
+# See tairix-ci.service for install instructions.
+
+[Unit]
+Description=Run the TAIRiX CI gate every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+# Catch up a missed run after sleep/suspend (the laptop-friendly behaviour
+# launchd gives for free).
+Persistent=true
+
+[Install]
+WantedBy=timers.target

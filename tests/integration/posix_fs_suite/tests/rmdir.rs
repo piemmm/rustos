@@ -5,7 +5,7 @@
 //! the filesystem decides the node's kind atomically in the same walk that
 //! removes it, never a caller-side stat.
 
-use rustos_test_posix_fs_suite::*;
+use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn rmdir_removes_an_empty_directory() {

@@ -4,7 +4,7 @@
 //! ## What this test asserts
 //!
 //! x86_64 has no broadcast TLB-invalidation instruction, so
-//! `X86_64Arch`'s `rustos_arch_api::CrossCpuTlbShootdown` impl raises an
+//! `X86_64Arch`'s `tairix_arch_api::CrossCpuTlbShootdown` impl raises an
 //! inter-processor interrupt at every other online CPU, each of which runs
 //! `invlpg` in the shootdown ISR and acknowledges; the initiator spins
 //! until every target has acknowledged. This is the only port whose
@@ -28,7 +28,7 @@
 //!
 //! ## How it differs from a production kernel
 //!
-//! It links only the `rustos-arch-x86_64` port, is alloc-free, and
+//! It links only the `tairix-arch-x86_64` port, is alloc-free, and
 //! supplies its own `kernel_main`. The QEMU-exit shortcut lives in this
 //! dedicated bin, never behind a Cargo feature on the arch crate
 //! (fail closed).
@@ -43,13 +43,13 @@ mod kernel {
     use core::fmt::Write as _;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use rustos_arch_api::{CrossCpuTlbShootdown, SecondaryBringup};
-    use rustos_arch_x86_64::acpi::{self, MadtEntry};
-    use rustos_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
-    use rustos_arch_x86_64::bootinfo::BootData;
-    use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
-    use rustos_arch_x86_64::smp;
-    use rustos_arch_x86_64::{percpu, preempt, qemu_exit, serial, tlb_shootdown};
+    use tairix_arch_api::{CrossCpuTlbShootdown, SecondaryBringup};
+    use tairix_arch_x86_64::acpi::{self, MadtEntry};
+    use tairix_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
+    use tairix_arch_x86_64::bootinfo::BootData;
+    use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
+    use tairix_arch_x86_64::smp;
+    use tairix_arch_x86_64::{percpu, preempt, qemu_exit, serial, tlb_shootdown};
 
     /// Logical CPUs this vertical brings up: the BSP plus a single AP
     /// (the per-CPU backings are sized to the CPUs the
@@ -168,7 +168,7 @@ mod kernel {
 
     /// Forward to a serial-logging panic that exits QEMU with failure.
     #[panic_handler]
-    fn rustos_xtlb_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    fn tairix_xtlb_x86_64_panic(info: &core::panic::PanicInfo<'_>) -> ! {
         let mut com1 = serial::Serial::init(serial::COM1_BASE);
         let _ = writeln!(com1, "[cross_cpu_tlb_shootdown_qemu_x86_64] panic: {info}");
         qemu_exit::exit_failure();
@@ -246,7 +246,7 @@ mod kernel {
 
         // Install the AP entry once, then bring the single AP up through
         // the Arch HAL `SecondaryBringup` trait (the INIT-SIPI-SIPI
-        // orchestration lives in `rustos_arch_x86_64::smp`, Stage W14).
+        // orchestration lives in `tairix_arch_x86_64::smp`, Stage W14).
         if smp::set_secondary_entry(ap_entry).is_err() {
             let _ = writeln!(
                 com1,

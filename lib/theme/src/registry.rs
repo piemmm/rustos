@@ -39,7 +39,7 @@ pub struct ThemeRegistry {
 
 impl ThemeRegistry {
     /// A registry holding the built-in dark and light themes, with the
-    /// dark theme active (RustOS's default).
+    /// dark theme active (TAIRiX's default).
     #[must_use]
     pub fn with_builtins() -> Self {
         Self {

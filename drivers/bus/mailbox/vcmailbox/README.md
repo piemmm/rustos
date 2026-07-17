@@ -1,10 +1,10 @@
-# `rustos-drv-bus-mailbox-vcmailbox` — VideoCore property-mailbox service driver
+# `tairix-drv-bus-mailbox-vcmailbox` — VideoCore property-mailbox service driver
 
 Autoloaded **user-space service driver** for the Broadcom BCM2711 (Raspberry
 Pi 4) VideoCore firmware property mailbox. It owns the discovered mailbox
 doorbell window and a DMA-carved property buffer and answers *synchronous*
 property-channel exchanges from other user-space drivers over the well-known
-`rustos_abi::mailbox_ipc::MAILBOX_ENDPOINT` call endpoint (`plans/PI.md` P10
+`tairix_abi::mailbox_ipc::MAILBOX_ENDPOINT` call endpoint (`plans/PI.md` P10
 D3).
 
 This is the "drivers in user space" steady state (`AGENTS.md` §4): the
@@ -24,7 +24,7 @@ values threaded from the matched hardware-tree node's resource grants
 
 ## Protocol
 
-The service is the server half of `rustos_abi::mailbox_ipc`: it `call_recv`s a
+The service is the server half of `tairix_abi::mailbox_ipc`: it `call_recv`s a
 32-word `VideoCore` property buffer, runs the exchange over
 `lib/vcmailbox::MmioMailbox`, and `call_reply`s a status-framed response. A
 malformed request or a transport fault is answered as a fail-closed in-band

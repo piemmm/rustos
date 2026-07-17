@@ -11,7 +11,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 
 use crate::command::Workers;
 use crate::ctrl::Tally;
@@ -20,7 +20,7 @@ use crate::ctrl::Tally;
 const OWN_WORD: &str = "stress";
 
 /// The dispatch line printed as the run starts (GNU `stress`'s
-/// "dispatching hogs" shape, extended with the RustOS-only cache kind).
+/// "dispatching hogs" shape, extended with the TAIRiX-only cache kind).
 #[must_use]
 pub fn dispatch_line(pid: u64, workers: &Workers) -> String {
     format!(

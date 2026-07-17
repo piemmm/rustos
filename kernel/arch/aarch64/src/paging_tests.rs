@@ -631,7 +631,7 @@ fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
 
     // SAFETY: the space is no CPU's active translation (host test) and no
     // other reference into its tables is live.
-    unsafe { rustos_arch_api::mmu::AddressSpace::reclaim_table_frames(&mut space) };
+    unsafe { tairix_arch_api::mmu::AddressSpace::reclaim_table_frames(&mut space) };
 
     // Every drawn table frame came back exactly once, the root last, and
     // no leaf frame (the mapped `pa` pages) was ever freed.
@@ -692,7 +692,7 @@ fn split_block_then_unmap_tears_down_exactly_one_page() {
 
     // A 4 KiB page cannot be unmapped while it is part of a block.
     assert_eq!(
-        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, va),
+        tairix_arch_api::mmu::AddressSpace::unmap(&mut space, va),
         Err(MapError::NotMapped),
         "a page inside a live block has no 4 KiB leaf to tear down"
     );
@@ -701,7 +701,7 @@ fn split_block_then_unmap_tears_down_exactly_one_page() {
     // After the split the page exists as an L3 leaf and unmaps cleanly,
     // returning its (identity) frame; its neighbour stays mapped.
     assert_eq!(
-        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, va),
+        tairix_arch_api::mmu::AddressSpace::unmap(&mut space, va),
         Ok(va),
         "the split page unmaps to its identity frame"
     );
@@ -787,7 +787,7 @@ fn prepare_guard_arena_splits_every_covering_block_preserving_translation() {
     // mapped — the property the guard page relies on.
     let guard = base + 3 * PAGE_SIZE as u64;
     assert_eq!(
-        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, guard),
+        tairix_arch_api::mmu::AddressSpace::unmap(&mut space, guard),
         Ok(guard),
     );
     assert_eq!(host_translate(space.root_phys(), guard), None);
@@ -891,7 +891,7 @@ fn a_default_sized_pool_cannot_prepare_a_maximal_arena() {
 
 #[test]
 fn passes_mmu_conformance() {
-    use rustos_arch_api::mmu;
+    use tairix_arch_api::mmu;
     static POOL: PageTablePool = PageTablePool::new();
     static POOL2: PageTablePool = PageTablePool::new();
     let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
@@ -908,7 +908,7 @@ fn passes_mmu_conformance() {
 
 #[test]
 fn declares_block_split_supported_and_the_hal_method_forwards() {
-    use rustos_arch_api::mmu::{self, BlockSplit};
+    use tairix_arch_api::mmu::{self, BlockSplit};
     static POOL: PageTablePool = PageTablePool::new();
     let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
 
@@ -926,7 +926,7 @@ fn declares_block_split_supported_and_the_hal_method_forwards() {
             .expect("HAL split_block forwards to the inherent split");
     }
     assert_eq!(
-        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, va),
+        tairix_arch_api::mmu::AddressSpace::unmap(&mut space, va),
         Ok(va),
         "the HAL-split page unmaps to its identity frame"
     );
@@ -943,7 +943,7 @@ fn declares_block_split_supported_and_the_hal_method_forwards() {
     }
     let arena_page = arena + 2 * PAGE_SIZE as u64;
     assert_eq!(
-        rustos_arch_api::mmu::AddressSpace::unmap(&mut space, arena_page),
+        tairix_arch_api::mmu::AddressSpace::unmap(&mut space, arena_page),
         Ok(arena_page),
         "a page in the HAL-prepared arena unmaps to its identity frame"
     );
@@ -951,7 +951,7 @@ fn declares_block_split_supported_and_the_hal_method_forwards() {
 
 #[test]
 fn passes_tlb_conformance() {
-    use rustos_arch_api::tlb;
+    use tairix_arch_api::tlb;
     static POOL: PageTablePool = PageTablePool::new();
     let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
     // The host has no TLB, so `flush_page` is a vacuous no-op here; the
@@ -965,7 +965,7 @@ fn passes_tlb_conformance() {
 
 #[test]
 fn passes_frames_conformance() {
-    use rustos_arch_api::frames::{self, PageTableFrames};
+    use tairix_arch_api::frames::{self, PageTableFrames};
     // The static pool is the boot/bootstrap `PageTableFrames` source; its
     // `phys_of` is the identity map (kernel memory), so the suite runs on
     // the host. A fresh pool hands out `POOL_SIZE` frames before failing
@@ -979,7 +979,7 @@ fn passes_frames_conformance() {
 
 #[test]
 fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
-    use rustos_arch_api::mmu::{self, PageFlags};
+    use tairix_arch_api::mmu::{self, PageFlags};
     static POOL: PageTablePool = PageTablePool::new();
     let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
 

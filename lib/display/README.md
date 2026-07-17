@@ -1,4 +1,4 @@
-# rustos-display
+# tairix-display
 
 Stability tier: **experimental**.
 
@@ -31,7 +31,7 @@ and the client can never drift apart.
   spans with every write bounds-checked by the window.
 - **Client** (`DisplayClient` / `RemoteDisplay`): the session-side half
   over the injected `DisplayTransport` seam. `RemoteDisplay` implements
-  the existing `rustos_abi` `Display` trait over the client's own
+  the existing `tairix_abi` `Display` trait over the client's own
   mapping of the shared frame region, so `Compositor::present` is
   unchanged: a present copies only the changed pixels (the damage
   unioned with the target frame's stale region — the double-buffer

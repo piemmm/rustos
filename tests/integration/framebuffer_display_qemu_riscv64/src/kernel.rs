@@ -2,18 +2,18 @@
 //! framebuffer-display QEMU vertical.
 //!
 //! Boots the production riscv64 `virt`-board pipeline (via
-//! [`rustos_test_riscv64_boot::boot`]) with an audit-observer sink in
+//! [`tairix_test_riscv64_boot::boot`]) with an audit-observer sink in
 //! place. On `AuditEvent::BootCompleted` it:
 //!
 //! 1. programs QEMU's `ramfb` over the `fw_cfg` MMIO DMA interface so a
 //!    static page-aligned scan-out surface in guest RAM becomes a real
 //!    framebuffer device the host scans out from (the boot hand-off);
 //! 2. assembles the parsed geometry into a
-//!    [`rustos_display::FramebufferConfig`];
+//!    [`tairix_display::FramebufferConfig`];
 //! 3. loads the signed framebuffer display `.rxe` through
-//!    [`rustos_drvhost::Host`] (the load gate) and drives it through
+//!    [`tairix_drvhost::Host`] (the load gate) and drives it through
 //!    `load -> use -> unload -> reload`, where "use" maps the surface
-//!    through the capability-gated [`rustos_kernel_virtio::KernelMmioMapper`]
+//!    through the capability-gated [`tairix_kernel_virtio::KernelMmioMapper`]
 //!    and `present`s a frame; a second independently-mapped window reads
 //!    the pixels back to confirm they landed in the scan-out memory.
 //!
@@ -27,10 +27,10 @@ mod scenario;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustos_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-use rustos_log::{Event, EventId, Sink};
-use rustos_test_riscv64_boot::boot;
+use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_log::{Event, EventId, Sink};
+use tairix_test_riscv64_boot::boot;
 
 /// Static boot heap, in the linker's NOLOAD `.heap` section so the boot
 /// trampoline neither zeroes nor includes it in the usable memory map.
@@ -74,7 +74,7 @@ fn framebuffer_qemu_panic(info: &PanicInfo<'_>) -> ! {
     handle_panic_via_serial(info)
 }
 
-/// Boot entry point — the production `rustos-arch-riscv64` surface with
+/// Boot entry point — the production `tairix-arch-riscv64` surface with
 /// the audit observer sink in place.
 #[no_mangle]
 pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
@@ -83,6 +83,6 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         dtb,
         &SERIAL_SINK,
         &AUDIT_SINK,
-        rustos_log::Level::Info,
+        tairix_log::Level::Info,
     )
 }

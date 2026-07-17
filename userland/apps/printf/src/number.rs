@@ -12,7 +12,7 @@
 //!   An out-of-range value saturates (negatives wrap for the unsigned
 //!   conversions, as in C).
 //! * Floats read as `strtod` through the one shared scanner
-//!   (`rustos_util::cnum`, also `seq`'s).
+//!   (`tairix_util::cnum`, also `seq`'s).
 //! * An empty argument converts to zero silently; an argument with no
 //!   number at all, a partially converted one, and an out-of-range one
 //!   carry the GNU diagnostic as a typed [`Note`] the client reports —
@@ -20,7 +20,7 @@
 
 use alloc::string::String;
 
-use rustos_util::cnum::{c_isspace, scan_double};
+use tairix_util::cnum::{c_isspace, scan_double};
 
 /// What a conversion wants to say about its argument, mirroring the GNU
 /// diagnostics. The first three are errors (the run exits `1`); the

@@ -1,6 +1,6 @@
-//! RustOS `reset` — restore the terminal to a sane state (`plans/APPS.md`).
+//! TAIRiX `reset` — restore the terminal to a sane state (`plans/APPS.md`).
 //!
-//! The RustOS counterpart of the ncurses `reset` tool, for the moment a
+//! The TAIRiX counterpart of the ncurses `reset` tool, for the moment a
 //! wedged terminal leaves behind: a crashed full-screen program may have
 //! parked the console on the alternate screen, hidden the cursor, left a
 //! scroll region or colours set, and left the input discipline raw. `reset`
@@ -9,7 +9,7 @@
 //!
 //! Which operations are written is decided by the inherited `TERM` through
 //! the compiled-in capability database (`lib/termcap`), and every operation
-//! is a `rustos_vt::Op` encoded through the one shared escape vocabulary —
+//! is a `tairix_vt::Op` encoded through the one shared escape vocabulary —
 //! never a hand-rolled escape string.
 //!
 //! # What this crate is
@@ -37,8 +37,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use rustos_termcap::Capabilities;
-use rustos_vt::{encode_all_into, EraseMode, Op, Sgr};
+use tairix_termcap::Capabilities;
+use tairix_vt::{encode_all_into, EraseMode, Op, Sgr};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `reset`'s own Help tree is unavailable.
@@ -125,7 +125,7 @@ pub fn reset_bytes(caps: &Capabilities) -> Vec<u8> {
 mod tests {
     extern crate std;
 
-    use rustos_termcap::TermType;
+    use tairix_termcap::TermType;
 
     use super::{parse, reset_bytes, Command, ResetError};
 
@@ -183,7 +183,7 @@ mod tests {
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
-        let locales = rustos_help::REQUIRED_LOCALES;
+        let locales = tairix_help::REQUIRED_LOCALES;
         for locale in locales {
             let path = format!("{help_root}/{locale}/reset.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

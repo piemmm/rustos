@@ -16,7 +16,7 @@ Adroddir am ffeil na ellir ei hagor na'i hysgrifennu ac mae'r rhediad
 yn parhau gyda'r allbynnau sy'n weddill, yn ôl y modd `--output-error`
 a ddewiswyd.
 
-Nid oes `SIGPIPE` gan RustOS: mae defnyddiwr sy'n diflannu'n ymddangos
+Nid oes `SIGPIPE` gan TAIRiX: mae defnyddiwr sy'n diflannu'n ymddangos
 fel gwall ysgrifennu ar yr allbwn safonol — unig allbwn y gorchymyn
 hwn a all fod yn bibell — felly ystyr «pibell» y moddau GNU yma yw'r
 allbwn hwnnw'n union. Heb `--output-error`, mae allbwn safonol a
@@ -24,7 +24,7 @@ fethodd yn atal y rhediad (cyfwerth â'r offeryn GNU yn marw o
 `SIGPIPE`, gyda'r rheswm wedi'i ddatgan ar y gwall safonol); gyda modd
 `-nopipe` fe'i goddefir yn dawel.
 
-Nid yw `tee -i` GNU (anwybyddu toriadau) ar gael: nid oes gan RustOS
+Nid yw `tee -i` GNU (anwybyddu toriadau) ar gael: nid oes gan TAIRiX
 osodiad signalau fesul proses i'w bennu. Daw'r switsh gyda'r gwaith
 cnewyllyn hwnnw yn hytrach na chael ei dderbyn a'i anwybyddu.
 

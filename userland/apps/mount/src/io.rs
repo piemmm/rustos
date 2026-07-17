@@ -1,15 +1,15 @@
 //! The seam through which `mount` attaches a filesystem, and the record it
 //! carries.
 //!
-//! Listing the mount table reuses the [`Transport`](rustos_procinfo::Transport)
-//! and [`Output`](rustos_procinfo::Output) seams from `lib/procinfo`; only the privileged *attach* operation needs a seam
+//! Listing the mount table reuses the [`Transport`](tairix_procinfo::Transport)
+//! and [`Output`](tairix_procinfo::Output) seams from `lib/procinfo`; only the privileged *attach* operation needs a seam
 //! of its own. Keeping it behind an object-safe trait lets the
 //! mount-request logic in [`crate::client`] run against an in-memory fixture
 //! with no kernel, mirroring the seam design of the other userland crates
 //! (`useradd`'s `UserDb`, `setcap`'s `FileSystem`).
 
-use rustos_abi::driver::filesystem::MountFlags;
-use rustos_abi::Errno;
+use tairix_abi::driver::filesystem::MountFlags;
+use tairix_abi::Errno;
 
 /// The fully-parsed attach request handed to [`Mounter::mount`].
 ///

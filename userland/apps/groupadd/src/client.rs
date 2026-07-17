@@ -3,7 +3,7 @@
 
 use alloc::string::String;
 
-use rustos_help::{own_short_help, HelpSource};
+use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::Command;
 use crate::error::GroupaddError;
@@ -39,7 +39,7 @@ const OWN_WORD: &str = "groupadd";
 /// * [`GroupaddError::Exists`] — a group with the requested name already
 ///   exists.
 /// * [`GroupaddError::Lookup`] — the database could not be consulted for the
-///   name; carries the underlying [`Errno`](rustos_abi::Errno).
+///   name; carries the underlying [`Errno`](tairix_abi::Errno).
 /// * [`GroupaddError::Create`] — the database refused or failed the creation
 ///   (e.g. a missing `CAP_USER_ADMIN` or a duplicate gid).
 /// * [`GroupaddError::Output`] — writing the short help failed.
@@ -89,8 +89,8 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use rustos_abi::Errno;
-    use rustos_help::{HelpSource, SourceError};
+    use tairix_abi::Errno;
+    use tairix_help::{HelpSource, SourceError};
 
     /// A Help tree with no documents at all: the short-help fallback path.
     struct NoHelp;

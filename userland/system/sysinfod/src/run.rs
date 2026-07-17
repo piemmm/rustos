@@ -2,24 +2,24 @@
 //! at `/System/Services/sysinfod.app/Run` — the long-running user-space service PID 1
 //! `init` launches to answer the `sysinfo` API (`AGENTS.md` §16.6).
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only, so it links the Rust
-//! userland runtime `rustos-rt` — never the C ABI, which exists solely for
-//! programs *not* written in Rust. `rustos-rt` provides `_start`, the
+//! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
+//! userland runtime `tairix-rt` — never the C ABI, which exists solely for
+//! programs *not* written in Rust. `tairix-rt` provides `_start`, the
 //! per-process stack canary, the panic handler, the `#[global_allocator]`, and
 //! the syscall wrappers (`call_create`/`call_recv`/`call_reply`/
-//! `call_peer_origin`/`sysinfo_introspect`/`hw_tree_read`); `rustos_rt::entry!`
+//! `call_peer_origin`/`sysinfo_introspect`/`hw_tree_read`); `tairix_rt::entry!`
 //! names this program's `main`.
 //!
 //! # What this service does
 //!
 //! `sysinfod` is the only server of the `sysinfo` API. At startup it binds the
-//! well-known [`rustos_abi::sysinfo::SYSINFO_ENDPOINT`] (an unrestricted-sender
+//! well-known [`tairix_abi::sysinfo::SYSINFO_ENDPOINT`] (an unrestricted-sender
 //! call endpoint — any process may query, but the id is a reserved rendezvous,
 //! so binding it needs the manifest's `CAP_IPC_BIND_PRIVILEGED`: a squatter
 //! could otherwise serve forged system state) and then blocks in a serve loop:
 //! receive a request, read the caller's kernel-attested `Origin`
 //! (`call_peer_origin`, never a caller claim), run the capability-checked
-//! [`rustos_sysinfod::serve`] dispatcher against the production source that
+//! [`tairix_sysinfod::serve`] dispatcher against the production source that
 //! reads the kernel's live introspection view, and reply.
 //!
 //! The dispatcher is the **broker**: it holds the privileged
@@ -39,30 +39,30 @@
 
 // --- Pure-Rust program --------------------------------------------------
 // Compiled only for the freestanding service binary, which links the optional
-// `rustos-rt` runtime through the default `program` feature. The kernel and
+// `tairix-rt` runtime through the default `program` feature. The kernel and
 // host tooling build only this crate's *library*, so this module (and
-// `rustos-rt`) never enter those builds.
+// `tairix-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
     extern crate alloc;
 
     use alloc::vec::Vec;
 
-    use rustos_abi::net_ipc::{
+    use tairix_abi::net_ipc::{
         decode_page_reply, NetInterfaceFactsRecord, NetInterfaceStateRecord, NetstackRequest,
         NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
-    use rustos_abi::sysinfo::{
+    use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, IntrospectDomain,
         KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord,
         RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
         UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
         SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
-    use rustos_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
-    use rustos_caps::CapabilitySet;
-    use rustos_rt::LogSink;
-    use rustos_sysinfod::{serve, Caller, ProcessScope, SysinfoSource};
+    use tairix_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
+    use tairix_caps::CapabilitySet;
+    use tairix_rt::LogSink;
+    use tairix_sysinfod::{serve, Caller, ProcessScope, SysinfoSource};
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
@@ -85,7 +85,7 @@ mod program {
         // A page comfortably larger than any scalar record; the kernel writes
         // only the record's bytes and returns the count.
         let mut buf = [0u8; 256];
-        let n = rustos_rt::sysinfo_introspect(domain.as_u32(), 0, &mut buf).map_err(errno_from)?;
+        let n = tairix_rt::sysinfo_introspect(domain.as_u32(), 0, &mut buf).map_err(errno_from)?;
         Ok(buf[..n].to_vec())
     }
 
@@ -99,7 +99,7 @@ mod program {
         let mut scratch = alloc::vec![0u8; per_call * record_len];
         let mut offset: u64 = 0;
         loop {
-            let n = rustos_rt::sysinfo_introspect(domain.as_u32(), offset, &mut scratch)
+            let n = tairix_rt::sysinfo_introspect(domain.as_u32(), offset, &mut scratch)
                 .map_err(errno_from)?;
             if n == 0 {
                 break;
@@ -153,7 +153,7 @@ mod program {
             // Read the discovered tree, growing the buffer until it fits.
             let mut buf = alloc::vec![0u8; 4096];
             loop {
-                match rustos_rt::hw_tree_read(&mut buf) {
+                match tairix_rt::hw_tree_read(&mut buf) {
                     Ok(n) => {
                         buf.truncate(n);
                         return Ok(buf);
@@ -276,7 +276,7 @@ mod program {
             let proc_id = caller.origin().proc_id().to_le_bytes();
             buf[..PROC_ID_LEN].copy_from_slice(&proc_id);
             let n =
-                rustos_rt::sysinfo_introspect(IntrospectDomain::TaskLimits.as_u32(), 0, &mut buf)
+                tairix_rt::sysinfo_introspect(IntrospectDomain::TaskLimits.as_u32(), 0, &mut buf)
                     .map_err(errno_from)?;
             if n < RESOURCE_LIMITS_REPORT_LEN {
                 return Err(Errno::BufferTooSmall);
@@ -284,7 +284,7 @@ mod program {
             // Decode the positional per-kind report, one record per LimitKind.
             let mut out = [ResourceLimitRecord::new(
                 LimitKind::AddressSpaceBytes,
-                rustos_abi::ResourceLimit::UNLIMITED,
+                tairix_abi::ResourceLimit::UNLIMITED,
                 0,
             ); LimitKind::COUNT];
             for (index, slot) in out.iter_mut().enumerate() {
@@ -349,7 +349,7 @@ mod program {
         let mut offset: u32 = 0;
         loop {
             let request = P::request(offset, NETSTACK_LIST_LIMIT_MAX);
-            let n = rustos_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
+            let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
                 .map_err(errno_from)?;
             let (count, body) = decode_page_reply(&reply[..n], P::RECORD_LEN)?;
             for chunk in body.chunks_exact(P::RECORD_LEN) {
@@ -370,7 +370,7 @@ mod program {
     /// endpoint ownership already restricts receive to this task.
     fn main() -> i32 {
         let empty = CapabilitySet::empty();
-        let bound = rustos_rt::call_create(
+        let bound = tairix_rt::call_create(
             SYSINFO_ENDPOINT,
             &empty,
             &empty,
@@ -391,7 +391,7 @@ mod program {
         loop {
             let mut ticket: u64 = 0;
             let request_len =
-                match rustos_rt::call_recv(SYSINFO_ENDPOINT, &mut request, &mut ticket) {
+                match tairix_rt::call_recv(SYSINFO_ENDPOINT, &mut request, &mut ticket) {
                     Ok(len) => len,
                     // A transient recv error (e.g. an oversize request left
                     // queued) must not kill the server; drop it and continue.
@@ -402,7 +402,7 @@ mod program {
             // fail-closed: reply an error rather than serving an unattested
             // request.
             let caller =
-                match rustos_rt::call_peer_origin(SYSINFO_ENDPOINT, ticket, &mut origin_buf) {
+                match tairix_rt::call_peer_origin(SYSINFO_ENDPOINT, ticket, &mut origin_buf) {
                     Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
                         Ok(origin) => Caller::new(origin),
                         Err(err) => {
@@ -429,7 +429,7 @@ mod program {
             ) {
                 Ok(len) => match encode_reply_ok(&payload[..len], &mut reply) {
                     Ok(total) => {
-                        let _ = rustos_rt::call_reply(SYSINFO_ENDPOINT, ticket, &reply[..total]);
+                        let _ = tairix_rt::call_reply(SYSINFO_ENDPOINT, ticket, &reply[..total]);
                     }
                     Err(err) => reply_error(&mut reply, ticket, err),
                 },
@@ -443,16 +443,16 @@ mod program {
     /// reply and fails closed on decode.
     fn reply_error(reply: &mut [u8], ticket: u64, err: Errno) {
         if let Ok(total) = encode_reply_err(err, reply) {
-            let _ = rustos_rt::call_reply(SYSINFO_ENDPOINT, ticket, &reply[..total]);
+            let _ = tairix_rt::call_reply(SYSINFO_ENDPOINT, ticket, &reply[..total]);
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
-// Whenever the real freestanding `rustos-rt` `_start` path is not compiled —
+// Whenever the real freestanding `tairix-rt` `_start` path is not compiled —
 // on the host (`cargo build --workspace`, clippy, fmt), or for a
 // `program`-less build of this crate — this inert `main` keeps the crate
 // building under the host tooling. It performs no I/O.

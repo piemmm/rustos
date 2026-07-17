@@ -17,8 +17,8 @@
 use crate::dma::DmaSlab;
 use crate::host::VirtioHost;
 use crate::transport::{Direction, Transport, VirtioError};
-use rustos_abi::DriverError;
-use rustos_dma_barrier::{dma_rmb, dma_wmb};
+use tairix_abi::DriverError;
+use tairix_dma_barrier::{dma_rmb, dma_wmb};
 
 /// Size, in bytes, of one packed-ring descriptor (virtio 1.1 §2.7.5).
 const PACKED_DESC_BYTES: usize = 16;

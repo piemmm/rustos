@@ -14,9 +14,9 @@
 use alloc::format;
 use alloc::string::String;
 
-use rustos_abi::time::Time64;
-use rustos_curses::{truncate_to_width, Pos, Window};
-use rustos_vt::{Attributes, BasicColor, Color};
+use tairix_abi::time::Time64;
+use tairix_curses::{truncate_to_width, Pos, Window};
+use tairix_vt::{Attributes, BasicColor, Color};
 
 use crate::model::{
     InputOp, IsaPurpose, Model, Overlay, Pane, Prompt, SortKey, View, Viewer, ViewerKind,
@@ -872,7 +872,7 @@ fn format_stamp(stamp: Time64) -> String {
     }
     let days = stamp.secs().div_euclid(86_400);
     let tod = stamp.secs().rem_euclid(86_400);
-    let (year, month, day) = rustos_fsmeta::calendar::civil_from_days(days);
+    let (year, month, day) = tairix_fsmeta::calendar::civil_from_days(days);
     let hour = tod / 3_600;
     let minute = (tod % 3_600) / 60;
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")

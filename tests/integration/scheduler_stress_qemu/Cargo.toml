@@ -1,5 +1,5 @@
 [package]
-name = "rustos-test-scheduler-stress-qemu"
+name = "tairix-test-scheduler-stress-qemu"
 description = "Stage 3a (b) QEMU integration test: scheduler stress on ≥ 4 real (emulated) cores."
 version.workspace = true
 edition.workspace = true
@@ -20,23 +20,23 @@ workspace = true
 # `kernel/arch/x86_64::smp` exercised end-to-end.
 #
 # The two crates are kept separate (rather than merged into one) because
-# a freestanding `[[bin]]` linking `rustos-arch-x86_64` cannot coexist
+# a freestanding `[[bin]]` linking `tairix-arch-x86_64` cannot coexist
 # with a `[lib] + tests/` integration test in the same package: the
 # former requires `#![no_std]`/`#![no_main]` and only builds for
 # `x86_64-unknown-none`, while the latter must compile for the host
 # triple under `cargo test --workspace`. AGENTS.md §2.2 forbids
 # duplicating the workload itself; the actual task body and assertions
-# live in shared constants on `rustos-test-scheduler-stress`, which this
+# live in shared constants on `tairix-test-scheduler-stress`, which this
 # crate depends on.
 
 [[bin]]
-name = "rustos-test-scheduler-stress-qemu"
+name = "tairix-test-scheduler-stress-qemu"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-rustos-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

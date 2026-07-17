@@ -20,7 +20,7 @@
 //! for either (deterministic, no hidden allocation). A
 //! sink that is full fails closed with [`DiscoveryError::SinkFull`].
 
-use rustos_abi::HwNode;
+use tairix_abi::HwNode;
 
 /// Why platform discovery, or a sink it wrote to, could not complete.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -57,7 +57,7 @@ pub trait HwNodeSink {
 ///
 /// Every architecture port implements this trait, building the hardware
 /// tree from its platform's native source. Exactly one node is a root
-/// (its parent is [`rustos_abi::HW_NODE_ROOT`]); every other node names an
+/// (its parent is [`tairix_abi::HW_NODE_ROOT`]); every other node names an
 /// already-emitted parent by id, so a collector can reconstruct the tree
 /// from the flat stream in emission order.
 pub trait PlatformDiscovery {
@@ -85,7 +85,7 @@ pub trait PlatformDiscovery {
 /// *enforced*, not asserted by inspection (`plans/WIRING.md` §0.3).
 pub mod conformance {
     use super::{DiscoveryError, HwNodeSink, PlatformDiscovery};
-    use rustos_abi::HwNode;
+    use tairix_abi::HwNode;
 
     /// Capacity of the id ledger the suite validates against.
     ///
@@ -189,7 +189,7 @@ pub mod conformance {
     mod tests {
         use super::super::{DiscoveryError, HwNodeSink, PlatformDiscovery};
         use super::run;
-        use rustos_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
+        use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 
         /// A faithful two-node discoverer: a root with one child.
         struct Double;

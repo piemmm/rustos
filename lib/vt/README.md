@@ -1,7 +1,7 @@
-# `rustos-vt`
+# `tairix-vt`
 
 The canonical ANSI / VT / xterm escape and attribute **vocabulary** for
-RustOS's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
+TAIRiX's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
 
 - the C0 / C1 control set and the CSI / OSC / DCS introducers,
 - the SGR attribute set (bold, dim, italic, underline, blink, reverse,

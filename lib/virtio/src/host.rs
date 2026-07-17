@@ -1,6 +1,6 @@
 //! Host seam for virtio drivers.
 //!
-//! The kernel side of RustOS will, at Stage 4.D Item 0 wiring time,
+//! The kernel side of TAIRiX will, at Stage 4.D Item 0 wiring time,
 //! supply a concrete [`VirtioHost`] backed by a per-process DMA pool. This crate ships the *interface* and a
 //! deterministic [`MockHost`] implementation used by the unit tests
 //! in every virtio driver crate. Decoupling the driver code from the
@@ -14,13 +14,13 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 use core::cell::RefCell;
 use core::ptr::NonNull;
-use rustos_abi::{CapabilityQuery, DriverError};
+use tairix_abi::{CapabilityQuery, DriverError};
 
 // `VirtioHost` moved into `lib/abi` at Stage 4.D Item 0-tail; the
 // trait is re-exported here so existing `use crate::VirtioHost`
 // import sites (in this crate and in every consuming virtio driver
 // crate) keep working unchanged.
-pub use rustos_abi::driver::{DmaHost, VirtioHost};
+pub use tairix_abi::driver::{DmaHost, VirtioHost};
 
 /// Factory that mints a per-driver [`VirtioHost`] for the duration of a
 /// single driver `register()` call.
@@ -159,7 +159,7 @@ impl VirtioHost for MockHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_abi::driver::BufferClass;
+    use tairix_abi::driver::BufferClass;
 
     #[test]
     fn mock_host_zero_initialises() {

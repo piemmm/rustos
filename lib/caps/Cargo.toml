@@ -1,6 +1,6 @@
 [package]
-name = "rustos-caps"
-description = "RustOS capability primitives: `Capability`, `CapabilitySet`, delegation, and signed tokens."
+name = "tairix-caps"
+description = "TAIRiX capability primitives: `Capability`, `CapabilitySet`, delegation, and signed tokens."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-rustos-abi = { path = "../abi", version = "=0.0.0" }
-rustos-collections = { path = "../collections", version = "=0.0.0" }
-rustos-crypto = { path = "../crypto", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 
 [dev-dependencies]
 # Tests need a signing key to produce real Ed25519 tokens; production callers
-# never sign — they only verify via `rustos-crypto`. The dev-only dependency
+# never sign — they only verify via `tairix-crypto`. The dev-only dependency
 # keeps the signing surface out of the audited build.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
 # The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
@@ -27,7 +27,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false }
 # the production capability surface.
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
 # The §19.7 model drives its programs through the shared seed/budget runner
-# (`rustos_fuzzseed::prop::drive`), so the seed selection, start-of-test seed
+# (`tairix_fuzzseed::prop::drive`), so the seed selection, start-of-test seed
 # log, and smoke/soak loop live in one place (`AGENTS.md` §2.2). Test
-# scaffolding only; never in a RustOS build.
-rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
+# scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }

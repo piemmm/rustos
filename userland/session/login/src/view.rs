@@ -9,7 +9,7 @@
 //! * a cyan-bordered login box in the middle of the screen carrying the
 //!   `Username:` prompt (which becomes the `Password:` prompt — unechoed,
 //!   showing the shared `[input active...]` marker instead, its dots
-//!   animated by the shared [`rustos_vt::secret`] timer cadence, exactly
+//!   animated by the shared [`tairix_vt::secret`] timer cadence, exactly
 //!   as every hidden field does);
 //! * a running `N failed attempts` line in red beneath the box after any
 //!   rejected attempt, accumulating until a session launches;
@@ -28,7 +28,7 @@
 //! parks the reader until a keystroke arrives or the bound elapses (a
 //! one-shot deadline, never a poll). While the secret marker is animating
 //! the bound is its next one-second frame (the shared
-//! [`rustos_vt::secret`] cadence); otherwise it is `REFRESH_INTERVAL`.
+//! [`tairix_vt::secret`] cadence); otherwise it is `REFRESH_INTERVAL`.
 //! The [`StatusSource`]'s monotonic clock is read once after every wait,
 //! and any animation frame whose deadline has passed is advanced before
 //! the event is handled — so the dots keep moving while keystrokes keep
@@ -49,11 +49,11 @@ use alloc::string::String;
 use core::cell::{Cell, RefCell};
 use core::time::Duration;
 
-use rustos_abi::sysinfo::LoadAverage;
-use rustos_abi::{Errno, Time64};
-use rustos_curses::{str_width, Event, InputMode, Pos, Screen, Size, Tty, Window};
-use rustos_users::MAX_USERNAME_LEN;
-use rustos_vt::{secret, Attributes, BasicColor, Color};
+use tairix_abi::sysinfo::LoadAverage;
+use tairix_abi::{Errno, Time64};
+use tairix_curses::{str_width, Event, InputMode, Pos, Screen, Size, Tty, Window};
+use tairix_users::MAX_USERNAME_LEN;
+use tairix_vt::{secret, Attributes, BasicColor, Color};
 
 use crate::session::LoginView;
 
@@ -78,7 +78,7 @@ pub struct LoginStatus {
     /// Distinct logged-in users.
     pub users: Option<u32>,
     /// The 1/5/15-minute load averages, fixed-point with
-    /// [`rustos_abi::sysinfo::LOAD_FIXED_SHIFT`] fractional bits.
+    /// [`tairix_abi::sysinfo::LOAD_FIXED_SHIFT`] fractional bits.
     pub load: Option<[u32; 3]>,
 }
 
@@ -99,7 +99,7 @@ pub trait StatusSource {
 
     /// The monotonic clock, in nanoseconds; only differences between
     /// readings are meaningful. It times the secret marker's animation
-    /// (the shared [`rustos_vt::secret`] cadence), so the dots advance on
+    /// (the shared [`tairix_vt::secret`] cadence), so the dots advance on
     /// real elapsed time whether or not keystrokes keep arriving. On a
     /// running system this is the `clock_get` syscall; in tests a
     /// scripted counter.
@@ -144,7 +144,7 @@ const BOX_ROWS: u16 = 5;
 /// Preferred interior-plus-border width of the login box.
 const BOX_COLS: u16 = 46;
 /// The title on the box's top border.
-const TITLE: &str = " RustOS Login ";
+const TITLE: &str = " TAIRiX Login ";
 
 /// How long an idle field read waits before the status bars and clock are
 /// re-queried and repainted. The wait is a kernel park with a one-shot
@@ -184,7 +184,7 @@ fn label_attributes() -> Attributes {
 fn format_clock(t: Time64) -> String {
     let days = t.secs().div_euclid(86_400);
     let second_of_day = t.secs().rem_euclid(86_400);
-    let (year, month, day) = rustos_fsmeta::calendar::civil_from_days(days);
+    let (year, month, day) = tairix_fsmeta::calendar::civil_from_days(days);
     let hour = second_of_day / 3_600;
     let minute = (second_of_day % 3_600) / 60;
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
@@ -210,9 +210,9 @@ fn top_line(status: &LoginStatus, now: Option<Time64>, cols: usize) -> String {
     let host = status.hostname.as_deref().unwrap_or(UNKNOWN);
     let left = match status.version {
         Some((major, minor, patch)) => {
-            format!(" {host} - RustOS {major}.{minor}.{patch}")
+            format!(" {host} - TAIRiX {major}.{minor}.{patch}")
         }
-        None => format!(" {host} - RustOS"),
+        None => format!(" {host} - TAIRiX"),
     };
     let right = now.map(format_clock).unwrap_or_default();
     pad_between(&left, &right, cols)
@@ -264,7 +264,7 @@ fn pad_between(left: &str, right: &str, cols: usize) -> String {
     let mut out = String::new();
     let mut width = 0usize;
     for ch in line.chars() {
-        let w = rustos_curses::char_width(ch) as usize;
+        let w = tairix_curses::char_width(ch) as usize;
         if width + w > cols {
             break;
         }
@@ -293,7 +293,7 @@ fn fit_tail(shown: &str, cols: usize) -> &str {
         let Some(dropped) = chars.next() else {
             break;
         };
-        width -= rustos_curses::char_width(dropped) as usize;
+        width -= tairix_curses::char_width(dropped) as usize;
         tail = chars.as_str();
     }
     tail
@@ -421,7 +421,7 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
     /// typed it shows the shared `[input active...]` marker, whose dots
     /// advance **on the timer alone** — one frame per second until the
     /// bounded window after the most recent keystroke elapses, exactly the
-    /// [`rustos_vt::secret::SecretIndicator`] cadence the kernel's own
+    /// [`tairix_vt::secret::SecretIndicator`] cadence the kernel's own
     /// secret prompt renders. A keystroke never moves the dots, so watching
     /// the marker reveals nothing about how much was typed.
     ///
@@ -591,11 +591,11 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
-    use rustos_abi::sysinfo::LOAD_FIXED_SHIFT;
-    use rustos_abi::{Errno, Time64};
-    use rustos_curses::{CursesError, Screen, Size, Tty};
-    use rustos_termcap::TermType;
-    use rustos_vt::secret::{SECRET_ANIMATE_NS, SECRET_TICK_NS};
+    use tairix_abi::sysinfo::LOAD_FIXED_SHIFT;
+    use tairix_abi::{Errno, Time64};
+    use tairix_curses::{CursesError, Screen, Size, Tty};
+    use tairix_termcap::TermType;
+    use tairix_vt::secret::{SECRET_ANIMATE_NS, SECRET_TICK_NS};
 
     /// A scripted terminal: reads replay queued byte chunks and fail once
     /// the script is exhausted (the closed-console signal); writes append
@@ -606,11 +606,11 @@ mod tests {
     }
 
     impl Tty for ScriptTty {
-        fn write(&mut self, bytes: &[u8]) -> rustos_curses::Result<()> {
+        fn write(&mut self, bytes: &[u8]) -> tairix_curses::Result<()> {
             self.written.borrow_mut().extend_from_slice(bytes);
             Ok(())
         }
-        fn read(&mut self) -> rustos_curses::Result<Vec<u8>> {
+        fn read(&mut self) -> tairix_curses::Result<Vec<u8>> {
             self.input.borrow_mut().pop_front().ok_or(CursesError::Io)
         }
     }
@@ -746,9 +746,9 @@ mod tests {
     #[test]
     fn top_line_carries_host_version_and_clock() {
         let line = top_line(&status(), Some(Time64::from_secs(0)), 60);
-        assert!(line.contains("lovelace - RustOS 0.3.1"), "{line}");
+        assert!(line.contains("lovelace - TAIRiX 0.3.1"), "{line}");
         assert!(line.ends_with("1970-01-01 00:00"), "{line}");
-        assert_eq!(rustos_curses::str_width(&line), 60);
+        assert_eq!(tairix_curses::str_width(&line), 60);
     }
 
     #[test]
@@ -768,7 +768,7 @@ mod tests {
         assert!(line.contains("users --"), "{line}");
         assert!(line.contains("load --"), "{line}");
         let top = top_line(&LoginStatus::default(), None, 80);
-        assert!(top.contains("-- - RustOS"), "{top}");
+        assert!(top.contains("-- - TAIRiX"), "{top}");
     }
 
     #[test]
@@ -776,7 +776,7 @@ mod tests {
         assert_eq!(pad_between("a", "b", 5), "a   b");
         // Overflow keeps the left text and truncates at the edge.
         assert_eq!(pad_between("abcdef", "gh", 4), "abcd");
-        assert_eq!(rustos_curses::str_width(&pad_between("", "", 7)), 7);
+        assert_eq!(tairix_curses::str_width(&pad_between("", "", 7)), 7);
     }
 
     #[test]
@@ -801,13 +801,13 @@ mod tests {
         let mut grid = alloc::vec![alloc::vec![' '; 80]; 24];
         let mut row = 0usize;
         let mut col = 0usize;
-        let mut parser = rustos_vt::Parser::new();
+        let mut parser = tairix_vt::Parser::new();
         parser.feed(&written.borrow(), |op| match op {
-            rustos_vt::Op::CursorPosition { row: r, col: c } => {
+            tairix_vt::Op::CursorPosition { row: r, col: c } => {
                 row = usize::from(r.saturating_sub(1)).min(23);
                 col = usize::from(c.saturating_sub(1)).min(79);
             }
-            rustos_vt::Op::Print(ch) => {
+            tairix_vt::Op::Print(ch) => {
                 grid[row][col] = ch;
                 if col < 79 {
                     col += 1;
@@ -925,8 +925,8 @@ mod tests {
         let text = transcript(&written);
         // The minimal-diff renderer may split runs of blanks into cursor
         // jumps, so each visible word is asserted on its own.
-        assert!(text.contains("lovelace - RustOS 0.3.1"), "{text}");
-        assert!(text.contains("RustOS") && text.contains("Login"), "{text}");
+        assert!(text.contains("lovelace - TAIRiX 0.3.1"), "{text}");
+        assert!(text.contains("TAIRiX") && text.contains("Login"), "{text}");
         assert!(text.contains("Username:"), "{text}");
         assert!(text.contains("load 0.50 1.00 2.00"), "{text}");
         assert!(mode.raws.get() >= 1);

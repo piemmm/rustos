@@ -8,19 +8,19 @@
 //! The kernel's validated user-copy path (`kernel/mem::uaccess`) proves
 //! every page before it moves a byte, so a mid-copy hardware fault means
 //! that proof was violated underneath it. The per-port fault window
-//! (`rustos_arch_x86_64::uaccess`) is the backstop that turns such a
+//! (`tairix_arch_x86_64::uaccess`) is the backstop that turns such a
 //! fault into an error return; this vertical proves the whole mechanism
 //! live: real kernel-mode `#PF` → dedicated `#PF` entry → frame-`RIP`
 //! rewrite → fix-up return.
 //!
 //! ## What this test asserts
 //!
-//! 1. The **production** boot pipeline (`rustos_kernel::boot`) installs
+//! 1. The **production** boot pipeline (`tairix_kernel::boot`) installs
 //!    the dedicated `#PF` entry *and* arms the Arch HAL guarded-copy
 //!    slot — the pairing under test lives on the real boot path, not a
 //!    test-only install.
 //! 2. On `AuditEvent::BootCompleted`, the shared
-//!    `rustos_arch_api::uaccess::conformance` checks pass: an intact
+//!    `tairix_arch_api::uaccess::conformance` checks pass: an intact
 //!    copy moves its bytes exactly; a copy reading an unmapped canonical
 //!    address returns the fault error; a copy writing it returns the
 //!    fault error — each taking a *real* kernel-mode `#PF` whose
@@ -28,7 +28,7 @@
 //! 3. The fatal `fault` observer reports FAILURE: reaching it means the
 //!    window redirect did not absorb the deliberate fault.
 //!
-//! ## How it differs from the production `rustos-kernel` binary
+//! ## How it differs from the production `tairix-kernel` binary
 //!
 //! Only the audit Sink is replaced (to hook `BootCompleted`) and the
 //! fault observer installed (to fail loud). The QEMU-exit shortcut lives
@@ -46,13 +46,13 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use rustos_arch_api::uaccess::conformance::{self, Verdict};
-    use rustos_arch_x86_64::{fault, qemu_exit};
-    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{
+    use tairix_arch_api::uaccess::conformance::{self, Verdict};
+    use tairix_arch_x86_64::{fault, qemu_exit};
+    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use rustos_log::{log, Event, EventId, Field, Level, Sink};
+    use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
     /// A page-aligned canonical virtual address the production kernel
     /// space leaves unmapped (256 GiB: far beyond the low identity
@@ -108,7 +108,7 @@ mod kernel {
                 message: "x86_64 uaccess-fault test: failed",
                 fields: &[Field {
                     key: "stage",
-                    value: rustos_log::FieldValue::Str(what),
+                    value: tairix_log::FieldValue::Str(what),
                 }],
             },
         );
@@ -172,9 +172,9 @@ mod kernel {
 
     static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 
-    /// Forward to the shared bridge in `rustos_kernel`.
+    /// Forward to the shared bridge in `tairix_kernel`.
     #[panic_handler]
-    fn rustos_uaccess_fault_x86_64_panic(info: &PanicInfo<'_>) -> ! {
+    fn tairix_uaccess_fault_x86_64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)
     }
 
@@ -191,7 +191,7 @@ mod kernel {
             multiboot_info,
             &SERIAL_SINK,
             &AUDIT_SINK,
-            rustos_log::Level::Info,
+            tairix_log::Level::Info,
         )
     }
 }

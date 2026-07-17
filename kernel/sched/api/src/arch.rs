@@ -16,7 +16,7 @@
 // defined once in `kernel/arch/api` and re-exported
 // here so the scheduler contract, every `kernel/sched/<impl>`, and
 // `kernel/core` all name the single canonical definition (no duplication).
-pub use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
+pub use tairix_arch_api::{CoreClass, CpuId, SchedulerArch};
 
 #[cfg(any(test, feature = "test-arch"))]
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};

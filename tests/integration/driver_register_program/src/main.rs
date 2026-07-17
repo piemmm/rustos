@@ -10,7 +10,7 @@
 //! stub:
 //!
 //! 1. reads `arg(1)` from the validated startup vector
-//!    (`rustos_rt::arg`, published by `_start` before `main` runs);
+//!    (`tairix_rt::arg`, published by `_start` before `main` runs);
 //! 2. parses it as the decimal reply endpoint id;
 //! 3. resolves the well-known port name handed over in `arg(2)` through
 //!    the production `port_resolve` syscall and refuses to proceed unless
@@ -24,7 +24,7 @@
 //! 5. sends a `DriverRegisterReply::registered` record over the
 //!    production `ipc_send` syscall (kernel-side capability check +
 //!    copy-in);
-//! 6. returns 0, which `rustos-rt` routes through the `exit` syscall.
+//! 6. returns 0, which `tairix-rt` routes through the `exit` syscall.
 //!
 //! Each failure path returns a distinct non-zero diagnostic so the
 //! vertical fails loudly: the reply never arrives
@@ -32,7 +32,7 @@
 //! pass.
 //!
 //! It is a **pure-Rust** program: it links the Rust
-//! userland runtime `rustos-rt` (which provides `_start`, the stack
+//! userland runtime `tairix-rt` (which provides `_start`, the stack
 //! canary, the panic handler, and the `ipc_send`/`exit` syscall wrappers),
 //! never the C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust
 //! programs. It is built position-independent and
@@ -46,8 +46,8 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use rustos_abi::hwtree::{GrantedResource, HwResourceKind};
-    use rustos_abi::{DriverHandle, DriverRegisterReply};
+    use tairix_abi::hwtree::{GrantedResource, HwResourceKind};
+    use tairix_abi::{DriverHandle, DriverRegisterReply};
 
     /// Raw value of the informational [`DriverHandle`] this stub reports.
     /// Any non-zero value works (the host mints its own unforgeable handle
@@ -71,7 +71,7 @@ mod program {
         Some(acc)
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall. Returns 0 after a successfully sent register reply, or a
     /// distinct non-zero diagnostic per failure site.
@@ -79,7 +79,7 @@ mod program {
         // The spawner placed the reply endpoint id in arg(1); an absent
         // or malformed argument is a wiring defect the vertical must
         // surface, never a silently skipped reply.
-        let Some(raw) = rustos_rt::arg(1) else {
+        let Some(raw) = tairix_rt::arg(1) else {
             return 10;
         };
         let Some(endpoint) = parse_u64(raw) else {
@@ -93,10 +93,10 @@ mod program {
         // proceed unless it names the same endpoint — the name path is
         // how a process finds a well-known service port it was not
         // handed directly.
-        let Some(name) = rustos_rt::arg(2) else {
+        let Some(name) = tairix_rt::arg(2) else {
             return 19;
         };
-        let Ok(resolved) = u64::try_from(rustos_rt::port_resolve(name)) else {
+        let Ok(resolved) = u64::try_from(tairix_rt::port_resolve(name)) else {
             return 20;
         };
         if resolved != endpoint {
@@ -110,7 +110,7 @@ mod program {
         // shortfall is a wiring defect the vertical must surface, never a
         // silently sent reply.
         let mut grant_buf = [0u8; GrantedResource::WIRE_LEN];
-        let read = rustos_rt::resource_grants(&mut grant_buf);
+        let read = tairix_rt::resource_grants(&mut grant_buf);
         if read != GrantedResource::WIRE_LEN as i64 {
             return 14;
         }
@@ -139,19 +139,19 @@ mod program {
         // payload bound, copy-in from this process's own address space,
         // and the per-send capability check. A
         // negative return is `-errno`.
-        if rustos_rt::ipc_send(endpoint, &reply.to_le_bytes()) < 0 {
+        if tairix_rt::ipc_send(endpoint, &reply.to_le_bytes()) < 0 {
             return 13;
         }
         0
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
 //
 // On the host (`cargo build --workspace`, clippy, fmt) the freestanding
-// `rustos-rt` entry path is not compiled, so this inert `main` keeps the
+// `tairix-rt` entry path is not compiled, so this inert `main` keeps the
 // crate building under the host tooling. It performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

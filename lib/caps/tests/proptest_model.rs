@@ -16,10 +16,10 @@
 //!
 //! ## Wall-clock budget
 //!
-//! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
+//! The shared `tairix_fuzzseed::prop::drive` runner owns the seed/budget
 //! policy (one definition): a plain `cargo test` runs [`SMOKE_CASES`]
 //! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
-//! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner keeps drawing
+//! exports `TAIRIX_PROPTEST_BUDGET_SECS` and the runner keeps drawing
 //! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
 //! deadline. The seed is logged at the start of each run (and pinnable via
 //! `--seed`), so a fresh-seed counterexample is still reproducible.
@@ -29,9 +29,9 @@ use std::collections::BTreeSet;
 use ed25519_dalek::{Signer, SigningKey};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use rustos_abi::{CapabilityId, Errno, ABI_VERSION_CURRENT};
-use rustos_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
-use rustos_crypto::{Ed25519PublicKey, Ed25519Signature};
+use tairix_abi::{CapabilityId, Errno, ABI_VERSION_CURRENT};
+use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
+use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
 /// Sequences run once by a plain `cargo test` (no budget set).
 const SMOKE_CASES: u32 = 256;
@@ -92,7 +92,7 @@ fn program() -> impl Strategy<Value = Vec<Cmd>> {
 
 #[test]
 fn capability_set_tracks_reference_model() {
-    rustos_fuzzseed::prop::drive(
+    tairix_fuzzseed::prop::drive(
         "capability_set_tracks_reference_model",
         SMOKE_CASES,
         BUDGET_BATCH_CASES,
@@ -201,7 +201,7 @@ fn token_verify_matches_error_precedence_oracle() {
     // a subject drawn from a small range so the mismatch path is exercised.
     const ISSUE_SUBJECT: u64 = 7;
     let strategy = (id_vec(), id_vec(), 0u64..4, 0u64..4, any::<bool>(), 6u64..9);
-    rustos_fuzzseed::prop::drive(
+    tairix_fuzzseed::prop::drive(
         "token_verify_matches_error_precedence_oracle",
         SMOKE_CASES,
         BUDGET_BATCH_CASES,

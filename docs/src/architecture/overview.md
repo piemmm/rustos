@@ -1,6 +1,6 @@
 # System overview
 
-RustOS is organised as a microkernel-leaning Rust workspace. This page is the
+TAIRiX is organised as a microkernel-leaning Rust workspace. This page is the
 single-screen map of the system; deeper subsystem pages land alongside the
 stages of [`PLAN.md`][plan] that introduce them.
 
@@ -52,4 +52,4 @@ mdBook scaffold, and CI. The crates listed in the diagram exist as
 placeholders that compile but expose no public items; their implementations
 are scheduled by [`PLAN.md`][plan].
 
-[plan]: https://github.com/rustos-project/rustos/blob/main/PLAN.md
+[plan]: https://github.com/tairix-project/tairix/blob/main/PLAN.md

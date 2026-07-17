@@ -1,6 +1,6 @@
-# `rustos-edit`
+# `tairix-edit`
 
-A full-screen text editor for RustOS in the spirit of the classic
+A full-screen text editor for TAIRiX in the spirit of the classic
 QuickBasic / MS-DOS editor: a menu bar (`File`, `Search`) across the top,
 the text area below it (white on blue on a colour terminal), and a status
 line carrying the file name, cursor position, and key hints. It edits one
@@ -61,8 +61,8 @@ bindings are function-key-driven — `F10` where the DOS editor used `Alt`,
   renderer) and `run` is the blocking event loop; the kernel parks the
   input read, never a poll (`AGENTS.md` §2.23).
 - **`command`** — the `edit [file] [-h | -?]` argument grammar.
-- **`run.rs`** — the freestanding `Run` binary: `rustos-rt` runtime, the
-  shared `rustos_curses::StreamTty` byte channel over fd 0/1, the `RtFs`
+- **`run.rs`** — the freestanding `Run` binary: `tairix-rt` runtime, the
+  shared `tairix_curses::StreamTty` byte channel over fd 0/1, the `RtFs`
   whole-file seam, raw input for the session (cooked restored on exit),
   and the `-h`/`-?` short help through the shared `lib/help` engine.
 

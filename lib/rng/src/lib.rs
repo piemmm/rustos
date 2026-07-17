@@ -1,6 +1,6 @@
-//! RustOS random number generation.
+//! TAIRiX random number generation.
 //!
-//! This crate is the one place the rest of RustOS gets randomness from. It
+//! This crate is the one place the rest of TAIRiX gets randomness from. It
 //! provides three layers, separated by purpose:
 //!
 //! * [`CsRng`] — the **cryptographically secure** generator. A NIST SP
@@ -39,9 +39,9 @@
 //! # Worked wiring
 //!
 //! ```
-//! use rustos_rng::{CombinedSource, CsRng, EntropyError, EntropySource, JitterSource};
-//! use rustos_rng::hardware::{HardwareEntropy, HardwareRng, PlatformFast};
-//! use rustos_rng::RandU64;
+//! use tairix_rng::{CombinedSource, CsRng, EntropyError, EntropySource, JitterSource};
+//! use tairix_rng::hardware::{HardwareEntropy, HardwareRng, PlatformFast};
+//! use tairix_rng::RandU64;
 //!
 //! # struct Rdrand;
 //! # impl HardwareRng for Rdrand {

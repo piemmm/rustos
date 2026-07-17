@@ -27,7 +27,7 @@ Um caminho ilegível é reportado no erro padrão e o percurso continua
 com o resto; um diretório ilegível não contribui nada em vez de uma
 soma parcial adivinhada.
 
-O RustOS ainda não tem ligações físicas, pelo que nenhuma entrada
+O TAIRiX ainda não tem ligações físicas, pelo que nenhuma entrada
 pode ser contada duas vezes e os interruptores GNU de deduplicação de
 ligações não existem; `-x` (um só sistema de ficheiros) ainda não
 está disponível; as variáveis de ambiente da família `DU_BLOCK_SIZE`

@@ -2,10 +2,10 @@
 
 A driver progresses through a fixed sequence of observable states
 between the moment a caller hands an image path to
-`rustos_drvhost::Host::load` and the moment the host returns a
+`tairix_drvhost::Host::load` and the moment the host returns a
 `DriverHandle`. Each state is a verification gate;
 a failure at any step yields a typed `HostError`, an audit record on
-the configured `rustos_log::Sink`, and *no* mutation of the host's
+the configured `tairix_log::Sink`, and *no* mutation of the host's
 loaded-driver table (`AGENTS.md` §5.4 — fail closed).
 
 ```text
@@ -97,7 +97,7 @@ loaded-driver table (`AGENTS.md` §5.4 — fail closed).
 | `InKernel`      | `CAP_DRV_LOAD` *and* `CAP_DRV_KERNEL` ⊆ caller, requested caps ⊆ caller |
 
 `requested caps ⊆ caller` is the only delegation rule in the system
-(`AGENTS.md` §5.2). It is enforced by `rustos_caps::CapabilitySet`'s
+(`AGENTS.md` §5.2). It is enforced by `tairix_caps::CapabilitySet`'s
 `is_subset_of`; the same primitive that backs `CapabilityToken::verify`.
 
 ## Audit timeline
@@ -127,7 +127,7 @@ three such buffers per `load`:
    wiped on `Drop` (i.e. on `Host::unload` or successful
    `Host::reload`).
 
-The wipe primitive is `rustos_drvhost::zeroize::secure_clear`, which
+The wipe primitive is `tairix_drvhost::zeroize::secure_clear`, which
 combines `core::ptr::write_volatile` with a sequentially-consistent
 `compiler_fence` so neither the optimiser nor the surrounding scope's
 `Drop` can re-order the writes away. The primitive is the only

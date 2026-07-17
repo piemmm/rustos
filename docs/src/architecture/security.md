@@ -109,7 +109,7 @@ manifest at dispatch time without re-parsing.
 ## Audit log writer
 
 Every decision routes through `kernel/sec::audit::record`, which emits a
-structured `rustos_log::Event` with a stable `EventId`. The
+structured `tairix_log::Event` with a stable `EventId`. The
 `kernel/sec` range is `1_000..2_000`; the issued identifiers are part
 of the audit contract with external log consumers and may not be
 re-used or re-numbered.
@@ -154,5 +154,5 @@ decision involves a prior `TaskCapabilitiesDerived` setup). This pins
 the audit trail to the documented IDs above.
 
 Rustdoc is the canonical reference for every type named above; build
-it with `cargo doc -p rustos-kernel-sec --no-deps` and follow the
+it with `cargo doc -p tairix-kernel-sec --no-deps` and follow the
 module index.

@@ -1,4 +1,4 @@
-# `rustos-drv-input-usb-kbd` — USB HID boot-keyboard class driver
+# `tairix-drv-input-usb-kbd` — USB HID boot-keyboard class driver
 
 `plans/USB.md` U4. The autoloaded **user-space HID boot-keyboard *class*
 driver** — the `Run` binary `devmgr` spawns when a HID boot-keyboard
@@ -14,15 +14,15 @@ host controller that speaks the URB transport (`AGENTS.md` §2.20 / §17.4).
 
 ## What it does
 
-`main` (a freestanding pure-Rust `rustos-rt` program):
+`main` (a freestanding pure-Rust `tairix-rt` program):
 
-1. Builds `rustos_drvrt::RtDriverHost::from_grants_query` over its granted
+1. Builds `tairix_drvrt::RtDriverHost::from_grants_query` over its granted
    resources (the interface node's two transport grants — no MMIO/DMA).
 2. Reads the URB transport endpoint id (`RtDriverHost::urb_endpoint`) and maps
    the shared URB data buffer the HCD forwarded (`RtDriverHost::map_shared` →
    `shm_map`).
-3. Runs `rustos_hid::pump_once` over a `UrbReportSource`: each `next_report`
-   submits a **blocking** interrupt-IN URB (`rustos_usb::UrbClient` over
+3. Runs `tairix_hid::pump_once` over a `UrbReportSource`: each `next_report`
+   submits a **blocking** interrupt-IN URB (`tairix_usb::UrbClient` over
    `ipc_call`) and copies the delivered report out of the shared buffer. The
    HCD leaves the call outstanding and replies only when the controller's
    completion interrupt delivers a report, so this driver **parks in the kernel
@@ -30,7 +30,7 @@ host controller that speaks the URB transport (`AGENTS.md` §2.20 / §17.4).
    HCD reports `NotFound`, the interface has vanished; the driver exits so
    `devmgr` can load a fresh instance when the HCD publishes the replugged
    interface.
-4. Decodes each boot report through `rustos_hid` and injects each key edge into
+4. Decodes each boot report through `tairix_hid` and injects each key edge into
    the kernel input-focus arbiter via `key_inject`.
 
 A failure to acquire the host or the transport grants exits with a reserved
@@ -47,7 +47,7 @@ reprogram the controller, reach another device's buffer, or touch the bus.
 ## Why a separate crate
 
 The reusable HID boot-report **decode** lives in `lib/hid`; this crate is a
-*separate* binary so it links the userland runtime `rustos-rt` and depends only
+*separate* binary so it links the userland runtime `tairix-rt` and depends only
 on `lib/*` crates (`lib/hid`, `lib/usb`, `lib/drvrt`, `lib/rt`, `lib/caps`,
 `lib/abi`) — reaching its host-controller driver only through the public URB
 transport ABI, so the §17.4 layering holds (no `drivers/*`→`drivers/*` edge).

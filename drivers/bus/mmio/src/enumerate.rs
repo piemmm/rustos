@@ -19,9 +19,9 @@
 // Same `dead_code` rationale as the PCI driver crate.
 #![allow(dead_code)]
 
-use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
-use rustos_fdt::Fdt;
+use tairix_abi::driver::bus::BusDevice;
+use tairix_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
+use tairix_fdt::Fdt;
 
 use crate::transport::MmioRead;
 
@@ -152,13 +152,13 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
     /// * [`DriverError::LengthOutOfRange`] — the slot length does not
     ///   fit in `usize` on this target.
     /// * [`DriverError::PermissionDenied`] — the caller does not hold
-    ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+    ///   [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
     ///   (propagated from the mapper).
     ///
     /// # Capabilities
     ///
     /// The `mapper` enforces
-    /// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP).
+    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP).
     pub fn map_slot_window(
         &self,
         base: u64,

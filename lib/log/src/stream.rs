@@ -11,7 +11,7 @@
 //! The discriminants are part of the on-disk record/segment format and must
 //! not be renumbered.
 
-use rustos_abi::Errno;
+use tairix_abi::Errno;
 
 /// The stream a log record belongs to.
 ///
@@ -170,7 +170,7 @@ impl Stream {
 #[cfg(test)]
 mod tests {
     use super::Stream;
-    use rustos_abi::Errno;
+    use tairix_abi::Errno;
 
     const ALL: [Stream; 6] = Stream::ALL;
 

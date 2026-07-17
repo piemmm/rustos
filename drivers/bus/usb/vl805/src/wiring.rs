@@ -14,7 +14,7 @@
 //! It does two things, in order:
 //!
 //! 1. reloads the VL805's firmware over the board-neutral
-//!    [`MailboxChannel`](rustos_abi::driver::mailbox::MailboxChannel) the
+//!    [`MailboxChannel`](tairix_abi::driver::mailbox::MailboxChannel) the
 //!    host exposes ([`DriverHost::mailbox`]) — the link bring-up's `PERST#`
 //!    drops the `VideoCore`-loaded firmware on EEPROM-less Pi 4 boards
 //!    ([`crate::reload_firmware`]); and
@@ -38,11 +38,11 @@
 //! its fail-closed paths; the live firmware reload is the on-metal
 //! acceptance item.
 
-use rustos_abi::hwtree::HW_NODE_ROOT;
-use rustos_abi::{
+use tairix_abi::hwtree::HW_NODE_ROOT;
+use tairix_abi::{
     DriverError, DriverHost, HwDeviceClass, HwMatchKey, HwNode, HwResource, HwResourceKind,
 };
-use rustos_usb::XHCI_COMPATIBLE;
+use tairix_usb::XHCI_COMPATIBLE;
 
 use crate::{reload_firmware, FirmwareResetOutcome};
 
@@ -50,7 +50,7 @@ use crate::{reload_firmware, FirmwareResetOutcome};
 /// register BAR and inbound-DMA grants this driver received on `node A`.
 ///
 /// `resources` is the driver's own granted resource set (its
-/// `rustos_drvrt::RtDriverHost::resources`, the grants the kernel minted for
+/// `tairix_drvrt::RtDriverHost::resources`, the grants the kernel minted for
 /// the matched VL805 PCI node). The first
 /// [`Mmio`](HwResourceKind::Mmio) grant is the controller's already-assigned
 /// register BAR at its CPU-physical address, and the

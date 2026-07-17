@@ -1,6 +1,6 @@
 ## NAME
 
-elsh — cragen orchmynion RustOS
+elsh — cragen orchmynion TAIRiX
 
 ## SYNOPSIS
 

@@ -7,7 +7,7 @@
 //! with the bundle's own short help. `lsusb` takes no positional
 //! operands; one is a usage error, never silently ignored.
 //!
-//! RustOS has no Linux bus/devnum registry — a discovered USB interface
+//! TAIRiX has no Linux bus/devnum registry — a discovered USB interface
 //! is a hardware-tree node with a stable node id under its controller's
 //! node — so `-s` selects those node ids: the bus half names the
 //! controller (parent) node id and the devnum half the interface node id

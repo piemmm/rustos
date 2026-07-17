@@ -1,7 +1,7 @@
 //! Deterministic fuzz harness for the `lib/path` parser (its untrusted
 //! path-string decoder).
 //!
-//! [`rustos_path::parse`] turns a string supplied by a user, a script, or a
+//! [`tairix_path::parse`] turns a string supplied by a user, a script, or a
 //! stored record — untrusted input — into a typed `Path`. The harness's
 //! invariants are:
 //!
@@ -12,13 +12,13 @@
 //! * a parsed `Path` never exceeds the fixed security bounds, and a rooted
 //!   (view/alias) path never retains a `.`/`..` navigation component.
 //!
-//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG draws
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
 //! pseudo-random path strings and mutates real path templates. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged
-//! seed; `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS` to extend the
+//! seed; `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the
 //! PRNG loop to a wall-clock budget.
 
-use rustos_path::{parse, Root, MAX_ALIAS_LEN, MAX_COMPONENTS, MAX_COMPONENT_LEN};
+use tairix_path::{parse, Root, MAX_ALIAS_LEN, MAX_COMPONENTS, MAX_COMPONENT_LEN};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -31,7 +31,7 @@ const MAX_NOISE: usize = 512;
 /// normalisation, unsupported resolvers, resource-reference shapes, and
 /// deliberately malformed forms).
 const TEMPLATES: &[&str] = &[
-    "/System/Kernel/rustos.rxe",
+    "/System/Kernel/tairix.rxe",
     "Home:/Documents/../Photos/2026",
     "alias::Backup/snapshots/latest",
     "../../notes/todo.txt",
@@ -93,13 +93,13 @@ fn exercise(input: &str) {
 
 #[test]
 fn parse_never_panics_and_round_trips_for_any_input() {
-    let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `rustos_fuzzseed::start`: fresh per
-    // run, reproducible from the logged value via `RUSTOS_FUZZ_SEED`.
-    let mut state: u64 = rustos_fuzzseed::start(
+    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh per
+    // run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
+    let mut state: u64 = tairix_fuzzseed::start(
         "parse_never_panics_and_round_trips_for_any_input",
-        rustos_fuzzseed::FUZZ_SEED_ENV,
+        tairix_fuzzseed::FUZZ_SEED_ENV,
     );
     let mut next = || {
         state = state
@@ -146,7 +146,7 @@ fn parse_never_panics_and_round_trips_for_any_input() {
         exercise(&String::from_utf8_lossy(&noise));
 
         iteration += 1;
-        if !rustos_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }

@@ -10,7 +10,7 @@
 //! load/exec words (`acorn.loadaddr` / `acorn.execaddr`), so a copy back to
 //! ADFS reproduces the native fields byte-for-byte.
 
-use rustos_abi::time::Time64;
+use tairix_abi::time::Time64;
 
 use crate::MetadataError;
 

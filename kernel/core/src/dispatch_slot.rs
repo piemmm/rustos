@@ -2,23 +2,23 @@
 //! syscall dispatcher.
 //!
 //! Stage 2.7 follow-up (f4) of `PLAN.md`. The production
-//! [`rustos_kernel_syscall::Dispatcher`] cannot be installed at the
+//! [`tairix_kernel_syscall::Dispatcher`] cannot be installed at the
 //! architecture-port's syscall-trampoline level directly because the
 //! trampoline expects a bare `extern "C" fn` callback that takes only
 //! a syscall number and an argument frame — there is no room in that
 //! ABI for borrowed kernel state. The
-//! `rustos_arch_x86_64::syscall_entry::set_dispatch_callback` step
+//! `tairix_arch_x86_64::syscall_entry::set_dispatch_callback` step
 //! therefore stays as it is in (c7-bin): it installs the binary's own
 //! `extern "C"` callback **before** `syscall` is enabled (the
 //! arch-level fail-closed ordering contract; see
-//! `rustos_arch_x86_64::syscall_entry` rustdoc).
+//! `tairix_arch_x86_64::syscall_entry` rustdoc).
 //!
 //! What was missing until (f4) is the *kernel-side* publication path:
 //! a place [`crate::kernel_main`] can hand its [`DispatchHook`] (built
 //! from `KernelState`'s scheduler, capability table, arch port, and
 //! audit sink) so that the binary's `extern "C"` callback can find it
 //! at syscall time. That place is one [`DispatchCallbackSlot`] per
-//! `rustos-kernel` binary, owned by the bin crate in a `'static`
+//! `tairix-kernel` binary, owned by the bin crate in a `'static`
 //! storage (not a global *mutable* static), referenced from
 //! [`crate::BootInfo`], and published
 //! at the new `Phase::Syscall` step `kernel_main` runs between
@@ -29,10 +29,10 @@
 //! The slot is installed exactly once, by `kernel_main`, on the BSP,
 //! before `syscall` may ever fire — the arch-level
 //! `set_dispatch_callback` is invoked before `syscall` is enabled
-//! (see `kernel/rustos-kernel::dispatch` rustdoc and
+//! (see `kernel/tairix-kernel::dispatch` rustdoc and
 //! "fail closed"). The slot only ever transitions
 //! `Empty → Installed`; no re-installation, no mutation after
-//! publish. [`rustos_sync::OnceCell`] is exactly that
+//! publish. [`tairix_sync::OnceCell`] is exactly that
 //! transition with the right memory ordering for cross-CPU
 //! observation, no extra primitive needed
 //! (no bloat).
@@ -47,8 +47,8 @@
 //! `kernel/sync::once`). Per-CPU syscalls observe `Some(hook)` from
 //! the moment `set` returns.
 
-use rustos_kernel_syscall::{RawArgs, SyscallResult};
-use rustos_sync::OnceCell;
+use tairix_kernel_syscall::{RawArgs, SyscallResult};
+use tairix_sync::OnceCell;
 
 /// Result of one [`DispatchHook::dispatch`] call.
 ///
@@ -138,7 +138,7 @@ pub enum RescheduleAction {
 /// * Production: `KernelDispatchHook` in
 ///   [`crate::syscalls`], which owns borrows into
 ///   `KernelState` (scheduler + capability table + arch + audit) and
-///   wraps a [`rustos_kernel_syscall::Dispatcher`].
+///   wraps a [`tairix_kernel_syscall::Dispatcher`].
 /// * Tests substitute their own implementation against `TestArch`.
 ///
 /// The trait is intentionally minimal: the bin-crate callback's job
@@ -154,7 +154,7 @@ pub trait DispatchHook: Sync {
     ///
     /// `raw_number` is the bottom 16 bits of the architecture's
     /// syscall-number register, exactly as the trampoline received
-    /// it (`rustos_kernel_syscall::Dispatcher::dispatch` validates
+    /// it (`tairix_kernel_syscall::Dispatcher::dispatch` validates
     /// it). `args` is the caller's register tuple already
     /// reinterpreted as a [`RawArgs`] by the trampoline.
     ///
@@ -162,7 +162,7 @@ pub trait DispatchHook: Sync {
     ///
     /// 1. Identifies the caller (per-CPU `current_task` + per-task
     ///    capability lookup).
-    /// 2. Forwards through [`rustos_kernel_syscall::Dispatcher::dispatch`],
+    /// 2. Forwards through [`tairix_kernel_syscall::Dispatcher::dispatch`],
     ///    which performs the remaining four steps.
     ///
     /// On a caller-identification failure (no task currently running
@@ -365,19 +365,19 @@ pub struct AlreadyInstalledError;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_kernel_syscall::RawArgs;
+    use tairix_kernel_syscall::RawArgs;
 
     /// Minimal hook that records the last `(raw_number, args)` it was
     /// handed. Used to verify the slot returns the registered hook
     /// untouched.
     struct RecordingHook {
-        log: rustos_sync::SpinLock<alloc::vec::Vec<(u16, RawArgs)>>,
+        log: tairix_sync::SpinLock<alloc::vec::Vec<(u16, RawArgs)>>,
     }
 
     impl RecordingHook {
         fn new() -> Self {
             Self {
-                log: rustos_sync::SpinLock::new(alloc::vec::Vec::new()),
+                log: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
             }
         }
     }

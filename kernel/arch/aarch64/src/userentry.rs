@@ -1,5 +1,5 @@
 //! aarch64 implementation of the Arch HAL "enter user mode" surface
-//! ([`rustos_arch_api::EnterUser`]).
+//! ([`tairix_arch_api::EnterUser`]).
 //!
 //! Dropping a freshly built process image into EL0 is the `eret`
 //! sequence: program `SP_EL0` with the user stack pointer, `ELR_EL1`
@@ -11,7 +11,7 @@
 //! of that sequence; the CC2/CC3 QEMU verticals reach
 //! it through the HAL rather than copying the `asm!` block.
 
-use rustos_arch_api::{EnterUser, UserEntry};
+use tairix_arch_api::{EnterUser, UserEntry};
 
 /// aarch64 implementation of the Arch HAL "enter user mode" surface.
 ///

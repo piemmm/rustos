@@ -10,7 +10,7 @@
 //! match keys, and **serves that interface's transfers** over the bus-agnostic
 //! URB transport. This driver binds the HID boot-keyboard interface node, maps
 //! the shared URB data buffer it was granted, submits interrupt-IN URBs to read
-//! reports, decodes each boot report through the arch-neutral `rustos_hid`
+//! reports, decodes each boot report through the arch-neutral `tairix_hid`
 //! composition, and injects keystrokes through `key_inject`. It knows neither
 //! the controller type nor the bus — the same binary works unchanged behind
 //! any host controller that speaks the URB transport.
@@ -39,12 +39,12 @@
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
-// The driver's identity — its [`BIND_KEYS`](rustos_drv_input_usb_kbd::BIND_KEYS)
+// The driver's identity — its [`BIND_KEYS`](tairix_drv_input_usb_kbd::BIND_KEYS)
 // bind table — lives in the crate's `lib` target so the host image builder can
 // author the signed manifest from it; this binary is the `Run` entry point.
 
 #[cfg(any(test, freestanding))]
-use rustos_abi::{DriverError, Errno};
+use tairix_abi::{DriverError, Errno};
 
 #[cfg(any(test, freestanding))]
 fn pump_error_limit_reached(consecutive_errors: &mut u8, limit: u8) -> bool {
@@ -64,16 +64,16 @@ fn transport_error(err: Errno) -> DriverError {
 #[cfg(freestanding)]
 mod program {
     use super::pump_error_limit_reached;
-    use rustos_abi::driver::input::ReportSource;
-    use rustos_abi::input::KeyInput;
-    use rustos_abi::{CapabilityId, DriverError, Errno};
-    use rustos_caps::CapabilitySet;
-    use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_hid::{pump_once, BootKeyboard, ConsoleSink, KeyboardConsole, REPORT_BUF_LEN};
-    use rustos_log::{log, Event, EventId, Level};
-    use rustos_rt::LogSink;
-    use rustos_usb::transport::{UrbCall, UrbClient};
-    use rustos_util::fmt::format_hex_u64;
+    use tairix_abi::driver::input::ReportSource;
+    use tairix_abi::input::KeyInput;
+    use tairix_abi::{CapabilityId, DriverError, Errno};
+    use tairix_caps::CapabilitySet;
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_hid::{pump_once, BootKeyboard, ConsoleSink, KeyboardConsole, REPORT_BUF_LEN};
+    use tairix_log::{log, Event, EventId, Level};
+    use tairix_rt::LogSink;
+    use tairix_usb::transport::{UrbCall, UrbClient};
+    use tairix_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
@@ -150,9 +150,9 @@ mod program {
                 level,
                 id,
                 message,
-                fields: &[rustos_log::Field {
+                fields: &[tairix_log::Field {
                     key,
-                    value: rustos_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(value, &mut value_buf)),
                 }],
             },
         );
@@ -169,7 +169,7 @@ mod program {
                 "endpoint_hex",
                 self.endpoint,
             );
-            match rustos_rt::ipc_call(self.endpoint, request, reply) {
+            match tairix_rt::ipc_call(self.endpoint, request, reply) {
                 Ok(len) => {
                     log_hex_event(
                         USB_KBD_URB_REPLY,
@@ -274,7 +274,7 @@ mod program {
                 "bytes_hex",
                 bytes.len() as u64,
             );
-            if rustos_rt::key_inject(rustos_abi::seat::SEAT_PRIMARY, &record) < 0 {
+            if tairix_rt::key_inject(tairix_abi::seat::SEAT_PRIMARY, &record) < 0 {
                 log_hex_event(
                     USB_KBD_INJECT,
                     Level::Warn,
@@ -295,7 +295,7 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     ///
     /// On success this never returns: the report pump runs for the life of the
@@ -399,7 +399,7 @@ mod program {
         }
     }
 
-    rustos_rt::entry!(main);
+    tairix_rt::entry!(main);
 }
 
 // --- Host stub ----------------------------------------------------------
@@ -414,7 +414,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{pump_error_limit_reached, transport_error};
-    use rustos_abi::{DriverError, Errno};
+    use tairix_abi::{DriverError, Errno};
 
     #[test]
     fn pump_error_limit_fails_closed_without_wrapping() {

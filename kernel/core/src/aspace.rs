@@ -2,18 +2,18 @@
 //! user-memory copy path, `PLAN.md` Stage 7).
 //!
 //! The kernel's `copy_from_user` / `copy_to_user` boundary
-//! ([`rustos_kernel_mem::uaccess`] /
+//! ([`tairix_kernel_mem::uaccess`] /
 //! `tests/SECURITY.md` §5) walks the *calling task's* address space.
 //! A syscall handler therefore needs to turn the caller's
-//! [`rustos_kernel_sec::TaskId`] into the pair the copy path consumes:
-//! the task's user [`AddressSpace`](rustos_kernel_mem::AddressSpace)
+//! [`tairix_kernel_sec::TaskId`] into the pair the copy path consumes:
+//! the task's user [`AddressSpace`](tairix_kernel_mem::AddressSpace)
 //! and the kernel [`PhysMap`] that backs it. This module owns that
 //! mapping.
 //!
 //! # Why trait objects
 //!
-//! [`rustos_kernel_mem::AddressSpace`] is generic over its
-//! [`PageTable`](rustos_kernel_mem::PageTable) backend, so the
+//! [`tairix_kernel_mem::AddressSpace`] is generic over its
+//! [`PageTable`](tairix_kernel_mem::PageTable) backend, so the
 //! kernel cannot hold a `BTreeMap<TaskId, AddressSpace<P>>` for a
 //! single `P` — different tasks may run on different architecture page
 //! tables, and the orchestrator that composes this registry into
@@ -29,7 +29,7 @@
 //!
 //! An entry is [`register`](AddressSpaceRegistry::register)ed when a
 //! task's `rxe` image is mapped (the loader's
-//! [`map_image`](rustos_kernel_mem::map_image) result handed to the
+//! [`map_image`](tairix_kernel_mem::map_image) result handed to the
 //! spawner) and [`withdraw`](AddressSpaceRegistry::withdraw)n when the
 //! task exits. Both are fail-closed: registering an id that is already
 //! present is refused rather than silently
@@ -40,7 +40,7 @@
 //! security-relevant logging, exactly as the dispatcher audits IPC
 //! endpoint lookups rather than [`PortRegistry`] doing so internally.
 //!
-//! [`PortRegistry`]: rustos_kernel_ipc::PortRegistry
+//! [`PortRegistry`]: tairix_kernel_ipc::PortRegistry
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -49,11 +49,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_abi::hwtree::{GrantedResource, HwResource};
-use rustos_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
-use rustos_kernel_sec::TaskId;
+use tairix_abi::hwtree::{GrantedResource, HwResource};
+use tairix_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
+use tairix_kernel_sec::TaskId;
 
 use crate::pipe::PipeEnd;
 use crate::resource::ResourceBacking;
@@ -359,9 +359,9 @@ pub struct DelegatedFile {
 /// What a descriptor resolves to: a filesystem path or a typed resource.
 ///
 /// A descriptor's number is unique per process regardless of what backs it,
-/// so both filesystem opens ([`SyscallNumber::FS_OPEN`](rustos_abi::SyscallNumber))
+/// so both filesystem opens ([`SyscallNumber::FS_OPEN`](tairix_abi::SyscallNumber))
 /// and resource opens
-/// ([`SyscallNumber::RESOURCE_OPEN`](rustos_abi::SyscallNumber)) draw from the
+/// ([`SyscallNumber::RESOURCE_OPEN`](tairix_abi::SyscallNumber)) draw from the
 /// single `OpenFileTable` allocator; the backing records which subsystem
 /// serves the handle's reads and writes.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -615,18 +615,18 @@ impl AddressSpaceRegistry {
     /// present to update.
     ///
     /// The registry stores a `Send + Sync`
-    /// [`FrozenAddressSpace`](rustos_kernel_mem::vmm::FrozenAddressSpace)
+    /// [`FrozenAddressSpace`](tairix_kernel_mem::vmm::FrozenAddressSpace)
     /// snapshot rather than the live, `!Sync` arch space (see
-    /// [`rustos_kernel_mem::LiveUserSpace`]). A snapshot frozen at spawn
+    /// [`tairix_kernel_mem::LiveUserSpace`]). A snapshot frozen at spawn
     /// describes only the task's spawn-time image and stack; once the task
     /// maps its own heap (`mem_map`), unmaps it, or a driver maps a granted
     /// window/DMA buffer, the snapshot is stale and the
-    /// [`rustos_kernel_mem::uaccess`] copy path can no longer see the new
+    /// [`tairix_kernel_mem::uaccess`] copy path can no longer see the new
     /// (or freed) pages. The mutating syscall handler re-freezes the live
     /// space and calls this to publish the fresh snapshot, so the very next
     /// `copy_in` / `copy_out` reflects the current mappings (the copy path must see exactly the task's live memory; the
     /// behaviour
-    /// [`FrozenAddressSpace`](rustos_kernel_mem::vmm::FrozenAddressSpace)'s
+    /// [`FrozenAddressSpace`](tairix_kernel_mem::vmm::FrozenAddressSpace)'s
     /// docs prescribe for a remap path).
     ///
     /// The physical map is left untouched: it is the kernel direct map,
@@ -1473,7 +1473,7 @@ impl AddressSpaceRegistry {
     }
 
     /// Resolve `task` to the `(address space, physical map)` pair the
-    /// [`rustos_kernel_mem::uaccess`] copy path consumes, or `None` if
+    /// [`tairix_kernel_mem::uaccess`] copy path consumes, or `None` if
     /// no entry is registered.
     #[must_use]
     pub fn resolve(&self, task: TaskId) -> Option<(&dyn UserAddressSpace, &dyn PhysMap)> {
@@ -1509,7 +1509,7 @@ impl AddressSpaceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustos_kernel_mem::{
+    use tairix_kernel_mem::{
         AddressSpace, Frame, HostPageTable, MapFlags, Page, PhysAddr, SimPhysMap, VirtAddr,
         PAGE_SIZE,
     };

@@ -10,7 +10,7 @@
 //! * [`LocalFrameService`] wraps an in-process [`Net`] device engine over a
 //!   plain owned region — the host-test and single-address-space form.
 //! * [`NetChannelClient`] is the cross-process client of the `netchan-v1`
-//!   contract ([`rustos_abi::driver::net_channel`]): it owns the stack's
+//!   contract ([`tairix_abi::driver::net_channel`]): it owns the stack's
 //!   mapping of the shared frame region and turns each doorbell into an
 //!   `ipc_call` to the driver process's device endpoint, over the injected
 //!   [`NetChannelTransport`] so it stays pure and host-testable.
@@ -20,15 +20,15 @@
 //! over it for each phase and never touches ring bytes across the doorbell,
 //! so the call boundary is the whole synchronisation (`net_ring`).
 
-use rustos_abi::driver::net::{DeviceFacts, Net};
-use rustos_abi::driver::net_channel::{
+use tairix_abi::driver::net::{DeviceFacts, Net};
+use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, AttachParams, NetChannelRequest,
     NET_CHANNEL_MAX_REPLY,
 };
-use rustos_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::reply::decode_status_reply;
-use rustos_abi::Errno;
+use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::reply::decode_status_reply;
+use tairix_abi::Errno;
 
 /// A link-layer frame service the interface pump drives.
 ///
@@ -123,16 +123,16 @@ impl<N: Net> FrameService for LocalFrameService<'_, N> {
         let mut rings = FrameRings::bind(self.region, self.geometry, self.class)?;
         self.net
             .service(&mut rings)
-            .map_err(rustos_abi::DriverError::as_errno)
+            .map_err(tairix_abi::DriverError::as_errno)
     }
 }
 
 /// The injected doorbell transport of a [`NetChannelClient`].
 ///
 /// One `ipc_call` to the driver process's device endpoint: the live service
-/// backs it with `rustos_rt::ipc_call` (an optional bare-metal-only
+/// backs it with `tairix_rt::ipc_call` (an optional bare-metal-only
 /// dependency), and host tests back it with an in-process fake that
-/// dispatches to a `rustos_virtio_net::NetChannelServer` (a dev-dependency),
+/// dispatches to a `tairix_virtio_net::NetChannelServer` (a dev-dependency),
 /// so the client is exercised without a kernel.
 pub trait NetChannelTransport {
     /// Send `request` to the driver endpoint and copy its reply into

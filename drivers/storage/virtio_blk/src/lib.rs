@@ -1,10 +1,10 @@
-//! RustOS virtio-blk block driver.
+//! TAIRiX virtio-blk block driver.
 //!
-//! Implements [`rustos_abi::driver::block::Block`] on top of the
+//! Implements [`tairix_abi::driver::block::Block`] on top of the
 //! bus-agnostic virtio protocol from `lib/virtio`. The driver is
 //! bus-agnostic: the same source compiles against the PCI and MMIO
 //! transports (from `drivers/bus/virtio`) because both implement the
-//! [`rustos_virtio::Transport`] trait. (the queue protocol lives once, in `lib/virtio`.)
+//! [`tairix_virtio::Transport`] trait. (the queue protocol lives once, in `lib/virtio`.)
 //!
 //! # Public surface
 //!
@@ -22,7 +22,7 @@
 //!
 //! The classified `read_blocks_with_class` / `write_blocks_with_class`
 //! methods honour the sensitive flag by scrubbing the bounce-buffer
-//! staging through [`rustos_virtio::BounceBuffer`]'s drop
+//! staging through [`tairix_virtio::BounceBuffer`]'s drop
 //! impl (`BufferClass::Sensitive` contract).
 
 #![no_std]
@@ -36,10 +36,10 @@
 extern crate alloc;
 
 use core::convert::TryFrom;
-use rustos_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
-use rustos_abi::driver::BufferClass;
-use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
-use rustos_virtio::{
+use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
+use tairix_abi::driver::BufferClass;
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_virtio::{
     BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
     VirtioHost,
 };
@@ -69,7 +69,7 @@ const BIND_PRIORITY: u16 = 10;
 /// from and the device manager (or the in-kernel bootstrap-floor
 /// catalogue) resolves a discovered node against. The match key carries no transport (PCI vs MMIO) detail: the
 /// same driver binds a virtio-blk device however it is attached, because
-/// the bus-agnostic [`rustos_virtio::Transport`] abstracts the transport.
+/// the bus-agnostic [`tairix_virtio::Transport`] abstracts the transport.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID),

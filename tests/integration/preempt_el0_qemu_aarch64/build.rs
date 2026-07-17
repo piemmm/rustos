@@ -3,7 +3,7 @@
 //!
 //! Three jobs on the freestanding `aarch64-unknown-none` target (mirroring the
 //! `spawn_el0_timeshare_qemu_aarch64` build script — the shared dump/convert
-//! helpers live in `rustos_itest_harness`, so no aarch64 build script re-rolls
+//! helpers live in `tairix_itest_harness`, so no aarch64 build script re-rolls
 //! them):
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel (the single
@@ -14,15 +14,15 @@
 //!    DTB pointer (`x0 = 0`), so the board tree is embedded at build time.
 //! 2. Compile the pure-Rust EL0 spinner program (`tests/integration/
 //!    el0_spinner_program`) **position-independent** for the freestanding
-//!    aarch64 target (its own `program.ld` roots `rustos-rt`'s `_start`), into a
+//!    aarch64 target (its own `program.ld` roots `tairix-rt`'s `_start`), into a
 //!    private target directory under `OUT_DIR`, pinning its busy-loop count
-//!    through the `RUSTOS_EL0_SPINS` environment variable so this script is the
+//!    through the `TAIRIX_EL0_SPINS` environment variable so this script is the
 //!    single source of truth for the count.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
-//!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
+//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
+//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -47,7 +47,7 @@ use std::process::Command;
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// Busy-loop iterations the spinner program runs before it exits. The single
-/// source of truth: passed to the program build via `RUSTOS_EL0_SPINS`. Large
+/// source of truth: passed to the program build via `TAIRIX_EL0_SPINS`. Large
 /// enough that the loop spans many generic-timer ticks even on fast QEMU TCG,
 /// so the runaway task is guaranteed to be involuntarily preempted at least
 /// once, yet small enough to drain well within the harness budget.
@@ -57,7 +57,7 @@ const SPINS: u64 = 200_000_000;
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
-    rustos_itest_harness::emit_target_cfg();
+    tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -82,7 +82,7 @@ fn main() {
 
         // One CPU: this is the single-core preemption slice.
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
         let rxe = build_and_convert_program(manifest_dir, &out_dir, &program_dir);
@@ -111,11 +111,11 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
+    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
     // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
+    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
     // `#[global_allocator]` (its `mem_map`-backed heap), so the program names
     // `alloc`; omitting it would pull `alloc` from the prebuilt sysroot while
     // `core` is built fresh, a duplicate-lang-item link error.
@@ -131,7 +131,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         // Pin the program's busy-loop count (the single source of truth).
-        .env("RUSTOS_EL0_SPINS", SPINS.to_string())
+        .env("TAIRIX_EL0_SPINS", SPINS.to_string())
         .env(
             "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
@@ -139,7 +139,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .args([
             "build",
             "-p",
-            "rustos-test-el0-spinner",
+            "tairix-test-el0-spinner",
             "--target",
             AARCH64_TARGET,
             "-Z",
@@ -154,12 +154,12 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         "building the el0-spinner fixture program failed"
     );
 
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/rustos-test-el0-spinner");
+    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-el0-spinner");
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
-    rustos_itest_harness::elf2rxe::elf_to_rxe(
+    tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         USER_BIAS,
     )
     .expect("convert the el0-spinner fixture program ELF into an rxe image")

@@ -29,13 +29,13 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_abi::{Errno, InputMode, Signal, TerminalSize};
-use rustos_kernel_sched_api::SchedulerArch;
-use rustos_kernel_sec::TaskId;
-use rustos_sync::SpinLock;
-use rustos_vt::control;
-use rustos_vt::line::EraseSeq;
-use rustos_vt::secret::{SecretIndicator, SecretInput};
+use tairix_abi::{Errno, InputMode, Signal, TerminalSize};
+use tairix_kernel_sched_api::SchedulerArch;
+use tairix_kernel_sec::TaskId;
+use tairix_sync::SpinLock;
+use tairix_vt::control;
+use tairix_vt::line::EraseSeq;
+use tairix_vt::secret::{SecretIndicator, SecretInput};
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -52,14 +52,14 @@ use crate::kthread::reschedule_current;
 ///
 /// Implementations must be [`Sync`]: the single installed console is
 /// shared by the per-CPU syscall handlers, exactly like the audit
-/// [`Sink`](rustos_log::Sink).
+/// [`Sink`](tairix_log::Sink).
 pub trait ConsoleWrite: Sync {
     /// Write `bytes` to the console, returning the number actually
     /// written.
     ///
     /// The caller has already copied `bytes` out of user memory through
     /// the validated `copy_from_user` boundary and
-    /// checked the caller's [`CapabilityId::CONSOLE_WRITE`](rustos_abi::CapabilityId::CONSOLE_WRITE);
+    /// checked the caller's [`CapabilityId::CONSOLE_WRITE`](tairix_abi::CapabilityId::CONSOLE_WRITE);
     /// the implementation only moves bytes to the device. A short write
     /// (fewer than `bytes.len()`) is permitted and reported through the
     /// return value, exactly as POSIX `write` allows; the caller loops.
@@ -199,7 +199,7 @@ pub trait ConsoleRead {
     /// The caller copies the filled prefix out to user memory through
     /// the validated `copy_to_user` boundary and has
     /// already checked the caller's
-    /// [`CapabilityId::CONSOLE_READ`](rustos_abi::CapabilityId::CONSOLE_READ);
+    /// [`CapabilityId::CONSOLE_READ`](tairix_abi::CapabilityId::CONSOLE_READ);
     /// the implementation only moves bytes from the device. A short
     /// read (fewer than `buf.len()`, including zero when no input is
     /// pending) is permitted and reported through the return value; the
@@ -268,7 +268,7 @@ pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
 /// that has decoded a directly attached keyboard (USB-HID / PS-2) into a
 /// key edge injects it through the `key_inject` syscall (`abi-v1` number
 /// 22), which — after checking
-/// [`CapabilityId::INPUT_INJECT`](rustos_abi::CapabilityId::INPUT_INJECT)
+/// [`CapabilityId::INPUT_INJECT`](tairix_abi::CapabilityId::INPUT_INJECT)
 /// — hands it to the kernel seat registry
 /// ([`crate::seat`]). While the seat is unowned the
 /// registry encodes a key press to its console (tty) bytes and pushes them
@@ -285,7 +285,7 @@ pub trait ConsoleInput: Sync {
     ///
     /// The caller (the input-focus arbiter's text sink, fed by the
     /// `key_inject` handler) has already decoded the key edge and checked
-    /// [`CapabilityId::INPUT_INJECT`](rustos_abi::CapabilityId::INPUT_INJECT);
+    /// [`CapabilityId::INPUT_INJECT`](tairix_abi::CapabilityId::INPUT_INJECT);
     /// the implementation only moves the encoded bytes into its queue. A
     /// short push
     /// (fewer than `bytes.len()`, including zero when the bounded queue
@@ -805,7 +805,7 @@ impl ConsoleDevice {
     /// per-console line-state column). An erase at the start of the line
     /// is a no-op, so it never walks the cursor back over the prompt. This
     /// is the echo half of the read line discipline; the reader's line
-    /// buffer (`rustos_vt::line::LineEditor`) applies the matching erase to
+    /// buffer (`tairix_vt::line::LineEditor`) applies the matching erase to
     /// the bytes it keeps (`plans/PI.md` P11). Echo is part of the kernel's
     /// read line discipline, so it does not require the reader to also hold
     /// `CAP_CONSOLE_WRITE`.
@@ -1010,7 +1010,7 @@ fn write_best_effort(write: &dyn ConsoleWrite, bytes: &[u8]) {
 }
 
 /// The secret-entry activity feedback of one console: the kernel-side host
-/// of the shared [`SecretIndicator`] marker (`rustos_vt::secret`), giving
+/// of the shared [`SecretIndicator`] marker (`tairix_vt::secret`), giving
 /// the operator visible progress while a password is typed with echo
 /// suppressed.
 ///
@@ -1144,7 +1144,7 @@ impl SecretFeedback {
 impl SecretState {
     /// Apply one erase to the tracked line length and feed the resulting
     /// event to the marker.
-    fn erase(&mut self, now_ns: u64) -> rustos_vt::secret::Render {
+    fn erase(&mut self, now_ns: u64) -> tairix_vt::secret::Render {
         self.len = self.len.saturating_sub(1);
         self.indicator.input(
             SecretInput::Erased {
@@ -1889,7 +1889,7 @@ mod tests {
         // The animation wants its one-second tick.
         assert_eq!(
             feedback.deadline_ns(),
-            Some(rustos_vt::secret::SECRET_TICK_NS)
+            Some(tairix_vt::secret::SECRET_TICK_NS)
         );
     }
 
@@ -1929,15 +1929,15 @@ mod tests {
         feedback.consumed(b"s", 0);
         // Each tick advances the dots and arms the next frame — no
         // further typing is required to keep the marker animating.
-        feedback.tick(rustos_vt::secret::SECRET_TICK_NS);
+        feedback.tick(tairix_vt::secret::SECRET_TICK_NS);
         assert_eq!(
             feedback.deadline_ns(),
-            Some(2 * rustos_vt::secret::SECRET_TICK_NS)
+            Some(2 * tairix_vt::secret::SECRET_TICK_NS)
         );
-        feedback.tick(2 * rustos_vt::secret::SECRET_TICK_NS);
+        feedback.tick(2 * tairix_vt::secret::SECRET_TICK_NS);
         assert_eq!(
             feedback.deadline_ns(),
-            Some(3 * rustos_vt::secret::SECRET_TICK_NS)
+            Some(3 * tairix_vt::secret::SECRET_TICK_NS)
         );
     }
 
@@ -2120,8 +2120,8 @@ mod tests {
     fn grant(device: &ConsoleDevice, granter: u64, owner: u64) {
         device
             .grant_foreground(
-                rustos_kernel_sec::TaskId(granter),
-                rustos_kernel_sec::TaskId(owner),
+                tairix_kernel_sec::TaskId(granter),
+                tairix_kernel_sec::TaskId(owner),
             )
             .expect("grant foreground");
     }
@@ -2138,7 +2138,7 @@ mod tests {
         assert_eq!(drain(queue), b"abcd");
         assert_eq!(
             crate::procsignal::take_pending_foreground_for_test(),
-            Some((rustos_kernel_sec::TaskId(9), Signal::Interrupt))
+            Some((tairix_kernel_sec::TaskId(9), Signal::Interrupt))
         );
     }
 
@@ -2152,7 +2152,7 @@ mod tests {
         assert_eq!(drain(queue), b"");
         assert_eq!(
             crate::procsignal::take_pending_foreground_for_test(),
-            Some((rustos_kernel_sec::TaskId(4), Signal::Stop))
+            Some((tairix_kernel_sec::TaskId(4), Signal::Stop))
         );
     }
 
@@ -2196,7 +2196,7 @@ mod tests {
         // The shell released the slot after its wait returned: bytes flow
         // again.
         device
-            .release_foreground(rustos_kernel_sec::TaskId(1))
+            .release_foreground(tairix_kernel_sec::TaskId(1))
             .expect("granter releases");
         assert_eq!(device.push(b"\x03"), Ok(1));
         assert_eq!(drain(queue), b"\x03");
@@ -2215,7 +2215,7 @@ mod tests {
         assert_eq!(drain(queue), b"");
         assert_eq!(
             crate::procsignal::take_pending_foreground_for_test(),
-            Some((rustos_kernel_sec::TaskId(9), Signal::Stop))
+            Some((tairix_kernel_sec::TaskId(9), Signal::Stop))
         );
     }
 
@@ -2238,7 +2238,7 @@ mod tests {
         let (device, _queue) = filter_device();
         assert_eq!(device.foreground(), None);
         grant(device, 1, 9);
-        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+        assert_eq!(device.foreground(), Some(tairix_kernel_sec::TaskId(9)));
     }
 
     #[test]
@@ -2248,7 +2248,7 @@ mod tests {
         // The same granter moves the ownership to another of its children
         // (a new foreground job) without releasing in between.
         grant(device, 1, 12);
-        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(12)));
+        assert_eq!(device.foreground(), Some(tairix_kernel_sec::TaskId(12)));
     }
 
     #[test]
@@ -2258,10 +2258,10 @@ mod tests {
         // The foreground owner (a nested shell) hands the console to its
         // own child; it becomes the recorded granter of the new owner.
         grant(device, 9, 20);
-        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(20)));
+        assert_eq!(device.foreground(), Some(tairix_kernel_sec::TaskId(20)));
         // The delegating owner can reclaim as the new grant's granter.
         device
-            .release_foreground(rustos_kernel_sec::TaskId(9))
+            .release_foreground(tairix_kernel_sec::TaskId(9))
             .expect("delegating owner releases");
         assert_eq!(device.foreground(), None);
     }
@@ -2273,10 +2273,10 @@ mod tests {
         // A task that is neither the granter nor the owner is refused; the
         // recorded ownership is untouched.
         assert_eq!(
-            device.grant_foreground(rustos_kernel_sec::TaskId(7), rustos_kernel_sec::TaskId(8)),
+            device.grant_foreground(tairix_kernel_sec::TaskId(7), tairix_kernel_sec::TaskId(8)),
             Err(Errno::NotForeground)
         );
-        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+        assert_eq!(device.foreground(), Some(tairix_kernel_sec::TaskId(9)));
     }
 
     #[test]
@@ -2284,10 +2284,10 @@ mod tests {
         let (device, _queue) = filter_device();
         grant(device, 1, 9);
         assert_eq!(
-            device.release_foreground(rustos_kernel_sec::TaskId(7)),
+            device.release_foreground(tairix_kernel_sec::TaskId(7)),
             Err(Errno::NotForeground)
         );
-        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+        assert_eq!(device.foreground(), Some(tairix_kernel_sec::TaskId(9)));
     }
 
     #[test]
@@ -2295,7 +2295,7 @@ mod tests {
         let (device, _queue) = filter_device();
         grant(device, 1, 9);
         device
-            .release_foreground(rustos_kernel_sec::TaskId(9))
+            .release_foreground(tairix_kernel_sec::TaskId(9))
             .expect("owner releases");
         assert_eq!(device.foreground(), None);
     }
@@ -2306,7 +2306,7 @@ mod tests {
         // The granter clears after its child exited (the exit path already
         // cleared the slot): a benign no-op for any caller.
         device
-            .release_foreground(rustos_kernel_sec::TaskId(7))
+            .release_foreground(tairix_kernel_sec::TaskId(7))
             .expect("idempotent release");
         assert_eq!(device.foreground(), None);
     }
@@ -2316,11 +2316,11 @@ mod tests {
         let (device, _queue) = filter_device();
         grant(device, 1, 9);
         // Another task's death leaves the recorded ownership in place …
-        device.clear_dead_foreground(rustos_kernel_sec::TaskId(7));
-        assert_eq!(device.foreground(), Some(rustos_kernel_sec::TaskId(9)));
+        device.clear_dead_foreground(tairix_kernel_sec::TaskId(7));
+        assert_eq!(device.foreground(), Some(tairix_kernel_sec::TaskId(9)));
         // … and the owner's death clears it, so the console is never
         // wedged behind a task that can no longer read it.
-        device.clear_dead_foreground(rustos_kernel_sec::TaskId(9));
+        device.clear_dead_foreground(tairix_kernel_sec::TaskId(9));
         assert_eq!(device.foreground(), None);
     }
 }

@@ -1,4 +1,4 @@
-//! RustOS `du` — estimate file space usage (Stage 6 `userland/apps/`, a
+//! TAIRiX `du` — estimate file space usage (Stage 6 `userland/apps/`, a
 //! `plans/APPS.md` command app).
 //!
 //! `du` walks each of its path operands and reports, per directory
@@ -24,7 +24,7 @@
 //! * [`Walk`] — stat a path and read a directory's entries.
 //! * [`Output`] — the standard output rows and standard error
 //!   diagnostics.
-//! * [`rustos_help::HelpSource`] — the tool's own `Help/` tree, read by
+//! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by
 //!   the short-help switches.
 //!
 //! The binary that ships as `du` wires the real syscall-backed filesystem
@@ -40,7 +40,7 @@
 //! occupies. `--apparent-size` (and `-b`) measure the apparent byte
 //! length instead. Block counts round **up** (a partially used block is a
 //! used block), through the one shared GNU size vocabulary in
-//! `lib/util` (`rustos_util::size`) that `df` uses too. RustOS has no
+//! `lib/util` (`tairix_util::size`) that `df` uses too. TAIRiX has no
 //! hard links yet (`plans/APPS.md` Stage E), so no entry can be counted
 //! twice; GNU's `-l`/hard-link deduplication becomes meaningful only
 //! when links land.
@@ -67,7 +67,7 @@
 //! they are authored once in the bundle's on-disk `Help/` tree, planted
 //! onto `/System` by the image builder from that source
 //! (`tools/syshelp`), and read back at runtime through the injected
-//! [`rustos_help::HelpSource`] seam. Help is never hardcoded into the
+//! [`tairix_help::HelpSource`] seam. Help is never hardcoded into the
 //! program (`plans/APPS.md`).
 //!
 //! # Layering & safety

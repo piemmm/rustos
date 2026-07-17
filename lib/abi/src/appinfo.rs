@@ -625,7 +625,7 @@ fn inline_str(buf: &[u8], len: u8) -> &str {
 
 /// Domain-separation prefix of the canonical bundle-contents digest
 /// framing ([`digest_bundle_contents`]), so a bundle-contents hash can
-/// never collide with a hash of any other RustOS structure.
+/// never collide with a hash of any other TAIRiX structure.
 pub const BUNDLE_CONTENT_DIGEST_MAGIC: [u8; 4] = *b"RBC1";
 
 /// One file covered by a bundle's content digest: its bundle-root-relative

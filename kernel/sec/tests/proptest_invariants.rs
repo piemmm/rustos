@@ -18,10 +18,10 @@
 //!    unchanged.
 
 use proptest::prelude::*;
-use rustos_abi::{CapabilityId, Errno};
-use rustos_caps::CapabilitySet;
-use rustos_kernel_sec::{TaskCapabilities, TaskId, UserId};
-use rustos_log::{Event, Sink};
+use tairix_abi::{CapabilityId, Errno};
+use tairix_caps::CapabilitySet;
+use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_log::{Event, Sink};
 
 /// Sink that throws away every event it receives. The property test is
 /// only interested in the *invariant*; the per-decision audit emission

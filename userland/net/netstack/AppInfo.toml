@@ -9,7 +9,7 @@
 # CAP_LOG_EMIT for its audit records. It deliberately does NOT request
 # CAP_NET_ADMIN — the service *enforces* that capability against its
 # callers; it never needs to hold it.
-id = "os.rustos.netstack"
+id = "os.tairix.netstack"
 name = "netstack"
 version = "0.1.0"
 kind = "service"

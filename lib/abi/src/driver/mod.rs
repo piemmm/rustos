@@ -169,13 +169,13 @@ pub const DRIVER_MANIFEST_MAX_BIND_KEYS: u8 = 16;
 
 /// Length of the Ed25519 public key embedded in a [`DriverManifest`].
 ///
-/// Matches `rustos_crypto::ED25519_PUBLIC_KEY_LEN`; the byte array is
+/// Matches `tairix_crypto::ED25519_PUBLIC_KEY_LEN`; the byte array is
 /// re-declared here so `lib/abi` keeps zero transitive dependencies.
 pub const DRIVER_SIGNER_PUBKEY_LEN: usize = 32;
 
 /// Length of the Ed25519 signature embedded in a [`DriverManifest`].
 ///
-/// Matches `rustos_crypto::ED25519_SIGNATURE_LEN`.
+/// Matches `tairix_crypto::ED25519_SIGNATURE_LEN`.
 pub const DRIVER_SIGNATURE_LEN: usize = 64;
 
 /// Unforgeable opaque handle for a live driver instance.
@@ -834,7 +834,7 @@ pub trait DriverHost {
     /// not (yet) ship virtio-class plumbing — for example a
     /// unit-test seam that drives a non-virtio driver, or the
     /// kernel host before the `kernel-host` feature is enabled on
-    /// `rustos-drv-bus-virtio`.
+    /// `tairix-drv-bus-virtio`.
     ///
     /// The signature takes `&self` (not `&mut self`) so it composes
     /// with the frozen driver-load entry point

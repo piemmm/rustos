@@ -11,17 +11,17 @@ use alloc::{format, vec};
 
 use core::cell::{Cell as CoreCell, RefCell};
 
-use rustos_abi::time::Time64;
-use rustos_abi::{
+use tairix_abi::time::Time64;
+use tairix_abi::{
     CapabilityId, Errno, FileKind, LoadHeader, ManifestHeader, RxePermission, Segment,
     LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
 };
-use rustos_curses::{Event, Pos, Size, Window};
+use tairix_curses::{Event, Pos, Size, Window};
 
-use rustos_log::{Event as LogEvent, Sink};
-use rustos_sandbox::decode::{DecodeService, SymbolRecord, MAX_INPUT};
-use rustos_sandbox::loopback::LoopbackLauncher;
-use rustos_sandbox::ParserSandbox;
+use tairix_log::{Event as LogEvent, Sink};
+use tairix_sandbox::decode::{DecodeService, SymbolRecord, MAX_INPUT};
+use tairix_sandbox::loopback::LoopbackLauncher;
+use tairix_sandbox::ParserSandbox;
 
 use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
 use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
@@ -2266,7 +2266,7 @@ fn rxe_with_aarch64_nops() -> Vec<u8> {
     };
     let header = LoadHeader {
         magic: LOAD_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         flags: LOAD_FLAG_PIE,
         segment_count: 2,
         needed_count: 0,
@@ -2302,7 +2302,7 @@ fn wasm_with_one_body() -> Vec<u8> {
 fn manifest_with(ids: &[CapabilityId]) -> Vec<u8> {
     let header = ManifestHeader {
         magic: MANIFEST_MAGIC,
-        abi_version: rustos_abi::ABI_VERSION_CURRENT,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
         flags: 0,
         capability_count: u16::try_from(ids.len()).expect("test counts fit"),
         reserved0: 0,

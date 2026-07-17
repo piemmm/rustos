@@ -10,7 +10,7 @@
 # principal the /System/Settings policy admits can change a setting. The
 # tool reads no input, so it requests no CAP_CONSOLE_READ and nothing
 # else.
-id = "os.rustos.configure"
+id = "os.tairix.configure"
 name = "configure"
 version = "0.1.0"
 kind = "command"
