@@ -1,7 +1,7 @@
 //! In-RAM filesystem soak harness (`.junie/filesystems.md`).
 //!
 //! Formats a RAM-backed [`RamBlock`] device with each first-party
-//! formatter (`rustfs`/`ext4`/`fat32`) and drives one generic,
+//! formatter (`arxfs`/`ext4`/`fat32`) and drives one generic,
 //! filesystem-agnostic [`exercise()`] body over the frozen
 //! `FilesystemRead`/`FilesystemWrite` ABI: create/write/read-back/
 //! truncate/remove round-trips across nested directories with a remount
@@ -21,7 +21,7 @@
 //! Alongside that fixed-sequence body, [`random_exercise`] drives a
 //! genuinely *randomized*, model-checked op mix (create/move/delete/
 //! extend/truncate in a different order every run) against a byte-exact
-//! oracle, registered as the `rustfs-random` soak target so it runs in
+//! oracle, registered as the `arxfs-random` soak target so it runs in
 //! parallel with the others (`tools/ci/soak.sh`).
 
 #![forbid(unsafe_code)]

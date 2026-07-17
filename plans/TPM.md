@@ -19,7 +19,7 @@ and (for the headline use case) a new boot-time key-provider seam to be
   (the encrypted boot/root volume) is "**seal the volume key to the TPM, gated
   on a measured boot chain**" (`TPM2_Seal`/`Unseal` bound to PCRs), *not* "the
   TPM encrypts the disk". The encryption already exists and is `lib/crypto`-
-  backed (`drivers/filesystem/rustfs/src/crypto.rs`); the TPM is a **key
+  backed (`drivers/filesystem/arxfs/src/crypto.rs`); the TPM is a **key
   protector** that plugs into the existing caller-supplied `VolumeKey` seam.
 - **Measured boot is a hard prerequisite for the sealing use case.** Sealing a
   key to a TPM **without** measuring the boot chain into PCRs is theatre: an
@@ -92,7 +92,7 @@ work is shared and done once.
     backdoored" note).
   - `lib/crypto` AEAD/KDF/HMAC/hash primitives (§2.12).
   - The caller-supplied `VolumeKey` injection point at the composition root
-    (`drivers/filesystem/rustfs/src/crypto.rs` — RustFS stores only the
+    (`drivers/filesystem/arxfs/src/crypto.rs` — ARXFS stores only the
     AEAD-wrapped master key; a `VolumeKey` is supplied to unseal it, the same DI
     seam encrypted swap and `init`/`login` use). This is exactly where a
     TPM-backed key provider attaches.
@@ -250,7 +250,7 @@ Arch HAL conformance vertical for the primitive (§17.2).
 
 **Deliverables**
 - A **TPM-backed `VolumeKey` provider** that plugs into the existing
-  composition-root seam (`drivers/filesystem/rustfs` crypto + the DI point):
+  composition-root seam (`drivers/filesystem/arxfs` crypto + the DI point):
   seal the volume key to a PCR policy at install time (§11 installer flow),
   unseal at boot, **fail closed** to the recovery path on PCR mismatch — never
   fall back to an unprotected key (§5.4).
@@ -266,7 +266,7 @@ hands off to recovery (T7); QEMU `swtpm` end-to-end seal-at-install /
 unseal-at-boot; the §21 timestamp discipline where applicable.
 
 **Docs** — `docs/src/security/encrypted-boot.md` (the measured-boot + sealed-key
-+ recovery model); update the rustfs/installer pages.
++ recovery model); update the arxfs/installer pages.
 
 ### Stage T7 — No-TPM fallback: at-boot passphrase/volume-key prompt
 

@@ -21,7 +21,7 @@ Six driver-class traits are defined under
 | Class      | Trait                                       | Stage 4 first drivers                     |
 |------------|---------------------------------------------|-------------------------------------------|
 | Display    | [`driver::display::Display`]                | `drivers/display/{vesa,framebuffer,gpu_virtio}` |
-| Filesystem | [`driver::filesystem::Filesystem`]          | `drivers/filesystem/{fat32,ext4,rustfs}` (Stage 5) |
+| Filesystem | [`driver::filesystem::Filesystem`]          | `drivers/filesystem/{fat32,ext4,arxfs}` (Stage 5) |
 | Block      | [`driver::block::Block`]                    | `drivers/storage/virtio_blk`              |
 | Net        | [`driver::net::Net`]                        | `drivers/network/virtio_net`              |
 | Input      | [`driver::input::Input`]                    | `drivers/input/{ps2,usb_kbd,usb_mouse}`             |

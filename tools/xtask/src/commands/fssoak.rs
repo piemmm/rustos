@@ -2,7 +2,7 @@
 //!
 //! `.junie/filesystems.md` requires a filesystem soak that formats a
 //! ≥ 1 GiB RAM volume with each first-party formatter and exercises it
-//! for integrity and the fail-closed extremes, for `rustfs`, `ext4`, and
+//! for integrity and the fail-closed extremes, for `arxfs`, `ext4`, and
 //! `fat32` **in parallel**. This orchestrator is the single place that
 //! runs each filesystem's soak for a wall-clock budget, mirroring the
 //! [`fuzz`](crate::commands) and
@@ -56,9 +56,9 @@ const SOAK_DEVICE_BYTES: u64 = 1024 * 1024 * 1024;
 /// `rustos_test_fs_soak::TARGETS` registry the harness owns.
 pub const TARGETS: &[Target] = &[
     Target {
-        name: "rustfs",
-        test_fn: "soak_rustfs",
-        description: "native rustfs: format + integrity + extremes",
+        name: "arxfs",
+        test_fn: "soak_arxfs",
+        description: "native arxfs: format + integrity + extremes",
     },
     Target {
         name: "ext4",
@@ -71,9 +71,9 @@ pub const TARGETS: &[Target] = &[
         description: "fat32: format + integrity + extremes",
     },
     Target {
-        name: "rustfs-random",
-        test_fn: "soak_rustfs_random",
-        description: "rustfs: randomized, model-checked op mix (new path each run)",
+        name: "arxfs-random",
+        test_fn: "soak_arxfs_random",
+        description: "arxfs: randomized, model-checked op mix (new path each run)",
     },
 ];
 
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_soak_target() {
-        for required in ["rustfs", "ext4", "fat32", "rustfs-random"] {
+        for required in ["arxfs", "ext4", "fat32", "arxfs-random"] {
             assert!(
                 TARGETS.iter().any(|t| t.name == required),
                 "missing required soak target {required}"

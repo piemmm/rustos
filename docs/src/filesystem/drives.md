@@ -22,7 +22,7 @@ volume that used to back it — is absent, corrupt, or deliberately hidden.
 
 Non-goals: this page defines only how storage is **named, discovered,
 published, and resolved to a root**. It does not define an on-disk filesystem
-format (that is `rustfs-spec.md` and the foreign-FS driver pages), and
+format (that is `arxfs-spec.md` and the foreign-FS driver pages), and
 resolving a name never opens anything or grants authority — open/read/write
 still enforce inode permissions, ACLs, capability gates, mount flags, and MAC
 policy (§14, §15).
@@ -57,7 +57,7 @@ Adding a new entry to the default root view, or a new resolver to the closed
 | Term | Meaning |
 |---|---|
 | **Storage object** | Anything that can hold bytes/blocks: disk, partition, network share, disk image, encrypted container, memory backing, WASM host object. Not necessarily a filesystem. |
-| **Filesystem driver** | A driver that interprets an on-disk/remote format (`rustfs`, `fat32`, `ext4`, `iso9660`, `adfs`, …). Implementation detail for normal paths. |
+| **Filesystem driver** | A driver that interprets an on-disk/remote format (`arxfs`, `fat32`, `ext4`, `iso9660`, `adfs`, …). Implementation detail for normal paths. |
 | **Volume root** | The root directory object produced by attaching a filesystem driver to a storage object. Independently addressable; not born under another volume. |
 | **Volume ID** | A stable, non-human identifier for a volume root, carried by `lib/abi` as a fixed-size type (§8). |
 | **Alias** | A human-facing root binding: a short name mapped to a root or view (`System:`, `Home:`, `Backup:`). Closer to a RISC OS disc name or an Amiga assign than a Unix mountpoint or a drive letter. |
@@ -107,8 +107,8 @@ explicitly for durable/administrative use:
 ```text
 alias::Home/Documents/file.txt                              # expanded Alias:/…
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt # stable, durable
-fs::rustfs/System/Kernel/rustos.rxe                         # explicit driver
-rustfs::System/Kernel/rustos.rxe                            # driver shorthand
+fs::arxfs/System/Kernel/rustos.rxe                         # explicit driver
+arxfs::System/Kernel/rustos.rxe                            # driver shorthand
 adfs::HardDisc4/Apps/Paint                                  # driver shorthand
 ```
 
@@ -146,7 +146,7 @@ Home:/../../System      # cannot escape the Home root
 Home:/Documents/file.txt
 alias::Home/Documents/file.txt
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt
-rustfs::System/Kernel/rustos.rxe
+arxfs::System/Kernel/rustos.rxe
 /Users/ian/Documents/file.txt          # valid view path, not canonical identity
 ```
 
@@ -322,7 +322,7 @@ publications and view bindings**, not only to Unix-style mountpoints. A view
 binding may only preserve or restrict them; relaxing a flag from the source
 root requires the explicit relax capability and is audited (§23 of the brief;
 `fs.flags.relax.*`). A filesystem-backed resolver (`adfs::`, `fat32::`,
-`rustfs::`) enforces the identical capability/ACL/flag/MAC/audit rules as
+`arxfs::`) enforces the identical capability/ACL/flag/MAC/audit rules as
 `alias::` / `id::` access to the same object — it is never a policy bypass.
 
 ## 16. System Information API integration
@@ -383,7 +383,7 @@ appears owned by the system user and the well-known `storage` group
 registry at root unlock), directories `rwxrwxr-x` and files `rw-rw-r--`, so
 any logged-in member reads and writes the medium while security-record
 stores stay refused (the format cannot hold one). A registry without the
-group, or a format with a real owner model (RustFS, ext4), gets no wrapper:
+group, or a format with a real owner model (ARXFS, ext4), gets no wrapper:
 the former stays restrictively system-owned, the latter keeps its on-disk
 owners/modes/ACLs.
 
@@ -413,7 +413,7 @@ so the view and the alias namespace cannot drift). **Durable `id::`
 resolution is wired at the same entry point** (`plans/DEVICES.md` D3a): the
 kernel volume forest (`kernel/core::fs::volumes::VolumeForest`, installed via
 `BootInfo::with_volumes`) maps each mounted volume's stable identity — the
-RustFS per-volume UUID, published by the boot mount/unlock paths with the
+ARXFS per-volume UUID, published by the boot mount/unlock paths with the
 audited `fs.root.publish.{allow,deny}` events — to the `/`-view location its
 root backs, so `id::<volume-id>/path` opens the same object under the same
 permissions, never a policy bypass, and an unpublished identity fails closed
@@ -504,7 +504,7 @@ the Unix single-root failure model. The forbidden outcomes of `AGENTS.md` and
 the brief are binding here: storage identity dependent on one `/` tree; volumes
 canonical only as `/Storage/<volume>`; `/mnt` / `/media` under another name;
 drive letters or `D:relative` semantics; filesystem type as durable identity;
-`adfs::` / `fat32::` / `rustfs::` bypassing policy; a path string as a
+`adfs::` / `fat32::` / `arxfs::` bypassing policy; a path string as a
 capability token; `uid = 0` bypassing namespace checks; `/proc`/`/sys` recreated
 under any resolver; a second path parser; C code or hand-written headers;
 target-specific behaviour in generic code; or a new default-view entry without

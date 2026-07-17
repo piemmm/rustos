@@ -10,12 +10,12 @@
 //!
 //! RustOS pulls in no external fuzz runner: a per-run-seeded LCG mutates
 //! valid seed heads (a structurally sound FAT32 boot sector, an ext4
-//! superblock, and a `RustFS` superblock slot), truncates them, and feeds
+//! superblock, and a `ARXFS` superblock slot), truncates them, and feeds
 //! pure noise. A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`]
 //! sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
 use rustos_fsprobe::{
-    fingerprint, probe, EXT4_SUPERBLOCK_MAGIC, PROBE_HEAD_LEN, RUSTFS_HEADER_MAGIC,
+    fingerprint, probe, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, PROBE_HEAD_LEN,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -52,10 +52,10 @@ fn ext4_head() -> Vec<u8> {
     head
 }
 
-/// A `RustFS` superblock-slot head.
-fn rustfs_head() -> Vec<u8> {
+/// A `ARXFS` superblock-slot head.
+fn arxfs_head() -> Vec<u8> {
     let mut head = vec![0u8; PROBE_HEAD_LEN];
-    head[..8].copy_from_slice(&RUSTFS_HEADER_MAGIC.to_le_bytes());
+    head[..8].copy_from_slice(&ARXFS_HEADER_MAGIC.to_le_bytes());
     head[8..12].copy_from_slice(&1u32.to_le_bytes());
     head[16..32].copy_from_slice(&[9u8; 16]);
     head
@@ -86,7 +86,7 @@ fn exercise_never_panics(bytes: &[u8]) {
 #[test]
 fn probing_any_head_never_panics() {
     let deadline = rustos_fuzzseed::budget_deadline(rustos_fuzzseed::FUZZ_BUDGET_ENV);
-    let corpus = [fat32_head(), ext4_head(), rustfs_head()];
+    let corpus = [fat32_head(), ext4_head(), arxfs_head()];
 
     let mut state: u64 = rustos_fuzzseed::start(
         "probing_any_head_never_panics",

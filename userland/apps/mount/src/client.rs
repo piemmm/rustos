@@ -218,15 +218,15 @@ mod tests {
     fn list_renders_one_line_per_mount_and_routes_the_query() {
         let mounter = MemMounter::new();
         let fixture = Fixture::new(alloc::vec![
-            record(b"rootfs", b"/", b"rustfs", MountFlags::READ_ONLY),
-            record(b"data", b"/Storage/data", b"rustfs", MountFlags::NOSUID),
+            record(b"rootfs", b"/", b"arxfs", MountFlags::READ_ONLY),
+            record(b"data", b"/Storage/data", b"arxfs", MountFlags::NOSUID),
         ]);
         let out = Recorder::new();
         assert_eq!(run(Command::List, &mounter, &fixture, &out), Ok(()));
         let lines = out.lines();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "rootfs on / type rustfs (ro)");
-        assert_eq!(lines[1], "data on /Storage/data type rustfs (rw,nosuid)");
+        assert_eq!(lines[0], "rootfs on / type arxfs (ro)");
+        assert_eq!(lines[1], "data on /Storage/data type arxfs (rw,nosuid)");
         assert_eq!(
             fixture.seen.borrow().as_slice(),
             &[SysinfoQueryId::MOUNT_LIST]
@@ -262,7 +262,7 @@ mod tests {
         let fixture = Fixture::new(alloc::vec![record(
             b"rootfs",
             b"/",
-            b"rustfs",
+            b"arxfs",
             MountFlags::default()
         )]);
         assert_eq!(
@@ -281,14 +281,14 @@ mod tests {
     fn a_mount_request_reaches_the_kernel() {
         let mounter = MemMounter::new();
         assert_eq!(
-            run_mount(&["-r", "-t", "rustfs", "vol", "/Storage/vol"], &mounter),
+            run_mount(&["-r", "-t", "arxfs", "vol", "/Storage/vol"], &mounter),
             Ok(())
         );
         let attached = mounter.attached.borrow();
         assert_eq!(attached.len(), 1);
         assert_eq!(attached[0].source, "vol");
         assert_eq!(attached[0].target, "/Storage/vol");
-        assert_eq!(attached[0].fstype.as_deref(), Some("rustfs"));
+        assert_eq!(attached[0].fstype.as_deref(), Some("arxfs"));
         assert!(attached[0].flags.contains(MountFlags::READ_ONLY));
     }
 

@@ -73,7 +73,7 @@ fn system_logs_and_settings_are_writable() {
 fn write_to_a_read_only_mount_is_refused() {
     // A volume mounted read-only refuses delegated mutation
     // before the driver is ever touched.
-    let (vfs, mut fs) = rustfs_backed_vfs(true);
+    let (vfs, mut fs) = arxfs_backed_vfs(true);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 

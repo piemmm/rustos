@@ -3,7 +3,7 @@
 The single shared **first-party compression codec** for RustOS (`AGENTS.md`
 §6, §16.4 — compression is a curated shared-library class). It implements a
 low-CPU, lossless LZ77 codec in the spirit of the zstd "fast" / LZ4 profiles
-(`docs/src/filesystem/rustfs-spec.md` §10 — *the v1 target is a low-CPU
+(`docs/src/filesystem/arxfs-spec.md` §10 — *the v1 target is a low-CPU
 zstd-fast-style profile, not maximum ratio*).
 
 - `compress(src, dst) -> Result<usize, Error>` — a single greedy LZ77 pass
@@ -25,8 +25,8 @@ and predictable rather than maximally dense.
 
 ## Why it lives in `lib/`
 
-RustFS compresses every file-data record before encrypting it
-(`docs/src/filesystem/rustfs-spec.md` §6, §10), and `AGENTS.md` §16.4 lists
+ARXFS compresses every file-data record before encrypting it
+(`docs/src/filesystem/arxfs-spec.md` §6, §10), and `AGENTS.md` §16.4 lists
 compression among the curated OS-provided shared-library classes, so the codec
 belongs in `lib/*` (§6) rather than buried in the filesystem driver. It is
 written first-party because `AGENTS.md` §2.12 — *roll your own; do not trust
@@ -39,8 +39,8 @@ is depended on, never depends.
 
 ## Stability tier
 
-`experimental` — the Stage 6 RustFS compression seam
-(`docs/src/filesystem/rustfs-spec.md` §15.6, §18). It is `no_std`, performs no
+`experimental` — the Stage 6 ARXFS compression seam
+(`docs/src/filesystem/arxfs-spec.md` §15.6, §18). It is `no_std`, performs no
 allocation (it works through caller-provided slices), and has no dependencies.
 No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths: both entry
 points are `Result`-based and total, and malformed compressed input returns

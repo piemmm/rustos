@@ -13,7 +13,7 @@
 //! security reduces to HMAC being a PRF (Bellare), it has no awkward
 //! block-cipher key/counter edge cases, and it is the construction
 //! [`rustos_crypto`] can already serve with zero new audit surface. It is the
-//! right "best in class" core for `RustFS` volume keys, the encrypted-swap key, and KASLR/ASLR seeds.
+//! right "best in class" core for `ARXFS` volume keys, the encrypted-swap key, and KASLR/ASLR seeds.
 //!
 //! # Backtracking and prediction resistance
 //!

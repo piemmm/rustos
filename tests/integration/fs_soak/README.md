@@ -1,7 +1,7 @@
 # `rustos-test-fs-soak` — in-RAM filesystem soak harness
 
 A host-side test crate that soak-tests the three first-party
-filesystems (`rustfs`, `ext4`, `fat32`) entirely in RAM, with no real
+filesystems (`arxfs`, `ext4`, `fat32`) entirely in RAM, with no real
 disk and no `mkfs` shell-out (`AGENTS.md` §12 / §2.12,
 `.junie/filesystems.md`).
 
@@ -26,7 +26,7 @@ disk and no `mkfs` shell-out (`AGENTS.md` §12 / §2.12,
     confirms allocation resumes), a duplicate create and a non-empty
     `rmdir` → `Busy`, and an empty or oversize name → `LengthOutOfRange`.
 - **`random_exercise`** — a second, *randomized*, model-checked body
-  registered as the **`rustfs-random`** target (it runs over rustfs).
+  registered as the **`arxfs-random`** target (it runs over arxfs).
   Where `exercise` replays one fixed operation sequence, this one draws
   every step from the run's seed, so it exercises the filesystem **in a
   different manner on every launch**:
@@ -48,7 +48,7 @@ disk and no `mkfs` shell-out (`AGENTS.md` §12 / §2.12,
   - fail-closed negative probes are sprinkled in (duplicate create →
     `Busy`, empty / 256-byte name → `LengthOutOfRange`, missing target →
     `NotFound`, non-empty `rmdir` → `Busy`) and must not mutate state.
-  The `rustfs-random` target's **start** seed is drawn from platform
+  The `arxfs-random` target's **start** seed is drawn from platform
   entropy (time + pid), so each launch takes a new path; set
   `RUSTOS_FSSOAK_SEED` to pin it and replay a failure (the start seed is
   printed, and every error is tagged with the reproducing seed).

@@ -5,7 +5,7 @@ use rustos_test_posix_fs_suite::*;
 
 #[test]
 fn truncate_shrinks_a_file() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -31,7 +31,7 @@ fn truncate_shrinks_a_file() {
 
 #[test]
 fn truncate_grows_a_file_with_zero_fill() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -59,7 +59,7 @@ fn truncate_grows_a_file_with_zero_fill() {
 
 #[test]
 fn truncate_of_a_directory_is_is_a_directory() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -73,7 +73,7 @@ fn truncate_of_a_directory_is_is_a_directory() {
 
 #[test]
 fn truncate_of_a_missing_file_is_not_found() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 

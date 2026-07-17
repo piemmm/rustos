@@ -5,16 +5,16 @@
 //! before it can ask the kernel to attach it (`rustos_abi::volume`). This
 //! crate is the one definition of that decision:
 //!
-//! * the on-disk **signatures** that identify a `RustFS`, ext4, or FAT32
+//! * the on-disk **signatures** that identify a `ARXFS`, ext4, or FAT32
 //!   volume head (and the sanity bounds that keep a lookalike from
 //!   matching),
-//! * the stable 16-byte **identity** each format carries (the `RustFS`
+//! * the stable 16-byte **identity** each format carries (the `ARXFS`
 //!   metadata-header UUID, the ext4 `s_uuid`, and the FAT32
 //!   serial+label+tag derivation the FAT32 driver publishes), and
 //! * the human-facing **volume label** where the format records one.
 //!
 //! The filesystem drivers import their shared constants and derivations
-//! from here (`RUSTFS_HEADER_MAGIC`, `EXT4_SUPERBLOCK_MAGIC`,
+//! from here (`ARXFS_HEADER_MAGIC`, `EXT4_SUPERBLOCK_MAGIC`,
 //! [`fat32_identity_from_boot`]), so the probe and the mounted driver can
 //! never disagree about what identifies a volume.
 //!
@@ -35,7 +35,7 @@
 use rustos_abi::volume::VolumeFsType;
 
 /// Bytes of an extent head the probe needs to see every supported
-/// signature: the FAT32 boot sector (512), the `RustFS` metadata header
+/// signature: the FAT32 boot sector (512), the `ARXFS` metadata header
 /// (128), and the ext4 superblock, which occupies bytes 1024..2048.
 ///
 /// A caller reads at least this many bytes from the start of the extent
@@ -43,10 +43,10 @@ use rustos_abi::volume::VolumeFsType;
 /// [`probe`].
 pub const PROBE_HEAD_LEN: usize = 2048;
 
-/// On-disk magic in the first eight bytes of every `RustFS` metadata block:
-/// `"RUSTFSB\3"` little-endian. Defined here so the `RustFS` driver and this
-/// probe share one value (`docs/src/filesystem/rustfs-spec.md` §8).
-pub const RUSTFS_HEADER_MAGIC: u64 = 0x5255_5354_4653_4203;
+/// On-disk magic in the first eight bytes of every `ARXFS` metadata block:
+/// `"ARXFSB\3"` little-endian. Defined here so the `ARXFS` driver and this
+/// probe share one value (`docs/src/filesystem/arxfs-spec.md` §8).
+pub const ARXFS_HEADER_MAGIC: u64 = 0x5255_5354_4653_4203;
 
 /// ext4/ext3/ext2 superblock magic (`s_magic`), little-endian at byte
 /// `0x38` of the superblock (fixed by the ext on-disk format).
@@ -75,7 +75,7 @@ pub struct ProbedVolume {
 
 impl ProbedVolume {
     /// The volume's recorded human-facing label, trimmed of the format's
-    /// padding; empty when the format records none (`RustFS`) or the field
+    /// padding; empty when the format records none (`ARXFS`) or the field
     /// is blank.
     #[must_use]
     pub fn label(&self) -> &[u8] {
@@ -87,33 +87,33 @@ impl ProbedVolume {
 ///
 /// `head` is the extent's leading bytes ([`PROBE_HEAD_LEN`] or more for
 /// full coverage; a shorter head simply cannot match the signatures that
-/// lie beyond it). The probe order is fixed and documented: `RustFS`, then
+/// lie beyond it). The probe order is fixed and documented: `ARXFS`, then
 /// ext4, then FAT32 — most-specific signature first, so a volume can never
 /// be claimed by a weaker lookalike check. Returns `None` when nothing
 /// matches (fail closed, never a guess).
 #[must_use]
 pub fn probe(head: &[u8]) -> Option<ProbedVolume> {
-    probe_rustfs(head)
+    probe_arxfs(head)
         .or_else(|| probe_ext4(head))
         .or_else(|| probe_fat32(head))
 }
 
 /// Ceiling on a mutation-evidence extent ([`evidence_len`]), in bytes: the
-/// largest any supported format's declaration can reach (the `RustFS`
+/// largest any supported format's declaration can reach (the `ARXFS`
 /// superblock ring of eight 4 KiB blocks). A head whose declared evidence
 /// would exceed it is refused (`None`), never clamped — a clamped window
 /// could no longer prove non-mutation.
 pub const EVIDENCE_MAX: u64 = 32 * 1024;
 
-/// Physical blocks of the `RustFS` superblock ring: four logical slots,
-/// each a mirrored pair. Defined here (like [`RUSTFS_HEADER_MAGIC`]) so
-/// the `RustFS` driver and the [`evidence_len`] window share one value.
-pub const RUSTFS_RING_BLOCKS: u64 = 8;
+/// Physical blocks of the `ARXFS` superblock ring: four logical slots,
+/// each a mirrored pair. Defined here (like [`ARXFS_HEADER_MAGIC`]) so
+/// the `ARXFS` driver and the [`evidence_len`] window share one value.
+pub const ARXFS_RING_BLOCKS: u64 = 8;
 
-/// The largest `RustFS` declaration (the ring at the format's maximum
+/// The largest `ARXFS` declaration (the ring at the format's maximum
 /// 4 KiB block size) fits the ceiling, so a structurally valid head is
 /// never refused for size alone.
-const _: () = assert!(RUSTFS_RING_BLOCKS * 4096 <= EVIDENCE_MAX);
+const _: () = assert!(ARXFS_RING_BLOCKS * 4096 <= EVIDENCE_MAX);
 
 /// Byte length, from the start of the extent, of the region whose content
 /// any *foreign mutation* of the volume must rewrite — the
@@ -121,7 +121,7 @@ const _: () = assert!(RUSTFS_RING_BLOCKS * 4096 <= EVIDENCE_MAX);
 /// (`plans/DEVICES.md` D4c). One definition per format, beside the
 /// signatures, so the probe and the verifier can never disagree:
 ///
-/// * `RustFS`: the whole superblock ring ([`RUSTFS_RING_BLOCKS`] mirrored
+/// * `ARXFS`: the whole superblock ring ([`ARXFS_RING_BLOCKS`] mirrored
 ///   slot blocks) — every committed transaction publishes a new generation
 ///   into a ring slot, so a foreign writer must land there.
 /// * ext4: the first 2048 bytes — the primary superblock (bytes
@@ -137,7 +137,7 @@ const _: () = assert!(RUSTFS_RING_BLOCKS * 4096 <= EVIDENCE_MAX);
 #[must_use]
 pub fn evidence_len(head: &[u8]) -> Option<u64> {
     let len = match probe(head)?.fstype {
-        VolumeFsType::RustFs => {
+        VolumeFsType::ARXFS => {
             // The plaintext block-size field of the superblock payload
             // (byte 128, following the metadata-block header). It is
             // unauthenticated here, but only sizes the window: a lying
@@ -147,7 +147,7 @@ pub fn evidence_len(head: &[u8]) -> Option<u64> {
             if !block_size.is_power_of_two() || !(512..=4096).contains(&block_size) {
                 return None;
             }
-            RUSTFS_RING_BLOCKS * block_size
+            ARXFS_RING_BLOCKS * block_size
         }
         VolumeFsType::Ext4 => 2048,
         VolumeFsType::Fat32 => {
@@ -246,17 +246,17 @@ fn take_label(field: &[u8]) -> ([u8; LABEL_MAX], u8) {
     (label, take as u8)
 }
 
-/// `RustFS`: every metadata block opens with the header magic, and block 0
-/// of a volume is a superblock-ring slot, so the head of a `RustFS` extent
+/// `ARXFS`: every metadata block opens with the header magic, and block 0
+/// of a volume is a superblock-ring slot, so the head of a `ARXFS` extent
 /// always carries the magic followed by the block-type word and the
-/// volume UUID (`docs/src/filesystem/rustfs-spec.md` §8). The payload is
+/// volume UUID (`docs/src/filesystem/arxfs-spec.md` §8). The payload is
 /// sealed and encrypted; only the identity is read here.
-fn probe_rustfs(head: &[u8]) -> Option<ProbedVolume> {
-    const RUSTFS_SUPERBLOCK_TYPE: u32 = 1;
-    if le_u64(head, 0)? != RUSTFS_HEADER_MAGIC {
+fn probe_arxfs(head: &[u8]) -> Option<ProbedVolume> {
+    const ARXFS_SUPERBLOCK_TYPE: u32 = 1;
+    if le_u64(head, 0)? != ARXFS_HEADER_MAGIC {
         return None;
     }
-    if le_u32(head, 8)? != RUSTFS_SUPERBLOCK_TYPE {
+    if le_u32(head, 8)? != ARXFS_SUPERBLOCK_TYPE {
         return None;
     }
     let mut identity = [0u8; 16];
@@ -267,7 +267,7 @@ fn probe_rustfs(head: &[u8]) -> Option<ProbedVolume> {
         return None;
     }
     Some(ProbedVolume {
-        fstype: VolumeFsType::RustFs,
+        fstype: VolumeFsType::ARXFS,
         identity,
         label: [0u8; LABEL_MAX],
         label_len: 0,
@@ -384,10 +384,10 @@ mod tests {
         head
     }
 
-    /// A `RustFS` superblock-slot head with the given volume UUID.
-    fn rustfs_head(uuid: [u8; 16]) -> [u8; PROBE_HEAD_LEN] {
+    /// A `ARXFS` superblock-slot head with the given volume UUID.
+    fn arxfs_head(uuid: [u8; 16]) -> [u8; PROBE_HEAD_LEN] {
         let mut head = [0u8; PROBE_HEAD_LEN];
-        head[..8].copy_from_slice(&RUSTFS_HEADER_MAGIC.to_le_bytes());
+        head[..8].copy_from_slice(&ARXFS_HEADER_MAGIC.to_le_bytes());
         head[8..12].copy_from_slice(&1u32.to_le_bytes());
         head[16..32].copy_from_slice(&uuid);
         head
@@ -462,15 +462,15 @@ mod tests {
     }
 
     #[test]
-    fn recognises_rustfs_and_refuses_a_nil_uuid() {
+    fn recognises_arxfs_and_refuses_a_nil_uuid() {
         let uuid = [9u8; 16];
-        let probed = probe(&rustfs_head(uuid)).expect("matches");
-        assert_eq!(probed.fstype, VolumeFsType::RustFs);
+        let probed = probe(&arxfs_head(uuid)).expect("matches");
+        assert_eq!(probed.fstype, VolumeFsType::ARXFS);
         assert_eq!(probed.identity, uuid);
         assert_eq!(probed.label(), b"");
 
-        assert_eq!(probe(&rustfs_head([0u8; 16])), None);
-        let mut wrong_type = rustfs_head(uuid);
+        assert_eq!(probe(&arxfs_head([0u8; 16])), None);
+        let mut wrong_type = arxfs_head(uuid);
         wrong_type[8..12].copy_from_slice(&3u32.to_le_bytes());
         assert_eq!(probe(&wrong_type), None);
     }
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_order_is_rustfs_before_ext4_before_fat32() {
+    fn probe_order_is_arxfs_before_ext4_before_fat32() {
         // A head that carries every signature at once resolves to the
         // most-specific match, deterministically.
         let mut head = fat32_boot(*b"SRLN", b"MYDISK     ");
@@ -493,9 +493,9 @@ mod tests {
         head[1024..2048].copy_from_slice(&ext[1024..2048]);
         assert_eq!(probe(&head).map(|p| p.fstype), Some(VolumeFsType::Ext4));
 
-        let rust = rustfs_head([9u8; 16]);
+        let rust = arxfs_head([9u8; 16]);
         head[..32].copy_from_slice(&rust[..32]);
-        assert_eq!(probe(&head).map(|p| p.fstype), Some(VolumeFsType::RustFs));
+        assert_eq!(probe(&head).map(|p| p.fstype), Some(VolumeFsType::ARXFS));
     }
 
     #[test]
@@ -509,13 +509,13 @@ mod tests {
         // ext4: the primary superblock ends at byte 2048.
         assert_eq!(evidence_len(&ext4_head([7u8; 16], b"backup")), Some(2048));
 
-        // RustFS: the whole mirrored superblock ring, sized by the
+        // ARXFS: the whole mirrored superblock ring, sized by the
         // plaintext block-size field.
-        let mut rust = rustfs_head([9u8; 16]);
+        let mut rust = arxfs_head([9u8; 16]);
         rust[128..132].copy_from_slice(&512u32.to_le_bytes());
-        assert_eq!(evidence_len(&rust), Some(RUSTFS_RING_BLOCKS * 512));
+        assert_eq!(evidence_len(&rust), Some(ARXFS_RING_BLOCKS * 512));
         rust[128..132].copy_from_slice(&4096u32.to_le_bytes());
-        assert_eq!(evidence_len(&rust), Some(RUSTFS_RING_BLOCKS * 4096));
+        assert_eq!(evidence_len(&rust), Some(ARXFS_RING_BLOCKS * 4096));
     }
 
     #[test]
@@ -530,9 +530,9 @@ mod tests {
         lying[48..50].copy_from_slice(&32u16.to_le_bytes()); // == reserved
         assert_eq!(evidence_len(&lying), None);
 
-        // RustFS: a block size outside the format's bounds.
+        // ARXFS: a block size outside the format's bounds.
         for bad in [0u32, 256, 768, 8192] {
-            let mut rust = rustfs_head([9u8; 16]);
+            let mut rust = arxfs_head([9u8; 16]);
             rust[128..132].copy_from_slice(&bad.to_le_bytes());
             assert_eq!(evidence_len(&rust), None);
         }

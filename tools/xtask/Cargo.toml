@@ -85,15 +85,15 @@ rustos-test-netstack-wire = { path = "../../tests/integration/netstack_wire", ve
 # tail reads, so the planted layout and the guest's expectations share
 # one source of truth (`AGENTS.md` §2.2).
 rustos-test-fat32-image = { path = "../../tests/integration/fat32_image", version = "=0.0.0" }
-# `test --qemu` likewise plants the Stage 5 rustfs vertical's backing
-# image from the `rustos-test-rustfs-image` fixture, which the real
-# rustfs driver itself authors (format + plant), so the planted layout
+# `test --qemu` likewise plants the Stage 5 arxfs vertical's backing
+# image from the `rustos-test-arxfs-image` fixture, which the real
+# arxfs driver itself authors (format + plant), so the planted layout
 # and the guest's expectations share one source of truth (`AGENTS.md`
 # §2.2).
-rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", version = "=0.0.0" }
+rustos-test-arxfs-image = { path = "../../tests/integration/arxfs_image", version = "=0.0.0" }
 # `test --qemu` plants the `plans/PI.md` P11 Chunk B-2 root-mount->login
 # vertical's backing from the `rustos-test-encrypted-root-image` fixture —
-# the whole-disk MBR + FAT-boot(`root.unlock`) + encrypted-RustFS-root
+# the whole-disk MBR + FAT-boot(`root.unlock`) + encrypted-ARXFS-root
 # image authored by the real in-tree drivers, the same bytes the
 # `root_mount` host tests split — so the planted layout and the guest's
 # unlock share one source of truth (`AGENTS.md` §2.2).

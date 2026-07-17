@@ -28,7 +28,7 @@ const SECURITY: u64 = 3;
 const USERS: u64 = 4;
 
 /// Mock root-volume driver: the fixed `/System/Security/Users` tree with
-/// a configurable database node, mirroring what rustfs reports for the
+/// a configurable database node, mirroring what arxfs reports for the
 /// mkimage-authored root volume.
 struct MockRoot {
     /// Bytes of the `Users` node.
@@ -53,7 +53,7 @@ impl MockRoot {
             reported_size: text.len() as u64,
             present: true,
             is_dir: false,
-            // The rustfs default for a created file.
+            // The arxfs default for a created file.
             security: NodeSecurity::new(0o644, 0, 0),
             read_called: false,
         }

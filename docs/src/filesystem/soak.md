@@ -1,7 +1,7 @@
 # Filesystem soak
 
 The filesystem soak stress-tests the three first-party filesystems —
-`rustfs`, `ext4`, and `fat32` — entirely in RAM, with no real disk and
+`arxfs`, `ext4`, and `fat32` — entirely in RAM, with no real disk and
 no `mkfs` shell-out (`AGENTS.md` §12 / §2.12). It lives in the
 `rustos-test-fs-soak` crate (`tests/integration/fs_soak`) and is driven
 by `cargo xtask fssoak`.
@@ -9,7 +9,7 @@ by `cargo xtask fssoak`.
 ## What it exercises
 
 Each filesystem is formatted with its own first-party formatter
-(`RustFs::format`, `Ext4::format`, `Fat32::format`) onto a `RamBlock` —
+(`ARXFS::format`, `Ext4::format`, `Fat32::format`) onto a `RamBlock` —
 a `Vec`-backed `Block` device of at least 1 GiB — and then driven
 through the frozen `FilesystemRead` + `FilesystemWrite` ABI by **one**
 filesystem-agnostic exerciser (`AGENTS.md` §2.2). Each deterministic
@@ -33,10 +33,10 @@ The exerciser is deterministic: a per-iteration seed drives the content
 and a SplitMix64-style advance, so any failure reproduces from the seed
 printed in the error.
 
-## The randomized `rustfs-random` target
+## The randomized `arxfs-random` target
 
 Alongside the fixed-sequence exerciser, a fourth target —
-`rustfs-random` — drives rustfs through a **randomized, model-checked**
+`arxfs-random` — drives arxfs through a **randomized, model-checked**
 body (`random_exercise`). A filesystem is a critical system, so it must
 be known to work for *any* operation order, not just one scripted path;
 this target exercises the filesystem **in a different manner on every
@@ -76,7 +76,7 @@ cleanly rather than papering over a driver gap.
 ## Running it
 
 ```
-cargo xtask fssoak --list             # the registry (rustfs/ext4/fat32/rustfs-random)
+cargo xtask fssoak --list             # the registry (arxfs/ext4/fat32/arxfs-random)
 cargo xtask fssoak --quick            # per-PR / smoke budget, ≥ 5 s each
 cargo xtask fssoak --soak             # nightly budget, ≥ 24 h each
 cargo xtask fssoak --target ext4 --secs 30
@@ -96,8 +96,8 @@ each, through `tools/ci/soak.sh`'s `fssoak` kind (also part of `all`),
 sharing the soak's wall-clock budget alongside the fuzz, proptest, and
 repeated-test jobs. The registry is the single source of truth —
 `soak.sh` enumerates `cargo xtask fssoak --list` and never hard-codes
-the filesystem list, so `rustfs-random` runs concurrently with the
-fixed-sequence `rustfs`/`ext4`/`fat32` jobs. Each ≥ 1 GiB volume in
+the filesystem list, so `arxfs-random` runs concurrently with the
+fixed-sequence `arxfs`/`ext4`/`fat32` jobs. Each ≥ 1 GiB volume in
 flight needs its own GiB of runner RAM.
 
 ## Block-size note

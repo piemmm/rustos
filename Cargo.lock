@@ -891,6 +891,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-fs-arxfs"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-compress",
+ "rustos-crypto",
+ "rustos-fsmeta",
+ "rustos-fsprobe",
+ "rustos-fuzzseed",
+ "rustos-log",
+ "zeroize",
+]
+
+[[package]]
 name = "rustos-drv-fs-ext4"
 version = "0.0.0"
 dependencies = [
@@ -904,20 +918,6 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-fsprobe",
-]
-
-[[package]]
-name = "rustos-drv-fs-rustfs"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
- "rustos-compress",
- "rustos-crypto",
- "rustos-fsmeta",
- "rustos-fsprobe",
- "rustos-fuzzseed",
- "rustos-log",
- "zeroize",
 ]
 
 [[package]]
@@ -1319,9 +1319,9 @@ dependencies = [
  "rustos-devmgr",
  "rustos-drv-bus-mmio",
  "rustos-drv-bus-virtio",
+ "rustos-drv-fs-arxfs",
  "rustos-drv-fs-ext4",
  "rustos-drv-fs-fat32",
- "rustos-drv-fs-rustfs",
  "rustos-drv-storage-emmc2",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
@@ -1340,8 +1340,8 @@ dependencies = [
  "rustos-log",
  "rustos-partition",
  "rustos-sync",
+ "rustos-test-arxfs-image",
  "rustos-test-encrypted-root-image",
- "rustos-test-rustfs-image",
  "rustos-users",
  "rustos-util",
  "rustos-virtio-input",
@@ -1619,8 +1619,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-crypto",
+ "rustos-drv-fs-arxfs",
  "rustos-drv-fs-fat32",
- "rustos-drv-fs-rustfs",
  "rustos-log",
  "rustos-partition",
  "rustos-syshelp",
@@ -1979,6 +1979,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-arxfs-image"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-drv-fs-arxfs",
+ "rustos-kernel-core",
+ "rustos-kernel-sec",
+ "rustos-log",
+ "rustos-users",
+]
+
+[[package]]
+name = "rustos-test-arxfs-virtio-blk-pci-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-storage-virtio-blk",
+ "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "rustos-test-autoload-input-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -2206,11 +2230,11 @@ name = "rustos-test-encrypted-root-image"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-drv-fs-arxfs",
  "rustos-drv-fs-fat32",
- "rustos-drv-fs-rustfs",
  "rustos-partition",
  "rustos-syshelp",
- "rustos-test-rustfs-image",
+ "rustos-test-arxfs-image",
 ]
 
 [[package]]
@@ -2366,9 +2390,9 @@ name = "rustos-test-fs-soak"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-drv-fs-arxfs",
  "rustos-drv-fs-ext4",
  "rustos-drv-fs-fat32",
- "rustos-drv-fs-rustfs",
  "rustos-fuzzseed",
 ]
 
@@ -2835,7 +2859,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-caps",
- "rustos-drv-fs-rustfs",
+ "rustos-drv-fs-arxfs",
  "rustos-kernel-core",
  "rustos-kernel-sec",
 ]
@@ -2973,30 +2997,6 @@ dependencies = [
  "rustos-test-encrypted-root-image",
  "rustos-test-virtio-qemu-support",
  "rustos-users",
-]
-
-[[package]]
-name = "rustos-test-rustfs-image"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
- "rustos-drv-fs-rustfs",
- "rustos-kernel-core",
- "rustos-kernel-sec",
- "rustos-log",
- "rustos-users",
-]
-
-[[package]]
-name = "rustos-test-rustfs-virtio-blk-pci-x86-64"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "rustos-abi",
- "rustos-drv-storage-virtio-blk",
- "rustos-drvhost",
- "rustos-itest-harness",
- "rustos-test-virtio-qemu-support",
 ]
 
 [[package]]
@@ -3724,8 +3724,8 @@ dependencies = [
  "rustos-crypto",
  "rustos-drv-bus-mmio",
  "rustos-drv-bus-virtio",
+ "rustos-drv-fs-arxfs",
  "rustos-drv-fs-fat32",
- "rustos-drv-fs-rustfs",
  "rustos-drv-network-virtio-net",
  "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
@@ -3742,10 +3742,10 @@ dependencies = [
  "rustos-net",
  "rustos-netstack",
  "rustos-pci",
+ "rustos-test-arxfs-image",
  "rustos-test-fat32-image",
  "rustos-test-netstack-wire",
  "rustos-test-riscv64-boot",
- "rustos-test-rustfs-image",
  "rustos-users",
  "rustos-virtio",
  "rustos-virtio-input",
@@ -4035,12 +4035,12 @@ dependencies = [
  "rustos-syshelp",
  "rustos-taskbar",
  "rustos-terminal",
+ "rustos-test-arxfs-image",
  "rustos-test-autoload-input-qemu-aarch64",
  "rustos-test-encrypted-root-image",
  "rustos-test-fat32-image",
  "rustos-test-memsoak",
  "rustos-test-netstack-wire",
- "rustos-test-rustfs-image",
  "rustos-theme",
  "rustos-users",
  "rustos-util",

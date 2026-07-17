@@ -13,7 +13,7 @@ SMART2 (the VM pressure model and reclaim ordering,
 `kernel/mem::pressure`: the shared five-band gauge with hysteresis over
 the frame allocator, the reserve floor, per-band per-class shrink
 targets, the `ramzip` handoff gate, deterministic escalation, and the
-`CachedFs` per-operation enforcement), SMART3 (the RustFS transform
+`CachedFs` per-operation enforcement), SMART3 (the ARXFS transform
 cache: the driver's injected `ClusterCache` seam and the kernel's
 classified, budgeted, pressure-governed, zeroing
 `TransformClusterCache`, installed on both boot volumes), SMART4
@@ -37,7 +37,7 @@ caches) are **shelved — not added**; the remaining classes are staged
 below  
 Target: RustOS  
 Primary code areas: `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
-Secondary code areas: `drivers/filesystem/rustfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
+Secondary code areas: `drivers/filesystem/arxfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
 Repository placement: `plans/SMARTRAM.md`, unless the repository layout in `AGENTS.md` is updated to permit another location
 
 This document defines the staged RustOS plan for using otherwise idle RAM as a
@@ -64,19 +64,19 @@ Before touching code, the implementing agent must read and reconcile:
 3. `plans/SWAPSWAPSWAP.md`.
 4. `plans/ALIAS.md`.
 5. `plans/DRIVES.md`.
-6. `plans/RUSTFS-METADATA.md` (extended-attribute model, `lib/fsmeta`, and the
+6. `plans/ARXFS-METADATA.md` (extended-attribute model, `lib/fsmeta`, and the
    namespace-scoped capability rules any metadata cache must preserve).
 7. `docs/src/architecture/memory.md`.
 8. `docs/src/architecture/security.md`.
 9. `docs/src/filesystem/drives.md`.
-10. `docs/src/filesystem/rustfs-spec.md`.
+10. `docs/src/filesystem/arxfs-spec.md`.
 11. `kernel/mem`.
 12. `kernel/core`.
 13. `kernel/sched`.
 14. `kernel/sec`.
 15. Existing VM pressure, page-reclaim, OOM, page-cache, filesystem-cache,
     scheduler-pressure, logging, and diagnostics code.
-16. `drivers/filesystem/rustfs` and any existing foreign filesystem cache code.
+16. `drivers/filesystem/arxfs` and any existing foreign filesystem cache code.
 17. `userland/system/appmgr`, `userland/shell/elsh`, and existing command or
     application-resolution helpers.
 18. `userland/gui/wm`, `userland/gui/taskbar`, and `userland/gui/session`.
@@ -215,7 +215,7 @@ This work does not implement:
 
 - the encrypted compressed anonymous-page tier described by
   `plans/SWAPSWAPSWAP.md`;
-- disk swap, RustFS swap, hibernation, or persistent crash dumps;
+- disk swap, ARXFS swap, hibernation, or persistent crash dumps;
 - a Linux-compatible `/proc`, `/sys`, `free`, `swapon`, `zramctl`, or `zswap`
   surface;
 - a public user tuning UI;
@@ -304,7 +304,7 @@ Rules:
   `plans/SWAPSWAPSWAP.md` section 6;
 - filesystem permissions and capabilities are checked at open/resolve/use time,
   never bypassed because metadata is cached;
-- extended-attribute metadata follows the `plans/RUSTFS-METADATA.md` model:
+- extended-attribute metadata follows the `plans/ARXFS-METADATA.md` model:
   cached attribute values and cached `list` results preserve the
   namespace-scoped capability filtering (a listing cached for a caller who may
   read `system.*` keys is never served to a caller who may not), and the one
@@ -319,7 +319,7 @@ Rules:
 
 ### 6.2 Transformation cache
 
-Current state: the RustFS decompressed-cluster cache is implemented (the
+Current state: the ARXFS decompressed-cluster cache is implemented (the
 SMART3 stage entry below and `docs/src/architecture/memory.md` section
 7i): the driver's injected `ClusterCache` seam plus the kernel's
 classified, budgeted, pressure-governed, zeroing
@@ -763,11 +763,11 @@ Status: **done** for every part with a current in-tree consumer
   type-detection consumer today, and this stage's deliverables are
   scoped to "where existing filesystem layers have current consumers".
   When an attribute consumer lands, its caching follows
-  `plans/RUSTFS-METADATA.md` (namespace-scoped capability filtering,
+  `plans/ARXFS-METADATA.md` (namespace-scoped capability filtering,
   `lib/fsmeta` as the one key grammar).
-- The **RustFS transform cache** retains the verified, decrypted,
+- The **ARXFS transform cache** retains the verified, decrypted,
   decompressed plaintext of compressed clusters. The driver exposes an
-  injected seam (`rustos_drv_fs_rustfs::ClusterCache`, keyed by the
+  injected seam (`rustos_drv_fs_arxfs::ClusterCache`, keyed by the
   run's first stored block) consulted only in the serving read path —
   never by scrub/check/rescue — with invalidation funnelled through the
   driver's single block-free choke point, a whole-cache purge on
@@ -801,7 +801,7 @@ wrong-sized entry failing closed instead of stalling) and kernel tests
 hysteresis, run-covering invalidation, replacement ledger balance,
 purge, per-band growth/drain enforcement, zero-backing refusal,
 wipe-in-place, and an end-to-end serve/invalidate/pressure-drain run
-over a real in-memory RustFS volume).
+over a real in-memory ARXFS volume).
 
 ### SMART4 - Application launch and runtime semantic caches
 
@@ -1050,7 +1050,7 @@ What now holds:
   — escalation yields the VM policy); the shared reserve floor; and
   no-stale-serving for a file mutated while the caches were drained.
 - **The layered stack** (`kernel/rustos-kernel/src/`
-  `transform_cache_tests.rs`): `CachedFs` over a real RustFS volume
+  `transform_cache_tests.rs`): `CachedFs` over a real ARXFS volume
   whose read path consults the installed `TransformClusterCache`, both
   on one gauge — a filesystem-cache hit never reaches the transform
   layer, and moderate pressure drains both layers while correct bytes
@@ -1261,7 +1261,7 @@ un-shelved):
 - reclaim latency per class;
 - memory saved or repeated work avoided per workload class;
 - filesystem metadata-heavy workload;
-- RustFS compressed/encrypted workload where RustFS supports it;
+- ARXFS compressed/encrypted workload where ARXFS supports it;
 - application launch cold/hot comparison;
 - command-resolution cold/hot comparison;
 - desktop asset render cold/hot comparison;
@@ -1289,7 +1289,7 @@ This work is complete only when all applicable items are true:
   rather than duplicated.
 - `plans/ALIAS.md` and `plans/DRIVES.md` have been read, and storage identity
   keys use durable identity and generation semantics where storage is involved.
-- `plans/RUSTFS-METADATA.md` has been read, and any extended-attribute caching
+- `plans/ARXFS-METADATA.md` has been read, and any extended-attribute caching
   preserves its namespace capability filtering and reuses `lib/fsmeta` rather
   than duplicating the key grammar or preset registry.
 - `PLAN.md` has been updated if a staged roadmap item advanced.
@@ -1350,9 +1350,9 @@ RustOS.
 
 Before coding, read `AGENTS.md`, `PLAN.md`, `plans/SMARTRAM.md`,
 `plans/SWAPSWAPSWAP.md`, `plans/ALIAS.md`, `plans/DRIVES.md`,
-`plans/RUSTFS-METADATA.md`,
+`plans/ARXFS-METADATA.md`,
 `docs/src/architecture/memory.md`, `docs/src/architecture/security.md`,
-`docs/src/filesystem/drives.md`, the filesystem docs relevant to RustFS,
+`docs/src/filesystem/drives.md`, the filesystem docs relevant to ARXFS,
 `kernel/mem`, `kernel/core`, `kernel/sched`, `kernel/sec`, existing VM pressure,
 page-reclaim, OOM, page-cache, filesystem-cache, logging, and diagnostics code,
 and every shared library that already owns app loading, command resolution,

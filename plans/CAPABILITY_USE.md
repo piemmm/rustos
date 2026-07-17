@@ -443,7 +443,7 @@ authorises it; anything not listed is denied.
 - `tools/mkimage`'s profile-keyed `users_db` seeds the debug root grant
   as `administrator_ceiling()`; its unit test pins the seeded record to
   the exact set. The shared users-root QEMU fixture
-  (`rustos_test_rustfs_image`) plants the same ceiling and the account's
+  (`rustos_test_arxfs_image`) plants the same ceiling and the account's
   `/Users/root` home directory, so the fixture cannot drift from the
   debug profile.
 - End-to-end QEMU acceptance vertical
@@ -496,7 +496,7 @@ exist from CU3).
   `UsersDbSource::text` now serves an owned zero-on-drop snapshot.
 - **Persistence** is the `UserAdminBacking` seam: production is
   `RootAdminBacking` (`kernel/rustos-kernel/src/user_admin_backing.rs`)
-  over a dedicated read-write `RustFs` window the unlock's
+  over a dedicated read-write `ARXFS` window the unlock's
   `WritableRootSink::publish` opens (the `/System` VFS mount shadows
   `/System/Security`, so the engine writes through a direct window exactly
   as the boot load read). Databases are replaced crash-safely (temp node

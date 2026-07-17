@@ -15,7 +15,7 @@
 //!   pinned third-party firmware blobs ([`firmware`]),
 //!   the generated `config.txt`, and `kernel8.img` — the freestanding
 //!   aarch64 `rustos-kernel` ELF flattened by [`elfflat`].
-//! - **Root partition** ([`rootfs`], `RustFS`, [`ROOT_PART_SECTORS`]): an
+//! - **Root partition** ([`rootfs`], `ARXFS`, [`ROOT_PART_SECTORS`]): an
 //!   encrypted volume carrying the directory skeleton. Its
 //!   volume key is **derived from a passphrase**: the
 //!   build provisions an
@@ -57,7 +57,7 @@ pub mod fatboot;
 pub mod firmware;
 pub mod rootfs;
 
-pub use rustos_drv_fs_rustfs::{
+pub use rustos_drv_fs_arxfs::{
     EntropySource, UnlockDescriptor, VolumeKey, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
     VOLUME_KEY_LEN,
 };
@@ -79,23 +79,23 @@ pub const BOOT_PART_LBA: u32 = 2048;
 /// blobs (~2.5 MiB) plus the kernel, while keeping the image small.
 pub const BOOT_PART_SECTORS: u32 = 131_072;
 
-/// First sector of the read-only `RustFS` `/System` partition (contiguous
+/// First sector of the read-only `ARXFS` `/System` partition (contiguous
 /// with the boot partition, which already ends 1 MiB-aligned). This is the
 /// design-B pre-unlock signed-driver store (`plans/PI.md`).
 pub const SYSTEM_PART_LBA: u32 = BOOT_PART_LBA + BOOT_PART_SECTORS;
 
-/// Sectors in the read-only `RustFS` `/System` partition: 64 MiB — the
+/// Sectors in the read-only `ARXFS` `/System` partition: 64 MiB — the
 /// skeleton plus headroom for the signed driver bundles that land
 /// here in the later design-B increments.
 pub const SYSTEM_PART_SECTORS: u32 = 131_072;
 
-/// First sector of the encrypted `RustFS` data-root partition (contiguous
+/// First sector of the encrypted `ARXFS` data-root partition (contiguous
 /// with the `/System` partition, which already ends 1 MiB-aligned).
 pub const ROOT_PART_LBA: u32 = SYSTEM_PART_LBA + SYSTEM_PART_SECTORS;
 
-/// Sectors in the `RustFS` root partition: 64 MiB — the skeleton plus
+/// Sectors in the `ARXFS` root partition: 64 MiB — the skeleton plus
 /// installer headroom. The installer grows the layout on first boot;
-/// `RustFs::grow` expands a volume to its device, so a card-sized root is
+/// `ARXFS::grow` expands a volume to its device, so a card-sized root is
 /// a first-boot job, not an image-build job.
 pub const ROOT_PART_SECTORS: u32 = 131_072;
 
@@ -116,9 +116,9 @@ pub enum MkimageError {
     Partition(MbrError),
     /// Authoring the FAT32 boot partition failed.
     BootPartition(DriverError),
-    /// Authoring the read-only `RustFS` `/System` partition failed.
+    /// Authoring the read-only `ARXFS` `/System` partition failed.
     SystemPartition(DriverError),
-    /// Authoring the `RustFS` root partition failed.
+    /// Authoring the `ARXFS` root partition failed.
     RootPartition(DriverError),
     /// Host randomness for the volume key is unavailable.
     Entropy(String),
@@ -511,12 +511,12 @@ pub fn build_rpi_image(
             block_count: u64::from(BOOT_PART_SECTORS),
         },
         Partition {
-            ty: PartitionType::RustFsSystem,
+            ty: PartitionType::ARXFSSystem,
             start_lba: u64::from(SYSTEM_PART_LBA),
             block_count: u64::from(SYSTEM_PART_SECTORS),
         },
         Partition {
-            ty: PartitionType::RustFsRoot,
+            ty: PartitionType::ARXFSRoot,
             start_lba: u64::from(ROOT_PART_LBA),
             block_count: u64::from(ROOT_PART_SECTORS),
         },
@@ -572,8 +572,8 @@ mod tests {
     use device::MemBlock;
     use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
     use rustos_abi::CapabilityId;
+    use rustos_drv_fs_arxfs::ARXFS;
     use rustos_drv_fs_fat32::Fat32;
-    use rustos_drv_fs_rustfs::RustFs;
     use rustos_users::STORAGE_GROUP;
 
     const TEST_KEY: VolumeKey = [0x42; VOLUME_KEY_LEN];
@@ -649,8 +649,8 @@ mod tests {
         assert_eq!(built.image[510], 0x55);
         assert_eq!(built.image[511], 0xaa);
         assert_eq!(built.image[446 + 4], mbr::PART_TYPE_FAT32_LBA);
-        assert_eq!(built.image[446 + 16 + 4], mbr::PART_TYPE_RUSTFS_SYSTEM);
-        assert_eq!(built.image[446 + 32 + 4], mbr::PART_TYPE_RUSTFS);
+        assert_eq!(built.image[446 + 16 + 4], mbr::PART_TYPE_ARXFS_SYSTEM);
+        assert_eq!(built.image[446 + 32 + 4], mbr::PART_TYPE_ARXFS);
 
         // The boot partition mounts and carries the flat kernel.
         let boot_at = BOOT_PART_LBA as usize * SECTOR_BYTES;
@@ -681,19 +681,19 @@ mod tests {
         let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
         let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
-        let mut rfs = RustFs::open(
+        let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &descriptor.derive_volume_key(INSTALLER_PASSPHRASE),
         )
         .expect("root partition mounts");
-        let rustfs_root = rfs.root();
-        rfs.lookup(rustfs_root, b"System").expect("/System exists");
+        let arxfs_root = rfs.root();
+        rfs.lookup(arxfs_root, b"System").expect("/System exists");
 
         // An installer image seeds the human-account security databases
         // (an empty users database — the first human user is a first-boot
         // job; the installer-profile content is pinned by
         // `an_installer_image_seeds_an_empty_users_database`).
-        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let system = rfs.lookup(arxfs_root, b"System").expect("/System");
         let security = rfs.lookup(system, b"Security").expect("Security");
         rfs.lookup(security, rootfs::USERS_DB_NAME.as_bytes())
             .expect("Users database exists");
@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn the_system_partition_mounts_read_only_and_carries_the_skeleton() {
-        use rustos_drv_fs_rustfs::SYSTEM_VOLUME_KEY;
+        use rustos_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         let built = build_rpi_image(
@@ -721,7 +721,7 @@ mod tests {
         let mut disk = MemBlock::from_bytes(built.image.clone()).expect("whole sectors");
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
-            .first_of_type(PartitionType::RustFsSystem)
+            .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         assert_eq!(system.start_lba, u64::from(SYSTEM_PART_LBA));
         assert_eq!(system.block_count, u64::from(SYSTEM_PART_SECTORS));
@@ -729,7 +729,7 @@ mod tests {
         // It mounts read-only under the non-secret well-known key and its
         // root *is* `/System`, carrying the skeleton directly.
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
             .expect("/System mounts read-only under the public key");
         let sys_root = sys.root();
         sys.lookup(sys_root, b"Drivers").expect("/System/Drivers");
@@ -751,7 +751,7 @@ mod tests {
 
     #[test]
     fn an_installed_driver_bundle_reads_back_from_the_readonly_system_store() {
-        use rustos_drv_fs_rustfs::SYSTEM_VOLUME_KEY;
+        use rustos_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // A synthetic bundle blob: this test proves the *planting* (path +
@@ -777,10 +777,10 @@ mod tests {
         let mut disk = MemBlock::from_bytes(built.image).expect("whole sectors");
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
-            .first_of_type(PartitionType::RustFsSystem)
+            .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
             .expect("/System mounts read-only under the public key");
 
         let mut node = sys.root();
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn an_installed_app_bundle_reads_back_beside_its_help_tree() {
-        use rustos_drv_fs_rustfs::SYSTEM_VOLUME_KEY;
+        use rustos_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // Synthetic bundle files: this test proves the *planting* of a
@@ -824,10 +824,10 @@ mod tests {
         let mut disk = MemBlock::from_bytes(built.image).expect("whole sectors");
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
-            .first_of_type(PartitionType::RustFsSystem)
+            .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
             .expect("/System mounts read-only under the public key");
 
         // Every planted bundle file reads back byte-for-byte at its store
@@ -871,7 +871,7 @@ mod tests {
         let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
         let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
-        assert!(RustFs::open(
+        assert!(ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &wrong,
         )
@@ -893,13 +893,13 @@ mod tests {
         let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
         let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
-        let mut rfs = RustFs::open(
+        let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &built.root_key,
         )
         .expect("root partition mounts");
-        let rustfs_root = rfs.root();
-        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let arxfs_root = rfs.root();
+        let system = rfs.lookup(arxfs_root, b"System").expect("/System");
         let security = rfs.lookup(system, b"Security").expect("Security");
 
         let users = rfs
@@ -960,13 +960,13 @@ mod tests {
         let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
         let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
-        let mut rfs = RustFs::open(
+        let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &built.root_key,
         )
         .expect("root partition mounts");
-        let rustfs_root = rfs.root();
-        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let arxfs_root = rfs.root();
+        let system = rfs.lookup(arxfs_root, b"System").expect("/System");
         let security = rfs.lookup(system, b"Security").expect("Security");
 
         let users = rfs
@@ -1025,13 +1025,13 @@ mod tests {
         let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
         let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
-        let mut rfs = RustFs::open(
+        let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
             &built.root_key,
         )
         .expect("root partition mounts");
-        let rustfs_root = rfs.root();
-        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let arxfs_root = rfs.root();
+        let system = rfs.lookup(arxfs_root, b"System").expect("/System");
         let security = rfs.lookup(system, b"Security").expect("Security");
 
         let groups = rfs

@@ -1,6 +1,6 @@
 [package]
 name = "rustos-compress"
-description = "First-party RustOS LZ (zstd-fast-style) compression codec — no external zstd/compression dependency (AGENTS.md §2.12, §16.4; rustfs-spec §3, §10)."
+description = "First-party RustOS LZ (zstd-fast-style) compression codec — no external zstd/compression dependency (AGENTS.md §2.12, §16.4; arxfs-spec §3, §10)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,8 +13,8 @@ workspace = true
 
 # No dependencies on purpose. The compression codec is first-party
 # (`AGENTS.md` §2.12 — roll our own; this is *not* the crypto carve-out):
-# RustFS must have no external zstd/compression dependency
-# (`docs/src/filesystem/rustfs-spec.md` §3, §17). The crate is `no_std` and
+# ARXFS must have no external zstd/compression dependency
+# (`docs/src/filesystem/arxfs-spec.md` §3, §17). The crate is `no_std` and
 # allocation-free; it compresses and decompresses through caller-provided
 # slices so it fits the kernel/driver stack-buffer style with no heap.
 

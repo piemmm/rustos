@@ -103,7 +103,7 @@ members = [
     "drivers/filesystem/adfs",
     "drivers/filesystem/ext4",
     "drivers/filesystem/fat32",
-    "drivers/filesystem/rustfs",
+    "drivers/filesystem/arxfs",
 
     # Drivers — input
     "drivers/input/ps2",
@@ -315,7 +315,7 @@ members = [
     "tests/integration/virtio_qemu_support",
     "tests/integration/fat32_image",
     "tests/integration/netstack_wire",
-    "tests/integration/rustfs_image",
+    "tests/integration/arxfs_image",
     "tests/integration/encrypted_root_image",
     "tests/integration/autoload_input_qemu_aarch64",
     "tests/integration/devmgr_hwtree_qemu_aarch64",
@@ -323,7 +323,7 @@ members = [
     "tests/integration/fs_soak",
     "tests/integration/virtio_blk_pci_x86_64",
     "tests/integration/fat32_virtio_blk_pci_x86_64",
-    "tests/integration/rustfs_virtio_blk_pci_x86_64",
+    "tests/integration/arxfs_virtio_blk_pci_x86_64",
     "tests/integration/netstack_pci_x86_64",
     "tests/integration/virtio_blk_mmio_riscv64",
     "tests/integration/netstack_mmio_riscv64",

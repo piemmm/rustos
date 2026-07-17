@@ -5,7 +5,7 @@ use rustos_test_posix_fs_suite::*;
 
 #[test]
 fn readdir_lists_created_children() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -35,7 +35,7 @@ fn readdir_lists_created_children() {
 
 #[test]
 fn readdir_of_a_file_is_not_a_directory() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -49,7 +49,7 @@ fn readdir_of_a_file_is_not_a_directory() {
 
 #[test]
 fn readdir_of_empty_directory_is_empty() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -63,7 +63,7 @@ fn readdir_of_empty_directory_is_empty() {
 
 #[test]
 fn stat_reports_size_after_writes() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -81,7 +81,7 @@ fn stat_reports_size_after_writes() {
 
 #[test]
 fn stat_of_a_missing_path_is_not_found() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 

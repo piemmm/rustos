@@ -98,12 +98,12 @@ flags:
 
 `with_default_layout` is the in-RAM shape before any disk is mounted. At
 boot the production `fs_*` mount table (`kernel/rustos-kernel`'s
-`system_mount`) wires two on-disk `RustFs` volumes into that layout:
+`system_mount`) wires two on-disk `ARXFS` volumes into that layout:
 
-- the **encrypted, writable root volume** (`RustFsRoot`) is mounted as
+- the **encrypted, writable root volume** (`ARXFSRoot`) is mounted as
   `/` (`MountTable::back_root`). It is the persistent home of `/`,
   `/Users`, `/Apps`, `/Storage`, and the writable `/System` exceptions;
-- the **read-only, well-known-keyed `/System` volume** (`RustFsSystem`)
+- the **read-only, well-known-keyed `/System` volume** (`ARXFSSystem`)
   is mounted *over* it at `/System`, carrying the immutable kernel image,
   drivers, and libraries.
 
@@ -117,16 +117,16 @@ covering volume:
 
 | Path                    | Resolves to        | Writable? |
 | ----------------------- | ------------------ | --------- |
-| `/Users/alice/notes`    | `RustFsRoot` (`/`) | yes       |
-| `/Apps/Example.app/Run` | `RustFsRoot`       | yes       |
-| `/System/Drivers/vesa`  | `RustFsSystem`     | no        |
-| `/System/Logs/boot`     | `RustFsRoot`       | yes       |
+| `/Users/alice/notes`    | `ARXFSRoot` (`/`) | yes       |
+| `/Apps/Example.app/Run` | `ARXFSRoot`       | yes       |
+| `/System/Drivers/vesa`  | `ARXFSSystem`     | no        |
+| `/System/Logs/boot`     | `ARXFSRoot`       | yes       |
 
 This is **disjoint sub-mounting**, never a union/overlay "merge" of two
 `/System` trees: no path is served by both volumes, so resolution stays
 deterministic and fail-closed. Consequently the two volumes carry
 **non-overlapping** content — the immutable `/System` subtree lives only
-on `RustFsRoot`'s read-only sibling, and the encrypted root authors only
+on `ARXFSRoot`'s read-only sibling, and the encrypted root authors only
 the writable-state subtree (`/System/Logs`, `/System/Settings`,
 `/System/Security`) plus the four top-level directories.
 

@@ -1,8 +1,8 @@
-//! Host tests for the `RustFs` transform cache (`plans/SMARTRAM.md`
+//! Host tests for the `ARXFS` transform cache (`plans/SMARTRAM.md`
 //! SMART3): classification, hit/miss accounting, LRU eviction with
 //! hysteresis, run-covering invalidation, purge, pressure-band
 //! enforcement, bounded admission, secret wiping, and an end-to-end run
-//! over a real in-memory `RustFs` volume.
+//! over a real in-memory `ARXFS` volume.
 
 use super::*;
 
@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use rustos_kernel_mem::{FreeMemorySource, PressureBand};
 
 /// The test gauge's backing size (1 GiB), so the band watermarks land
@@ -307,7 +307,7 @@ fn the_wipe_zeroes_the_plaintext_in_place() {
 }
 
 // ---------------------------------------------------------------------------
-// End to end: the production cache inside a real RustFS volume.
+// End to end: the production cache inside a real ARXFS volume.
 // ---------------------------------------------------------------------------
 
 /// An in-memory block device for the end-to-end volume.
@@ -397,7 +397,7 @@ struct Observed {
     counts: Arc<SeamCounts>,
 }
 
-impl rustos_drv_fs_rustfs::ClusterCache for Observed {
+impl rustos_drv_fs_arxfs::ClusterCache for Observed {
     fn get(&mut self, phys: u64) -> Option<&[u8]> {
         let served = self.inner.get(phys);
         if served.is_some() {
@@ -437,7 +437,7 @@ fn cached_volume() -> (
     &'static TestSource,
     &'static MemoryPressure,
     Arc<SeamCounts>,
-    RustFs<VecBlock>,
+    ARXFS<VecBlock>,
 ) {
     let (source, pressure) = pressured(free_for(PressureBand::Normal));
     let counts = Arc::new(SeamCounts::default());
@@ -452,7 +452,7 @@ fn cached_volume() -> (
         ),
         counts: Arc::clone(&counts),
     };
-    let fs = RustFs::format(
+    let fs = ARXFS::format(
         VecBlock::new(512, 256),
         32,
         &TEST_KEY,

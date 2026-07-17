@@ -104,7 +104,7 @@ The intended tiering model is:
 ```text
 active RAM
   -> encrypted compressed anonymous-memory tier
-  -> optional encrypted block/RustFS swap, only if configured later
+  -> optional encrypted block/ARXFS swap, only if configured later
   -> pressure policy: reclaim, freeze, kill, or OOM
 ```
 
@@ -119,7 +119,7 @@ not magic extra RAM and not ordinary persistent swap.
 This work does not implement:
 
 - A disk-swap subsystem.
-- A RustFS swap file format.
+- A ARXFS swap file format.
 - Hibernation.
 - Persistent crash dumps.
 - A user-visible tuning UI.
@@ -700,7 +700,7 @@ Docs:
 
 Deliverables:
 
-- Separate design document for encrypted block/RustFS swap, consistent with
+- Separate design document for encrypted block/ARXFS swap, consistent with
   `ALIAS.md` and `DRIVES.md` storage naming.
 - Capability, storage, and failure policy. The swap backing is named by
   durable identity (pinned `disk:`/`part:`/`vol:` alias with fingerprint, or

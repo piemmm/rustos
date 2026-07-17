@@ -1,6 +1,6 @@
-# RustFS Sparse File Support
+# ARXFS Sparse File Support
 
-This appendix defines the sparse-file layer for RustFS. It is intended to be appended to an existing RustFS specification that already implements copy-on-write transactions, checksums, encryption, compression, dedupe, scrub, check, rescue, TRIM, and device-health handling.
+This appendix defines the sparse-file layer for ARXFS. It is intended to be appended to an existing ARXFS specification that already implements copy-on-write transactions, checksums, encryption, compression, dedupe, scrub, check, rescue, TRIM, and device-health handling.
 
 Sparse support is mandatory, always enabled, and not tunable. There is no mount option, feature flag, user knob, or profile that disables it.
 
@@ -8,7 +8,7 @@ RLE/FILL records are intentionally not part of this appendix. Repeated non-zero 
 
 ## 1. Purpose
 
-RustFS must store logical all-zero ranges without allocating physical data records.
+ARXFS must store logical all-zero ranges without allocating physical data records.
 
 A file containing 10 MiB of zero bytes must be represented as metadata-only ZERO/Hole extents plus inode metadata. It must not create a zstd payload, a dedupe chunk, an encrypted data record, or any other physical data blob for the zero range.
 
@@ -22,17 +22,17 @@ Sparse support is required for:
 
 ## 2. Terminology
 
-A **data extent** maps a logical file range to a physical RustFS chunk or record.
+A **data extent** maps a logical file range to a physical ARXFS chunk or record.
 
 A **ZERO extent** maps a logical file range to zero bytes and has no physical data payload.
 
-A **hole** is an unmapped logical file range that reads as zero. RustFS may represent holes explicitly as ZERO extents or implicitly as gaps between extent mappings. The implementation may choose either representation internally, but the observable behaviour is identical.
+A **hole** is an unmapped logical file range that reads as zero. ARXFS may represent holes explicitly as ZERO extents or implicitly as gaps between extent mappings. The implementation may choose either representation internally, but the observable behaviour is identical.
 
 A **sparse file** is any file whose logical size is larger than the physical data allocated for its contents because one or more logical ranges are ZERO extents or holes.
 
 ## 3. On-Disk Representation
 
-RustFS extent metadata must support a ZERO/Hole extent kind.
+ARXFS extent metadata must support a ZERO/Hole extent kind.
 
 ```text
 ExtentKind:
@@ -40,7 +40,7 @@ ExtentKind:
     Zero
 ```
 
-A `Data` extent references an existing RustFS physical chunk or record.
+A `Data` extent references an existing ARXFS physical chunk or record.
 
 A `Zero` extent contains:
 
@@ -50,7 +50,7 @@ logical_offset
 logical_length
 extent_kind = Zero
 generation
-metadata checksum/authentication fields inherited from RustFS metadata
+metadata checksum/authentication fields inherited from ARXFS metadata
 ```
 
 A `Zero` extent must not contain:
@@ -68,7 +68,7 @@ physical checksum
 
 There is no physical data to checksum, encrypt, compress, dedupe, scrub, relocate, or trim.
 
-Metadata protecting the ZERO extent itself remains covered by the existing RustFS metadata integrity and encryption rules.
+Metadata protecting the ZERO extent itself remains covered by the existing ARXFS metadata integrity and encryption rules.
 
 ## 4. Storage Pipeline Order
 
@@ -108,15 +108,15 @@ Reads beyond end-of-file follow normal filesystem EOF behaviour and must not be 
 
 ### 6.1 Writing All-Zero Data
 
-If a write buffer for a logical range is entirely zero, RustFS must create or merge ZERO extents for that range.
+If a write buffer for a logical range is entirely zero, ARXFS must create or merge ZERO extents for that range.
 
-If the range previously referenced physical data, the old data extents are removed from the current transaction view. Their physical chunks are released through the normal RustFS copy-on-write refcount/free path.
+If the range previously referenced physical data, the old data extents are removed from the current transaction view. Their physical chunks are released through the normal ARXFS copy-on-write refcount/free path.
 
-If old physical chunks are still referenced by snapshots, reflinks, dedupe owners, or retained recovery roots, they remain live. They are not freed or trimmed until the existing RustFS safety rules say they are unreachable.
+If old physical chunks are still referenced by snapshots, reflinks, dedupe owners, or retained recovery roots, they remain live. They are not freed or trimmed until the existing ARXFS safety rules say they are unreachable.
 
 ### 6.2 Writing Non-Zero Data Into a Hole
 
-A non-zero write into a ZERO extent or hole allocates normal physical data using the existing RustFS data path.
+A non-zero write into a ZERO extent or hole allocates normal physical data using the existing ARXFS data path.
 
 The extent map must split as needed:
 
@@ -136,9 +136,9 @@ after:
 
 Partial writes must preserve existing logical contents.
 
-If a partial write into a data record makes the whole resulting logical record zero, RustFS may replace that record with a ZERO extent.
+If a partial write into a data record makes the whole resulting logical record zero, ARXFS may replace that record with a ZERO extent.
 
-If determining that would require expensive read-modify-check work, RustFS may keep the result as a normal data record. The mandatory guarantee is that explicitly written all-zero buffers become sparse where the full written logical range is known to be zero.
+If determining that would require expensive read-modify-check work, ARXFS may keep the result as a normal data record. The mandatory guarantee is that explicitly written all-zero buffers become sparse where the full written logical range is known to be zero.
 
 ### 6.4 File Extension
 
@@ -154,7 +154,7 @@ Expanding a file creates a hole from the old EOF to the new EOF.
 
 ## 7. Extent Normalisation
 
-RustFS must keep extent maps compact.
+ARXFS must keep extent maps compact.
 
 After any operation that creates, deletes, or splits extents, adjacent compatible ZERO extents should be merged within the same transaction.
 
@@ -178,11 +178,11 @@ The committed extent map must be sorted by logical offset and must not contain o
 
 ZERO extents are not deduped chunks.
 
-RustFS must not create a global dedupe-index entry for an all-zero logical range represented as a ZERO extent.
+ARXFS must not create a global dedupe-index entry for an all-zero logical range represented as a ZERO extent.
 
 Rationale: every zero range is already represented in the optimal shared form: no physical data at all.
 
-If an existing physical all-zero data chunk is discovered during background work, RustFS may rewrite references to that chunk as ZERO extents. The physical chunk is then released when its refcount reaches zero and all snapshot/recovery constraints allow it.
+If an existing physical all-zero data chunk is discovered during background work, ARXFS may rewrite references to that chunk as ZERO extents. The physical chunk is then released when its refcount reaches zero and all snapshot/recovery constraints allow it.
 
 ## 9. Interaction With Compression
 
@@ -196,9 +196,9 @@ This appendix deliberately avoids a separate RLE storage mode.
 
 ZERO extents have no data payload and therefore no data encryption operation.
 
-This must not create a plaintext data bypass because the logical bytes are defined by metadata as zero. The metadata that records the ZERO extent remains protected by the existing RustFS metadata encryption, authentication, and checksum rules.
+This must not create a plaintext data bypass because the logical bytes are defined by metadata as zero. The metadata that records the ZERO extent remains protected by the existing ARXFS metadata encryption, authentication, and checksum rules.
 
-If RustFS exposes encrypted-volume metadata leakage considerations elsewhere, sparse extents must be included in that model: an observer with raw-device access may infer allocation patterns unless the broader metadata-protection design hides them.
+If ARXFS exposes encrypted-volume metadata leakage considerations elsewhere, sparse extents must be included in that model: an observer with raw-device access may infer allocation patterns unless the broader metadata-protection design hides them.
 
 ## 11. Interaction With Checksums and Scrub
 
@@ -214,9 +214,9 @@ If scrub sees a Data extent whose decrypted/decompressed logical contents are al
 
 Creating a ZERO extent does not issue TRIM directly because no physical range belongs to the ZERO extent.
 
-When a ZERO write replaces existing Data extents, the replaced physical ranges enter the existing RustFS free/refcount/discard pipeline.
+When a ZERO write replaces existing Data extents, the replaced physical ranges enter the existing ARXFS free/refcount/discard pipeline.
 
-TRIM remains subject to the existing RustFS safety rules:
+TRIM remains subject to the existing ARXFS safety rules:
 
 ```text
 no live extent references
@@ -228,7 +228,7 @@ safe transaction generation reached
 
 ## 13. Filesystem Check and Recovery
 
-`rustfs check` must validate sparse metadata.
+`arxfs check` must validate sparse metadata.
 
 Required checks:
 
@@ -262,11 +262,11 @@ Unsafe repair actions requiring explicit aggressive recovery mode:
 - dropping non-zero data because it resembles sparse metadata.
 ```
 
-`rustfs rescue` must be able to reconstruct sparse files from inode extent maps even when physical allocation metadata is partially damaged, because ZERO extents do not require data-block recovery.
+`arxfs rescue` must be able to reconstruct sparse files from inode extent maps even when physical allocation metadata is partially damaged, because ZERO extents do not require data-block recovery.
 
 ## 14. Space Accounting
 
-RustFS must account logical size and allocated physical size separately.
+ARXFS must account logical size and allocated physical size separately.
 
 For a sparse file:
 
@@ -283,7 +283,7 @@ Metadata space consumed by the inode and extent records may be counted as filesy
 
 ## 15. API Behaviour
 
-RustFS should expose sparse behaviour through normal file operations.
+ARXFS should expose sparse behaviour through normal file operations.
 
 Required behaviours:
 
@@ -292,14 +292,14 @@ read from hole -> zero bytes
 write all-zero range -> sparse ZERO extent
 truncate larger -> hole
 truncate smaller -> remove extents beyond EOF
-copy sparse file within RustFS -> preserve sparseness where possible
+copy sparse file within ARXFS -> preserve sparseness where possible
 clone/reflink sparse file -> preserve ZERO extents exactly
 snapshot sparse file -> preserve ZERO extents exactly
 ```
 
-If RustOS exposes `SEEK_DATA` / `SEEK_HOLE`-style behaviour, RustFS must report ZERO extents and implicit holes as holes, not as data.
+If RustOS exposes `SEEK_DATA` / `SEEK_HOLE`-style behaviour, ARXFS must report ZERO extents and implicit holes as holes, not as data.
 
-If RustOS exposes an explicit punch-hole or zero-range API, RustFS must implement it by creating ZERO extents and releasing replaced Data extents through the normal COW/refcount/free path.
+If RustOS exposes an explicit punch-hole or zero-range API, ARXFS must implement it by creating ZERO extents and releasing replaced Data extents through the normal COW/refcount/free path.
 
 ## 16. Performance Requirements
 
@@ -307,7 +307,7 @@ Zero detection must be cheap and bounded.
 
 The implementation should use a simple first-party all-zero scan over the write buffer. It must not allocate large temporary buffers, call the compressor to decide whether data is zero, or depend on external libraries.
 
-For large writes, zero detection may operate per RustFS record so that mixed data and zero regions are represented efficiently.
+For large writes, zero detection may operate per ARXFS record so that mixed data and zero regions are represented efficiently.
 
 Sparse reads must synthesize zeroes without disk I/O for the sparse range.
 
@@ -315,7 +315,7 @@ Sparse writes must avoid unnecessary physical allocation.
 
 ## 17. Mandatory Tests
 
-The RustFS sparse implementation is incomplete unless these tests pass.
+The ARXFS sparse implementation is incomplete unless these tests pass.
 
 ```text
 1. create 10 MiB zero file
@@ -360,7 +360,7 @@ The RustFS sparse implementation is incomplete unless these tests pass.
 10. encrypted volume sparse file
     - sparse reads return zeroes
     - no plaintext data payload exists for sparse ranges
-    - metadata remains protected by RustFS metadata rules
+    - metadata remains protected by ARXFS metadata rules
 ```
 
 ## 18. Acceptance Criteria
@@ -374,7 +374,7 @@ Sparse support is accepted only when:
 - reads from ZERO extents and holes return zeroes;
 - writes into holes allocate normal data only for written non-zero ranges;
 - snapshots, reflinks, retained roots, and COW recovery remain correct;
-- rustfs check validates sparse metadata and can rebuild secondary indexes around it;
+- arxfs check validates sparse metadata and can rebuild secondary indexes around it;
 - no RLE/FILL storage mode is introduced by this appendix;
 - the implementation uses first-party Rust only and adds no external dependency.
 ```

@@ -513,8 +513,8 @@ rustos/
 │   │   │                #   the shared lib/fsmeta acorn.* keys.
 │   │   ├── ext4/
 │   │   ├── fat32/
-│   │   └── rustfs/      # Native, POSIX-compliant, capability-aware FS.
-│   │                    #   v1 target (docs/src/filesystem/rustfs-spec.md, staged): COW,
+│   │   └── arxfs/      # Native, POSIX-compliant, capability-aware FS.
+│   │                    #   v1 target (docs/src/filesystem/arxfs-spec.md, staged): COW,
 │   │                    #   encrypted, checksummed, compressed, dedup.
 │   ├── input/
 │   ├── network/
@@ -582,7 +582,7 @@ rustos/
 │   │                    #   seam, never a second engine (§2.2). Fail
 │   │                    #   closed: a refused listing completes to
 │   │                    #   nothing, never a guess.
-│   ├── compress/        # First-party LZ codec; RustFS compresses every record
+│   ├── compress/        # First-party LZ codec; ARXFS compresses every record
 │   │                    #   with it, no external dependency (§2.12, §16.4).
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
@@ -660,11 +660,11 @@ rustos/
 │   │                    #   store + self-identifying encoding, and the closed
 │   │                    #   foreign-metadata preset registry (Acorn/Amiga/Atari/
 │   │                    #   Mac) with checked Time64 conversions — the one
-│   │                    #   definition RustFS, the foreign-FS drivers, and the
-│   │                    #   copy/archive tools share (§2.2; rustfs-spec §21).
+│   │                    #   definition ARXFS, the foreign-FS drivers, and the
+│   │                    #   copy/archive tools share (§2.2; arxfs-spec §21).
 │   ├── fsprobe/         # Shared filesystem signature/label/identity probe:
 │   │                    #   the one definition of how an extent head is
-│   │                    #   recognised as RustFS/ext4/FAT32, the stable
+│   │                    #   recognised as ARXFS/ext4/FAT32, the stable
 │   │                    #   identity each format carries, and the short
 │   │                    #   display fingerprint (ALIAS §3.8) — shared by the
 │   │                    #   volmgr policy driver's probe and the filesystem
@@ -1550,7 +1550,7 @@ You are not exempt from any rule above. In addition:
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
-    | RustFS | `docs/src/filesystem/rustfs-spec.md` (binding spec); `plans/RUSTFS-METADATA.md`; `plans/RUSTFS-SNAPSHOT.md`; `plans/RUSTFS-FEC.md`; `plans/SPARSE.md` |
+    | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/ARXFS-METADATA.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md`; `plans/SPARSE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
@@ -2699,7 +2699,7 @@ may store absolute time as 32-bit seconds.
   persistent time storage. Pointer width is not time width.
 - All syscalls, IPC, `sysinfo`, `stdinfo`, logs, scheduler metadata,
   file metadata, and native on-disk formats use `Time64`.
-- RustFS stores `created`, `modified`, `accessed`, and `changed`
+- ARXFS stores `created`, `modified`, `accessed`, and `changed`
   timestamps as true `Time64`. Every new RustOS-native filesystem must
   do the same.
 - Filesystem drivers must preserve the widest timestamp range and
@@ -2996,7 +2996,7 @@ format conformance**. These remain deliberately fixed and fail-closed (§5.4,
   caps, command-line/config length caps) — these are defences (§19.5), not
   capacities; widening them "to be flexible" is a security regression (§2.17).
 - On-disk / wire format constants dictated by an external or native format
-  (ext4/FAT32 block sizes and name lengths, RustFS metadata-block size, ABI
+  (ext4/FAT32 block sizes and name lengths, ARXFS metadata-block size, ABI
   record sizes) — fixed by the format, not by us (§2.13, §21).
 - Explicitly charter-blessed fixed defaults, such as the §22 random output
   reserve (a 2 KiB, preferably per-CPU, default is sanctioned there).
@@ -3175,8 +3175,8 @@ rule, stop and ask (§15.7) — never resolve it with a "for now" shortcut
   unrelated devices or the whole system, §26.1), and the event is logged
   through the hash-chained audit log with a stable event ID (§19.4) so a
   failing drive is observable through the System Information API (§16.6).
-- **Integrity over silent corruption (§5.4 fail closed).** RustFS checksums
-  every record (§3, RustFS spec) so corruption from a failing disk is *detected*
+- **Integrity over silent corruption (§5.4 fail closed).** ARXFS checksums
+  every record (§3, ARXFS spec) so corruption from a failing disk is *detected*
   rather than silently served; on a checksum or read failure the layer fails
   closed and reports, it does not return data it cannot vouch for. Bounded,
   documented retry/timeout budgets that fail closed are permitted; an unbounded
@@ -3200,7 +3200,7 @@ rule, stop and ask (§15.7) — never resolve it with a "for now" shortcut
   Mount, lookup, allocation, free-space search, `stat`, and directory listing
   must not require reading, building, or walking an O(volume-size) in-memory
   structure: a 100 TB+ volume cannot have its entire allocation map, inode
-  table, or directory index resident or linearly scanned per operation. RustFS
+  table, or directory index resident or linearly scanned per operation. ARXFS
   and every filesystem driver use paged, on-demand, indexed (B-tree / extent /
   bitmap-hierarchy) structures so cost scales with the working set, not the
   device (§2.16, §24.1). A design that is fine at 1 TB but quadratic or

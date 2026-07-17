@@ -5,7 +5,7 @@
 //! system — so the author and the consumer share one on-disk definition. It carries exactly what the Pi GPU bootloader
 //! reads: the verified firmware blobs, the generated `config.txt`, and the
 //! flat `kernel8.img`. It also carries the volume's plaintext
-//! [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor) — the
+//! [`UnlockDescriptor`](rustos_drv_fs_arxfs::UnlockDescriptor) — the
 //! salt + iteration count the bootstrap reads *before* anything is
 //! decrypted, to turn the operator passphrase into the encrypted root's
 //! volume key.
@@ -28,12 +28,12 @@ pub const CONFIG_TXT_NAME: &str = "config.txt";
 /// passphrase under the descriptor's salt + iteration count, and only
 /// then opens the root. It carries no secret — only the public KDF
 /// parameters (see
-/// [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor)).
+/// [`UnlockDescriptor`](rustos_drv_fs_arxfs::UnlockDescriptor)).
 ///
 /// The literal is defined once beside the descriptor it names; the writer
 /// here and the boot-path reader import the same constant so the contract
 /// cannot drift.
-pub use rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME;
+pub use rustos_drv_fs_arxfs::ROOT_UNLOCK_NAME;
 
 /// Render the `config.txt` the Pi firmware boots RustOS with.
 ///
@@ -78,7 +78,7 @@ const BOOT_FAT_SERIAL: u32 = 0x5253_4F53; // "RSOS"
 /// Author the FAT32 boot partition: format `sectors` sectors and plant the
 /// firmware blobs, `config.txt`, `kernel8.img`, and the root volume's
 /// `unlock_descriptor` (the encoded
-/// [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor) bytes, at
+/// [`UnlockDescriptor`](rustos_drv_fs_arxfs::UnlockDescriptor) bytes, at
 /// [`ROOT_UNLOCK_NAME`]).
 ///
 /// # Errors

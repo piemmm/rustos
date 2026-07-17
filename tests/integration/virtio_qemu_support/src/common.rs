@@ -35,8 +35,8 @@ use rustos_abi::Duration64;
 use rustos_abi::{CapabilityId, DriverHandle, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
+use rustos_drv_fs_arxfs::ARXFS;
 use rustos_drv_fs_fat32::Fat32;
-use rustos_drv_fs_rustfs::RustFs;
 use rustos_drv_network_virtio_net::VirtioNet;
 use rustos_drv_storage_virtio_blk::VirtioBlk;
 use rustos_drvhost::{
@@ -399,31 +399,31 @@ pub fn fat32_round_trip<Tr: Transport>(
     Ok(())
 }
 
-/// rustfs-over-virtio-blk device tail: open the device over `transport`,
-/// mount the planted rustfs volume through the real
-/// [`RustFs`](rustos_drv_fs_rustfs::RustFs) driver, verify the planted
+/// arxfs-over-virtio-blk device tail: open the device over `transport`,
+/// mount the planted arxfs volume through the real
+/// [`ARXFS`](rustos_drv_fs_arxfs::ARXFS) driver, verify the planted
 /// file reads back its known contents, then create and write a fresh
 /// file and read it back. Generic over the transport so the PCI and
 /// MMIO verticals run identical code.
 ///
 /// The on-disk layout and the planted/written file names and contents
-/// come from the shared [`rustos_test_rustfs_image`] fixture — the same
+/// come from the shared [`rustos_test_arxfs_image`] fixture — the same
 /// source of truth the host harness plants the backing image from (and
 /// which the real driver itself authored), so the two sides cannot drift.
-pub fn rustfs_round_trip<Tr: Transport>(
+pub fn arxfs_round_trip<Tr: Transport>(
     env: &dyn QemuEnv,
     transport: Tr,
     vhost: &dyn VirtioHost,
 ) -> Result<(), &'static str> {
-    use rustos_test_rustfs_image as image;
+    use rustos_test_arxfs_image as image;
 
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
-    let geo = blk.geometry().map_err(|_| "rustfs geometry")?;
+    let geo = blk.geometry().map_err(|_| "arxfs geometry")?;
     if geo.block_count != image::TOTAL_SECTORS || geo.block_size as usize != image::SECTOR_BYTES {
-        return Err("rustfs device geometry mismatch");
+        return Err("arxfs device geometry mismatch");
     }
-    let mut fs = RustFs::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "rustfs mount")?;
-    env.log("virtio-qemu: rustfs volume mounted");
+    let mut fs = ARXFS::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "arxfs mount")?;
+    env.log("virtio-qemu: arxfs volume mounted");
 
     let root = fs.root();
     let planted = fs
@@ -436,7 +436,7 @@ pub fn rustfs_round_trip<Tr: Transport>(
     if &buf[..n] != image::PLANTED_FILE_CONTENT {
         return Err("planted file contents mismatch");
     }
-    env.log("virtio-qemu: rustfs planted file verified");
+    env.log("virtio-qemu: arxfs planted file verified");
 
     fs.create(root, image::NEW_FILE_NAME, NodeKind::RegularFile)
         .map_err(|_| "create new file")?;
@@ -457,13 +457,13 @@ pub fn rustfs_round_trip<Tr: Transport>(
     if &rb[..m] != image::NEW_FILE_CONTENT {
         return Err("new file round-trip mismatch");
     }
-    env.log("virtio-qemu: rustfs write round-trip verified");
+    env.log("virtio-qemu: arxfs write round-trip verified");
     Ok(())
 }
 
 /// users-root device tail: open the device over `transport`, mount the
 /// planted users-root volume through the real
-/// [`RustFs`](rustos_drv_fs_rustfs::RustFs) driver, then drive the
+/// [`ARXFS`](rustos_drv_fs_arxfs::ARXFS) driver, then drive the
 /// kernel's boot-time users-database load
 /// ([`rustos_kernel_core::load_users_db`]) against the mounted root —
 /// the `plans/PI.md` P11 root-volume read path, end to end on a live
@@ -472,7 +472,7 @@ pub fn rustfs_round_trip<Tr: Transport>(
 /// usable by the login path.
 ///
 /// The on-disk layout and the planted account come from the shared
-/// [`rustos_test_rustfs_image`] users-root fixture — the same source of
+/// [`rustos_test_arxfs_image`] users-root fixture — the same source of
 /// truth the host harness plants the backing image from (authored by
 /// the real driver), so the two sides cannot drift.
 pub fn users_db_load<Tr: Transport>(
@@ -480,10 +480,10 @@ pub fn users_db_load<Tr: Transport>(
     transport: Tr,
     vhost: &dyn VirtioHost,
 ) -> Result<(), &'static str> {
-    use rustos_test_rustfs_image as image;
+    use rustos_test_arxfs_image as image;
 
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
-    let mut fs = RustFs::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "users-root mount")?;
+    let mut fs = ARXFS::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "users-root mount")?;
     env.log("virtio-qemu: users-root volume mounted");
 
     let db = rustos_kernel_core::load_users_db(&mut fs, env.audit_sink())

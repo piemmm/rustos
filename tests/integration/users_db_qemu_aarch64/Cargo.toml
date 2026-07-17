@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-users-db-qemu-aarch64"
-description = "plans/PI.md P11 QEMU integration test: boot the aarch64 virt-board, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, load the signed virtio-blk `.rxe`, mount the planted users-root rustfs volume through the real driver, then drive the kernel's boot-time users-database load (rustos_kernel_core::load_users_db) and prove the parsed database authenticates the planted account — the root-volume read path for /System/Security/Users, end to end on a live (emulated) board."
+description = "plans/PI.md P11 QEMU integration test: boot the aarch64 virt-board, build the virtio-MMIO bus from the device tree, provision an MmioTransport through the capability-gated KernelMmioMapper, load the signed virtio-blk `.rxe`, mount the planted users-root arxfs volume through the real driver, then drive the kernel's boot-time users-database load (rustos_kernel_core::load_users_db) and prove the parsed database authenticates the planted account — the root-volume read path for /System/Security/Users, end to end on a live (emulated) board."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

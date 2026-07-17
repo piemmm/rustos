@@ -5,7 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::gpt::{self, ENTRY_LEN, TYPE_GUID_EFI_SYSTEM, TYPE_GUID_RUSTFS_ROOT};
+use crate::gpt::{self, ENTRY_LEN, TYPE_GUID_ARXFS_ROOT, TYPE_GUID_EFI_SYSTEM};
 use crate::mbr::{self, MbrError, MBR_SECTOR_LEN};
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::DriverError;
@@ -81,7 +81,7 @@ fn boot(start: u32, sectors: u32) -> Partition {
 
 fn root(start: u32, sectors: u32) -> Partition {
     Partition {
-        ty: PartitionType::RustFsRoot,
+        ty: PartitionType::ARXFSRoot,
         start_lba: u64::from(start),
         block_count: u64::from(sectors),
     }
@@ -89,7 +89,7 @@ fn root(start: u32, sectors: u32) -> Partition {
 
 fn system(start: u32, sectors: u32) -> Partition {
     Partition {
-        ty: PartitionType::RustFsSystem,
+        ty: PartitionType::ARXFSSystem,
         start_lba: u64::from(start),
         block_count: u64::from(sectors),
     }
@@ -108,7 +108,7 @@ fn mbr_round_trips_the_boot_and_root_layout() {
     assert_eq!(table.partitions().len(), 2);
     assert_eq!(table.first_of_type(PartitionType::FatBoot), Some(parts[0]));
     assert_eq!(
-        table.first_of_type(PartitionType::RustFsRoot),
+        table.first_of_type(PartitionType::ARXFSRoot),
         Some(parts[1])
     );
     assert_eq!(table.first_of_type(PartitionType::Other), None);
@@ -127,18 +127,18 @@ fn mbr_round_trips_the_three_partition_design_b_layout() {
 
     // The `/System` entry carries its own distinct type byte, separate from
     // the encrypted data root's.
-    assert_eq!(sector[446 + 4], mbr::PART_TYPE_RUSTFS_SYSTEM);
-    assert_ne!(mbr::PART_TYPE_RUSTFS_SYSTEM, mbr::PART_TYPE_RUSTFS);
+    assert_eq!(sector[446 + 4], mbr::PART_TYPE_ARXFS_SYSTEM);
+    assert_ne!(mbr::PART_TYPE_ARXFS_SYSTEM, mbr::PART_TYPE_ARXFS);
 
     let table = mbr::parse(&sector).expect("parses");
     assert_eq!(table.partitions().len(), 3);
     assert_eq!(table.first_of_type(PartitionType::FatBoot), Some(parts[1]));
     assert_eq!(
-        table.first_of_type(PartitionType::RustFsSystem),
+        table.first_of_type(PartitionType::ARXFSSystem),
         Some(parts[0])
     );
     assert_eq!(
-        table.first_of_type(PartitionType::RustFsRoot),
+        table.first_of_type(PartitionType::ARXFSRoot),
         Some(parts[2])
     );
 }
@@ -147,8 +147,8 @@ fn mbr_round_trips_the_three_partition_design_b_layout() {
 fn mbr_type_byte_round_trips_every_representable_role() {
     for ty in [
         PartitionType::FatBoot,
-        PartitionType::RustFsSystem,
-        PartitionType::RustFsRoot,
+        PartitionType::ARXFSSystem,
+        PartitionType::ARXFSRoot,
     ] {
         let byte = mbr::type_byte_for(ty).expect("representable role");
         assert_eq!(mbr::classify(byte), ty);
@@ -177,14 +177,14 @@ fn mbr_encode_refuses_an_unrepresentable_role_instead_of_dropping_it() {
 #[test]
 fn gpt_classifies_the_system_guid_distinctly_from_the_root_guid() {
     assert_eq!(
-        gpt::classify(&gpt::TYPE_GUID_RUSTFS_SYSTEM),
-        PartitionType::RustFsSystem
+        gpt::classify(&gpt::TYPE_GUID_ARXFS_SYSTEM),
+        PartitionType::ARXFSSystem
     );
     assert_eq!(
-        gpt::classify(&TYPE_GUID_RUSTFS_ROOT),
-        PartitionType::RustFsRoot
+        gpt::classify(&TYPE_GUID_ARXFS_ROOT),
+        PartitionType::ARXFSRoot
     );
-    assert_ne!(gpt::TYPE_GUID_RUSTFS_SYSTEM, TYPE_GUID_RUSTFS_ROOT);
+    assert_ne!(gpt::TYPE_GUID_ARXFS_SYSTEM, TYPE_GUID_ARXFS_ROOT);
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn mbr_encode_rejects_empty_and_sector_zero_and_too_many() {
 #[test]
 fn mbr_encode_rejects_a_partition_too_large_for_32_bit_fields() {
     let huge = Partition {
-        ty: PartitionType::RustFsRoot,
+        ty: PartitionType::ARXFSRoot,
         start_lba: u64::from(u32::MAX) + 1,
         block_count: 64,
     };
@@ -241,7 +241,7 @@ fn mbr_parse_rejects_overlapping_on_disk_entries() {
     let mut sector = [0u8; MBR_SECTOR_LEN];
     for (i, (start, sectors)) in [(2048u32, 4096u32), (4096, 4096)].iter().enumerate() {
         let base = mbr::PARTITION_TABLE_OFFSET + i * mbr::PARTITION_ENTRY_LEN;
-        sector[base + 4] = mbr::PART_TYPE_RUSTFS;
+        sector[base + 4] = mbr::PART_TYPE_ARXFS;
         sector[base + 8..base + 12].copy_from_slice(&start.to_le_bytes());
         sector[base + 12..base + 16].copy_from_slice(&sectors.to_le_bytes());
     }
@@ -313,7 +313,7 @@ fn build_gpt(
 fn gpt_parses_boot_and_root_partitions() {
     let parts = [
         (TYPE_GUID_EFI_SYSTEM, 2048u64, 67583u64),
-        (TYPE_GUID_RUSTFS_ROOT, 67584, 200_000),
+        (TYPE_GUID_ARXFS_ROOT, 67584, 200_000),
     ];
     let mut dev = build_gpt(512, 262_144, 128, &parts);
 
@@ -322,21 +322,19 @@ fn gpt_parses_boot_and_root_partitions() {
     let bootp = table.first_of_type(PartitionType::FatBoot).expect("boot");
     assert_eq!(bootp.start_lba, 2048);
     assert_eq!(bootp.block_count, 67583 - 2048 + 1);
-    let rootp = table
-        .first_of_type(PartitionType::RustFsRoot)
-        .expect("root");
+    let rootp = table.first_of_type(PartitionType::ARXFSRoot).expect("root");
     assert_eq!(rootp.start_lba, 67584);
     assert_eq!(rootp.block_count, 200_000 - 67584 + 1);
 }
 
 #[test]
 fn gpt_parses_with_a_4k_logical_block() {
-    let parts = [(TYPE_GUID_RUSTFS_ROOT, 256u64, 50_000u64)];
+    let parts = [(TYPE_GUID_ARXFS_ROOT, 256u64, 50_000u64)];
     let mut dev = build_gpt(4096, 65_536, 128, &parts);
     let table = parse_partition_table(&mut dev).expect("parses 4k GPT");
     assert_eq!(
         table
-            .first_of_type(PartitionType::RustFsRoot)
+            .first_of_type(PartitionType::ARXFSRoot)
             .unwrap()
             .start_lba,
         256
@@ -345,7 +343,7 @@ fn gpt_parses_with_a_4k_logical_block() {
 
 #[test]
 fn gpt_rejects_a_corrupt_header_crc() {
-    let parts = [(TYPE_GUID_RUSTFS_ROOT, 2048u64, 4096u64)];
+    let parts = [(TYPE_GUID_ARXFS_ROOT, 2048u64, 4096u64)];
     let mut dev = build_gpt(512, 8192, 128, &parts);
     // Flip a header byte the CRC covers (the entries-LBA field).
     let mut hdr = [0u8; 512];
@@ -353,7 +351,7 @@ fn gpt_rejects_a_corrupt_header_crc() {
     hdr[72] ^= 0xff;
     dev.write_blocks(1, &hdr).unwrap();
     // Detection now fails -> falls back to MBR (the protective MBR has no
-    // RustFS entry), so no scheme yields a usable table.
+    // ARXFS entry), so no scheme yields a usable table.
     assert!(matches!(
         parse_partition_table(&mut dev),
         Err(PartitionError::Mbr(_))
@@ -362,7 +360,7 @@ fn gpt_rejects_a_corrupt_header_crc() {
 
 #[test]
 fn gpt_rejects_a_corrupt_entries_crc() {
-    let parts = [(TYPE_GUID_RUSTFS_ROOT, 2048u64, 4096u64)];
+    let parts = [(TYPE_GUID_ARXFS_ROOT, 2048u64, 4096u64)];
     let mut dev = build_gpt(512, 8192, 128, &parts);
     // Corrupt the entry array (LBA 2) without touching the header.
     let mut blk = [0u8; 512];
@@ -377,7 +375,7 @@ fn gpt_rejects_a_corrupt_entries_crc() {
 
 #[test]
 fn gpt_rejects_an_extent_past_the_device() {
-    let parts = [(TYPE_GUID_RUSTFS_ROOT, 2048u64, 999_999u64)];
+    let parts = [(TYPE_GUID_ARXFS_ROOT, 2048u64, 999_999u64)];
     let mut dev = build_gpt(512, 8192, 128, &parts);
     assert_eq!(
         parse_partition_table(&mut dev),
@@ -398,7 +396,7 @@ fn dispatch_reads_an_mbr_disk() {
 
     let table = parse_partition_table(&mut dev).expect("parses MBR via dispatch");
     assert_eq!(
-        table.first_of_type(PartitionType::RustFsRoot),
+        table.first_of_type(PartitionType::ARXFSRoot),
         Some(parts[1])
     );
 }

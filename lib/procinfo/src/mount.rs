@@ -198,8 +198,8 @@ mod tests {
     #[test]
     fn walk_routes_the_mount_query_and_yields_records() {
         let fixture = Fixture::new(alloc::vec![
-            record(b"rootfs", b"/", b"rustfs", MountFlags::READ_ONLY),
-            record(b"data", b"/Storage/data", b"rustfs", MountFlags::default()),
+            record(b"rootfs", b"/", b"arxfs", MountFlags::READ_ONLY),
+            record(b"data", b"/Storage/data", b"arxfs", MountFlags::default()),
         ]);
         let got = collect(&fixture).expect("ok");
         assert_eq!(got.len(), 2);
@@ -213,12 +213,7 @@ mod tests {
     fn walk_pages_until_a_short_page() {
         let mut records = Vec::new();
         for _ in 0..=MOUNT_PAGE {
-            records.push(record(
-                b"v",
-                b"/Storage/v",
-                b"rustfs",
-                MountFlags::default(),
-            ));
+            records.push(record(b"v", b"/Storage/v", b"arxfs", MountFlags::default()));
         }
         let fixture = Fixture::new(records);
         let got = collect(&fixture).expect("ok");
@@ -238,7 +233,7 @@ mod tests {
         let mut fixture = Fixture::new(alloc::vec![record(
             b"rootfs",
             b"/",
-            b"rustfs",
+            b"arxfs",
             MountFlags::default()
         )]);
         fixture.malformed = true;
@@ -251,8 +246,8 @@ mod tests {
     #[test]
     fn sink_error_stops_the_walk() {
         let fixture = Fixture::new(alloc::vec![
-            record(b"a", b"/a", b"rustfs", MountFlags::default()),
-            record(b"b", b"/b", b"rustfs", MountFlags::default()),
+            record(b"a", b"/a", b"arxfs", MountFlags::default()),
+            record(b"b", b"/b", b"arxfs", MountFlags::default()),
         ]);
         let count = RefCell::new(0usize);
         let result = for_each_mount(&fixture, |_| {
@@ -268,10 +263,10 @@ mod tests {
         let flags = MountFlags::NOSUID
             .union(MountFlags::NODEV)
             .union(MountFlags::NOEXEC);
-        let line = render_mount(&record(b"data", b"/Storage/data", b"rustfs", flags));
+        let line = render_mount(&record(b"data", b"/Storage/data", b"arxfs", flags));
         assert_eq!(
             line,
-            "data on /Storage/data type rustfs (rw,nosuid,nodev,noexec)"
+            "data on /Storage/data type arxfs (rw,nosuid,nodev,noexec)"
         );
     }
 
@@ -302,8 +297,8 @@ mod tests {
 
     #[test]
     fn read_only_renders_ro() {
-        let line = render_mount(&record(b"rootfs", b"/", b"rustfs", MountFlags::READ_ONLY));
-        assert_eq!(line, "rootfs on / type rustfs (ro)");
+        let line = render_mount(&record(b"rootfs", b"/", b"arxfs", MountFlags::READ_ONLY));
+        assert_eq!(line, "rootfs on / type arxfs (ro)");
     }
 
     #[test]
@@ -321,7 +316,7 @@ mod tests {
         let line = render_mount(&record(
             &[0xFF, 0xFE],
             b"/",
-            b"rustfs",
+            b"arxfs",
             MountFlags::default(),
         ));
         assert!(line.contains('\u{FFFD}'));

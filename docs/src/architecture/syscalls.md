@@ -182,7 +182,7 @@ access. The `chmod` command app and `fstree`'s mode editor are its callers.
 
 The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the
 `getxattr`/`setxattr`/`listxattr`/`removexattr` shapes over the per-inode
-`namespace.rest` store `lib/fsmeta` defines and `docs/src/filesystem/rustfs-spec.md`
+`namespace.rest` store `lib/fsmeta` defines and `docs/src/filesystem/arxfs-spec.md`
 §21 specifies. A key carries `1..=FS_ATTR_KEY_MAX` (255) bytes and a value at
 most `FS_ATTR_VALUE_MAX` (3072) opaque bytes; both bounds are refused at
 dispatch with `LengthOutOfRange` before any user memory beyond them is read.

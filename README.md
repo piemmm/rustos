@@ -62,7 +62,7 @@ next stage, hence still `◐`.
 
 ## Filesystem feature support
 
-This table compares the RustFS *design as implemented* against what each
+This table compares the ARXFS *design as implemented* against what each
 foreign filesystem itself provides — the on-disk format and its canonical
 implementation (Linux for ext4/btrfs/XFS/bcachefs, the VFAT spec for FAT32,
 RISC OS for ADFS, OpenZFS for the ZFS layer) — **not** against RustOS's
@@ -72,7 +72,7 @@ the pool supplies block-level services underneath ext4 semantics, marked
 Legend: `✓` provided (optional features count) · `◐` partial ·
 `▢` recognised future stage · `—` not provided.
 
-| Feature | RustFS | ext4 | FAT32 | btrfs | XFS | bcachefs | ADFS | ext4 on ZFS |
+| Feature | ARXFS | ext4 | FAT32 | btrfs | XFS | bcachefs | ADFS | ext4 on ZFS |
 | --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
 | RustOS driver | ✓ native | ✓ read/write | ✓ read/write | — | — | — | ✓ read/write | — |
 | Long file names (255 bytes) | ✓ | ✓ | ✓ VFAT | ✓ | ✓ | ✓ | ✓ E+/F+ | ✓ |
@@ -97,7 +97,7 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Online grow | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
 | Device-health monitoring → triggered scrub | ✓ | — | — | — | — | — | — | ◐ ZED |
 
-RustOS ships drivers for RustFS (native) and for ext4, FAT32, and ADFS as
+RustOS ships drivers for ARXFS (native) and for ext4, FAT32, and ADFS as
 interoperability drivers for foreign volumes: ext4 maintains every on-disk
 checksum it mounts (`metadata_csum`, `gdt_csum`, `64bit`) and fails closed to
 read-only on feature sets outside its write allow-list; FAT32 has no on-disk
@@ -108,8 +108,8 @@ checksum and surfacing RISC OS load/exec/filetype/datestamp metadata through
 the shared `acorn.*` attribute keys. The
 drivers' declared-limit timestamp surface is staged per `AGENTS.md` §21.
 btrfs, XFS, bcachefs, and ZFS have no RustOS driver and appear only for
-comparison — including what RustFS does *not* do: snapshots, multi-device
-pooling/RAID, and self-healing of *data* (RustFS today detects and classifies
+comparison — including what ARXFS does *not* do: snapshots, multi-device
+pooling/RAID, and self-healing of *data* (ARXFS today detects and classifies
 bad data blocks through its three-layer integrity pipeline but repairs only
 its mirrored metadata; data reconstruction is a recognised later stage).
 Per-driver detail lives in each crate's `README.md` under

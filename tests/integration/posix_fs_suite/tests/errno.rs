@@ -27,7 +27,7 @@ fn vfs_error_maps_to_the_documented_stable_errno() {
 
 #[test]
 fn a_real_missing_lookup_surfaces_enoent() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -40,7 +40,7 @@ fn a_real_missing_lookup_surfaces_enoent() {
 
 #[test]
 fn a_real_permission_denial_surfaces_eacces() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let admin = cred(ROOT_UID, ROOT_GID, &caps);
 

@@ -31,7 +31,7 @@ This must never be confused with the fixed security/format *bounds* on
 untrusted input (§24.4), which stay deliberately fixed and fail closed:
 parser parameter/byte caps (`lib/vt` `MAX_PARAMS`/`MAX_STRING`, `lib/fdt`
 `MAX_DEPTH`, the `lib/svg` caps), on-disk/wire format constants (ext4/FAT32,
-RustFS, ABI record sizes), and the charter-blessed §22 RNG output reserve.
+ARXFS, ABI record sizes), and the charter-blessed §22 RNG output reserve.
 Turning a security bound into a growable capacity, or a capacity into a frozen
 ceiling, are both defects — when in doubt, stop and ask (`AGENTS.md` §15.7).
 

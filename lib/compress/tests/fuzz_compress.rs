@@ -1,10 +1,10 @@
 //! Deterministic fuzz harness for the first-party LZ decoder
-//! (`docs/src/filesystem/rustfs-spec.md` §10 — the
+//! (`docs/src/filesystem/arxfs-spec.md` §10 — the
 //! required "compression decode" fuzz target).
 //!
 //! [`rustos_compress::decompress`] parses a byte stream that, on a real
 //! system, may have been written or corrupted by anything: it is the
-//! untrusted-input parser `RustFS` runs over every compressed data record. Per
+//! untrusted-input parser `ARXFS` runs over every compressed data record. Per
 //! that decode path is driven by a fuzz harness whose invariants are:
 //!
 //! * `decompress` never panics for any input — it returns `Ok` for a valid

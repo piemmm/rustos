@@ -53,7 +53,7 @@ authority.
   data, force-unmount, and verified re-insert are the staged D4 work
   (`plans/DEVICES.md` §2.5). A cleanly detached volume is withdrawn
   through `volume_detach` by that machinery, not by this driver.
-- Only the kernel-attachable filesystems (RustFS / ext4 / FAT32) are
+- Only the kernel-attachable filesystems (ARXFS / ext4 / FAT32) are
   recognised; anything else is left untouched and logged.
 - The probe is read-only by construction (`write_blocks` refuses), so a
   hostile or corrupt medium can never be mutated by probing it.

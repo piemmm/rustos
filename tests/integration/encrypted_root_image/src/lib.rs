@@ -11,11 +11,11 @@
 //! 2. A **FAT32 boot partition** at [`BOOT_LBA`], authored by the real
 //!    [`Fat32`] driver, carrying the plaintext `root.unlock`
 //!    key-derivation descriptor ([`ROOT_UNLOCK_NAME`]).
-//! 3. An **encrypted `RustFS` root partition** at [`ROOT_LBA`], whose
+//! 3. An **encrypted `ARXFS` root partition** at [`ROOT_LBA`], whose
 //!    volume key is **derived from [`PASSPHRASE`]** through the descriptor
 //!    above, carrying `/System/Security/Users` with the
 //!    single [`USERNAME`]/[`PASSWORD`] account — the shared
-//!    [`rustos_test_rustfs_image`] users-root volume.
+//!    [`rustos_test_arxfs_image`] users-root volume.
 //!
 //! The host harness (`tools/xtask`) plants [`build_image`]'s bytes on the
 //! test's virtio-blk backing; the freestanding guest tail
@@ -42,13 +42,13 @@ use alloc::vec::Vec;
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
-use rustos_drv_fs_fat32::Fat32;
-use rustos_drv_fs_rustfs::{
-    EntropySource, RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY,
+use rustos_drv_fs_arxfs::{
+    EntropySource, UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY,
     UNLOCK_DESCRIPTOR_LEN, UNLOCK_MIN_ITERATIONS,
 };
+use rustos_drv_fs_fat32::Fat32;
 use rustos_partition::{mbr, Partition, PartitionType};
-use rustos_test_rustfs_image as root_image;
+use rustos_test_arxfs_image as root_image;
 
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// the 512-byte sector QEMU's virtio-blk reports by default and the sector
@@ -65,12 +65,12 @@ pub const BOOT_LBA: u64 = 2048;
 /// footprint — the same size `tools/mkimage` formats the boot partition at.
 pub const FAT_BOOT_SECTORS: u64 = 131_072;
 
-/// First sector of the read-only `RustFS` `/System` partition: directly
+/// First sector of the read-only `ARXFS` `/System` partition: directly
 /// after the boot partition, which already ends 1 MiB-aligned. This is the
 /// design-B pre-unlock signed-driver store (`plans/PI.md` B1).
 pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 
-/// Sectors in the read-only `RustFS` `/System` partition: 32 MiB. Large
+/// Sectors in the read-only `ARXFS` `/System` partition: 32 MiB. Large
 /// enough to carry the skeleton, the design-B signed driver bundle(s) the
 /// pre-unlock autoload reads from its `Drivers/` store (`plans/PI.md`
 /// design B / B2), **and** the full set of self-contained application
@@ -80,12 +80,12 @@ pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 /// planted on the backing file).
 pub const SYSTEM_SECTORS: u64 = 65_536;
 
-/// First sector of the encrypted `RustFS` root partition: directly after
+/// First sector of the encrypted `ARXFS` root partition: directly after
 /// the `/System` partition.
 pub const ROOT_LBA: u64 = SYSTEM_LBA + SYSTEM_SECTORS;
 
-/// Sectors in the encrypted `RustFS` root partition — the shared
-/// [`rustos_test_rustfs_image`] users-root volume's footprint.
+/// Sectors in the encrypted `ARXFS` root partition — the shared
+/// [`rustos_test_arxfs_image`] users-root volume's footprint.
 pub const ROOT_SECTORS: u64 = root_image::TOTAL_SECTORS;
 
 /// Total sectors in the assembled whole-disk image.
@@ -97,7 +97,7 @@ pub const TOTAL_SECTORS: u64 = ROOT_LBA + ROOT_SECTORS;
 pub const PASSPHRASE: &[u8] = b"unlock-vertical correct horse battery staple";
 
 /// Username of the single account planted on the root volume — the shared
-/// [`rustos_test_rustfs_image`] users-root account, so the guest tail's
+/// [`rustos_test_arxfs_image`] users-root account, so the guest tail's
 /// authentication proof names exactly what the volume carries.
 pub const USERNAME: &str = root_image::USERS_FIXTURE_USERNAME;
 
@@ -125,7 +125,7 @@ impl EntropySource for FixtureEntropy {
 /// In-memory whole-disk / partition [`Block`] double addressing
 /// [`SECTOR_BYTES`]-byte sectors, with its geometry derived from its actual
 /// backing length (so a 64 MiB FAT partition formats correctly, unlike the
-/// fixed-geometry rustfs fixture double).
+/// fixed-geometry arxfs fixture double).
 struct MemDisk {
     store: Vec<u8>,
 }
@@ -216,7 +216,7 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
     Ok(fs.into_block().store)
 }
 
-/// Author the read-only `/System` partition: format a small `RustFS`
+/// Author the read-only `/System` partition: format a small `ARXFS`
 /// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`], lay the
 /// `/System` skeleton at its root (`Drivers` plus `Security`), and
 /// plant the design-B signed driver `drivers` into its `Drivers/` store —
@@ -241,7 +241,7 @@ fn build_system_partition(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, DriverError> {
-    let mut fs = RustFs::format(
+    let mut fs = ARXFS::format(
         MemDisk::new(SYSTEM_SECTORS),
         64,
         &SYSTEM_VOLUME_KEY,
@@ -298,7 +298,7 @@ fn build_system_partition(
 ///
 /// # Errors
 ///
-/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
+/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
 /// authoring, or the MBR encode. The fixed geometry makes a failure a
 /// programming error in this fixture, but it is surfaced rather than
 /// panicked so the builder holds to in every path it links
@@ -331,7 +331,7 @@ pub fn build_image_with_apps(apps: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, Driv
 ///
 /// # Errors
 ///
-/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
+/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverError> {
     build_image_with_contents(&[], &[], passphrase)
@@ -353,7 +353,7 @@ pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverE
 ///
 /// # Errors
 ///
-/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
+/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
     build_image_with_contents(drivers, &[], PASSPHRASE)
@@ -370,7 +370,7 @@ pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>
 ///
 /// # Errors
 ///
-/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
+/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
 /// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_contents(
     drivers: &[(&[&[u8]], &[u8])],
@@ -389,12 +389,12 @@ pub fn build_image_with_contents(
             block_count: FAT_BOOT_SECTORS,
         },
         Partition {
-            ty: PartitionType::RustFsSystem,
+            ty: PartitionType::ARXFSSystem,
             start_lba: SYSTEM_LBA,
             block_count: SYSTEM_SECTORS,
         },
         Partition {
-            ty: PartitionType::RustFsRoot,
+            ty: PartitionType::ARXFSRoot,
             start_lba: ROOT_LBA,
             block_count: ROOT_SECTORS,
         },
@@ -439,14 +439,14 @@ mod tests {
         assert_eq!(boot.block_count, FAT_BOOT_SECTORS);
 
         let system = table
-            .first_of_type(PartitionType::RustFsSystem)
+            .first_of_type(PartitionType::ARXFSSystem)
             .expect("a read-only /System partition is present");
         assert_eq!(system.start_lba, SYSTEM_LBA);
         assert_eq!(system.block_count, SYSTEM_SECTORS);
 
         let root = table
-            .first_of_type(PartitionType::RustFsRoot)
-            .expect("a RustFS root partition is present");
+            .first_of_type(PartitionType::ARXFSRoot)
+            .expect("a ARXFS root partition is present");
         assert_eq!(root.start_lba, ROOT_LBA);
         assert_eq!(root.block_count, ROOT_SECTORS);
     }
@@ -469,11 +469,11 @@ mod tests {
         let mut disk = MemDisk { store: bytes };
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
-            .first_of_type(PartitionType::RustFsSystem)
+            .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::new(disk, system.start_lba, system.block_count)
             .expect("the /System window is in range");
-        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
             .expect("the /System volume mounts read-only under the public key");
 
         for (components, expected) in &apps {
@@ -502,11 +502,11 @@ mod tests {
         let mut disk = MemDisk { store: bytes };
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let system = table
-            .first_of_type(PartitionType::RustFsSystem)
+            .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::new(disk, system.start_lba, system.block_count)
             .expect("the /System window is in range");
-        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
             .expect("the /System volume mounts read-only under the public key");
         let root = sys.root();
         sys.lookup(root, b"Drivers")
@@ -518,18 +518,18 @@ mod tests {
     /// the volume the fixture provisions agree.
     #[test]
     fn the_root_window_mounts_under_the_passphrase_derived_key() {
-        use rustos_drv_fs_rustfs::RustFs;
+        use rustos_drv_fs_arxfs::ARXFS;
 
         let bytes = build_image().expect("the whole-disk image assembles");
         let mut disk = MemDisk { store: bytes };
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
         let root = table
-            .first_of_type(PartitionType::RustFsRoot)
-            .expect("a RustFS root partition is present");
+            .first_of_type(PartitionType::ARXFSRoot)
+            .expect("a ARXFS root partition is present");
 
         let (_descriptor, key) = provision(PASSPHRASE).expect("the descriptor provisions");
         let window = PartitionBlock::new(disk, root.start_lba, root.block_count)
             .expect("the root window is in range");
-        RustFs::open(window, &key).expect("the root mounts under the descriptor-derived key");
+        ARXFS::open(window, &key).expect("the root mounts under the descriptor-derived key");
     }
 }

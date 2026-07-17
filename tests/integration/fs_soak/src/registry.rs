@@ -4,16 +4,16 @@ use std::time::{Duration, Instant};
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
 use rustos_abi::DriverError;
+use rustos_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use rustos_drv_fs_ext4::Ext4;
 use rustos_drv_fs_fat32::Fat32;
-use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
 
 use crate::{exercise, random_exercise, RamBlock};
 
-/// Volume key the soak formats and remounts rustfs with. `RustFS` is
-/// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5), so the
+/// Volume key the soak formats and remounts arxfs with. `ARXFS` is
+/// encrypted-by-default (`docs/src/filesystem/arxfs-spec.md` §5), so the
 /// soak exercises the encrypted-volume path under this fixed key.
-const RUSTFS_SOAK_KEY: VolumeKey = [0xa5; VOLUME_KEY_LEN];
+const ARXFS_SOAK_KEY: VolumeKey = [0xa5; VOLUME_KEY_LEN];
 
 /// Volume identity the soak stamps onto its ext4 volumes: deterministic
 /// (the soak is reproducible), non-nil (the formatter refuses the reserved
@@ -21,7 +21,7 @@ const RUSTFS_SOAK_KEY: VolumeKey = [0xa5; VOLUME_KEY_LEN];
 const SOAK_EXT4_UUID: [u8; 16] = [0x5A; 16];
 
 /// Deterministic stand-in for the platform RNG seam: a byte counter that gives
-/// `RustFs::format` distinct, reproducible key material and UUID. Soak
+/// `ARXFS::format` distinct, reproducible key material and UUID. Soak
 /// scaffolding only, never a production entropy source.
 struct SoakEntropy {
     next: u8,
@@ -41,12 +41,12 @@ impl EntropySource for SoakEntropy {
 /// `cargo xtask fssoak --list` and the `soak.sh` fan-out, so neither
 /// hard-codes the list.
 ///
-/// `rustfs`/`ext4`/`fat32` run the fixed-sequence [`exercise()`];
-/// `rustfs-random` runs the randomized, model-checked [`random_exercise`]
-/// over rustfs, taking a different path on every launch. Both draw a fresh
+/// `arxfs`/`ext4`/`fat32` run the fixed-sequence [`exercise()`];
+/// `arxfs-random` runs the randomized, model-checked [`random_exercise`]
+/// over arxfs, taking a different path on every launch. Both draw a fresh
 /// start seed each launch and log it, so every run differs
 /// and any failure replays from the logged seed.
-pub const TARGETS: &[&str] = &["rustfs", "ext4", "fat32", "rustfs-random"];
+pub const TARGETS: &[&str] = &["arxfs", "ext4", "fat32", "arxfs-random"];
 
 /// A filesystem the soak can format on a [`RamBlock`] and remount,
 /// reached only through the frozen [`FilesystemRead`]/[`FilesystemWrite`]
@@ -76,19 +76,14 @@ fn inode_budget(bytes: u64) -> u32 {
     u32::try_from(raw).unwrap_or(200_000)
 }
 
-impl SoakFs for RustFs<RamBlock> {
+impl SoakFs for ARXFS<RamBlock> {
     fn format_volume(block: RamBlock) -> Result<Self, DriverError> {
         let inodes = inode_budget(block.len_bytes());
-        RustFs::format(
-            block,
-            inodes,
-            &RUSTFS_SOAK_KEY,
-            &mut SoakEntropy { next: 1 },
-        )
+        ARXFS::format(block, inodes, &ARXFS_SOAK_KEY, &mut SoakEntropy { next: 1 })
     }
 
     fn remount(self) -> Result<Self, DriverError> {
-        RustFs::open(self.into_block(), &RUSTFS_SOAK_KEY)
+        ARXFS::open(self.into_block(), &ARXFS_SOAK_KEY)
     }
 }
 
@@ -126,10 +121,10 @@ impl SoakFs for Fat32<RamBlock> {
 /// filesystem is unknown or the exerciser finds an inconsistency.
 pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(), String> {
     match name {
-        "rustfs" => run::<RustFs<RamBlock>>(name, device_bytes, budget_secs),
+        "arxfs" => run::<ARXFS<RamBlock>>(name, device_bytes, budget_secs),
         "ext4" => run::<Ext4<RamBlock>>(name, device_bytes, budget_secs),
         "fat32" => run::<Fat32<RamBlock>>(name, device_bytes, budget_secs),
-        "rustfs-random" => run_random::<RustFs<RamBlock>>(name, device_bytes, budget_secs),
+        "arxfs-random" => run_random::<ARXFS<RamBlock>>(name, device_bytes, budget_secs),
         other => Err(format!(
             "fssoak: unknown filesystem `{other}`; known: {}",
             TARGETS.join(", ")

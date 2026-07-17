@@ -198,7 +198,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use rustos_abi::driver::block::Block;
-    use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
+    use rustos_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 
     const KEY: VolumeKey = [0x5A; VOLUME_KEY_LEN];
     const SECTOR: usize = 512;
@@ -253,10 +253,10 @@ mod tests {
     /// `/System/Security/{Users,Groups}` files (system-owned) and an empty
     /// `/Users` tree. The driver lock is leaked to `'static`, exactly as
     /// `LateFilesystem::register` leaks the production instance.
-    fn backing() -> RootAdminBacking<RustFs<VecBlock>> {
+    fn backing() -> RootAdminBacking<ARXFS<VecBlock>> {
         let block = VecBlock(alloc::vec![0u8; 4 * 1024 * 1024]);
         let mut fs =
-            RustFs::format(block, 64, &KEY, &mut TestEntropy(3)).expect("test volume formats");
+            ARXFS::format(block, 64, &KEY, &mut TestEntropy(3)).expect("test volume formats");
         let root = fs.root();
         let system = fs
             .create(root, b"System", NodeKind::Directory)
@@ -277,7 +277,7 @@ mod tests {
         RootAdminBacking::new(Arc::new(SleepLock::new(fs)))
     }
 
-    fn read_file(backing: &RootAdminBacking<RustFs<VecBlock>>, name: &[u8]) -> Vec<u8> {
+    fn read_file(backing: &RootAdminBacking<ARXFS<VecBlock>>, name: &[u8]) -> Vec<u8> {
         let mut fs = backing.fs.lock();
         let fs = &mut *fs;
         let security = resolve_security_dir(fs).expect("Security resolves");

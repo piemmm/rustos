@@ -9,7 +9,7 @@
 //! the validated `users-v1` database the `users_db_read` syscall serves
 //! (`kernel/core::load_users_db_source`). It adds no policy of its own; it
 //! threads the already-landed building blocks together in the one layer
-//! permitted to name both the `rustfs` driver and `kernel/core`
+//! permitted to name both the `arxfs` driver and `kernel/core`
 //! (`rustos-kernel`, `Layer::Tooling`).
 //!
 //! The composition is, in order:
@@ -19,11 +19,11 @@
 //!    buffer → refused, never trusted).
 //! 2. [`UnlockDescriptor::derive_volume_key`] derives the volume key from
 //!    the typed passphrase via the descriptor's PBKDF2-HMAC-SHA256
-//!    parameters (`lib/crypto`, `docs/src/filesystem/rustfs-spec.md` §7).
+//!    parameters (`lib/crypto`, `docs/src/filesystem/arxfs-spec.md` §7).
 //!    The derived key is held in a [`Zeroizing`] wrapper so it is wiped on
 //!    drop and never lingers on the boot stack (secret
 //!    hygiene; the audited `zeroize` crate, not a hand-rolled primitive).
-//! 3. [`RustFs::open`] mounts the encrypted root under that key. A wrong
+//! 3. [`ARXFS::open`] mounts the encrypted root under that key. A wrong
 //!    passphrase never unwraps the master key and the mount is refused
 //!    with [`DriverError::PermissionDenied`] — there is no separate
 //!    "wrong passphrase" oracle and no fallback to a plaintext mount
@@ -52,7 +52,7 @@
 //! [`mount_root_disk_and_load_users`] sits one layer above that seam: it
 //! takes the **single** whole-disk [`Block`] device a board brings up,
 //! parses its partition table (MBR or GPT — scheme- and
-//! architecture-neutral, the same definition `tools/mkimage` writes), locates the FAT boot and `RustFS` root
+//! architecture-neutral, the same definition `tools/mkimage` writes), locates the FAT boot and `ARXFS` root
 //! partitions by role, and threads bounds-checked windows onto each into
 //! the composition above.
 //!
@@ -69,10 +69,10 @@ use alloc::sync::Arc;
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use rustos_abi::{DriverError, Errno};
-use rustos_drv_fs_fat32::Fat32;
-use rustos_drv_fs_rustfs::{
-    RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DESCRIPTOR_LEN,
+use rustos_drv_fs_arxfs::{
+    UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DESCRIPTOR_LEN,
 };
+use rustos_drv_fs_fat32::Fat32;
 use rustos_kernel_core::{
     build_identity_table, load_groups_db, load_users_db_source, ConsoleRead, ConsoleWrite,
     GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersAdmin, LateUsersDb, SleepLock,
@@ -92,7 +92,7 @@ use zeroize::Zeroizing;
 /// driver-store file service needs.
 ///
 /// Blanket-implemented for every filesystem driver that is both
-/// [`FilesystemRead`] and [`FilesystemSecurity`] (the production `RustFs`
+/// [`FilesystemRead`] and [`FilesystemSecurity`] (the production `ARXFS`
 /// among them), so `&mut dyn RootVolume` is the **object-safe** handle the
 /// continuation passed to [`with_system_volume`] receives — letting the
 /// generic unlock policy hand a freshly mounted, concretely-typed volume to
@@ -112,7 +112,7 @@ const ROOT_MOUNT_UNLOCKED: EventId = EventId(4133);
 /// Audit event: the root unlock was refused by a **structural** failure
 /// before a database could be served — the on-FAT descriptor could not be
 /// read or failed to decode, the partition table or a partition was
-/// missing/malformed, the volume was not rustfs, or the device faulted.
+/// missing/malformed, the volume was not arxfs, or the device faulted.
 /// The `cause` field names which check refused; no secret (passphrase,
 /// key, or volume bytes) is ever logged. The
 /// decision fails closed: no database is held.
@@ -142,7 +142,7 @@ const ROOT_UNLOCK_KEY_REJECTED: EventId = EventId(4142);
 const SYSTEM_VOLUME_MOUNTED: EventId = EventId(4140);
 
 /// Audit event: no read-only `/System` volume was mounted — the disk
-/// carries no `RustFsSystem` partition, or the volume's window could not be
+/// carries no `ARXFSSystem` partition, or the volume's window could not be
 /// built or opened read-only. In B1 this is **not** fatal: the encrypted
 /// root still serves the system, so the boot proceeds. The `cause` field names which check declined, secret-free.
 const SYSTEM_VOLUME_UNAVAILABLE: EventId = EventId(4141);
@@ -170,7 +170,7 @@ pub enum RootMountError {
     /// The root volume could not be mounted under the derived key:
     /// [`DriverError::PermissionDenied`] for a wrong passphrase (the
     /// master key never unwraps), [`DriverError::BadMagic`] for a volume
-    /// that is not rustfs, or a device fault. There is no plaintext-mount
+    /// that is not arxfs, or a device fault. There is no plaintext-mount
     /// fallback (encrypted by default; — fail
     /// closed).
     Mount(DriverError),
@@ -187,7 +187,7 @@ pub enum RootMountError {
     /// `root.unlock` descriptor), so the encrypted root cannot be
     /// unlocked. No database is served.
     NoBootPartition,
-    /// The disk carries no `RustFS` root partition to mount.
+    /// The disk carries no `ARXFS` root partition to mount.
     NoRootPartition,
     /// A parsed partition extent does not fit the device geometry, so its
     /// bounds-checked window could not be built (a
@@ -215,7 +215,7 @@ impl RootMountError {
             Self::DescriptorRead(_) => "descriptor_unreadable",
             Self::Descriptor(_) => "descriptor_invalid",
             Self::Mount(DriverError::PermissionDenied) => "unlock_refused",
-            Self::Mount(DriverError::BadMagic) => "not_a_rustfs_volume",
+            Self::Mount(DriverError::BadMagic) => "not_a_arxfs_volume",
             Self::Mount(_) => "mount_failed",
             Self::Users(err) => err.cause(),
             Self::PartitionTable(_) => "partition_table_invalid",
@@ -272,8 +272,8 @@ pub struct UnlockedRoot {
 /// The unlock itself cannot do this: it holds the key but not a second
 /// `'static` block window onto the root partition (it reuses one borrowed
 /// window per passphrase attempt). The live implementation captures the
-/// `'static` driver-store device, opens the read-write [`RustFs`] window
-/// onto the `RustFsRoot` partition under the supplied key, and registers it
+/// `'static` driver-store device, opens the read-write [`ARXFS`] window
+/// onto the `ARXFSRoot` partition under the supplied key, and registers it
 /// through `crate::system_mount::register_writable_state`. It is
 /// **fail-soft**: publishing the writable backing is never allowed to abort
 /// an otherwise-successful unlock.
@@ -423,7 +423,7 @@ pub fn unlock_root_and_load_users<B: Block>(
     // 3. Mount the encrypted root. A wrong passphrase fails to unwrap the
     //    master key and is refused fail-closed — no plaintext fallback,
     //    no separate oracle.
-    let mut fs = match RustFs::open(block, &volume_key) {
+    let mut fs = match ARXFS::open(block, &volume_key) {
         Ok(fs) => fs,
         Err(err) => {
             let error = RootMountError::Mount(err);
@@ -536,7 +536,7 @@ where
 }
 
 /// Bring up the users database from a single partitioned disk: parse its
-/// partition table, locate the FAT boot and `RustFS` root partitions, and
+/// partition table, locate the FAT boot and `ARXFS` root partitions, and
 /// run the unlock + load composition over a bounds-checked window onto
 /// each (`plans/PI.md` P11 Chunk B-2).
 ///
@@ -547,14 +547,14 @@ where
 /// ([`parse_partition_table`] detects which), so the same code reads a
 /// Raspberry Pi MBR image and a UEFI x86_64 GPT disk without a board
 /// `cfg`. The partitions are located by **role**
-/// (`FatBoot` / `RustFsRoot`), not by a hard-coded index, and the on-disk
+/// (`FatBoot` / `ARXFSRoot`), not by a hard-coded index, and the on-disk
 /// definition is the one `tools/mkimage` writes.
 ///
 /// The two partitions are opened **in sequence** over a borrowed `disk`
 /// (one device, never two simultaneous mutable windows, via the
 /// `impl Block for &mut B` forwarding): the FAT boot window is built, the
 /// descriptor read, the window dropped to reclaim the disk, then the
-/// `RustFS` root window is built for the mount. The untrusted on-disk
+/// `ARXFS` root window is built for the mount. The untrusted on-disk
 /// table is validated fail-closed before any partition is trusted, and a disk missing either partition serves
 /// no database.
 ///
@@ -596,7 +596,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
         reject(audit, error);
         return Err(error);
     };
-    let Some(root_extent) = table.first_of_type(PartitionType::RustFsRoot) else {
+    let Some(root_extent) = table.first_of_type(PartitionType::ARXFSRoot) else {
         let error = RootMountError::NoRootPartition;
         reject(audit, error);
         return Err(error);
@@ -624,7 +624,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
         }
     };
 
-    // 4. Open a window onto the RustFS root partition and run the unlock +
+    // 4. Open a window onto the ARXFS root partition and run the unlock +
     //    users-load composition over it.
     let root = match PartitionBlock::from_partition(&mut disk, &root_extent) {
         Ok(root) => root,
@@ -655,10 +655,10 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
 /// system without any `'static` promotion.
 ///
 /// The disk's partition table is parsed fail-closed; if it carries a
-/// [`PartitionType::RustFsSystem`] partition, a bounds-checked
+/// [`PartitionType::ARXFSSystem`] partition, a bounds-checked
 /// [`PartitionBlock`] window is opened over it and mounted **read-only**
 /// under the non-secret well-known [`SYSTEM_VOLUME_KEY`]
-/// ([`RustFs::open_read_only`] — the volume holds no secrets and its
+/// ([`ARXFS::open_read_only`] — the volume holds no secrets and its
 /// integrity rests on the per-bundle Ed25519 signatures the load gate
 /// verifies). The volume's root is probed for the
 /// `Drivers` store directory to confirm it is a real `/System` volume, the
@@ -682,7 +682,7 @@ pub fn with_system_volume<Disk: Block, R>(
         system_volume_unavailable(audit, "partition_table_invalid");
         return None;
     };
-    let Some(extent) = table.first_of_type(PartitionType::RustFsSystem) else {
+    let Some(extent) = table.first_of_type(PartitionType::ARXFSSystem) else {
         system_volume_unavailable(audit, "no_system_partition");
         return None;
     };
@@ -693,7 +693,7 @@ pub fn with_system_volume<Disk: Block, R>(
     };
     // Mount read-only under the public key; the volume carries no secrets,
     // so the kernel can never mutate it.
-    let Ok(mut system) = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
+    let Ok(mut system) = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
         system_volume_unavailable(audit, "system_mount_failed");
         return None;
     };
@@ -972,7 +972,7 @@ fn finish_install(
 /// takes the console write/read halves as object-safe seams
 /// ([`ConsoleWrite`] / [`ConsoleRead`]), so it names no architecture or
 /// device type and is host-tested with a mock console
-/// over the same MBR + encrypted-`RustFS` disk fixture `tools/mkimage`
+/// over the same MBR + encrypted-`ARXFS` disk fixture `tools/mkimage`
 /// writes. The kthread passes the **blocking** console
 /// read ([`BlockingConsoleRead`](rustos_kernel_core::BlockingConsoleRead))
 /// so an empty poll parks the task on the scheduler rather than
@@ -1290,7 +1290,7 @@ fn gave_up(audit: &dyn Sink, cause: &'static str) {
 /// cannot flood the boot log, while the record stays available for
 /// brute-force forensics when the level is lowered. Every other refusal is a genuine structural failure (a
 /// corrupt/missing descriptor, a missing/malformed partition table or
-/// partition, a non-rustfs volume, a device fault) and maps to the
+/// partition, a non-arxfs volume, a device fault) and maps to the
 /// `Error`-level [`ROOT_MOUNT_REJECTED`].
 ///
 /// A pure mapping so the audit level/event a refusal earns can be asserted
@@ -1398,12 +1398,12 @@ mod tests {
 
     use rustos_abi::driver::block::BlockGeometry;
     use rustos_abi::driver::filesystem::FilesystemWrite;
-    use rustos_drv_fs_rustfs::{EntropySource, UNLOCK_MIN_ITERATIONS};
+    use rustos_drv_fs_arxfs::{EntropySource, UNLOCK_MIN_ITERATIONS};
     use rustos_kernel_core::UsersDbSource;
     use rustos_log::{Event as LogEvent, Sink as LogSink};
     use rustos_partition::{mbr, Partition};
+    use rustos_test_arxfs_image as image;
     use rustos_test_encrypted_root_image as disk_image;
-    use rustos_test_rustfs_image as image;
     use rustos_users::UsersDb;
 
     /// Deterministic entropy for provisioning a descriptor's salt in
@@ -1566,8 +1566,8 @@ mod tests {
     }
 
     #[test]
-    fn a_non_rustfs_volume_is_refused() {
-        // a device that is not a rustfs volume (here a zeroed
+    fn a_non_arxfs_volume_is_refused() {
+        // a device that is not a arxfs volume (here a zeroed
         // image of the right geometry) fails the mount closed rather than
         // being misread; no database is served.
         let (descriptor_bytes, _key) = provision();
@@ -1577,7 +1577,7 @@ mod tests {
         let sink = RecordingSink::new();
 
         let err = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect_err("a non-rustfs volume must be refused");
+            .expect_err("a non-arxfs volume must be refused");
 
         assert!(matches!(err, RootMountError::Mount(_)), "{err:?}");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
@@ -1607,7 +1607,7 @@ mod tests {
             "the probe outcome is below the default filter"
         );
 
-        // Every other refusal — including a non-rustfs volume or a device
+        // Every other refusal — including a non-arxfs volume or a device
         // fault, which are *also* `Mount(_)` but not a wrong passphrase — is
         // the ERROR-level structural rejection.
         for error in [
@@ -1631,10 +1631,10 @@ mod tests {
     const FAT_SECTOR_BYTES: usize = 512;
 
     /// 64 MiB, the production boot-partition size `tools/mkimage` formats.
-    /// A valid FAT32 volume needs far more than the small rustfs fixture's
+    /// A valid FAT32 volume needs far more than the small arxfs fixture's
     /// 2048 sectors, so this `Block` double is sized for a real FAT32 format
     /// rather than reusing `image::VecBlock` (whose fixed geometry is the
-    /// rustfs fixture's). Forwarded from the shared whole-disk fixture so
+    /// arxfs fixture's). Forwarded from the shared whole-disk fixture so
     /// the boot-partition size has one definition.
     const FAT_BOOT_SECTORS: u64 = disk_image::FAT_BOOT_SECTORS;
 
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn a_disk_without_a_root_partition_serves_no_database() {
         // a valid table that carries a FAT boot partition but no
-        // RustFS root partition is fail-closed NoRootPartition — the
+        // ARXFS root partition is fail-closed NoRootPartition — the
         // encrypted root cannot be located, so none is mounted.
         let (descriptor_bytes, _key) = provision();
         let boot = author_boot_partition(&descriptor_bytes);

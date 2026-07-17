@@ -1,7 +1,7 @@
 //! The cryptographically secure RNG ([`CsRng`]).
 //!
 //! [`CsRng`] is the generator the rest of RustOS reaches for whenever the
-//! randomness must be unpredictable: `RustFS` volume and per-record keys, the
+//! randomness must be unpredictable: `ARXFS` volume and per-record keys, the
 //! encrypted-swap key, nonces, the KASLR/ASLR seed,
 //! capability-token material. It pairs an [`HmacDrbg`] with an
 //! [`EntropySource`] and reseeds from that source on a fixed schedule, so a
@@ -87,7 +87,7 @@ impl<E: EntropySource> CsRng<E> {
     }
 
     /// Instantiate with a caller-chosen `personalization` string, which binds
-    /// this instance's output to a domain (e.g. `b"rustfs/volume-key"`) so two
+    /// this instance's output to a domain (e.g. `b"arxfs/volume-key"`) so two
     /// generators seeded from the same source still diverge.
     ///
     /// # Errors

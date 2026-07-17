@@ -49,7 +49,7 @@ pub struct VolumeInfo {
     /// The mount target — the path the tree opens when the volume is
     /// chosen.
     pub target: String,
-    /// The mounted filesystem's type name (`rustfs`, `ext4`, …), as the
+    /// The mounted filesystem's type name (`arxfs`, `ext4`, …), as the
     /// mount table reports it.
     pub fstype: String,
     /// Free/total bytes, or `None` when the volume cannot report them

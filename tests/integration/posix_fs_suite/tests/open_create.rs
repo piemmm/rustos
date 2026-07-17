@@ -6,7 +6,7 @@ use rustos_test_posix_fs_suite::*;
 
 #[test]
 fn create_makes_an_empty_regular_file() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -22,7 +22,7 @@ fn create_makes_an_empty_regular_file() {
 
 #[test]
 fn create_existing_name_is_already_exists() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -36,7 +36,7 @@ fn create_existing_name_is_already_exists() {
 
 #[test]
 fn create_in_missing_directory_is_not_found() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -48,7 +48,7 @@ fn create_in_missing_directory_is_not_found() {
 
 #[test]
 fn write_then_read_round_trips_across_a_block_boundary() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -74,7 +74,7 @@ fn write_then_read_round_trips_across_a_block_boundary() {
 
 #[test]
 fn write_at_offset_leaves_a_sparse_zero_prefix() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -94,7 +94,7 @@ fn write_at_offset_leaves_a_sparse_zero_prefix() {
 
 #[test]
 fn write_to_a_directory_is_is_a_directory() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -108,7 +108,7 @@ fn write_to_a_directory_is_is_a_directory() {
 
 #[test]
 fn read_of_a_directory_is_is_a_directory() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -123,7 +123,7 @@ fn read_of_a_directory_is_is_a_directory() {
 
 #[test]
 fn read_past_end_of_file_returns_zero_bytes() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 

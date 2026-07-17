@@ -12,7 +12,7 @@
 //!
 //! It mirrors [`crate::users::load_users_db`]: given the live
 //! [`FilesystemRead`] + [`FilesystemSecurity`] driver of the mounted root
-//! volume (rustfs on a real installation), it builds a minimal root-backed
+//! volume (arxfs on a real installation), it builds a minimal root-backed
 //! VFS (`crate::fs::root_backed_vfs`) and walks [`DRIVER_STORE_PATH`]
 //! through the VFS's-checked per-inode delegation, collecting the
 //! path of every regular file it finds.

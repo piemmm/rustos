@@ -9,11 +9,11 @@ deliverable.
 
 ## What it exercises
 
-The suite drives the **real** `rustfs` driver
-(`rustos_drv_fs_rustfs::RustFs`) through the **real**
+The suite drives the **real** `arxfs` driver
+(`rustos_drv_fs_arxfs::ARXFS`) through the **real**
 `kernel/core::fs::Vfs` policy layer — the identical code paths the
 kernel runs — and never re-implements any filesystem semantics
-(`AGENTS.md` §2.2). A `rustfs` volume is formatted in memory, mounted at
+(`AGENTS.md` §2.2). A `arxfs` volume is formatted in memory, mounted at
 `/Storage/vol` in a default-layout VFS, and every case asserts behaviour
 through the per-inode-security delegation methods (`*_via_secured`).
 
@@ -34,9 +34,9 @@ The test files mirror `pjdfstest`'s operation groups:
 
 ## The permission and capability-gate cases
 
-`permission.rs` is the heart of the suite. Because `rustfs` stores a full
+`permission.rs` is the heart of the suite. Because `arxfs` stores a full
 per-inode §5.3 record, the suite can stamp a node's owner, mode bits,
-ACL, and optional capability gate (through `RustFs::set_security`) and
+ACL, and optional capability gate (through `ARXFS::set_security`) and
 then assert the VFS decision. In particular it pins the case the charter
 (`AGENTS.md` §5.3) and `PLAN.md` Stage 5 call out by name: a file marked
 with a required capability is unreadable without that capability, even at
@@ -47,7 +47,7 @@ never branches on `uid == 0` (§5.1).
 
 This suite is the filesystem *semantics* layer. The companion
 end-to-end verticals
-(`tests/integration/{rustfs,fat32}_virtio_blk_pci_x86_64`) already prove
+(`tests/integration/{arxfs,fat32}_virtio_blk_pci_x86_64`) already prove
 the same drivers mount and round-trip over a real (emulated) virtio-blk
 device under QEMU; the conformance assertions here run on the host
 against the very same driver and VFS code, so the two together cover the
@@ -56,5 +56,5 @@ filesystem stack from on-disk bytes to POSIX-visible behaviour.
 It is filesystem-agnostic by construction: the harness talks to the VFS
 and a `drivers/filesystem/*` driver behind the frozen ABI traits, so a
 second driver can be exercised by swapping the backing constructor.
-`rustfs` is the first subject because it is the native filesystem that
+`arxfs` is the first subject because it is the native filesystem that
 stores the per-inode §5.3 record the permission cases require.

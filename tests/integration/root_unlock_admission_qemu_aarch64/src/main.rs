@@ -33,7 +33,7 @@
 //! 3. **Mounts + installs.** On its first dispatch the kthread brings the
 //!    virtio-blk device up over the production device-IRQ path, prompts
 //!    `Root passphrase: ` on the primary (UART) console, reads the
-//!    passphrase the runner types, mounts the encrypted `RustFS` root,
+//!    passphrase the runner types, mounts the encrypted `ARXFS` root,
 //!    installs the users database into `LATE_USERS_DB`, and opens the
 //!    console-0 gate — logging the `USERS_DB_INSTALLED_MESSAGE` audit line.
 //!
@@ -43,7 +43,7 @@
 //! `USERS_DB_INSTALLED_MESSAGE` (`EventId(4139)`) — the witness that the
 //! **in-kernel kthread**, admitted by `spawn_if_present`, brought the
 //! discovered virtio-blk root up over the production device-IRQ path,
-//! prompted, read the typed passphrase, mounted the encrypted `RustFS`
+//! prompted, read the typed passphrase, mounted the encrypted `ARXFS`
 //! root, and installed the users database into `LATE_USERS_DB`. That is the
 //! full *kthread-admission* path this vertical exists to prove (distinct
 //! from `root_unlock_login`, which drives the unlock policy directly). A run

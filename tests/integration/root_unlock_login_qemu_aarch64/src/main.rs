@@ -1,7 +1,7 @@
 //! `plans/PI.md` P11 Chunk B-2 QEMU integration test: drive the production
 //! interactive root-unlock policy over a real (emulated) whole-disk
 //! encrypted-root image on the aarch64 `virt` board's virtio-MMIO bus —
-//! type the passphrase at the prompt, mount the encrypted `RustFS` root,
+//! type the passphrase at the prompt, mount the encrypted `ARXFS` root,
 //! install the loaded users database into a `LateUsersDb` cell, and prove
 //! the planted account authenticates through it.
 //!

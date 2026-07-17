@@ -36,8 +36,8 @@ fn run(name: &str) {
 }
 
 #[test]
-fn soak_rustfs() {
-    run("rustfs");
+fn soak_arxfs() {
+    run("arxfs");
 }
 
 #[test]
@@ -50,14 +50,14 @@ fn soak_fat32() {
     run("fat32");
 }
 
-/// The randomized, model-checked rustfs soak: a different operation path
+/// The randomized, model-checked arxfs soak: a different operation path
 /// on every launch, run in parallel with the others under `soak.sh`.
 #[test]
-fn soak_rustfs_random() {
-    run("rustfs-random");
+fn soak_arxfs_random() {
+    run("arxfs-random");
 }
 
 #[test]
 fn registry_lists_every_soak_target() {
-    assert_eq!(TARGETS, &["rustfs", "ext4", "fat32", "rustfs-random"]);
+    assert_eq!(TARGETS, &["arxfs", "ext4", "fat32", "arxfs-random"]);
 }

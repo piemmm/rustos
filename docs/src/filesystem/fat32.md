@@ -114,8 +114,8 @@ normalisation policy likewise belong to the VFS.
 FAT32 has no per-file extended-attribute store and the driver does not
 implement the `FilesystemAttrs` ABI (its attribute facet answers `None`, so
 the `fs_attr_*` syscalls refuse a FAT32 mount with `NotSupported`), so it
-cannot represent RustFS extended
-attributes or foreign-filesystem preset metadata (`rustfs-spec.md` §21). Under
+cannot represent ARXFS extended
+attributes or foreign-filesystem preset metadata (`arxfs-spec.md` §21). Under
 the cross-filesystem preservation contract, an exact-preservation copy of a
 file carrying such attributes onto FAT32 reports `MetadataNotRepresentable`; a
 best-effort copy drops them only under an explicit, documented lossy policy.

@@ -30,8 +30,8 @@ use crate::Errno;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum VolumeFsType {
-    /// The native filesystem (`drivers/filesystem/rustfs`).
-    RustFs = 0,
+    /// The native filesystem (`drivers/filesystem/arxfs`).
+    ARXFS = 0,
     /// ext2/ext3/ext4 (`drivers/filesystem/ext4`).
     Ext4 = 1,
     /// FAT32 (`drivers/filesystem/fat32`).
@@ -52,7 +52,7 @@ impl VolumeFsType {
     /// [`Errno::OutOfRange`] if `value` names no known filesystem type.
     pub const fn from_u8(value: u8) -> Result<Self, Errno> {
         match value {
-            0 => Ok(Self::RustFs),
+            0 => Ok(Self::ARXFS),
             1 => Ok(Self::Ext4),
             2 => Ok(Self::Fat32),
             _ => Err(Errno::OutOfRange),
@@ -295,11 +295,7 @@ mod tests {
 
     #[test]
     fn fstype_round_trips_and_rejects_unknown() {
-        for fstype in [
-            VolumeFsType::RustFs,
-            VolumeFsType::Ext4,
-            VolumeFsType::Fat32,
-        ] {
+        for fstype in [VolumeFsType::ARXFS, VolumeFsType::Ext4, VolumeFsType::Fat32] {
             assert_eq!(VolumeFsType::from_u8(fstype.as_u8()), Ok(fstype));
         }
         assert_eq!(VolumeFsType::from_u8(3), Err(Errno::OutOfRange));

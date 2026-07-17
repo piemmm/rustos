@@ -165,7 +165,7 @@ fn plan_from(
     ordinals: &mut [u32; 3],
 ) -> VolumePlan {
     let slot = match probed.fstype {
-        VolumeFsType::RustFs => 0,
+        VolumeFsType::ARXFS => 0,
         VolumeFsType::Ext4 => 1,
         VolumeFsType::Fat32 => 2,
     };

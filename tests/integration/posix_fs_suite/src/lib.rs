@@ -1,8 +1,8 @@
 //! Shared harness for the pjdfstest-equivalent POSIX filesystem
 //! conformance suite (`PLAN.md` Stage 5).
 //!
-//! The suite drives the **real** `rustfs` driver
-//! ([`rustos_drv_fs_rustfs::RustFs`]) through the **real**
+//! The suite drives the **real** `arxfs` driver
+//! ([`rustos_drv_fs_arxfs::ARXFS`]) through the **real**
 //! [`rustos_kernel_core::fs::Vfs`] policy layer and asserts the
 //! POSIX-visible semantics of every filesystem operation the system
 //! exposes: directory and file creation, unlink/rmdir, truncate,
@@ -15,12 +15,12 @@
 //! Like `pjdfstest`, the suite is filesystem-agnostic by construction: it
 //! talks to the VFS and a `drivers/filesystem/*` driver behind the frozen
 //! ABI traits, so a second driver can be exercised by swapping the backing
-//! constructor. `rustfs` is the first subject because it is the native FS
+//! constructor. `arxfs` is the first subject because it is the native FS
 //! that stores a full per-inode record, which the
 //! capability/ACL-gate assertions require.
 //!
 //! The block-device-over-QEMU mount path is covered separately by the
-//! `rustfs`/`fat32` virtio-blk verticals; this crate is the *semantics*
+//! `arxfs`/`fat32` virtio-blk verticals; this crate is the *semantics*
 //! suite and runs on the host against the identical driver and VFS code.
 
 #![forbid(unsafe_code)]
@@ -30,14 +30,14 @@ use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::filesystem::MountFlags;
 use rustos_abi::driver::DriverHandle;
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
+use rustos_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 
-/// Volume key the suite formats its rustfs test volume with. `RustFS` is
-/// encrypted-by-default (`docs/src/filesystem/rustfs-spec.md` §5).
+/// Volume key the suite formats its arxfs test volume with. `ARXFS` is
+/// encrypted-by-default (`docs/src/filesystem/arxfs-spec.md` §5).
 const SUITE_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
 /// Deterministic stand-in for the platform RNG seam: a byte counter that gives
-/// `RustFs::format` distinct, reproducible key material and UUID. Test
+/// `ARXFS::format` distinct, reproducible key material and UUID. Test
 /// scaffolding only, never a production entropy source.
 struct SuiteEntropy {
     next: u8,
@@ -64,7 +64,7 @@ pub use rustos_kernel_core::fs::{Credentials, Mode, Path, Vfs, VfsError};
 pub use rustos_kernel_sec::{GroupId, UserId};
 
 /// Logical block (sector) size of the in-memory device, in bytes. The
-/// `rustfs` minimum block size, matching the verticals' 512-byte sectors.
+/// `arxfs` minimum block size, matching the verticals' 512-byte sectors.
 pub const SECTOR_BYTES: usize = 512;
 
 /// Size of the in-memory device, in 512-byte sectors (1 MiB) — large
@@ -75,22 +75,22 @@ pub const TOTAL_SECTORS: u64 = 2048;
 /// Number of inodes the test volume is formatted with.
 pub const INODE_COUNT: u32 = 64;
 
-/// Mount point at which the `rustfs` volume is attached in the test VFS.
+/// Mount point at which the `arxfs` volume is attached in the test VFS.
 /// Lives under `/Storage`, the top-level directory for mounted
 /// volumes, which is writable in the default layout.
 pub const MOUNT: &str = "/Storage/vol";
 
-/// Uid and gid `rustfs` stamps onto the volume root and every node it
-/// creates (see `RustFs::format`/`create`). A credential with this
+/// Uid and gid `arxfs` stamps onto the volume root and every node it
+/// creates (see `ARXFS::format`/`create`). A credential with this
 /// identity owns the whole tree, so it stands in for the administrative
 /// installer user that lays the volume down.
 pub const ROOT_UID: u32 = 0;
-/// Owning gid of the `rustfs` volume root and freshly created nodes.
+/// Owning gid of the `arxfs` volume root and freshly created nodes.
 pub const ROOT_GID: u32 = 0;
 
-/// The live `rustfs` driver instance the suite drives, bound to the
+/// The live `arxfs` driver instance the suite drives, bound to the
 /// in-memory [`VecBlock`] device.
-pub type LiveFs = RustFs<VecBlock>;
+pub type LiveFs = ARXFS<VecBlock>;
 
 /// An in-memory [`Block`] device backing the test volume. Addresses
 /// [`SECTOR_BYTES`]-byte sectors exactly as the virtio-blk device the
@@ -161,7 +161,7 @@ pub fn path(text: &str) -> Path {
     Path::parse(text).expect("test path literal is a valid absolute path")
 }
 
-/// A path inside the mounted `rustfs` volume: `MOUNT` joined with `rel`
+/// A path inside the mounted `arxfs` volume: `MOUNT` joined with `rel`
 /// (which must not begin with `/`).
 ///
 /// # Panics
@@ -202,7 +202,7 @@ pub fn cred_with_groups<'a>(
 }
 
 /// Build a default-layout [`Vfs`] (owner `(ROOT_UID, ROOT_GID)`) with a
-/// freshly formatted `rustfs` volume mounted at [`MOUNT`], and return both
+/// freshly formatted `arxfs` volume mounted at [`MOUNT`], and return both
 /// the VFS and the live driver.
 ///
 /// The mount carries [`MountFlags::READ_ONLY`] when `read_only` is set, so
@@ -215,14 +215,14 @@ pub fn cred_with_groups<'a>(
 /// point cannot be laid down — either is a test-harness bug, not a
 /// runtime condition.
 #[must_use]
-pub fn rustfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
-    let fs = RustFs::format(
+pub fn arxfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
+    let fs = ARXFS::format(
         VecBlock::new(TOTAL_SECTORS),
         INODE_COUNT,
         &SUITE_KEY,
         &mut SuiteEntropy { next: 1 },
     )
-    .expect("format the fixed-geometry rustfs test volume");
+    .expect("format the fixed-geometry arxfs test volume");
 
     let mut vfs = Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID));
     let caps = CapabilitySet::empty();
@@ -238,7 +238,7 @@ pub fn rustfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
     };
     vfs.mounts_write()
         .mount(path(MOUNT), flags, Some(handle))
-        .expect("mount the rustfs volume");
+        .expect("mount the arxfs volume");
 
     (vfs, fs)
 }

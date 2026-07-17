@@ -2,9 +2,9 @@
 //!
 //! The suite covers the round-trip identity, a representative corpus, fixed
 //! known-answer vectors that pin the on-disk frame format, the
-//! incompressible-input path `RustFS` relies on for its raw-store fallback, and
+//! incompressible-input path `ARXFS` relies on for its raw-store fallback, and
 //! the malformed-input rejection that must never panic
-//! (`docs/src/filesystem/rustfs-spec.md` §10).
+//! (`docs/src/filesystem/arxfs-spec.md` §10).
 
 extern crate alloc;
 
@@ -119,7 +119,7 @@ fn known_answer_four_literals() {
 #[test]
 fn incompressible_is_stored_via_literals_and_round_trips() {
     // Pseudo-random bytes do not compress; the codec must still produce a
-    // valid frame that decodes byte-identically (RustFS stores such a record
+    // valid frame that decodes byte-identically (ARXFS stores such a record
     // raw, but the codec itself must never corrupt it).
     let mut noise = Vec::new();
     let mut state: u32 = 0xC0FF_EE00;

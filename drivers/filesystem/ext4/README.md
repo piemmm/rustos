@@ -9,7 +9,7 @@ through the versioned `FilesystemSecurity` trait.
 The frozen `Filesystem` trait carries only `mount`/`unmount` and a
 `DriverHandle` — it cannot perform I/O — so each surface is a **new
 versioned trait** rather than a widening of the shipped one
-(`AGENTS.md` §2.4 / §9), exactly as for the FAT32 and rustfs drivers.
+(`AGENTS.md` §2.4 / §9), exactly as for the FAT32 and arxfs drivers.
 
 ## Supported volumes
 

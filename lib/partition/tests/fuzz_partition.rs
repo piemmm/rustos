@@ -91,7 +91,7 @@ fn mbr_image() -> Vec<u8> {
             block_count: 4096,
         },
         Partition {
-            ty: PartitionType::RustFsRoot,
+            ty: PartitionType::ARXFSRoot,
             start_lba: 6144,
             block_count: 4096,
         },
@@ -103,7 +103,7 @@ fn mbr_image() -> Vec<u8> {
 }
 
 /// A CRC-correct GPT disk image as a seed (protective MBR + header +
-/// entry array, one `RustFS` root entry). Kept small so the mutation loop
+/// entry array, one `ARXFS` root entry). Kept small so the mutation loop
 /// clones it cheaply.
 fn gpt_image() -> Vec<u8> {
     let bs = 512usize;
@@ -119,7 +119,7 @@ fn gpt_image() -> Vec<u8> {
     // Entry array from LBA 2.
     let region_len = num_entries as usize * gpt::ENTRY_LEN;
     let mut region = vec![0u8; region_len];
-    region[0..16].copy_from_slice(&gpt::TYPE_GUID_RUSTFS_ROOT);
+    region[0..16].copy_from_slice(&gpt::TYPE_GUID_ARXFS_ROOT);
     region[16] = 1;
     region[32..40].copy_from_slice(&12u64.to_le_bytes());
     region[40..48].copy_from_slice(&14u64.to_le_bytes());
@@ -165,7 +165,7 @@ fn exercise_never_panics(bytes: &[u8]) {
         if let Ok(table) = parse_partition_table(&mut dev) {
             // Touch every accessor a caller would.
             let _ = table.first_of_type(PartitionType::FatBoot);
-            let _ = table.first_of_type(PartitionType::RustFsRoot);
+            let _ = table.first_of_type(PartitionType::ARXFSRoot);
             for p in table.partitions() {
                 let _ = (p.ty, p.start_lba, p.block_count);
             }

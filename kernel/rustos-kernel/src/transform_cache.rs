@@ -1,8 +1,8 @@
-//! The `RustFs` transform cache: reclaimable decompressed-cluster
+//! The `ARXFS` transform cache: reclaimable decompressed-cluster
 //! plaintext (`plans/SMARTRAM.md` SMART3, section 6.2).
 //!
 //! [`TransformClusterCache`] is the production implementation of the
-//! [`ClusterCache`] seam the `RustFs` driver exposes: it retains the
+//! [`ClusterCache`] seam the `ARXFS` driver exposes: it retains the
 //! verified, decrypted, decompressed plaintext of compressed clusters
 //! between reads, so the driver pays the transform pipeline (per-block
 //! AEAD + integrity checks, then a whole-frame decompression) once per
@@ -40,7 +40,7 @@
 //!
 //! Entries are keyed by the cluster's first stored physical block; the
 //! driver invalidates on every block free and purges on transaction
-//! rollback (the `rustos_drv_fs_rustfs::ClusterCache` contract), so an
+//! rollback (the `rustos_drv_fs_arxfs::ClusterCache` contract), so an
 //! entry can never outlive the bytes it was derived from. The plaintext
 //! is decrypted user data from an encrypted-at-rest volume: every
 //! buffer is volatilely wiped before its entry is released — on
@@ -51,7 +51,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_drv_fs_rustfs::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
+use rustos_drv_fs_arxfs::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 use rustos_kernel_mem::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
@@ -77,7 +77,7 @@ struct Entry {
 }
 
 /// The reclaimable decompressed-cluster cache one mounted volume
-/// installs into its `RustFs` driver. See the module docs.
+/// installs into its `ARXFS` driver. See the module docs.
 pub struct TransformClusterCache {
     budget: CacheBudget,
     /// The system memory-pressure gauge, sampled at the head of every

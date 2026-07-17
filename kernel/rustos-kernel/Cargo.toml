@@ -103,13 +103,13 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
 # The production root-volume unlock + users-database load composition
 # (`src/root_mount.rs`, `plans/PI.md` P11): the boot path mounts the
-# encrypted root through the real `RustFs` driver under the
+# encrypted root through the real `ARXFS` driver under the
 # passphrase-derived volume key, then runs the `kernel/core` users-database
 # read. `rustos-kernel` (`Layer::Tooling`) is the one crate permitted to
 # name a filesystem driver across strata (`AGENTS.md` §17.4 / §8); the
 # composition is architecture-neutral, so it is a common dependency and its
 # host tests run on the CI host.
-rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
 # The user-database parser (`AGENTS.md` §2.2): the root-unlock path re-parses
 # the validated `users-v1` text it just loaded to feed the kernel identity
 # table build (`kernel/core::build_identity_table`), reusing the one
@@ -130,7 +130,7 @@ rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0
 rustos-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0" }
 # The shared, scheme-neutral partition layer (`AGENTS.md` §2.2): the boot
 # path splits the single whole-disk block device into its FAT boot and
-# `RustFS` root partitions through `parse_partition_table` + the
+# `ARXFS` root partitions through `parse_partition_table` + the
 # bounds-checked `PartitionBlock` window — the same MBR/GPT definition
 # `tools/mkimage` writes the image with, so author and reader cannot drift.
 # Scheme- and architecture-neutral (MBR on the Pi, GPT on UEFI x86_64), so
@@ -357,15 +357,15 @@ rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0
 # the `host-tests` feature so production builds never link it
 # (`AGENTS.md` §2.3).
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
-# The `root_mount` host tests author a real users-root rustfs volume under
+# The `root_mount` host tests author a real users-root arxfs volume under
 # a passphrase-derived key through the shared fixture (one on-disk-layout
 # source of truth, `AGENTS.md` §2.2) and re-open it through the production
 # composition. `rustos-kernel` (`Layer::Tooling`) already names
 # tests/integration crates as build/dev glue (cf. `rustos-itest-harness`).
-rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", version = "=0.0.0" }
+rustos-test-arxfs-image = { path = "../../tests/integration/arxfs_image", version = "=0.0.0" }
 # The single-source-of-truth whole-disk image fixture (`AGENTS.md` §2.2):
 # the `mount_root_disk_and_load_users` end-to-end test consumes the same
-# MBR + FAT-boot(`root.unlock`) + encrypted-`RustFS`-root bytes the
+# MBR + FAT-boot(`root.unlock`) + encrypted-`ARXFS`-root bytes the
 # `-M virt` root-mount->login QEMU vertical plants, so the disk layout and
 # the passphrase-derived unlock live in exactly one place rather than being
 # re-assembled in this test module.

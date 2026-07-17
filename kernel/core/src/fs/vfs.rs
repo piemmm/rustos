@@ -345,7 +345,7 @@ impl Vfs {
     // These mirror the `*_via` methods above but judge every delegated
     // node against the driver's *own* stored record rather than the
     // uniform mount-point template. The kernel
-    // host calls these for a driver such as `rustfs` that stores full
+    // host calls these for a driver such as `arxfs` that stores full
     // per-inode ownership, mode, ACL, and capability gate; the
     // template-based `*_via` methods remain for drivers (e.g. FAT) that
     // store no per-file owner. The driver still makes no permission

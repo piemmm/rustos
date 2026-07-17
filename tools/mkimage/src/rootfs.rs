@@ -1,13 +1,13 @@
-//! `RustFS` root-partition authoring.
+//! `ARXFS` root-partition authoring.
 //!
-//! The root partition is a genuine encrypted `RustFS` volume laid down by
-//! the real driver (`rustos-drv-fs-rustfs`) and pre-populated with the
+//! The root partition is a genuine encrypted `ARXFS` volume laid down by
+//! the real driver (`rustos-drv-fs-arxfs`) and pre-populated with the
 //! authoritative top-level layout: exactly `/System`, `/Users`, `/Apps`,
 //! and `/Storage`. It is the **writable** volume mounted as `/`, so under
 //! `/System` it carries **only** the writable-state subtree
 //! ([`WRITABLE_SYSTEM_SUBDIRS`]: `Logs`, `Settings`, and `Security`) — the
 //! immutable `/System` content (`Kernel`, `Drivers`, `Libraries`, …) lives on
-//! the separate read-only `RustFsSystem` volume that is mounted *over* this
+//! the separate read-only `ARXFSSystem` volume that is mounted *over* this
 //! one at `/System`, so duplicating it here would be dead weight and a second
 //! copy that could drift.
 //! The user and group databases under `/System/Security`, the first user's
@@ -19,15 +19,15 @@
 //! kernel can build its identity table without running the installer; an
 //! installer image ships neither.
 //!
-//! `RustFS` has no plaintext mode: the volume is provisioned under a
+//! `ARXFS` has no plaintext mode: the volume is provisioned under a
 //! caller-supplied volume key, and mounting it requires that key. The
 //! image builder draws a fresh random key per image and hands it back to
 //! the operator (`crate::build_rpi_image`); it is never stored inside the
 //! image.
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
-use rustos_drv_fs_rustfs::{
-    plant_nested_file, EntropySource, RustFs, Security, VolumeKey, SYSTEM_VOLUME_KEY,
+use rustos_drv_fs_arxfs::{
+    plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
 };
 
 use crate::device::MemBlock;
@@ -37,7 +37,7 @@ use crate::MkimageError;
 /// other top-level name on a RustOS volume is a defect.
 pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 
-/// The full `/System` subtree the **read-only** `RustFsSystem` volume ships
+/// The full `/System` subtree the **read-only** `ARXFSSystem` volume ships
 /// (`build_system_partition`). `Security` additionally carries its fixed
 /// `Keys` and `Policy` subdirectories; the `Users`/`Groups` databases inside
 /// it are installer-authored data, not image content. `Apps` is the system
@@ -68,14 +68,14 @@ pub const SYSTEM_SUBDIRS: [&str; 13] = [
 /// writable exceptions mounted over the read-only `/System`, and `Security`
 /// holds the encrypted user/group databases (read by the boot-time
 /// `/System/Security` reader off this volume, where the secret belongs — it
-/// is never placed on the well-known-keyed `RustFsSystem` volume). The
+/// is never placed on the well-known-keyed `ARXFSSystem` volume). The
 /// immutable subdirectories in [`SYSTEM_SUBDIRS`] are deliberately absent
-/// here; they live only on `RustFsSystem`.
+/// here; they live only on `ARXFSSystem`.
 pub const WRITABLE_SYSTEM_SUBDIRS: [&str; 3] = ["Logs", "Settings", "Security"];
 
 /// Number of inodes the root volume is formatted with: ample for the
 /// skeleton plus the installer's first-boot output, while trivial against
-/// the volume size (`RustFS` allocates inodes from this hint's table).
+/// the volume size (`ARXFS` allocates inodes from this hint's table).
 const ROOT_INODE_HINT: u32 = 4096;
 
 /// Name of the user database file under `/System/Security`.
@@ -135,7 +135,7 @@ pub struct RootSeed<'a> {
     pub machine_id: Option<&'a [u8]>,
 }
 
-/// Author the `RustFS` root partition: format `sectors` sectors under
+/// Author the `ARXFS` root partition: format `sectors` sectors under
 /// `volume_key`, create the directory skeleton, and lay down everything
 /// `seed` describes ([`RootSeed`]).
 ///
@@ -151,7 +151,7 @@ pub fn build_root_partition(
     seed: &RootSeed<'_>,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::RootPartition)?;
-    let mut fs = RustFs::format(dev, ROOT_INODE_HINT, volume_key, entropy)
+    let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, volume_key, entropy)
         .map_err(MkimageError::RootPartition)?;
     let root = fs.root();
 
@@ -178,7 +178,7 @@ pub fn build_root_partition(
 /// account's home with, so a seeded account can enter and write its own
 /// home while no other ordinary principal can read it.
 fn create_home_dir(
-    fs: &mut RustFs<MemBlock>,
+    fs: &mut ARXFS<MemBlock>,
     users: NodeId,
     username: &str,
     uid: u32,
@@ -200,7 +200,7 @@ fn create_home_dir(
 ///
 /// This is the design-B pre-unlock store (`plans/PI.md`): it carries no
 /// secrets, so it is keyed by the public [`SYSTEM_VOLUME_KEY`] and the
-/// kernel mounts it read-only (`RustFs::open_read_only`) *before* the
+/// kernel mounts it read-only (`ARXFS::open_read_only`) *before* the
 /// encrypted data root is unlocked. The signed driver bundles land here in
 /// the later design-B increments; B1 establishes the volume and its
 /// skeleton. The subdirectories are laid down through the one shared
@@ -219,7 +219,7 @@ pub fn build_system_partition(
     apps: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
-    let mut fs = RustFs::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
+    let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
         .map_err(MkimageError::SystemPartition)?;
     let root = fs.root();
     create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
@@ -286,11 +286,11 @@ pub fn build_system_partition(
 /// matching group registry under `Security` (every profile carries the
 /// default system/service accounts), and — for a debug image — the baked
 /// log-attestation key and machine-id. The immutable `/System` content is
-/// **not** authored here (it lives on the read-only `RustFsSystem` volume);
+/// **not** authored here (it lives on the read-only `ARXFSSystem` volume);
 /// only what the writable root volume actually backs at runtime is laid
 /// down.
 fn populate_system_subtree(
-    fs: &mut RustFs<MemBlock>,
+    fs: &mut ARXFS<MemBlock>,
     system: NodeId,
     seed: &RootSeed<'_>,
 ) -> Result<(), MkimageError> {
@@ -325,7 +325,7 @@ fn populate_system_subtree(
 /// id. Unlike the log-attestation key the machine-id is public identity, so it
 /// is readable by any principal (only the system user may rewrite it).
 fn write_machine_id_file(
-    fs: &mut RustFs<MemBlock>,
+    fs: &mut ARXFS<MemBlock>,
     security: NodeId,
     name: &str,
     bytes: &[u8],
@@ -351,7 +351,7 @@ fn write_machine_id_file(
 /// `/System`-volume authoring paths reuse; `wrap` tags
 /// the failure with the partition the caller is authoring.
 fn create_system_subdirs(
-    fs: &mut RustFs<MemBlock>,
+    fs: &mut ARXFS<MemBlock>,
     system: NodeId,
     wrap: fn(rustos_abi::DriverError) -> MkimageError,
 ) -> Result<(), MkimageError> {
@@ -372,7 +372,7 @@ fn create_system_subdirs(
 /// Policy}` through, so the two cannot drift; `wrap` tags the failure with
 /// the partition the caller is authoring.
 fn create_security_subdirs(
-    fs: &mut RustFs<MemBlock>,
+    fs: &mut ARXFS<MemBlock>,
     security: NodeId,
     wrap: fn(rustos_abi::DriverError) -> MkimageError,
 ) -> Result<(), MkimageError> {
@@ -388,7 +388,7 @@ fn create_security_subdirs(
 /// the users-database and group-registry authoring both go through, so the
 /// two cannot drift in how a security file is laid down.
 fn write_security_file(
-    fs: &mut RustFs<MemBlock>,
+    fs: &mut ARXFS<MemBlock>,
     security: rustos_abi::driver::filesystem::NodeId,
     name: &str,
     text: &str,
@@ -413,7 +413,7 @@ fn write_security_file(
 /// the secret until the journal/attestation principal exists (no new
 /// capability is minted ahead of that holder).
 fn write_key_file(
-    fs: &mut RustFs<MemBlock>,
+    fs: &mut ARXFS<MemBlock>,
     keys: NodeId,
     name: &str,
     bytes: &[u8],
@@ -445,7 +445,7 @@ mod tests {
     use rustos_abi::DriverError;
 
     const TEST_SECTORS: u64 = 131_072; // 64 MiB, the production root size.
-    const TEST_KEY: VolumeKey = [0x42; rustos_drv_fs_rustfs::VOLUME_KEY_LEN];
+    const TEST_KEY: VolumeKey = [0x42; rustos_drv_fs_arxfs::VOLUME_KEY_LEN];
 
     /// Stand-in database texts: the seeding contract is "the given text is
     /// written verbatim", so the tests only need recognisable bytes (the
@@ -495,7 +495,7 @@ mod tests {
         );
 
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("the volume mounts under its key");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("the volume mounts under its key");
         let root = fs.root();
         for name in TOP_LEVEL_DIRS {
             fs.lookup(root, name.as_bytes())
@@ -503,7 +503,7 @@ mod tests {
         }
         let system = fs.lookup(root, b"System").expect("/System exists");
         // The encrypted root carries ONLY the writable-state /System subtree;
-        // the immutable content lives on the read-only RustFsSystem volume.
+        // the immutable content lives on the read-only ARXFSSystem volume.
         for sub in WRITABLE_SYSTEM_SUBDIRS {
             fs.lookup(system, sub.as_bytes())
                 .unwrap_or_else(|_| panic!("/System/{sub} exists"));
@@ -516,7 +516,7 @@ mod tests {
         // The immutable subdirectories are deliberately absent on the
         // writable root — duplicating them here is the "two /System folders"
         // defect this layering removes. They are reached at `/System` through
-        // the read-only RustFsSystem volume mounted over `/`.
+        // the read-only ARXFSSystem volume mounted over `/`.
         for immutable in ["Kernel", "Drivers", "Libraries", "Fonts", "Services"] {
             assert!(
                 fs.lookup(system, immutable.as_bytes()).is_err(),
@@ -529,9 +529,9 @@ mod tests {
     fn the_wrong_key_is_refused() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let wrong: VolumeKey = [0x43; rustos_drv_fs_rustfs::VOLUME_KEY_LEN];
+        let wrong: VolumeKey = [0x43; rustos_drv_fs_arxfs::VOLUME_KEY_LEN];
         assert_eq!(
-            RustFs::open(dev, &wrong).err(),
+            ARXFS::open(dev, &wrong).err(),
             Some(DriverError::PermissionDenied)
         );
     }
@@ -552,7 +552,7 @@ mod tests {
         let text = TEST_USERS;
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -571,7 +571,7 @@ mod tests {
         let text = TEST_GROUPS;
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -591,7 +591,7 @@ mod tests {
 
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let users = fs.lookup(root, b"Users").expect("/Users exists");
         let home = fs.lookup(users, b"root").expect("/Users/root exists");
@@ -607,7 +607,7 @@ mod tests {
     fn an_installer_shaped_root_ships_no_log_attestation_key() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -644,7 +644,7 @@ mod tests {
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -682,7 +682,7 @@ mod tests {
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -705,7 +705,7 @@ mod tests {
     fn an_unseeded_root_ships_no_machine_id() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");

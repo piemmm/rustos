@@ -24,7 +24,7 @@ pub struct BlockGeometry {
 /// Discard tells the device a range of logical blocks no longer holds
 /// useful data, letting flash/thin-provisioned backends reclaim it.
 /// It is an *advisory* hint: a caller must never assume a discarded
-/// block reads back as zero (`docs/src/filesystem/rustfs-spec.md`
+/// block reads back as zero (`docs/src/filesystem/arxfs-spec.md`
 /// §11). A device that does not support discard reports
 /// [`DiscardCapability::unsupported`]; such a device is *recorded, not
 /// failed* by the caller.
@@ -61,7 +61,7 @@ impl DiscardCapability {
 
 /// A point-in-time device-health snapshot, modelled on the `SMART` / `NVMe`
 /// telemetry a storage device exposes
-/// (`docs/src/filesystem/rustfs-spec.md` §11).
+/// (`docs/src/filesystem/arxfs-spec.md` §11).
 ///
 /// A filesystem uses it to decide *when* maintenance (a scrub) is worth
 /// running and whether a device is degrading, by comparing successive
@@ -110,7 +110,7 @@ pub struct HealthSnapshot {
 /// Either the device exposes telemetry ([`DeviceHealth::Available`]) or it
 /// does not ([`DeviceHealth::Unavailable`]). The two states are kept
 /// distinct so a caller never confuses "no data" with "all counters zero"
-/// (`docs/src/filesystem/rustfs-spec.md` §11). A device without telemetry
+/// (`docs/src/filesystem/arxfs-spec.md` §11). A device without telemetry
 /// is *recorded, not failed*: the filesystem's health subsystem stays
 /// enabled regardless.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -260,7 +260,7 @@ pub trait Block {
     /// [`DiscardCapability::unsupported`]; a driver whose backend
     /// supports discard overrides it. A device without discard support
     /// is *recorded, not failed* by the caller
-    /// (`docs/src/filesystem/rustfs-spec.md` §11), so this method does
+    /// (`docs/src/filesystem/arxfs-spec.md` §11), so this method does
     /// not error merely because discard is unavailable.
     ///
     /// # Errors
@@ -282,7 +282,7 @@ pub trait Block {
     ///
     /// Discard is advisory: it neither reads nor writes caller data and
     /// the caller must never assume the range reads back as zero
-    /// afterwards (`docs/src/filesystem/rustfs-spec.md` §11). The caller
+    /// afterwards (`docs/src/filesystem/arxfs-spec.md` §11). The caller
     /// is responsible for aligning `lba` and `blocks` to the
     /// granularity reported by [`Self::discard_capability`] and for
     /// keeping `blocks` within
@@ -310,7 +310,7 @@ pub trait Block {
     }
 
     /// Report the device's current health telemetry
-    /// (`docs/src/filesystem/rustfs-spec.md` §11).
+    /// (`docs/src/filesystem/arxfs-spec.md` §11).
     ///
     /// Reading health is non-destructive and never fails on a healthy
     /// device. The default implementation reports
@@ -648,7 +648,7 @@ mod tests {
     /// A `Block` device that supports discard and records the ranges it
     /// was asked to discard into a fixed-size log (`lib/abi` performs no
     /// allocation). Mirrors the contract a real flash/thin backend would
-    /// honour and is the shape the `RustFS` trim tests assert against.
+    /// honour and is the shape the `ARXFS` trim tests assert against.
     struct RecordingDiscardBlock {
         geo: BlockGeometry,
         granularity: u64,
@@ -713,7 +713,7 @@ mod tests {
 
     /// A `Block` device that exposes a fixed health snapshot, mirroring the
     /// shape a real `SMART` / `NVMe` backend would report and the form the
-    /// `RustFS` health tests assert against.
+    /// `ARXFS` health tests assert against.
     struct HealthyBlock {
         geo: BlockGeometry,
         snapshot: HealthSnapshot,

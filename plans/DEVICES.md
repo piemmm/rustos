@@ -63,7 +63,7 @@ Facts the stages below build on, so no stage re-derives them:
   (`rustos_abi::driver::block::Block`), implemented by
   `drivers/storage/virtio_blk` and `drivers/storage/emmc2` with bounded,
   fixed-cost DMA staging. Filesystem crates exist for ext4, FAT32, and
-  RustFS; `lib/partition` is the shared MBR/GPT layer.
+  ARXFS; `lib/partition` is the shared MBR/GPT layer.
 - **The storage namespace is specified and partially landed.** The
   binding spec (`docs/src/filesystem/drives.md`) defines the forest of
   named roots: canonical `id::<volume-id>` identity, aliases, the
@@ -472,7 +472,7 @@ volume-policy service.
   as the equivalent view path — never a policy bypass. A nil or
   duplicate identity is refused at publish; an unpublished identity
   fails closed `NotFound`.
-- `RustFs::volume_uuid()` exposes the per-volume UUID (already minted at
+- `ARXFS::volume_uuid()` exposes the per-volume UUID (already minted at
   format and verified into every block header), and the boot mount paths
   publish both boot volumes — the read-only System volume at the
   `System` view prefix, the encrypted writable root at the view root —
@@ -520,7 +520,7 @@ volume-policy service.
 - **The service** (`kernel/rustos-kernel::volume_service`, installed via
   the `BootInfo::with_volume_service` seam → `NULL_VOLUME_SERVICE`
   fail-closed default): windows the extent (`PartitionBlock`), opens the
-  matched filesystem (RustFS / ext4 / FAT32), mounts under
+  matched filesystem (ARXFS / ext4 / FAT32), mounts under
   `/Storage/<name>` with `nosuid,nodev,noexec` (+`ro` per the device),
   and publishes the identity **last** with full unwind on any refusal.
   Detach orders fs-flush → device-flush → unmount → unregister →
@@ -538,7 +538,7 @@ volume-policy service.
   posture (stores refused — silently-lossy records are forbidden). The
   ext4 **formatter wrote a nil `s_uuid`** — a real defect the new tests
   exposed; `Ext4::format` now takes the caller-minted UUID and refuses
-  nil. (2) A RustFS attach uses the well-known key (non-secret volumes,
+  nil. (2) A ARXFS attach uses the well-known key (non-secret volumes,
   as the System volume): a privately-keyed volume refuses with a typed
   error, and key-provisioned attach arrives with volmgr's key policy —
   the kernel never guesses a secret. (3) The mount template is the
@@ -577,7 +577,7 @@ volume-policy service.
   refuses by construction), probes a whole-device filesystem signature
   first (superfloppy), else the GPT/MBR table (`lib/partition`), probing
   each present partition's head **by content** through the new
-  `lib/fsprobe` crate (the one home of the RustFS/ext4/FAT32 signature,
+  `lib/fsprobe` crate (the one home of the ARXFS/ext4/FAT32 signature,
   label, and identity definitions — the fs drivers import their magic/
   identity from it, so probe and driver can never disagree; §2.2), and
   asks the kernel to attach each recognised volume (the D3b
@@ -590,7 +590,7 @@ volume-policy service.
   1. the volume's own label, sanitised through the alias character rules
      (ALIAS.md §5.2: lowercased `a-z0-9-_`, everything else dropped,
      leading separators stripped, empty falls through);
-  2. else `<fstype><n>` (`fat1`, `ext1`, `rustfs1`), `n` the 1-based
+  2. else `<fstype><n>` (`fat1`, `ext1`, `arxfs1`), `n` the 1-based
      per-type ordinal in device order;
   3. a name the kernel reports in use (`AlreadyExists`) gets the
      volume-identity fingerprint appended (ALIAS.md §3.8, rendered by
@@ -637,7 +637,7 @@ volume-policy service.
   medium without ambient authority while non-members read only. No
   installed gid (or a registry without the group) leaves the volume
   restrictively system-owned (fail closed, never an invented gid); volumes
-  with a real owner model (ext4, RustFS) are never wrapped. Removable
+  with a real owner model (ext4, ARXFS) are never wrapped. Removable
   mounts keep `nosuid,nodev,noexec` (landed in D3b); `CAP_FS_MOUNT_RELAX`
   relaxation stays future work with its own enforcement point.
 - **Catalog enumeration:** listing a driver-backed directory merges the
@@ -803,8 +803,8 @@ first, then the force-unmount exit, then the verified re-insert replay.
   fs-neutral in mechanics, per-format only in extent.** `lib/fsprobe`
   gained `evidence_len` (beside the signatures, so probe and verifier
   share one definition, §2.2): the window any foreign mutation must
-  rewrite — the whole `RustFS` superblock ring (`RUSTFS_RING_BLOCKS`,
-  now the one shared constant the rustfs driver re-exports), the ext4
+  rewrite — the whole `ARXFS` superblock ring (`ARXFS_RING_BLOCKS`,
+  now the one shared constant the arxfs driver re-exports), the ext4
   primary superblock (write-time/mount-count/checksums live there), and
   the FAT32 boot+FSInfo sectors (honestly weaker; the format offers
   nothing stronger), each bounded by `EVIDENCE_MAX` and fail-closed on

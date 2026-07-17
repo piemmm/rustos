@@ -44,7 +44,7 @@ in all of them applies here without exception.
   address, no `cfg` fork outside the port (§2.20).
 - **Each increment lands complete and green.** No "for now" shims (§2.19):
   an increment that wires the unlock pipeline wires the whole pipeline
-  (unlock kthread → RustFS root mount → users DB publish → `/System` mount
+  (unlock kthread → ARXFS root mount → users DB publish → `/System` mount
   → services/`login` off disk), with its QEMU vertical, docs, and the full
   §7 whole-project gate. Verticals reuse the shared scenario crates the
   aarch64 bins wrap ("thin new bin over shared scenario code"), never a
@@ -77,7 +77,7 @@ in all of them applies here without exception.
   el0_*, stack_guard/overrun/grow, kthread_switch, c_program, wait,
   mem_map, cross_cpu_tlb_shootdown, scheduler_stress.
 - **Drivers under test:** `virtio_blk_pci_x86_64`, `netstack_pci_x86_64`,
-  `fat32_virtio_blk_pci_x86_64`, `rustfs_virtio_blk_pci_x86_64`,
+  `fat32_virtio_blk_pci_x86_64`, `arxfs_virtio_blk_pci_x86_64`,
   `vesa_display_qemu_x86_64`, `ps2_input_qemu_x86_64`, `irq_qemu_x86_64`;
   the virtio-PCI provisioning seam and an in-kernel driver host
   (`x86_64/driver_host.rs`) exist.
@@ -100,7 +100,7 @@ lands whatever QEMU boots the kernel from today, complete for that path —
 if genuine BIOS+UEFI hybrid boot needs boot-loader work beyond this plan,
 that is surfaced under §15.7 before A1 is scoped, never stubbed), a FAT
 boot partition carrying the kernel and the `root.unlock` descriptor, and
-an encrypted RustFS root with the §16 skeleton — reusing the existing
+an encrypted ARXFS root with the §16 skeleton — reusing the existing
 pure-Rust rootfs/partition/appload planting code (`build_system_partition`,
 the `image_apps`/`image_drivers` pipelines) unchanged. Deliverables: the
 `--target x86_64` builder in `tools/mkimage` with `installer`/`debug`
@@ -113,7 +113,7 @@ the verticals mount.
 The `PLAN.md` increment-5 end state. Bind the virtio-blk-PCI root through
 the shared `root_storage` gate in the x86_64 production boot; add the
 port's `root_unlock` admission (the unlock kthread composing the shared
-`root_mount` pipeline: PBKDF2 unlock → RustFS root mount → users DB +
+`root_mount` pipeline: PBKDF2 unlock → ARXFS root mount → users DB +
 admin publish → read-only `/System` mount → volume forest → disk-backed
 app store), wiring `with_app_store`/`with_users_db`/`with_users_admin`/
 `with_filesystem`/`with_volumes` exactly as the aarch64 boot does. riscv64

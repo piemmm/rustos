@@ -22,7 +22,7 @@
 //!   security record; a silently-lossy store is forbidden), and the
 //!   structural read/write/stats surfaces pass through untouched.
 //!
-//! Volumes with a real owner model (`RustFS`, ext4) are never wrapped:
+//! Volumes with a real owner model (`ARXFS`, ext4) are never wrapped:
 //! their on-disk owners, modes, and ACLs keep governing access.
 
 use rustos_abi::driver::filesystem::{

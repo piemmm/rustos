@@ -17,7 +17,7 @@ validated fail-closed against an untrusted, possibly-hostile disk
 
 - A scheme-neutral model in *device logical blocks* (64-bit LBAs, large
   enough for GPT): `Partition`, `PartitionType` (`FatBoot`,
-  `RustFsRoot`, `Other`), and an inline `PartitionTable`.
+  `ARXFSRoot`, `Other`), and an inline `PartitionTable`.
 - `parse_partition_table(dev)` — detect MBR vs GPT and parse, returning
   the neutral table.
 - `mbr` — the classic MBR scheme: `encode` (image author) + `parse`

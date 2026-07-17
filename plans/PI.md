@@ -2093,7 +2093,7 @@ SDHCI-5.1 block driver implementing `rustos_abi::driver::block::Block`:
   (§0.4); the emulation artefact is the host state-machine test.
 
 **Metal acceptance — PIO accepted, DMA pending.** A real Pi 4 boots the P9
-image, reads the FAT boot partition and mounts the RustFS root from the SD
+image, reads the FAT boot partition and mounts the ARXFS root from the SD
 card; the operator's UART log is the recorded acceptance artefact. That
 acceptance predates the DMA fast path and exercised the PIO path. The
 ADMA2 DMA fast path — now the default the aarch64 root-unlock bring-up
@@ -2107,7 +2107,7 @@ root-unlock path.
 **Done when:** host unit tests cover the SDHCI command/response + block
 transfer state machine (both transfer directions) against a mock host —
 done; a metal checklist demonstrates reading the FAT boot partition and
-the RustFS root from a real card — done (operator metal acceptance).
+the ARXFS root from a real card — done (operator metal acceptance).
 
 ### P9 — Bootable SD image (`tools/mkimage`) `[x]`
 
@@ -2117,11 +2117,11 @@ user mode (operator metal acceptance).
 - `tools/mkimage` (`rustos-mkimage`, lib + bin) authors
   `images/rustos-aarch64-rpi.img` in pure Rust (§12 — no
   `parted`/`mkfs` shell-outs): an MBR (two 1 MiB-aligned primaries,
-  `0x0C` FAT32 boot @ LBA 2048, `0x7F` RustFS root, 64 MiB each), with
+  `0x0C` FAT32 boot @ LBA 2048, `0x7F` ARXFS root, 64 MiB each), with
   both partitions laid down by the **real** in-tree drivers
-  (`Fat32::format` / `RustFs::format` — author and consumer share one
+  (`Fat32::format` / `ARXFS::format` — author and consumer share one
   on-disk definition, §2.2), mirroring the
-  `tests/integration/{fat32,rustfs}_image` fixture pattern.
+  `tests/integration/{fat32,arxfs}_image` fixture pattern.
 - Boot partition: the verified firmware blobs (the `disable-bt` overlay
   planted at its firmware-fixed `overlays/` path), a generated
   `config.txt` (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
@@ -2144,11 +2144,11 @@ user mode (operator metal acceptance).
   written. `armstub8.bin` is optional and unpinned — no official binary
   exists and the boot stub parks secondaries itself; it joins the
   manifest when SMP-on-metal needs it.
-- Root partition: an encrypted RustFS volume (no plaintext mode) carrying
+- Root partition: an encrypted ARXFS volume (no plaintext mode) carrying
   the §16 skeleton (`/System` + its twelve subdirectories incl.
   `Security/{Keys,Policy}`, `/Users`, `/Apps`, `/Storage`); the §11
   databases/users are the installer's first-boot job. The volume key is
-  **passphrase-derived** (§11): the build provisions a per-volume rustfs
+  **passphrase-derived** (§11): the build provisions a per-volume arxfs
   `UnlockDescriptor` (random salt + PBKDF2 cost), derives the key from the
   profile's `passphrase_for` (`INSTALLER_PASSPHRASE` — **blank** — for the
   installer; `DEBUG_PASSPHRASE` — `root` — for the never-shipped debug
@@ -3791,7 +3791,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         trusted, spawn, args, caller_caps, sink)` is the thin production glue
         the live boot path drives once the root is mounted: it sources the
         store paths *and* the bundle bytes from the just-mounted root volume
-        `fs` (the rustfs driver) — `enumerate_driver_store(fs, …)` for the
+        `fs` (the arxfs driver) — `enumerate_driver_store(fs, …)` for the
         §5.3-checked path walk, then a `VfsImageSource` over the *same* `fs`
         for the bytes (the two `&mut fs` reads are strictly sequential, so the
         one borrow never overlaps) — and defers entirely to `autoload_drivers`
@@ -4012,8 +4012,8 @@ the secret-bearing user data (`/Users`, app/user installs, `/Storage`).
 
 **Target on-disk layout (the §16/§11 image; `tools/mkimage`):** three MBR
 partitions — (1) FAT boot (firmware/kernel/`root.unlock`, unchanged);
-(2) **`/System` — read-only `RustFS`, unencrypted, signed-bundle store**;
-(3) data root — encrypted `RustFS` carrying `/Users`/`/Apps`/`/Storage` and
+(2) **`/System` — read-only `ARXFS`, unencrypted, signed-bundle store**;
+(3) data root — encrypted `ARXFS` carrying `/Users`/`/Apps`/`/Storage` and
 `/System/Security/Users`. The installer (§11) authors the same split; expert
 mode may not collapse it.
 
@@ -4036,11 +4036,11 @@ marked metal).** The in-kernel `keyboard_service`/`usb_keyboard.rs` scaffold
 stays the metal driver and stays wired throughout, so the working metal
 keyboard never regresses (§2.17), until the final flip:
 - **B1 — three-partition layout + read-only `/System` mount. DONE (host +
-  `-M virt`).** `lib/partition` carries a `RustFsSystem` role (MBR type byte
-  `0x7e`, GPT GUID `TYPE_GUID_RUSTFS_SYSTEM`). `RustFs::open_read_only` mounts
+  `-M virt`).** `lib/partition` carries a `ARXFSSystem` role (MBR type byte
+  `0x7e`, GPT GUID `TYPE_GUID_ARXFS_SYSTEM`). `ARXFS::open_read_only` mounts
   a volume read-only and every mutator fails closed (`commit` backstop +
-  early `deny_if_read_only` guards, §5.4). The `/System` volume is a `RustFS`
-  volume keyed by the non-secret well-known `rustos_drv_fs_rustfs::
+  early `deny_if_read_only` guards, §5.4). The `/System` volume is a `ARXFS`
+  volume keyed by the non-secret well-known `rustos_drv_fs_arxfs::
   SYSTEM_VOLUME_KEY` (effectively unencrypted; integrity rests on the
   per-bundle signatures, §18.6). `tools/mkimage::rootfs::build_system_partition`
   lays the §16.2 skeleton at the volume root and `build_rpi_image` emits the
@@ -4066,7 +4066,7 @@ keyboard never regresses (§2.17), until the final flip:
   `/System`) is scanned at the volume-relative `rustos_kernel_core::
   SYSTEM_VOLUME_STORE_PATH` (`/Drivers`), the §16.2 `/System/Drivers/` store.
   The fixtures plant the signed `virtio_kbd` bundle into the `/System` volume's
-  `Drivers/` store (shared `rustos_test_rustfs_image::plant_nested_file`; the
+  `Drivers/` store (shared `rustos_test_arxfs_image::plant_nested_file`; the
   encrypted root carries no drivers, §2.14); `SYSTEM_SECTORS` grown to 8 MiB to
   hold it. `autoload_input_qemu_aarch64` proves the full discover→signed
   gate→spawn→`key_inject` path runs pre-unlock (PASS on
@@ -4234,7 +4234,7 @@ keyboard never regresses (§2.17), until the final flip:
     the below-`Info` `4142` `ROOT_UNLOCK_KEY_REJECTED` (Debug); `4134`
     `ROOT_MOUNT_REJECTED` (Error) is narrowed to *structural* refusals
     (unreadable/invalid descriptor, missing/malformed table or partition,
-    non-rustfs volume, device fault). The interactive wrong-attempt audit
+    non-arxfs volume, device fault). The interactive wrong-attempt audit
     stays `4137` `ROOT_UNLOCK_RETRY` (Warn) and give-up `4138` (Error). So
     neither the per-boot probe nor routine retries flood the log, while the
     record stays available for brute-force forensics when the level is
@@ -4293,9 +4293,9 @@ two users — or the same user twice — can be logged in concurrently.
   capability-gated or unreadable record refuses, §5.1/§5.4); every
   outcome is audited (`USERS_DB_LOADED` 4040 / `USERS_DB_REJECTED` 4041)
   and any refusal leaves **no** database. Proven by kernel/core unit
-  tests (every refusal), the `rustfs_image` users-root fixture round
+  tests (every refusal), the `arxfs_image` users-root fixture round
   trip through the real driver, and the `users_db_qemu_aarch64` `-M
-  virt` vertical (virtio-blk MMIO → rustfs mount → loader →
+  virt` vertical (virtio-blk MMIO → arxfs mount → loader →
   authenticate). The Pi's metal root mount (P8/P9) and the
   volume-key hand-off to the loader on metal ride the P8/P9 metal
   items.
@@ -4568,18 +4568,18 @@ two users — or the same user twice — can be logged in concurrently.
    and age limits are meaningful. The debug-build dual echo stays a
    debug-only exception.
 3. **Login over a real database in production.** The passphrase-derived
-   root-unlock **primitive is landed**: `drivers/filesystem/rustfs`'s
+   root-unlock **primitive is landed**: `drivers/filesystem/arxfs`'s
    `unlock` module (`UnlockDescriptor` — PBKDF2-HMAC-SHA256 over a
    per-volume random salt + bounded iteration count, fail-closed
    encode/decode, `derive_volume_key`) turns an operator passphrase into
    the volume's `VolumeKey` (`AGENTS.md` §11). It is the LUKS-style
    indirection above the always-encrypted volume; the plaintext
    descriptor rides beside the volume (the FAT boot partition on a Pi
-   image). A wrong passphrase derives the wrong key and `RustFs::open`
+   image). A wrong passphrase derives the wrong key and `ARXFS::open`
    refuses it (`PermissionDenied`) — no separate oracle. Host-proven:
-   the `unlock` unit tests plus an end-to-end rustfs test that formats a
+   the `unlock` unit tests plus an end-to-end arxfs test that formats a
    volume under a passphrase-derived key and re-mounts it (wrong
-   passphrase refused). Docs: `docs/src/filesystem/rustfs-spec.md` §7
+   passphrase refused). Docs: `docs/src/filesystem/arxfs-spec.md` §7
    (incl. the §19.9 TPM/secure-boot future hand-off, which seals the key
    to a measured boot and falls back to the passphrase).
 
@@ -4634,14 +4634,14 @@ two users — or the same user twice — can be logged in concurrently.
        LANDED (host-proven).** `rustos_kernel::root_mount::unlock_root_and_load_users`
        (`kernel/rustos-kernel/src/root_mount.rs`) is the one composition —
        in the `Layer::Tooling` bin crate, the only layer permitted to name
-       both the `rustfs` driver and `kernel/core` (§17.4) — that turns the
+       both the `arxfs` driver and `kernel/core` (§17.4) — that turns the
        three artefacts a boot path recovers off storage into the served
        `users-v1` database: the plaintext `root.unlock` descriptor, the
        typed passphrase, and the encrypted root `Block` device. It decodes
        the descriptor fail-closed (`UnlockDescriptor::decode`, §5.4.3),
        derives the volume key from the passphrase (PBKDF2-HMAC-SHA256) in a
        `Zeroizing` wrapper (§4 — wiped on drop, the audited `zeroize` crate,
-       no hand-rolled primitive), mounts the encrypted root (`RustFs::open`
+       no hand-rolled primitive), mounts the encrypted root (`ARXFS::open`
        — a wrong passphrase refused with `PermissionDenied`, no plaintext
        fallback, no separate oracle, §4 / §5.4), then runs
        `load_users_db_source`. Every refusal is audited (`4133`
@@ -4649,8 +4649,8 @@ two users — or the same user twice — can be logged in concurrently.
        logged, §19.4) and yields no database (§5.4.5). Host-proven by 4
        tests (the correct passphrase unlocks the volume and the served text
        parses + authenticates the planted `root`/`root`; a wrong passphrase,
-       a tampered descriptor, and a non-rustfs volume each refused
-       fail-closed). The shared `rustos_test_rustfs_image` fixture gained
+       a tampered descriptor, and a non-arxfs volume each refused
+       fail-closed). The shared `rustos_test_arxfs_image` fixture gained
        `build_users_root_image_with_key` + `VecBlock::from_bytes` so the
        test authors a real volume under a passphrase-derived key through the
        one on-disk-layout source of truth (§2.2). No `lib/abi`/C-header
@@ -4661,7 +4661,7 @@ two users — or the same user twice — can be logged in concurrently.
        partition through the **same** real FAT32 driver `tools/mkimage`
        authored it with — one on-disk definition for writer and reader
        (§2.2). The file name is now the shared
-       `rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME` constant (hoisted from
+       `rustos_drv_fs_arxfs::ROOT_UNLOCK_NAME` constant (hoisted from
        `tools/mkimage::fatboot`, which re-exports it; §2.2 / §2.14). The
        descriptor is a fixed-length record, so the read is strictly bounded
        and fail-closed (§5.4 / §24.4): the entry's size is checked to be
@@ -4696,11 +4696,11 @@ two users — or the same user twice — can be logged in concurrently.
        MBR/GPT parse (the boot reader), the one on-disk definition
        `tools/mkimage` writes (§2.2), so it reads a Pi MBR card **and** a
        UEFI x86_64 GPT disk with no board `cfg` (§2.20). It locates the FAT
-       boot and `RustFS` root partitions **by role** (not by index), opens a
+       boot and `ARXFS` root partitions **by role** (not by index), opens a
        bounds-checked `PartitionBlock` window onto each **in sequence** (one
        device, two windows, via the new `impl Block for &mut B` forwarding in
        `lib/abi`), reads the descriptor off the boot window, then mounts the
-       root window. A malformed/forged table, a missing FAT boot or `RustFS`
+       root window. A malformed/forged table, a missing FAT boot or `ARXFS`
        root partition, or an out-of-range extent is audited (`4134`) and
        returned (`RootMountError::PartitionTable`/`NoBootPartition`/
        `NoRootPartition`/`PartitionWindow`); no database is served (§2.9 /
@@ -4780,7 +4780,7 @@ two users — or the same user twice — can be logged in concurrently.
        structural failure or a console read fault gives up (`4138`), leaving
        the cell empty so every login is refused until reboot (§2.9 / §5.4.5).
        Host-proven by `root_mount` tests over a mock console + the same
-       MBR + encrypted-`RustFS` disk fixture `tools/mkimage` writes (§2.2). No
+       MBR + encrypted-`ARXFS` disk fixture `tools/mkimage` writes (§2.2). No
        `lib/abi`/C-header change.
      - **Chunk B-2 `&'static LateUsersDb` dispatch-hook wiring — LANDED
        (whole gate green).** The shared set-once cell
@@ -4798,12 +4798,12 @@ two users — or the same user twice — can be logged in concurrently.
        virtio-blk-mmio bring-up, then drives the production
        `unlock_root_disk_interactively` over a planted **whole-disk**
        encrypted-root image (MBR + FAT boot carrying `root.unlock` + a
-       passphrase-derived encrypted `RustFS` root): it types the passphrase
+       passphrase-derived encrypted `ARXFS` root): it types the passphrase
        at the prompt over a scripted console, mounts the root, installs the
        database into a `LateUsersDb`, and proves the planted account
        authenticates while a wrong password is refused. The disk is the
        shared `rustos-test-encrypted-root-image` fixture (authored by the
-       real in-tree FAT32/`RustFS` drivers + `mbr::encode`), which the
+       real in-tree FAT32/`ARXFS` drivers + `mbr::encode`), which the
        `root_mount` host tests also split, so the in-memory split tests and
        the live (emulated) board exercise one on-disk layout (§2.2). No
        `lib/abi`/C-header change.

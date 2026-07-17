@@ -1036,24 +1036,24 @@ normal, mild, moderate, severe, critical — is shared with
   refused outside normal pressure — the volume is always still served
   straight from the driver.
 
-## 7i. The RustFS transform cache (SMART3)
+## 7i. The ARXFS transform cache (SMART3)
 
 The transformation cache (`plans/SMARTRAM.md` SMART3, section 6.2)
-retains the expensive intermediate form RustFS produces on every read of
+retains the expensive intermediate form ARXFS produces on every read of
 a compressed cluster: the verified, decrypted, decompressed cluster
 plaintext. Without it, each read that touches a compressed cluster pays
 the full pipeline — a device read, an AEAD decrypt, and integrity checks
 per stored block, then a whole-frame decompression — once per *call*;
 with it, once per *cluster*.
 
-- **A driver seam, a kernel implementation.** The RustFS driver stays
+- **A driver seam, a kernel implementation.** The ARXFS driver stays
   kernel-independent: it exposes the `ClusterCache` trait
-  (`rustos_drv_fs_rustfs::ClusterCache`) and consults an injected
+  (`rustos_drv_fs_arxfs::ClusterCache`) and consults an injected
   implementation only in its serving read path. The production
   implementation is `rustos_kernel::transform_cache::TransformClusterCache`,
   installed by the boot path on both mounted volumes (`system_mount`
   for the read-only `/System` volume, the unlock path for the writable
-  root) via `RustFs::with_cluster_cache`. A volume without a cache
+  root) via `ARXFS::with_cluster_cache`. A volume without a cache
   behaves exactly as before, and the integrity passes (scrub, check,
   rescue) never consult it — they exist to verify the on-disk bytes.
 - **Complementary to `CachedFs`, not duplicate.** `CachedFs` (§7g)
@@ -1226,7 +1226,7 @@ plan binds, over **one** shared gauge:
   refusal, with no new mechanism.
 - **The layered stack** is proven in
   `kernel/rustos-kernel/src/transform_cache_tests.rs`: `CachedFs`
-  wrapping a real RustFS volume whose read path consults the installed
+  wrapping a real ARXFS volume whose read path consults the installed
   `TransformClusterCache`, both on one gauge — a filesystem-cache hit
   never reaches the transform layer, and moderate pressure drains both
   layers on their own next operations while the volume still serves
@@ -1262,7 +1262,7 @@ layers above rather than duplicating them: `CachedFs` (§7g) retains
 served plaintext per volume and the transform cache (§7i) retains
 decompressed cluster plaintext; the block cache retains the raw device
 blocks underneath both, so their misses — and every consumer with no
-higher cache (partition-table walks, driver-store scans, RustFS
+higher cache (partition-table walks, driver-store scans, ARXFS
 metadata block reads) — avoid a device round-trip that parks the
 calling task across a completion interrupt.
 

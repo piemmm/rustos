@@ -779,11 +779,11 @@ mod tests {
     #[test]
     fn unsupported_resolvers_refused() {
         assert_eq!(
-            parse("fs::rustfs/System/x"),
+            parse("fs::arxfs/System/x"),
             Err(PathError::UnsupportedResolver)
         );
         assert_eq!(
-            parse("rustfs::System/x"),
+            parse("arxfs::System/x"),
             Err(PathError::UnsupportedResolver)
         );
         assert_eq!(

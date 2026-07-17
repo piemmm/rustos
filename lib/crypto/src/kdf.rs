@@ -7,8 +7,8 @@
 //! is ever required and the construction stays a thin wrapper over the audited
 //! [`crate::mac`] primitive rather than a hand-rolled KDF.
 //!
-//! This is what `RustFS` uses to grow its per-volume key hierarchy
-//! (`docs/src/filesystem/rustfs-spec.md` §7): one master key derives the
+//! This is what `ARXFS` uses to grow its per-volume key hierarchy
+//! (`docs/src/filesystem/arxfs-spec.md` §7): one master key derives the
 //! metadata-authentication, filename, and content keys, each under a distinct
 //! `context`, so a derived key never collides with another use of the master.
 //!
@@ -180,17 +180,17 @@ mod tests {
 
     #[test]
     fn derivation_is_deterministic_and_full_width() {
-        let a = derive_key(&SECRET, b"rustfs/content");
-        let b = derive_key(&SECRET, b"rustfs/content");
+        let a = derive_key(&SECRET, b"arxfs/content");
+        let b = derive_key(&SECRET, b"arxfs/content");
         assert_eq!(a, b);
         assert_eq!(a.len(), DERIVED_KEY_LEN);
     }
 
     #[test]
     fn distinct_contexts_yield_independent_keys() {
-        let content = derive_key(&SECRET, b"rustfs/content");
-        let filename = derive_key(&SECRET, b"rustfs/filename");
-        let meta = derive_key(&SECRET, b"rustfs/meta-mac");
+        let content = derive_key(&SECRET, b"arxfs/content");
+        let filename = derive_key(&SECRET, b"arxfs/filename");
+        let meta = derive_key(&SECRET, b"arxfs/meta-mac");
         assert_ne!(content, filename);
         assert_ne!(content, meta);
         assert_ne!(filename, meta);
@@ -200,8 +200,8 @@ mod tests {
     fn distinct_secrets_yield_independent_keys() {
         let other = [0x43; 32];
         assert_ne!(
-            derive_key(&SECRET, b"rustfs/content"),
-            derive_key(&other, b"rustfs/content")
+            derive_key(&SECRET, b"arxfs/content"),
+            derive_key(&other, b"arxfs/content")
         );
     }
 }

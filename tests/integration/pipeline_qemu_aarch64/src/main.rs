@@ -6,7 +6,7 @@
 //!
 //! ## What this test asserts
 //!
-//! The production boot path unlocks and mounts the encrypted `RustFS`
+//! The production boot path unlocks and mounts the encrypted `ARXFS`
 //! root, login authenticates `root`/`root`, and the session shell runs
 //! the runner's ordered script:
 //!

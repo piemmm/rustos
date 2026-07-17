@@ -10,7 +10,7 @@
 //! and the SMART3 `TransformClusterCache` retains *decompressed
 //! cluster plaintext*; this cache retains the raw device blocks
 //! underneath both, so their misses — and every uncached consumer of
-//! the disk (partition-table walks, driver-store scans, `RustFs`
+//! the disk (partition-table walks, driver-store scans, `ARXFS`
 //! metadata block reads) — avoid a device round-trip that otherwise
 //! parks the calling task across a completion interrupt.
 //!

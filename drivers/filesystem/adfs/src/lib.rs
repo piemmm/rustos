@@ -37,7 +37,7 @@
 //! Load/exec addresses, the 12-bit filetype, the 40-bit centisecond
 //! datestamp, and the `FileCore` attribute bits are surfaced through the
 //! shared `rustos_fsmeta` Acorn preset as the canonical `acorn.*`
-//! attribute keys, so a copy to `RustFS` and back is byte-exact.
+//! attribute keys, so a copy to `ARXFS` and back is byte-exact.
 //!
 //! # Public surface
 //!

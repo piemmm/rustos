@@ -27,7 +27,7 @@ const FILL_FILE_BYTES: usize = 2 * 1024 * 1024;
 /// bytes: every block is then high-entropy and distinct, so the content is
 /// neither compressible nor deduplicable and the fill genuinely consumes
 /// physical blocks (a flat ramp would collide mod 256 and dedupe away under
-/// `docs/src/filesystem/rustfs-spec.md` §9). Taking the low byte avoids any
+/// `docs/src/filesystem/arxfs-spec.md` §9). Taking the low byte avoids any
 /// narrowing `as` cast.
 fn byte_at(seed: u64, file: u64, offset: u64) -> u8 {
     let mut x = seed
@@ -307,10 +307,10 @@ fn exercise_exhaustion<F: SoakFs>(
     seed: u64,
 ) -> Result<(), String> {
     // Each fill file gets *distinct* content (a per-file id mixed into every
-    // byte). RustFS deduplicates identical data records, so filling with one
+    // byte). ARXFS deduplicates identical data records, so filling with one
     // repeated buffer would share a single chunk and never exhaust the volume;
     // unique content makes the fill genuinely consume space and reach
-    // `NoSpace` (`docs/src/filesystem/rustfs-spec.md` §9).
+    // `NoSpace` (`docs/src/filesystem/arxfs-spec.md` §9).
     let fill_base = 0x5000_0000u64;
     let max_files = (device_bytes / FILL_FILE_BYTES as u64) + 16;
     let mut idx = 0u64;

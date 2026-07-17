@@ -12,7 +12,7 @@
 //! [`Uniform`] applies the mount point's [`Metadata`] to every node (the
 //! natural model for a filesystem like FAT that stores no per-file owner),
 //! while [`PerInode`] reads each node's own stored record through
-//! [`FilesystemSecurity`] (for a driver like `rustfs` that stores full
+//! [`FilesystemSecurity`] (for a driver like `arxfs` that stores full
 //! per-inode ownership, mode, ACL, and capability gate).
 //!
 //! The adapter is constructed per call with a `&mut dyn FilesystemRead`
@@ -113,7 +113,7 @@ pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized, P = Uniform> {
 /// The two implementations are the two sources a delegated subtree
 /// can have: the uniform mount-point template ([`Uniform`], for a driver
 /// like FAT that stores no per-file owner) and the driver's own stored
-/// per-inode record ([`PerInode`], for a driver like `rustfs`). Both feed
+/// per-inode record ([`PerInode`], for a driver like `arxfs`). Both feed
 /// the *same* [`Metadata::authorize`] decision (the VFS is the single policy point).
 ///
 /// The two implementors [`Uniform`] and [`PerInode`] are the only ones the
@@ -126,7 +126,7 @@ pub trait MetaPolicy<R: FilesystemRead + ?Sized> {
     /// Stamp the freshly created `node` with its creator's identity.
     ///
     /// A driver's raw `create` mints the node with the format's own
-    /// default record (`RustFS` stamps the system user), which would lock
+    /// default record (`ARXFS` stamps the system user), which would lock
     /// an ordinary creator out of a file it just made. Under [`PerInode`]
     /// the stored record's ownership is rewritten to the creating
     /// caller's `(uid, gid)` — mode, ACL, and capability gate untouched —
