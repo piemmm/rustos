@@ -43,7 +43,7 @@ static SPAWNER: FixedSpawner = FixedSpawner::new(virtio_blk_register);
 /// A scripted console input source: yields the fixture
 /// [`disk_image::PASSPHRASE`] bytes followed by a single line terminator,
 /// then reports end of input — the exact bytes an operator types at the
-/// `Root filesystem passphrase:` prompt. `Sync` through an atomic cursor over the
+/// `ARXFS passphrase:` prompt. `Sync` through an atomic cursor over the
 /// immutable passphrase, as [`ConsoleRead`] requires (its `read` takes
 /// `&self`).
 struct ScriptedPassphrase {

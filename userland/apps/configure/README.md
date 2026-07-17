@@ -14,7 +14,7 @@ render are the shared `lib/sysconfig` engine — the same engine every
 boot-time consumer (the login service's `os.loginType`) reads through, so
 producer and consumer can never diverge. Settings take effect at the point
 their consumer parses the store: the store lives on the encrypted root
-volume, so it is read only after the `Root filesystem passphrase:` unlock.
+volume, so it is read only after the `ARXFS passphrase:` unlock.
 
 Reads and writes go through the secured VFS under the caller's own
 kernel-attested identity: `/System/Settings` is owned by the system

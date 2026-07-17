@@ -211,11 +211,11 @@ const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
     line[value.len()] == b'\n'
 }
 
-/// The passphrase line the admission vertical types at `Root filesystem passphrase: `.
+/// The passphrase line the admission vertical types at `ARXFS passphrase: `.
 const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
 
 /// A deliberately wrong passphrase *prefix* (no line terminator) the
-/// admission vertical types at the first `Root filesystem passphrase: `
+/// admission vertical types at the first `ARXFS passphrase: `
 /// prompt, so the run also proves the two timed-wake behaviours of the
 /// secret prompt end to end:
 ///
@@ -263,7 +263,7 @@ const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
 /// `input_virtio_mmio` vertical's "eventq armed" readiness marker
 /// (inject only once the driver can receive). The typed characters buffer
 /// as console type-ahead in the seat's keyboard queue until the in-kernel
-/// unlock kthread's `Root filesystem passphrase:` prompt drains them — the
+/// unlock kthread's `ARXFS passphrase:` prompt drains them — the
 /// prompt itself renders on the video console, never on serial, so the
 /// typing is gated on the armed-driver witness rather than the prompt text.
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
@@ -1939,11 +1939,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, "root\n"),
             ("Password", Duration::ZERO, "wrong\n"),
             ("1 failed attempt", Duration::ZERO, OVERLONG_USERNAME),
@@ -3409,7 +3405,7 @@ const TESTS: &[QemuTest] = &[
     // and binds the virtio-blk root, the init seam admits the in-kernel
     // unlock kthread (`unlock_service::spawn_if_present`), and the kthread
     // brings the device up over the production device-IRQ path, prompts at
-    // `Root filesystem passphrase: `, reads the typed passphrase, mounts the encrypted
+    // `ARXFS passphrase: `, reads the typed passphrase, mounts the encrypted
     // `RustFS` root, and installs the users database into `LATE_USERS_DB`.
     // The kernel-side audit sink reports PASS through the ARM semihosting
     // finisher the instant it sees the unlock-service install message
@@ -3457,7 +3453,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[
             (
-                "Root filesystem passphrase: ",
+                "ARXFS passphrase: ",
                 Duration::ZERO,
                 WRONG_UNLOCK_PASSPHRASE_PREFIX,
             ),
@@ -3467,11 +3463,7 @@ const TESTS: &[QemuTest] = &[
             // Wait-only step: the notice must arrive with no further input
             // (the timed wake, not a keystroke, ends the delay park).
             ("Incorrect passphrase", Duration::ZERO, ""),
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
         ],
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
@@ -3523,11 +3515,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             // The full-screen login view paints `Username:` once and the
             // minimal-diff renderer then repaints only the changed label
             // cells (`Password` over it), so the anchors are the labels
@@ -3616,11 +3604,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@rustos ~% ", Duration::ZERO, "memsoak\n"),
@@ -3671,11 +3655,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@rustos ~% ", Duration::ZERO, "yes | head -n 2\n"),
@@ -3749,11 +3729,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@rustos ~% ", Duration::ZERO, "sysmon\n"),
@@ -3801,11 +3777,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             (

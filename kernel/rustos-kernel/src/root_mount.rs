@@ -761,6 +761,30 @@ const ROOT_UNLOCK_GAVE_UP: EventId = EventId(4138);
 /// buffer is a zeroized on-stack array of exactly this size.
 pub const MAX_PASSPHRASE_LEN: usize = 256;
 
+/// The single source of the encrypted-root filesystem's operator-facing
+/// label. Both the unlock prompt and the post-unlock line are built from
+/// this one token, so renaming the filesystem cannot leave the two
+/// spellings out of step.
+macro_rules! fs_label {
+    () => {
+        "ARXFS"
+    };
+}
+
+/// The interactive unlock prompt drawn on its own fresh line. `\r\n` opens
+/// the line; the trailing space separates the label from the typed secret.
+const FS_UNLOCK_PROMPT: &[u8] = concat!("\r\n", fs_label!(), " passphrase: ").as_bytes();
+
+/// The line a successful unlock leaves behind, followed by one blank line.
+///
+/// A carriage return returns the cursor to the start of the prompt line,
+/// the bare label overwrites the `<label> passphrase: ` text, and the
+/// erase-to-end-of-line control clears whatever the operator typed (and the
+/// `[input complete]` feedback marker) off the tail — so the line reads just
+/// the label. The `\r\n\r\n` then ends that line and leaves one blank line
+/// separating the unlock from the login `Username:` prompt that follows.
+const FS_UNLOCKED_LINE: &[u8] = concat!("\r", fs_label!(), "\x1b[K\r\n\r\n").as_bytes();
+
 /// The one set-once credential cell the production dispatch hook reads
 /// and the in-kernel root-unlock kthread writes.
 ///
@@ -935,7 +959,7 @@ fn finish_install(
 /// drawn. An installer image is provisioned with a blank root passphrase
 /// (`rustos_mkimage::INSTALLER_PASSPHRASE`) so a fresh
 /// install boots straight into the installer rather than stalling
-/// behind a `Root filesystem passphrase:` prompt the operator cannot answer. Only
+/// behind an `ARXFS passphrase:` prompt the operator cannot answer. Only
 /// when the blank passphrase does **not** unlock the root (a debug or
 /// production image with a non-blank passphrase) is the operator prompted
 /// interactively. A non-blank passphrase failing the silent attempt is no
@@ -956,7 +980,7 @@ fn finish_install(
 ///
 /// Each attempt:
 ///
-/// 1. Writes the `Root filesystem passphrase:` prompt to `console` (best
+/// 1. Writes the `ARXFS passphrase:` prompt to `console` (best
 ///    effort — a write error does not by itself abort the attempt).
 /// 2. Reads one line into a zeroized, fixed-length on-stack buffer
 ///    ([`MAX_PASSPHRASE_LEN`]); the passphrase is never heap-allocated,
@@ -1048,7 +1072,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // An installer image is provisioned with a **blank** root passphrase
     // (`rustos_mkimage::INSTALLER_PASSPHRASE`): a fresh
     // install must boot straight into the installer, never stall behind
-    // a `Root filesystem passphrase:` prompt the operator has no value to
+    // an `ARXFS passphrase:` prompt the operator has no value to
     // answer. So if the blank passphrase unlocks the root we install and
     // return with no prompt at all. A debug or production image whose
     // passphrase is non-blank simply fails this attempt — the master key
@@ -1079,7 +1103,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // cannot satisfy, or a dead console, fails closed — re-prompting those
     // could never succeed.
     loop {
-        write_all(console, b"\r\nRoot filesystem passphrase: ");
+        write_all(console, FS_UNLOCK_PROMPT);
 
         // A zeroized, fixed-length buffer: the typed secret never reaches
         // the heap and is wiped when this attempt's buffer drops.
@@ -1103,10 +1127,11 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
 
         match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
             Ok(unlocked) => {
-                // The passphrase was accepted: move off the completed-marker
-                // line and leave one blank line so the login `Username:`
-                // prompt that follows is clearly separated from the unlock.
-                write_all(console, b"\r\n\r\n");
+                // The passphrase was accepted: collapse the prompt line to
+                // just the filesystem label (overwriting the typed line and
+                // its completed-marker) and leave one blank line so the login
+                // `Username:` prompt that follows is clearly separated.
+                write_all(console, FS_UNLOCKED_LINE);
                 return finish_install(unlocked, install, audit);
             }
             Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
@@ -2233,7 +2258,7 @@ mod tests {
         assert_eq!(delays.load(Ordering::Relaxed), 2, "one delay per wrong try");
         let out = console.bytes();
         assert_eq!(
-            count_occurrences(&out, b"Root filesystem passphrase: "),
+            count_occurrences(&out, b"ARXFS passphrase: "),
             3,
             "three prompts (two wrong + the correct one) with the new wording"
         );
@@ -2242,8 +2267,15 @@ mod tests {
             2,
             "one notice per wrong attempt"
         );
-        // The successful attempt ends the completed-marker line and leaves a
-        // blank line before login draws its `Username:` prompt.
+        // The successful attempt collapses the prompt line to just the
+        // filesystem label (carriage return, label, erase-to-end-of-line)
+        // and then leaves a blank line before login draws its `Username:`
+        // prompt.
+        assert_eq!(
+            count_occurrences(&out, b"\rARXFS\x1b[K"),
+            1,
+            "the unlock collapses the prompt line to the bare label"
+        );
         assert!(
             out.ends_with(b"\r\n\r\n"),
             "a blank line separates the unlock from login"

@@ -1017,7 +1017,7 @@ accounts refuses every login rather than inventing one (`AGENTS.md`
 `plans/PI.md` P11) adds one more state: while the encrypted root is still
 being unlocked the read returns **`WouldBlock`** — the live-but-not-ready
 signal — so `login` *waits without prompting* and leaves the console to
-the concurrent `Root filesystem passphrase:` prompt; once the unlock resolves the
+the concurrent `ARXFS passphrase:` prompt; once the unlock resolves the
 read returns the installed database, or `NotImplemented` if the unlock
 produced none (the deny-all prompt then runs). An undersized buffer is refused whole with `BufferTooSmall` (a
 credential database is never truncated, `AGENTS.md` §2.9); a buffer sized

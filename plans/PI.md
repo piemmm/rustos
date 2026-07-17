@@ -4760,14 +4760,16 @@ two users — or the same user twice — can be logged in concurrently.
        disk and taking the console halves as the object-safe
        `rustos_kernel_core::{ConsoleWrite, ConsoleRead}` seams, it names no
        arch or device type (§17.4). Each attempt prompts
-       `Root filesystem passphrase:`, reads one line into a zeroized,
+       `ARXFS passphrase:`, reads one line into a zeroized,
        fixed-length on-stack buffer
        (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
        memory beyond the attempt, §4 / §19.4; Backspace edits, an over-long
        line is a refused attempt not a truncated secret, §5.4.3), and runs
        `mount_root_disk_and_load_users`. Success publishes the loaded
-       database into the set-once `LateUsersDb` (`4136`) and closes the prompt
-       with a CR + blank line so the login `Username:` is separated; a wrong
+       database into the set-once `LateUsersDb` (`4136`) and collapses the
+       prompt line in place to just the filesystem label `ARXFS` (CR + label
+       + erase-to-end-of-line) followed by a blank line so the login
+       `Username:` is separated; a wrong
        passphrase (`Mount(PermissionDenied)`) is audited (`4137`),
        rate-limited by a minimum three-second timed park
        (`unlock_service::park_for_ns`, injected as a `delay` seam so host

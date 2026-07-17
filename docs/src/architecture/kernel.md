@@ -385,13 +385,13 @@ over the same MBR + encrypted-`RustFS` disk fixture `tools/mkimage` writes
 (§2.2). It tries the **blank** passphrase silently *first*, before drawing
 any prompt: the installer image is provisioned with a blank root passphrase
 (`rustos_mkimage::INSTALLER_PASSPHRASE`, §11), so a fresh install unlocks and
-boots straight into the §11 installer with no `Root filesystem passphrase:`
+boots straight into the §11 installer with no `ARXFS passphrase:`
 prompt at all. Only when the blank passphrase does not unlock the root (a debug image —
 passphrase `root` — or a production image with an operator-chosen passphrase)
 is the operator prompted interactively; a non-blank passphrase failing the
 silent attempt is no oracle (the master key simply never unwraps, exactly as
 for any wrong passphrase, §5.4). Each interactive attempt prompts
-`Root filesystem passphrase:`, reads one line into a zeroized, fixed-length
+`ARXFS passphrase:`, reads one line into a zeroized, fixed-length
 on-stack buffer (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
 memory beyond the attempt, §4 / §19.4), and runs
 `mount_root_disk_and_load_users`. On success (silent or prompted) the loaded
@@ -410,9 +410,11 @@ error the disk itself cannot satisfy (no table, no boot/root partition, an
 unreadable/invalid descriptor, a corrupt database) or a console read fault
 gives up; every give-up path (`4138` `ROOT_UNLOCK_GAVE_UP`, with a
 secret-free `cause`) leaves the cell empty, so every login is refused until
-the next boot (§2.9 / §5.4.5). On a *successful* unlock the prompt closes
-with a carriage-return and a blank line so the login `Username:` that
-follows is cleanly separated.
+the next boot (§2.9 / §5.4.5). On a *successful* unlock the prompt line is
+collapsed in place to just the filesystem label `ARXFS` (a carriage return,
+the label, and an erase-to-end-of-line clear the typed secret and its
+completed-input marker off the tail) followed by a blank line, so the login
+`Username:` that follows is cleanly separated.
 
 The `&'static LateUsersDb` dispatch-hook half is wired: the boot path hands
 the syscall dispatch hook `&rustos_kernel::root_mount::LATE_USERS_DB`
