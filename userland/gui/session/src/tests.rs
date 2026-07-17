@@ -1148,6 +1148,93 @@ fn set_icons_installs_a_loaded_set_and_the_bar_still_presents() {
     assert_eq!(comp.window_count(), 1);
 }
 
+// ---- desktop shell: the pointer cursor ----
+
+#[test]
+fn refresh_cursor_installs_the_pointer_from_the_first_frame() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    assert!(
+        comp.cursor_bounds().is_none(),
+        "no pointer is shown before the shell installs one"
+    );
+
+    shell.refresh_cursor(&mut comp);
+
+    assert!(
+        comp.cursor_bounds().is_some(),
+        "the shell installs a pointer cursor so the desktop shows one"
+    );
+    assert_eq!(
+        shell.cursor().kind(),
+        CursorKind::Arrow,
+        "the plain arrow shows over the empty desktop"
+    );
+}
+
+#[test]
+fn the_pointer_tracks_motion() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.refresh_cursor(&mut comp);
+    let before = comp.cursor_bounds().expect("the pointer is shown");
+
+    shell.handle(moved(300, 400), &mut comp);
+
+    let after = comp.cursor_bounds().expect("the pointer is still shown");
+    assert_eq!(shell.router().pointer(), Point::new(300, 400));
+    assert_eq!(
+        (after.left() - before.left(), after.top() - before.top()),
+        (300, 400),
+        "the cursor hotspot moved with the pointer"
+    );
+}
+
+#[test]
+fn the_pointer_shape_follows_the_window_under_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    assert!(comp.set_window_cursor(window, CursorKind::Text));
+
+    shell.handle(moved(250, 250), &mut comp);
+    assert_eq!(
+        shell.cursor().kind(),
+        CursorKind::Text,
+        "over the window the pointer takes the window's cursor hint"
+    );
+
+    shell.handle(moved(900, 500), &mut comp);
+    assert_eq!(
+        shell.cursor().kind(),
+        CursorKind::Arrow,
+        "back over the desktop it is the plain arrow"
+    );
+}
+
+#[test]
+fn set_cursors_installs_loaded_artwork_and_keeps_the_pointer_shown() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.refresh_cursor(&mut comp);
+    let mut reader =
+        MemoryAssets::default().with("/System/Graphics/Cursors/cursor.arrow.svg", VALID_SVG);
+    let theme = shell.session().load_cursors(&mut reader);
+
+    shell.set_cursors(theme, &mut comp);
+
+    assert_eq!(
+        shell.cursor().registry().active_id().name(),
+        "desktop",
+        "the loaded cursor set is active, replacing the built-in one"
+    );
+    assert!(
+        comp.cursor_bounds().is_some(),
+        "swapping the artwork re-renders the pointer rather than blanking it"
+    );
+}
+
 #[test]
 fn set_scale_rescales_the_bar_transparently_and_is_idempotent() {
     let mut shell = shell();

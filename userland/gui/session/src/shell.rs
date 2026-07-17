@@ -38,9 +38,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::Errno;
+use rustos_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use rustos_icon::IconSet;
 use rustos_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
-use rustos_wm::{Color, Compositor, InputEvent, InputResponse, Point, Scale, Surface, WindowId};
+use rustos_wm::{
+    Color, Compositor, CursorController, InputEvent, InputResponse, Point, Scale, Surface, WindowId,
+};
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::presenter::TaskbarPresenter;
@@ -105,6 +108,7 @@ pub struct DesktopShell {
     presenter: TaskbarPresenter,
     renderer: TaskbarRenderer,
     tasks: TaskBridge,
+    cursor: CursorController,
 }
 
 impl DesktopShell {
@@ -124,6 +128,7 @@ impl DesktopShell {
             presenter: TaskbarPresenter::new(),
             renderer: TaskbarRenderer::new(),
             tasks: TaskBridge::new(),
+            cursor: CursorController::new(),
         }
     }
 
@@ -155,6 +160,54 @@ impl DesktopShell {
     #[must_use]
     pub const fn tasks(&self) -> &TaskBridge {
         &self.tasks
+    }
+
+    /// The pointer-cursor controller: the on-screen pointer shape and the
+    /// cursor sets it draws from.
+    #[must_use]
+    pub const fn cursor(&self) -> &CursorController {
+        &self.cursor
+    }
+
+    /// Bring the pointer cursor up to date and, the first time, install it —
+    /// so the desktop shows a pointer from its very first frame.
+    ///
+    /// Runs the window manager's cursor-shape policy against the current
+    /// interaction state (the plain arrow over the desktop background, a
+    /// window's own [`cursor_hint`](rustos_wm::Window::cursor_hint) under the
+    /// pointer, the move cursor during an interactive grab), re-rasterising at
+    /// the output density only when the chosen shape, the active cursor set,
+    /// or the [`scale`](Compositor::scale) actually changed, and repositions
+    /// the overlay so its hotspot tracks the pointer. It is called for you as
+    /// each input event is [`handle`](Self::handle)d and on a runtime
+    /// [`set_scale`](Self::set_scale); the embedder calls it once after the
+    /// first [`present`](Self::present) to show the pointer at start-up.
+    ///
+    /// Fails closed: if the chosen shape cannot be rasterised the current
+    /// cursor is left untouched rather than blanking the pointer.
+    pub fn refresh_cursor(&mut self, compositor: &mut Compositor) {
+        self.cursor.refresh(self.router.wm(), compositor);
+        compositor.move_cursor(self.router.pointer());
+    }
+
+    /// Install a loaded cursor set as the active pointer artwork, replacing
+    /// the built-in set, and re-render the current shape so the new artwork
+    /// shows without waiting for the next interaction.
+    ///
+    /// The `theme` is the [`CursorTheme`] the session assembled from the
+    /// on-disk `/System/Graphics` SVG assets
+    /// ([`DesktopSession::load_cursors`](crate::DesktopSession::load_cursors)),
+    /// already failed closed per kind to the built-in cursor, so this cannot
+    /// blank the pointer. It is the cursor counterpart of
+    /// [`set_icons`](Self::set_icons).
+    pub fn set_cursors(&mut self, theme: CursorTheme, compositor: &mut Compositor) {
+        let mut registry = CursorRegistry::with_builtin();
+        let id = CursorSetId::new("desktop");
+        if registry.register(id, theme).is_ok() {
+            let _ = registry.set_active(id);
+        }
+        self.cursor
+            .set_registry(registry, self.router.wm(), compositor);
     }
 
     /// Open `surface` as a top-level application window at `origin`, list it on
@@ -216,17 +269,18 @@ impl DesktopShell {
     /// single source of truth — and re-lays the bar in place. No desktop
     /// restart is needed and the taskbar holds no scale of its own, so the
     /// rescale is transparent to it. On a `true`
-    /// return the embedder brings the other scale-dependent overlays it owns
-    /// up to date: the cursor (one
-    /// [`CursorController::refresh`](rustos_wm::CursorController::refresh)) and
-    /// any app that sizes in physical pixels (each reads its own window's
-    /// density through [`Compositor::window_scale`], never sets it). Setting
-    /// the scale already in effect re-presents nothing and returns `false`.
+    /// return the pointer cursor is re-rasterised at the new density here
+    /// ([`refresh_cursor`](Self::refresh_cursor)), and the embedder brings the
+    /// other scale-dependent overlays it owns up to date: any app that sizes
+    /// in physical pixels (each reads its own window's density through
+    /// [`Compositor::window_scale`], never sets it). Setting the scale already
+    /// in effect re-presents nothing and returns `false`.
     pub fn set_scale(&mut self, scale: Scale, compositor: &mut Compositor) -> bool {
         if !compositor.set_scale(scale) {
             return false;
         }
         self.present(compositor);
+        self.refresh_cursor(compositor);
         true
     }
 
@@ -280,8 +334,13 @@ impl DesktopShell {
     /// task highlight). A window-manager action re-presents only when it moved
     /// focus (a press), keeping the highlight in step; motion and drags change
     /// no highlight and stay cheap.
+    ///
+    /// Whatever the event did, the pointer cursor is then brought up to date
+    /// ([`refresh_cursor`](Self::refresh_cursor)): its hotspot follows pointer
+    /// motion and its shape follows what is under it (or the move cursor
+    /// during a drag), so the desktop always shows a live pointer.
     pub fn handle(&mut self, event: InputEvent, compositor: &mut Compositor) -> ShellOutcome {
-        match self
+        let outcome = match self
             .router
             .handle(event, compositor, self.session.taskbar_mut())
         {
@@ -302,7 +361,9 @@ impl DesktopShell {
                 self.present(compositor);
                 ShellOutcome::Session(event)
             }
-        }
+        };
+        self.refresh_cursor(compositor);
+        outcome
     }
 
     /// Keep the bar's highlighted task in step when the window manager moves
