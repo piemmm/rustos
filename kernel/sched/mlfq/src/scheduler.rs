@@ -524,7 +524,18 @@ impl<A: SchedulerArch> Scheduler<A> {
         if let Some(mut guard) = task.body.try_lock() {
             *guard = None;
         }
-        self.clear_current_matching(id);
+        // A task killed while it is the current task on some CPU is still
+        // physically executing that CPU's context: clearing the slot only
+        // updates bookkeeping. The CPU must be nudged into the scheduler so
+        // it drops the now-exited context and picks other work — otherwise a
+        // CPU-bound victim running alone on a tickless core (no quantum
+        // armed) never reaches a scheduling point and pegs that core
+        // indefinitely after it was told to die. The IPI is the same
+        // cross-CPU reschedule request spawn/unpark use; to the calling CPU
+        // it is a documented no-op.
+        if let Some(cpu) = self.clear_current_matching(id) {
+            self.arch.send_ipi(cpu);
+        }
         Ok(())
     }
 
@@ -1130,10 +1141,20 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// [`TaskState::Running`] cannot remain the current task on any
     /// CPU. The CAS is per-slot, so a concurrent `dispatch` of a
     /// *different* task on a sibling CPU is untouched.
-    fn clear_current_matching(&self, id: TaskId) {
-        for slot in self.current.iter() {
-            let _ = slot.compare_exchange(id, 0, Ordering::AcqRel, Ordering::Relaxed);
+    fn clear_current_matching(&self, id: TaskId) -> Option<CpuId> {
+        let mut ran_on = None;
+        for (cpu, slot) in self.current.iter().enumerate() {
+            if slot
+                .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                #[allow(clippy::cast_possible_truncation)]
+                // The slot index is bounded by the configured CPU count.
+                let cpu = cpu as CpuId;
+                ran_on = Some(cpu);
+            }
         }
+        ran_on
     }
 }
 
@@ -1279,6 +1300,40 @@ mod tests {
     fn idle_when_no_work() {
         let (_arch, sched) = mk(2);
         assert_eq!(sched.step(0), Ok(StepOutcome::Idle));
+    }
+
+    /// Killing a task that is the current task on a remote CPU must send
+    /// that CPU a reschedule IPI, so a CPU-bound victim is knocked off its
+    /// now-exited context promptly instead of running past its death.
+    #[test]
+    fn exit_ipis_the_cpu_running_the_victim() {
+        let (arch, sched) = mk(4);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        sched.set_current(2, id);
+        let before = arch.ipi_count(2);
+        sched.exit(id).expect("exit");
+        assert_eq!(
+            arch.ipi_count(2),
+            before + 1,
+            "exit must nudge the CPU running the victim"
+        );
+        assert_eq!(sched.current_task(2), None);
+    }
+
+    /// Exiting a task that is not the current task on any CPU sends no IPI:
+    /// there is no running context to knock off.
+    #[test]
+    fn exit_of_non_running_task_sends_no_ipi() {
+        let (arch, sched) = mk(4);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        let before: u64 = (0..4).map(|c| arch.ipi_count(c)).sum();
+        sched.exit(id).expect("exit");
+        let after: u64 = (0..4).map(|c| arch.ipi_count(c)).sum();
+        assert_eq!(before, after, "no running context, so no reschedule IPI");
     }
 
     #[test]
