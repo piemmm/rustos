@@ -1,6 +1,6 @@
 [package]
 name = "rustos-fsprobe"
-description = "RustOS filesystem signature, label, and identity probe: the one no_std definition of how the head of a block extent is recognised as a supported filesystem (RustFS / ext4 / FAT32), which stable identity it carries, and how that identity renders as a short display fingerprint (plans/DEVICES.md D3c, plans/ALIAS.md §3.8)."
+description = "RustOS filesystem signature, label, and identity probe: the one no_std definition of how the head of a block extent is recognised as a supported filesystem (ARXFS / ext4 / FAT32), which stable identity it carries, and how that identity renders as a short display fingerprint (plans/DEVICES.md D3c, plans/ALIAS.md §3.8)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

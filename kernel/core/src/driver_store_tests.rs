@@ -61,7 +61,7 @@ impl MockNode {
 }
 
 /// A mock root-volume driver presenting an arbitrary directory tree,
-/// mirroring the structural surface rustfs reports for the
+/// mirroring the structural surface arxfs reports for the
 /// mkimage-authored root.
 struct MockStore {
     nodes: BTreeMap<u64, MockNode>,

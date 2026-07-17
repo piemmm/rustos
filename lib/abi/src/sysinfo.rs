@@ -1781,7 +1781,7 @@ pub const MOUNT_TARGET_MAX: usize = 64;
 
 /// Maximum bytes of the filesystem-type name carried in a [`MountRecord`].
 ///
-/// Driver type names (`rustfs`, `ext4`, `fat32`, …) are short; the bound
+/// Driver type names (`arxfs`, `ext4`, `fat32`, …) are short; the bound
 /// keeps a hostile reply from claiming an unbounded type string.
 pub const MOUNT_FSTYPE_MAX: usize = 16;
 
@@ -3598,7 +3598,7 @@ mod tests {
         let rec = MountRecord::new(
             b"/Storage/data",
             b"/Storage/data",
-            b"rustfs",
+            b"arxfs",
             flags,
             usage,
             MountAvailability::UnavailableDirty,
@@ -3607,7 +3607,7 @@ mod tests {
         .unwrap();
         assert_eq!(rec.source_bytes(), b"/Storage/data");
         assert_eq!(rec.target_bytes(), b"/Storage/data");
-        assert_eq!(rec.fstype_bytes(), b"rustfs");
+        assert_eq!(rec.fstype_bytes(), b"arxfs");
         assert_eq!(rec.flags(), flags);
         assert_eq!(rec.usage(), usage);
         assert_eq!(rec.availability(), MountAvailability::UnavailableDirty);
@@ -3636,7 +3636,7 @@ mod tests {
             MountRecord::new(
                 &long_source,
                 b"/",
-                b"rustfs",
+                b"arxfs",
                 MountFlags::default(),
                 VolumeStats::default(),
                 MountAvailability::Available,
@@ -3649,7 +3649,7 @@ mod tests {
             MountRecord::new(
                 b"src",
                 &long_target,
-                b"rustfs",
+                b"arxfs",
                 MountFlags::default(),
                 VolumeStats::default(),
                 MountAvailability::Available,
@@ -3687,7 +3687,7 @@ mod tests {
             MountRecord::new(
                 b"src",
                 b"/",
-                b"rustfs",
+                b"arxfs",
                 MountFlags::default(),
                 free_over_total,
                 MountAvailability::Available,
@@ -3708,7 +3708,7 @@ mod tests {
             MountRecord::new(
                 b"src",
                 b"/",
-                b"rustfs",
+                b"arxfs",
                 MountFlags::default(),
                 avail_over_free,
                 MountAvailability::Available,
@@ -3720,7 +3720,7 @@ mod tests {
         let ok = MountRecord::new(
             b"src",
             b"/",
-            b"rustfs",
+            b"arxfs",
             MountFlags::default(),
             VolumeStats::default(),
             MountAvailability::Available,
@@ -3742,7 +3742,7 @@ mod tests {
         let rec = MountRecord::new(
             b"src",
             b"/",
-            b"rustfs",
+            b"arxfs",
             MountFlags::default(),
             VolumeStats::default(),
             MountAvailability::Available,

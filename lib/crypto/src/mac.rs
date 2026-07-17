@@ -1,8 +1,8 @@
 //! Keyed message authentication (HMAC-SHA256).
 //!
 //! The one MAC exposed by RustOS is HMAC-SHA256 (RFC 2104, FIPS 198-1). It is
-//! the keyed authenticator `RustFS` seals every metadata block with
-//! (`docs/src/filesystem/rustfs-spec.md` §5, §8): the tag covers a block's
+//! the keyed authenticator `ARXFS` seals every metadata block with
+//! (`docs/src/filesystem/arxfs-spec.md` §5, §8): the tag covers a block's
 //! identity, owner, generation, expected address, and payload, so a stale,
 //! misdirected, wrong-type, torn, or bit-rotted metadata block fails the
 //! check and is repaired from its redundant copy rather than trusted.

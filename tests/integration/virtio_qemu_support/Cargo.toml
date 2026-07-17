@@ -47,9 +47,9 @@ rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", 
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
-rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
+rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
 rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
 rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
@@ -82,9 +82,9 @@ rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", 
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
-rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
+rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
 rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
 rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
@@ -117,9 +117,9 @@ rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", 
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 rustos-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
-rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
+rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
 rustos-net = { path = "../../../lib/net", version = "=0.0.0" }
 rustos-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }

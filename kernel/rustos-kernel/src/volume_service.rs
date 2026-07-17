@@ -60,7 +60,7 @@
 //! volume is a **re-insert** and is recovered in place rather than
 //! re-attached as a duplicate. The journal carries a dual-acceptance
 //! shadow of the volume's mutation-evidence window (the region any
-//! foreign mutation must rewrite: the `RustFS` superblock ring, the ext4
+//! foreign mutation must rewrite: the `ARXFS` superblock ring, the ext4
 //! superblock, the FAT32 boot+`FSInfo` head — honestly weaker for weaker
 //! formats), seeded at attach and maintained on every write. When the
 //! re-read window proves non-mutation — every evidence block equals its
@@ -86,9 +86,9 @@ use rustos_abi::driver::filesystem::{
 use rustos_abi::sysinfo::MountAvailability;
 use rustos_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use rustos_abi::{DriverError, DriverHandle, Errno};
+use rustos_drv_fs_arxfs::{ARXFS, SYSTEM_VOLUME_KEY};
 use rustos_drv_fs_ext4::Ext4;
 use rustos_drv_fs_fat32::Fat32;
-use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
 use rustos_kernel_core::callreg::EndpointVanishObserver;
 use rustos_kernel_core::devres::installed_shared_mem_facility;
 use rustos_kernel_core::fs::blkclient::BlkClient;
@@ -454,24 +454,24 @@ fn open_filesystem(
     volume_handle: u64,
 ) -> Result<OpenedVolume, Errno> {
     match fstype {
-        VolumeFsType::RustFs => {
-            // A removable RustFS volume is keyed like any RustFS volume.
+        VolumeFsType::ARXFS => {
+            // A removable ARXFS volume is keyed like any ARXFS volume.
             // The well-known key covers non-secret volumes (the same key
             // the read-only system volume uses); a volume under a private
             // key refuses the open with a typed error, and key-provisioned
             // attach arrives with the volume manager's key policy — the
             // kernel never guesses a secret.
             let fs = if read_only {
-                RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+                ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
             } else {
-                RustFs::open(window, &SYSTEM_VOLUME_KEY)
+                ARXFS::open(window, &SYSTEM_VOLUME_KEY)
             }
             .map_err(DriverError::as_errno)?;
             let identity = fs.volume_uuid();
             Ok(OpenedVolume {
                 driver: cached(fs, volume_handle, wiring.pressure, wiring.audit),
                 identity,
-                fstype: "rustfs",
+                fstype: "arxfs",
             })
         }
         VolumeFsType::Ext4 => {
@@ -609,7 +609,7 @@ fn mount_template(map_gid: Option<GroupId>) -> Metadata {
 fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
     match fstype {
         VolumeFsType::Fat32 => LATE_STORAGE_GID.get(),
-        VolumeFsType::RustFs | VolumeFsType::Ext4 => None,
+        VolumeFsType::ARXFS | VolumeFsType::Ext4 => None,
     }
 }
 

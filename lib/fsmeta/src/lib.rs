@@ -1,10 +1,10 @@
 //! Shared extended-file-metadata model for RustOS filesystems.
 //!
-//! `RustFS` gives every file a general-purpose, namespaced `key → value`
+//! `ARXFS` gives every file a general-purpose, namespaced `key → value`
 //! extended-attribute store, and uses it to preserve foreign-filesystem
 //! per-file metadata (Acorn/RISC OS, Amiga, Atari, classic Mac) that has no
 //! POSIX equivalent and would otherwise be destroyed by a copy. This crate is
-//! the **one definition** of that model, shared by `RustFS`, the
+//! the **one definition** of that model, shared by `ARXFS`, the
 //! foreign-filesystem drivers, and the copy/move/archive tooling, so a key
 //! written by one is read identically by another and no conversion logic is
 //! duplicated.

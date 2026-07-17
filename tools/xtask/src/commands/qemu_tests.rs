@@ -151,21 +151,25 @@ enum NetPeerMode {
 /// Which filesystem volume (if any) the host harness plants on the
 /// test's virtio-blk backing image. Each variant names a shared
 /// single-source-of-truth image fixture.
+// `ARXFS` is the filesystem's product name and is spelled in full capitals
+// everywhere; the mixed-case `Arxfs` the acronym lint would otherwise require
+// is not an accepted spelling of the name.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FsDisk {
     /// No filesystem volume (the test uses `disk_sectors` or no disk).
     None,
     /// The shared [`rustos_test_fat32_image`] FAT32 volume.
     Fat32,
-    /// The shared [`rustos_test_rustfs_image`] rustfs volume.
-    Rustfs,
-    /// The shared [`rustos_test_rustfs_image`] users-root volume:
+    /// The shared [`rustos_test_arxfs_image`] arxfs volume.
+    ARXFS,
+    /// The shared [`rustos_test_arxfs_image`] users-root volume:
     /// the standard filesystem tree with `/System/Security/Users` planted
     /// (`plans/PI.md` P11).
     UsersRoot,
     /// The shared [`rustos_test_encrypted_root_image`] whole-disk image: an
     /// MBR, a FAT boot partition carrying the `root.unlock` descriptor, and
-    /// a passphrase-derived encrypted `RustFS` root carrying
+    /// a passphrase-derived encrypted `ARXFS` root carrying
     /// `/System/Security/Users` — the root-mount->login vertical's backing
     /// (`plans/PI.md` P11 Chunk B-2).
     EncryptedRootDisk,
@@ -211,11 +215,11 @@ const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
     line[value.len()] == b'\n'
 }
 
-/// The passphrase line the admission vertical types at `Root filesystem passphrase: `.
+/// The passphrase line the admission vertical types at `ARXFS passphrase: `.
 const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
 
 /// A deliberately wrong passphrase *prefix* (no line terminator) the
-/// admission vertical types at the first `Root filesystem passphrase: `
+/// admission vertical types at the first `ARXFS passphrase: `
 /// prompt, so the run also proves the two timed-wake behaviours of the
 /// secret prompt end to end:
 ///
@@ -263,7 +267,7 @@ const WRONG_UNLOCK_PASSPHRASE_PREFIX: &str = "abc";
 /// `input_virtio_mmio` vertical's "eventq armed" readiness marker
 /// (inject only once the driver can receive). The typed characters buffer
 /// as console type-ahead in the seat's keyboard queue until the in-kernel
-/// unlock kthread's `Root filesystem passphrase:` prompt drains them — the
+/// unlock kthread's `ARXFS passphrase:` prompt drains them — the
 /// prompt itself renders on the video console, never on serial, so the
 /// typing is gated on the armed-driver witness rather than the prompt text.
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
@@ -1101,26 +1105,26 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 5 end-to-end rustfs vertical: `rustos-test-rustfs-virtio-blk-
+    // Stage 5 end-to-end arxfs vertical: `rustos-test-arxfs-virtio-blk-
     // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
-    // instead of a raw sector round-trip it mounts the planted rustfs
-    // volume through the real rustfs driver, verifies the planted file,
+    // instead of a raw sector round-trip it mounts the planted arxfs
+    // volume through the real arxfs driver, verifies the planted file,
     // and creates+writes+reads-back a fresh file before `qemu_exit`.
-    // The backing image is the shared `rustos-test-rustfs-image` rustfs
-    // volume (`FsDisk::Rustfs`) — which the driver itself authored — not
+    // The backing image is the shared `rustos-test-arxfs-image` arxfs
+    // volume (`FsDisk::ARXFS`) — which the driver itself authored — not
     // the sector-0 pattern, so its geometry is the image's own size.
     // Single CPU and a 60-second budget match the FAT32 vertical and the
     // other boot-then-do-fixed-work tests.
     QemuTest {
-        package: "rustos-test-rustfs-virtio-blk-pci-x86-64",
-        binary: "rustos-test-rustfs-virtio-blk-pci-x86-64",
+        package: "rustos-test-arxfs-virtio-blk-pci-x86-64",
+        binary: "rustos-test-arxfs-virtio-blk-pci-x86-64",
         target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
         ramfb: false,
-        fs_disk: FsDisk::Rustfs,
+        fs_disk: FsDisk::ARXFS,
         keyboard: None,
         typed_keys: &[],
         screendumps: &[],
@@ -1939,11 +1943,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, "root\n"),
             ("Password", Duration::ZERO, "wrong\n"),
             ("1 failed attempt", Duration::ZERO, OVERLONG_USERNAME),
@@ -3336,14 +3336,14 @@ const TESTS: &[QemuTest] = &[
     // `plans/PI.md` P11 (root-volume read path at boot):
     // `rustos-test-users-db-qemu-aarch64` reuses the exact virtio-blk-mmio
     // bring-up above, then instead of a raw sector round-trip it mounts
-    // the planted users-root rustfs volume through the real driver and
+    // the planted users-root arxfs volume through the real driver and
     // drives the kernel's boot-time users-database load
     // (`rustos_kernel_core::load_users_db`) — /System/Security/Users read
     // off the volume through the-checked VFS delegation — then
     // proves the parsed database authenticates the planted account and
     // refuses a wrong password before the ARM semihosting PASS. The
     // backing image is the fixture's users-root volume
-    // (`FsDisk::UsersRoot`) — authored by the real rustfs driver — so its
+    // (`FsDisk::UsersRoot`) — authored by the real arxfs driver — so its
     // geometry is the image's own size. Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work tests.
     QemuTest {
@@ -3369,7 +3369,7 @@ const TESTS: &[QemuTest] = &[
     // (`rustos_kernel::root_mount::unlock_root_disk_interactively`) over a
     // planted **whole-disk** encrypted-root image (`FsDisk::EncryptedRootDisk`
     // — MBR + FAT boot carrying `root.unlock` + a passphrase-derived
-    // encrypted RustFS root): it reads the descriptor off the FAT boot
+    // encrypted ARXFS root): it reads the descriptor off the FAT boot
     // partition, types the fixture passphrase at the prompt over a scripted
     // console, mounts the encrypted root, installs the loaded users database
     // into a `LateUsersDb` cell, and proves the planted account authenticates
@@ -3409,8 +3409,8 @@ const TESTS: &[QemuTest] = &[
     // and binds the virtio-blk root, the init seam admits the in-kernel
     // unlock kthread (`unlock_service::spawn_if_present`), and the kthread
     // brings the device up over the production device-IRQ path, prompts at
-    // `Root filesystem passphrase: `, reads the typed passphrase, mounts the encrypted
-    // `RustFS` root, and installs the users database into `LATE_USERS_DB`.
+    // `ARXFS passphrase: `, reads the typed passphrase, mounts the encrypted
+    // `ARXFS` root, and installs the users database into `LATE_USERS_DB`.
     // The kernel-side audit sink reports PASS through the ARM semihosting
     // finisher the instant it sees the unlock-service install message
     // (`EventId(4139)`) — the witness that the kthread-admission path
@@ -3457,7 +3457,7 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[
             (
-                "Root filesystem passphrase: ",
+                "ARXFS passphrase: ",
                 Duration::ZERO,
                 WRONG_UNLOCK_PASSPHRASE_PREFIX,
             ),
@@ -3467,11 +3467,7 @@ const TESTS: &[QemuTest] = &[
             // Wait-only step: the notice must arrive with no further input
             // (the timed wake, not a keystroke, ends the delay park).
             ("Incorrect passphrase", Duration::ZERO, ""),
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
         ],
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
@@ -3523,11 +3519,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             // The full-screen login view paints `Username:` once and the
             // minimal-diff renderer then repaints only the changed label
             // cells (`Password` over it), so the anchors are the labels
@@ -3616,11 +3608,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@rustos ~% ", Duration::ZERO, "memsoak\n"),
@@ -3671,11 +3659,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@rustos ~% ", Duration::ZERO, "yes | head -n 2\n"),
@@ -3749,11 +3733,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@rustos ~% ", Duration::ZERO, "sysmon\n"),
@@ -3801,11 +3781,7 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            (
-                "Root filesystem passphrase: ",
-                Duration::ZERO,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             (
@@ -5331,8 +5307,8 @@ struct FsImage {
 /// `None` for an enrolment with no filesystem disk. The bytes come from a
 /// single-source-of-truth image fixture the kernel-side tail also names, so
 /// the planted on-disk layout and the guest's expectations cannot drift:
-/// the FAT32 fixture is hand-built; the rustfs fixture is authored by the
-/// real rustfs driver itself (format + plant).
+/// the FAT32 fixture is hand-built; the arxfs fixture is authored by the
+/// real arxfs driver itself (format + plant).
 fn fs_disk_image(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
@@ -5346,18 +5322,18 @@ fn fs_disk_image(
             bytes: rustos_test_fat32_image::build_image(),
             total_sectors: rustos_test_fat32_image::TOTAL_SECTORS,
         }),
-        FsDisk::Rustfs => Some(FsImage {
-            extension: "rustfs.img",
-            bytes: rustos_test_rustfs_image::build_image()
-                .map_err(|e| format!("test --qemu ({}): build rustfs image: {e:?}", t.package))?,
-            total_sectors: rustos_test_rustfs_image::TOTAL_SECTORS,
+        FsDisk::ARXFS => Some(FsImage {
+            extension: "arxfs.img",
+            bytes: rustos_test_arxfs_image::build_image()
+                .map_err(|e| format!("test --qemu ({}): build arxfs image: {e:?}", t.package))?,
+            total_sectors: rustos_test_arxfs_image::TOTAL_SECTORS,
         }),
         FsDisk::UsersRoot => Some(FsImage {
             extension: "users.img",
-            bytes: rustos_test_rustfs_image::build_users_root_image().map_err(|e| {
+            bytes: rustos_test_arxfs_image::build_users_root_image().map_err(|e| {
                 format!("test --qemu ({}): build users-root image: {e:?}", t.package)
             })?,
-            total_sectors: rustos_test_rustfs_image::TOTAL_SECTORS,
+            total_sectors: rustos_test_arxfs_image::TOTAL_SECTORS,
         }),
         FsDisk::EncryptedRootDisk => Some(FsImage {
             extension: "encrypted-root.img",

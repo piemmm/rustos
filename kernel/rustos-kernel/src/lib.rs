@@ -95,9 +95,9 @@ pub mod dispatch_core;
 // `root.unlock` descriptor, the typed passphrase, and the encrypted root
 // block device into the validated `users-v1` database
 // `kernel/core::load_users_db_source` serves. `rustos-kernel`
-// (`Layer::Tooling`) is the one layer permitted to name both the `rustfs`
+// (`Layer::Tooling`) is the one layer permitted to name both the `arxfs`
 // driver and `kernel/core`. It is architecture-neutral
-// (it consumes only the `lib/abi` `Block` seam and the `rustfs`/`kernel/core`
+// (it consumes only the `lib/abi` `Block` seam and the `arxfs`/`kernel/core`
 // APIs), so it is un-gated — it compiles on every target and its host unit
 // tests run on the CI host; the aarch64 boot path supplies the discovered
 // root block device, the FAT-read descriptor, and the console passphrase
@@ -281,12 +281,12 @@ pub mod app_store;
 // every instruction set.
 pub mod kernel_fs;
 
-// The RustFS transform cache (`plans/SMARTRAM.md` SMART3): the production
+// The ARXFS transform cache (`plans/SMARTRAM.md` SMART3): the production
 // implementation of the driver's `ClusterCache` seam, retaining verified,
 // decrypted, decompressed cluster plaintext under the `kernel/mem::reclaim`
 // classification/budget model and the SMART2 pressure bands. Each mounted
 // volume installs one at registration (`system_mount`, the aarch64 unlock
-// path). Architecture-neutral (rustfs + kernel/mem seams only), so its unit
+// path). Architecture-neutral (arxfs + kernel/mem seams only), so its unit
 // and end-to-end tests run on the CI host.
 pub mod transform_cache;
 
@@ -307,7 +307,7 @@ pub mod block_cache;
 // (a second, park-safe `'static` window onto the boot disk's `/System`
 // volume, published once the disk is up). The production identity half is
 // installed by `root_mount` at the encrypted-root unlock. It names
-// `rustos_drv_fs_rustfs` and the kernel-core mount service, and consumes the
+// `rustos_drv_fs_arxfs` and the kernel-core mount service, and consumes the
 // `shared_block` window, so it is gated like `shared_block` on the two
 // instruction sets where the boot path compiles; its bounds/forwarding unit
 // tests run on the CI host.
@@ -318,7 +318,7 @@ pub mod system_mount;
 // engine commits through (`plans/CAPABILITY_USE.md` CU4): the type-erased
 // admin window onto the writable encrypted root, its crash-safe database
 // persistence, and owned home-directory provisioning. Depends only on the
-// rustfs driver and kernel/core seams, so it compiles — and its unit tests
+// arxfs driver and kernel/core seams, so it compiles — and its unit tests
 // run — on the CI host as well as every kernel target.
 pub mod user_admin_backing;
 

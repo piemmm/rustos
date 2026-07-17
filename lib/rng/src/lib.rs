@@ -5,7 +5,7 @@
 //!
 //! * [`CsRng`] — the **cryptographically secure** generator. A NIST SP
 //!   800-90Ar1 HMAC-SHA256 DRBG ([`drbg::HmacDrbg`]) that reseeds from a
-//!   pluggable [`EntropySource`] for forward secrecy. This is what `RustFS`
+//!   pluggable [`EntropySource`] for forward secrecy. This is what `ARXFS`
 //!   keys, the encrypted-swap key, nonces, and the
 //!   KASLR/ASLR seed must use. Its draws are fallible and fail closed — they never block, spin, or panic.
 //! * [`FastRng`] — a **fast, non-cryptographic** generator (xoshiro256++) for

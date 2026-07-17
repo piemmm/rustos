@@ -1321,7 +1321,7 @@ the service binds.
   `build.rs` and the autoload fixtures also use (`AGENTS.md` §2.2);
   `tools/mkimage` only plants the bytes (`build_rpi_image`'s `drivers`
   argument), it never drives `cargo`. The store-planting routine is the single
-  `rustos_drv_fs_rustfs::plant_nested_file`.
+  `rustos_drv_fs_arxfs::plant_nested_file`.
 
 Metal-only (`plans/PI.md` §0.4): QEMU `virt` models no `VideoCore` mailbox, so
 the wire protocol, the client channel, and the server transform are host-tested

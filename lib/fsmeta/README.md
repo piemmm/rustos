@@ -3,7 +3,7 @@
 The one definition of RustOS's extended-file-metadata model: the namespaced
 attribute-key grammar, the bounded per-inode attribute store with its
 self-identifying on-disk encoding, and the closed foreign-metadata preset
-registry. RustFS, the foreign-filesystem drivers, and the copy/move/archive
+registry. ARXFS, the foreign-filesystem drivers, and the copy/move/archive
 tooling all share this crate, so a key written by one is read identically by
 another and no conversion logic is duplicated (`AGENTS.md` §2.2).
 
@@ -38,5 +38,5 @@ another and no conversion logic is duplicated (`AGENTS.md` §2.2).
 ## Stability
 
 **experimental.** The on-disk attribute encoding and the preset value
-encodings are pre-release and evolve in place until RustFS's first shipped
+encodings are pre-release and evolve in place until ARXFS's first shipped
 release (`AGENTS.md` §2.13).

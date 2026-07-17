@@ -419,9 +419,12 @@ mod program {
             .start_menu_mut()
             .add_launcher(VIEWER_LAUNCHER, VIEWER_LABEL);
 
-        // First frame: place the bar and push the whole surface once; every
-        // later present carries only the composited damage.
+        // First frame: place the bar, install the pointer cursor at the
+        // seat's initial pointer position, and push the whole surface once;
+        // every later present carries only the composited damage. The cursor
+        // is then kept live by the shell as each seat event is pumped.
         shell.present(&mut compositor);
+        shell.refresh_cursor(&mut compositor);
         if let Err(code) = present(&mut compositor, &mut display) {
             return code;
         }

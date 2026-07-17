@@ -161,7 +161,7 @@ if [ "$kind" = "both" ] || [ "$kind" = "all" ] || [ "$kind" = "proptest" ]; then
     done < <(enumerate proptest)
 fi
 # The filesystems.md filesystem soak: one job per registered target
-# (rustfs, ext4, fat32, and the randomized rustfs-random), each
+# (arxfs, ext4, fat32, and the randomized arxfs-random), each
 # formatting a ≥1 GiB RAM volume and exercising it for the per-job
 # budget. The registry (`cargo xtask fssoak --list`) is the single
 # source of truth, so this never hard-codes the filesystem list.

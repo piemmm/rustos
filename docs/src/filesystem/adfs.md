@@ -41,7 +41,7 @@ The RISC OS load/exec words are surfaced through the canonical
 ([metadata registry](./metadata-registry.md)): `acorn.loadaddr`,
 `acorn.execaddr`, `acorn.attr`, and — for filetyped objects —
 `acorn.filetype` and `acorn.datestamp`. The conversions live in the
-`rustos_fsmeta` Acorn preset, so a copy to `RustFS` and back reproduces
+`rustos_fsmeta` Acorn preset, so a copy to `ARXFS` and back reproduces
 the native fields byte-for-byte. A typed object's 40-bit centisecond
 stamp is reported (widened to `Time64`) as all four node timestamps;
 ADFS stores exactly one instant, and an untyped object honestly reports

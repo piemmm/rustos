@@ -7,13 +7,13 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
   `kernel/core::fs` (the VFS). It is architecture-neutral and depends only
   on `lib/abi`, `lib/caps`, and `kernel/sec`.
 - **I/O** — reading and writing blocks and parsing an on-disk format —
-  lives in the `drivers/filesystem/*` crates (`rustfs`, `ext4`, `fat32`)
+  lives in the `drivers/filesystem/*` crates (`arxfs`, `ext4`, `fat32`)
   behind the [`Filesystem`] trait in `lib/abi`. The VFS never duplicates a
   driver's block I/O. The frozen `Filesystem` trait is mount/unmount only;
   path I/O delegates to a driver through the separate versioned
   `FilesystemRead` and `FilesystemWrite` traits (`AGENTS.md` §2.4 / §9).
   The first block-backed driver is the read/write [FAT32 driver](./fat32.md);
-  the native [rustfs driver](./rustfs.md) adds a copy-on-write
+  the native [arxfs driver](./arxfs.md) adds a copy-on-write
   filesystem that stores per-inode ACLs and capability gates; the
   read/write [ext4 driver](./ext4.md) reads ext2/ext3/ext4 volumes,
   mutates the unchecksummed feature set, and surfaces each inode's stored
@@ -21,7 +21,7 @@ RustOS separates **filesystem policy** from **filesystem I/O**:
 
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in
-[Permissions](./permissions.md). The native [rustfs](./rustfs.md) format —
+[Permissions](./permissions.md). The native [arxfs](./arxfs.md) format —
 copy-on-write today, growing always-encrypted, checksummed, compressed, and
 deduplicating storage in stages behind these same traits — is the one
 native format; there is no separate `v1`.
@@ -101,7 +101,7 @@ Where that `Metadata` comes from is the one place the two policies differ:
   `remove_via_secured`) instead read **each node's own stored §5.3
   record** through the driver's `FilesystemSecurity` surface and translate
   it (`Metadata::from_node_security`). The kernel host calls these for a
-  driver such as [rustfs](./rustfs.md) that stores full per-inode owner,
+  driver such as [arxfs](./arxfs.md) that stores full per-inode owner,
   mode, ACL, and capability gate — so a file marked owner-only or gated on
   a capability is enforced as stored regardless of the mount template — or
   the [ext4 driver](./ext4.md), which reports each inode's stored owner and
@@ -124,10 +124,10 @@ The whole driver-backed read **and** write path is exercised end-to-end
 under QEMU against a real (emulated) virtio-blk device by three verticals:
 the `fat32_virtio_blk_pci_x86_64` vertical mounts a planted FAT32 image
 through the FAT32 driver (see [FAT32](./fat32.md)), the
-`rustfs_virtio_blk_pci_x86_64` vertical mounts a planted rustfs volume —
-one the rustfs driver itself authored — through the rustfs driver (see
-[rustfs](./rustfs.md)), and the `users_db_qemu_aarch64` vertical mounts a
-planted users-root rustfs volume on the aarch64 `virt` board and drives
+`arxfs_virtio_blk_pci_x86_64` vertical mounts a planted arxfs volume —
+one the arxfs driver itself authored — through the arxfs driver (see
+[arxfs](./arxfs.md)), and the `users_db_qemu_aarch64` vertical mounts a
+planted users-root arxfs volume on the aarch64 `virt` board and drives
 the kernel's users-database load against it. The first two round-trip a
 read and a write through the shared, transport-generic device tail.
 

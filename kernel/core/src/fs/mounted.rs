@@ -82,7 +82,7 @@ struct DriverEntry<F: 'static> {
     /// mount snapshot reports it. Registration-time facts, not driver state:
     /// the registrar names what it mounted.
     source: String,
-    /// The driver's filesystem-type name (`rustfs`, …).
+    /// The driver's filesystem-type name (`arxfs`, …).
     fstype: String,
     /// The volume's stable published identity (the same 16 bytes the volume
     /// forest publishes for `id::` paths), or all-zero when the registrar

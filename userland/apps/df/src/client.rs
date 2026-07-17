@@ -653,19 +653,14 @@ mod tests {
     /// in-RAM binding.
     fn table() -> Fixture {
         Fixture::new(alloc::vec![
-            record("RustFsRoot", "/", "rustfs", usage(512, 4096, 2048, 2032)),
+            record("ARXFSRoot", "/", "arxfs", usage(512, 4096, 2048, 2032)),
             record(
-                "RustFsSystem",
+                "ARXFSSystem",
                 "/System",
-                "rustfs",
+                "arxfs",
                 usage(512, 1024, 128, 112),
             ),
-            record(
-                "RustFsRoot",
-                "/Users",
-                "rustfs",
-                usage(512, 4096, 2048, 2032)
-            ),
+            record("ARXFSRoot", "/Users", "arxfs", usage(512, 4096, 2048, 2032)),
             record("", "/System/Logs", "", VolumeStats::default()),
         ])
     }
@@ -690,9 +685,9 @@ mod tests {
         // (1024 + 1016 = 2040). System: 512 total, 448 used, 56 avail.
         assert_eq!(
             out,
-            "Filesystem   1K-blocks Used Available Use% Mounted on\n\
-             RustFsRoot        2048 1024      1016  51% /\n\
-             RustFsSystem       512  448        56  89% /System\n"
+            "Filesystem  1K-blocks Used Available Use% Mounted on\n\
+             ARXFSRoot        2048 1024      1016  51% /\n\
+             ARXFSSystem       512  448        56  89% /System\n"
         );
         assert!(err.is_empty());
         // The duplicate /Users mount and the unbacked binding were hidden
@@ -722,10 +717,10 @@ mod tests {
         let (clean, out, _, _) = run_case(&["-T"], &table(), &MemProbe::new(&[]));
         assert!(clean);
         assert!(out.contains("Type"));
-        assert!(out.contains("rustfs"));
-        let (clean, out, _, _) = run_case(&["-a", "-x", "rustfs"], &table(), &MemProbe::new(&[]));
+        assert!(out.contains("arxfs"));
+        let (clean, out, _, _) = run_case(&["-a", "-x", "arxfs"], &table(), &MemProbe::new(&[]));
         assert!(clean);
-        assert!(!out.contains("rustfs"));
+        assert!(!out.contains("arxfs"));
         assert!(out.contains("/System/Logs"));
         let result = {
             let command = parse(&["-t", "ext4"]).expect("parse");

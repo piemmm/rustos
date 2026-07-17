@@ -9,7 +9,7 @@
 //!
 //! The production boot path discovers and binds the virtio-blk root,
 //! admits the in-kernel unlock kthread, and (once the runner types the
-//! fixture passphrase at `Root passphrase: `) mounts the encrypted `RustFS`
+//! fixture passphrase at `Root passphrase: `) mounts the encrypted `ARXFS`
 //! root and installs the users database. PID 1's console login then
 //! prompts; the runner authenticates `root`/`root` against the planted
 //! account — whose grant is the shared administrator ceiling

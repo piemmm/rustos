@@ -6,7 +6,7 @@
 //! vertical: the bare virtio-blk MMIO device id, the spawner registering
 //! the loaded image through the virtio-blk `register`, and the boot
 //! harness. The device tail ([`users_db_load`]) mounts the planted
-//! users-root rustfs volume and drives
+//! users-root arxfs volume and drives
 //! `rustos_kernel_core::load_users_db` — the boot-time root-volume read
 //! path for `/System/Security/Users` — then proves the parsed database
 //! authenticates the planted account.

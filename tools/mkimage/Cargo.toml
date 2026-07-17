@@ -23,13 +23,13 @@ path = "src/main.rs"
 # down by the *real* in-tree filesystem drivers — the same code the booted
 # system mounts the volumes with — so the image author and the consumer can
 # never drift (AGENTS.md §2.2). It mirrors how the QEMU vertical fixtures
-# (`tests/integration/{fat32,rustfs}_image`) author their backing disks.
+# (`tests/integration/{fat32,arxfs}_image`) author their backing disks.
 [dependencies]
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-arch-aarch64 = { path = "../../kernel/arch/aarch64", version = "=0.0.0" }
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
 # The per-installation log-attestation key file is authored through the one
 # `rustos_log::LogAttestationKey` on-disk format, so the image author and the
 # journal principal that later reads it cannot drift (AGENTS.md §2.2).

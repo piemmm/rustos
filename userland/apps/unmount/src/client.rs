@@ -291,7 +291,7 @@ mod tests {
     fn table() -> Fixture {
         Fixture {
             records: alloc::vec![
-                record(b"RustFsRoot", b"/", MountAvailability::Available, [0u8; 16]),
+                record(b"ARXFSRoot", b"/", MountAvailability::Available, [0u8; 16]),
                 record(
                     b"usb1",
                     b"/Storage/usb1",

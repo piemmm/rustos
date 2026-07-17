@@ -2,21 +2,21 @@
 
 The `lib/fsmeta` preset registry is the single source of truth for how each
 foreign filesystem's native per-file metadata maps to and from the normalised
-attribute values RustFS stores (`docs/src/filesystem/rustfs-spec.md` §21). It
-lives once and is shared by RustFS, the foreign-filesystem drivers, and the
+attribute values ARXFS stores (`docs/src/filesystem/arxfs-spec.md` §21). It
+lives once and is shared by ARXFS, the foreign-filesystem drivers, and the
 copy/move/archive tooling (`AGENTS.md` §2.2). Every conversion is exact and
 checked: a value or `Time64` instant the foreign format cannot represent fails
 closed with `MetadataNotRepresentable` / `TimestampOutOfRange`, never silently
 truncated, wrapped, or guessed (`AGENTS.md` §21).
 
-RustFS stores every value as opaque bytes and never interprets it; the registry
+ARXFS stores every value as opaque bytes and never interprets it; the registry
 and the converting tool own interpretation.
 
 ## Namespaces
 
 `user`, `rustos`, and the foreign namespaces (`acorn`, `amiga`, `atari`, `mac`)
 are ordinary file metadata (file read/write permission). `system` and `trusted`
-are privileged (a VFS capability gate). See rustfs-spec §21.1.
+are privileged (a VFS capability gate). See arxfs-spec §21.1.
 
 ## Acorn / RISC OS (ADFS, FileCore)
 
@@ -57,7 +57,7 @@ attributes distinct from a generic FAT mapping so intent is not lost.
 | `mac.type` | four-character type code (`OSType`), e.g. `TEXT`. |
 | `mac.creator` | four-character creator code, e.g. `ttxt`. |
 | `mac.finderflags` | 16-bit Finder flags, big-endian. |
-| `mac.resourcefork` | the resource fork, stored as a *named stream* (rustfs-spec §21.2), not an inline attribute value. |
+| `mac.resourcefork` | the resource fork, stored as a *named stream* (arxfs-spec §21.2), not an inline attribute value. |
 
 ## RustOS native
 
@@ -68,7 +68,7 @@ attributes distinct from a generic FAT mapping so intent is not lost.
 
 ## Status
 
-The registry is **experimental** and evolves in place until RustFS's first
+The registry is **experimental** and evolves in place until ARXFS's first
 shipped release (`AGENTS.md` §2.13). The `cp`/`mv`/desktop/archive tooling and
 the per-family foreign-filesystem driver wiring that consume it are staged
-future work (rustfs-spec §18).
+future work (arxfs-spec §18).

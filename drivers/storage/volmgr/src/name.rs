@@ -9,7 +9,7 @@
 //!    digits, `-`, and `_`, everything else dropped, leading separators
 //!    stripped — an empty result falls through;
 //! 2. else the **filesystem-type fallback** `<fstype><n>` (`fat1`,
-//!    `ext1`, `rustfs1`), where `n` is the volume's 1-based ordinal among
+//!    `ext1`, `arxfs1`), where `n` is the volume's 1-based ordinal among
 //!    its type's volumes on the probed device;
 //! 3. a name the kernel reports already in use gets the volume-identity
 //!    **fingerprint** appended (`plans/ALIAS.md` §3.8, rendered by
@@ -86,12 +86,12 @@ pub fn sanitise_label(label: &[u8]) -> Option<VolumeName> {
 }
 
 /// The `<fstype><n>` fallback name for a volume with no usable label:
-/// `fat1`, `ext1`, `rustfs1`, … `ordinal` is 1-based among the device's
+/// `fat1`, `ext1`, `arxfs1`, … `ordinal` is 1-based among the device's
 /// volumes of that type, so the derivation is stable per device layout.
 #[must_use]
 pub fn fallback_name(fstype: VolumeFsType, ordinal: u32) -> VolumeName {
     let prefix: &[u8] = match fstype {
-        VolumeFsType::RustFs => b"rustfs",
+        VolumeFsType::ARXFS => b"arxfs",
         VolumeFsType::Ext4 => b"ext",
         VolumeFsType::Fat32 => b"fat",
     };
@@ -207,8 +207,8 @@ mod tests {
         assert_eq!(fallback_name(VolumeFsType::Fat32, 1).as_bytes(), b"fat1");
         assert_eq!(fallback_name(VolumeFsType::Ext4, 2).as_bytes(), b"ext2");
         assert_eq!(
-            fallback_name(VolumeFsType::RustFs, 12).as_bytes(),
-            b"rustfs12"
+            fallback_name(VolumeFsType::ARXFS, 12).as_bytes(),
+            b"arxfs12"
         );
         // A zero ordinal is a caller bug; it is clamped, never rendered
         // as an empty suffix.

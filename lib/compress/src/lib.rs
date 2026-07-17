@@ -2,8 +2,8 @@
 //!
 //! This crate is the single shared home of RustOS's general-purpose,
 //! lossless compression (lists compression as a curated
-//! shared-library class). `RustFS` uses it to compress every file-data record
-//! before encryption (`docs/src/filesystem/rustfs-spec.md` §6, §10), and it
+//! shared-library class). `ARXFS` uses it to compress every file-data record
+//! before encryption (`docs/src/filesystem/arxfs-spec.md` §6, §10), and it
 //! is written here rather than pulled from a registry because — *roll
 //! your own; do not trust external code* — bars an external
 //! `zstd`/`lz4`/compression dependency. This is **not** the crypto carve-out:
@@ -13,7 +13,7 @@
 //!
 //! [`compress`] and [`decompress`] implement a low-CPU, byte-oriented LZ77
 //! codec in the spirit of the zstd "fast" / LZ4 profiles
-//! (`docs/src/filesystem/rustfs-spec.md` §10 — *the v1 target is a low-CPU
+//! (`docs/src/filesystem/arxfs-spec.md` §10 — *the v1 target is a low-CPU
 //! zstd-fast-style profile, not maximum ratio*). The encoder is a single
 //! greedy pass over a small hash table of recent 4-byte sequences; the
 //! decoder is a tight literal-copy / match-copy loop. There is no entropy
@@ -39,7 +39,7 @@
 //! adversarial compressed stream returns [`Error::Corrupt`], never a panic,
 //! and the declared output length is bounds-checked against the caller's
 //! destination *before* any byte is produced, so memory is bounded before
-//! work begins (`docs/src/filesystem/rustfs-spec.md` §10 — *bound memory
+//! work begins (`docs/src/filesystem/arxfs-spec.md` §10 — *bound memory
 //! before allocation; malformed compressed data returns an error, never
 //! panic*).
 
@@ -72,7 +72,7 @@ const NIBBLE_MAX: usize = 15;
 const EXT_FULL: u8 = 0xFF;
 
 /// Log2 of the match-finder hash table. A 4096-entry table is a few
-/// kilobytes of stack and is ample for the kilobyte-scale records `RustFS`
+/// kilobytes of stack and is ample for the kilobyte-scale records `ARXFS`
 /// compresses; a larger table buys little for a fast profile.
 const HASH_LOG: u32 = 12;
 
@@ -89,7 +89,7 @@ const HASH_MUL: u32 = 2_654_435_761;
 /// the record raw on a [`Self::TooSmall`] from [`compress`] (the
 /// "compression did not win" path), and treats a [`Self::Corrupt`] from
 /// [`decompress`] as data corruption
-/// (`docs/src/filesystem/rustfs-spec.md` §10).
+/// (`docs/src/filesystem/arxfs-spec.md` §10).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     /// The destination buffer was too small to hold the output. From
@@ -231,9 +231,9 @@ fn emit_sequence(
 /// The codec is a single greedy LZ77 pass: a hash table maps the most recent
 /// position of each 4-byte sequence, and a confirmed back-reference within the
 /// 64 KiB window is extended and emitted, otherwise the byte is deferred as a
-/// literal. Compression "winning" is the caller's policy — `RustFS` keeps the
+/// literal. Compression "winning" is the caller's policy — `ARXFS` keeps the
 /// raw record when the compressed form is not smaller
-/// (`docs/src/filesystem/rustfs-spec.md` §10) — so this function does not
+/// (`docs/src/filesystem/arxfs-spec.md` §10) — so this function does not
 /// itself reject a non-shrinking result; it only fails when `dst` is too
 /// small. Size `dst` with [`max_compressed_len`] to guarantee success.
 ///
@@ -292,7 +292,7 @@ pub fn compress(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
 ///
 /// The declared uncompressed length is read from the frame header and checked
 /// against `dst.len()` before any output is produced, so memory is bounded up
-/// front (`docs/src/filesystem/rustfs-spec.md` §10). Every literal copy,
+/// front (`docs/src/filesystem/arxfs-spec.md` §10). Every literal copy,
 /// back-reference offset, and match length is validated against the frame and
 /// the bytes produced so far.
 ///

@@ -1,7 +1,7 @@
 //! The namespaced-key grammar.
 //!
 //! An attribute key is `namespace "." rest`, compared byte-for-byte
-//! (case-sensitive, matching `RustFS` directory-name comparison). The namespace
+//! (case-sensitive, matching `ARXFS` directory-name comparison). The namespace
 //! is drawn from a **closed, curated set** — an unknown namespace is rejected
 //! at set time (fail closed), never stored. Each namespace carries a fixed
 //! [`NamespaceAccess`] class that says whether reading or writing its

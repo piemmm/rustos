@@ -902,7 +902,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let result = self.inner.create(dir, name, kind);
         // Invalidate whether or not the driver succeeded: a partially
         // applied refusal on a foreign driver must not leave stale
-        // entries standing (RustFS rolls back, but the cache does not
+        // entries standing (ARXFS rolls back, but the cache does not
         // assume it). Name bindings changed, so the directory's whole
         // lookup set goes (driver name matching may fold case).
         let dir_raw = dir.raw();

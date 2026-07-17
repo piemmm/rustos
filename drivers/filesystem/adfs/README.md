@@ -38,7 +38,7 @@ Load/exec addresses, the 12-bit filetype, the 40-bit centisecond
 datestamp, and the `FileCore` attribute bits are surfaced as the
 canonical `acorn.*` attribute keys through the shared `rustos_fsmeta`
 Acorn preset (`acorn.loadaddr`, `acorn.execaddr`, `acorn.attr`,
-`acorn.filetype`, `acorn.datestamp`), so a copy to `RustFS` and back is
+`acorn.filetype`, `acorn.datestamp`), so a copy to `ARXFS` and back is
 byte-exact. `FilesystemTimestamps` reports a typed object's stamp as
 all four `Time64` instants (the format stores exactly one); untyped
 objects honestly report the epoch. ADFS stores no general-purpose

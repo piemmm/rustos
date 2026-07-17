@@ -1,6 +1,6 @@
 //! permission-model conformance, exercised end-to-end: the VFS
 //! applies mode bits, ACL grants, and the optional per-inode capability
-//! gate to the record the real `rustfs` driver stores. This is the suite's
+//! gate to the record the real `arxfs` driver stores. This is the suite's
 //! analogue of `pjdfstest`'s `chmod`/`granular` permission cases, plus the
 //! capability gate the charter and `PLAN.md` Stage 5
 //! call out explicitly.
@@ -32,7 +32,7 @@ fn planted_file(vfs: &Vfs, fs: &mut LiveFs, name: &str, body: &[u8], sec: NodeSe
 
 #[test]
 fn owner_can_read_a_private_file_but_a_stranger_cannot() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     planted_file(
         &vfs,
         &mut fs,
@@ -62,7 +62,7 @@ fn capability_gate_blocks_read_even_at_mode_0644() {
     // PLAN.md Stage 5 /: a file marked with a required
     // capability is unreadable without it, even though mode 0644 would
     // otherwise grant the read.
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let mut sec = NodeSecurity::new(0o644, OWNER_UID, OWNER_GID);
     sec.required_cap = Some(CapabilityId::AUDIT_READ);
     planted_file(&vfs, &mut fs, "audit.log", b"audit trail", sec);
@@ -87,7 +87,7 @@ fn capability_gate_blocks_read_even_at_mode_0644() {
 
 #[test]
 fn acl_grant_allows_a_read_the_mode_bits_would_deny() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let mut sec = NodeSecurity::new(0o600, OWNER_UID, OWNER_GID);
     sec.push_acl(SecurityAcl {
         subject: SecuritySubject::Group(SHARED_GID),
@@ -117,7 +117,7 @@ fn acl_grant_allows_a_read_the_mode_bits_would_deny() {
 
 #[test]
 fn directory_without_search_permission_blocks_traversal() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let admin = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -151,7 +151,7 @@ fn directory_without_search_permission_blocks_traversal() {
 
 #[test]
 fn write_into_a_read_only_directory_is_denied() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let admin = cred(ROOT_UID, ROOT_GID, &caps);
 

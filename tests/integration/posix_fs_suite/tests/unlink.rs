@@ -5,7 +5,7 @@ use rustos_test_posix_fs_suite::*;
 
 #[test]
 fn unlink_removes_a_file() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -23,7 +23,7 @@ fn unlink_removes_a_file() {
 
 #[test]
 fn unlink_missing_file_is_not_found() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -35,7 +35,7 @@ fn unlink_missing_file_is_not_found() {
 
 #[test]
 fn the_name_is_reusable_after_unlink() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -49,7 +49,7 @@ fn the_name_is_reusable_after_unlink() {
 
 #[test]
 fn unlink_leaves_sibling_files_intact() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 

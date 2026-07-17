@@ -29,7 +29,7 @@ use core::convert::Infallible;
 
 use rustos_abi::driver::block::Block;
 use rustos_crypto::Ed25519PublicKey;
-use rustos_drv_fs_rustfs::{RustFs, VolumeKey};
+use rustos_drv_fs_arxfs::{VolumeKey, ARXFS};
 use rustos_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, ProcessSpawn, SecretFeedback,
     SleepLock, YieldHandle,
@@ -116,7 +116,7 @@ pub struct UnlockEnv {
 }
 
 /// The live [`WritableRootSink`]: on a successful unlock it opens a second,
-/// independent `'static` read-write [`RustFs`] window onto the `RustFsRoot`
+/// independent `'static` read-write [`ARXFS`] window onto the `ARXFSRoot`
 /// partition under the just-derived key and registers it as the **writable
 /// root volume** backing — `/` itself and every writable sub-mount of it
 /// (`/Users`, `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`), which
@@ -144,7 +144,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
         &self,
         volume_key: &VolumeKey,
     ) -> Option<alloc::sync::Arc<SleepLock<alloc::boxed::Box<dyn KernelFs>>>> {
-        // Locate the RustFsRoot extent on a throwaway probe window, then open
+        // Locate the ARXFSRoot extent on a throwaway probe window, then open
         // the durable owned `'static` window onto it.
         let extent = {
             let mut probe = self.store.window();
@@ -156,7 +156,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
                 );
                 return None;
             };
-            let Some(extent) = table.first_of_type(PartitionType::RustFsRoot) else {
+            let Some(extent) = table.first_of_type(PartitionType::ARXFSRoot) else {
                 note(
                     self.audit,
                     Level::Error,
@@ -179,7 +179,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
         // mount, exactly as the read mount does. Compressed clusters are
         // served through the SMART3 transform cache, charged to the root
         // volume's mount identity and governed by the shared pressure gauge.
-        let Ok(fs) = RustFs::open(window, volume_key) else {
+        let Ok(fs) = ARXFS::open(window, volume_key) else {
             note(
                 self.audit,
                 Level::Error,

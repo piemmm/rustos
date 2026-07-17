@@ -697,7 +697,7 @@ Example:
 
 ```text
 [  0.064] info  kernel.mem: detected usable=32768MiB
-[  0.903] info  kernel.fs: mounted path=/ readonly=true type=rustfs
+[  0.903] info  kernel.fs: mounted path=/ readonly=true type=arxfs
 [  1.420] error kernel.net: dhcp timeout iface=net0 elapsed=10s
 ```
 

@@ -1,5 +1,5 @@
 //! `plans/PI.md` P11 QEMU integration test: read `/System/Security/Users`
-//! off a real (emulated) users-root rustfs volume over the aarch64
+//! off a real (emulated) users-root arxfs volume over the aarch64
 //! `virt` board's virtio-MMIO bus, through the kernel's boot-time
 //! users-database load.
 //!

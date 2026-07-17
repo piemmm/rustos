@@ -65,7 +65,7 @@ with a one-line description each. The families are:
   relocation makes `load` fail closed, and that the output buffer is
   zeroed on every failure.
 * The remaining untrusted-input decoders each carry their own harness as
-  they land (`AGENTS.md` §19.5/§19.6): `fuzz_ramzip` and the RustFS/ADFS
+  they land (`AGENTS.md` §19.5/§19.6): `fuzz_ramzip` and the ARXFS/ADFS
   mount decoders (`fuzz_mount`, `fuzz_adfs_mount`), `fuzz_compress` (the
   first-party LZ decoder), `fuzz_svg`, `fuzz_virtqueue` (the hostile
   device-written used ring), `fuzz_vt`, `fuzz_fdt`, and the partition

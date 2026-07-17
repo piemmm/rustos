@@ -3003,7 +3003,7 @@ fn volumed_fixture() -> FakeFs {
         .volumes(vec![
             VolumeInfo {
                 target: String::from("/"),
-                fstype: String::from("rustfs"),
+                fstype: String::from("arxfs"),
                 space: Some(VolumeSpace {
                     free_bytes: 500,
                     total_bytes: 1000,
@@ -3064,7 +3064,7 @@ fn the_volume_list_renders_targets_types_and_space() {
     let mut window = Window::new(Pos::new(0, 0), Size::new(12, 60));
     render(&m, &mut window);
     assert!(row_text(&window, 0).contains("Volumes"));
-    assert!(row_text(&window, 1).contains("rustfs"));
+    assert!(row_text(&window, 1).contains("arxfs"));
     assert!(row_text(&window, 1).contains("free 500/1000"));
     let second = row_text(&window, 2);
     assert!(second.contains("/data") && second.contains("free -"));

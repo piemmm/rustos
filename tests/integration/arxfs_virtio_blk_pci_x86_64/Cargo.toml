@@ -1,0 +1,44 @@
+[package]
+name = "rustos-test-arxfs-virtio-blk-pci-x86-64"
+description = "Stage 5 end-to-end QEMU integration test: boot the rustos-kernel pipeline, bring a real virtio-blk-pci device online (the same shared bring-up the virtio-blk and FAT32 verticals use), then mount the planted arxfs volume through the real arxfs driver, verify the planted file, and create+write+read-back a fresh file before signalling QEMU success."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Stage 5 end-to-end arxfs-over-virtio_blk vertical (x86_64). The binary
+# reuses the production boot pipeline and the device-agnostic virtio
+# bring-up from the shared support crate, and replaces only the audit
+# sink so that, on observing `AuditEvent::BootCompleted`, it drives the
+# arxfs round-trip and flips QEMU's `isa-debug-exit` device to success
+# once every step has cleared. The host harness plants the arxfs image
+# from the shared `rustos-test-arxfs-image` fixture.
+#
+# The signed `.rxe` manifest (the virtio-blk driver the bring-up loads)
+# and its trust anchor are generated at build time by `build.rs` so the
+# test itself stays `no_std` + `no_main` and pulls in no host-only crypto
+# crate.
+
+[[bin]]
+name = "rustos-test-arxfs-virtio-blk-pci-x86-64"
+path = "src/main.rs"
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+
+# The device-agnostic bring-up scaffolding plus the shared arxfs device
+# tail live in the support crate; this bin pulls in only the abi, the
+# virtio-blk driver, and the driver host the loaded image resolves to
+# (`AGENTS.md` §2.2).
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
+rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+rustos-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

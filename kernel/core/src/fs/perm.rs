@@ -180,7 +180,7 @@ impl Metadata {
     /// Translate a filesystem driver's stored security record
     /// ([`NodeSecurity`]) into the VFS policy [`Metadata`].
     ///
-    /// This is the bridge that lets a driver such as `rustfs`, which stores
+    /// This is the bridge that lets a driver such as `arxfs`, which stores
     /// full per-inode ownership, mode bits, an ACL, and an optional
     /// capability gate, drive the decision instead of a uniform
     /// mount-point template. Each grant-only driver ACL entry expands into

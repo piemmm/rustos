@@ -42,7 +42,7 @@ For the in-RAM tree the `Metadata` above is held directly on the inode.
 For a [driver-backed mount](./overview.md) it has two sources: the uniform
 mount-point template (a driver such as FAT that stores no per-file owner),
 or — for a driver that stores a full per-inode §5.3 record and implements
-`FilesystemSecurity`, such as [rustfs](./rustfs.md) — the node's own stored
+`FilesystemSecurity`, such as [arxfs](./arxfs.md) — the node's own stored
 record, translated by `Metadata::from_node_security`. Each grant-only
 driver ACL entry (a `subject` plus an `rwx` triad) expands into one
 **allow** ACL entry per bit it grants; the driver surface carries no

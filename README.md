@@ -62,42 +62,39 @@ next stage, hence still `◐`.
 
 ## Filesystem feature support
 
-This table compares the RustFS *design as implemented* against what each
+This table compares the ARXFS *design as implemented* against what each
 foreign filesystem itself provides — the on-disk format and its canonical
-implementation (Linux for ext4/btrfs/XFS/bcachefs, the VFAT spec for FAT32,
-RISC OS for ADFS, OpenZFS for the ZFS layer) — **not** against RustOS's
-interoperability drivers. The `ext4 on ZFS` column is ext4 on a ZFS zvol:
-the pool supplies block-level services underneath ext4 semantics, marked
-`(ZFS)` where the service is block-level and unaware of file structure.
+Linux implementation for ext4/btrfs/XFS/bcachefs — **not** against RustOS's
+interoperability drivers.
 Legend: `✓` provided (optional features count) · `◐` partial ·
 `▢` recognised future stage · `—` not provided.
 
-| Feature | RustFS | ext4 | FAT32 | btrfs | XFS | bcachefs | ADFS | ext4 on ZFS |
-| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| RustOS driver | ✓ native | ✓ read/write | ✓ read/write | — | — | — | ✓ read/write | — |
-| Long file names (255 bytes) | ✓ | ✓ | ✓ VFAT | ✓ | ✓ | ✓ | ✓ E+/F+ | ✓ |
-| POSIX owner / mode / ACL | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
-| Per-inode capability gate | ✓ | — | — | — | — | — | — | — |
-| 64-bit ns timestamps (pre-1970 / post-2038) | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
-| Encryption at rest | ✓ always-on | ✓ fscrypt | — | — | — | ✓ | — | ✓ (ZFS) |
-| Checksummed metadata | ✓ keyed + mirrored | ✓ | — | ✓ | ✓ | ✓ | — | ✓ (ZFS) |
-| Data checksums | ✓ | — | — | ✓ | — | ✓ | — | ✓ (ZFS) |
-| Metadata self-heal (redundant copies) | ✓ | — | — | ✓ DUP | — | ✓ | — | ✓ (ZFS) |
-| Data self-heal (redundancy) | ▢ | — | — | ✓ RAID | — | ✓ replicas | — | ✓ (ZFS, with redundancy) |
-| Transparent compression | ✓ | — | — | ✓ | — | ✓ | — | ✓ (ZFS) |
-| Deduplication | ✓ inline | — | — | ✓ offline | ✓ offline | — | — | ✓ (ZFS, inline) |
-| Reflink / COW file clones | ✓ | — | — | ✓ | ✓ | ✓ | — | — |
-| Snapshots | — | — | — | ✓ | — | ✓ | — | ✓ (ZFS, zvol) |
-| Sparse files (holes) | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
-| Crash consistency | ✓ COW | ✓ journal | — | ✓ COW | ✓ journal | ✓ COW | — | ✓ journal + COW |
-| Multi-device / RAID | — | — | — | ✓ | — | ✓ | — | ✓ (ZFS pool) |
-| Online scrub | ✓ verify + metadata repair | — | — | ✓ | ✓ | ✓ | — | ✓ (ZFS) |
-| Offline check / repair | ✓ + rescue | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
-| TRIM / discard | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
-| Online grow | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
-| Device-health monitoring → triggered scrub | ✓ | — | — | — | — | — | — | ◐ ZED |
+| Feature | ARXFS | ext4 | btrfs | XFS | bcachefs |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| RustOS driver | ✓ native | ✓ read/write | — | — | — |
+| Long file names (255 bytes) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| POSIX owner / mode / ACL | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Per-inode capability gate | ✓ | — | — | — | — |
+| 64-bit ns timestamps (pre-1970 / post-2038) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Encryption at rest | ✓ always-on | ✓ fscrypt | — | — | ✓ |
+| Checksummed metadata | ✓ keyed + mirrored | ✓ | ✓ | ✓ | ✓ |
+| Data checksums | ✓ | — | ✓ | — | ✓ |
+| Metadata self-heal (redundant copies) | ✓ | — | ✓ DUP | — | ✓ |
+| Data self-heal (redundancy) | ▢ | — | ✓ RAID | — | ✓ replicas |
+| Transparent compression | ✓ | — | ✓ | — | ✓ |
+| Deduplication | ✓ inline | — | ✓ offline | ✓ offline | — |
+| Reflink / COW file clones | ✓ | — | ✓ | ✓ | ✓ |
+| Snapshots | — | — | ✓ | — | ✓ |
+| Sparse files (holes) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Crash consistency | ✓ COW | ✓ journal | ✓ COW | ✓ journal | ✓ COW |
+| Multi-device / RAID | — | — | ✓ | — | ✓ |
+| Online scrub | ✓ verify + metadata repair | — | ✓ | ✓ | ✓ |
+| Offline check / repair | ✓ + rescue | ✓ | ✓ | ✓ | ✓ |
+| TRIM / discard | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Online grow | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Device-health monitoring → triggered scrub | ✓ | — | — | — | — |
 
-RustOS ships drivers for RustFS (native) and for ext4, FAT32, and ADFS as
+RustOS ships drivers for ARXFS (native) and for ext4, FAT32, and ADFS as
 interoperability drivers for foreign volumes: ext4 maintains every on-disk
 checksum it mounts (`metadata_csum`, `gdt_csum`, `64bit`) and fails closed to
 read-only on feature sets outside its write allow-list; FAT32 has no on-disk
@@ -107,9 +104,9 @@ big directories, old- and new-map hard discs), validating every on-disc
 checksum and surfacing RISC OS load/exec/filetype/datestamp metadata through
 the shared `acorn.*` attribute keys. The
 drivers' declared-limit timestamp surface is staged per `AGENTS.md` §21.
-btrfs, XFS, bcachefs, and ZFS have no RustOS driver and appear only for
-comparison — including what RustFS does *not* do: snapshots, multi-device
-pooling/RAID, and self-healing of *data* (RustFS today detects and classifies
+btrfs, XFS, and bcachefs have no RustOS driver and appear only for
+comparison — including what ARXFS does *not* do: snapshots, multi-device
+pooling/RAID, and self-healing of *data* (ARXFS today detects and classifies
 bad data blocks through its three-layer integrity pipeline but repairs only
 its mirrored metadata; data reconstruction is a recognised later stage).
 Per-driver detail lives in each crate's `README.md` under

@@ -22,7 +22,7 @@ default (`SystemConfig::default`), which is how a fresh installation and a
 pre-unlock boot behave.
 
 The store lives inside `/System/Settings` on the encrypted root volume, so
-it can only be read after the operator's `Root filesystem passphrase:`
+it can only be read after the operator's `ARXFS passphrase:`
 unlocks the root — a boot-time consumer therefore parses it post-unlock by
 construction, and runs on defaults before that. Write authority is the
 existing `/System/Settings` per-inode policy under the caller's

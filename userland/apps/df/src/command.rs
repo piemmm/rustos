@@ -208,8 +208,8 @@ fn take_value<'a>(
     Ok(value)
 }
 
-/// The value of a short option: the rest of its cluster (`-t rustfs` as
-/// `-trustfs`) or the next argument.
+/// The value of a short option: the rest of its cluster (`-t arxfs` as
+/// `-tarxfs`) or the next argument.
 fn take_cluster_value<'a>(
     rest: &'a str,
     args: &[&'a str],
@@ -279,7 +279,7 @@ mod tests {
     fn type_filters_accumulate() {
         let options = report(&[
             "-t",
-            "rustfs",
+            "arxfs",
             "-tmemfs",
             "--exclude-type=fat32",
             "-x",
@@ -287,7 +287,7 @@ mod tests {
         ]);
         assert_eq!(
             options.types,
-            vec!["rustfs".to_string(), "memfs".to_string()]
+            vec!["arxfs".to_string(), "memfs".to_string()]
         );
         assert_eq!(
             options.exclude_types,

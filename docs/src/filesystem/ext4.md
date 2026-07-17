@@ -7,7 +7,7 @@ driver for ext2/ext3/ext4 volumes behind any
 frozen `Filesystem` trait remains mount/unmount only, so each surface is
 a separate trait rather than a widening of the shipped one
 (`AGENTS.md` §2.4 / §9), exactly as for the [FAT32](./fat32.md) and
-[rustfs](./rustfs.md) drivers.
+[arxfs](./arxfs.md) drivers.
 
 ext4 is the dominant Linux on-disk format, so reading existing volumes
 (installation media, foreign disks) was the first need; mutation arrived
@@ -66,7 +66,7 @@ permission decision: the VFS metadata layer that mounts it is the policy
 point (`AGENTS.md` §5.4).
 
 The driver implements the versioned `FilesystemSecurity` trait (as
-[rustfs](./rustfs.md) does), so the VFS can drive authorization from the
+[arxfs](./arxfs.md) does), so the VFS can drive authorization from the
 stored per-inode §5.3 record instead of the uniform mount-point
 template. `security(node)` reports a `NodeSecurity` carrying the inode's
 POSIX mode (the low 12 bits, with the type bits stripped) and its owner
@@ -235,8 +235,8 @@ vertical remain future work.
 The ext4 driver does **not** implement the `FilesystemAttrs` ABI (its
 attribute facet answers `None`, so the `fs_attr_*` syscalls refuse an ext4
 mount with `NotSupported`), so it cannot
-represent RustFS extended attributes or foreign-filesystem preset metadata
-(`rustfs-spec.md` §21). Under the cross-filesystem preservation contract an
+represent ARXFS extended attributes or foreign-filesystem preset metadata
+(`arxfs-spec.md` §21). Under the cross-filesystem preservation contract an
 exact-preservation copy of a file carrying such attributes onto ext4 reports
 `MetadataNotRepresentable`; a best-effort copy drops them only under an
 explicit, documented lossy policy. (ext4 xattr blocks are read today only to

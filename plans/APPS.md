@@ -919,7 +919,7 @@ behind the floor work below).
   `-i`/`-P`/`-l`/`--total`, operand→covering-mount by longest prefix)
   from the ungated `MOUNT_LIST` rows, which now carry each volume's
   `VolumeStats` — the support work: a new versioned `FilesystemStats`
-  driver-ABI extension (`stats() -> VolumeStats`, rustfs reports its
+  driver-ABI extension (`stats() -> VolumeStats`, arxfs reports its
   live accounting with the metadata reserve withheld from
   `avail_blocks` and the honest zero inode pair), `MountRecord` evolved
   in place to embed the usage block (invariant-checked on construct and
@@ -949,7 +949,7 @@ behind the floor work below).
   in-place `abi-v1` evolution), then `touch`, `ls -l` dates and `-t`/`-u`/
   `-c` sorts, `cp -p`/`-u`, `mv -u`, `date -r`.
 - **Stage E — VFS links (planned; separate design).** Symbolic/hard-link
-  support in the VFS and RustFS, then `ln`, `readlink`, `link`, `unlink`,
+  support in the VFS and ARXFS, then `ln`, `readlink`, `link`, `unlink`,
   `ls -L/-H`, `cp -l/-s/-d/-a`, `stat`'s link fields.
 
 ## 12.2 Terminal colour, the standard scheme, and box drawing

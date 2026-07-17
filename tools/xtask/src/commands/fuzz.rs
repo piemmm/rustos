@@ -129,10 +129,10 @@ pub const TARGETS: &[Target] = &[
         description: "ramzip compressed-entry restore (tampered/truncated sealed entries)",
     },
     Target {
-        package: "rustos-drv-fs-rustfs",
+        package: "rustos-drv-fs-arxfs",
         test: "fuzz_mount",
         description:
-            "rustfs mount / metadata + directory decode (superblock ring, root, trees, dirents)",
+            "arxfs mount / metadata + directory decode (superblock ring, root, trees, dirents)",
     },
     Target {
         package: "rustos-drv-fs-adfs",
@@ -701,11 +701,11 @@ mod tests {
     }
 
     #[test]
-    fn rustfs_mount_harness_is_registered() {
+    fn arxfs_mount_harness_is_registered() {
         let opts = parse(&argv(&["--target", "fuzz_mount"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "rustos-drv-fs-rustfs");
+        assert_eq!(chosen[0].package, "rustos-drv-fs-arxfs");
     }
 
     #[test]

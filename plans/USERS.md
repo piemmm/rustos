@@ -175,7 +175,7 @@ no-login service account.
     (record set, ceilings, lookup↔records agreement).
   - `tools/mkimage` seeds human accounts only: debug ⇒ `root` + `wheel`
     + `storage`; installer ⇒ empty users database + `storage`. The QEMU
-    disk fixture (`tests/integration/rustfs_image`) seeds the same
+    disk fixture (`tests/integration/arxfs_image`) seeds the same
     human-only shape; both are pinned by tests.
 
 - **U3 — spawn-side wiring.** Status: **done**. What now holds:

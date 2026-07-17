@@ -1,0 +1,49 @@
+[package]
+name = "rustos-drv-fs-arxfs"
+description = "RustOS native filesystem driver (CoW, journaled, ACL + capability gates per inode)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared filesystem-signature definitions (the metadata-header magic),
+# so this driver and the volume manager's probe can never disagree.
+rustos-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
+# The keyed metadata authenticator that seals every metadata block
+# (`docs/src/filesystem/arxfs-spec.md` §5, §8). Crypto is the standing
+# "don't roll your own" exception (`AGENTS.md` §2.12): the MAC routes through
+# `lib/crypto`, never a hand-rolled primitive.
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+# The first-party LZ codec every file-data record is compressed with before
+# encryption (`docs/src/filesystem/arxfs-spec.md` §6, §10). It is first-party,
+# not an external zstd/compression crate (`AGENTS.md` §2.12; this is *not* the
+# crypto carve-out): ARXFS must have no external compression dependency.
+rustos-compress = { path = "../../../lib/compress", version = "=0.0.0" }
+# The shared extended-metadata model: the namespaced attribute-key grammar and
+# the bounded AttrSet with its self-identifying encoding, the one definition of
+# the on-disk attribute store ARXFS keeps and the foreign-metadata registry
+# the copy tools use (`docs/src/filesystem/arxfs-spec.md` §21; `AGENTS.md` §2.2).
+rustos-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# Structured, stable-event-id logging for the security-relevant findings the
+# online scrub reports (`docs/src/filesystem/arxfs-spec.md` §12; `AGENTS.md`
+# §5.4 — log security decisions with a stable event ID; §19.4).
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Volatile wiping of decrypted scratch and transform-cache plaintext before
+# the buffers return to the heap (`plans/SMARTRAM.md` §6.2): a plain zeroing
+# loop over a dying buffer can be optimised away, so the wipe routes through
+# the same audited crate the kernel caches use.
+zeroize = { version = "1.8.1", default-features = false }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# seam (`rustos_fuzzseed`): one place picks the per-run seed, logs it at
+# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
+# §2.2). Test scaffolding only; never in a RustOS build.
+rustos-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

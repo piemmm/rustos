@@ -699,7 +699,7 @@ mod tests {
                     MountRecord::new(
                         b"rootfs",
                         b"/",
-                        b"rustfs",
+                        b"arxfs",
                         MountFlags::READ_ONLY,
                         VolumeStats::default(),
                         MountAvailability::Available,
@@ -709,7 +709,7 @@ mod tests {
                     MountRecord::new(
                         b"data",
                         b"/Storage/data",
-                        b"rustfs",
+                        b"arxfs",
                         MountFlags::NOSUID.union(MountFlags::NODEV),
                         VolumeStats::default(),
                         MountAvailability::Available,

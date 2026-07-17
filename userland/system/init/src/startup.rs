@@ -151,7 +151,7 @@ impl core::fmt::Write for BufWriter<'_> {
 /// summary:
 ///
 /// ```text
-/// RustOS 0.0.0: 8192MiB
+/// RustOS 0.0.0 8192MiB
 ///
 /// ARM Cortex-A72, 4 cores
 /// ```
@@ -188,7 +188,7 @@ pub fn render_banner(facts: Option<rustos_abi::BootFacts>, buf: &mut [u8; BANNER
 fn write_facts_banner(w: &mut BufWriter<'_>, facts: &rustos_abi::BootFacts) -> core::fmt::Result {
     use core::fmt::Write as _;
 
-    write!(w, "{BANNER_PREFIX}: ")?;
+    write!(w, "{BANNER_PREFIX} ")?;
     if facts.memory_bytes > GIB_THRESHOLD {
         // Round to the nearest whole GiB; the saturating add cannot
         // overflow below u64::MAX - GIB/2, far past any real machine.
@@ -671,7 +671,7 @@ session /Apps/Shell.app/Run login   # the login service
         assert_eq!(
             banner(Some(facts)),
             format!(
-                "RustOS {}: 8192MiB\n\nIntel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz, 36 cores\n",
+                "RustOS {} 8192MiB\n\nIntel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz, 36 cores\n",
                 env!("CARGO_PKG_VERSION"),
             ),
         );
@@ -701,7 +701,7 @@ session /Apps/Shell.app/Run login   # the login service
             cpu_count: 4,
             memory_bytes: 100 * 1024 * 1024 * 1024,
         };
-        assert!(banner(Some(facts)).contains(": 102400MiB\n"));
+        assert!(banner(Some(facts)).contains(" 102400MiB\n"));
     }
 
     #[test]
@@ -713,7 +713,7 @@ session /Apps/Shell.app/Run login   # the login service
             memory_bytes: 256 * 1024 * 1024 * 1024,
         };
         let text = banner(Some(facts));
-        assert!(text.contains(": 256GiB\n"), "{text}");
+        assert!(text.contains(" 256GiB\n"), "{text}");
         assert!(text.ends_with("SiFive U74-MC, 128 cores\n"), "{text}");
     }
 
@@ -727,7 +727,7 @@ session /Apps/Shell.app/Run login   # the login service
             cpu_count: 4,
             memory_bytes: 8192 * 1024 * 1024 - 100 * 1024,
         };
-        assert!(banner(Some(facts)).contains(": 8192MiB\n"));
+        assert!(banner(Some(facts)).contains(" 8192MiB\n"));
     }
 
     #[test]

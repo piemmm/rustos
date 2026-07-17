@@ -383,7 +383,7 @@ deferred to later stages (not stubbed, §15.1).
   `CompletionWait` seam rather than busy-spinning, §17.1/§2.16) ships its
   read and write paths host-tested against a register-level mock; it has no
   QEMU vertical (QEMU models no Pi EMMC2); its PIO path is accepted on metal
-  (reads the FAT boot partition + RustFS root off a real Pi 4 SD card), while
+  (reads the FAT boot partition + ARXFS root off a real Pi 4 SD card), while
   the cache-synchronized DMA path remains metal-gated (`plans/PI.md` P8).
 - DMA goes through `kernel/sec::dma` (`CAP_MMIO_MAP`/`MEM_DMA` checked, audited);
   MMIO is reached only through the capability-gated `KernelMmioMapper`.
@@ -1178,8 +1178,8 @@ order (one fully-gated increment each):
            throughout, so the working metal keyboard never regresses (§2.17):
            - **B1 — DONE (host + `-M virt`)** — three-partition image (FAT boot
              + read-only `/System` + encrypted data root) in `tools/mkimage`
-             (`build_system_partition` + `build_rpi_image`), a `RustFsSystem`
-             partition role in `lib/partition`, `RustFs::open_read_only` + the
+             (`build_system_partition` + `build_rpi_image`), a `ARXFSSystem`
+             partition role in `lib/partition`, `ARXFS::open_read_only` + the
              non-secret `SYSTEM_VOLUME_KEY`, and the kernel mounting `/System`
              read-only over a `lib/partition` window in
              `root_mount::autoload_system_drivers` (audited 4140/4141). The
@@ -2035,7 +2035,7 @@ order (one fully-gated increment each):
            stays pure (`build_rpi_image`'s `drivers` seam plants bytes only); the
            ELF→`rxe` converter and signer are the shared `rustos_itest_harness`
            definitions the kernel `build.rs` uses (§2.2); the store-planting
-           routine is the single `rustos_drv_fs_rustfs::plant_nested_file`.
+           routine is the single `rustos_drv_fs_arxfs::plant_nested_file`.
            Host-tested: mkimage plants and reads the bundle back from the
            read-only `/System` store; the image builds end to end in the CI image
            gate.
@@ -2290,7 +2290,7 @@ order (one fully-gated increment each):
 **Dependencies:** Stage 4 (`Filesystem` trait + a block driver).
 
 **Deliverables**
-- `drivers/filesystem/rustfs`: native FS, copy-on-write, ACL + capability
+- `drivers/filesystem/arxfs`: native FS, copy-on-write, ACL + capability
   gates per inode, journaled, POSIX-compliant (latest standard targeted).
 - `drivers/filesystem/ext4`: read/write driver (uses upstream-audited parser
   where possible; otherwise implemented in-tree with tests).
@@ -2309,14 +2309,14 @@ order (one fully-gated increment each):
 - POSIX FS test suite (`pjdfstest`-equivalent) run under QEMU.
 - ACL + capability gate tests: a user without `CAP_AUDIT_READ` cannot read
   a file marked as such, even with mode 0644.
-- Crash-consistency tests for `rustfs` journal.
+- Crash-consistency tests for `arxfs` journal.
 - Layout-enforcement tests: the default layout exposes exactly the four
   top-level directories; a user with root write permission may `mkdir
   /etc` (the VFS reserves no error for the name); `/System` is read-only
   at runtime except for the two writable paths listed in §16.2.
 
 **Docs**
-- `docs/src/filesystem/{overview,rustfs,ext4,fat32,permissions,layout}.md`
+- `docs/src/filesystem/{overview,arxfs,ext4,fat32,permissions,layout}.md`
   (the new `layout.md` mirrors `AGENTS.md` §16).
 
 **Status: complete.**
@@ -2327,7 +2327,7 @@ order (one fully-gated increment each):
   fail-closed `Metadata::authorize` (never branches on `uid == 0`);
   longest-prefix `MountTable` with read-only `/System` (writable `Logs`/
   `Settings`).
-- Filesystem drivers: `rustfs` (native COW, journaled), `ext4` (read +
+- Filesystem drivers: `arxfs` (native COW, journaled), `ext4` (read +
   checksummed/`64bit`/`metadata_csum` validated against `mke2fs`/`e2fsck`,
   first-party crc32c/crc16), `fat32`, and `adfs` (read/write across every
   Acorn `FileCore` format — S/M/L/D old map, E/F new map, E+/F+ big
@@ -2337,27 +2337,27 @@ order (one fully-gated increment each):
   corruption test suite plus a registered `fuzz_mount` harness). Each
   ships a first-party `format` (no `mkfs` shell-out, §12) and returns
   `NoSpace`/`Errno::NoSpace` on exhaustion.
-- Tests: `rustfs` journal crash-consistency soak (seeded, old-or-new
-  recovery), end-to-end `rustfs`-over-virtio_blk QEMU vertical (fixture
-  authored by `RustFs::format` itself, §2.2), the `pjdfstest`-equivalent
+- Tests: `arxfs` journal crash-consistency soak (seeded, old-or-new
+  recovery), end-to-end `arxfs`-over-virtio_blk QEMU vertical (fixture
+  authored by `ARXFS::format` itself, §2.2), the `pjdfstest`-equivalent
   `posix_fs_suite` over the real driver + VFS, and `fs_soak` (`cargo xtask
   fssoak`) exercising every formatter over a ≥ 1 GiB `RamBlock`.
 
 ---
 
-## Stage 5 follow-up — RustFS (native on-disk format evolution)
+## Stage 5 follow-up — ARXFS (native on-disk format evolution)
 
 **Dependencies:** Stage 5 (the VFS policy layer and the frozen
 `Filesystem*` traits) and `lib/crypto`.
 
-**Goal.** Grow the native filesystem to the full RustFS design — copy-on-write,
+**Goal.** Grow the native filesystem to the full ARXFS design — copy-on-write,
 always-encrypted, checksummed, compressed, deduplicating, SSD-aware,
 recoverable — as **one** on-disk version (no `v1`/`v2` pair) behind the frozen
 `Filesystem*` traits. One mandatory profile (every feature on, not tunable);
 first-party codec (no external zstd, §2.12); crypto via `lib/crypto` only. Spec:
-`docs/src/filesystem/rustfs-spec.md`; user docs: `docs/src/filesystem/rustfs.md`.
+`docs/src/filesystem/arxfs-spec.md`; user docs: `docs/src/filesystem/arxfs.md`.
 
-**Status: all stages complete — RustFS v1 is done.** The COW `rustfs` driver
+**Status: all stages complete — ARXFS v1 is done.** The COW `arxfs` driver
 replaced the old journaled one outright (self-identifying block headers,
 four-slot superblock ring, transaction root + inline commit, COW inode map)
 and grew through spec Stages 2–12 into: COW B-trees, keyed-MAC + mirrored
@@ -2367,13 +2367,13 @@ fuzz/crash-replay/corruption-injection suites. Also done: always-on **sparse
 files** (metadata-only holes detected pre-hash/dedupe/compress, spec §19) and
 **255-byte directory names** (263-byte slot, ext4 charset rules,
 case-sensitive) with online **grow** (shrink rejected, spec §13). Passes unit
-tests, the 1 GiB `fssoak`, the POSIX suite, the rustfs-over-virtio_blk QEMU
+tests, the 1 GiB `fssoak`, the POSIX suite, the arxfs-over-virtio_blk QEMU
 vertical, and the `fuzz_mount`/`fuzz_compress` harnesses. Per-stage legend:
 spec §18.
 
 Compression is **cluster-granular** (on-disk format v2, spec §6/§10): an
 aligned 16-block cluster stores as one compressed extent in strictly fewer
-physical blocks (`drivers/filesystem/rustfs/src/cluster.rs`), so the savings
+physical blocks (`drivers/filesystem/arxfs/src/cluster.rs`), so the savings
 are real freed space; a single-block record always stores raw (inside a fixed
 1:1 block a compressed frame frees nothing, so no CPU is spent where no block
 can be freed). Partial overwrites decompose a cluster back to per-block
@@ -2381,18 +2381,18 @@ records; reflinks share clusters whole; seeks stay one extent-tree descent.
 
 ---
 
-## Stage 5 follow-up — RustFS extended file metadata (`plans/RUSTFS-METADATA.md`)
+## Stage 5 follow-up — ARXFS extended file metadata (`plans/ARXFS-METADATA.md`)
 
-**Dependencies:** Stage 5 follow-up (RustFS v1) and `lib/crypto`. Design brief:
-`plans/RUSTFS-METADATA.md`; spec: `docs/src/filesystem/rustfs-spec.md` §21 +
+**Dependencies:** Stage 5 follow-up (ARXFS v1) and `lib/crypto`. Design brief:
+`plans/ARXFS-METADATA.md`; spec: `docs/src/filesystem/arxfs-spec.md` §21 +
 `docs/src/filesystem/metadata-registry.md`.
 
-**Goal.** Give every RustFS inode a general-purpose, namespaced extended-
+**Goal.** Give every ARXFS inode a general-purpose, namespaced extended-
 attribute store and use it to preserve foreign-filesystem per-file metadata
 (Acorn/RISC OS, Amiga, Atari, classic Mac) across a copy — interoperability
 with foreign data, not RustOS self-compatibility (§2.13). One shared definition
 in `lib/fsmeta` (grammar, `AttrSet`/`AttrEntry`, preset registry with checked
-`Time64` conversions), consumed by RustFS, the foreign-FS drivers, and the
+`Time64` conversions), consumed by ARXFS, the foreign-FS drivers, and the
 copy/archive tools (§2.2).
 
 **Design decisions (load-bearing).**
@@ -2409,7 +2409,7 @@ copy/archive tools (§2.2).
 
 **Status: foundation + syscall surface done.** Delivered: `lib/fsmeta`
 (grammar + AttrSet + preset registry + fuzz harness), the `FilesystemAttrs`
-ABI, and the RustFS attribute store (encrypt/decrypt, COW read/write,
+ABI, and the ARXFS attribute store (encrypt/decrypt, COW read/write,
 free-on-remove, free-space rebuild accounting, reflink copy) with driver
 tests (round-trip/remount, case-sensitivity, unknown-namespace + oversize +
 block-overflow fail-closed, encryption at rest, read-only refusal,
@@ -2423,7 +2423,7 @@ validated, ordinary namespaces follow the node's own read/write permissions,
 and the privileged `system`/`trusted` namespaces are refused and hidden from
 listings (their capability still arrives with its first holder, §5.2). A
 driver declares support through the `FilesystemAttrsProvider` facet
-(`RustFs` serves it; `CachedFs`/`GroupMappedFs` forward with cache
+(`ARXFS` serves it; `CachedFs`/`GroupMappedFs` forward with cache
 invalidation and mapped authorisation; ext4/FAT32 answer the typed
 `Errno::NotSupported`; the new `Errno::NoData` is the absent-attribute
 answer). `lib/rt` wrappers, `ros_sys_fs_attr_*` C stubs, and the regenerated
@@ -2436,17 +2436,17 @@ caller.
 - The resource-fork *named-stream* content path for values above `VALUE_MAX`.
 - Per-family foreign-FS driver wiring (lands with the ADFS/Amiga/Atari/Mac
   drivers, which do not yet exist).
-- Snapshot send/receive carrying the attribute set (with `plans/RUSTFS-SNAPSHOT.md`).
+- Snapshot send/receive carrying the attribute set (with `plans/ARXFS-SNAPSHOT.md`).
 
 ---
 
-## Stage 5 follow-up — RustFS FEC and multi-device redundancy (`plans/RUSTFS-FEC.md`)
+## Stage 5 follow-up — ARXFS FEC and multi-device redundancy (`plans/ARXFS-FEC.md`)
 
-**Dependencies:** Stage 5 follow-up (RustFS v1). Staged plan:
-`plans/RUSTFS-FEC.md` (stages FEC0–FEC20).
+**Dependencies:** Stage 5 follow-up (ARXFS v1). Staged plan:
+`plans/ARXFS-FEC.md` (stages FEC0–FEC20).
 
 **Goal.** Always-on forward error correction and multi-device redundancy for
-RustFS: local RS(8+2) media repair on a one-device pool; replication or
+ARXFS: local RS(8+2) media repair on a one-device pool; replication or
 topology-selected RS(k+1)/RS(k+2) across distinct whole-device failure
 domains; a semantic "survive N whole-device failures" protection floor (never
 raw `k+m`); online add/remove/replace/rebalance/protection changes with
@@ -2456,7 +2456,7 @@ through the existing storage-discovery path (`blkio` block-service endpoints
 on storage-class hardware-tree nodes, consumed by `drivers/storage/volmgr`).
 
 **Status: planned.** Design, invariants, staging, and acceptance live in
-`plans/RUSTFS-FEC.md`; no implementation has landed.
+`plans/ARXFS-FEC.md`; no implementation has landed.
 
 ---
 
@@ -2474,13 +2474,13 @@ full path walk per child).
 - `FilesystemRead::read_dir` takes an opaque resume cursor (`getdents`
   `d_off` model): a full listing is one bounded scan; a stale or
   arbitrary cursor is bounds-checked and fail-closed. All four
-  implementations (rustfs, ext4, fat32, in-RAM mock) resume in O(1).
+  implementations (arxfs, ext4, fat32, in-RAM mock) resume in O(1).
 - The driver `DirEntry` carries the child's full `NodeInfo`, the service
   `ReaddirEntry` and the wire record carry `size`/`allocated`, and `du`
   sums a directory from the one listing (one open + one readdir per
   directory instead of `n` open/stat/close round-trips).
 - The delegated listing fails closed on a non-advancing driver cursor,
-  and rustfs regression tests pin the O(1)-resume read cost and the
+  and arxfs regression tests pin the O(1)-resume read cost and the
   per-entry metadata.
 - **Repeat-access cost is now served by the clean, rebuildable
   filesystem cache** (`kernel/core::fs::CachedFs`, see the SMARTRAM
@@ -2499,7 +2499,7 @@ full path walk per child).
 - **Single-descent secured walk.** The delegate's per-component
   `lookup` + `node_info` + `security` triple re-reads the same inodes
   via separate B-tree descents (~9 reads per component measured on
-  rustfs); a combined driver resolve step should read each inode once
+  arxfs); a combined driver resolve step should read each inode once
   (~2× fewer reads per open).
 - **Per-block MAC cost on target hardware.** Every metadata read pays an
   HMAC-SHA256 over the whole block in software (Pi 4 has no ARMv8
@@ -2660,7 +2660,7 @@ added to the file-map verticals.
   `plans/PI.md` P11 Chunk A — host-proven): given the on-FAT `root.unlock`
   descriptor, the typed passphrase, and the encrypted root block device it
   derives the volume key (PBKDF2, zeroed-on-drop), mounts the root
-  (`RustFs::open`, wrong-passphrase fail-closed), and runs
+  (`ARXFS::open`, wrong-passphrase fail-closed), and runs
   `load_users_db_source`. The FAT `root.unlock` reader that recovers the
   first of those three inputs is wired
   (`rustos_kernel::root_mount::read_root_unlock_descriptor`, `plans/PI.md`
@@ -2679,7 +2679,7 @@ added to the file-map verticals.
   the shared, scheme-neutral `lib/partition` layer (MBR encode + fail-closed
   MBR/GPT parse, the one on-disk definition `tools/mkimage` writes, §2.2 /
   §2.20 — works for a Pi MBR card and a UEFI x86_64 GPT disk on any arch),
-  locates the FAT boot and `RustFS` root partitions by role, opens a
+  locates the FAT boot and `ARXFS` root partitions by role, opens a
   bounds-checked `PartitionBlock` window onto each in sequence (one device,
   two windows via `impl Block for &mut B`), and runs the composition —
   fail-closing a malformed/forged table or a missing partition. Root-device
@@ -3170,7 +3170,7 @@ transfer, landed in increments:
     fetched automatically from the manifest's pinned source when not
     operator-staged, every download checksum-gated —
     generated `config.txt`, flattened `kernel8.img`), and an encrypted
-    RustFS root with the §16 skeleton, both laid down by the real
+    ARXFS root with the §16 skeleton, both laid down by the real
     in-tree drivers. Docs: `docs/src/install/raspberry_pi.md`. The emitted
     image boots a real Pi 4 into user mode (operator metal acceptance,
     `plans/PI.md` P9). The store also ships the signed virtio-input
@@ -3600,7 +3600,7 @@ before continuing Stage 6:
   boot_time: Time64 }`; all call sites + fuzz harness updated.
 - §20 `stdinfo`: `STDINFO_FD = 3`, closed `StdInfoRecord` (closed `StdInfoKind`,
   no synonyms), `no_std`/alloc-free `write_jsonl` (fail-closed on small buffer).
-- RustFS stores the four §21 timestamps as true `Time64` via a separate
+- ARXFS stores the four §21 timestamps as true `Time64` via a separate
   versioned `FilesystemTimestamps` trait (not a widening of read/write, §2.4);
   inode record reshaped, `FORMAT_VERSION` bumped, clock seam defaults to epoch
   (never panics).
@@ -3784,7 +3784,7 @@ and fail-closed (§24.4) — this work must not loosen them.
   configurable ceiling (`IdentityTableBuilder::with_supplementary_group_limit`);
   the supplementary-group store was already a growable `Vec`, and a candidate
   record can never raise the ceiling, so the §24.4 anti-DoS bound is preserved.
-- RustFS mount footprint (`drivers/filesystem/rustfs/src/lib.rs`) — **done**
+- ARXFS mount footprint (`drivers/filesystem/arxfs/src/lib.rs`) — **done**
   (the §24.1 fix for the Raspberry Pi 4 eMMC2 boot OOM): both in-RAM
   allocation structures that scaled with the device block count are now
   sparse. The per-transaction private-block tracker was a dense
@@ -3807,7 +3807,7 @@ and fail-closed (§24.4) — this work must not loosen them.
   answer is a paged / on-disk free-space representation (extent /
   bitmap-hierarchy) with only a bounded working-set cache resident, so even a
   near-full 100 TB+ volume mounts within a fixed RAM budget (see
-  `docs/src/filesystem/rustfs-spec.md` §4).
+  `docs/src/filesystem/arxfs-spec.md` §4).
 - Kernel heap arena — `lib/kalloc` `FreeListAllocator` / `HEAP_BYTES` — **done**
   (the §24.1 fix for the `stress --vm` kernel OOM panic): the heap was a fixed
   64 MiB `.bss` slab that, once exhausted, returned null from `GlobalAlloc` →
@@ -3839,7 +3839,7 @@ and fail-closed (§24.4) — this work must not loosen them.
 - (Explicitly **out of scope / leave fixed**: the §22 RNG reserve
   `DEFAULT_RESERVE_BYTES`/`RANDOM_RESERVE_DEFAULT_BYTES` (charter-blessed), and
   all untrusted-input/format bounds — `lib/vt` `MAX_PARAMS`/`MAX_STRING`,
-  `lib/fdt` `MAX_DEPTH`, `lib/svg` caps, ext4/fat32/rustfs format constants,
+  `lib/fdt` `MAX_DEPTH`, `lib/svg` caps, ext4/fat32/arxfs format constants,
   path/name/command-line/config length caps. These are §24.4 defences.)
 
 **Deliverables**
@@ -4168,7 +4168,7 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   (`plans/DEVICES.md` D3a): `lib/path` gained `Root::VolumeId` in place and
   the kernel volume forest (`kernel/core::fs::volumes`, installed via
   `BootInfo::with_volumes`) resolves a published volume's stable identity —
-  the RustFS per-volume UUID, published by the boot mount/unlock paths with
+  the ARXFS per-volume UUID, published by the boot mount/unlock paths with
   audited `fs.root.publish.{allow,deny}` events — at the same entry point,
   fail-closed for an unpublished id. **Runtime attach/unpublish is landed**
   (`plans/DEVICES.md` D3b): the `volume_attach`/`volume_detach` syscalls
@@ -4348,7 +4348,7 @@ listing now prints under `-l`/`-s` (GNU parity) — backed by honest
 allocation plumbing: `NodeInfo`/`DelegatedInfo`/`FileStat` carry an
 `allocated`-bytes field filled from each format's real tracking (ext4
 `i_blocks`, huge-file aware — and the osd2 `file_acl` high-half mis-read
-fixed with a regression test; FAT32 cluster-chain walk; RustFS extent-tree
+fixed with a regression test; FAT32 cluster-chain walk; ARXFS extent-tree
 sum; memfs length), with the C header regenerated.
 
 Every store-registered command app (`cat`, `groupadd`, `ls`, `man`, `ps`,
@@ -4681,14 +4681,14 @@ fail-closed), the kernel volume forest
 `id::<volume-id>/path` at the single kernel path-resolution entry point to
 the view location the published volume's root backs (authorised by the
 secured VFS identically — never a policy bypass), and boot publication of
-both boot volumes' RustFS UUIDs with audited `fs.root.publish.{allow,deny}`
+both boot volumes' ARXFS UUIDs with audited `fs.root.publish.{allow,deny}`
 events. D3b (done) landed the runtime half: the `volume_attach` /
 `volume_detach` syscalls (`CAP_FS_MOUNT` + per-resource grant checks,
 audited), the kernel blkio-client `Block` over a served endpoint + shared
 window (counted kernel hold on the window's frames), the runtime-mutable
 mount table with per-mount permission templates, `Arc`-shared driver
 registration with `unregister`, forest `unpublish`, and the
-`RuntimeVolumeService` mounting RustFS/ext4/FAT32 under `/Storage/<name>`
+`RuntimeVolumeService` mounting ARXFS/ext4/FAT32 under `/Storage/<name>`
 with full unwind and the drives.md hotplug audit events — ext4/FAT32
 gained `FilesystemStats` + volume identity along the way (and the ext4
 formatter's nil-`s_uuid` defect was fixed: the caller now mints the UUID).
@@ -4698,7 +4698,7 @@ endpoint and `volume_attach` behind the matched node's own grants, so the
 per-node instance — not a singleton watcher — is the least-privilege,
 zero-new-kernel-surface design) that probes a whole-device filesystem
 signature else the GPT/MBR partitions **by content** through the new
-`lib/fsprobe` crate (the one home of the RustFS/ext4/FAT32
+`lib/fsprobe` crate (the one home of the ARXFS/ext4/FAT32
 signature/label/identity definitions, imported by the fs drivers
 themselves), derives the deterministic catalog name (sanitised label →
 `<fstype><n>` → identity-fingerprint suffix on collision), and issues the
@@ -4736,7 +4736,7 @@ detach identities), and the new `unmount` command-app bundle
 landed verified re-insert: an attach whose `lib/fsprobe`-probed identity
 matches an unavailable volume is recovered in place — the journal's
 dual-acceptance mutation-evidence shadow (seeded from the per-format
-`fsprobe::evidence_len` window: `RustFS` superblock ring / ext4
+`fsprobe::evidence_len` window: `ARXFS` superblock ring / ext4
 superblock / FAT32 boot+FSInfo) is re-read and, when every evidence
 block matches its committed-or-latest copy, the retained writes replay
 and commit (event 4185) and the volume returns to full service under
@@ -4895,7 +4895,7 @@ typed worker refusals counted as expected outcomes (`REFUSED_EXIT` 3, GNU
 exit conventions 0/1/130/143), total scratch-tree hygiene on every exit
 path, and an fd-3 `summary` record; the stage also landed
 `MetaPolicy::stamp_creation` (the secured VFS stamps a created node with
-its creator's uid/gid — RustFS's raw create stamped the system user, locking
+its creator's uid/gid — ARXFS's raw create stamped the system user, locking
 creators out of their own files) and `ProcessWait::parent_exited` (the
 shared task reclaim severs a dead parent's child rows: zombies dropped,
 running children orphaned without breaking `is_live`, an orphan's exit
@@ -5028,7 +5028,7 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   (fail closed, driver keeps serving).
 - **Single-writer coherence fix (pre-existing corruption hazard):** the
   root volume was opened read-write **twice** (the `fs_*` driver plus a
-  second `RustFs` window for the `CAP_USER_ADMIN` engine), which could
+  second `ARXFS` window for the `CAP_USER_ADMIN` engine), which could
   double-allocate COW clusters and made any cache unsound.
   `FilesystemSecurity::set_security` moved into the abi trait (abi-v1
   unfrozen, in-place evolution), the `AdminFs` trait was deleted,
@@ -5073,8 +5073,8 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   deliberately not built — the mounted kernel filesystem surface
   (`KernelFs`) has no attribute or type-detection consumer today, and
   the stage is scoped to current consumers.
-- The RustFS transform cache: the driver exposes an injected
-  `ClusterCache` seam (`drivers/filesystem/rustfs`'s `xform` module —
+- The ARXFS transform cache: the driver exposes an injected
+  `ClusterCache` seam (`drivers/filesystem/arxfs`'s `xform` module —
   keyed by the stored run's first physical block, consulted only in the
   serving read path, never by scrub/check/rescue; invalidation funnels
   through the single block-free choke point, rollback purges, a
@@ -5153,7 +5153,7 @@ evidence (`plans/SMARTRAM.md` SMART10; `docs/src/architecture/memory.md`
   evidence (warm passes deterministically perform zero driver reads /
   load-gate runs; wall-clock numbers printed as estimates).
 - The layered stack in `kernel/rustos-kernel`'s transform-cache suite:
-  `CachedFs` over a real RustFS volume consulting the installed
+  `CachedFs` over a real ARXFS volume consulting the installed
   `TransformClusterCache` on one gauge — a filesystem-cache hit never
   reaches the transform layer; moderate pressure drains both layers
   while correct bytes keep being served.
@@ -5187,7 +5187,7 @@ evidence (`plans/SMARTRAM.md` SMART10; `docs/src/architecture/memory.md`
   `BufferClass::Sensitive` I/O bypasses *and* evicts its range so no
   key-slot block is ever retained; every released buffer is wiped.
 
-**Remaining (staged, `plans/SMARTRAM.md` §12):** the non-RustFS
+**Remaining (staged, `plans/SMARTRAM.md` §12):** the non-ARXFS
 transform families (verified bundle/manifest state gated on their
 consumers) — gated on the subsystems they consume.
 UI caches (SMART5) and the reliability/background/predictive caches

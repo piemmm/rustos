@@ -1027,7 +1027,7 @@ fn secured_set_mode_of_missing_path_is_not_found() {
 
 /// A created node is stamped with its **creator's** identity, not the
 /// driver's raw default: the driver mints the record with its own
-/// baked-in owner (`RustFS` stamps the system user), and before the create
+/// baked-in owner (`ARXFS` stamps the system user), and before the create
 /// returns the secured path rewrites the ownership to the creating
 /// caller, so a user can immediately use a private-mode file it just
 /// made. Before the stamp landed this read failed `PermissionDenied` —

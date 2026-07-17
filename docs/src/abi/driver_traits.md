@@ -317,7 +317,7 @@ The surface is allocation-free: a `NodeId` is an opaque,
 implementation-minted token (`NodeId::NONE` is reserved), `NodeInfo`
 reports `{ kind, size, allocated }` — `allocated` being the bytes of
 on-disk storage the node's data really occupies, from the format's own
-allocation tracking (ext4 `i_blocks`, a FAT cluster chain, RustFS mapped
+allocation tracking (ext4 `i_blocks`, a FAT cluster chain, ARXFS mapped
 extents) — and `read_dir` writes the entry name into a caller-provided
 buffer alongside a `DirEntry { node, info, name_len, next_cursor }`.
 The entry carries the child's full `NodeInfo`, so a listing consumer
@@ -377,7 +377,7 @@ VFS translates it into its policy metadata and applies the §5.3 model
 (`AGENTS.md` §5.4). A driver such as FAT that keeps no per-file owner
 simply does not implement this trait, and the VFS keeps applying the
 mount-point template. The first implementation is the native
-[`rustfs` driver](../filesystem/rustfs.md); the
+[`arxfs` driver](../filesystem/arxfs.md); the
 [`ext4` driver](../filesystem/ext4.md) also implements it, reporting each
 inode's stored mode and owner (its POSIX ACLs live in xattr blocks the
 read surface does not yet decode, so it surfaces no `required_cap` and no
@@ -398,7 +398,7 @@ nanoseconds), so absolute time is never a seconds-only scalar and the
 full pre-1970 / post-2038 range round-trips without truncation. A driver
 whose backing format keeps no timestamps (or only narrower legacy ones it
 cannot widen) simply does not implement it. The first implementation is
-the native [`rustfs` driver](../filesystem/rustfs.md).
+the native [`arxfs` driver](../filesystem/arxfs.md).
 
 Every mountable driver additionally implements a separate versioned
 whole-volume statistics trait, `FilesystemStats`, alongside (never a
@@ -413,17 +413,17 @@ avail_blocks, files, files_free }` record: whole blocks of the unit the
 mounted format actually allocates in, with every count 64-bit
 (`AGENTS.md` §26.6 — a volume may exceed what 32 bits hold).
 `avail_blocks` is the portion of `free_blocks` an ordinary data
-allocation may consume (a format that withholds a reserve — rustfs's
+allocation may consume (a format that withholds a reserve — arxfs's
 metadata reserve — reports the smaller number), so `avail_blocks ≤
 free_blocks ≤ total_blocks` always holds and consumers are never
 promised space the driver would refuse. `files`/`files_free` report a
 fixed inode table's capacity; a format that allocates inodes dynamically
-(rustfs) carries the honest `0`/`0` "untracked" pair, never a fabricated
+(arxfs) carries the honest `0`/`0` "untracked" pair, never a fabricated
 total. The report is a read of the driver's own accounting, never a
 device walk, and it feeds the mount snapshot the System Information
 API's `MOUNT_LIST` rows carry (so `df` renders it without a `/proc`).
 The first implementation is the native
-[`rustfs` driver](../filesystem/rustfs.md).
+[`arxfs` driver](../filesystem/arxfs.md).
 
 ## Block
 

@@ -9,7 +9,7 @@ use rustos_test_posix_fs_suite::*;
 
 #[test]
 fn rmdir_removes_an_empty_directory() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -27,7 +27,7 @@ fn rmdir_removes_an_empty_directory() {
 
 #[test]
 fn rmdir_of_non_empty_directory_is_not_empty() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -44,7 +44,7 @@ fn rmdir_of_non_empty_directory_is_not_empty() {
 
 #[test]
 fn rmdir_succeeds_once_the_directory_is_emptied() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -60,7 +60,7 @@ fn rmdir_succeeds_once_the_directory_is_emptied() {
 
 #[test]
 fn rmdir_of_a_file_is_not_a_directory() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
@@ -77,7 +77,7 @@ fn rmdir_of_a_file_is_not_a_directory() {
 
 #[test]
 fn rmdir_missing_directory_is_not_found() {
-    let (vfs, mut fs) = rustfs_backed_vfs(false);
+    let (vfs, mut fs) = arxfs_backed_vfs(false);
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 

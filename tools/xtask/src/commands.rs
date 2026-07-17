@@ -200,7 +200,7 @@ impl Command {
                 "Drive the §19.7 stateful capability models for a wall-clock budget."
             }
             Command::FsSoak => {
-                "Soak rustfs/ext4/fat32 on a ≥1 GiB RAM volume for a wall-clock budget."
+                "Soak arxfs/ext4/fat32 on a ≥1 GiB RAM volume for a wall-clock budget."
             }
             Command::ModelCheck => {
                 "Exhaustively model-check the §19.7 Silver capability + IPC state machine."

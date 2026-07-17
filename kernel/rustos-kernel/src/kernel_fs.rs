@@ -5,7 +5,7 @@
 //! read, write, security, and the whole-volume space accounting the
 //! mount snapshot reports — plus [`Send`] (the mount lives behind a
 //! sleeping lock shared across the per-CPU syscall handlers). The
-//! blanket impl makes every concrete driver (a `RustFs<…>`, a
+//! blanket impl makes every concrete driver (a `ARXFS<…>`, a
 //! `CachedFs<…>` wrapper) a `KernelFs`; the `Box<dyn KernelFs>`
 //! forwarding impls let the boxed, board-specific driver be the single
 //! concrete type the boot-time statics name.

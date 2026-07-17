@@ -93,6 +93,20 @@ impl SessionInputRouter {
         self.wm.focused()
     }
 
+    /// The window manager's input router.
+    ///
+    /// The desktop's pointer-cursor controller reads its interaction state —
+    /// the tracked pointer and the in-flight move-grab — to choose the
+    /// on-screen cursor shape ([`desired_cursor`](rustos_wm::desired_cursor)).
+    /// It is the window manager's router that owns that state (motion is
+    /// fanned to both inner routers, so its pointer is always in step), so the
+    /// controller reads it here rather than the session router keeping a
+    /// second copy.
+    #[must_use]
+    pub const fn wm(&self) -> &InputRouter {
+        &self.wm
+    }
+
     /// `true` while an interactive window move-grab is in progress.
     #[must_use]
     pub fn is_moving(&self) -> bool {

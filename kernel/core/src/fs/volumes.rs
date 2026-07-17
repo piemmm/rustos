@@ -3,7 +3,7 @@
 //!
 //! RustOS storage is a forest of independently addressable named roots. The
 //! durable machine form of a root is `id::<volume-id>/path`, where the
-//! volume id is the filesystem's own stable identity (the `RustFs`
+//! volume id is the filesystem's own stable identity (the `ARXFS`
 //! per-volume UUID). This registry is the kernel-side map from that
 //! identity to the live root: a boot or hotplug path **publishes** each
 //! mounted volume's identity together with the `/`-view location its root

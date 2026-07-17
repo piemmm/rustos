@@ -35,7 +35,7 @@ The design direction is:
 
 - Storage roots are a forest, not one global Unix tree.
 - A root is named by a resolver and root selector, e.g. `id::<volume-id>/path`,
-  `alias::Home/path`, `fs::rustfs/<root>/path`.
+  `alias::Home/path`, `fs::arxfs/<root>/path`.
 - User-facing shorthand uses `Alias:/path`, e.g. `Home:/Documents/spec.md`.
 - The first-class user idea is the alias: a named root binding such as
   `System:`, `Users:`, `Home:`, `Apps:`, `Backup:`, or `CameraCard:`.
@@ -183,7 +183,7 @@ fs::<driver>/<root-selector>/path/inside/root
 Optional driver shorthand:
 
 ```text
-rustfs::System/path
+arxfs::System/path
 fat32::EFI/BOOT/BOOTX64.EFI
 adfs::HardDisc4/Apps/Paint
 ```
@@ -211,7 +211,7 @@ volume root.
 
 ### 5.2 Filesystem driver
 
-A driver that interprets an on-disk or remote filesystem format: `rustfs`,
+A driver that interprets an on-disk or remote filesystem format: `arxfs`,
 `fat32`, `ext4`, `iso9660`, `adfs`, etc.
 
 The filesystem driver is implementation detail for normal paths. It may be
@@ -267,8 +267,8 @@ Examples:
 ```text
 alias::Home/Documents/file.txt
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt
-fs::rustfs/System/Kernel/rustos.rxe
-rustfs::System/Kernel/rustos.rxe
+fs::arxfs/System/Kernel/rustos.rxe
+arxfs::System/Kernel/rustos.rxe
 ```
 
 `::` names a resolver. Some resolvers are filesystem-backed; most are not.
@@ -309,7 +309,7 @@ Examples:
 
 ```text
 System:/Kernel/rustos.rxe
-System:/Drivers/storage/rustfs/Driver.rxe
+System:/Drivers/storage/arxfs/Driver.rxe
 Users:/ian/Documents/DRIVES.md
 Home:/Documents/DRIVES.md
 Apps:/Editor.app/Run
@@ -381,10 +381,10 @@ Optional shorthand:
 Examples:
 
 ```text
-fs::rustfs/System/Kernel/rustos.rxe
+fs::arxfs/System/Kernel/rustos.rxe
 fs::fat32/EFI/BOOT/BOOTX64.EFI
 fs::adfs/HardDisc4/Apps/Paint
-rustfs::System/Kernel/rustos.rxe
+arxfs::System/Kernel/rustos.rxe
 fat32::EFI/BOOT/BOOTX64.EFI
 adfs::HardDisc4/Apps/Paint
 ```
@@ -880,7 +880,7 @@ Home:/../../System     # cannot escape Home root
 Home:/Documents/file.txt
 alias::Home/Documents/file.txt
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/Documents/file.txt
-rustfs::System/Kernel/rustos.rxe
+arxfs::System/Kernel/rustos.rxe
 /Users/ian/Documents/file.txt       # valid view path, not canonical storage ID
 ```
 
@@ -1106,7 +1106,7 @@ names. A technical details pane may show:
 ```text
 Alias: Backup:
 Stable ID: id::<uuid>
-Filesystem: rustfs
+Filesystem: arxfs
 Device: dev::<diagnostic-id>
 Flags: nosuid,nodev,noexec
 ```
@@ -1168,7 +1168,7 @@ Possible layouts:
 
 ### 19.1 Single-volume install
 
-All required aliases target subroots of one encrypted RustFS volume:
+All required aliases target subroots of one encrypted ARXFS volume:
 
 ```text
 System: -> id::<root>/System
@@ -1207,9 +1207,9 @@ paths where the namespace manager is available.
 
 ---
 
-## 20. RustFS and foreign filesystem implications
+## 20. ARXFS and foreign filesystem implications
 
-RustFS should be the native filesystem and may store rich metadata:
+ARXFS should be the native filesystem and may store rich metadata:
 
 - stable volume ID;
 - volume label;
@@ -1399,7 +1399,7 @@ The final spec must reject these outcomes explicitly.
 - Drive letters such as `C:` become the primary model.
 - Windows `D:relative` semantics are accepted.
 - Filesystem type becomes the normal durable path identity.
-- `adfs::`, `fat32::`, or `rustfs::` bypass policy.
+- `adfs::`, `fat32::`, or `arxfs::` bypass policy.
 - A path string acts as a capability token.
 - `uid = 0` can bypass namespace checks.
 - `/proc` or `/sys` is recreated as `proc::`, `sys::`, or a hidden virtual tree.

@@ -182,7 +182,7 @@ access. The `chmod` command app and `fstree`'s mode editor are its callers.
 
 The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the
 `getxattr`/`setxattr`/`listxattr`/`removexattr` shapes over the per-inode
-`namespace.rest` store `lib/fsmeta` defines and `docs/src/filesystem/rustfs-spec.md`
+`namespace.rest` store `lib/fsmeta` defines and `docs/src/filesystem/arxfs-spec.md`
 §21 specifies. A key carries `1..=FS_ATTR_KEY_MAX` (255) bytes and a value at
 most `FS_ATTR_VALUE_MAX` (3072) opaque bytes; both bounds are refused at
 dispatch with `LengthOutOfRange` before any user memory beyond them is read.
@@ -1017,7 +1017,7 @@ accounts refuses every login rather than inventing one (`AGENTS.md`
 `plans/PI.md` P11) adds one more state: while the encrypted root is still
 being unlocked the read returns **`WouldBlock`** — the live-but-not-ready
 signal — so `login` *waits without prompting* and leaves the console to
-the concurrent `Root filesystem passphrase:` prompt; once the unlock resolves the
+the concurrent `ARXFS passphrase:` prompt; once the unlock resolves the
 read returns the installed database, or `NotImplemented` if the unlock
 produced none (the deny-all prompt then runs). An undersized buffer is refused whole with `BufferTooSmall` (a
 credential database is never truncated, `AGENTS.md` §2.9); a buffer sized

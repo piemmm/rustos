@@ -3,7 +3,7 @@
 //!
 //! A flashed RustOS disk (an SD card, a USB stick, a UEFI hard disk, a
 //! `virt` virtio-blk image) carries a partition table that names a FAT
-//! boot partition the firmware reads and the encrypted `RustFS` root
+//! boot partition the firmware reads and the encrypted `ARXFS` root
 //! partition the kernel mounts (`tools/mkimage`).
 //! The table is **not** one scheme on one board: a Raspberry Pi image is
 //! an MBR disk, a UEFI x86_64 disk is GPT, and RustOS must read either on
@@ -60,23 +60,27 @@ pub const MAX_PARTITIONS: usize = 128;
 /// the filesystem a partition is handed to still validates its own
 /// on-disk magic (a match is necessary, never
 /// sufficient).
+// `ARXFS` is the filesystem's product name and is spelled in full capitals
+// everywhere; the mixed-case `Arxfs` the acronym lint would otherwise require
+// is not an accepted spelling of the name.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PartitionType {
     /// A FAT partition the platform firmware boots from: an MBR
     /// FAT32-LBA partition, or a GPT EFI System Partition.
     FatBoot,
-    /// The read-only, signed-bundle `RustFS` `/System` partition the
+    /// The read-only, signed-bundle `ARXFS` `/System` partition the
     /// kernel mounts read-only **before** unlocking the encrypted data
     /// root (the design-B pre-unlock driver store, `plans/PI.md`). It
     /// carries no secrets, so it is keyed by a non-secret well-known
     /// volume key; tamper-evidence comes from the per-bundle Ed25519
     /// signatures the load gate verifies, not from
     /// encryption.
-    RustFsSystem,
-    /// The encrypted `RustFS` data-root partition the kernel mounts after
+    ARXFSSystem,
+    /// The encrypted `ARXFS` data-root partition the kernel mounts after
     /// the operator unlocks it; carries `/Users`, `/Apps`, `/Storage`, and
     /// `/System/Security`.
-    RustFsRoot,
+    ARXFSRoot,
     /// Any other partition; RustOS's boot path does not consume it.
     Other,
 }

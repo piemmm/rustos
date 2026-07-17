@@ -271,7 +271,7 @@ accounts (`AGENTS.md` §5.4.5).
 The composition that *produces* the mounted driver `load_users_db_source`
 reads from is `rustos_kernel::root_mount::unlock_root_and_load_users`
 (`plans/PI.md` P11, Chunk A) — the one layer permitted to name both the
-`rustfs` driver and `kernel/core` (`rustos-kernel`, `Layer::Tooling`,
+`arxfs` driver and `kernel/core` (`rustos-kernel`, `Layer::Tooling`,
 `AGENTS.md` §17.4). Given the plaintext `root.unlock` key-derivation
 descriptor read off the FAT boot partition, the passphrase the operator
 typed at the console, and the encrypted root block device, it: decodes the
@@ -279,13 +279,13 @@ descriptor fail-closed (`UnlockDescriptor::decode`, §5.4.3); derives the
 volume key from the passphrase (PBKDF2-HMAC-SHA256), holding it in a
 `Zeroizing` wrapper so it is wiped on drop (`AGENTS.md` §4 — the audited
 `zeroize` crate, no hand-rolled primitive); mounts the encrypted root
-(`RustFs::open`), a wrong passphrase refused with `PermissionDenied` and no
+(`ARXFS::open`), a wrong passphrase refused with `PermissionDenied` and no
 plaintext fallback (§4 / §5.4); then runs `load_users_db_source`. Every
 refusal is audited (the bin-crate ids in the shared `4_000` range; no
 passphrase, key, or volume byte is ever logged, §19.4) and yields **no**
 database, so a root that cannot be unlocked serves none (§5.4.5). A
 **structural** refusal — an unreadable/invalid descriptor, a
-missing/malformed partition table or partition, a non-rustfs volume, or a
+missing/malformed partition table or partition, a non-arxfs volume, or a
 device fault — is the ERROR-level `4134` `ROOT_MOUNT_REJECTED`. A **wrong
 passphrase** is not a system error: it is recorded as the below-`Info`
 `4142` `ROOT_UNLOCK_KEY_REJECTED` (`Debug`), so the silent blank-passphrase
@@ -299,7 +299,7 @@ key-derivation descriptor — is recovered off the FAT boot partition by
 `rustos_kernel::root_mount::read_root_unlock_descriptor`, which mounts the
 partition through the **same** real FAT32 driver `tools/mkimage` authored
 it with (one on-disk definition for writer and reader, `AGENTS.md` §2.2;
-the file name is the shared `rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME`
+the file name is the shared `rustos_drv_fs_arxfs::ROOT_UNLOCK_NAME`
 constant). The descriptor is a fixed-length record, so the read is strictly
 bounded and fail-closed (§5.4 / §24.4): the entry's size is checked to be
 exactly `UNLOCK_DESCRIPTOR_LEN` *before* a byte is read — rejecting both a
@@ -381,17 +381,17 @@ console keyboard is live (`plans/PI.md` P11 Chunk B-2). It is generic over
 the `Block` disk and takes the console write/read halves as the object-safe
 `rustos_kernel_core::{ConsoleWrite, ConsoleRead}` seams, so it names no
 architecture or device type (§17.4) and is host-tested with a mock console
-over the same MBR + encrypted-`RustFS` disk fixture `tools/mkimage` writes
+over the same MBR + encrypted-`ARXFS` disk fixture `tools/mkimage` writes
 (§2.2). It tries the **blank** passphrase silently *first*, before drawing
 any prompt: the installer image is provisioned with a blank root passphrase
 (`rustos_mkimage::INSTALLER_PASSPHRASE`, §11), so a fresh install unlocks and
-boots straight into the §11 installer with no `Root filesystem passphrase:`
+boots straight into the §11 installer with no `ARXFS passphrase:`
 prompt at all. Only when the blank passphrase does not unlock the root (a debug image —
 passphrase `root` — or a production image with an operator-chosen passphrase)
 is the operator prompted interactively; a non-blank passphrase failing the
 silent attempt is no oracle (the master key simply never unwraps, exactly as
 for any wrong passphrase, §5.4). Each interactive attempt prompts
-`Root filesystem passphrase:`, reads one line into a zeroized, fixed-length
+`ARXFS passphrase:`, reads one line into a zeroized, fixed-length
 on-stack buffer (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
 memory beyond the attempt, §4 / §19.4), and runs
 `mount_root_disk_and_load_users`. On success (silent or prompted) the loaded
@@ -410,9 +410,11 @@ error the disk itself cannot satisfy (no table, no boot/root partition, an
 unreadable/invalid descriptor, a corrupt database) or a console read fault
 gives up; every give-up path (`4138` `ROOT_UNLOCK_GAVE_UP`, with a
 secret-free `cause`) leaves the cell empty, so every login is refused until
-the next boot (§2.9 / §5.4.5). On a *successful* unlock the prompt closes
-with a carriage-return and a blank line so the login `Username:` that
-follows is cleanly separated.
+the next boot (§2.9 / §5.4.5). On a *successful* unlock the prompt line is
+collapsed in place to just the filesystem label `ARXFS` (a carriage return,
+the label, and an erase-to-end-of-line clear the typed secret and its
+completed-input marker off the tail) followed by a blank line, so the login
+`Username:` that follows is cleanly separated.
 
 The `&'static LateUsersDb` dispatch-hook half is wired: the boot path hands
 the syscall dispatch hook `&rustos_kernel::root_mount::LATE_USERS_DB`

@@ -12,13 +12,13 @@
 //!
 //! # The mount layering: writable root, read-only `/System` shadow
 //!
-//! The system has two `RustFs` volumes on the one bootstrap-floor disk:
+//! The system has two `ARXFS` volumes on the one bootstrap-floor disk:
 //!
-//! * the **encrypted, writable root volume** (`RustFsRoot`) — the persistent
+//! * the **encrypted, writable root volume** (`ARXFSRoot`) — the persistent
 //!   home of every writable path: `/` itself, `/Users`, `/Apps`, `/Storage`,
 //!   and the two writable `/System` exceptions `/System/Logs` and
 //!   `/System/Settings`; and
-//! * the **read-only, well-known-keyed `/System` volume** (`RustFsSystem`) —
+//! * the **read-only, well-known-keyed `/System` volume** (`ARXFSSystem`) —
 //!   the immutable kernel image, drivers, and libraries.
 //!
 //! The writable volume is mounted as `/` (`MountTable::back_root`); the
@@ -49,7 +49,7 @@
 //!
 //! The bootstrap-floor disk type `B` (virtio-blk on the QEMU `virt` / x86_64
 //! root, EMMC2 on the Raspberry Pi 4) is dynamic in one binary, so the
-//! concrete `RustFs<PartitionBlock<SharedBlockHandle<'static, B>>>` differs
+//! concrete `ARXFS<PartitionBlock<SharedBlockHandle<'static, B>>>` differs
 //! per board. The boot-time [`LateFilesystem`] / [`MountedFilesystemService`]
 //! statics must be a *single* concrete type, so the mounted driver is erased
 //! behind [`KernelFs`] (a `Box<dyn KernelFs>`); the forwarding impls below
@@ -71,7 +71,7 @@ use rustos_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
 };
 use rustos_abi::DriverHandle;
-use rustos_drv_fs_rustfs::{RustFs, SYSTEM_VOLUME_KEY};
+use rustos_drv_fs_arxfs::{ARXFS, SYSTEM_VOLUME_KEY};
 use rustos_kernel_core::{
     CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
     VolumeForest,
@@ -183,7 +183,7 @@ const SYSTEM_FS_MOUNTED: EventId = EventId(4143);
 const SYSTEM_FS_WRITABLE_MOUNTED: EventId = EventId(4145);
 
 /// Audit event: no read-only `/System` volume could be published as the
-/// `fs_*` mount (no `RustFsSystem` partition, an out-of-range window, an
+/// `fs_*` mount (no `ARXFSSystem` partition, an out-of-range window, an
 /// unmountable volume, or a VFS/install refusal). The `fs_*` syscalls keep
 /// failing closed; this is never fatal to boot. The `cause` field names the
 /// check that declined, secret-free.
@@ -271,7 +271,7 @@ pub(crate) fn publish_volume_identity(
 ///
 /// * `/` — the encrypted, writable root volume ([`ROOT_VOLUME_HANDLE`]): the
 ///   persistent home of `/Users`, `/Apps`, `/Storage`, and `/` itself.
-/// * `/System` — read-only, the `RustFsSystem` volume
+/// * `/System` — read-only, the `ARXFSSystem` volume
 ///   ([`SYSTEM_MOUNT_HANDLE`], whole-volume so no rebasing): the kernel
 ///   image, drivers, and libraries are immutable at runtime and shadow the
 ///   writable root at `/System` (longest-prefix resolution).
@@ -335,7 +335,7 @@ fn system_vfs() -> Result<Vfs, VfsError> {
 /// encrypted-root unlock window.
 ///
 /// Every step is fail-soft and fail-closed (`AGENTS.md` §5.4 / §2.9): a disk
-/// with no `RustFsSystem` partition, an out-of-range window, an unmountable
+/// with no `ARXFSSystem` partition, an out-of-range window, an unmountable
 /// volume, or a VFS/install refusal leaves the `fs_*` syscalls failing closed
 /// (`NotImplemented`) and is audited, never panicked and never a silent
 /// device fallback. No secret is consumed or logged — the `/System` volume is
@@ -360,7 +360,7 @@ pub fn install_system_mount<B: Block + 'static>(
             unavailable(audit, "partition_table_invalid");
             return;
         };
-        let Some(extent) = table.first_of_type(PartitionType::RustFsSystem) else {
+        let Some(extent) = table.first_of_type(PartitionType::ARXFSSystem) else {
             unavailable(audit, "no_system_partition");
             return;
         };
@@ -376,7 +376,7 @@ pub fn install_system_mount<B: Block + 'static>(
     // no secrets and the kernel can never mutate it through this handle. The
     // volume's compressed clusters (driver bundles, libraries) are served
     // through the SMART3 transform cache, charged to this mount's identity.
-    let Ok(fs) = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
+    let Ok(fs) = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
         unavailable(audit, "system_mount_failed");
         return;
     };
@@ -405,7 +405,7 @@ pub fn install_system_mount<B: Block + 'static>(
     }
     let driver = cached(fs, SYSTEM_MOUNT_HANDLE, pressure, audit);
     if LATE_FILESYSTEM
-        .register(system_handle, driver, "RustFsSystem", "rustfs", volume_uuid)
+        .register(system_handle, driver, "ARXFSSystem", "arxfs", volume_uuid)
         .is_err()
     {
         // Registered once per boot; a refusal is a logic error. The
@@ -426,7 +426,7 @@ pub fn install_system_mount<B: Block + 'static>(
     // The read-only `/System` volume's root is the `/System` view subtree,
     // so its durable `id::` root resolves there. Fail-soft: a refusal was
     // audited and leaves the volume reachable through the `/` view.
-    let _ = publish_volume_identity(volume_uuid, &["System"], "RustFsSystem", audit);
+    let _ = publish_volume_identity(volume_uuid, &["System"], "ARXFSSystem", audit);
     // The on-disk application store is now readable. Install its semantic
     // launch cache — budgeted from the kernel heap arena exactly like the
     // volume caches above and governed by the same pressure gauge
@@ -477,8 +477,8 @@ pub fn register_writable_state(
     let Ok(shared) = LATE_FILESYSTEM.register(
         handle,
         cached(driver, ROOT_VOLUME_HANDLE, pressure, audit),
-        "RustFsRoot",
-        "rustfs",
+        "ARXFSRoot",
+        "arxfs",
         volume_uuid,
     ) else {
         unavailable(audit, "writable_already_installed");
@@ -496,7 +496,7 @@ pub fn register_writable_state(
     // The writable root volume *is* `/`, so its durable `id::` root
     // resolves at the view root. Fail-soft: a refusal was audited and
     // leaves the volume reachable through the `/` view.
-    let _ = publish_volume_identity(volume_uuid, &[], "RustFsRoot", audit);
+    let _ = publish_volume_identity(volume_uuid, &[], "ARXFSRoot", audit);
     Some(shared)
 }
 

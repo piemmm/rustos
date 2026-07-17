@@ -194,7 +194,7 @@ pub struct NodeInfo {
     pub size: u64,
     /// Bytes of on-disk storage the node's data occupies — the real
     /// allocation the format tracks (ext4 `i_blocks`, a FAT cluster
-    /// chain, `RustFS` mapped extents), never a value derived from `size`
+    /// chain, `ARXFS` mapped extents), never a value derived from `size`
     /// when the format knows better. `0` for a node whose data occupies
     /// no dedicated blocks (an empty file, or a directory whose entries
     /// live in shared metadata structures).
@@ -838,7 +838,7 @@ pub trait FilesystemAttrsProvider {
 ///
 /// `files` / `files_free` report the volume's inode capacity for a format
 /// with a fixed inode table. A format whose inodes are allocated dynamically
-/// (`rustfs`) has no fixed capacity to report and carries `0` in both — the
+/// (`arxfs`) has no fixed capacity to report and carries `0` in both — the
 /// honest "untracked" answer, never a fabricated total.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -1432,7 +1432,7 @@ mod tests {
     /// A node holding a single extended attribute in fixed buffers, enough to
     /// exercise the [`FilesystemAttrs`] contract (buffer sizing, `None` for
     /// absent, `NotFound` for a dead node) without an allocator. The key
-    /// grammar and bounds are validated in `lib/fsmeta` and by the `RustFS`
+    /// grammar and bounds are validated in `lib/fsmeta` and by the `ARXFS`
     /// integration tests, not here.
     struct MockAttrsFs {
         key: [u8; 64],

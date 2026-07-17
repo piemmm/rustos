@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-encrypted-root-image"
-description = "Shared whole-disk encrypted-root image fixture for the plans/PI.md P11 Chunk B-2 root-mount->login QEMU vertical. Composes the same on-disk artefacts tools/mkimage writes a real installable disk from — an MBR table, a FAT32 boot partition carrying the plaintext root.unlock key-derivation descriptor, and a passphrase-derived encrypted RustFS root carrying /System/Security/Users — through the real in-tree drivers, so the fixture and the booted system cannot drift (AGENTS.md §2.2). The host harness (xtask) plants build_image's bytes on the test's virtio-blk backing; the freestanding guest tail drives the production interactive unlock policy over that disk."
+description = "Shared whole-disk encrypted-root image fixture for the plans/PI.md P11 Chunk B-2 root-mount->login QEMU vertical. Composes the same on-disk artefacts tools/mkimage writes a real installable disk from — an MBR table, a FAT32 boot partition carrying the plaintext root.unlock key-derivation descriptor, and a passphrase-derived encrypted ARXFS root carrying /System/Security/Users — through the real in-tree drivers, so the fixture and the booted system cannot drift (AGENTS.md §2.2). The host harness (xtask) plants build_image's bytes on the test's virtio-blk backing; the freestanding guest tail drives the production interactive unlock policy over that disk."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,13 +19,13 @@ path = "src/lib.rs"
 # tail (`tests/integration/virtio_qemu_support`, which needs the passphrase
 # and the planted account to drive the unlock and assert authentication).
 # The on-disk artefacts are laid down by the real in-tree drivers (FAT32 +
-# RustFS) and the real descriptor + partition-table encoders, so the
+# ARXFS) and the real descriptor + partition-table encoders, so the
 # fixture cannot drift from the system that mounts the disk (`AGENTS.md`
 # §2.2).
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
-rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = "=0.0.0" }
+rustos-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 # The system app store's Help/ trees, discovered from the command-app
 # bundles' own on-disk `Help/` sources and embedded at build time
 # (`rustos_syshelp`), planted onto the fixture's read-only /System volume
@@ -36,4 +36,4 @@ rustos-drv-fs-rustfs = { path = "../../../drivers/filesystem/rustfs", version = 
 # links into the freestanding guest tail unchanged.
 rustos-syshelp = { path = "../../../tools/syshelp", version = "=0.0.0" }
 rustos-partition = { path = "../../../lib/partition", version = "=0.0.0" }
-rustos-test-rustfs-image = { path = "../rustfs_image", version = "=0.0.0" }
+rustos-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }

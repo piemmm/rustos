@@ -237,7 +237,7 @@ mod tests {
             parse(&[
                 "-r",
                 "-t",
-                "rustfs",
+                "arxfs",
                 "-o",
                 "nosuid,nodev",
                 "vol",
@@ -246,7 +246,7 @@ mod tests {
             Ok(mount(
                 "vol",
                 "/Storage/vol",
-                Some("rustfs"),
+                Some("arxfs"),
                 MountFlags::READ_ONLY
                     .union(MountFlags::NOSUID)
                     .union(MountFlags::NODEV),
@@ -270,8 +270,8 @@ mod tests {
     #[test]
     fn attached_short_values_parse() {
         assert_eq!(
-            parse(&["-trustfs", "-onodev", "v", "/Storage/v"]),
-            Ok(mount("v", "/Storage/v", Some("rustfs"), MountFlags::NODEV))
+            parse(&["-tarxfs", "-onodev", "v", "/Storage/v"]),
+            Ok(mount("v", "/Storage/v", Some("arxfs"), MountFlags::NODEV))
         );
     }
 

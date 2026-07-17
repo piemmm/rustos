@@ -77,7 +77,7 @@ Facts the stages below build on, so no stage re-derives them:
   counters); `kernel/mem::ramzip` accounts caps, stored/logical bytes,
   compression attempts/acceptances/rejections, fault-ins, authentication
   failures, and thrash escalations (`plans/SWAPSWAPSWAP.md` §10); the
-  SMARTRAM caches (`CachedFs`, the RustFS `TransformClusterCache`, the
+  SMARTRAM caches (`CachedFs`, the ARXFS `TransformClusterCache`, the
   `LaunchCache`, the `BlockCache`) are budgeted and counted. All of it is
   internal-only today (`plans/SMARTRAM.md` SMART9 — "no public ABI"), and
   `plans/SWAPSWAPSWAP.md` §16 already rules that a public query belongs in
@@ -684,7 +684,7 @@ implementation fixed):
 - **Reconciliation — the secured VFS stamps creations.**
   `MetaPolicy::stamp_creation` rewrites a freshly created node's
   ownership to the creating caller's `(uid, gid)` under the `PerInode`
-  policy (mode/ACL/gate untouched, `Uniform` no-op): RustFS's raw create
+  policy (mode/ACL/gate untouched, `Uniform` no-op): ARXFS's raw create
   stamped the system user, which locked creators out of their own
   private-mode files — the scratch tree under `$HOME/Library/stress`
   depends on the fix.

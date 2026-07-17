@@ -3,7 +3,7 @@
 //!
 //! [`load_users_db`] is the kernel's root-volume read path for the user
 //! database: given the live [`FilesystemRead`] +
-//! [`FilesystemSecurity`] driver of the mounted root volume (rustfs on a
+//! [`FilesystemSecurity`] driver of the mounted root volume (arxfs on a
 //! real installation), it resolves [`USERS_DB_PATH`] through the VFS's
 //! -checked per-inode delegation ([`crate::fs::Vfs::read_via_secured`]), bounds
 //! the file against [`rustos_users::MAX_DB_LEN`] *before* reading it,
