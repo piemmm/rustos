@@ -374,9 +374,11 @@ pub struct Screendump {
 /// order: each step waits for the guest to print
 /// [`ready_marker`](Self::ready_marker) on the serial console *after*
 /// the previous step's match (proving the reader is blocked on input —
-/// e.g. a login prompt), then writes [`line`](Self::line) to the pipe.
+/// e.g. a login prompt), waits [`delay_after_marker`](Self::delay_after_marker),
+/// then writes [`line`](Self::line) to the pipe.
 /// QEMU delivers the bytes to the guest's serial device RX exactly as a
-/// human typing would — the serial-console analogue of [`KeyInjection`].
+/// human typing would — one paced byte per supervision tick, the
+/// serial-console analogue of [`KeyInjection`].
 /// Because matching advances through the log, a repeated prompt (a
 /// second `Username: ` after a refused login) anchors its own step. A
 /// run that exits before every step was sent fails: an unreached marker
@@ -386,7 +388,10 @@ pub struct SerialInjection {
     /// Serial-console substring the runner waits for before writing.
     /// The guest prints it once it is blocked reading input.
     pub ready_marker: String,
-    /// Bytes written verbatim to the guest's serial input (include the
+    /// Delay between observing the readiness marker and writing the line.
+    /// Zero sends on the same supervision tick.
+    pub delay_after_marker: Duration,
+    /// Bytes typed in order to the guest's serial input (include the
     /// terminating `\n` for line-oriented readers).
     pub line: String,
 }
@@ -801,20 +806,22 @@ impl Spec {
 
     /// Append one step to the serial-input script: pipe QEMU's stdin and
     /// write `line` to the guest's serial input once the guest prints
-    /// `ready_marker` on the serial console, past the previous step's
-    /// match. Call repeatedly to script a whole exchange (prompt → reply
-    /// → next prompt → …); the steps replay strictly in order, and a run
-    /// that exits before every step was sent fails. Used by the
-    /// interactive-session verticals to type at the blocked login
-    /// deterministically without runner interactivity.
+    /// `ready_marker` on the serial console, past the previous step's match,
+    /// and `delay_after_marker` has elapsed. Call repeatedly to script a whole
+    /// exchange (prompt → reply → next prompt → …); the steps replay strictly
+    /// in order, and a run that exits before every step was sent fails. Used
+    /// by the interactive-session verticals to type at the blocked login and
+    /// to reproduce deliberate human pauses deterministically.
     #[must_use]
     pub fn with_serial_input(
         mut self,
         ready_marker: impl Into<String>,
+        delay_after_marker: Duration,
         line: impl Into<String>,
     ) -> Self {
         self.serial_input.push(SerialInjection {
             ready_marker: ready_marker.into(),
+            delay_after_marker,
             line: line.into(),
         });
         self
@@ -1021,13 +1028,12 @@ fn supervise(
     // arrive in order and a repeated prompt (e.g. a second `Username: `
     // after a refused login) anchors its own step rather than re-firing
     // on the first occurrence.
-    let mut serial_step = 0usize;
-    let mut serial_search_from = 0usize;
+    let mut serial_script = SerialScriptState::default();
     let done = 'run: loop {
         if let Some(status) = child.try_wait()? {
             break 'run exit_reason(
                 spec,
-                serial_step,
+                serial_script.step,
                 injections.pointer_done(spec),
                 injections.typing_done(spec),
                 injections.screendumps_verified(spec),
@@ -1050,14 +1056,15 @@ fn supervise(
             &spec.serial_input,
             &captured,
             &mut serial_stdin,
-            &mut serial_step,
-            &mut serial_search_from,
+            &mut serial_script,
+            Instant::now(),
         );
         if let Err(e) = advanced {
             let _ = child.kill();
             let _ = child.wait();
             break 'run DoneReason::InjectionFailed(format!(
-                "serial input injection failed at step {serial_step}: {e}"
+                "serial input injection failed at step {}: {e}",
+                serial_script.step
             ));
         }
         if Instant::now() >= deadline {
@@ -1110,7 +1117,8 @@ fn supervise(
 /// guest's serial input and move the cursor on. Matching only ever
 /// advances through the log, so a repeated prompt anchors its own step.
 ///
-/// `step` and `search_from` carry the script cursor between poll ticks;
+/// `state` carries the script cursor, pending delay, and byte position between
+/// poll ticks;
 /// the matched end of a marker is a UTF-8 boundary (it follows a complete
 /// marker match), so the next slice start is always valid.
 ///
@@ -1118,33 +1126,67 @@ fn supervise(
 ///
 /// Returns the write error when the guest's stdin pipe is missing or the
 /// write/flush fails; the caller turns it into an injection failure.
-fn advance_serial_script(
+#[derive(Default)]
+struct SerialScriptState {
+    step: usize,
+    search_from: usize,
+    matched: Option<PendingSerialStep>,
+}
+
+struct PendingSerialStep {
+    matched_end: usize,
+    send_at: Instant,
+    byte: usize,
+}
+
+fn advance_serial_script<W: Write>(
     steps: &[SerialInjection],
     captured: &Mutex<String>,
-    serial_stdin: &mut Option<std::process::ChildStdin>,
-    step: &mut usize,
-    search_from: &mut usize,
+    serial_stdin: &mut Option<W>,
+    state: &mut SerialScriptState,
+    now: Instant,
 ) -> io::Result<()> {
-    while *step < steps.len() {
-        let s = &steps[*step];
-        let found = {
-            let log = captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            log[*search_from..]
-                .find(&s.ready_marker)
-                .map(|at| *search_from + at + s.ready_marker.len())
+    while state.step < steps.len() {
+        let serial_step = &steps[state.step];
+        if state.matched.is_none() {
+            let found = {
+                let log = captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                log[state.search_from..]
+                    .find(&serial_step.ready_marker)
+                    .map(|at| state.search_from + at + serial_step.ready_marker.len())
+            };
+            let Some(matched_end) = found else { break };
+            state.matched = Some(PendingSerialStep {
+                matched_end,
+                send_at: now + serial_step.delay_after_marker,
+                byte: 0,
+            });
+        }
+        let Some(pending) = state.matched.as_mut() else {
+            break;
         };
-        let Some(matched_end) = found else { break };
-        // Safe to use stdin: `run` piped it because the script is
-        // non-empty.
-        let stdin = serial_stdin
-            .as_mut()
-            .ok_or_else(|| io::Error::other("qemu stdin pipe missing"))?;
-        stdin.write_all(s.line.as_bytes())?;
-        stdin.flush()?;
-        *search_from = matched_end;
-        *step += 1;
+        if now < pending.send_at {
+            break;
+        }
+        if let Some(byte) = serial_step.line.as_bytes().get(pending.byte) {
+            // Safe to use stdin: `run` piped it because the script is
+            // non-empty. One byte per supervision tick models human typing
+            // and cannot burst an emulated UART FIFO with a whole line.
+            let stdin = serial_stdin
+                .as_mut()
+                .ok_or_else(|| io::Error::other("qemu stdin pipe missing"))?;
+            stdin.write_all(core::slice::from_ref(byte))?;
+            stdin.flush()?;
+            pending.byte += 1;
+            if pending.byte < serial_step.line.len() {
+                break;
+            }
+        }
+        state.search_from = pending.matched_end;
+        state.step += 1;
+        state.matched = None;
     }
     Ok(())
 }
@@ -1813,13 +1855,78 @@ mod tests {
     #[test]
     fn with_serial_input_records_the_script_steps_in_order() {
         let s = Spec::for_aarch64_kernel("/tmp/k")
-            .with_serial_input("Username: ", "root\n")
-            .with_serial_input("Password: ", "wrong\n");
+            .with_serial_input("Username: ", Duration::ZERO, "root\n")
+            .with_serial_input("Password: ", Duration::from_secs(1), "wrong\n");
         assert_eq!(s.serial_input.len(), 2);
         assert_eq!(s.serial_input[0].ready_marker, "Username: ");
+        assert_eq!(s.serial_input[0].delay_after_marker, Duration::ZERO);
         assert_eq!(s.serial_input[0].line, "root\n");
         assert_eq!(s.serial_input[1].ready_marker, "Password: ");
+        assert_eq!(s.serial_input[1].delay_after_marker, Duration::from_secs(1));
         assert_eq!(s.serial_input[1].line, "wrong\n");
+    }
+
+    #[test]
+    fn serial_script_waits_for_each_steps_declared_delay() {
+        let start = Instant::now();
+        let steps = [SerialInjection {
+            ready_marker: String::from("root@rustos ~% "),
+            delay_after_marker: Duration::from_secs(1),
+            line: String::from("s"),
+        }];
+        let captured = Mutex::new(String::from("root@rustos ~% "));
+        let mut output = Some(Vec::new());
+        let mut state = SerialScriptState::default();
+
+        advance_serial_script(&steps, &captured, &mut output, &mut state, start)
+            .expect("observe marker");
+        assert_eq!(state.step, 0, "step must remain pending during delay");
+        assert!(output.as_ref().expect("writer").is_empty());
+
+        advance_serial_script(
+            &steps,
+            &captured,
+            &mut output,
+            &mut state,
+            start + Duration::from_millis(999),
+        )
+        .expect("remain delayed");
+        assert_eq!(state.step, 0);
+        assert!(output.as_ref().expect("writer").is_empty());
+
+        advance_serial_script(
+            &steps,
+            &captured,
+            &mut output,
+            &mut state,
+            start + Duration::from_secs(1),
+        )
+        .expect("send after delay");
+        assert_eq!(state.step, 1);
+        assert_eq!(output.expect("writer"), b"s");
+    }
+
+    #[test]
+    fn serial_script_types_at_most_one_byte_per_supervision_tick() {
+        let start = Instant::now();
+        let steps = [SerialInjection {
+            ready_marker: String::from("prompt"),
+            delay_after_marker: Duration::ZERO,
+            line: String::from("ab"),
+        }];
+        let captured = Mutex::new(String::from("prompt"));
+        let mut output = Some(Vec::new());
+        let mut state = SerialScriptState::default();
+
+        advance_serial_script(&steps, &captured, &mut output, &mut state, start)
+            .expect("type first byte");
+        assert_eq!(state.step, 0, "the second byte remains pending");
+        assert_eq!(output.as_ref().expect("writer"), b"a");
+
+        advance_serial_script(&steps, &captured, &mut output, &mut state, start)
+            .expect("type second byte on the next tick");
+        assert_eq!(state.step, 1);
+        assert_eq!(output.expect("writer"), b"ab");
     }
 
     #[test]

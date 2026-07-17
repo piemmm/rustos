@@ -43,13 +43,14 @@
 //!
 //! # Fairness
 //!
-//! Waiters retain FIFO registration order and release wakes the oldest one.
-//! This avoids a thundering herd and prevents a long-waiting disk operation
-//! from being perpetually displaced by newer contenders.
+//! Waiters retain FIFO registration order. Release hands ownership directly
+//! to the oldest task while keeping the lock closed to fresh contenders, then
+//! wakes only that task. This avoids both a thundering herd and barging: a
+//! long-waiting disk operation cannot be perpetually displaced by newer work.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -71,6 +72,9 @@ pub struct SleepLock<T: ?Sized> {
     /// `true` while the lock is held. The single point of mutual exclusion;
     /// every acquire is a `compare_exchange` against it.
     locked: AtomicBool,
+    /// FIFO ownership handed directly to one parked task. Zero means no
+    /// handoff is outstanding; scheduler task ids never use zero.
+    handoff: AtomicU64,
     /// Contenders parked waiting for the holder to release. Reuses the one
     /// kernel wait-queue definition (its register/wake/unpark bookkeeping is
     /// tested in `crate::waitq`); this lock adds only the acquire/release
@@ -103,6 +107,7 @@ impl<T> SleepLock<T> {
     pub const fn new(value: T) -> Self {
         Self {
             locked: AtomicBool::new(false),
+            handoff: AtomicU64::new(0),
             waiters: WaitQueue::new(),
             data: UnsafeCell::new(value),
         }
@@ -146,8 +151,19 @@ impl<T: ?Sized> SleepLock<T> {
             if let Some(guard) = self.try_lock() {
                 return guard;
             }
-            self.park_until_released();
+            if let Some(task) = self.park_until_released() {
+                if self.claim_handoff(task) {
+                    return SleepGuard { lock: self };
+                }
+            }
         }
+    }
+
+    /// Claim direct FIFO ownership granted to `task` by the prior holder.
+    fn claim_handoff(&self, task: u64) -> bool {
+        self.handoff
+            .compare_exchange(task, 0, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// One park attempt on a contended acquire: register the current caller,
@@ -157,7 +173,7 @@ impl<T: ?Sized> SleepLock<T> {
     /// register window); the [`lock`](Self::lock) loop then re-attempts the
     /// fast-path acquire. Registering **before** the re-test is what makes
     /// the release/park race lossless (see the module docs).
-    fn park_until_released(&self) {
+    fn park_until_released(&self) -> Option<u64> {
         // The scheduler hook supplies the current CPU, the current task to
         // register, and the `unpark` the releaser uses. Without it (before
         // the boot path installs the hook, or in a host test of an unrelated
@@ -167,15 +183,15 @@ impl<T: ?Sized> SleepLock<T> {
         // scheduler to contend on.
         let Some(hook) = wait_arch() else {
             core::hint::spin_loop();
-            return;
+            return None;
         };
         let Some(cpu) = hook.current_cpu() else {
             core::hint::spin_loop();
-            return;
+            return None;
         };
         let Some(task) = hook.current_task(cpu) else {
             core::hint::spin_loop();
-            return;
+            return None;
         };
         // Register before the re-test so a release between the failed
         // fast-path attempt and the park is never missed: the releaser's
@@ -188,7 +204,7 @@ impl<T: ?Sized> SleepLock<T> {
         // re-attempt the fast path.
         if !self.locked.load(Ordering::Acquire) {
             self.waiters.deregister(task);
-            return;
+            return None;
         }
         // Park off the run queue. Every dispatched kthread — a user task in
         // its syscall trap and a kernel service kthread body alike — has a
@@ -200,24 +216,46 @@ impl<T: ?Sized> SleepLock<T> {
         if !reschedule_current(cpu, RescheduleAction::Park) {
             self.waiters.deregister(task);
             core::hint::spin_loop();
-            return;
+            return None;
         }
-        // Woken: stop waiting and re-attempt the acquire.
+        // Woken: stop waiting and let `lock` claim a direct handoff when this
+        // task was the designated FIFO successor. A spurious wake has no
+        // handoff and simply re-enters the normal acquire/park loop.
         self.waiters.deregister(task);
+        Some(task)
     }
 
     /// Release the lock and wake the oldest parked contender.
     ///
-    /// Called only by [`SleepGuard`]'s `Drop`. The `Release` store publishes
-    /// the critical section's writes to the next holder's `Acquire`; the wake
-    /// then re-readies the oldest parked contender, which re-tests and either
-    /// acquires or re-parks. A fail-safe no-op wake before the arch
-    /// hook is installed (no task can be parked then).
+    /// Called only by [`SleepGuard`]'s `Drop`. With a waiter, ownership is
+    /// published directly to the oldest task and `locked` remains true, so a
+    /// fresh contender cannot barge before the wake runs. Without a waiter,
+    /// the `Release` store unlocks normally. The designated waiter's Acquire
+    /// claim observes the prior holder's critical-section writes.
     fn release(&self) {
-        self.locked.store(false, Ordering::Release);
-        if let Some(hook) = wait_arch() {
-            self.waiters.wake_one(hook);
+        self.release_with(wait_arch());
+    }
+
+    /// Release through `hook`, factored so host tests can drive the direct
+    /// handoff state machine without installing the process-global boot hook.
+    fn release_with(&self, hook: Option<&dyn crate::waitq::WaitQueueArch>) {
+        if let Some(hook) = hook {
+            if let Some(task) = self.waiters.oldest_task() {
+                // Keep `locked` true while ownership is in flight, preventing
+                // a fresh contender from barging ahead of the FIFO waiter.
+                // The waiter's Acquire claim publishes the prior holder's
+                // critical-section writes before it receives the guard.
+                self.handoff.store(task, Ordering::Release);
+                if self.waiters.wake_task(hook, task) {
+                    return;
+                }
+                // The waiter vanished between observation and wake. Clear the
+                // unused grant and release normally rather than stranding the
+                // lock in an ownerless held state.
+                self.handoff.store(0, Ordering::Relaxed);
+            }
         }
+        self.locked.store(false, Ordering::Release);
     }
 }
 
@@ -258,6 +296,32 @@ mod tests {
     use super::*;
 
     use alloc::vec::Vec;
+    use rustos_kernel_sched_api::TaskId;
+    use rustos_sync::SpinLock;
+
+    struct RecordingWake {
+        tasks: SpinLock<Vec<TaskId>>,
+    }
+
+    impl RecordingWake {
+        const fn new() -> Self {
+            Self {
+                tasks: SpinLock::new(Vec::new()),
+            }
+        }
+    }
+
+    impl crate::waitq::WaitQueueArch for RecordingWake {
+        fn unpark(&self, id: TaskId) {
+            self.tasks.lock().push(id);
+        }
+
+        fn now_ns(&self) -> u64 {
+            0
+        }
+
+        fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+    }
 
     #[test]
     fn an_uncontended_lock_grants_and_releases() {
@@ -306,5 +370,48 @@ mod tests {
             let _guard = lock.lock();
         }
         assert!(lock.waiters.is_empty(), "no contender was ever registered");
+    }
+
+    #[test]
+    fn release_hands_ownership_to_the_oldest_waiter_without_barging() {
+        let lock = SleepLock::new(());
+        let wake = RecordingWake::new();
+        lock.locked.store(true, Ordering::Relaxed);
+        lock.waiters.register(11, NO_DEADLINE);
+        lock.waiters.register(22, NO_DEADLINE);
+
+        lock.release_with(Some(&wake));
+
+        assert!(lock.locked.load(Ordering::Acquire));
+        assert_eq!(lock.handoff.load(Ordering::Acquire), 11);
+        assert_eq!(wake.tasks.lock().as_slice(), &[11]);
+        assert!(
+            lock.try_lock().is_none(),
+            "a fresh contender cannot barge ahead of the FIFO handoff"
+        );
+        assert!(!lock.claim_handoff(22));
+        assert!(lock.claim_handoff(11));
+    }
+
+    #[test]
+    fn repeated_release_handoffs_follow_fifo_order() {
+        let lock = SleepLock::new(());
+        let wake = RecordingWake::new();
+        lock.locked.store(true, Ordering::Relaxed);
+        for task in [31, 32, 33] {
+            lock.waiters.register(task, NO_DEADLINE);
+        }
+
+        for task in [31, 32, 33] {
+            lock.release_with(Some(&wake));
+            assert_eq!(lock.handoff.load(Ordering::Acquire), task);
+            lock.waiters.deregister(task);
+            assert!(lock.claim_handoff(task));
+        }
+        assert_eq!(wake.tasks.lock().as_slice(), &[31, 32, 33]);
+
+        lock.release_with(Some(&wake));
+        assert!(!lock.locked.load(Ordering::Acquire));
+        assert!(lock.try_lock().is_some());
     }
 }

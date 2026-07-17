@@ -572,6 +572,7 @@ pub fn boot(
                 halt_current_cpu()
             }
         };
+    smp::install_current_cpu_index(BOOT_CPU);
     let arch = build_arch_handle(&cpu_mpidrs, counter_hz);
     // Discover each core's static class (`capacity-dmips-mhz`) so the
     // scheduler can place background work on efficiency cores. A

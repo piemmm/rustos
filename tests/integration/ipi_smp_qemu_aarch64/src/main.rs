@@ -173,6 +173,9 @@ mod kernel {
     /// the boot core starts it. Brings up its interrupt path, signals
     /// ready, and idles waiting for the IPI.
     extern "C" fn secondary_entry(cpu: CpuId) -> ! {
+        if smp::current_cpu_index() != cpu {
+            qemu_exit::exit_failure(FAIL_WRONG_CPU);
+        }
         // SAFETY: this is the secondary core's first action; it has a
         // private stack (smp.s) and no source is armed on it yet. The
         // shared IPI callback was installed by the boot core before it
@@ -243,15 +246,20 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_PSCI_NOT_DISCOVERED);
         }
 
-        // Build the arch handle with the four-core MPIDR map so
-        // `current_cpu` reverse-maps each core's affinity and `send_ipi`
-        // targets the right GICv2 CPU interface. Install the *discovered*
+        // Build the arch handle with the four-core MPIDR map so `send_ipi`
+        // targets the right GICv2 CPU interface. Each core's dense identity
+        // is published through its per-CPU word before scheduler/IRQ use.
+        // Install the *discovered*
         // PSCI conduit so the `SecondaryBringup` HAL trait issues `CPU_ON`
         // over the conduit read from the tree (`plans/PI.md` P5).
         // Per-CPU bookkeeping backing for this two-core vertical.
         static ARCH_STORAGE: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::with_cpus(&ARCH_STORAGE, BOOT_CPU, counter_hz, &[0, 1, 2, 3])
             .with_secondary_start(SecondaryStart::Psci(psci_method));
+        smp::install_current_cpu_index(BOOT_CPU);
+        if smp::current_cpu_index() != BOOT_CPU {
+            qemu_exit::exit_failure(FAIL_WRONG_CPU);
+        }
 
         // P3: prove the GICv2 bases are *discovered*, not assumed. Poison
         // the runtime base, then read the GICD/GICC bases from the

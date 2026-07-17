@@ -141,6 +141,7 @@ fn load_observations_track_dispatch<S: SchedulerPolicy<TestArch>>() {
     let (arch, sched) = make::<S>(1, 64);
     arch.set_current_cpu(0);
     assert_eq!(sched.queue_depth(0), Ok(0), "empty queue at rest");
+    assert_eq!(sched.has_ready_work(0), Ok(false), "no idle work at rest");
     assert_eq!(sched.cpu_switches(0), Ok(0), "no dispatches at rest");
 
     for _ in 0..2 {
@@ -149,6 +150,11 @@ fn load_observations_track_dispatch<S: SchedulerPolicy<TestArch>>() {
             .expect("spawn");
     }
     assert_eq!(sched.queue_depth(0), Ok(2), "both tasks queued runnable");
+    assert_eq!(
+        sched.has_ready_work(0),
+        Ok(true),
+        "queued tasks prevent idle"
+    );
 
     assert!(matches!(sched.step(0), Ok(StepOutcome::Ran(_))));
     assert_eq!(sched.queue_depth(0), Ok(1), "one task consumed");
@@ -156,10 +162,12 @@ fn load_observations_track_dispatch<S: SchedulerPolicy<TestArch>>() {
 
     assert!(matches!(sched.step(0), Ok(StepOutcome::Ran(_))));
     assert_eq!(sched.queue_depth(0), Ok(0), "queue drained");
+    assert_eq!(sched.has_ready_work(0), Ok(false), "drained CPU may idle");
     assert_eq!(sched.cpu_switches(0), Ok(2), "switches are cumulative");
 
     // Out-of-range CPUs fail closed, never a fabricated figure.
     assert_eq!(sched.queue_depth(99), Err(SchedError::NoSuchCpu));
+    assert_eq!(sched.has_ready_work(99), Err(SchedError::NoSuchCpu));
     assert_eq!(sched.cpu_switches(99), Err(SchedError::NoSuchCpu));
 }
 

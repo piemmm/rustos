@@ -481,12 +481,15 @@ impl SchedulerArch for Aarch64Arch {
     fn current_cpu(&self) -> CpuId {
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
-            // Recover the running core's affinity (`crate::smp` reads
-            // `MPIDR_EL1`) and reverse-map it to a dense `CpuId`. An
-            // unmapped core falls back to the boot CPU rather than
-            // inventing an id (fail closed).
-            let affinity = u64::from(crate::smp::current_cpu_index());
-            self.cpu_for_mpidr(affinity).unwrap_or(self.boot_cpu)
+            // The bring-up path publishes the validated dense identity in
+            // this CPU's Arch HAL per-CPU word before enabling scheduling or
+            // interrupts. Reject an out-of-range word rather than indexing a
+            // discovered-sized table with invented identity.
+            let cpu = crate::smp::current_cpu_index();
+            usize::try_from(cpu)
+                .ok()
+                .filter(|&index| index < self.cpu_to_mpidr.len())
+                .map_or(self.boot_cpu, |_| cpu)
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {

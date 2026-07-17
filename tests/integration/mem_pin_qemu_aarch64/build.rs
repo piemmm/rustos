@@ -1,5 +1,5 @@
-//! Build-time fixture generator for the ST2 aarch64 memory-pinning
-//! vertical.
+//! Build-time fixture generator for the shared aarch64 memory-pinning and
+//! blocking-IPC migration chassis.
 //!
 //! Three jobs on the freestanding `aarch64-unknown-none` target:
 //!
@@ -11,7 +11,7 @@
 //!    so the board tree is embedded at build time; the dump helper lives in
 //!    the shared harness so no aarch64 build script re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program
-//!    (`tests/integration/mem_pin_program`) **once** — the four roles
+//!    (`tests/integration/mem_pin_program`) **once** — the five roles
 //!    are selected at runtime from the registry argument vector —
 //!    position-independent for the freestanding aarch64 target.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
@@ -45,11 +45,17 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
 fn main() {
     rustos_itest_harness::emit_target_cfg();
+    println!("cargo:rustc-check-cfg=cfg(migration_smp)");
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
     let manifest_dir = manifest_dir.trim_end_matches('/');
+    let migration_smp = env::var("CARGO_PKG_NAME")
+        .is_ok_and(|name| name == "rustos-test-mem-pin-migration-qemu-aarch64");
+    if migration_smp {
+        println!("cargo:rustc-cfg=migration_smp");
+    }
 
     let program_dir = format!("{manifest_dir}/../mem_pin_program");
     println!("cargo:rerun-if-changed={program_dir}/src/main.rs");
@@ -67,9 +73,9 @@ fn main() {
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
 
-        // One CPU: this is the single-core live-scheduler slice.
+        let cpu_count = if migration_smp { 4 } else { 1 };
         let out_dir_os = std::ffi::OsString::from(&out_dir);
-        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
+        let dtb = rustos_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, cpu_count);
         write_dtb_fixture(&dtb_path, &dtb);
 
         let rxe = build_and_convert_program(manifest_dir, &out_dir, &program_dir);
@@ -157,7 +163,7 @@ fn write_program_fixture(path: &std::path::Path, rxe: &[u8]) {
     let _ = writeln!(out, "pub const USER_BIAS: u64 = {USER_BIAS:#x};");
     let _ = writeln!(
         out,
-        "/// The converted `rxe` image of the four-role fixture program."
+        "/// The converted `rxe` image of the five-role fixture program."
     );
     let _ = write!(out, "pub const PROGRAM_RXE: &[u8] = &[");
     for (i, b) in rxe.iter().enumerate() {

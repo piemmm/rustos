@@ -11,11 +11,11 @@
 //! runner ([`super::parallel`]): each enrolment is independent (its own
 //! per-binary backing images, a `-serial stdio` console, and a unique unix
 //! monitor socket), so the only resource they contend for is host CPU. The
-//! runner weights each guest by its emulated-CPU count plus one unit for
-//! emulator/I/O work against one less than half the host's effective logical
-//! capacity. Reserving SMT and host-runner headroom keeps process-level QEMU
-//! work from competing with a matrix that fills every reported thread with TCG
-//! vCPUs, so no guest is starved past its wall-clock deadline. See [`run_once`].
+//! runner charges one-vCPU guests for the vCPU plus emulator/I/O work against
+//! one quarter of the host's effective logical capacity. SMP TCG guests reserve
+//! that complete budget and therefore run alone: their synchronising vCPUs must
+//! make simultaneous host progress and cannot safely share a wall-clock budget
+//! with other CPU-bound emulators. See [`run_once`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -96,14 +96,13 @@ struct QemuTest {
     /// time — the same definition the guest renders with — never
     /// hand-copied literals (`plans/APPWIN.md` AW3).
     pointer_script: Option<PointerScriptBuilder>,
-    /// Ordered serial-input script: for each `(marker, line)` step, pipe
-    /// QEMU's stdin and write `line` to the guest's serial input once it
-    /// prints `marker` on the serial console past the previous step's
-    /// match. The run fails if the guest exits before every step was
-    /// sent, so an unreached prompt is a test failure. Used by the
-    /// aarch64 interactive-session vertical to hold a deterministic
-    /// multi-exchange dialogue with the blocked login.
-    serial: &'static [(&'static str, &'static str)],
+    /// Ordered serial-input script: for each `(marker, delay, line)` step,
+    /// pipe QEMU's stdin, wait `delay` after `marker` appears past the previous
+    /// match, then type `line` one paced byte at a time. The run fails if the
+    /// guest exits before every step was sent, so an unreached prompt is a test
+    /// failure. Used by the aarch64 interactive-session vertical to hold a
+    /// deterministic multi-exchange dialogue with the blocked login.
+    serial: &'static [(&'static str, Duration, &'static str)],
 }
 
 /// Builds an enrolment's ordered pointer script at run time (the click
@@ -376,6 +375,18 @@ const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
 /// The username line the session-ceiling vertical types at the login
 /// view's `Username:` field.
 const SESSION_USERNAME_LINE: &str = "root\n";
+
+/// One character beyond the account format's username bound. The byte array
+/// is generated from the shared bound, and its fixed ASCII payload is valid
+/// UTF-8 by construction.
+const OVERLONG_USERNAME_BYTES: [u8; rustos_users::MAX_USERNAME_LEN + 1] =
+    [b'x'; rustos_users::MAX_USERNAME_LEN + 1];
+
+/// String view of [`OVERLONG_USERNAME_BYTES`] for the serial dialogue table.
+const OVERLONG_USERNAME: &str = match core::str::from_utf8(&OVERLONG_USERNAME_BYTES) {
+    Ok(username) => username,
+    Err(_) => "",
+};
 
 /// The password line the session-ceiling vertical types at the login
 /// view's `Password` field.
@@ -1899,10 +1910,10 @@ const TESTS: &[QemuTest] = &[
     // whole and advanced rather than crashing per keystroke), types a
     // wrong password the authenticator refuses — the view then paints the
     // red `1 failed attempt` line and returns to the username field — and
-    // finally types a 513-byte line (one byte past login's 512-byte
-    // `INPUT_LINE_MAX` validation bound); the view refuses the over-long
-    // line whole (`LengthOutOfRange`), login records the console error and
-    // exits fail-closed; `init` reaps it and relaunches it. The audit sink
+    // finally types one character beyond the account format's shared
+    // `MAX_USERNAME_LEN` validation bound; the view refuses the over-long
+    // username whole (`LengthOutOfRange`), login records the console error
+    // and exits fail-closed; `init` reaps it and relaunches it. The audit sink
     // reports PASS through the ARM semihosting finisher once it has seen
     // the expected `ProcessSpawned` and audited-syscall counts — and the
     // runner fails the run if the guest exits before every scripted prompt
@@ -1928,13 +1939,14 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
-            ("Username:", "root\n"),
-            ("Password", "wrong\n"),
             (
-                "1 failed attempt",
-                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
+                "Root filesystem passphrase: ",
+                Duration::ZERO,
+                UNLOCK_PASSPHRASE_LINE,
             ),
+            ("Username:", Duration::ZERO, "root\n"),
+            ("Password", Duration::ZERO, "wrong\n"),
+            ("1 failed attempt", Duration::ZERO, OVERLONG_USERNAME),
         ],
     },
     // PI Design D P-3 (`.junie/next-pi-prompt.md`):
@@ -2084,6 +2096,29 @@ const TESTS: &[QemuTest] = &[
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // Deterministic regression for the syscall-return continuation boundary:
+    // a real EL0 parent completes an ordinary `clock_get` with a pending
+    // reschedule, CFQ runs a competing child that parks, and only then may the
+    // parent resume and receive its sentinel result. The child stays parked
+    // until the parent exits, so a missing parent requeue or corrupted saved
+    // exception frame cannot be hidden by another wake; either defect reaches
+    // the bounded harness timeout rather than a raised application deadline.
+    QemuTest {
+        package: "rustos-test-syscall-resume-qemu-aarch64",
+        binary: "rustos-test-syscall-resume-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
         ramfb: false,
@@ -2418,9 +2453,10 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // The STRESSTEST ST2 memory-pinning vertical: the end-to-end proof of
+    // The STRESSTEST ST2 memory-pinning plus one-vCPU IPC control: end-to-end
+    // proof of
     // the `mem_pin`/`mem_unpin` pair through the production
-    // `KernelDispatchHook` on real traps. The four-role fixture program's
+    // `KernelDispatchHook` on real traps. The five-role fixture program's
     // parent is spawned through the production
     // `InitSpawnCtx::spawn_driver_process` seam and drives the children
     // through production `spawn` + `wait`: `deny` (no `CAP_MEM_PIN`) sees
@@ -2433,14 +2469,30 @@ const TESTS: &[QemuTest] = &[
     // its over-budget map succeeds — the pin mark is never inherited even
     // though the lowered limit is. PASS once the chassis reaps a parent
     // exit of 0; every failure site carries a distinct finisher (the
-    // parent's diagnostic exit code is folded in). Single CPU and a
-    // 60-second budget match the other boot-then-do-fixed-work aarch64
-    // tests.
+    // parent's diagnostic exit code is folded in). It then performs 64
+    // private call/reply cycles with saved integer/FP/stack/address-space
+    // checks as the one-CPU migration control.
     QemuTest {
         package: "rustos-test-mem-pin-qemu-aarch64",
         binary: "rustos-test-mem-pin-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    QemuTest {
+        package: "rustos-test-mem-pin-migration-qemu-aarch64",
+        binary: "rustos-test-mem-pin-migration-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 4,
         timeout: Duration::from_secs(60),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
@@ -3406,15 +3458,20 @@ const TESTS: &[QemuTest] = &[
         serial: &[
             (
                 "Root filesystem passphrase: ",
+                Duration::ZERO,
                 WRONG_UNLOCK_PASSPHRASE_PREFIX,
             ),
             // Wait-only-then-Enter step: the two-dot frame must arrive with
             // no further input (the timed wake advances the dots).
-            ("..]", "\n"),
+            ("..]", Duration::ZERO, "\n"),
             // Wait-only step: the notice must arrive with no further input
             // (the timed wake, not a keystroke, ends the delay park).
-            ("Incorrect passphrase", ""),
-            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            ("Incorrect passphrase", Duration::ZERO, ""),
+            (
+                "Root filesystem passphrase: ",
+                Duration::ZERO,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
         ],
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
@@ -3466,26 +3523,30 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
+            (
+                "Root filesystem passphrase: ",
+                Duration::ZERO,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
             // The full-screen login view paints `Username:` once and the
             // minimal-diff renderer then repaints only the changed label
             // cells (`Password` over it), so the anchors are the labels
             // without their trailing blanks.
-            ("Username:", SESSION_USERNAME_LINE),
-            ("Password", SESSION_PASSWORD_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             // The default prompt is `\u@\h \w% ` (rustos_elsh env.rs): login
             // spawns the shell as `root` with HOME=/Users/root, and the shell
             // defaults HOSTNAME to `rustos`, so at home the prompt renders
             // `root@rustos ~% ` (the home directory abbreviated to `~`).
-            ("root@rustos ~% ", "cd /Users/root\n"),
-            ("root@rustos ~% ", "pwd\n"),
-            ("/Users/root", "ps\n"),
+            ("root@rustos ~% ", Duration::ZERO, "cd /Users/root\n"),
+            ("root@rustos ~% ", Duration::ZERO, "pwd\n"),
+            ("/Users/root", Duration::ZERO, "ps\n"),
             // The typed word `--bogus` must reach the child as `argv[1]`
             // through the spawn startup-strings block: `ps` refuses the
             // unknown option and prints its usage line — output that a
             // child running under its registered default argv could never
             // produce — proving caller-supplied arguments arrive end to end.
-            ("PID  PPID", "ps --bogus\n"),
+            ("PID  PPID", Duration::ZERO, "ps --bogus\n"),
             // `man man` (plans/APPS.md §7): the spawned tool resolves its
             // own bundle through the shared store-then-PATH policy, reads
             // `/System/Apps/man.app/Help/en-US/man.md` off the mounted
@@ -3493,18 +3554,23 @@ const TESTS: &[QemuTest] = &[
             // streams the rendered page (a serial console attests no
             // geometry, so no pager prompt). `SEE ALSO` is the page's final
             // section heading — seeing it proves the whole document arrived.
-            ("usage: ps", "man man\n"),
+            ("usage: ps", Duration::ZERO, "man man\n"),
             // `ls /System/Apps` (plans/APPS.md deliverable 6): the spawned
             // tool stats the operand and reads the directory through the
             // `fs_stat`/`fs_readdir` syscalls under its own manifest's
             // `CAP_FS_ACCESS`. `man.app` in the output is an entry only a
             // real directory read of the mounted read-only /System volume
             // produces.
-            ("SEE ALSO", "ls /System/Apps\n"),
-            ("man.app", "ulimit processes 1000\n"),
-            ("root@rustos ~% ", "ulimit -H processes 2000\n"),
+            ("SEE ALSO", Duration::ZERO, "ls /System/Apps\n"),
+            ("man.app", Duration::ZERO, "ulimit processes 1000\n"),
+            (
+                "root@rustos ~% ",
+                Duration::ZERO,
+                "ulimit -H processes 2000\n",
+            ),
             (
                 "cannot raise hard limit (requires CAP_RLIMIT_RAISE)",
+                Duration::ZERO,
                 "exit\n",
             ),
         ],
@@ -3550,11 +3616,15 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
-            ("Username:", SESSION_USERNAME_LINE),
-            ("Password", SESSION_PASSWORD_LINE),
-            ("root@rustos ~% ", "memsoak\n"),
-            (MEMSOAK_PASS_PREFIX, "exit\n"),
+            (
+                "Root filesystem passphrase: ",
+                Duration::ZERO,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@rustos ~% ", Duration::ZERO, "memsoak\n"),
+            (MEMSOAK_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
@@ -3601,13 +3671,17 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
-            ("Username:", SESSION_USERNAME_LINE),
-            ("Password", SESSION_PASSWORD_LINE),
-            ("root@rustos ~% ", "yes | head -n 2\n"),
+            (
+                "Root filesystem passphrase: ",
+                Duration::ZERO,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@rustos ~% ", Duration::ZERO, "yes | head -n 2\n"),
             // The pipeline terminating at all (the prompt returning) is the
             // broken-pipe + member-reap witness.
-            ("root@rustos ~% ", "seq 1 1000 | wc -c\n"),
+            ("root@rustos ~% ", Duration::ZERO, "seq 1 1000 | wc -c\n"),
             // `lspci --help` then `lsusb --help` (plans/DEVICES.md DEVICE1
             // V2/V3) prove the resource-carrying bundles end to end: the
             // spawn's load gate re-hashes each whole on-disk bundle —
@@ -3623,11 +3697,19 @@ const TESTS: &[QemuTest] = &[
             // `rustos-lspci`'s / `rustos-lsusb`'s tests.) Typed before the
             // round-trip `cat`, so the audit sink's arm-on-`cat` discipline
             // is untouched.
-            ("3893", "lspci --help\n"),
-            ("PCI/PCIe", "lsusb --help\n"),
-            ("USB devices", "seq 776001 776005 > /Users/root/nums.txt\n"),
-            ("root@rustos ~% ", "cat < /Users/root/nums.txt\n"),
-            ("776005", "exit\n"),
+            ("3893", Duration::ZERO, "lspci --help\n"),
+            ("PCI/PCIe", Duration::ZERO, "lsusb --help\n"),
+            (
+                "USB devices",
+                Duration::ZERO,
+                "seq 776001 776005 > /Users/root/nums.txt\n",
+            ),
+            (
+                "root@rustos ~% ",
+                Duration::ZERO,
+                "cat < /Users/root/nums.txt\n",
+            ),
+            ("776005", Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/STRESSTEST.md` ST4: the `sysmon` monitor acceptance vertical.
@@ -3667,57 +3749,49 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
-            ("Username:", SESSION_USERNAME_LINE),
-            ("Password", SESSION_PASSWORD_LINE),
-            ("root@rustos ~% ", "sysmon\n"),
+            (
+                "Root filesystem passphrase: ",
+                Duration::ZERO,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@rustos ~% ", Duration::ZERO, "sysmon\n"),
             // The first frame's pressure line rendered its gated figures.
-            ("Pressure:", "r"),
+            ("Pressure:", Duration::ZERO, "r"),
             // The refresh key was accepted (raw-mode input works); the
             // reclaim ledger panel header rendered.
-            ("reclaimable", "q"),
+            ("reclaimable", Duration::ZERO, "q"),
             // The monitor quit and the shell repainted its prompt on the
             // restored screen.
-            ("root@rustos ~% ", "exit\n"),
+            ("root@rustos ~% ", Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/STRESSTEST.md` ST5: the `stress` load-generator acceptance
     // vertical. `rustos-test-stress-qemu-aarch64` boots the *production*
     // aarch64 pipeline with the planted encrypted-root disk, unlocks the
     // root, authenticates `root`/`root` at the console login, and runs a
-    // oversubscribed `stress --cpu 10 --timeout 4s &` load, proves foreground
-    // progress through `sysinfo uptime`, then runs the original
-    // mixed `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s`
-    // load. Both launch from the store bundle (the load gate verifies the
-    // whole on-disk bundle; the granted `CAP_MEM_PIN` lets each controller
-    // pin itself and `CAP_PROC_SPAWN` lets it re-enter its own attested binary
-    // as workers through the kernel's `@self` token). The `since boot:` token
-    // proves the shell and sysinfod progress while ten CPU-bound workers
-    // saturate four CPUs. The `dispatching hogs`
-    // token witnesses the dispatch line; `successful run completed`
-    // witnesses the timeout teardown — every worker `Terminate`d, reaped,
-    // and the scratch files removed — with the prompt returning as the
-    // reap witness. The post-load `sysinfo pressure` render's
-    // `reserve bytes:` token and `sysinfo reclaim`'s `clean-file-data`
-    // class row witness the gated `MEMORY_PRESSURE`/`RECLAIM_STATS`
-    // figures after the load (the ST5 movement assertions on
-    // `RAMZIP_STATS` stay behind the plan's §0 restartable-user-fault
-    // prerequisite; the numeric counter-movement rows are host/kernel
-    // tests). Each line is typed only after its marker appeared. The
-    // guest audit sink arms on the stress *controller*'s audited `exit`
-    // (`sc=exit`, `comm=stress` — its workers are `Terminate`d and never
-    // invoke `exit`) and reports PASS on the audited exit of the *shell*
-    // (`comm=elsh`), typed only after both renders appeared — the
-    // arm-then-exit discipline, immune to the two intervening `sysinfo`
-    // exits. A 120-second budget covers boot + bounded PBKDF2 + the
-    // bounded loads + teardown on QEMU TCG; four CPUs reproduce the
-    // production SMP saturation shape.
+    // exact reported sequence: after the first authenticated shell prompt it
+    // waits one second, types exactly
+    // `stress --cpu 10 --timeout 120s --background`, requires the returned
+    // prompt to accept `sysmon`, observes its `Pressure:` frame, refreshes to
+    // the `reclaimable` panel, and quits back to the shell while ten CPU-bound
+    // workers saturate four CPUs. It then waits for the detached controller's
+    // audited `comm=stress` exit after the full 120-second run before typing
+    // `exit`. The first stress exit belongs to the foreground detach launcher
+    // and occurs before the returned prompt; advancing the serial-script cursor
+    // past the post-sysmon prompt makes the later `comm=stress` marker
+    // unambiguously the detached controller. The guest sink independently
+    // requires both stress exits before the shell's exit can report PASS. A
+    // 300-second guest budget covers boot, bounded PBKDF2, the required
+    // 120-second load, and teardown on QEMU TCG; four CPUs reproduce the RPi4
+    // saturation shape.
     QemuTest {
         package: "rustos-test-stress-qemu-aarch64",
         binary: "rustos-test-stress-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 4,
-        timeout: Duration::from_secs(120),
+        timeout: Duration::from_secs(300),
         disk_sectors: None,
         netstack_peer: NetPeerMode::None,
         ramfb: false,
@@ -3727,34 +3801,30 @@ const TESTS: &[QemuTest] = &[
         screendumps: &[],
         pointer_script: None,
         serial: &[
-            ("Root filesystem passphrase: ", UNLOCK_PASSPHRASE_LINE),
-            ("Username:", SESSION_USERNAME_LINE),
-            ("Password", SESSION_PASSWORD_LINE),
+            (
+                "Root filesystem passphrase: ",
+                Duration::ZERO,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             (
                 "root@rustos ~% ",
-                "stress --cpu 10 --timeout 4s &\n",
+                Duration::from_secs(1),
+                "stress --cpu 10 --timeout 120s --background\n",
             ),
-            // The non-quiet controller prints this only after all ten workers
-            // have been admitted. Querying a service at that point proves
-            // foreground work is scheduled while all four CPUs are saturated.
-            ("dispatching hogs: 10 cpu", "sysinfo uptime\n"),
-            ("since boot:", ""),
-            // Continue the original mixed-load acceptance after the shell
-            // repaint, preserving its spawn/timeout/cleanup coverage.
-            (
-                "root@rustos ~% ",
-                "stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s\n",
-            ),
-            // The controller dispatched its workers through `@self`.
-            ("dispatching hogs", ""),
-            // The timeout tore the run down: workers terminated, reaped,
-            // scratch removed, and the summary printed. The prompt marker
-            // in the next step is the clean-exit witness.
-            ("successful run completed", "sysinfo pressure\n"),
-            // The post-load pressure figures rendered.
-            ("reserve bytes:", "sysinfo reclaim\n"),
-            // The reclaim ledger rendered its class rows.
-            ("clean-file-data", "exit\n"),
+            // The detached launcher returned and the shell accepts a command.
+            ("root@rustos ~% ", Duration::ZERO, "sysmon\n"),
+            // The monitor rendered while the CPU workers were active.
+            ("Pressure:", Duration::ZERO, "r"),
+            // Raw input and a fresh sysinfo round trip remain live under load.
+            ("reclaimable", Duration::ZERO, "q"),
+            // Advance past the prompt restored by `sysmon`; the launcher's
+            // earlier stress exit is now outside the remaining search window.
+            ("root@rustos ~% ", Duration::ZERO, ""),
+            // The detached controller exited only after its 120-second timeout
+            // tore down and reaped all ten workers.
+            ("comm=stress", Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/PI.md` design B / B2 + `plans/DISPLAY.md` D7d (first stage): the
@@ -4549,27 +4619,35 @@ fn build_targets() -> Vec<&'static str> {
     targets
 }
 
-/// Host-capacity weight for one QEMU guest.
+/// Host-capacity weight for one QEMU guest within `host_budget`.
 ///
-/// Each guest consumes its declared vCPU threads plus one unit for QEMU's
-/// emulator/I/O work. Charging only vCPUs lets a matrix of one-vCPU guests
-/// occupy every logical host CPU while their process-level work competes for
-/// the same cores, making otherwise reachable wall-clock deadlines flaky.
+/// A uniprocessor guest consumes its vCPU plus one unit for QEMU's emulator/I/O
+/// work. An SMP TCG guest consumes the entire budget and therefore runs alone:
+/// its mutually synchronising vCPU threads need simultaneous host progress,
+/// and co-scheduling it with other CPU-bound emulators can starve the whole
+/// guest even when the aggregate thread count fits the nominal host capacity.
 #[must_use]
-pub(crate) fn qemu_job_weight(cpus: u32) -> usize {
-    usize::try_from(cpus).unwrap_or(1).max(1).saturating_add(1)
+pub(crate) fn qemu_job_weight(cpus: u32, host_budget: usize) -> usize {
+    let budget = host_budget.max(1);
+    if cpus > 1 {
+        budget
+    } else {
+        2.min(budget)
+    }
 }
 
 /// QEMU matrix capacity derived from effective logical host parallelism.
 ///
-/// TCG vCPU threads are sustained compute workloads, so two SMT siblings do
-/// not provide the same wall-clock capacity as two independent cores. Use at
-/// most half the reported logical capacity, then reserve one unit for the host
-/// scheduler and runner; the weighted runner still lets a heavier guest run
-/// alone when its weight exceeds this budget.
+/// TCG vCPU threads are sustained compute workloads, so SMT siblings do not
+/// provide independent wall-clock capacity and QEMU's emulator/I/O threads
+/// still compete with cargo and the host. Use at most one quarter of reported
+/// logical capacity; the weighted runner still lets a heavier guest run alone
+/// when its weight exceeds this budget. The additional headroom keeps the
+/// four-vCPU stress and migration guests' solo-reachable deadlines reachable
+/// when the complete matrix is active.
 #[must_use]
 pub(crate) fn qemu_host_budget_for(logical_cpus: usize) -> usize {
-    logical_cpus.max(1).div_ceil(2).saturating_sub(1).max(1)
+    logical_cpus.max(1).div_ceil(4)
 }
 
 /// QEMU matrix capacity for this host.
@@ -4588,14 +4666,16 @@ pub(crate) fn qemu_host_budget() -> usize {
 /// images and drives a guest whose serial console is `-serial stdio` and
 /// whose QEMU monitor is a unique per-run unix socket, so two guests share
 /// no host resource except CPU. They are therefore run through the shared
-/// weighted-concurrency runner ([`super::parallel`]): each guest's weight is
-/// its emulated-CPU count plus one emulator/I/O unit and the budget is one less
-/// than half the host's effective logical-CPU count, so QEMU's non-vCPU work
-/// and the host retain capacity without treating SMT siblings as full
-/// independent TCG cores.
+/// weighted-concurrency runner ([`super::parallel`]): one-vCPU guests reserve
+/// one emulator/I/O unit beyond their vCPU, while an SMP guest reserves the
+/// complete budget and runs alone. The budget is one quarter of the host's
+/// effective logical-CPU count, so QEMU's non-vCPU work, cargo, and the host
+/// retain capacity without treating SMT siblings as full independent TCG
+/// cores.
 /// That keeps every guest's wall-clock deadline as reachable as it is for a
-/// solo run (no TCG starvation), so co-scheduling does not make a test flaky. On a single-core host the budget collapses to one and the matrix
-/// runs strictly sequentially.
+/// solo run (no TCG starvation), so co-scheduling does not make a test flaky.
+/// On a single-core host the budget collapses to one and the matrix runs
+/// strictly sequentially.
 /// `only` restricts the pass to the enrolments whose package name contains
 /// it — the `--only` debugging filter ([`enrolled`]).
 pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
@@ -4610,7 +4690,7 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
         .into_iter()
         .map(|t| {
             let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
-            let weight = qemu_job_weight(t.cpus);
+            let weight = qemu_job_weight(t.cpus, budget);
             let target_dir = target_dir.clone();
             let stores = stores_for(ctx, t)?;
             Ok(Job::closure(label, weight, move || {
@@ -5418,9 +5498,23 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
     // Pipe QEMU's stdin for the interactive-session vertical and let the
     // runner replay the scripted exchange, each line typed once the guest
     // prints that step's prompt.
-    for (marker, line) in t.serial {
-        spec = spec.with_serial_input(*marker, *line);
+    for (marker, delay_after_marker, line) in t.serial {
+        spec = spec.with_serial_input(*marker, *delay_after_marker, *line);
     }
+
+    let serial_log = kernel.with_extension("serial.log");
+    std::fs::remove_file(&serial_log)
+        .or_else(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e),
+        })
+        .map_err(|e| {
+            format!(
+                "test --qemu ({}): remove stale serial log {}: {e}",
+                t.package,
+                serial_log.display()
+            )
+        })?;
 
     // Always collect the peer's verdict, even when the run itself failed,
     // so the thread never outlives the run unjoined.
@@ -5436,21 +5530,46 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
             }
             Ok(())
         }
-        Outcome::Fail { status, serial } => Err(format!(
-            "test --qemu ({}) FAILED (qemu status {status})\n--- serial ---\n{serial}\n--- end ---",
-            t.package
-        )),
-        Outcome::Timeout { budget, serial } => Err(format!(
-            "test --qemu ({}) TIMEOUT after {budget:?} (no retries per AGENTS.md §7)\n--- serial ---\n{serial}\n--- end ---",
-            t.package
-        )),
+        Outcome::Fail { status, serial } => {
+            persist_failure_serial(t.package, &serial_log, &serial)?;
+            Err(format!(
+                "test --qemu ({}) FAILED (qemu status {status}; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                t.package,
+                serial_log.display()
+            ))
+        }
+        Outcome::Timeout { budget, serial } => {
+            persist_failure_serial(t.package, &serial_log, &serial)?;
+            Err(format!(
+                "test --qemu ({}) TIMEOUT after {budget:?} (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                t.package,
+                serial_log.display()
+            ))
+        }
     }
+}
+
+/// Persist a failed guest's complete serial transcript beside its kernel.
+///
+/// The command-line report also includes the transcript, but build output can
+/// exceed a terminal or CI log's display limit. The sidecar keeps the original
+/// bytes available for diagnosis without changing the guest or rerunning a
+/// failed workload.
+fn persist_failure_serial(package: &str, path: &Path, serial: &str) -> Result<(), String> {
+    std::fs::write(path, serial).map_err(|e| {
+        format!(
+            "test --qemu ({}): persist failure serial {}: {e}",
+            package,
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_targets, qemu_host_budget_for, qemu_job_weight, PrimePlan, MEMSOAK_PASS_PREFIX, TESTS,
+        build_targets, persist_failure_serial, qemu_host_budget_for, qemu_job_weight, PrimePlan,
+        MEMSOAK_PASS_PREFIX, TESTS,
     };
     use std::time::Duration;
 
@@ -5466,6 +5585,29 @@ mod tests {
             pass.starts_with(MEMSOAK_PASS_PREFIX),
             "fixture PASS line {pass:?} must start with the script marker {MEMSOAK_PASS_PREFIX:?}"
         );
+    }
+
+    #[test]
+    fn spawn_session_overlong_username_tracks_the_account_format_bound() {
+        assert_eq!(
+            super::OVERLONG_USERNAME.len(),
+            rustos_users::MAX_USERNAME_LEN + 1
+        );
+        assert!(super::OVERLONG_USERNAME.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[test]
+    fn failed_guest_serial_is_persisted_verbatim() {
+        let path = std::env::temp_dir().join(format!(
+            "rustos-xtask-serial-{}-{}.log",
+            std::process::id(),
+            line!()
+        ));
+        let transcript = "boot\0serial\nfinal marker\n";
+        persist_failure_serial("fixture", &path, transcript).expect("persist transcript");
+        let actual = std::fs::read_to_string(&path).expect("read transcript");
+        std::fs::remove_file(&path).expect("remove transcript");
+        assert_eq!(actual, transcript);
     }
 
     #[test]
@@ -5497,40 +5639,43 @@ mod tests {
     }
 
     #[test]
-    fn qemu_weight_reserves_emulator_capacity_beyond_vcpus() {
+    fn qemu_weight_reserves_emulator_capacity_and_isolates_smp() {
         assert_eq!(
-            qemu_job_weight(1),
+            qemu_job_weight(1, 16),
             2,
             "one-vCPU guest needs process headroom"
         );
         assert_eq!(
-            qemu_job_weight(4),
-            5,
-            "SMP guest keeps one emulator/I/O unit"
+            qemu_job_weight(4, 16),
+            16,
+            "SMP guest must reserve the complete host budget"
         );
         assert_eq!(
-            qemu_job_weight(0),
+            qemu_job_weight(0, 16),
             2,
             "invalid zero still fails safe to one vCPU"
         );
+        assert_eq!(qemu_job_weight(1, 1), 1);
+        assert_eq!(qemu_job_weight(4, 0), 1);
     }
 
     #[test]
-    fn qemu_budget_reserves_smt_and_host_headroom() {
+    fn qemu_budget_reserves_smt_headroom() {
         assert_eq!(qemu_host_budget_for(0), 1);
         assert_eq!(qemu_host_budget_for(1), 1);
         assert_eq!(qemu_host_budget_for(2), 1);
-        assert_eq!(qemu_host_budget_for(8), 3);
-        assert_eq!(qemu_host_budget_for(9), 4);
-        assert_eq!(qemu_host_budget_for(22), 10);
+        assert_eq!(qemu_host_budget_for(4), 1);
+        assert_eq!(qemu_host_budget_for(8), 2);
+        assert_eq!(qemu_host_budget_for(9), 3);
+        assert_eq!(qemu_host_budget_for(64), 16);
     }
 
     /// The smallest wall-clock budget any enrolment may carry.
     ///
     /// Every enrolled QEMU test is a boot-then-do-fixed-work vertical whose
     /// budget is sized to be reachable when the guest runs co-scheduled with
-    /// the rest of the matrix (the weighted-concurrency runner charges vCPUs
-    /// plus one emulator/I/O unit), not merely when it runs solo. This
+    /// the rest of the matrix (the weighted-concurrency runner gives SMP
+    /// guests exclusive admission), not merely when it runs solo. This
     /// floor is the reachable minimum the guard below enforces; the runner
     /// applies each enrolment's own [`super::QemuTest::timeout`] verbatim on
     /// both a developer machine and a CI runner, with no split that could

@@ -2629,6 +2629,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-mem-pin-migration-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-caps",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-ipc",
+ "rustos-kernel-irq",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-api",
+ "rustos-kernel-sched-cfq",
+ "rustos-kernel-sec",
+ "rustos-kernel-syscall",
+ "rustos-log",
+ "rustos-sync",
+]
+
+[[package]]
 name = "rustos-test-mem-pin-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -3527,6 +3551,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-syscall-resume-program"
+version = "0.0.0"
+dependencies = [
+ "rustos-rt",
+]
+
+[[package]]
+name = "rustos-test-syscall-resume-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kalloc",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-cfq",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-sysmon-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -3994,6 +4042,7 @@ dependencies = [
  "rustos-test-netstack-wire",
  "rustos-test-rustfs-image",
  "rustos-theme",
+ "rustos-users",
  "rustos-util",
  "rustos-vcmailbox",
  "rustos-virtio-input",

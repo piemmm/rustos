@@ -149,10 +149,10 @@ fn host_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
     ]
 }
 
-/// One unit per QEMU integration test, weighted by emulated CPUs plus one
-/// emulator/I/O unit against a host-CPU budget so concurrent replicas retain
-/// process-level scheduling capacity and never manufacture a load-dependent
-/// timeout (see the module docs).
+/// One unit per QEMU integration test, using the same host-capacity admission
+/// as the pull-request matrix: one-vCPU replicas retain emulator/I/O headroom,
+/// while an SMP TCG replica runs alone so its synchronising vCPUs cannot be
+/// starved into a load-dependent timeout (see the module docs).
 fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
     let budget = qemu_tests::qemu_host_budget();
     qemu_tests::enrolments()
@@ -161,7 +161,7 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
             let target_dir = ctx.target_dir();
             let label = format!("qemu {}", enrol.package);
             let job_label = label.clone();
-            let weight = qemu_tests::qemu_job_weight(enrol.cpus);
+            let weight = qemu_tests::qemu_job_weight(enrol.cpus, budget);
             FlakeUnit::new(label, budget, move |_| {
                 let target_dir = target_dir.clone();
                 let job_label = job_label.clone();

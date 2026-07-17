@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-mem-pin"
-description = "STRESSTEST ST2 memory-pinning fixture: a minimal, separately-linked pure-Rust EL0 program built once and driven in four argv-selected roles (parent / deny / pin / child). deny holds no CAP_MEM_PIN and asserts mem_pin is refused PermissionDenied while the ungated mem_unpin still answers success; pin lowers its own pinned-memory-bytes bound through rlimit_set, pins itself (idempotently), asserts an over-budget mem_map is refused OutOfRange while a within-budget one succeeds, unpins, and asserts the formerly refused map now succeeds; child simply maps past the parent's pinned budget, proving the pin mark is never inherited across spawn even though the limit is. The parent reaps deny and pin, then pins itself under a lowered bound and spawns child through the production spawn + wait syscalls. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+description = "STRESSTEST fixture: a separately-linked pure-Rust EL0 program with five roles (parent / deny / pin / child / ipc). The first four prove mem_pin policy, budget, and no-inheritance through production spawn/wait; ipc repeatedly blocks on a private call endpoint and verifies reply plus callee-saved integer/FP, stack, control-flow, and address-space-local state across CPU migration. Built PIE and converted to rxe by the shared aarch64 control/migration chassis."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

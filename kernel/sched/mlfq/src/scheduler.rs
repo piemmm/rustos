@@ -996,6 +996,22 @@ impl<A: SchedulerArch> Scheduler<A> {
             .ok_or(SchedError::NoSuchCpu)
     }
 
+    /// Whether `cpu` must re-step rather than enter its idle wait.
+    ///
+    /// Includes globally overflowed ready work because the next step on any
+    /// CPU drains that list before selecting a task.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
+    pub fn has_ready_work(&self, cpu: CpuId) -> SchedResult<bool> {
+        let local_ready = self
+            .cpus
+            .get(cpu as usize)
+            .map(|state| state.bands.iter().any(|band| band.len_approx() != 0))
+            .ok_or(SchedError::NoSuchCpu)?;
+        Ok(local_ready || !self.overflow.lock().is_empty())
+    }
+
     /// Returns the most recent state of `id`. Convenience for tests.
     ///
     /// Returns [`TaskState::Exited`] for a task that has been drained
@@ -1200,6 +1216,10 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn queue_depth(&self, cpu: CpuId) -> SchedResult<u64> {
         Scheduler::queue_depth(self, cpu)
+    }
+
+    fn has_ready_work(&self, cpu: CpuId) -> SchedResult<bool> {
+        Scheduler::has_ready_work(self, cpu)
     }
 
     fn state_of(&self, id: TaskId) -> TaskState {

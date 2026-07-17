@@ -732,27 +732,39 @@ implementation fixed):
   `stamp_creation` (creator-owned file + directory), and
   `parent_exited` (zombie drop, honest orphan liveness, no stranded
   zombie, sibling isolation, stop discard), and the
-  `stress_qemu_aarch64` full-boot vertical: login →
-  `stress --cpu 10 --timeout 4s &` across four CPUs → all ten workers
-  dispatched → foreground `sysinfo uptime` service progress while the
-  syscall-free load remains active → clean timeout, followed by
-  `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s` from the
-  store bundle → `dispatching hogs` → `successful run completed` →
-  post-load `sysinfo pressure` (`reserve bytes:`) and `sysinfo reclaim`
-  (`clean-file-data`) renders → clean prompt, PASS keyed on the
-  controller's audited exit then the shell's (arm-then-exit). The
-  QEMU matrix charges each guest its vCPU count plus one emulator/I/O unit
-  against host parallelism, so concurrent one-vCPU guests retain enough host
-  capacity for this vertical's fixed completion deadline. The aarch64
+  `stress_qemu_aarch64` full-boot vertical reproduces the reported metal
+  sequence exactly on four CPUs: login → wait one second at the first shell
+  prompt → `stress --cpu 10 --timeout 120s --background` → returned prompt
+  accepts `sysmon` → `Pressure:` frame renders → raw `r` refresh reaches the
+  `reclaimable` panel → `q` restores the shell → detached controller reaches
+  its audited exit after the full 120-second run → shell exits. The sink
+  requires both `comm=stress` exits (foreground detach launcher plus detached
+  controller) before the shell exit can report PASS; workers terminate through
+  controller teardown and do not invoke `exit`. The QEMU matrix retains
+  emulator/I/O headroom for one-vCPU guests and admits an SMP TCG guest alone,
+  so mutually synchronising guest CPUs cannot be starved by another emulator
+  past a wall-clock deadline. The aarch64
   context switch preserves each suspended continuation's `DAIF` in its
   on-stack native frame; without that state, a blocking syscall could return
   to the dispatcher with IRQs masked and starve the same service-progress
   assertion under SMP. `kthread_switch_qemu_aarch64` pins the lower-level
   invariant with two continuations carrying opposite IRQ-mask states across
-  repeated switches. Scheduler park completion also preserves an early
-  waker's already-enqueued `Ready` transition, and sleeping disk-lock release
-  wakes FIFO one-at-a-time so the driver-store service cannot starve behind a
-  thundering herd of bundle reads. The numeric
+  repeated switches. `syscall_resume_qemu_aarch64` pins the higher-level
+  completion sequence: a successful ordinary syscall suspends its EL0 parent,
+  a second EL0 task parks in a blocking syscall, and the parent resumes with
+  its result intact. The CFQ host suite drives the same parent-yield/child-park
+  sequence through a cross-CPU steal. Aarch64 publishes each validated dense
+  CPU id through `TPIDR_EL1` before IRQ/scheduler use, so sparse firmware MPIDR
+  affinities can never index the discovered-sized continuation/preemption
+  tables. The shared production-dispatch chassis additionally runs 64 private
+  IPC call/reply cycles as a one-vCPU control and a four-vCPU migration proof;
+  the latter starts real secondary dispatchers, observes the known caller on
+  multiple CPUs, and checks reply, integer/FP, stack, PC, and address-space
+  state after every wake. Scheduler park completion also preserves an early
+  waker's already-enqueued `Ready` transition. Sleeping disk-lock release now
+  hands ownership directly to the oldest FIFO waiter while the lock remains
+  closed to barging, so newer bundle reads cannot repeatedly steal the lock
+  before the woken driver-store continuation runs. The numeric
   counter-movement rows are the ST1 kernel/host tests;
   `RAMZIP_STATS` movement stays behind the §0 restartable-user-fault
   prerequisite.

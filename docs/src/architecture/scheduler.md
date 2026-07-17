@@ -499,14 +499,20 @@ with synchronous console output (riscv64 SBI, x86_64 COM1) inherit nothing.
 The idle CPU itself sleeps through [`KernelArch::wait_for_interrupt`]: when
 the dispatch loop finds no runnable task but a live task is still parked
 (e.g. a perpetual service blocked in a blocking-wait syscall), the loop
-masks device interrupts, drains any pending wake once more, tops up the
-buffered console transmit one last time, and — if nothing became runnable —
-parks the CPU on the port's race-free idle wait (`wfi` on
+masks device interrupts, drains any pending wake once more, and rechecks
+scheduler readiness before sleeping: both its local run queue and the global
+overflow awaiting re-homing. The readiness recheck covers scheduler work whose
+placement IPI arrived and was consumed after the preceding idle verdict but
+before interrupt masking; an IPI arriving after masking remains pending and
+wakes the architecture wait. If neither deferred nor scheduler work is ready,
+the loop tops up the buffered console transmit one last time and parks the CPU
+on the port's race-free idle wait (`wfi` on
 aarch64/riscv64, `sti; hlt; cli` on x86_64) rather than halting, then
 re-enables interrupts; the armed wakeup one-shot or a device IRQ wakes a
-waiter and the loop re-steps and dispatches it. Masking across the park and
-draining before the `wfi`/`hlt` closes the park/wake race, so no edge is
-lost. PID 1 `init` now launches the perpetual
+waiter and the loop re-steps and dispatches it. Masking across the park,
+draining deferred events, and rechecking scheduler readiness before the
+`wfi`/`hlt` close both wake-publication races, so no edge is lost. PID 1 `init`
+now launches the perpetual
 `/System/Services/devmgr.app/Run` service (a `service` directive in its startup
 config, supervised alongside the per-console login sessions), which reads
 the discovered hardware tree and parks in `hw_tree_wait` for the life of

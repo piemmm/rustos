@@ -183,6 +183,27 @@ EL0→EL0 context switches — each switching back into its own page-table root
 via its `pre_resume` hook. The run passes once both tasks have yielded their
 full count and exited, with no task left live.
 
+The syscall-completion boundary has a separate aarch64 proof in
+`tests/integration/syscall_resume_qemu_aarch64`. A real EL0 parent completes
+an ordinary syscall with a pending reschedule; its successful result remains
+on the parent kernel stack while a second EL0 task enters its own address
+space and parks from a blocking syscall. The parent then resumes the suspended
+handler, receives the original result, and exits cleanly. A CFQ host regression
+adds the SMP half: after the parent yields and the child parks on another CPU,
+an idle sibling steals and resumes the parent with its closure state intact.
+These tests pin that a runnable continuation always has exactly one scheduler
+owner across park and migration.
+
+The production-dispatch control/migration siblings extend that proof through
+real synchronous IPC: the one-vCPU run is the control, while the four-vCPU run
+uses dispatcher handshakes to pause each observed source only after the caller
+blocks and force a remote steal. Sixty-four replies cross at least four CPU
+transitions while callee-saved integer/FP registers, stack, control flow, and
+address-space-local state remain intact. The store/filesystem `SleepLock` also
+hands ownership directly to its oldest FIFO waiter while remaining closed to
+fresh contenders; wake-one without this reservation permits barging and can
+starve the very continuation the scheduler correctly readied.
+
 ### Two ring-3 tasks timeshare a CPU on x86_64 (`plans/PI.md` X2)
 
 The same two-task timeshare on x86_64 needs one extra, x86_64-specific piece

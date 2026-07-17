@@ -495,7 +495,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
     pub fn step(&self, cpu: CpuId) -> SchedResult<StepOutcome> {
         let me = self.cpu_state(cpu)?;
-        self.drain_overflow();
+        self.drain_overflow(cpu);
 
         if let Some(entry) = me.queue.pick() {
             return Ok(self.dispatch(cpu, entry.id));
@@ -511,7 +511,7 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     /// Best-effort drain of the overflow list back onto each task's home
     /// CPU. A task that still does not fit is left for a later step.
-    fn drain_overflow(&self) {
+    fn drain_overflow(&self, current_cpu: CpuId) {
         let mut g = self.overflow.lock();
         let pending: Vec<TaskId> = g.drain(..).collect();
         drop(g);
@@ -526,7 +526,11 @@ impl<A: SchedulerArch> Scheduler<A> {
                 vruntime: task.vruntime(),
             };
             match self.cpus.get(home as usize) {
-                Some(cpu) if cpu.queue.push(entry).is_ok() => {}
+                Some(cpu) if cpu.queue.push(entry).is_ok() => {
+                    if home != current_cpu {
+                        self.arch.send_ipi(home);
+                    }
+                }
                 _ => self.overflow.lock().push(id),
             }
         }
@@ -722,6 +726,11 @@ impl<A: SchedulerArch> Scheduler<A> {
                     if self.cpus[dest as usize].queue.push(entry).is_err() {
                         self.overflow.lock().push(id);
                     }
+                    // `dest` may be parked in `wfi`: queue/overflow
+                    // publication alone cannot make its dispatcher run.
+                    // Signal after publishing so the IPI's release barrier
+                    // orders the ready ownership before the target wakes.
+                    self.arch.send_ipi(dest);
                 }
             }
         }
@@ -811,6 +820,22 @@ impl<A: SchedulerArch> Scheduler<A> {
             .get(cpu as usize)
             .map(|state| state.queue.ready_len() as u64)
             .ok_or(SchedError::NoSuchCpu)
+    }
+
+    /// Whether `cpu` must re-step rather than enter its idle wait.
+    ///
+    /// Includes globally overflowed ready work because the next step on any
+    /// CPU drains that list before selecting a task.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `cpu` is out of range.
+    pub fn has_ready_work(&self, cpu: CpuId) -> SchedResult<bool> {
+        let local_ready = self
+            .cpus
+            .get(cpu as usize)
+            .map(|state| state.queue.ready_len() != 0)
+            .ok_or(SchedError::NoSuchCpu)?;
+        Ok(local_ready || !self.overflow.lock().is_empty())
     }
 
     /// Most recent state of `id` ([`TaskState::Exited`] once drained).
@@ -958,6 +983,10 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn queue_depth(&self, cpu: CpuId) -> SchedResult<u64> {
         Scheduler::queue_depth(self, cpu)
+    }
+
+    fn has_ready_work(&self, cpu: CpuId) -> SchedResult<bool> {
+        Scheduler::has_ready_work(self, cpu)
     }
 
     fn state_of(&self, id: TaskId) -> TaskState {
@@ -1156,6 +1185,126 @@ mod tests {
             Ok(StepOutcome::Ran(id)),
             "an idle CPU steals the remote task"
         );
+    }
+
+    #[test]
+    fn cross_class_yield_rehome_signals_the_idle_destination() {
+        let arch = Arc::new(TestArch::new(2).expect("arch"));
+        arch.set_core_class(0, CoreClass::Efficiency);
+        arch.set_core_class(1, CoreClass::Performance);
+        let sched = Scheduler::new(
+            SchedulerConfig {
+                cpus: 2,
+                queue_capacity_per_band: 64,
+                yields_before_demotion: 1,
+                boost_interval_ticks: 8,
+            },
+            arch.clone(),
+        )
+        .expect("scheduler");
+        let task = sched
+            .spawn(0, Priority::Low, |_| TaskAction::Yield)
+            .expect("spawn background task");
+        let ipis_before = arch.ipi_count(0);
+
+        // CPU 1 steals the background task from efficiency CPU 0. Its yield
+        // rehomes it to the efficiency pool; CPU 0 may be parked, so the
+        // remote enqueue must signal it after publishing the ready entry.
+        arch.set_current_cpu(1);
+        assert_eq!(sched.step(1), Ok(StepOutcome::Ran(task)));
+        assert_eq!(sched.queue_depth(0), Ok(1));
+        assert_eq!(
+            arch.ipi_count(0),
+            ipis_before + 1,
+            "cross-class rehome wakes the idle destination CPU"
+        );
+    }
+
+    #[test]
+    fn remote_overflow_drain_signals_the_task_home_cpu() {
+        let arch = Arc::new(TestArch::new(2).expect("arch"));
+        let sched = Scheduler::new(
+            SchedulerConfig {
+                cpus: 2,
+                queue_capacity_per_band: 2,
+                yields_before_demotion: 1,
+                boost_interval_ticks: 8,
+            },
+            arch.clone(),
+        )
+        .expect("scheduler");
+        let mut last = 0;
+        for _ in 0..5 {
+            last = sched
+                .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+                .expect("spawn");
+        }
+        assert_eq!(
+            sched
+                .lookup(last)
+                .expect("last task")
+                .home_cpu
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(sched.overflow.lock().as_slice(), &[last]);
+
+        // Free one slot on CPU 0. A later step on CPU 1 drains the global
+        // overflow into that remote slot; CPU 0 is not executing this drain
+        // and therefore requires an IPI to observe the newly-owned work.
+        arch.set_current_cpu(0);
+        assert!(matches!(sched.step(0), Ok(StepOutcome::Ran(_))));
+        let ipis_before = arch.ipi_count(0);
+        arch.set_current_cpu(1);
+        assert!(matches!(sched.step(1), Ok(StepOutcome::Ran(_))));
+        assert_eq!(
+            arch.ipi_count(0),
+            ipis_before + 1,
+            "remote overflow publication wakes the task's home CPU"
+        );
+    }
+
+    #[test]
+    fn yielded_parent_survives_child_park_and_cross_cpu_steal() {
+        // Regression for the service-spawn continuation sequence: a parent
+        // yields after an ordinary syscall, the newly runnable child parks,
+        // and an idle sibling CPU steals the parent. The parent's closure
+        // state is its stand-in for the saved syscall result/continuation; it
+        // must be invoked again intact rather than stranded as Ready with no
+        // queue owner.
+        let (arch, sched) = mk(2);
+        let parent_runs = Arc::new(AtomicU64::new(0));
+        let result = Arc::new(AtomicU64::new(0));
+        let parent_runs_for_body = parent_runs.clone();
+        let result_for_body = result.clone();
+        let parent = sched
+            .spawn(0, Priority::Normal, move |_| {
+                if parent_runs_for_body.fetch_add(1, Ordering::SeqCst) == 0 {
+                    TaskAction::Yield
+                } else {
+                    result_for_body.store(0x51a7_c011, Ordering::SeqCst);
+                    TaskAction::Exit
+                }
+            })
+            .expect("spawn parent");
+        let child = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Park)
+            .expect("spawn child");
+
+        arch.set_current_cpu(0);
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(parent)));
+        arch.set_current_cpu(1);
+        assert_eq!(sched.step(1), Ok(StepOutcome::Ran(child)));
+        assert_eq!(sched.state_of(child), TaskState::Parked);
+
+        assert_eq!(
+            sched.step(1),
+            Ok(StepOutcome::Ran(parent)),
+            "the idle sibling steals and resumes the yielded parent"
+        );
+        assert_eq!(parent_runs.load(Ordering::SeqCst), 2);
+        assert_eq!(result.load(Ordering::SeqCst), 0x51a7_c011);
+        assert_eq!(sched.current_task(1), None);
     }
 
     #[test]

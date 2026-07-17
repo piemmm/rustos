@@ -2259,11 +2259,16 @@ The aarch64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`
 system register — the EL1-private thread pointer the kernel uses as its
 per-CPU anchor (the EL0 `TPIDR_EL0` belongs to user TLS and is never
 touched). `PerCpuStorage::read_self_base` / `write_self_base` are a
-single `mrs` / `msr TPIDR_EL1`; the word is opaque (the kernel decides
-whether it holds a per-CPU control-block address or a dense `CpuId`). On
-the host build there is no `TPIDR_EL1`, so the handle backs the word with
-an in-handle cell solely for the round-trip + isolation conformance
-verticals (`percpu::conformance`), folded into the port's
+single `mrs` / `msr TPIDR_EL1`. Production stores the validated dense
+`CpuId`: the boot CPU publishes id 0 after ordering the discovered
+topology, and the shared secondary trampoline publishes its PSCI/spin-table
+handoff id before invoking any installed secondary callback. IRQ, timer,
+scheduler-current, serial-owner, and continuation paths therefore index the
+discovered-sized per-CPU tables with dense identity; a sparse or clustered
+`MPIDR_EL1` affinity is never truncated into an array index. On the host
+build there is no `TPIDR_EL1`, so the handle backs the word with an in-handle
+cell solely for the round-trip + isolation conformance verticals
+(`percpu::conformance`), folded into the port's
 `passes_arch_hal_conformance_suite`.
 
 ## Interrupt controller (GICv2)
@@ -2333,7 +2338,8 @@ Stage W6), in `kernel/arch/aarch64::smp`:
   the `fdt` reader discovers, entering the core at the `smp.s` trampoline.
   The trampoline masks interrupts, computes the core's stack top as
   `base + (cpuid + 1) * stride` from the published pool globals (indexed by
-  the dense id PSCI passes as the `context_id`), and tail-calls the
+  the dense id PSCI passes as the `context_id`), publishes that id through
+  `TPIDR_EL1` in the shared Rust trampoline, and tail-calls the
   installed entry. It fails closed (`StartCpuError`) on an out-of-range id,
   a missing entry, or a PSCI error rather than assuming the core came up.
 - `smp::current_cpu_index` reads the running core's affinity from

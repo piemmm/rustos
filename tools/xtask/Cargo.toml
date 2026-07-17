@@ -69,6 +69,10 @@ rustos-syshelp = { path = "../syshelp", version = "=0.0.0" }
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
 # timeouts, no retries) in exactly one place — see AGENTS.md §2.2.
 rustos-qemu = { path = "../qemu", version = "=0.0.0" }
+# The interactive login negative fixture derives its over-limit username from
+# the account database format's own bound, so production validation and the
+# QEMU script cannot drift.
+rustos-users = { path = "../../lib/users", version = "=0.0.0" }
 
 # The QEMU netstack verticals' host-side link peer: the same pure
 # `lib/net` protocol engine the guest's netstack drives, run by the

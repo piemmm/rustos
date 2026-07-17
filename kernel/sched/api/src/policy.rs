@@ -205,6 +205,17 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// * [`crate::SchedError::NoSuchCpu`] if `cpu` is out of range.
     fn queue_depth(&self, cpu: CpuId) -> SchedResult<u64>;
 
+    /// Whether `cpu` must re-step instead of committing to an idle wait.
+    ///
+    /// This includes both the CPU's directly queued tasks and any globally
+    /// overflowed ready task that the next scheduler step can re-home. The
+    /// masked idle path uses this after an idle verdict so a consumed
+    /// placement IPI cannot leave published work asleep indefinitely.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchCpu`] if `cpu` is out of range.
+    fn has_ready_work(&self, cpu: CpuId) -> SchedResult<bool>;
+
     /// Most recent state of `id` ([`TaskState::Exited`] once drained).
     fn state_of(&self, id: TaskId) -> TaskState;
 

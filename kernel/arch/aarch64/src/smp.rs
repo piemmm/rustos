@@ -4,12 +4,12 @@
 //! and recovering a running core's identity, mirroring riscv64's
 //! [`crate::smp`] (the parity reference, `plans/WIRING.md` Stage W6):
 //!
-//! * `current_cpu_index` reads the running core's affinity out of
-//!   `MPIDR_EL1`. On the `virt` board the linear core index is the low
-//!   affinity field (`Aff0`), so this is the per-core identity the IRQ
-//!   path forwards to the timer / IPI callbacks — the aarch64 analogue
-//!   of riscv64 reading the hartid from `tp`. The dense
-//!   `CpuId`↔`MPIDR` reconciliation for the scheduler lives in
+//! * `install_current_cpu_index` publishes the firmware-validated dense
+//!   [`CpuId`](rustos_arch_api::CpuId) into the calling CPU's Arch HAL per-CPU word (`TPIDR_EL1`),
+//!   and `current_cpu_index` reads it. IRQ, timer, scheduler-current, and
+//!   continuation paths therefore index discovered-sized tables with dense
+//!   identity rather than assuming a sparse/clustered `MPIDR_EL1` affinity is
+//!   an array index. The `CpuId`↔`MPIDR` map itself lives in
 //!   [`crate::kernel_arch::Aarch64Arch`].
 //! * `set_secondary_entry` installs the set-once `extern "C"
 //!   fn(CpuId) -> !` a freshly-started secondary core runs, and
@@ -71,7 +71,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_arch_api::CpuId;
+use rustos_arch_api::{CpuId, PerCpu};
+
+use crate::percpu_hal::PerCpuStorage;
 
 /// Per-secondary-core kernel stack size, in bytes (64 KiB).
 ///
@@ -506,20 +508,32 @@ fn clear_secondary_entry_for_tests() {
 /// affinity the `virt` board assigns linearly.
 pub const MPIDR_AFFINITY_MASK: u64 = 0x00FF_FFFF;
 
-/// Read the calling core's dense id from its `MPIDR_EL1` affinity.
+/// The Arch HAL per-CPU word used to hold the dense [`CpuId`] assigned from
+/// the validated firmware topology.
+static DENSE_CPU_ID: PerCpuStorage = PerCpuStorage::new();
+
+/// Publish `cpu` as the calling core's dense identity.
 ///
-/// On the QEMU `virt` board the boot loader assigns each core an affinity
-/// equal to its linear index (`Aff0 = index` for the small core counts
-/// RustOS' tests use), so the low affinity byte is the dense [`CpuId`].
-/// This is the aarch64 analogue of riscv64's `current_hartid` and is the
-/// id the IRQ path forwards to the per-core timer / IPI callbacks.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+/// The boot CPU publishes dense id zero after firmware topology validation;
+/// each secondary publishes the id passed through the validated bring-up
+/// conduit before enabling vectors, the GIC, or preemption. `TPIDR_EL1` is
+/// banked per CPU, so migration cannot change another core's identity.
+pub fn install_current_cpu_index(cpu: CpuId) {
+    // SAFETY: this writes only the calling CPU's Arch HAL per-CPU word, and
+    // `cpu` is the identity assigned to that same CPU by boot bring-up.
+    unsafe {
+        DENSE_CPU_ID.write_self_base(cpu as usize);
+    }
+}
+
+/// Read the calling core's boot-published dense id.
+///
+/// Interrupt, preemption, scheduler-current, and continuation tables all use
+/// this identity. Raw `MPIDR_EL1` affinities may be sparse or clustered and
+/// therefore are never used directly as array indices.
 #[must_use]
 pub fn current_cpu_index() -> CpuId {
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        current_affinity() as CpuId
-    }
+    CpuId::try_from(DENSE_CPU_ID.read_self_base()).unwrap_or(0)
 }
 
 /// Read the calling core's full `MPIDR_EL1` affinity (`Aff0`–`Aff2`,
@@ -536,15 +550,6 @@ pub fn current_affinity() -> u64 {
         core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr, options(nomem, nostack, preserves_flags));
     }
     mpidr & MPIDR_AFFINITY_MASK
-}
-
-/// Host substitute for the `MPIDR_EL1` affinity read: the single-core
-/// host build always reports core `0`. Never linked into a kernel image
-/// (the aarch64 build uses the `mrs` reader above).
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-#[must_use]
-pub fn current_cpu_index() -> CpuId {
-    0
 }
 
 /// Power on the parked secondary core `cpu` (whose firmware identity is
@@ -726,6 +731,7 @@ fn spintable_trampoline_addr() -> usize {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn rustos_arch_aarch64_secondary_main(cpu: CpuId) -> ! {
+    install_current_cpu_index(cpu);
     let raw = SECONDARY_ENTRY_FN.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: every store into the slot round-trips a valid

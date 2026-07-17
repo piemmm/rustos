@@ -20,7 +20,7 @@
 
 extern crate std;
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use rustos_arch_api::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
 
@@ -94,6 +94,15 @@ pub struct TestArch {
     /// Number of [`KernelArch::set_device_irqs(true)`](KernelArch::set_device_irqs)
     /// calls observed.
     irq_enables: AtomicU64,
+    /// Test-only gate that pauses the first device-IRQ mask operation until a
+    /// cooperating thread publishes work in the idle-commit window.
+    idle_mask_gate_armed: AtomicBool,
+    /// Whether the gated device-IRQ mask operation has been reached.
+    idle_mask_gate_entered: AtomicBool,
+    /// Release flag for the gated device-IRQ mask operation.
+    idle_mask_gate_released: AtomicBool,
+    /// Number of [`KernelArch::wait_for_interrupt`] calls observed.
+    interrupt_waits: AtomicU64,
     /// Number of [`KernelArch::pump_console_tx`] calls observed.
     ///
     /// The dispatch loop calls the buffered-console-transmit hook on every
@@ -130,6 +139,10 @@ impl TestArch {
             halts: AtomicU64::new(0),
             ipis: AtomicU64::new(0),
             irq_enables: AtomicU64::new(0),
+            idle_mask_gate_armed: AtomicBool::new(false),
+            idle_mask_gate_entered: AtomicBool::new(false),
+            idle_mask_gate_released: AtomicBool::new(false),
+            interrupt_waits: AtomicU64::new(0),
             pump_tx_calls: AtomicU64::new(0),
             monotonic_ns: AtomicU64::new(0),
             wakeup_calls: AtomicU64::new(0),
@@ -165,6 +178,31 @@ impl TestArch {
     #[must_use]
     pub fn irq_enable_count(&self) -> u64 {
         self.irq_enables.load(Ordering::Relaxed)
+    }
+
+    /// Pause the next device-IRQ mask operation until
+    /// [`Self::release_idle_mask_gate`] is called.
+    pub fn arm_idle_mask_gate(&self) {
+        self.idle_mask_gate_entered.store(false, Ordering::Relaxed);
+        self.idle_mask_gate_released.store(false, Ordering::Relaxed);
+        self.idle_mask_gate_armed.store(true, Ordering::Release);
+    }
+
+    /// Whether the dispatch loop has reached the armed IRQ-mask gate.
+    #[must_use]
+    pub fn idle_mask_gate_entered(&self) -> bool {
+        self.idle_mask_gate_entered.load(Ordering::Acquire)
+    }
+
+    /// Release an IRQ-mask operation paused by [`Self::arm_idle_mask_gate`].
+    pub fn release_idle_mask_gate(&self) {
+        self.idle_mask_gate_released.store(true, Ordering::Release);
+    }
+
+    /// Number of idle interrupt waits observed.
+    #[must_use]
+    pub fn interrupt_wait_count(&self) -> u64 {
+        self.interrupt_waits.load(Ordering::Relaxed)
     }
 
     /// Number of times [`KernelArch::pump_console_tx`] was reached.
@@ -281,7 +319,16 @@ impl KernelArch for TestArch {
     fn set_device_irqs(&self, enabled: bool) {
         if enabled {
             self.irq_enables.fetch_add(1, Ordering::Relaxed);
+        } else if self.idle_mask_gate_armed.swap(false, Ordering::AcqRel) {
+            self.idle_mask_gate_entered.store(true, Ordering::Release);
+            while !self.idle_mask_gate_released.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
         }
+    }
+
+    fn wait_for_interrupt(&self) {
+        self.interrupt_waits.fetch_add(1, Ordering::Relaxed);
     }
 
     fn pump_console_tx(&self) {

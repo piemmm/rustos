@@ -954,13 +954,14 @@ fn service_between_dispatches<A: KernelArch>(arch: &A) {
 /// dispatcher context, where taking the scheduler/run-queue locks is
 /// safe.
 ///
-/// The idle path parks race-free: it masks device IRQs, drains once
-/// more so a wake a handler flagged just before the commit to sleep is
-/// observed rather than slept through (no lost wake-up), and only then
-/// parks on [`KernelArch::wait_for_interrupt`], which still wakes on
-/// the pending-but-masked interrupt. Device IRQs are left masked when
-/// the loop returns: whichever way it ended, there is no dispatcher
-/// left on this CPU to service them.
+/// The idle path parks race-free: it masks device IRQs, drains once more,
+/// and rechecks scheduler readiness (the local queue plus global overflow)
+/// before committing to sleep. The recheck covers a placement IPI that arrived
+/// and was consumed after `step` reported idle but before IRQ masking; any
+/// later IPI remains pending while masked and wakes
+/// [`KernelArch::wait_for_interrupt`]. Device IRQs are
+/// left masked when the loop returns: whichever way it ended, there is no
+/// dispatcher left on this CPU to service them.
 fn run_dispatch_loop<A: KernelArch>(
     scheduler: &Scheduler<A>,
     arch: &A,
@@ -1016,7 +1017,10 @@ fn run_dispatch_loop<A: KernelArch>(
                 // the foreground job now, not after the next unrelated
                 // interrupt.
                 let delivered = crate::procsignal::drain_pending_foreground();
-                if !(woke || delivered) {
+                let Ok(local_ready) = scheduler.has_ready_work(cpu) else {
+                    break;
+                };
+                if !(woke || delivered || local_ready) {
                     arch.pump_console_tx();
                     arch.wait_for_interrupt();
                 }
@@ -1035,7 +1039,8 @@ mod dispatch_loop_tests {
     use crate::test_arch::TestArch;
     use crate::KernelArch;
     use alloc::sync::Arc;
-    use rustos_kernel_sched_api::{Priority, TaskAction};
+    use rustos_kernel_sched_api::{Priority, StepOutcome, TaskAction};
+    use std::thread;
 
     /// A task may suspend the dispatcher from an exception context whose
     /// architecture mask still blocks device interrupts. Once the scheduler
@@ -1070,6 +1075,56 @@ mod dispatch_loop_tests {
             2,
             "initial enable plus post-step restoration must both occur"
         );
+    }
+
+    #[test]
+    fn idle_commit_rechecks_work_published_after_the_idle_step() {
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let scheduler = Arc::new(
+            Scheduler::new(
+                SchedulerConfig {
+                    cpus: 1,
+                    queue_capacity_per_band: 8,
+                    yields_before_demotion: 1,
+                    boost_interval_ticks: 10,
+                },
+                arch.clone(),
+            )
+            .expect("scheduler builds"),
+        );
+        let sentinel = scheduler
+            .spawn_parked(0, Priority::Normal, |_| TaskAction::Park)
+            .expect("parked sentinel spawns");
+        arch.arm_idle_mask_gate();
+
+        let publisher_arch = arch.clone();
+        let publisher_scheduler = scheduler.clone();
+        let publisher = thread::spawn(move || {
+            while !publisher_arch.idle_mask_gate_entered() {
+                thread::yield_now();
+            }
+            let retire_scheduler = publisher_scheduler.clone();
+            publisher_scheduler
+                .spawn(0, Priority::Normal, move |_| {
+                    retire_scheduler
+                        .exit(sentinel)
+                        .expect("sentinel remains live until the injected task runs");
+                    TaskAction::Exit
+                })
+                .expect("work publishes in the masked idle-commit window");
+            publisher_arch.release_idle_mask_gate();
+        });
+
+        run_dispatch_loop(scheduler.as_ref(), arch.as_ref(), 0, DispatchRole::Boot);
+        publisher.join().expect("publisher thread completes");
+
+        assert_eq!(
+            arch.interrupt_wait_count(),
+            0,
+            "the dispatcher must not sleep after work was published in its idle-commit window"
+        );
+        assert_eq!(scheduler.live_task_count(), 0);
+        assert_eq!(scheduler.step(0), Ok(StepOutcome::Idle));
     }
 }
 

@@ -24,16 +24,25 @@
 //!   is never inherited even though the lowered limit is) so its
 //!   over-budget map succeeds, exits 0.
 //!
-//! The chassis reaps the parent through the producer's non-blocking poll
-//! and PASSes only on a parent exit of 0.
+//! The shared source also drives a private production call endpoint. The
+//! one-vCPU package is the control; the four-vCPU sibling starts real
+//! secondary dispatchers and repeatedly pauses the observed source after the
+//! caller blocks so another CPU must steal and resume it. Every reply is
+//! checked together with integer/FP, stack, PC, and address-space-local state.
 
 use core::panic::PanicInfo;
+#[cfg(migration_smp)]
+use core::sync::atomic::{AtomicPtr, AtomicU32};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use rustos_abi::{CapabilityId, Errno, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS};
+use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
+#[cfg(migration_smp)]
+use rustos_arch_aarch64::kernel_arch::SecondaryStart;
 use rustos_arch_aarch64::paging::{
     configure_device_gigapages, configure_ram_gigapages, AddressSpace as ArchAddressSpace,
     PageTablePool, GIGAPAGE_MASK_WORDS,
@@ -42,7 +51,11 @@ use rustos_arch_aarch64::{
     enable_fp_el1, exceptions, fault, gic, handle_panic_via_serial, qemu_exit, syscall_entry,
     Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
 };
+#[cfg(migration_smp)]
+use rustos_arch_aarch64::{preempt, smp};
 use rustos_arch_api::CpuId;
+#[cfg(migration_smp)]
+use rustos_arch_api::SecondaryBringup;
 use rustos_caps::CapabilitySet;
 use rustos_fdt::Fdt;
 use rustos_kalloc::FreeListAllocator;
@@ -51,19 +64,21 @@ use rustos_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_B
 use rustos_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use rustos_kernel::spawn_layout::USER_STACK_COMMIT_PAGES;
 use rustos_kernel_core::{
-    AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
-    KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
-    ProgramRegistry, RandomReserve, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
-    NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
+    spawn_kthread, AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram,
+    InitSpawnCtx, KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
+    ProcessWait, ProgramRegistry, RandomReserve, Yielder, NULL_DMA_ALLOC_FACILITY,
+    NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
-use rustos_kernel_ipc::PortRegistry;
+use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, PortRegistry, RecvCall};
 use rustos_kernel_irq::{IrqTable, UnsupportedController};
 use rustos_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
-use rustos_kernel_sched_api::SchedulerArch;
+#[cfg(migration_smp)]
+use rustos_kernel_sched_api::StepOutcome;
+use rustos_kernel_sched_api::{Priority, SchedulerArch};
 use rustos_kernel_sched_cfq::{Scheduler, SchedulerConfig};
-use rustos_kernel_sec::{CapTable, TaskId as SecTaskId};
+use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_log::{log, Event, EventId, Level};
 use rustos_sync::RwLock;
 
@@ -72,8 +87,13 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-/// The single-core slice runs logical CPU 0 on the boot core.
+/// Dense id of the boot core.
 const BOOT_CPU: CpuId = 0;
+#[cfg(migration_smp)]
+const CPU_COUNT: u32 = 4;
+#[cfg(not(migration_smp))]
+const CPU_COUNT: u32 = 1;
+const CPU_MPIDRS: [u64; 4] = [0, 1, 2, 3];
 
 /// Gigabytes of identity map the boot address space provides: `[0, 2 GiB)`
 /// covers the `virt` board's device MMIO (GiB 0) and the RAM base at GiB 1
@@ -155,8 +175,14 @@ const FAIL_HOOK_INSTALL: u16 = 9;
 const FAIL_RESOLVER_INSTALL: u16 = 10;
 const FAIL_BIAS: u16 = 11;
 const FAIL_POLL: u16 = 12;
-const FAIL_DRAINED: u16 = 13;
 const FAIL_PARENT_STOPPED: u16 = 14;
+const FAIL_ENDPOINT: u16 = 15;
+const FAIL_SERVER: u16 = 16;
+const FAIL_IPC_CONTROL: u16 = 17;
+#[cfg(migration_smp)]
+const FAIL_SECONDARY: u16 = 18;
+#[cfg(migration_smp)]
+const FAIL_NO_MIGRATION: u16 = 19;
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: u16 = 100;
@@ -195,14 +221,24 @@ static mut FRAME_POOL: FramePool = FramePool([0; PAGE_SIZE * FRAME_COUNT]);
 static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 
 /// Per-CPU storage backing the scheduler's arch handle.
-static SCHED_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+static SCHED_STORAGE: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
 
 /// Per-CPU storage backing the dispatch hook + spawn ctx arch handle.
-static HOOK_ARCH_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
+static HOOK_ARCH_STORAGE: Aarch64ArchStorage<4> = Aarch64ArchStorage::new();
+
+#[cfg(migration_smp)]
+static SMP_SCHEDULER: AtomicPtr<Scheduler<Aarch64BinArch>> = AtomicPtr::new(core::ptr::null_mut());
+#[cfg(migration_smp)]
+static SMP_ONLINE: AtomicU32 = AtomicU32::new(0);
+#[cfg(migration_smp)]
+static SMP_PAUSED: AtomicU32 = AtomicU32::new(0);
 
 /// This vertical binds no IRQ lines; the fail-closed controller mirrors
 /// what `kernel/core::init` installs when a port exposes no routing.
 static IRQ_CONTROLLER: UnsupportedController = UnsupportedController;
+
+/// Private call endpoint used only by the migration fixture role.
+const MIGRATION_ENDPOINT: u64 = 0x4d49_4752_4154_4501;
 
 fn note(id: EventId, message: &'static str) {
     log(
@@ -431,23 +467,38 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
     };
     let frames: &'static FrameAllocator = Box::leak(Box::new(frames));
 
-    let sched_arch = Arc::new(Aarch64BinArch::new(Aarch64Arch::new(
+    let sched_inner = Aarch64Arch::with_cpus(
         &SCHED_STORAGE,
         BOOT_CPU,
         counter_hz,
-    )));
-    let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch) else {
+        &CPU_MPIDRS[..CPU_COUNT as usize],
+    );
+    let hook_inner = Aarch64Arch::with_cpus(
+        &HOOK_ARCH_STORAGE,
+        BOOT_CPU,
+        counter_hz,
+        &CPU_MPIDRS[..CPU_COUNT as usize],
+    );
+    #[cfg(migration_smp)]
+    let (sched_inner, hook_inner) = {
+        let method = Fdt::new(DTB_BLOB)
+            .ok()
+            .and_then(|fdt| rustos_arch_aarch64::fdt::psci_method(&fdt))
+            .unwrap_or_else(|| qemu_exit::exit_failure(FAIL_SECONDARY));
+        (
+            sched_inner.with_secondary_start(SecondaryStart::Psci(method)),
+            hook_inner.with_secondary_start(SecondaryStart::Psci(method)),
+        )
+    };
+    let sched_arch = Arc::new(Aarch64BinArch::new(sched_inner));
+    let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(CPU_COUNT), sched_arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
 
     Subsystems {
         frames,
         sched: Box::leak(Box::new(sched)),
-        arch: Box::leak(Box::new(Aarch64BinArch::new(Aarch64Arch::new(
-            &HOOK_ARCH_STORAGE,
-            BOOT_CPU,
-            counter_hz,
-        )))),
+        arch: Box::leak(Box::new(Aarch64BinArch::new(hook_inner))),
         caps: Box::leak(Box::new(RwLock::new(CapTable::new()))),
         ipc: Box::leak(Box::new(RwLock::new(PortRegistry::new()))),
         aspaces: Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new()))),
@@ -455,6 +506,172 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
             Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>
         ))),
         irq_table: Box::leak(Box::new(IrqTable::new(0))),
+    }
+}
+
+/// Register the private migration endpoint and spawn its event-driven echo
+/// server as a real scheduler kthread.
+fn install_echo_server(sys: &Subsystems) {
+    let empty = CapabilitySet::empty();
+    let creator = TaskCapabilities::derive(
+        SecTaskId(0x4d49_4752),
+        UserId(0),
+        empty,
+        empty,
+        &SERIAL_SINK,
+    );
+    let endpoint = match CallEndpoint::create(
+        EndpointId(MIGRATION_ENDPOINT),
+        &creator,
+        CapabilitySet::empty(),
+        CapabilitySet::empty(),
+        CallEndpointLimits {
+            max_request: 8,
+            max_reply: 8,
+            capacity: 8,
+        },
+        &SERIAL_SINK,
+    ) {
+        Ok(endpoint) => Arc::new(endpoint),
+        Err(_) => qemu_exit::exit_failure(FAIL_ENDPOINT),
+    };
+    if rustos_kernel_core::callreg::register(Arc::clone(&endpoint), &SERIAL_SINK).is_err() {
+        qemu_exit::exit_failure(FAIL_ENDPOINT);
+    }
+    let server_id = Arc::new(AtomicU64::new(0));
+    let body_id = Arc::clone(&server_id);
+    let body_endpoint = Arc::clone(&endpoint);
+    let server = spawn_kthread(
+        sys.sched,
+        ContextSwitchHal::new(),
+        BOOT_CPU,
+        Priority::High,
+        move |yielder: &mut Yielder<ContextSwitchHal>| {
+            let id = body_id.load(Ordering::Acquire);
+            body_endpoint.record_server_task(id);
+            loop {
+                rustos_kernel_core::waitq::SERVE_WAITQ
+                    .register(id, rustos_kernel_core::waitq::NO_DEADLINE);
+                match body_endpoint.recv_call(8) {
+                    RecvCall::Received(call) => {
+                        rustos_kernel_core::waitq::SERVE_WAITQ.deregister(id);
+                        let poster =
+                            match body_endpoint.reply(call.ticket, &call.request, &SERIAL_SINK) {
+                                Ok(poster) => poster,
+                                Err(_) => qemu_exit::exit_failure(FAIL_SERVER),
+                            };
+                        rustos_kernel_core::waitq::call_wake_task(poster);
+                    }
+                    RecvCall::Empty => {
+                        yielder.park();
+                        rustos_kernel_core::waitq::SERVE_WAITQ.deregister(id);
+                    }
+                    RecvCall::TooLarge { .. } => qemu_exit::exit_failure(FAIL_SERVER),
+                }
+            }
+        },
+    );
+    let Ok(server) = server else {
+        qemu_exit::exit_failure(FAIL_SERVER);
+    };
+    server_id.store(server, Ordering::Release);
+}
+
+/// Drive CPU 0 until the kernel-parented `pid` exits and return its code.
+fn drive_process(sys: &Subsystems, wait: &KernelProcessWait<Aarch64BinArch>, pid: u64) -> i32 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = pid as i32;
+    for _ in 0..MAX_STEPS {
+        let _ = sys.sched.step(BOOT_CPU);
+        let _ = rustos_kernel_core::waitq::drain_pending_wakes();
+        match wait.poll(SecTaskId(0), pid, WaitFlags::empty()) {
+            Ok(reaped) => match reaped.status {
+                WaitStatus::Exited(code) => return code,
+                WaitStatus::Stopped(_) => qemu_exit::exit_failure(FAIL_PARENT_STOPPED),
+            },
+            Err(Errno::WouldBlock) => {}
+            Err(_) => qemu_exit::exit_failure(FAIL_POLL),
+        }
+    }
+    qemu_exit::exit_failure(FAIL_DEADLOCK)
+}
+
+#[cfg(migration_smp)]
+extern "C" fn migration_ipi(cpu: CpuId) {
+    rustos_kernel_core::note_preempt_tick(cpu);
+}
+
+#[cfg(migration_smp)]
+extern "C" fn migration_preempt(cpu: CpuId) {
+    let _ = rustos_kernel_core::preempt_current(cpu);
+}
+
+/// Secondary-core entry for the four-vCPU migration package.
+#[cfg(migration_smp)]
+extern "C" fn migration_secondary(cpu: CpuId) -> ! {
+    // SAFETY: the boot core published the permanent identity root before
+    // issuing CPU_ON; this secondary has not enabled interrupts yet.
+    if !unsafe { rustos_arch_aarch64::paging::adopt_boot_translation() } {
+        qemu_exit::exit_failure(FAIL_SECONDARY);
+    }
+    // SAFETY: per-CPU vector/GIC/SGI setup on this secondary, exactly once.
+    unsafe {
+        exceptions::init_vectors();
+        gic::init();
+        preempt::enable_ipi();
+        exceptions::enable_irq();
+    }
+    SMP_ONLINE.fetch_or(1u32 << cpu, Ordering::Release);
+    let scheduler = SMP_SCHEDULER.load(Ordering::Acquire);
+    if scheduler.is_null() {
+        qemu_exit::exit_failure(FAIL_SECONDARY);
+    }
+    // SAFETY: `start_migration_secondaries` publishes the leaked scheduler
+    // before CPU_ON and it remains live for the kernel's lifetime.
+    let scheduler = unsafe { &*scheduler };
+    loop {
+        if SMP_PAUSED.load(Ordering::Acquire) & (1u32 << cpu) != 0 {
+            // SAFETY: the test controller deliberately pauses this idle
+            // dispatcher after its task blocks; an IPI wakes it when the
+            // pause is released.
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+            continue;
+        }
+        let outcome = scheduler.step(cpu);
+        let _ = rustos_kernel_core::waitq::drain_pending_wakes();
+        if matches!(outcome, Ok(StepOutcome::Idle)) {
+            // SAFETY: this CPU has no runnable work; a timer/device/IPI wakes
+            // the parked dispatcher, with no lock held across the wait.
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+        }
+    }
+}
+
+/// Start CPUs 1..3 and wait until their dispatch loops are live.
+#[cfg(migration_smp)]
+fn start_migration_secondaries(sys: &Subsystems) {
+    static STACKS: smp::SecondaryStackPool<4> = smp::SecondaryStackPool::new();
+    SMP_SCHEDULER.store(sys.sched as *const _ as *mut _, Ordering::Release);
+    if STACKS.register().is_err() || smp::set_secondary_entry(migration_secondary).is_err() {
+        qemu_exit::exit_failure(FAIL_SECONDARY);
+    }
+    preempt::set_ipi_callback(migration_ipi);
+    preempt::set_preempt_callback(migration_preempt);
+    // SAFETY: boot CPU vectors/GIC are live and callbacks are installed.
+    unsafe {
+        preempt::enable_ipi();
+        exceptions::enable_irq();
+    }
+    for cpu in 1..CPU_COUNT {
+        // SAFETY: topology, stack pool, and callback are published; each id
+        // names a distinct parked QEMU CPU.
+        if unsafe { sys.arch.arch().start_secondary(cpu) }.is_err() {
+            qemu_exit::exit_failure(FAIL_SECONDARY);
+        }
+    }
+    let expected = ((1u32 << CPU_COUNT) - 1) & !1;
+    while SMP_ONLINE.load(Ordering::Acquire) != expected {
+        core::hint::spin_loop();
     }
 }
 
@@ -485,6 +702,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if rustos_kernel_core::waitq::install_wait_arch(wait_arch).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }
+    install_echo_server(&sys);
 
     // The scheduler-side process-wait producer: records every parent/child
     // link the production spawn paths register and backs the production
@@ -531,6 +749,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if DISPATCH_SLOT.install_dispatcher(hook).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }
+    #[cfg(migration_smp)]
+    start_migration_secondaries(&sys);
 
     // Spawn the parent role through the production runtime-spawn seam
     // (`KernelSpawnCtx` assembly inside `KernelInitSpawner`), recorded
@@ -562,50 +782,102 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         "aarch64 mem-pin test: parent spawned through the production seam",
     );
 
-    // The budget-bounded cooperative drive: step the scheduler and poll the
-    // wait producer for the parent's exit between steps. The parent runs
-    // the whole deny / pin / child sequence through production spawn +
-    // wait; a parent exit of 0 is the PASS, anything else names the failing
-    // site through its diagnostic code.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let parent_pid = parent_pid as i32;
-    let mut steps = 0u64;
-    while steps < MAX_STEPS {
-        let _ = sys.sched.step(BOOT_CPU);
-        steps += 1;
-
-        // Deliver any wake a handler deferred while the task ran — the same
-        // between-dispatches service the production loop performs; without
-        // it a child's `exit` never unparks the parent blocked in `wait`.
-        let _ = rustos_kernel_core::waitq::drain_pending_wakes();
-
-        match wait_producer.poll(SecTaskId(0), parent_pid, WaitFlags::empty()) {
-            Ok(reaped) => match reaped.status {
-                WaitStatus::Exited(0) => {
-                    note(
-                        TEST_PASS,
-                        "aarch64 mem-pin test: parent verified all three children and exited 0",
-                    );
-                    qemu_exit::exit_success();
-                }
-                WaitStatus::Exited(code) => {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    qemu_exit::exit_failure(FAIL_EXIT_BASE + (code as u16));
-                }
-                WaitStatus::Stopped(_) => {
-                    qemu_exit::exit_failure(FAIL_PARENT_STOPPED);
-                }
-            },
-            Err(Errno::WouldBlock) => {}
-            Err(_) => qemu_exit::exit_failure(FAIL_POLL),
-        }
-
-        // A fully drained workload without a reapable parent means the
-        // parent vanished down a path that never recorded its exit; fail
-        // with a distinct finisher rather than spinning out the watchdog.
-        if sys.sched.live_task_count() == 0 {
-            qemu_exit::exit_failure(FAIL_DRAINED);
-        }
+    let parent_code = drive_process(&sys, wait_producer, parent_pid);
+    if parent_code != 0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        qemu_exit::exit_failure(FAIL_EXIT_BASE + parent_code as u16);
     }
-    qemu_exit::exit_failure(FAIL_DEADLOCK);
+
+    let ipc_pid = match init_ctx.spawn_driver_process(
+        &AARCH64_PROCESS_SPAWN,
+        "/bin/mp-ipc",
+        PROGRAM_RXE,
+        CapabilitySet::empty(),
+        &[],
+        &[b"mp", b"ipc"],
+        None,
+    ) {
+        Ok(pid) => pid,
+        Err(_) => qemu_exit::exit_failure(FAIL_SPAWN),
+    };
+
+    #[cfg(not(migration_smp))]
+    let ipc_code = drive_process(&sys, wait_producer, ipc_pid);
+
+    #[cfg(migration_smp)]
+    let (ipc_code, observed_cpus) = {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let poll_pid = ipc_pid as i32;
+        let mut observed = 0u32;
+        let mut last_cpu = None;
+        let mut migrations = 0u32;
+        let mut exit_code = None;
+        for _ in 0..MAX_STEPS {
+            let _ = rustos_kernel_core::waitq::drain_pending_wakes();
+            let mut running_cpu = None;
+            for cpu in 1..CPU_COUNT {
+                if sys.sched.current_task(cpu) == Some(ipc_pid) {
+                    observed |= 1u32 << cpu;
+                    running_cpu = Some(cpu);
+                    break;
+                }
+            }
+            if let Some(cpu) = running_cpu {
+                if last_cpu != Some(cpu) {
+                    if let Some(previous) = last_cpu {
+                        migrations += 1;
+                        SMP_PAUSED.fetch_and(!(1u32 << previous), Ordering::AcqRel);
+                        SchedulerArch::send_ipi(sys.arch, previous);
+                    }
+                    SMP_PAUSED.store(1u32 << cpu, Ordering::Release);
+                    last_cpu = Some(cpu);
+                }
+            }
+            // Wake every unpaused secondary so one of them steals the ready
+            // caller after its currently observed source dispatcher pauses.
+            let paused = SMP_PAUSED.load(Ordering::Acquire);
+            for cpu in 1..CPU_COUNT {
+                if paused & (1u32 << cpu) == 0 {
+                    SchedulerArch::send_ipi(sys.arch, cpu);
+                }
+            }
+            match wait_producer.poll(SecTaskId(0), poll_pid, WaitFlags::empty()) {
+                Ok(reaped) => match reaped.status {
+                    WaitStatus::Exited(code) => {
+                        exit_code = Some(code);
+                        break;
+                    }
+                    WaitStatus::Stopped(_) => qemu_exit::exit_failure(FAIL_PARENT_STOPPED),
+                },
+                Err(Errno::WouldBlock) => {}
+                Err(_) => qemu_exit::exit_failure(FAIL_POLL),
+            }
+        }
+        SMP_PAUSED.store(0, Ordering::Release);
+        (
+            exit_code.unwrap_or_else(|| qemu_exit::exit_failure(FAIL_DEADLOCK)),
+            (observed, migrations),
+        )
+    };
+
+    if ipc_code != 0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        qemu_exit::exit_failure(FAIL_IPC_CONTROL + ipc_code as u16);
+    }
+
+    #[cfg(migration_smp)]
+    if observed_cpus.0.count_ones() < 2 || observed_cpus.1 < 4 {
+        #[allow(clippy::cast_possible_truncation)]
+        qemu_exit::exit_failure(FAIL_NO_MIGRATION + observed_cpus.0 as u16);
+    }
+
+    note(
+        TEST_PASS,
+        if cfg!(migration_smp) {
+            "aarch64 mem-pin test: four-CPU blocking IPC migration passed"
+        } else {
+            "aarch64 mem-pin test: ST2 roles and one-CPU IPC control passed"
+        },
+    );
+    qemu_exit::exit_success();
 }

@@ -1,11 +1,9 @@
 //! `plans/STRESSTEST.md` ST5 QEMU integration test: boot the *production*
 //! aarch64 `rustos-kernel` pipeline on the `virt` board with the planted
 //! whole-disk encrypted-root image, log in as the seeded `root` account,
-//! run an oversubscribed background CPU load plus a mixed **`stress`** load
-//! under `--timeout` on the console, prove foreground service progress while
-//! the CPU load is active, watch both runs tear themselves down, and render
-//! the post-load `sysinfo pressure` / `sysinfo reclaim` figures on the
-//! transcript.
+//! run the reported oversubscribed detached **`stress`** command under its full
+//! 120-second timeout, and prove the shell and `sysmon` remain interactive
+//! while all four CPUs are saturated.
 //!
 //! ## What this test asserts
 //!
@@ -13,46 +11,29 @@
 //! root, login authenticates `root`/`root`, and the session shell runs the
 //! runner's ordered script:
 //!
-//! 1. `stress --cpu 10 --timeout 4s &` on four emulated CPUs — the shell's
-//!    background-job form returns the prompt, the controller confirms all ten
-//!    workers were dispatched, then `sysinfo uptime` must render `since boot:`
-//!    while all CPUs are saturated. This proves timer-driven CFQ preemption
-//!    keeps the shell, IPC service, and controller progressing while CPU
-//!    workers issue no syscalls. The command-level `--background` detach path
-//!    has separate parser/controller coverage and feeds the same controller.
-//! 2. `stress --cpu 1 --vm 1 --vm-bytes 16M --io 1 --timeout 2s` — the
-//!    store bundle spawns through the full signature + capability +
-//!    interface-hash load gate; the controller pins itself
-//!    (`CAP_MEM_PIN`), opts into the signal intake, and re-enters its own
-//!    attested binary as three workers through the kernel's `@self`
-//!    token. The `dispatching hogs` line on the transcript witnesses the
-//!    dispatch; the `successful run completed` line witnesses the timeout
-//!    teardown — every worker `Terminate`d, reaped, and the scratch files
-//!    removed — and the prompt returning at all is the reap-and-exit
-//!    witness.
-//! 3. `sysinfo pressure` — the `reserve bytes:` token witnesses the gated
-//!    `MEMORY_PRESSURE` figures rendered after the load.
-//! 4. `sysinfo reclaim` — the `clean-file-data` class row witnesses the
-//!    `RECLAIM_STATS` ledger rendered after the io worker churned the
-//!    write path.
-//! 5. `exit` — typed only after both renders appeared.
+//! 1. After the authenticated shell prompt appears, the runner waits one
+//!    second and types exactly
+//!    `stress --cpu 10 --timeout 120s --background`. The command-level detach
+//!    path respawns a quiet controller and returns the shell prompt.
+//! 2. The returned prompt must accept `sysmon`. Its `Pressure:` frame must
+//!    render while all CPUs are saturated; `r` must refresh to the
+//!    `reclaimable` panel, and `q` must return to the shell. This proves
+//!    timer-driven preemption, input delivery, IPC, and the system-information
+//!    service all progress while CPU workers issue no syscalls.
+//! 3. After `sysmon` returns, the script waits for the detached controller's
+//!    audited exit at the end of its full 120-second run, then types `exit`.
 //!
-//! ## Why the PASS keys on `stress`'s exit *then* the shell's exit
+//! ## Why the PASS keys on two `stress` exits *then* the shell's exit
 //!
-//! The kernel-side witness is the stress **controller's** audited `exit`
-//! (`SyscallInvoked`, `EventId(5000)`, `sc=exit`, `comm=stress`) — the
-//! workers are ended by `Terminate` and never invoke the `exit` syscall,
-//! so the controller's is unambiguous — which only lands after the whole
-//! dispatch/teardown ran. Exiting QEMU there would tear the run down
-//! before the post-load `sysinfo` renders were observed, so the sink only
-//! *arms* on it and reports PASS on the audited `exit` of the **shell**
-//! (`comm=elsh`), typed by the runner only after both renders appeared —
-//! so the verified lines provably reached the transcript before the run
-//! ended (the arm-then-exit discipline). The two `sysinfo` exits between
-//! them do not fire the PASS: only the shell's name does. A refused
-//! spawn, a failed teardown, or a hung controller never reaches the armed
-//! exit: the run times out with the failing step in the serial transcript
-//! — the documented fail-loud behaviour.
+//! `--background` creates two `comm=stress` audited exits: the foreground
+//! launcher after it has spawned the detached controller, then the detached
+//! controller after the full load and teardown. Workers are ended by
+//! `Terminate` and never invoke `exit`. The sink therefore arms only after
+//! both stress exits and reports PASS on the subsequent audited shell exit.
+//! The script cannot type that exit until `sysmon` has rendered, refreshed,
+//! quit, and the second stress exit appears after the restored prompt. A
+//! refused spawn, unresponsive console, failed teardown, or hung controller
+//! leaves a scripted marker unreached and the run fails loud by timeout.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -79,7 +60,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicU64, Ordering};
 
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -125,11 +106,13 @@ mod kernel {
     /// `sysinfo` exits.
     const SHELL_COMM: &str = "elsh";
 
-    /// Set once `stress`'s audited `exit` has been observed. The PASS
-    /// finisher fires on the shell's audited `exit`, so the verified
-    /// post-load renders provably reached the transcript before the run
-    /// ended.
-    static CONTROLLER_DONE: AtomicBool = AtomicBool::new(false);
+    /// The foreground detach launcher and the detached load controller each
+    /// invoke `exit`; workers are terminated by the controller without doing
+    /// so themselves.
+    const REQUIRED_STRESS_EXITS: u64 = 2;
+
+    /// Number of audited `stress` exits observed by the sink.
+    static STRESS_EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
     /// The string value of `event`'s field `key`, if present.
     fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
@@ -146,9 +129,8 @@ mod kernel {
     }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports
-    /// PASS once `stress` has exited and the shell's subsequent scripted
-    /// `exit` dispatches (see the module docs for why the PASS is deferred
-    /// to the shell's own exit).
+    /// PASS once both `stress` processes have exited and the shell's subsequent
+    /// scripted `exit` dispatches (see the module docs for the ordering proof).
     struct StressSink;
 
     impl Sink for StressSink {
@@ -160,8 +142,12 @@ mod kernel {
                 return;
             }
             match field_str(event, "comm") {
-                Some(CONTROLLER_COMM) => CONTROLLER_DONE.store(true, Ordering::Release),
-                Some(SHELL_COMM) if CONTROLLER_DONE.load(Ordering::Acquire) => {
+                Some(CONTROLLER_COMM) => {
+                    STRESS_EXIT_COUNT.fetch_add(1, Ordering::AcqRel);
+                }
+                Some(SHELL_COMM)
+                    if STRESS_EXIT_COUNT.load(Ordering::Acquire) >= REQUIRED_STRESS_EXITS =>
+                {
                     qemu_exit::exit_success();
                 }
                 _ => {}

@@ -218,6 +218,17 @@ impl WaitQueue {
         }
     }
 
+    /// The oldest registered task without waking or removing it.
+    ///
+    /// Used by [`SleepLock`](crate::SleepLock) to publish direct ownership
+    /// handoff before waking the designated FIFO waiter. The waiter remains
+    /// registered until it resumes, so the normal register-before-retest
+    /// lost-wake discipline is preserved.
+    #[must_use]
+    pub(crate) fn oldest_task(&self) -> Option<TaskId> {
+        self.waiters.lock().first().map(|waiter| waiter.task)
+    }
+
     /// Wake exactly `task` if it is currently registered, returning whether
     /// it was (the wake-one discipline — an addressed event such as a
     /// posted request or a ticket's reply wakes its one target, never the

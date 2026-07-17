@@ -17,14 +17,14 @@
 //! harnesses every job weighs `1` and the budget is a job *count*, so the
 //! model collapses to "run at most N at a time" — its historical behaviour.
 //!
-//! The QEMU matrix uses the weight to mean **emulated CPUs**: a guest's TCG
-//! vCPU threads are the CPU-bound load it places on the host, so weighting by
-//! `cpus` and setting the budget to the host's logical-CPU count keeps the
-//! sum of concurrently-running guest vCPUs at or below the number of host
-//! cores. That is what makes co-scheduling guests safe under TCG: a guest is
-//! never starved of a host core, so its wall-clock deadline
+//! The QEMU matrix uses weight as **host-capacity demand**. One-vCPU guests
+//! charge their vCPU and emulator/I/O work; SMP TCG guests charge the complete
+//! host-derived budget and therefore run alone because their synchronising
+//! vCPU threads require simultaneous progress. That is what makes guest
+//! scheduling safe under TCG: a guest is not starved of host CPU, so its
+//! wall-clock deadline
 //! ([`rustos_qemu::Runner::run`]) stays as reachable as it is for a solo run,
-//! and's no-flaky-tests / no-retry rules hold. (A single job heavier than
+//! and the no-flaky-tests / no-retry rules hold. (A single job heavier than
 //! the whole budget — a guest with more vCPUs than the host has cores — still
 //! runs, alone, when nothing else is in flight, rather than deadlocking.)
 //!

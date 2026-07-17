@@ -256,8 +256,14 @@ vertical — a single-handle `run_all` round-trip check (folded into
 `sched-arch`-gated), aarch64 `TPIDR_EL1`, riscv64 `tp`, wasm32
 worker-local slot. Every port's `passes_arch_hal_conformance_suite`
 drives a real `PerCpuStorage`; each port also carries host round-trip +
-isolation tests. Docs: `docs/src/platform/{x86_64,aarch64,riscv64,
-wasm32}.md`, `docs/src/architecture/modularity.md`.
+isolation tests. The aarch64 production boot stores the validated dense
+`CpuId` in `TPIDR_EL1`: boot id 0 after topology ordering and each secondary
+id in the shared trampoline before its installed callback. All aarch64 IRQ,
+timer, scheduler-current, serial-owner, and continuation indexing therefore
+uses dense identity rather than truncating sparse/clustered MPIDR affinity;
+the four-core IPI vertical asserts each secondary observes its handed-off id.
+Docs: `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
+`docs/src/architecture/modularity.md`.
 
 - Define `PerCpu`; implement over x86_64 GS-base, aarch64
   `TPIDR_EL1`, riscv64 `tp`, wasm32 worker slot.
