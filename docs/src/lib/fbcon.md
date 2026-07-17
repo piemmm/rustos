@@ -11,14 +11,14 @@ It turns a byte stream into on-screen text by feeding it to the single shared
 `rustos_vt::Parser`, applying each parsed `rustos_vt::Op` to a retained cell
 grid, and repainting the dirtied cells once per write onto a borrowed 32-bit
 scan-out surface (`&mut [u32]`), rendering glyphs with the
-shared `rustos_font` Inconsolata EX + M PLUS 1 Code + Noto Sans Hebrew
-coverage atlas: 15×28 cells with 16-level anti-aliased coverage, Japanese
-hiragana/katakana/kanji and Hebrew/Yiddish alongside the primary face's
-Latin/Greek/Cyrillic repertoire, and a U+FFFD fallback for anything the merged
-family does not map. Double-width glyphs occupy a lead plus
-a continuation cell (the same `rustos_vt::char_width` layout the curses window
-writer produces), and their bitmap paints across both cells as one repaint
-unit. It is a full terminal:
+shared `rustos_font` Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
+Hebrew coverage atlas: 15×28 cells with 16-level anti-aliased coverage,
+Japanese hiragana/katakana/kanji, all precomposed Hangul syllables, and
+Hebrew/Yiddish alongside the primary face's Latin/Greek/Cyrillic repertoire,
+with a U+FFFD fallback for anything the merged family does not map. Double-width
+glyphs occupy a lead plus a continuation cell (the same
+`rustos_vt::char_width` layout the curses window writer produces), and their
+bitmap paints across both cells as one repaint unit. It is a full terminal:
 
 - SGR colour: the 16 base colours, the 256-colour palette (colour cube + grey
   ramp), and 24-bit truecolour.

@@ -159,11 +159,12 @@ unchanged (`AGENTS.md` §5.4).
 
 `render(terminal, theme, viewport)` paints the grid into a `rustos-raster`
 `Surface` sized to the viewport, using the theme's palette and the shared
-`rustos-font` monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese
-and Noto Sans Hebrew companions). Hebrew and Yiddish letters, final forms,
-punctuation, and marks occupy individual terminal cells; a Japanese full-width
-bitmap paints its lead and continuation cells as one unit, so a
-continuation-cell background cannot erase half the glyph.
+`rustos-font` monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese,
+D2Coding Korean, and Noto Sans Hebrew companions). Hebrew and Yiddish letters,
+final forms, punctuation, and marks occupy individual terminal cells;
+Japanese and precomposed Hangul full-width bitmaps paint their lead and
+continuation cells as one unit, so a continuation-cell background cannot erase
+half a glyph.
 Each cell is drawn with its own rendition: its
 `lib/vt` `Attributes` select the foreground and background, resolved one way
 (`AGENTS.md` §2.2) — a `Default` colour takes the theme's `on_surface` /

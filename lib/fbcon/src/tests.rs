@@ -231,36 +231,24 @@ fn hebrew_ink_survives_a_coloured_background_and_local_overwrite() {
 }
 
 #[test]
-fn an_uncovered_scalar_renders_the_replacement_glyph() {
-    // Hangul is outside the merged family: the scalar renders U+FFFD, visibly
-    // wrong rather than dropped. It is double-width, so the lead cell holds the
-    // fallback glyph.
-    let (mut console, mut pixels) = small_console();
-    console.write_bytes(&mut pixels, "한".as_bytes());
-    let geometry = *console.geometry();
-    let lead = cell(&pixels, &geometry, 0, 0);
-    let (mut reference, mut ref_pixels) = small_console();
-    reference.write_bytes(&mut ref_pixels, "\u{FFFD}".as_bytes());
-    assert_eq!(lead, cell(&ref_pixels, reference.geometry(), 0, 0));
-}
-
-#[test]
-fn a_japanese_glyph_paints_both_cells_and_advances_by_two() {
-    let (mut console, mut pixels) = console_of(4, 1);
-    console.write_bytes(&mut pixels, "世a".as_bytes());
-    let geometry = *console.geometry();
-    // The lead and continuation cells both carry the full-width glyph, and the
-    // narrow `a` lands in the third column — the same two-column layout the
-    // curses window writer assumes.
-    assert!(!cell_blank(&pixels, &geometry, 0, 0), "lead glyph drawn");
-    assert!(
-        cell_has(&pixels, &geometry, 1, 0, DEFAULT_FOREGROUND),
-        "continuation has glyph ink"
-    );
-    assert!(
-        cell_has(&pixels, &geometry, 2, 0, DEFAULT_FOREGROUND),
-        "a in column 2"
-    );
+fn wide_east_asian_glyphs_paint_both_cells_and_advance_by_two() {
+    for (text, language) in [("世a", "Japanese"), ("한a", "Korean")] {
+        let (mut console, mut pixels) = console_of(4, 1);
+        console.write_bytes(&mut pixels, text.as_bytes());
+        let geometry = *console.geometry();
+        assert!(
+            !cell_blank(&pixels, &geometry, 0, 0),
+            "{language} lead glyph drawn"
+        );
+        assert!(
+            cell_has(&pixels, &geometry, 1, 0, DEFAULT_FOREGROUND),
+            "{language} continuation has glyph ink"
+        );
+        assert!(
+            cell_has(&pixels, &geometry, 2, 0, DEFAULT_FOREGROUND),
+            "a follows {language} glyph in column 2"
+        );
+    }
 }
 
 #[test]

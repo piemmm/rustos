@@ -1,9 +1,9 @@
 //! The system bitmap font and the glyph blitter that draws it onto a
 //! [`Surface`].
 //!
-//! [`BitmapFont`] couples the generated Inconsolata EX + M PLUS 1 Code + Noto
-//! Sans Hebrew atlas with its metrics (cell size, pen advance, line height) and
-//! the coverage-aware blitter.
+//! [`BitmapFont`] couples the generated Inconsolata EX + M PLUS 1 Code +
+//! `D2Coding` + Noto Sans Hebrew atlas with its metrics (cell size, pen advance,
+//! line height) and the coverage-aware blitter.
 //! [`BitmapFont::draw_text`] composites each glyph onto a `lib/raster`
 //! [`Surface`] through that crate's single premultiplied-alpha
 //! [`Pixel::over`] path: the text colour is premultiplied once, scaled per
@@ -18,7 +18,8 @@ use crate::atlas;
 use crate::glyph::{lookup_or_fallback, Glyph};
 
 /// The system monospace bitmap font: Inconsolata EX with its M PLUS 1 Code
-/// Japanese and Noto Sans Hebrew companions, plus their shared layout metrics.
+/// Japanese, `D2Coding` Korean, and Noto Sans Hebrew companions, plus their shared
+/// layout metrics.
 ///
 /// The face's uniform advance already carries the inter-glyph side bearings
 /// and its ascent + descent carry the line box, so the pen advances by
@@ -28,7 +29,8 @@ pub struct BitmapFont(());
 
 impl BitmapFont {
     /// The built-in family, with Inconsolata EX primary, M PLUS 1 Code for
-    /// Japanese coverage, and Noto Sans Hebrew for Hebrew and Yiddish.
+    /// Japanese, `D2Coding` for Korean, and Noto Sans Hebrew for Hebrew and
+    /// Yiddish coverage.
     #[must_use]
     pub const fn inconsolata() -> Self {
         Self(())
@@ -106,11 +108,12 @@ impl BitmapFont {
         let mut pen = x;
         for ch in text.chars() {
             let cells = u32::from(char_width(ch));
+            let glyph = lookup_or_fallback(ch);
             draw_glyph(
                 surface,
                 pen,
                 y,
-                lookup_or_fallback(ch),
+                &glyph,
                 self.advance().saturating_mul(cells),
                 &sources,
             );
@@ -140,7 +143,7 @@ fn draw_glyph(
     surface: &mut Surface,
     x: i32,
     y: i32,
-    glyph: Glyph,
+    glyph: &Glyph,
     width: u32,
     sources: &[Pixel; 16],
 ) {

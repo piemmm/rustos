@@ -1,10 +1,11 @@
 //! `cargo xtask font-atlas` implementation.
 //!
 //! The system text family combines Inconsolata EX (Latin, Greek, Cyrillic),
-//! M PLUS 1 Code Regular (Japanese), and Noto Sans Hebrew `ExtraCondensed`, all
-//! under SIL OFL 1.1 and committed as TrueType sources under `lib/font/assets/`.
-//! Faces have precedence in that order and each companion fills only codepoints
-//! earlier faces do not map. The renderers never parse TrueType at runtime:
+//! M PLUS 1 Code Regular (Japanese), `D2Coding` Regular (Korean), and Noto Sans
+//! Hebrew `ExtraCondensed`, all under SIL OFL 1.1 and committed as TrueType
+//! sources under `lib/font/assets/`. Faces have precedence in that order and
+//! each companion fills only codepoints earlier faces do not map. The renderers
+//! never parse TrueType at runtime:
 //! this command rasterises the merged repertoire into a fixed-cell,
 //! 4-bit-coverage bitmap atlas and emits it as
 //! generated data (`lib/font/src/atlas.rs` + `lib/font/src/atlas_coverage.bin`)
@@ -22,10 +23,10 @@
 //! Pixel geometry: the em square is [`EM_PX`] pixels tall. Inconsolata is
 //! strictly monospace: every spacing glyph advances by one uniform width the
 //! generator reads from the face itself, and that advance defines the terminal
-//! cell. Every bitmap slot is two cells wide so Japanese full-width outlines
-//! can cover the continuation cell reserved by `lib/vt`; narrow outlines leave
-//! the second cell transparent. Cell height and baseline derive from the
-//! primary face. Zero-advance combining marks rasterise like
+//! cell. Every bitmap slot is two cells wide so Japanese and Korean full-width
+//! outlines can cover the continuation cell reserved by `lib/vt`; narrow
+//! outlines leave the second cell transparent. Cell height and baseline derive
+//! from the primary face. Zero-advance combining marks rasterise like
 //! any other glyph — the face draws their outlines inside the advance-wide
 //! cell (GPOS anchor repositioning is a shaping concern the cell grid
 //! deliberately does not have), so each mark lands in its own cell: the same
@@ -38,6 +39,8 @@ use std::path::Path;
 pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/Inconsolata-EX.ttf";
 /// Workspace-relative path of the committed Japanese companion face.
 pub const JAPANESE_TTF_PATH: &str = "lib/font/assets/MPLUS1Code-Regular.ttf";
+/// Workspace-relative path of the committed Korean companion face.
+pub const KOREAN_TTF_PATH: &str = "lib/font/assets/D2Coding-Regular.ttf";
 /// Workspace-relative path of the committed Hebrew companion face.
 pub const HEBREW_TTF_PATH: &str = "lib/font/assets/NotoSansHebrew-ExtraCondensed.ttf";
 /// Workspace-relative path of the generated Rust atlas view.
@@ -57,6 +60,36 @@ const EM_PX: u32 = 25;
 
 /// Maximum terminal cells occupied by one generated glyph bitmap.
 const MAX_GLYPH_CELLS: u32 = 2;
+
+/// Maximum literal run represented by one atlas compression token.
+const MAX_LITERAL_LEN: usize = 128;
+
+/// Minimum repeated byte sequence represented by a back-reference.
+const MIN_MATCH_LEN: usize = 3;
+
+/// Maximum repeated byte sequence represented by one back-reference.
+const MAX_MATCH_LEN: usize = 34;
+
+/// Maximum backwards distance represented by a back-reference.
+const MAX_MATCH_DISTANCE: usize = 1024;
+
+/// Repertoire a face may contribute to the merged system atlas.
+#[derive(Copy, Clone)]
+enum Repertoire {
+    /// Every mapped codepoint not supplied by an earlier face.
+    Full,
+    /// Korean letters only: compatibility jamo and precomposed syllables.
+    Korean,
+}
+
+impl Repertoire {
+    fn contains(self, code: u32) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Korean => (0x3130..=0x318F).contains(&code) || (0xAC00..=0xD7A3).contains(&code),
+        }
+    }
+}
 
 /// Coverage sample rows per pixel row (vertical supersampling).
 const SAMPLE_ROWS: u32 = 4;
@@ -864,13 +897,17 @@ struct Atlas {
     fallback: u32,
 }
 
-/// Rasterise an ordered family of faces into an [`Atlas`].
+/// Rasterise an ordered family of scoped faces into an [`Atlas`].
 ///
 /// For an overlapping codepoint, the earliest face supplies the outline.
-fn build_atlas(face_data: &[&[u8]]) -> Result<Atlas, String> {
+fn build_atlas(face_data: &[(&[u8], Repertoire)]) -> Result<Atlas, String> {
     let faces = face_data
         .iter()
-        .map(|data| Face::parse(data))
+        .map(|&(data, repertoire)| {
+            let mut face = Face::parse(data)?;
+            face.mapped.retain(|&(code, _)| repertoire.contains(code));
+            Ok::<_, String>(face)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let primary = faces
         .first()
@@ -948,22 +985,37 @@ impl Atlas {
             * self.geometry.height as usize
     }
 
-    /// The packed coverage payload: every glyph bitmap concatenated in codepoint
-    /// order, each row packed two pixels per byte, left pixel in the high
-    /// nibble.
-    fn coverage_bytes(&self) -> Vec<u8> {
+    /// The coverage payload: a little-endian offset table followed by one
+    /// independently compressed block per glyph. Independent blocks keep
+    /// lookup bounded to one glyph and make a corrupt block unable to affect
+    /// its neighbours.
+    fn coverage_bytes(&self) -> Result<Vec<u8>, String> {
         let width = self.geometry.width as usize * MAX_GLYPH_CELLS as usize;
-        let mut bytes = Vec::with_capacity(self.cells.len() * self.bytes_per_glyph());
+        let mut compressed = Vec::new();
+        let mut offsets = Vec::with_capacity(self.cells.len() + 1);
+        offsets.push(0u32);
         for cell in &self.cells {
+            let mut packed = Vec::with_capacity(self.bytes_per_glyph());
             for row in cell.chunks(width) {
                 for pair in row.chunks(2) {
                     let high = pair[0] << 4;
                     let low = pair.get(1).copied().unwrap_or(0);
-                    bytes.push(high | low);
+                    packed.push(high | low);
                 }
             }
+            compress_glyph(&packed, &mut compressed)?;
+            offsets
+                .push(u32::try_from(compressed.len()).map_err(|_| {
+                    "font-atlas: compressed payload exceeds u32 offsets".to_owned()
+                })?);
         }
-        bytes
+        let table_bytes = offsets.len() * size_of::<u32>();
+        let mut bytes = Vec::with_capacity(table_bytes + compressed.len());
+        for offset in offsets {
+            bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        bytes.extend_from_slice(&compressed);
+        Ok(bytes)
     }
 
     /// Render the generated Rust view (`lib/font/src/atlas.rs`).
@@ -974,13 +1026,15 @@ impl Atlas {
              //\n\
              // Emitted by `cargo xtask font-atlas --write` from the committed faces\n\
              // under `lib/font/assets/` (SIL OFL 1.1; see\n\
-             // `lib/font/assets/OFL.txt` and `NotoSansHebrew-OFL.txt`).\n\
+             // `lib/font/assets/OFL.txt`, `D2Coding-OFL.txt`, and\n\
+             // `NotoSansHebrew-OFL.txt`).\n\
              // `cargo xtask font-atlas` (run by `ci`)\n\
              // fails closed if this file drifts from a fresh generation\n\
              // (AGENTS.md §2.2: generated views are never hand-maintained).\n\n",
         );
         out.push_str(
-            "//! The generated Inconsolata EX + M PLUS 1 Code + Noto Sans Hebrew\n\
+            "//! The generated Inconsolata EX + M PLUS 1 Code + `D2Coding` +\n\
+             //! Noto Sans Hebrew\n\
              //! glyph atlas: fixed-cell 4-bit coverage bitmaps for the merged\n\
              //! repertoire, plus the codepoint → glyph-index range table. Pure data;\n\
              //! lookup and blitting live in\n\
@@ -1053,9 +1107,10 @@ impl Atlas {
         }
         out.push_str("];\n\n");
         out.push_str(
-            "/// The packed coverage payload: [`CELL_COUNT`] glyph bitmaps of\n\
-             /// [`BYTES_PER_GLYPH`] bytes each, in range order. Within a bitmap: row\n\
-             /// major, two 4-bit pixels per byte, left pixel in the high nibble,\n\
+            "/// The coverage payload: a `(CELL_COUNT + 1)`-entry little-endian\n\
+             /// `u32` offset table followed by one independently compressed block per\n\
+             /// glyph. Decoded bitmaps are [`BYTES_PER_GLYPH`] bytes in range order:\n\
+             /// row major, two 4-bit pixels per byte, left pixel in the high nibble,\n\
              /// `0` transparent through `15` fully covered.\n\
              pub static COVERAGE: &[u8] = include_bytes!(\"atlas_coverage.bin\");\n",
         );
@@ -1063,10 +1118,94 @@ impl Atlas {
     }
 }
 
+/// Compress one packed glyph with a bounded LZ token stream.
+///
+/// A token below `0x80` is followed by `token + 1` literal bytes. A token at
+/// or above `0x80` and its following byte encode a 3–34 byte back-reference:
+/// the token's low two bits and the following byte hold `distance - 1`, while
+/// bits 2–6 hold `length - 3`. Matches never cross glyph boundaries.
+fn compress_glyph(glyph: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+    let mut literal_start = 0usize;
+    let mut cursor = 0usize;
+    while cursor < glyph.len() {
+        let (distance, length) = best_match(glyph, cursor);
+        if length < MIN_MATCH_LEN {
+            cursor += 1;
+            if cursor - literal_start == MAX_LITERAL_LEN {
+                emit_literals(&glyph[literal_start..cursor], output)?;
+                literal_start = cursor;
+            }
+            continue;
+        }
+        emit_literals(&glyph[literal_start..cursor], output)?;
+        let distance_minus_one = distance - 1;
+        let encoded_length = u8::try_from(length - MIN_MATCH_LEN)
+            .map_err(|_| "font-atlas: match length exceeds token field".to_owned())?;
+        let distance_high = u8::try_from(distance_minus_one >> 8)
+            .map_err(|_| "font-atlas: match distance exceeds token field".to_owned())?;
+        let distance_low = u8::try_from(distance_minus_one & 0xFF)
+            .map_err(|_| "font-atlas: match distance low byte exceeds token field".to_owned())?;
+        let token = 0x80 | (encoded_length << 2) | distance_high;
+        output.push(token);
+        output.push(distance_low);
+        cursor += length;
+        literal_start = cursor;
+    }
+    emit_literals(&glyph[literal_start..], output)?;
+    Ok(())
+}
+
+/// Find the longest encodable match ending before `cursor`.
+fn best_match(glyph: &[u8], cursor: usize) -> (usize, usize) {
+    if cursor + MIN_MATCH_LEN > glyph.len() {
+        return (0, 0);
+    }
+    let first_candidate = cursor.saturating_sub(MAX_MATCH_DISTANCE);
+    let mut best_distance = 0usize;
+    let mut best_length = 0usize;
+    for candidate in (first_candidate..cursor).rev() {
+        if glyph[candidate] != glyph[cursor] {
+            continue;
+        }
+        let max_length = MAX_MATCH_LEN.min(glyph.len() - cursor);
+        let mut length = 1usize;
+        while length < max_length && glyph[candidate + length] == glyph[cursor + length] {
+            length += 1;
+        }
+        if length > best_length {
+            best_distance = cursor - candidate;
+            best_length = length;
+            if length == max_length {
+                break;
+            }
+        }
+    }
+    (best_distance, best_length)
+}
+
+/// Emit a non-empty literal slice in chunks accepted by the decoder.
+fn emit_literals(mut literals: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+    while !literals.is_empty() {
+        let length = literals.len().min(MAX_LITERAL_LEN);
+        output.push(
+            u8::try_from(length - 1)
+                .map_err(|_| "font-atlas: literal length exceeds token field".to_owned())?,
+        );
+        output.extend_from_slice(&literals[..length]);
+        literals = &literals[length..];
+    }
+    Ok(())
+}
+
 /// Generate the atlas from the committed face, returning the two artefacts
 /// as `(rust_view, coverage_payload)`.
 fn generate(workspace_root: &Path) -> Result<(String, Vec<u8>), String> {
-    let paths = [DEFAULT_TTF_PATH, JAPANESE_TTF_PATH, HEBREW_TTF_PATH];
+    let paths = [
+        DEFAULT_TTF_PATH,
+        JAPANESE_TTF_PATH,
+        KOREAN_TTF_PATH,
+        HEBREW_TTF_PATH,
+    ];
     let face_data = paths
         .map(|path| {
             let path = workspace_root.join(path);
@@ -1075,9 +1214,18 @@ fn generate(workspace_root: &Path) -> Result<(String, Vec<u8>), String> {
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let faces = face_data.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let faces = face_data
+        .iter()
+        .map(Vec::as_slice)
+        .zip([
+            Repertoire::Full,
+            Repertoire::Full,
+            Repertoire::Korean,
+            Repertoire::Full,
+        ])
+        .collect::<Vec<_>>();
     let atlas = build_atlas(&faces)?;
-    Ok((atlas.render_rust(), atlas.coverage_bytes()))
+    Ok((atlas.render_rust(), atlas.coverage_bytes()?))
 }
 
 /// Regenerate the committed atlas artefacts in place (`--write`).
@@ -1133,19 +1281,38 @@ mod tests {
         std::fs::read(workspace_root().join(DEFAULT_TTF_PATH)).expect("committed face")
     }
 
-    fn committed_fallback_face() -> Vec<u8> {
-        std::fs::read(workspace_root().join(JAPANESE_TTF_PATH)).expect("committed fallback face")
+    fn committed_japanese_face() -> Vec<u8> {
+        std::fs::read(workspace_root().join(JAPANESE_TTF_PATH)).expect("committed Japanese face")
+    }
+
+    fn committed_korean_face() -> Vec<u8> {
+        std::fs::read(workspace_root().join(KOREAN_TTF_PATH)).expect("committed Korean face")
     }
 
     fn committed_hebrew_face() -> Vec<u8> {
         std::fs::read(workspace_root().join(HEBREW_TTF_PATH)).expect("committed Hebrew face")
     }
 
+    fn system_faces<'a>(
+        primary: &'a [u8],
+        japanese: &'a [u8],
+        korean: &'a [u8],
+        hebrew: &'a [u8],
+    ) -> [(&'a [u8], Repertoire); 4] {
+        [
+            (primary, Repertoire::Full),
+            (japanese, Repertoire::Full),
+            (korean, Repertoire::Korean),
+            (hebrew, Repertoire::Full),
+        ]
+    }
+
     fn committed_atlas() -> Atlas {
         let primary = committed_face();
-        let japanese = committed_fallback_face();
+        let japanese = committed_japanese_face();
+        let korean = committed_korean_face();
         let hebrew = committed_hebrew_face();
-        build_atlas(&[&primary, &japanese, &hebrew]).expect("atlas builds")
+        build_atlas(&system_faces(&primary, &japanese, &korean, &hebrew)).expect("atlas builds")
     }
 
     /// The coverage cell for `code`, unpacked to one nibble value per pixel.
@@ -1159,6 +1326,44 @@ mod tests {
         &atlas.cells[index]
     }
 
+    fn payload_offset(payload: &[u8], index: usize) -> usize {
+        let start = index * size_of::<u32>();
+        let bytes: [u8; 4] = payload[start..start + 4].try_into().expect("offset entry");
+        u32::from_le_bytes(bytes) as usize
+    }
+
+    fn decode_for_test(mut encoded: &[u8], decoded_len: usize) -> Vec<u8> {
+        let mut decoded = Vec::with_capacity(decoded_len);
+        while let Some((&token, rest)) = encoded.split_first() {
+            encoded = rest;
+            if token < 0x80 {
+                let length = usize::from(token) + 1;
+                decoded.extend_from_slice(&encoded[..length]);
+                encoded = &encoded[length..];
+                continue;
+            }
+            let (&distance_low, rest) = encoded.split_first().expect("match distance");
+            encoded = rest;
+            let length = usize::from((token >> 2) & 0x1F) + MIN_MATCH_LEN;
+            let distance = ((usize::from(token & 0x03) << 8) | usize::from(distance_low)) + 1;
+            for _ in 0..length {
+                decoded.push(decoded[decoded.len() - distance]);
+            }
+        }
+        assert_eq!(decoded.len(), decoded_len, "decoded glyph length");
+        decoded
+    }
+
+    fn packed_cell(cell: &[u8], width: usize) -> Vec<u8> {
+        let mut packed = Vec::with_capacity(cell.len().div_ceil(2));
+        for row in cell.chunks(width) {
+            for pair in row.chunks(2) {
+                packed.push((pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
+            }
+        }
+        packed
+    }
+
     #[test]
     fn geometry_matches_the_face_metrics() {
         let atlas = committed_atlas();
@@ -1168,6 +1373,28 @@ mod tests {
         assert_eq!(atlas.geometry.height, 28);
         assert_eq!(atlas.geometry.baseline, 23);
         assert_eq!(atlas.bytes_per_glyph(), 15 * 28);
+    }
+
+    #[test]
+    fn compressed_payload_round_trips_without_size_regression() {
+        const PRE_KOREAN_PAYLOAD_BYTES: usize = 3_756_060;
+
+        let atlas = committed_atlas();
+        let payload = atlas.coverage_bytes().expect("coverage encoding succeeds");
+        assert!(
+            payload.len() <= PRE_KOREAN_PAYLOAD_BYTES,
+            "compressed payload grew to {} bytes",
+            payload.len()
+        );
+        let table_len = (atlas.cells.len() + 1) * size_of::<u32>();
+        let blocks = &payload[table_len..];
+        let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
+        for (index, cell) in atlas.cells.iter().enumerate() {
+            let start = payload_offset(&payload, index);
+            let end = payload_offset(&payload, index + 1);
+            let decoded = decode_for_test(&blocks[start..end], atlas.bytes_per_glyph());
+            assert_eq!(decoded, packed_cell(cell, width), "glyph {index}");
+        }
     }
 
     #[test]
@@ -1275,6 +1502,34 @@ mod tests {
     }
 
     #[test]
+    fn korean_is_covered_with_two_cell_glyphs() {
+        let atlas = committed_atlas();
+        let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
+        for ch in ['가', '각', '한', '글', '안', '녕', '하', '세', '요', '힣'] {
+            let glyph = cell_of(&atlas, u32::from(ch));
+            assert!(
+                glyph.iter().any(|&coverage| coverage > 0),
+                "{ch:?} has no ink"
+            );
+            assert!(
+                glyph
+                    .chunks(width)
+                    .any(|row| row[atlas.geometry.width as usize..].iter().any(|&c| c > 0)),
+                "{ch:?} never reaches its continuation cell"
+            );
+        }
+    }
+
+    #[test]
+    fn korean_scope_excludes_unrelated_companion_glyphs() {
+        let atlas = committed_atlas();
+        let unrelated_d2coding_codepoint = 0x1D02;
+        assert!(atlas.ranges.iter().all(|range| {
+            !(range.first..range.first + range.len).contains(&unrelated_d2coding_codepoint)
+        }));
+    }
+
+    #[test]
     fn hebrew_is_covered_with_single_cell_glyphs() {
         let atlas = committed_atlas();
         let width = atlas.geometry.width as usize * MAX_GLYPH_CELLS as usize;
@@ -1312,33 +1567,81 @@ mod tests {
     #[test]
     fn generation_is_deterministic() {
         let face = committed_face();
-        let fallback_face = committed_fallback_face();
+        let japanese_face = committed_japanese_face();
+        let korean_face = committed_korean_face();
         let hebrew_face = committed_hebrew_face();
-        let faces = [&face[..], &fallback_face[..], &hebrew_face[..]];
+        let faces = system_faces(&face, &japanese_face, &korean_face, &hebrew_face);
         let a = build_atlas(&faces).expect("atlas builds");
         let b = build_atlas(&faces).expect("atlas builds");
         assert_eq!(a.render_rust(), b.render_rust());
-        assert_eq!(a.coverage_bytes(), b.coverage_bytes());
+        assert_eq!(
+            a.coverage_bytes().expect("first encoding succeeds"),
+            b.coverage_bytes().expect("second encoding succeeds")
+        );
     }
 
     #[test]
     fn truncated_face_fails_closed() {
         let face = committed_face();
-        let fallback_face = committed_fallback_face();
+        let japanese_face = committed_japanese_face();
+        let korean_face = committed_korean_face();
         let hebrew_face = committed_hebrew_face();
         assert!(build_atlas(&[]).is_err());
-        assert!(build_atlas(&[&face[..64], &fallback_face, &hebrew_face]).is_err());
-        assert!(build_atlas(&[&face[..face.len() / 2], &fallback_face, &hebrew_face]).is_err());
-        assert!(build_atlas(&[&face, &fallback_face[..64], &hebrew_face]).is_err());
-        assert!(build_atlas(&[
-            &face,
-            &fallback_face[..fallback_face.len() / 2],
+        assert!(build_atlas(&system_faces(
+            &face[..64],
+            &japanese_face,
+            &korean_face,
             &hebrew_face,
-        ])
+        ))
         .is_err());
-        assert!(build_atlas(&[&face, &fallback_face, &hebrew_face[..64]]).is_err());
-        assert!(
-            build_atlas(&[&face, &fallback_face, &hebrew_face[..hebrew_face.len() / 2],]).is_err()
-        );
+        assert!(build_atlas(&system_faces(
+            &face[..face.len() / 2],
+            &japanese_face,
+            &korean_face,
+            &hebrew_face,
+        ))
+        .is_err());
+        assert!(build_atlas(&system_faces(
+            &face,
+            &japanese_face[..64],
+            &korean_face,
+            &hebrew_face,
+        ))
+        .is_err());
+        assert!(build_atlas(&system_faces(
+            &face,
+            &japanese_face[..japanese_face.len() / 2],
+            &korean_face,
+            &hebrew_face,
+        ))
+        .is_err());
+        assert!(build_atlas(&system_faces(
+            &face,
+            &japanese_face,
+            &korean_face[..64],
+            &hebrew_face,
+        ))
+        .is_err());
+        assert!(build_atlas(&system_faces(
+            &face,
+            &japanese_face,
+            &korean_face[..korean_face.len() / 2],
+            &hebrew_face,
+        ))
+        .is_err());
+        assert!(build_atlas(&system_faces(
+            &face,
+            &japanese_face,
+            &korean_face,
+            &hebrew_face[..64],
+        ))
+        .is_err());
+        assert!(build_atlas(&system_faces(
+            &face,
+            &japanese_face,
+            &korean_face,
+            &hebrew_face[..hebrew_face.len() / 2],
+        ))
+        .is_err());
     }
 }

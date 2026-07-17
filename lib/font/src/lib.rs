@@ -1,9 +1,9 @@
 //! Shared text rasterisation primitives (`lib/font`).
 //!
 //! This crate is the single home of the system's text rendering: the
-//! generated Inconsolata EX + M PLUS 1 Code + Noto Sans Hebrew glyph atlas
-//! ([`atlas`], emitted by `cargo xtask font-atlas --write` from the committed
-//! SIL OFL 1.1 faces in `assets/`), the Unicode glyph lookup over it
+//! generated Inconsolata EX + M PLUS 1 Code + `D2Coding` + Noto Sans Hebrew glyph
+//! atlas ([`atlas`], emitted by `cargo xtask font-atlas --write` from the
+//! committed SIL OFL 1.1 faces in `assets/`), the Unicode glyph lookup over it
 //! ([`glyph`]), and the blitter
 //! that draws it onto a `lib/raster` `Surface` ([`font`], behind the
 //! default-on `render` feature). Font rendering is one of the curated
@@ -13,12 +13,13 @@
 //!
 //! Inconsolata EX remains primary for Latin, Greek, Cyrillic, box drawing,
 //! arrows, punctuation, and currency; M PLUS 1 Code fills missing Japanese
-//! hiragana, katakana, punctuation, and kanji; Noto Sans Hebrew `ExtraCondensed`
-//! fills Hebrew and Yiddish letters, punctuation, and marks. Anything outside
-//! the merged repertoire renders U+FFFD, visibly wrong rather than silently
-//! dropped. The cell model is one scalar per grid entry: a zero-advance
-//! combining mark occupies its own cell, while a wide Japanese bitmap may cover
-//! the lead and continuation cells reserved by `rustos_vt::char_width`.
+//! hiragana, katakana, punctuation, and kanji; `D2Coding` fills all precomposed
+//! Hangul syllables; Noto Sans Hebrew `ExtraCondensed` fills Hebrew and Yiddish
+//! letters, punctuation, and marks. Anything outside the merged repertoire
+//! renders U+FFFD, visibly wrong rather than silently dropped. The cell model is
+//! one scalar per grid entry: a zero-advance combining mark occupies its own
+//! cell, while a wide Japanese or Korean bitmap may cover the lead and
+//! continuation cells reserved by `rustos_vt::char_width`.
 //!
 //! The [`atlas`] and [`glyph`] modules are dependency-free `no_std` data and
 //! lookup, so a consumer that brings its own blitter — the framebuffer
@@ -36,6 +37,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+#[cfg(test)]
+extern crate std;
 
 pub mod atlas;
 #[cfg(feature = "render")]
