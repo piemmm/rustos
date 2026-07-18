@@ -252,9 +252,24 @@ its sample again.
 A detection carries the full diagnosis, never secrets: `cpu` (the locked
 CPU), `observer` (the CPU that caught a cross-CPU lockup), `stalled_ms` (how
 long it has been silent), and — from the last-known context each cadence
-sample records — `pc` (interrupted program counter) and `pstate`
-(interrupted processor state). Every episode is reported **once**, never
-once per tick, and self-closes on recovery.
+sample records — `pc` (interrupted program counter), `pstate` (interrupted
+processor state), and `context` (`kernel` or `user`, the most decisive clue
+for the "why"). A hard lockup's recorded sample is, by definition, the one
+taken *before* the CPU went silent, so it names the innocent code the CPU
+last returned to rather than the wedge: the record marks it
+`sampled=pre_silence`, and the observer reads the interrupt controller's
+globally-shared state live to name the device line actually stuck —
+`stuck_irq=<id>`, the lowest shared line stuck active over merely pending —
+through the Arch-HAL query `WatchdogArch::stuck_interrupt` (aarch64: the
+lowest active/pending GICv2 SPI). Because the id alone cannot say whether
+that line is a live storm or a line already masked-and-contained, the record
+adds `stuck_state=<active|pending>,<enabled|masked>`: `active,enabled` is a
+handler in flight on an unmasked line (a real storm), while `pending,masked`
+is a line asserted but already contained by the kernel (the wedge is
+elsewhere). `stuck_irq`/`stuck_state` are omitted when no line is stuck (a
+pure IRQ-masked in-kernel spin), and a soft lockup — whose sample is live —
+carries neither marker. Every episode is reported **once**, never once per
+tick, and self-closes on recovery.
 
 `CPU_LOCKUP_RECOVERY` (a `Warn`) records the best-effort recovery the
 watchdog asked the architecture port for after a detection

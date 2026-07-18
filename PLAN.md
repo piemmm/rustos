@@ -1998,7 +1998,19 @@ order (one fully-gated increment each):
                    emits `CPU_HARD_LOCKUP_DETECTED` (4082) / `_CLEARED` (4083).
                    Each sample records the interrupted PC/PSTATE/kernel-vs-user
                    as last-known context, so a detection carries `cpu`,
-                   `observer`, `stalled_ms`, `pc`, `pstate`. A detection drives
+                   `observer`, `stalled_ms`, `pc`, `pstate`, `context`. A hard
+                   lockup's recorded sample is stale (taken before the CPU went
+                   silent), so it is marked `sampled=pre_silence` and the
+                   observer names the live stuck controller line as
+                   `stuck_irq=<id>` plus `stuck_state=<active|pending>,<enabled|
+                   masked>` via the Arch-HAL query `WatchdogArch::stuck_interrupt`
+                   returning a `StuckInterrupt {intid, active, enabled}` (default
+                   `None`; aarch64 reads the lowest active/pending GICv2 SPI and
+                   its `GICD_ISENABLER` bit through `gic::stuck_spi`, host-tested
+                   against the mock distributor). `stuck_state` distinguishes a
+                   live storm (`active,enabled`) from a masked-but-asserted line
+                   the kernel already contained (`pending,masked`), so the pin is
+                   unambiguous. A detection drives
                    a best-effort `WatchdogArch::request_recovery` (reschedule
                    for soft, directed attention for hard), recorded with its
                    honest outcome as `CPU_LOCKUP_RECOVERY` (4084). All paths

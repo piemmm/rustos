@@ -73,7 +73,9 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use tairix_arch_api::{CpuId, RecoveryOutcome, WatchdogArch, WatchdogKind, WatchdogSample};
+use tairix_arch_api::{
+    CpuId, RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind, WatchdogSample,
+};
 use tairix_log::{Level, Sink};
 use tairix_sync::once::OnceCell;
 use tairix_util::fmt::format_hex_u64;
@@ -466,7 +468,13 @@ fn scan(observer: CpuId, now_ns: u64) {
         };
         match classify(state, now_ns) {
             Verdict::HardOnset(elapsed) => {
-                let diag = Diag::snapshot(state);
+                // The victim's own last-known sample is stale (it went
+                // silent), so mark it pre-silence and read the shared
+                // controller live for the device line actually wedging it —
+                // the "why" the stale sample cannot give.
+                let mut diag = Diag::snapshot(state);
+                diag.sample_stale = true;
+                diag.stuck = recovery().and_then(WatchdogArch::stuck_interrupt);
                 report_lockup(
                     AuditEvent::CpuHardLockupDetected,
                     Level::Error,
@@ -478,6 +486,9 @@ fn scan(observer: CpuId, now_ns: u64) {
                 drive_recovery(target, WatchdogKind::Hard);
             }
             Verdict::SoftOnset(elapsed) => {
+                // A soft-locked CPU is still taking its watchdog sample, so
+                // its recorded context is fresh (`sample_stale` stays false)
+                // and there is no stuck-line story to tell.
                 let diag = Diag::snapshot(state);
                 report_lockup(
                     AuditEvent::CpuStallDetected,
@@ -593,6 +604,21 @@ struct Diag {
     /// kernel (a held lock / in-flight syscall / masked in-kernel spin) or a
     /// user task — the single most decisive clue for the "why".
     in_kernel: bool,
+    /// Whether the recorded sample is *stale* — the last one taken before
+    /// the CPU went silent (a hard lockup), so pc/aux/context name the
+    /// innocent code the CPU last returned to, not the wedge. Rendered as
+    /// `sampled=pre_silence`. A soft lockup's sample is live, so this is
+    /// `false` and no marker is rendered.
+    sample_stale: bool,
+    /// The device interrupt the **observer** read live as stuck in the
+    /// shared controller (active over pending), or `None`. Rendered as
+    /// `stuck_irq=<id>` plus `stuck_state=<active|pending>,<enabled|masked>`
+    /// — the "why" the stale sample cannot give, with enough state to tell
+    /// a live storm (active, enabled) from a masked-but-asserted line the
+    /// kernel already contained (pending, masked). Filled only on the
+    /// hard-lockup path (the observer's cross-CPU read); a snapshot of the
+    /// CPU's own context leaves it `None`.
+    stuck: Option<StuckInterrupt>,
 }
 
 impl Diag {
@@ -602,6 +628,8 @@ impl Diag {
         task: WatchdogSample::NO_TASK,
         aux: 0,
         in_kernel: false,
+        sample_stale: false,
+        stuck: None,
     };
 
     /// Whether this diagnosis carries a real captured sample (as opposed to
@@ -611,14 +639,32 @@ impl Diag {
         self.pc != 0 || self.task != WatchdogSample::NO_TASK
     }
 
-    /// Read a CPU's recorded last-known context.
+    /// Read a CPU's recorded last-known context. The observer-supplied
+    /// `sample_stale` / `stuck` fields default off; the hard-lockup
+    /// path sets them after the snapshot.
     fn snapshot(state: &CpuState) -> Self {
         Self {
             pc: state.wd_ctx_pc.load(Ordering::Acquire),
             task: state.wd_ctx_task.load(Ordering::Acquire),
             aux: state.wd_ctx_aux.load(Ordering::Acquire),
             in_kernel: state.wd_ctx_in_kernel.load(Ordering::Acquire),
+            sample_stale: false,
+            stuck: None,
         }
+    }
+}
+
+/// A short, stable tag for a stuck line's state: whether it is actively
+/// storming (`active`) or merely `pending`, and whether it is still
+/// `enabled` (free to keep firing) or `masked` (contained). This is what
+/// separates a live wedge (`active,enabled`) from a masked-but-asserted
+/// line the kernel already contained (`pending,masked`).
+fn stuck_state_tag(stuck: StuckInterrupt) -> &'static str {
+    match (stuck.active, stuck.enabled) {
+        (true, true) => "active,enabled",
+        (true, false) => "active,masked",
+        (false, true) => "pending,enabled",
+        (false, false) => "pending,masked",
     }
 }
 
@@ -672,10 +718,10 @@ fn report_to(
 
     // Build the field list on the stack. The order is stable so a reader
     // and a parser see the same shape every time.
-    let mut fields: [tairix_log::Field<'_>; 7] = [tairix_log::Field {
+    let mut fields: [tairix_log::Field<'_>; 10] = [tairix_log::Field {
         key: "cpu",
         value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
-    }; 7];
+    }; 10];
     let mut n = 1;
     if let Some(obs) = observer {
         fields[n] = tairix_log::Field {
@@ -714,6 +760,34 @@ fn report_to(
         fields[n] = tairix_log::Field {
             key: "context",
             value: tairix_log::FieldValue::Str(if diag.in_kernel { "kernel" } else { "user" }),
+        };
+        n += 1;
+        // A hard lockup's context is the last sample taken *before* the CPU
+        // went silent (~`stalled_ms` old), not a live reading — mark it so
+        // a reader does not mistake the innocent code the CPU last returned
+        // to for the actual wedge.
+        if diag.sample_stale {
+            fields[n] = tairix_log::Field {
+                key: "sampled",
+                value: tairix_log::FieldValue::Str("pre_silence"),
+            };
+            n += 1;
+        }
+    }
+    // The device interrupt currently stuck in the shared controller, read
+    // live by the observer — the "why" the stale sample cannot give. The
+    // id alone is ambiguous, so `stuck_state` says whether it is a live
+    // storm (`active,enabled`) or a masked-but-asserted line the kernel
+    // already contained (`pending,masked`).
+    if let Some(stuck) = diag.stuck {
+        fields[n] = tairix_log::Field {
+            key: "stuck_irq",
+            value: tairix_log::FieldValue::UnsignedInt(u64::from(stuck.intid)),
+        };
+        n += 1;
+        fields[n] = tairix_log::Field {
+            key: "stuck_state",
+            value: tairix_log::FieldValue::Str(stuck_state_tag(stuck)),
         };
         n += 1;
     }
@@ -1119,6 +1193,12 @@ mod tests {
             task: 12,
             aux: 0x3c5,
             in_kernel: true,
+            sample_stale: true,
+            stuck: Some(StuckInterrupt {
+                intid: 37,
+                active: true,
+                enabled: true,
+            }),
         };
         report_to(
             sink,
@@ -1143,6 +1223,89 @@ mod tests {
         // The kernel/user context distinguishes an in-kernel wedge from a
         // spinning user task — the most decisive clue for the "why".
         assert_eq!(field(ev, "context"), Some("kernel"));
+        // The recorded pc/pstate are the last sample *before* the CPU went
+        // silent, and the observer read the live stuck controller line.
+        assert_eq!(field(ev, "sampled"), Some("pre_silence"));
+        assert_eq!(field(ev, "stuck_irq"), Some("37"));
+        // The state pins whether it is a live storm or a contained line.
+        assert_eq!(field(ev, "stuck_state"), Some("active,enabled"));
+    }
+
+    #[test]
+    fn a_hard_lockup_without_a_stuck_line_omits_it() {
+        // No SPI is stuck (the wedge is a pure in-kernel spin with IRQs
+        // masked, not a storm), so the observer reports no line rather than
+        // a fabricated one — but still marks the sample pre-silence.
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let diag = Diag {
+            pc: 0x0021_d42c,
+            task: WatchdogSample::NO_TASK,
+            aux: 0x345,
+            in_kernel: true,
+            sample_stale: true,
+            stuck: None,
+        };
+        report_to(
+            sink,
+            AuditEvent::CpuHardLockupDetected,
+            Level::Error,
+            1,
+            Some(0),
+            10_000_000_000,
+            &diag,
+        );
+        let ev = &sink.snapshot()[0];
+        assert_eq!(field(ev, "context"), Some("kernel"));
+        assert_eq!(field(ev, "sampled"), Some("pre_silence"));
+        assert_eq!(field(ev, "stuck_irq"), None);
+        assert_eq!(field(ev, "stuck_state"), None);
+    }
+
+    #[test]
+    fn stuck_state_tag_names_every_active_enabled_combination() {
+        let tag = |active, enabled| {
+            stuck_state_tag(StuckInterrupt {
+                intid: 111,
+                active,
+                enabled,
+            })
+        };
+        assert_eq!(tag(true, true), "active,enabled");
+        assert_eq!(tag(true, false), "active,masked");
+        assert_eq!(tag(false, true), "pending,enabled");
+        assert_eq!(tag(false, false), "pending,masked");
+    }
+
+    #[test]
+    fn a_masked_pending_stuck_line_reports_it_as_contained() {
+        // The decisive case: a line asserted but already masked by the
+        // kernel is contained, not a live storm. The report says so
+        // (`pending,masked`) so a reader looks elsewhere for the wedge.
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let diag = Diag {
+            pc: 0x0021_d524,
+            task: WatchdogSample::NO_TASK,
+            aux: 0x345,
+            in_kernel: true,
+            sample_stale: true,
+            stuck: Some(StuckInterrupt {
+                intid: 111,
+                active: false,
+                enabled: false,
+            }),
+        };
+        report_to(
+            sink,
+            AuditEvent::CpuHardLockupDetected,
+            Level::Error,
+            1,
+            Some(0),
+            10_000_000_000,
+            &diag,
+        );
+        let ev = &sink.snapshot()[0];
+        assert_eq!(field(ev, "stuck_irq"), Some("111"));
+        assert_eq!(field(ev, "stuck_state"), Some("pending,masked"));
     }
 
     #[test]
@@ -1153,6 +1316,8 @@ mod tests {
             task: 15,
             aux: 0x6000_0000,
             in_kernel: false,
+            sample_stale: false,
+            stuck: None,
         };
         report_to(
             sink,
@@ -1165,6 +1330,11 @@ mod tests {
         );
         let ev = &sink.snapshot()[0];
         assert_eq!(field(ev, "context"), Some("user"));
+        // A soft lockup's sample is live (the CPU still takes its watchdog
+        // sample), so it carries no pre-silence marker and no stuck line.
+        assert_eq!(field(ev, "sampled"), None);
+        assert_eq!(field(ev, "stuck_irq"), None);
+        assert_eq!(field(ev, "stuck_state"), None);
     }
 
     #[test]
@@ -1187,6 +1357,11 @@ mod tests {
         assert_eq!(field(ev, "pc"), None);
         assert_eq!(field(ev, "task"), None);
         assert_eq!(field(ev, "pstate"), None);
+        // A clear record carries no sample, so neither the pre-silence
+        // marker nor a stuck line is rendered.
+        assert_eq!(field(ev, "sampled"), None);
+        assert_eq!(field(ev, "stuck_irq"), None);
+        assert_eq!(field(ev, "stuck_state"), None);
     }
 
     #[test]

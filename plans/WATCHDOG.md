@@ -50,6 +50,29 @@ task, `context` (whether the last-known sample was in **kernel** code or a
 **user** task — the most decisive clue for a wedge's "why"), and the recovery
 kind + outcome.
 
+Two further hard-lockup fields make the diagnosis honest and actionable. A
+hard lockup's recorded pc/pstate/context are, by definition, the last sample
+taken *before* the CPU went silent (~`stalled_ms` old) — they name the
+innocent code the CPU last returned to, not the wedge — so the record carries
+`sampled=pre_silence` to say so (a soft lockup's sample is live and carries no
+such marker). Because that stale sample cannot name what is wedging the core
+*now*, the observer reads the interrupt controller's globally-shared state
+live and reports `stuck_irq=<id>` together with `stuck_state`: the lowest
+shared line stuck **active** (handler in flight, never completed) in
+preference to merely **pending**. The read is a new Arch-HAL query,
+`WatchdogArch::stuck_interrupt`, returning a `StuckInterrupt {intid, active,
+enabled}` (default `None`; a port with no globally-observable controller
+state reports nothing rather than guessing). The id alone is ambiguous, so
+`stuck_state=<active|pending>,<enabled|masked>` records both whether a
+handler is in flight (`active`) and whether the line is still unmasked
+(`enabled`): a live storm reads `active,enabled`, while a line the kernel
+already masked after one delivery whose source never deasserted reads
+`pending,masked` (asserted but contained, so the wedge is elsewhere).
+Only shared lines are observable this way — aarch64 GICv2 SPIs (id ≥ 32);
+per-CPU banked SGIs/PPIs are not, since the observer cannot read another CPU's
+banked state. `stuck_irq` is omitted when no line is stuck (a pure in-kernel
+spin with IRQs masked, not a storm).
+
 ## Monopoly guard: a lone CPU-bound user task (done)
 
 The ordinary preemption tick is competitor-gated (`preempt::preempt_current`):
@@ -100,6 +123,16 @@ owns the timer + the `WatchdogArch` recovery (directed reschedule/attention SGI
 via `gic::send_sgi`); `exceptions::handle_irq` dispatches PPI 27; the bin
 (`gic_irq.rs`) installs the callback (reads `ELR_EL1`/`SPSR_EL1`, builds the
 neutral `WatchdogSample`) and arms the cadence on every online CPU.
+
+`WatchdogArch::stuck_interrupt` (aarch64) is `gic::stuck_spi()`: the observer
+scans the distributor's `GICD_ISACTIVER` then `GICD_ISPENDR` over the SPI
+range for the lowest stuck line and reads its `GICD_ISENABLER` bit, returning
+its id plus `active` (which bank matched) and `enabled` (unmasked). A pure
+read of globally-shared state, safe from any CPU, so a core hard-wedged on a
+device SPI is named in the report even though its own sample is stale, and the
+`active`/`enabled` pair tells a live storm apart from a masked-but-asserted
+line the kernel already contained. The scan logic is host-tested against the
+mock distributor; the live MMIO read is metal-only (`None` off metal).
 
 Limitation (hardware, not a defect): on GICv2 non-secure there is no
 non-maskable channel, so a CPU wedged with IRQs masked cannot be *interrupted*

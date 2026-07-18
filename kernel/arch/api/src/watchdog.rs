@@ -139,6 +139,36 @@ impl WatchdogSample {
     };
 }
 
+/// A device interrupt found *stuck* in the shared interrupt controller by
+/// the watchdog observer, with the two facts that turn a bare line id into
+/// a verdict: whether it is **active** (a live storm) or merely
+/// **pending**, and whether it is **enabled** (free to keep delivering) or
+/// **masked** (asserted but contained).
+///
+/// A hard lockup's own sample is stale, so the observer reads the
+/// controller's globally-shared state live to name the offending line. The
+/// bare id alone is ambiguous — an `intid` could be a core wedged mid-
+/// handler (active, enabled) *or* an asserted line the kernel already
+/// masked and contained (pending, masked), which point at entirely
+/// different causes. Carrying `active`/`enabled` alongside the id makes the
+/// diagnosis decisive without a second boot to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StuckInterrupt {
+    /// The shared interrupt id (aarch64 GICv2 SPI, id >= 32).
+    pub intid: u32,
+    /// `true` when the line is **active** — acknowledged but not yet
+    /// completed, i.e. a handler is in flight (or re-firing faster than it
+    /// completes): the signature of a live storm. `false` when the line is
+    /// only **pending** (asserted but no handler running), e.g. a line the
+    /// kernel masked after one delivery whose source never deasserted.
+    pub active: bool,
+    /// `true` when the line is **enabled** (unmasked) at the distributor —
+    /// free to be delivered again and storm a CPU. `false` when it is
+    /// **masked**: the assertion is contained and cannot reach a CPU, so a
+    /// masked-pending line is almost certainly not the live wedge.
+    pub enabled: bool,
+}
+
 /// The per-architecture non-maskable-recovery handle the watchdog reaches
 /// through.
 ///
@@ -158,6 +188,38 @@ pub trait WatchdogArch: Send + Sync {
     /// implementation must be non-blocking: it raises a cross-CPU signal
     /// and returns, never spinning to wait for the target to react.
     fn request_recovery(&self, target: CpuId, kind: WatchdogKind) -> RecoveryOutcome;
+
+    /// The interrupt id currently *stuck* in the shared interrupt
+    /// controller — active (acknowledged but not yet completed) or pending
+    /// — that most likely explains a hard lockup, or `None` when the port
+    /// exposes no globally-observable interrupt state.
+    ///
+    /// A hard lockup's own last-known sample is stale (it is, by
+    /// definition, the sample taken *before* the CPU went silent), so it
+    /// names the innocent code the CPU last returned to, not the storm or
+    /// stuck line wedging it now. This lets the **observer** CPU read the
+    /// controller's globally-visible state instead — on a shared
+    /// distributor a device line stuck active because its handler never
+    /// completes (an interrupt storm, or a line whose real servicing is
+    /// deferred) shows up here — and name the offending line in the
+    /// diagnosis, the decisive "why" the stale sample cannot give.
+    ///
+    /// Only globally-shared lines are observable this way (aarch64 GICv2
+    /// SPIs, id >= 32); per-CPU banked lines (SGIs/PPIs) are not, since the
+    /// observer cannot read another CPU's banked state. It is a pure read
+    /// of shared state with no side effects, safe to call from the
+    /// non-maskable sample path. The default is `None`: a port without such
+    /// introspection wired reports nothing rather than guessing (fail
+    /// closed), exactly as one without a recovery channel simply never
+    /// installs a handle.
+    ///
+    /// The returned [`StuckInterrupt`] carries not just the line id but
+    /// whether it is actively storming (`active`) and still enabled
+    /// (`enabled`), so a reader can tell a live wedge (active, enabled)
+    /// from a contained masked-pending line without a second boot.
+    fn stuck_interrupt(&self) -> Option<StuckInterrupt> {
+        None
+    }
 }
 
 /// Host-run conformance vertical every port drives over its
@@ -186,6 +248,10 @@ pub mod conformance {
             // target, including the caller's own CPU (a self-request is a
             // benign no-op equivalent to a self-reschedule).
             let _ = arch.request_recovery(self_cpu, kind);
+            // A stuck-interrupt query must never panic and must answer with
+            // either no line or a well-formed id; a port with no shared
+            // interrupt introspection legitimately answers `None`.
+            let _ = arch.stuck_interrupt();
             let outcome = arch.request_recovery(self_cpu.wrapping_add(1), kind);
             match outcome {
                 RecoveryOutcome::Rescheduled
@@ -199,7 +265,7 @@ pub mod conformance {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{RecoveryOutcome, WatchdogArch, WatchdogKind};
+        use super::super::{RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind};
         use super::run_all;
         use crate::CpuId;
 
@@ -228,6 +294,34 @@ pub mod conformance {
             }
             assert_eq!(run_all(&NoneArch, 3), Ok(()));
         }
+
+        #[test]
+        fn a_handle_that_names_a_stuck_line_passes_conformance() {
+            // A port that can read its shared controller answers a concrete
+            // stuck line; conformance accepts that alongside the default.
+            struct SpiArch;
+            impl WatchdogArch for SpiArch {
+                fn request_recovery(&self, _target: CpuId, _kind: WatchdogKind) -> RecoveryOutcome {
+                    RecoveryOutcome::AttentionRaised
+                }
+                fn stuck_interrupt(&self) -> Option<StuckInterrupt> {
+                    Some(StuckInterrupt {
+                        intid: 37,
+                        active: true,
+                        enabled: true,
+                    })
+                }
+            }
+            assert_eq!(run_all(&SpiArch, 0), Ok(()));
+            assert_eq!(
+                SpiArch.stuck_interrupt(),
+                Some(StuckInterrupt {
+                    intid: 37,
+                    active: true,
+                    enabled: true,
+                })
+            );
+        }
     }
 }
 
@@ -252,5 +346,18 @@ mod tests {
     #[test]
     fn cadence_is_one_second() {
         assert_eq!(CADENCE_NS, 1_000_000_000);
+    }
+
+    #[test]
+    fn stuck_interrupt_defaults_to_none() {
+        // A port that does not override the query reports no stuck line
+        // (fail closed) rather than guessing one.
+        struct DefaultArch;
+        impl WatchdogArch for DefaultArch {
+            fn request_recovery(&self, _target: CpuId, _kind: WatchdogKind) -> RecoveryOutcome {
+                RecoveryOutcome::Unsupported
+            }
+        }
+        assert_eq!(DefaultArch.stuck_interrupt(), None);
     }
 }
