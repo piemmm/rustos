@@ -4,9 +4,9 @@ ls — elencare il contenuto delle directory
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -74,9 +74,23 @@ blocchi sono separati da una riga vuota.
   qui (vedi sopra), quindi coincide con `-l`.
 - `-o` — formato lungo senza la colonna del gruppo; implica `-l`.
 - `-p` — aggiungere `/` alle directory.
-- `-Q, --quote-name` — racchiudere ogni nome tra virgolette doppie,
-  con escape di virgolette, barre rovesciate e caratteri di
-  controllo.
+- `-N, --literal` — stampare i nomi così come sono, senza virgolette
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — virgolettatura in stile C: racchiudere ogni nome
+  tra virgolette doppie, con escape di virgolette, barre rovesciate e
+  caratteri di controllo (`--quoting-style=c`).
+- `-b, --escape` — come `-Q` ma senza le virgolette circostanti e con
+  gli spazi con escape (`--quoting-style=escape`).
+- `--quoting-style=WORD` — come vengono virgolettati i nomi: `literal`
+  (`-N`), `shell`, `shell-always`, `shell-escape`,
+  `shell-escape-always`, `c` (`-Q`) o `escape` (`-b`). Il valore
+  predefinito è `shell-escape` su un terminale e `literal` altrimenti;
+  gli stili `locale` e `clocale` non sono supportati.
+- `-q, --hide-control-chars` — mostrare i caratteri non grafici come
+  `?` (il valore predefinito su un terminale); influisce solo sugli
+  stili senza escape.
+- `--show-control-chars` — stampare i caratteri non grafici così come
+  sono (il valore predefinito quando l'output non è un terminale).
 - `-r, --reverse` — invertire l'ordine di ordinamento.
 - `-R, --recursive` — elencare le sottodirectory ricorsivamente.
 - `-s, --size` — stampare la dimensione allocata di ogni voce in blocchi

@@ -4,9 +4,9 @@ ls — הצגת תוכן ספריות
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -59,8 +59,22 @@ ls — הצגת תוכן ספריות
   זה תואם ל-`-l`.
 - `-o` — תבנית ארוכה בלי עמודת הקבוצה; משתמע ממנה `-l`.
 - `-p` — הוספת `/` לספריות.
-- `-Q, --quote-name` — עטיפת כל שם במירכאות כפולות, עם בריחה של
-  מירכאות, לוכסנים אחוריים ותווי בקרה.
+- `-N, --literal` — הדפסת השמות כפי שהם, ללא ציטוט
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — ציטוט בסגנון C: עטיפת כל שם במירכאות
+  כפולות, עם בריחה של מירכאות, לוכסנים אחוריים ותווי בקרה
+  (`--quoting-style=c`).
+- `-b, --escape` — כמו `-Q` אך ללא המירכאות המקיפות ועם בריחה
+  של רווחים (`--quoting-style=escape`).
+- `--quoting-style=WORD` — כיצד מצוטטים השמות: `literal` (`-N`),
+  `shell`, `shell-always`, `shell-escape`, `shell-escape-always`,
+  `c` (`-Q`) או `escape` (`-b`). ברירת המחדל היא `shell-escape`
+  במסוף ו-`literal` אחרת; הסגנונות `locale` ו-`clocale` אינם
+  נתמכים.
+- `-q, --hide-control-chars` — הצגת תווים לא-גרפיים כ-`?` (ברירת
+  המחדל במסוף); משפיע רק על הסגנונות שאינם בורחים.
+- `--show-control-chars` — הדפסת תווים לא-גרפיים כפי שהם (ברירת
+  המחדל כאשר הפלט אינו מסוף).
 - `-r, --reverse` — היפוך סדר המיון.
 - `-R, --recursive` — הצגת תת-ספריות רקורסיבית.
 - `-s, --size` — הדפסת הגודל המוקצה של כל רשומה בבלוקים של 1024

@@ -4,9 +4,9 @@ ls — rhestru cynnwys cyfeiriaduron
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -72,8 +72,23 @@ llinell wag.
   rhifol yma (gweler uchod), felly mae'n cyfateb i `-l`.
 - `-o` — fformat hir heb golofn y grŵp; mae'n awgrymu `-l`.
 - `-p` — atodi `/` at gyfeiriaduron.
-- `-Q, --quote-name` — rhoi pob enw mewn dyfynodau dwbl, gan ddianc
-  dyfynodau, ôl-slaesau a nodau rheoli.
+- `-N, --literal` — argraffu enwau'n llythrennol, heb ddyfynnu
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — dyfynnu arddull C: rhoi pob enw mewn dyfynodau
+  dwbl, gan ddianc dyfynodau, ôl-slaesau a nodau rheoli
+  (`--quoting-style=c`).
+- `-b, --escape` — fel `-Q` ond heb y dyfynodau amgylchynol a chyda
+  bylchau wedi'u dianc (`--quoting-style=escape`).
+- `--quoting-style=WORD` — sut y dyfynnir enwau: `literal` (`-N`),
+  `shell`, `shell-always`, `shell-escape`, `shell-escape-always`,
+  `c` (`-Q`), neu `escape` (`-b`). Y rhagosodiad yw `shell-escape`
+  wrth derfynell a `literal` fel arall; ni chefnogir yr arddulliau
+  `locale` a `clocale`.
+- `-q, --hide-control-chars` — dangos nodau annraffig fel `?` (y
+  rhagosodiad wrth derfynell); yn effeithio ar yr arddulliau nad
+  ydynt yn dianc yn unig.
+- `--show-control-chars` — argraffu nodau annraffig fel y maent (y
+  rhagosodiad pan nad terfynell yw'r allbwn).
 - `-r, --reverse` — gwrthdroi trefn y didoli.
 - `-R, --recursive` — rhestru is-gyfeiriaduron yn ailadroddus.
 - `-s, --size` — argraffu maint neilltuedig pob cofnod mewn blociau

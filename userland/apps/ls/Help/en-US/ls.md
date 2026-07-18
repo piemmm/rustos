@@ -4,9 +4,9 @@ ls — list directory contents
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -39,6 +39,13 @@ identically). The timestamp is the modified time by default; `-c`,
 sorted by), and `--time-style` — or `--full-time` — sets its format.
 There is still no link-count column because the filesystem contract
 does not carry hard links yet; it will appear when it does.
+
+Names are quoted so that awkward characters are visible and safe to
+paste back into a shell: at a terminal the default is `shell-escape`
+(a name with spaces or metacharacters is quoted, control characters
+shown as `$'…'` escapes), and elsewhere it is `literal` (names
+verbatim). `-N`, `-Q`, `-b`, and `--quoting-style` choose the style,
+and `-q` shows control characters as `?`.
 
 When more than one operand is given — and always under `-R` — each
 directory's listing is preceded by a `path:` header, and blocks are
@@ -75,8 +82,22 @@ separated by a blank line.
   above), so this matches `-l`.
 - `-o` — long format without the group column; implies `-l`.
 - `-p` — append `/` to directories.
-- `-Q, --quote-name` — double-quote each name, escaping quotes,
-  backslashes, and control characters.
+- `-N, --literal` — print names verbatim, without quoting
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — C-style quoting: double-quote each name,
+  escaping quotes, backslashes, and control characters
+  (`--quoting-style=c`).
+- `-b, --escape` — like `-Q` but without the surrounding quotes and
+  with spaces escaped (`--quoting-style=escape`).
+- `--quoting-style=WORD` — how names are quoted: `literal` (`-N`),
+  `shell`, `shell-always`, `shell-escape`, `shell-escape-always`, `c`
+  (`-Q`), or `escape` (`-b`). The default is `shell-escape` at a
+  terminal and `literal` otherwise; the `locale` and `clocale` styles
+  are not supported.
+- `-q, --hide-control-chars` — show nongraphic characters as `?` (the
+  default at a terminal); affects only the non-escaping styles.
+- `--show-control-chars` — print nongraphic characters as-is (the
+  default when the output is not a terminal).
 - `-r, --reverse` — reverse the sort order.
 - `-R, --recursive` — list subdirectories recursively.
 - `-s, --size` — print each entry's allocated size in 1024-byte blocks

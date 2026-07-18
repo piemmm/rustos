@@ -4,9 +4,9 @@ ls — listar el contenido de los directorios
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -71,8 +71,23 @@ se separan con una línea en blanco.
   numéricos aquí (véase arriba), así que coincide con `-l`.
 - `-o` — formato largo sin la columna de grupo; implica `-l`.
 - `-p` — añadir `/` a los directorios.
-- `-Q, --quote-name` — entrecomillar cada nombre, escapando comillas,
-  barras invertidas y caracteres de control.
+- `-N, --literal` — imprimir los nombres tal cual, sin entrecomillar
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — entrecomillado estilo C: entrecomillar cada
+  nombre, escapando comillas, barras invertidas y caracteres de
+  control (`--quoting-style=c`).
+- `-b, --escape` — como `-Q` pero sin las comillas circundantes y con
+  los espacios escapados (`--quoting-style=escape`).
+- `--quoting-style=WORD` — cómo se entrecomillan los nombres: `literal`
+  (`-N`), `shell`, `shell-always`, `shell-escape`,
+  `shell-escape-always`, `c` (`-Q`) o `escape` (`-b`). El valor
+  predeterminado es `shell-escape` en una terminal y `literal` en caso
+  contrario; los estilos `locale` y `clocale` no se admiten.
+- `-q, --hide-control-chars` — mostrar los caracteres no gráficos como
+  `?` (el valor predeterminado en una terminal); solo afecta a los
+  estilos que no escapan.
+- `--show-control-chars` — imprimir los caracteres no gráficos tal cual
+  (el valor predeterminado cuando la salida no es una terminal).
 - `-r, --reverse` — invertir el orden de clasificación.
 - `-R, --recursive` — listar los subdirectorios recursivamente.
 - `-s, --size` — mostrar el tamaño asignado de cada entrada en bloques

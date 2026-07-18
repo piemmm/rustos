@@ -4,9 +4,9 @@ ls — سرد محتويات الأدلة
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -59,8 +59,22 @@ ls — سرد محتويات الأدلة
   `-l`. المالك والمجموعة رقميان دائمًا هنا (انظر أعلاه)، فيطابق `-l`.
 - `-o` — صيغة طويلة بلا عمود المجموعة؛ يستلزم `-l`.
 - `-p` — إلحاق `/` بالأدلة.
-- `-Q, --quote-name` — وضع كل اسم بين علامتي اقتباس مزدوجتين، مع
-  الهروب من علامات الاقتباس والشرطات المائلة العكسية وأحرف التحكم.
+- `-N, --literal` — طباعة الأسماء كما هي، دون اقتباس
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — اقتباس بأسلوب C: وضع كل اسم بين علامتي اقتباس
+  مزدوجتين، مع الهروب من علامات الاقتباس والشرطات المائلة العكسية
+  وأحرف التحكم (`--quoting-style=c`).
+- `-b, --escape` — مثل `-Q` لكن دون علامات الاقتباس المحيطة ومع الهروب
+  من المسافات (`--quoting-style=escape`).
+- `--quoting-style=WORD` — كيفية اقتباس الأسماء: `literal` (`-N`)،
+  `shell`، `shell-always`، `shell-escape`، `shell-escape-always`،
+  `c` (`-Q`) أو `escape` (`-b`). الافتراضي هو `shell-escape` في
+  الطرفية و`literal` خلاف ذلك؛ النمطان `locale` و`clocale` غير
+  مدعومين.
+- `-q, --hide-control-chars` — إظهار الأحرف غير القابلة للطباعة كـ `?`
+  (الافتراضي في الطرفية)؛ يؤثر فقط في الأنماط غير الهاربة.
+- `--show-control-chars` — طباعة الأحرف غير القابلة للطباعة كما هي
+  (الافتراضي عندما لا يكون المخرج طرفية).
 - `-r, --reverse` — عكس ترتيب الفرز.
 - `-R, --recursive` — سرد الأدلة الفرعية تكراريًا.
 - `-s, --size` — طباعة الحجم المخصص لكل مدخل بكتل من 1024 بايت

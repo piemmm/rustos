@@ -4,9 +4,9 @@ ls — 列出目录内容
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -46,8 +46,18 @@ ls — 列出目录内容
   主与属组本来就是数字（见上），因此与 `-l` 相同。
 - `-o` — 不带属组列的长格式；隐含 `-l`。
 - `-p` — 给目录追加 `/`。
-- `-Q, --quote-name` — 给每个名字加双引号，并转义引号、反斜杠和控制字
-  符。
+- `-N, --literal` — 原样输出名字，不加引号（`--quoting-style=literal`）。
+- `-Q, --quote-name` — C 风格引用：给每个名字加双引号，并转义引号、反斜
+  杠和控制字符（`--quoting-style=c`）。
+- `-b, --escape` — 与 `-Q` 相同，但不加外围引号，并转义空格
+  （`--quoting-style=escape`）。
+- `--quoting-style=WORD` — 名字的引用方式：`literal`（`-N`）、`shell`、
+  `shell-always`、`shell-escape`、`shell-escape-always`、`c`（`-Q`）
+  或 `escape`（`-b`）。默认在终端上为 `shell-escape`，否则为 `literal`；
+  不支持 `locale` 和 `clocale` 风格。
+- `-q, --hide-control-chars` — 将非图形字符显示为 `?`（终端上的默认值）；
+  仅影响不转义的风格。
+- `--show-control-chars` — 原样输出非图形字符（输出不是终端时的默认值）。
 - `-r, --reverse` — 反转排序顺序。
 - `-R, --recursive` — 递归列出子目录。
 - `-s, --size` — 以 1024 字节块打印每个条目的分配大小（受 `-h` 缩放），

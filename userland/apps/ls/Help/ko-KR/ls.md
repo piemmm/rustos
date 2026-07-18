@@ -4,9 +4,9 @@ ls — 디렉터리 내용 나열하기
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -53,8 +53,23 @@ ls — 디렉터리 내용 나열하기
   같습니다.
 - `-o` — 그룹 열이 없는 긴 형식. `-l`을 함의합니다.
 - `-p` — 디렉터리에 `/`를 붙입니다.
-- `-Q, --quote-name` — 각 이름을 큰따옴표로 감싸고 따옴표, 역슬래시,
-  제어 문자를 이스케이프합니다.
+- `-N, --literal` — 이름을 따옴표 없이 그대로 출력합니다
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — C 스타일 따옴표: 각 이름을 큰따옴표로
+  감싸고 따옴표, 역슬래시, 제어 문자를 이스케이프합니다
+  (`--quoting-style=c`).
+- `-b, --escape` — `-Q`와 같지만 둘러싸는 따옴표 없이 공백을
+  이스케이프합니다 (`--quoting-style=escape`).
+- `--quoting-style=WORD` — 이름을 따옴표로 묶는 방식: `literal`
+  (`-N`), `shell`, `shell-always`, `shell-escape`,
+  `shell-escape-always`, `c` (`-Q`), 또는 `escape` (`-b`). 기본값은
+  터미널에서는 `shell-escape`, 그 외에는 `literal`입니다.
+  `locale`과 `clocale` 스타일은 지원되지 않습니다.
+- `-q, --hide-control-chars` — 비출력 문자를 `?`로 표시합니다
+  (터미널에서의 기본값); 이스케이프하지 않는 스타일에만
+  영향을 줍니다.
+- `--show-control-chars` — 비출력 문자를 그대로 출력합니다
+  (출력이 터미널이 아닐 때의 기본값).
 - `-r, --reverse` — 정렬 순서를 뒤집습니다.
 - `-R, --recursive` — 하위 디렉터리를 재귀적으로 나열합니다.
 - `-s, --size` — 각 항목의 할당 크기를 1024바이트 블록으로

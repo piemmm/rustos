@@ -77,6 +77,39 @@ pub enum TimeField {
     Created,
 }
 
+/// How each rendered name is quoted (`-N` / `-Q` / `-b` / `--quoting-style`).
+///
+/// These are the GNU `ls` quoting styles. The `locale` and `clocale` styles
+/// are a documented divergence: they select quotation marks from the active
+/// locale, which TAIRiX has no infrastructure for, so they are refused (fail
+/// closed) rather than faked — the same stance the tool already takes on a
+/// custom `--time-style=+FORMAT`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuotingStyle {
+    /// Names verbatim, no quoting (`-N` / `--literal` / `--quoting-style=literal`).
+    /// With `-q` (hide control characters) nongraphic bytes become `?`.
+    Literal,
+    /// Quote for the shell only when the name contains a shell-special or
+    /// nongraphic character (`--quoting-style=shell`). Nongraphic characters
+    /// are left literal (or, with `-q`, shown as `?`).
+    Shell,
+    /// Like [`Shell`](Self::Shell) but always quote, even a plain name
+    /// (`--quoting-style=shell-always`).
+    ShellAlways,
+    /// Like [`Shell`](Self::Shell) but render nongraphic characters with
+    /// `$'…'` ANSI-C escapes (`--quoting-style=shell-escape`).
+    ShellEscape,
+    /// Like [`ShellEscape`](Self::ShellEscape) but always quote
+    /// (`--quoting-style=shell-escape-always`).
+    ShellEscapeAlways,
+    /// C string quoting: always double-quoted with C backslash escapes
+    /// (`-Q` / `--quote-name` / `--quoting-style=c`).
+    C,
+    /// Like [`C`](Self::C) but without the surrounding double quotes and with
+    /// spaces escaped (`-b` / `--escape` / `--quoting-style=escape`).
+    Escape,
+}
+
 /// How a timestamp is rendered in the long format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimeStyle {
@@ -124,8 +157,16 @@ pub struct Options {
     pub width: Option<usize>,
     /// Name indicator suffixes (`-p` / `-F`).
     pub indicator: Indicator,
-    /// Double-quote rendered names (`-Q`).
-    pub quote: bool,
+    /// How each name is quoted (`-N` / `-Q` / `-b` / `--quoting-style`).
+    /// `None` selects the GNU default, resolved against the attested console
+    /// at render time: `shell-escape` when the output is a terminal, `literal`
+    /// otherwise.
+    pub quoting: Option<QuotingStyle>,
+    /// Whether nongraphic characters are shown as `?` in the non-escaping
+    /// quoting styles (`-q` / `--hide-control-chars` vs `--show-control-chars`).
+    /// `None` selects the GNU default: hide when the output is a terminal,
+    /// show otherwise.
+    pub hide_control_chars: Option<bool>,
     /// Print each entry's allocated size in 1024-byte blocks (`-s`), plus
     /// a `total` line per directory block.
     pub size: bool,
@@ -161,7 +202,8 @@ impl Options {
         format: None,
         width: None,
         indicator: Indicator::None,
-        quote: false,
+        quoting: None,
+        hide_control_chars: None,
         size: false,
         human_readable: false,
         hide_owner: false,
@@ -214,7 +256,21 @@ pub enum Command {
 ///   the Help document).
 /// * `-o` — long format without the group column; implies `-l`.
 /// * `-p` — append `/` to directories.
-/// * `-Q` / `--quote-name` — double-quote each rendered name.
+/// * `-N` / `--literal` / `--quoting-style=literal` — print names verbatim,
+///   no quoting.
+/// * `-Q` / `--quote-name` / `--quoting-style=c` — C-string quoting: each
+///   name double-quoted with C backslash escapes.
+/// * `-b` / `--escape` / `--quoting-style=escape` — like `-Q` but without
+///   the surrounding quotes and with spaces escaped.
+/// * `--quoting-style=WORD` — the quoting style by name: `literal` (`-N`),
+///   `shell`, `shell-always`, `shell-escape`, `shell-escape-always`, `c`
+///   (`-Q`), or `escape` (`-b`). The last quoting flag wins. The GNU
+///   default is `shell-escape` at a terminal and `literal` otherwise. The
+///   `locale` / `clocale` styles are refused (fail closed; a documented
+///   divergence).
+/// * `-q` / `--hide-control-chars` — show nongraphic characters as `?` (the
+///   default at a terminal); `--show-control-chars` prints them as-is (the
+///   default otherwise). Only affects the non-escaping styles.
 /// * `-r` / `--reverse` — reverse the sort order.
 /// * `-R` / `--recursive` — list subdirectories recursively.
 /// * `-s` / `--size` — print each entry's allocated size in 1024-byte
@@ -266,8 +322,9 @@ pub enum Command {
 ///
 /// [`LsError::Usage`] for any unrecognised option before `--`, a `-w` /
 /// `--width` without a valid non-negative integer value, an unknown
-/// `--time` / `--time-style` word (including a custom `+FORMAT`), or a
-/// value given to a long option that takes none.
+/// `--time` / `--time-style` / `--quoting-style` word (including a custom
+/// `--time-style=+FORMAT` and the `locale` / `clocale` quoting styles), or
+/// a value given to a long option that takes none.
 pub fn parse(args: &[&str]) -> Result<Command, LsError> {
     let mut state = ParseState::default();
     let mut paths = Vec::new();
@@ -375,7 +432,11 @@ fn apply_long<'a>(
         "classify" => options.indicator = Indicator::Classify,
         "human-readable" => options.human_readable = true,
         "numeric-uid-gid" => options.long = true,
-        "quote-name" => options.quote = true,
+        "literal" => options.quoting = Some(QuotingStyle::Literal),
+        "quote-name" => options.quoting = Some(QuotingStyle::C),
+        "escape" => options.quoting = Some(QuotingStyle::Escape),
+        "hide-control-chars" => options.hide_control_chars = Some(true),
+        "show-control-chars" => options.hide_control_chars = Some(false),
         "size" => options.size = true,
         "group-directories-first" => options.group_directories_first = true,
         "reverse" => options.reverse = true,
@@ -397,6 +458,10 @@ fn apply_long<'a>(
         }
         "sort" => {
             state.explicit_sort = Some(parse_sort(long_value(inline, args)?)?);
+            return Ok(false);
+        }
+        "quoting-style" => {
+            options.quoting = Some(parse_quoting_style(long_value(inline, args)?)?);
             return Ok(false);
         }
         "width" => {
@@ -445,7 +510,10 @@ fn apply_short<'a>(
                 options.hide_group = true;
             }
             'p' => options.indicator = Indicator::Slash,
-            'Q' => options.quote = true,
+            'N' => options.quoting = Some(QuotingStyle::Literal),
+            'Q' => options.quoting = Some(QuotingStyle::C),
+            'b' => options.quoting = Some(QuotingStyle::Escape),
+            'q' => options.hide_control_chars = Some(true),
             'r' => options.reverse = true,
             'R' => options.recursive = true,
             's' => options.size = true,
@@ -544,9 +612,31 @@ fn parse_time_style(raw: &str) -> Result<TimeStyle, LsError> {
     }
 }
 
+/// Parse a `--quoting-style=WORD` value into a [`QuotingStyle`].
+///
+/// The `locale` and `clocale` styles are refused (a documented divergence,
+/// fail closed): they select quotation marks from the active locale, which
+/// TAIRiX has no infrastructure for, so they are not faked. Any other word
+/// is a usage error, never a silently ignored token.
+fn parse_quoting_style(raw: &str) -> Result<QuotingStyle, LsError> {
+    match raw {
+        "literal" => Ok(QuotingStyle::Literal),
+        "shell" => Ok(QuotingStyle::Shell),
+        "shell-always" => Ok(QuotingStyle::ShellAlways),
+        "shell-escape" => Ok(QuotingStyle::ShellEscape),
+        "shell-escape-always" => Ok(QuotingStyle::ShellEscapeAlways),
+        "c" => Ok(QuotingStyle::C),
+        "escape" => Ok(QuotingStyle::Escape),
+        _ => Err(LsError::Usage),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command, Format, Hidden, Indicator, Options, Sort, TimeField, TimeStyle};
+    use super::{
+        parse, Command, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField,
+        TimeStyle,
+    };
     use crate::error::LsError;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -867,7 +957,7 @@ mod tests {
                     sort: Sort::Size,
                     reverse: true,
                     recursive: true,
-                    quote: true,
+                    quoting: Some(QuotingStyle::C),
                     ..Options::DEFAULT
                 },
                 &["."],
@@ -879,7 +969,110 @@ mod tests {
                 Options {
                     reverse: true,
                     recursive: true,
-                    quote: true,
+                    quoting: Some(QuotingStyle::C),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn quoting_flags_select_their_style_and_last_wins() {
+        // Each short/long quoting flag selects its style.
+        let cases: &[(&[&str], QuotingStyle)] = &[
+            (&["-N"], QuotingStyle::Literal),
+            (&["--literal"], QuotingStyle::Literal),
+            (&["-Q"], QuotingStyle::C),
+            (&["--quote-name"], QuotingStyle::C),
+            (&["-b"], QuotingStyle::Escape),
+            (&["--escape"], QuotingStyle::Escape),
+        ];
+        for &(args, style) in cases {
+            assert_eq!(
+                parse(args),
+                Ok(list(
+                    Options {
+                        quoting: Some(style),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ))
+            );
+        }
+        // The last quoting flag wins, whatever the spelling.
+        assert_eq!(
+            parse(&["-Q", "-b", "-N"]),
+            Ok(list(
+                Options {
+                    quoting: Some(QuotingStyle::Literal),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(
+            parse(&["-N", "--quote-name"]),
+            Ok(list(
+                Options {
+                    quoting: Some(QuotingStyle::C),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn quoting_style_word_selects_the_style() {
+        for (word, style) in [
+            ("literal", QuotingStyle::Literal),
+            ("shell", QuotingStyle::Shell),
+            ("shell-always", QuotingStyle::ShellAlways),
+            ("shell-escape", QuotingStyle::ShellEscape),
+            ("shell-escape-always", QuotingStyle::ShellEscapeAlways),
+            ("c", QuotingStyle::C),
+            ("escape", QuotingStyle::Escape),
+        ] {
+            let expected = Ok(list(
+                Options {
+                    quoting: Some(style),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ));
+            assert_eq!(parse(&["--quoting-style", word]), expected.clone());
+            assert_eq!(
+                parse(&[&alloc::format!("--quoting-style={word}")]),
+                expected
+            );
+        }
+        // The locale-dependent styles are refused (fail closed), as is any
+        // unknown word.
+        assert_eq!(parse(&["--quoting-style=locale"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--quoting-style=clocale"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--quoting-style=bogus"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn hide_and_show_control_chars_parse() {
+        for args in [["-q"], ["--hide-control-chars"]] {
+            assert_eq!(
+                parse(&args),
+                Ok(list(
+                    Options {
+                        hide_control_chars: Some(true),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ))
+            );
+        }
+        assert_eq!(
+            parse(&["--show-control-chars"]),
+            Ok(list(
+                Options {
+                    hide_control_chars: Some(false),
                     ..Options::DEFAULT
                 },
                 &["."],
@@ -1244,7 +1437,12 @@ mod tests {
                 "`-n, --numeric-uid-gid`",
                 "`-o`",
                 "`-p`",
+                "`-N, --literal`",
                 "`-Q, --quote-name`",
+                "`-b, --escape`",
+                "`-q, --hide-control-chars`",
+                "`--show-control-chars`",
+                "`--quoting-style=WORD`",
                 "`-r, --reverse`",
                 "`-R, --recursive`",
                 "`-s, --size`",

@@ -4,9 +4,9 @@ ls — lister le contenu des répertoires
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -73,9 +73,24 @@ blocs sont séparés par une ligne vide.
   toujours numériques ici (voir ci-dessus), donc identique à `-l`.
 - `-o` — format long sans la colonne groupe ; implique `-l`.
 - `-p` — ajouter `/` aux répertoires.
-- `-Q, --quote-name` — entourer chaque nom de guillemets doubles, en
-  échappant guillemets, barres obliques inverses et caractères de
-  contrôle.
+- `-N, --literal` — afficher les noms tels quels, sans guillemets
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — mise entre guillemets de style C : entourer
+  chaque nom de guillemets doubles, en échappant guillemets, barres
+  obliques inverses et caractères de contrôle (`--quoting-style=c`).
+- `-b, --escape` — comme `-Q` mais sans les guillemets englobants et
+  avec les espaces échappés (`--quoting-style=escape`).
+- `--quoting-style=WORD` — comment les noms sont mis entre guillemets :
+  `literal` (`-N`), `shell`, `shell-always`, `shell-escape`,
+  `shell-escape-always`, `c` (`-Q`) ou `escape` (`-b`). La valeur par
+  défaut est `shell-escape` sur un terminal et `literal` sinon ; les
+  styles `locale` et `clocale` ne sont pas pris en charge.
+- `-q, --hide-control-chars` — afficher les caractères non graphiques
+  comme `?` (la valeur par défaut sur un terminal) ; n'affecte que les
+  styles sans échappement.
+- `--show-control-chars` — afficher les caractères non graphiques tels
+  quels (la valeur par défaut lorsque la sortie n'est pas un
+  terminal).
 - `-r, --reverse` — inverser l'ordre de tri.
 - `-R, --recursive` — lister les sous-répertoires récursivement.
 - `-s, --size` — afficher la taille allouée de chaque entrée en blocs de

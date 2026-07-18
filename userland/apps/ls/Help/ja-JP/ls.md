@@ -4,9 +4,9 @@ ls — ディレクトリの内容を一覧する
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -54,8 +54,22 @@ ls — ディレクトリの内容を一覧する
   `-l` と一致する。
 - `-o` — グループの列を省いた長い形式。`-l` を含意する。
 - `-p` — ディレクトリに `/` を付ける。
-- `-Q, --quote-name` — 各名前を二重引用符で囲み、引用符・バックスラッ
-  シュ・制御文字をエスケープする。
+- `-N, --literal` — 名前を引用せずにそのまま表示する
+  （`--quoting-style=literal`）。
+- `-Q, --quote-name` — Cスタイルの引用：各名前を二重引用符で囲み、
+  引用符・バックスラッシュ・制御文字をエスケープする
+  （`--quoting-style=c`）。
+- `-b, --escape` — `-Q` と同様だが囲みの引用符を付けず、空白を
+  エスケープする（`--quoting-style=escape`）。
+- `--quoting-style=WORD` — 名前の引用方法：`literal`（`-N`）、
+  `shell`、`shell-always`、`shell-escape`、`shell-escape-always`、
+  `c`（`-Q`）、または `escape`（`-b`）。既定は端末では
+  `shell-escape`、それ以外では `literal`。`locale` と `clocale`
+  のスタイルは非対応。
+- `-q, --hide-control-chars` — 非表示文字を `?` として表示する
+  （端末での既定）。エスケープしないスタイルにのみ影響する。
+- `--show-control-chars` — 非表示文字をそのまま表示する
+  （出力が端末でないときの既定）。
 - `-r, --reverse` — 並び順を逆にする。
 - `-R, --recursive` — サブディレクトリを再帰的に一覧する。
 - `-s, --size` — 各項目の割り当てサイズを 1024 バイトブロックで印字し
