@@ -75,6 +75,18 @@ pub(crate) struct CpuState {
     /// lone, preemptible user task legitimately makes no scheduler progress
     /// and must never be flagged.
     pub(crate) wd_ctx_in_kernel: AtomicBool,
+    /// A pending **forced** reschedule for a lone user task that has
+    /// monopolised this CPU: the watchdog cadence sets it when it samples an
+    /// `Active` CPU running a user task that has withheld the CPU from the
+    /// scheduler past the monopoly-guard window, and the return-to-user
+    /// preempt point honours it by suspending the task back to the
+    /// dispatcher — unconditionally, without a runnable competitor. This is
+    /// how a CPU-bound user task that never yields is still returned to the
+    /// scheduler (so the dispatch loop's housekeeping and progress stamp run
+    /// again) without arming any new periodic timer: it rides the watchdog
+    /// cadence that is already firing on the CPU. Distinct from
+    /// [`Self::preempt_pending`], which is gated on a runnable competitor.
+    pub(crate) force_yield: AtomicBool,
 }
 
 impl CpuState {
@@ -93,6 +105,7 @@ impl CpuState {
             wd_ctx_task: AtomicU64::new(u64::MAX),
             wd_ctx_aux: AtomicU64::new(0),
             wd_ctx_in_kernel: AtomicBool::new(false),
+            force_yield: AtomicBool::new(false),
         }
     }
 }

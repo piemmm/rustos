@@ -101,6 +101,25 @@ pub const DEFAULT_SOFT_LOCKUP_THRESHOLD_NS: u64 = 10_000_000_000;
 /// late. Diagnostic policy, not a capacity.
 pub const DEFAULT_HARD_LOCKUP_THRESHOLD_NS: u64 = 10_000_000_000;
 
+/// How long an `Active` CPU may run a **user** task without returning to
+/// the scheduler before the watchdog cadence forces that task to yield, in
+/// nanoseconds (1 second).
+///
+/// A lone CPU-bound user task has no competitor, so the ordinary
+/// competitor-gated preemption tick deliberately leaves it running; without
+/// this guard it would withhold the CPU from the dispatch loop
+/// indefinitely, stalling per-dispatch housekeeping and the progress
+/// heartbeat (a runnable task monopolising a CPU by refusing to yield). A
+/// task that returns to the scheduler normally re-stamps progress long
+/// before this window elapses, so a healthy task never triggers it; only a
+/// genuine monopoliser does. Well below the 10-second soft/hard thresholds,
+/// so the guard forces a housekeeping yield many times over before a stall
+/// could ever be misjudged. A diagnostic/policy value, not a resource
+/// capacity, and not a scheduler quantum: it rides the ~1 Hz watchdog
+/// cadence already firing on the CPU and arms no new timer, so the tickless
+/// invariant is preserved.
+pub const DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS: u64 = 1_000_000_000;
+
 /// Nanoseconds per millisecond, for rendering the human-facing duration.
 const NS_PER_MS: u64 = 1_000_000;
 
@@ -247,6 +266,55 @@ pub fn note_progress(cpu: CpuId, now_ns: u64) {
     }
 }
 
+/// Stamp `state`'s liveness heartbeat at `now_ns` *without* a sampled
+/// context, returning `Some(stalled_ns)` when the CPU was in a *reported*
+/// hard lockup and has now recovered.
+///
+/// This is the liveness analogue of [`record_progress`]: reaching the
+/// dispatch loop is itself proof the CPU is alive and takes interrupts (it
+/// either just woke from `wfi` by taking one, or is running continuously),
+/// so the dispatcher stamps liveness here for the same reason it stamps
+/// progress. Without it a CPU returning to `Active` after a long idle park
+/// would carry the stale liveness heartbeat from *before* the park — its
+/// non-maskable sample is only taken while running, not while parked — and
+/// a cross-CPU scan would falsely report it hard-locked the instant it
+/// republishes `Active`. Unlike [`record_liveness`] it leaves the recorded
+/// sample context untouched: the dispatcher has no interrupted PC/PSTATE to
+/// record, and the context only feeds a report's "why".
+fn record_alive(state: &CpuState, now_ns: u64) -> Option<u64> {
+    let prev = state.last_seen_ns.swap(now_ns.max(1), Ordering::Release);
+    if state.hard_reported.swap(false, Ordering::AcqRel) {
+        Some(now_ns.saturating_sub(prev))
+    } else {
+        None
+    }
+}
+
+/// Record that `cpu` is alive at monotonic time `now_ns` from a context
+/// that proves liveness without a sampled interrupt — the dispatch loop
+/// calls this once per iteration, alongside [`note_progress`], before it
+/// republishes the CPU as `Active`.
+///
+/// Pure accounting on the common path (one atomic store); it emits only on
+/// the rare edge where a previously-reported hard lockup clears, so it is
+/// cheap enough for the hot dispatch path. An out-of-range `cpu` is a
+/// no-op (fail closed).
+pub fn note_alive(cpu: CpuId, now_ns: u64) {
+    let Some(state) = cpu_state::get(cpu) else {
+        return;
+    };
+    if let Some(stalled_ns) = record_alive(state, now_ns) {
+        report_lockup(
+            AuditEvent::CpuHardLockupCleared,
+            Level::Warn,
+            cpu,
+            None,
+            stalled_ns,
+            &Diag::EMPTY,
+        );
+    }
+}
+
 /// Stamp `state`'s liveness heartbeat at `now_ns` and record `sample` as
 /// its last-known context. Returns `Some(stalled_ns)` when the CPU was in
 /// a *reported* hard lockup and has now recovered.
@@ -292,8 +360,44 @@ pub fn on_watchdog_tick(cpu: CpuId, now_ns: u64, sample: &WatchdogSample) {
                 &Diag::EMPTY,
             );
         }
+        // A lone CPU-bound *user* task that never returns to the scheduler
+        // keeps taking this very cadence sample (so it is not wedged), but
+        // it withholds the CPU from the dispatch loop, stalling housekeeping
+        // and the progress heartbeat. Force it back to the dispatcher once:
+        // the return-to-user preempt point this same interrupt runs honours
+        // the request, so the task cannot monopolise the CPU by refusing to
+        // yield. Nothing is armed here beyond the cadence already firing.
+        if monopolises_cpu(state, now_ns, sample.in_kernel) {
+            crate::preempt::request_forced_yield(cpu);
+        }
     }
     scan(cpu, now_ns);
+}
+
+/// Whether `state`'s CPU is an `Active` core running a **user** task that
+/// has withheld the CPU from the scheduler past
+/// [`DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS`].
+///
+/// Pure predicate (no I/O, no latch), so the monopoly policy is unit-tested
+/// directly. Only a CPU that is `Active`, was sampled in *user* mode
+/// (kernel code is never preempted — the kernel is non-preemptible), and
+/// has an *armed* progress heartbeat older than the guard qualifies; an
+/// unarmed heartbeat (`0`) or a clock that went backwards never does (fail
+/// closed — no phantom yield).
+fn monopolises_cpu(state: &CpuState, now_ns: u64, in_kernel: bool) -> bool {
+    if in_kernel {
+        return false;
+    }
+    if WatchdogActivity::from_u8(state.wd_activity.load(Ordering::Acquire))
+        != WatchdogActivity::Active
+    {
+        return false;
+    }
+    let last_progress = state.last_progress_ns.load(Ordering::Acquire);
+    if last_progress == 0 {
+        return false;
+    }
+    now_ns.saturating_sub(last_progress) >= DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS
 }
 
 /// The verdict of classifying one CPU during the cross-CPU scan.
@@ -483,6 +587,12 @@ struct Diag {
     task: u64,
     /// Last-known port-defined processor-state word (`0` = none).
     aux: u64,
+    /// Whether the last-known context was **kernel** code (`true`) or a
+    /// **user** task (`false`). Rendered as the `context` field so a report
+    /// says at a glance whether a wedged CPU was last executing in the
+    /// kernel (a held lock / in-flight syscall / masked in-kernel spin) or a
+    /// user task — the single most decisive clue for the "why".
+    in_kernel: bool,
 }
 
 impl Diag {
@@ -491,7 +601,15 @@ impl Diag {
         pc: 0,
         task: WatchdogSample::NO_TASK,
         aux: 0,
+        in_kernel: false,
     };
+
+    /// Whether this diagnosis carries a real captured sample (as opposed to
+    /// the empty recovery/clear record). Only then is the kernel/user
+    /// `context` meaningful.
+    fn has_sample(&self) -> bool {
+        self.pc != 0 || self.task != WatchdogSample::NO_TASK
+    }
 
     /// Read a CPU's recorded last-known context.
     fn snapshot(state: &CpuState) -> Self {
@@ -499,6 +617,7 @@ impl Diag {
             pc: state.wd_ctx_pc.load(Ordering::Acquire),
             task: state.wd_ctx_task.load(Ordering::Acquire),
             aux: state.wd_ctx_aux.load(Ordering::Acquire),
+            in_kernel: state.wd_ctx_in_kernel.load(Ordering::Acquire),
         }
     }
 }
@@ -553,10 +672,10 @@ fn report_to(
 
     // Build the field list on the stack. The order is stable so a reader
     // and a parser see the same shape every time.
-    let mut fields: [tairix_log::Field<'_>; 6] = [tairix_log::Field {
+    let mut fields: [tairix_log::Field<'_>; 7] = [tairix_log::Field {
         key: "cpu",
         value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
-    }; 6];
+    }; 7];
     let mut n = 1;
     if let Some(obs) = observer {
         fields[n] = tairix_log::Field {
@@ -588,6 +707,13 @@ fn report_to(
         fields[n] = tairix_log::Field {
             key: "pstate",
             value: tairix_log::FieldValue::Str(hex0x(diag.aux, &mut aux_buf)),
+        };
+        n += 1;
+    }
+    if diag.has_sample() {
+        fields[n] = tairix_log::Field {
+            key: "context",
+            value: tairix_log::FieldValue::Str(if diag.in_kernel { "kernel" } else { "user" }),
         };
         n += 1;
     }
@@ -698,6 +824,73 @@ mod tests {
         state.hard_reported.store(true, Ordering::Relaxed);
         assert_eq!(record_liveness(state, 1_500, &sample), Some(500));
         assert_eq!(record_liveness(state, 1_600, &sample), None);
+    }
+
+    #[test]
+    fn alive_refreshes_liveness_without_touching_context() {
+        let state = reset(35);
+        // A stale liveness heartbeat and a captured context from an earlier
+        // real sample.
+        state.last_seen_ns.store(1, Ordering::Relaxed);
+        state.wd_ctx_pc.store(0xabcd, Ordering::Relaxed);
+        state.wd_ctx_task.store(3, Ordering::Relaxed);
+        state.wd_ctx_aux.store(0x345, Ordering::Relaxed);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        // Proof-of-life from the dispatcher: liveness advances, context is
+        // left exactly as the last real sample recorded it.
+        assert_eq!(record_alive(state, 5_000), None);
+        assert_eq!(state.last_seen_ns.load(Ordering::Relaxed), 5_000);
+        assert_eq!(state.wd_ctx_pc.load(Ordering::Relaxed), 0xabcd);
+        assert_eq!(state.wd_ctx_task.load(Ordering::Relaxed), 3);
+        assert_eq!(state.wd_ctx_aux.load(Ordering::Relaxed), 0x345);
+        assert!(state.wd_ctx_in_kernel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn alive_after_a_reported_hard_lockup_reports_recovery_once() {
+        let state = reset(36);
+        state.last_seen_ns.store(1_000, Ordering::Relaxed);
+        state.hard_reported.store(true, Ordering::Relaxed);
+        // Reaching the dispatcher clears a latched hard episode and reports
+        // the recovery gap exactly once.
+        assert_eq!(record_alive(state, 3_000), Some(2_000));
+        assert_eq!(record_alive(state, 3_100), None);
+    }
+
+    #[test]
+    fn a_stamped_liveness_heartbeat_is_never_the_unarmed_sentinel() {
+        let state = reset(37);
+        record_alive(state, 0);
+        assert_ne!(state.last_seen_ns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_cpu_returning_from_a_long_idle_park_is_not_hard_locked() {
+        // The regression: a CPU idle-parked far longer than the hard
+        // threshold (its non-maskable sample is not taken while parked)
+        // carries a stale liveness heartbeat. When it wakes it must stamp
+        // liveness *before* it republishes Active — exactly the order the
+        // dispatch loop uses (`note_alive` then `set_activity(Active)`) — so
+        // the cross-CPU scan never sees it Active with the pre-park
+        // heartbeat and never reports a false hard lockup.
+        let state = reset(39);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        // Last real sample was taken before a long idle park.
+        state.last_seen_ns.store(1_000, Ordering::Relaxed);
+        state.last_progress_ns.store(1_000, Ordering::Relaxed);
+        let now = 1_000 + 20 * DEFAULT_HARD_LOCKUP_THRESHOLD_NS;
+        // The dispatch loop's proof-of-life stamps at the top, before Active.
+        record_alive(state, now);
+        record_progress(state, now);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        assert_eq!(classify(state, now), Verdict::Quiet);
+        // And without the fix — Active republished over the pre-park
+        // heartbeat — the very same scan would have fired.
+        state.last_seen_ns.store(1_000, Ordering::Relaxed);
+        state.last_progress_ns.store(1_000, Ordering::Relaxed);
+        assert!(matches!(classify(state, now), Verdict::HardOnset(_)));
     }
 
     // --- Classification --------------------------------------------
@@ -819,6 +1012,97 @@ mod tests {
         assert_eq!(state.wd_ctx_task.load(Ordering::Relaxed), 9);
     }
 
+    // --- Monopoly guard (a lone CPU-bound user task) ----------------
+
+    /// Arm `state` as an Active CPU whose scheduler progress was last
+    /// stamped at `progress_ns`.
+    fn active_with_progress(cpu: CpuId, progress_ns: u64) -> &'static CpuState {
+        let state = reset(cpu);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        state.last_progress_ns.store(progress_ns, Ordering::Relaxed);
+        state
+    }
+
+    #[test]
+    fn a_lone_user_task_past_the_guard_monopolises() {
+        let state = active_with_progress(50, 1_000);
+        let now = 1_000 + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
+        assert!(monopolises_cpu(state, now, false));
+        // Boundary is inclusive; a hair under is not yet a monopoly.
+        assert!(!monopolises_cpu(state, now - 1, false));
+    }
+
+    #[test]
+    fn kernel_code_is_never_force_yielded() {
+        let state = active_with_progress(51, 1_000);
+        let now = 1_000 + 10 * DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
+        // The kernel is non-preemptible: a CPU sampled in kernel code is
+        // never a monopoly candidate, however long since progress.
+        assert!(!monopolises_cpu(state, now, true));
+    }
+
+    #[test]
+    fn a_non_active_or_unarmed_cpu_never_monopolises() {
+        // Not Active (parked/offline): owes no progress, never a monopoly.
+        let idle = reset(52);
+        idle.last_progress_ns.store(1_000, Ordering::Relaxed);
+        let now = 1_000 + 10 * DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
+        assert!(!monopolises_cpu(idle, now, false));
+        // Active but progress never armed (0): fail closed, no phantom yield.
+        let fresh = reset(53);
+        fresh
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        assert!(!monopolises_cpu(fresh, now, false));
+    }
+
+    #[test]
+    fn on_watchdog_tick_requests_a_forced_yield_for_a_monopolising_user_cpu() {
+        let state = active_with_progress(54, 1_000);
+        state.force_yield.store(false, Ordering::Relaxed);
+        let sample = WatchdogSample {
+            pc: 0x4000_0000,
+            task: 21,
+            aux: 0x6000_0000,
+            in_kernel: false,
+        };
+        on_watchdog_tick(54, 1_000 + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS, &sample);
+        assert!(state.force_yield.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn on_watchdog_tick_does_not_force_yield_a_kernel_or_recent_cpu() {
+        // Sampled in the kernel: never force-yielded.
+        let in_kernel = active_with_progress(55, 1_000);
+        in_kernel.force_yield.store(false, Ordering::Relaxed);
+        let ksample = WatchdogSample {
+            pc: 0x1000,
+            task: WatchdogSample::NO_TASK,
+            aux: 0x3c5,
+            in_kernel: true,
+        };
+        on_watchdog_tick(
+            55,
+            1_000 + 10 * DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS,
+            &ksample,
+        );
+        assert!(!in_kernel.force_yield.load(Ordering::Relaxed));
+        // A user task that returned to the scheduler recently: not a
+        // monopoly, so no forced yield.
+        let recent = active_with_progress(56, 1_000);
+        recent.force_yield.store(false, Ordering::Relaxed);
+        let usample = WatchdogSample {
+            pc: 0x4000_0000,
+            task: 22,
+            aux: 0x6000_0000,
+            in_kernel: false,
+        };
+        on_watchdog_tick(56, 1_500, &usample);
+        assert!(!recent.force_yield.load(Ordering::Relaxed));
+    }
+
     // --- Diagnostics rendering --------------------------------------
 
     #[test]
@@ -834,6 +1118,7 @@ mod tests {
             pc: 0xffff_0000_1234_5678,
             task: 12,
             aux: 0x3c5,
+            in_kernel: true,
         };
         report_to(
             sink,
@@ -855,6 +1140,31 @@ mod tests {
         assert_eq!(field(ev, "pc"), Some("0xffff000012345678"));
         assert_eq!(field(ev, "task"), Some("12"));
         assert_eq!(field(ev, "pstate"), Some("0x00000000000003c5"));
+        // The kernel/user context distinguishes an in-kernel wedge from a
+        // spinning user task — the most decisive clue for the "why".
+        assert_eq!(field(ev, "context"), Some("kernel"));
+    }
+
+    #[test]
+    fn a_user_context_record_says_user() {
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let diag = Diag {
+            pc: 0x4000_0000,
+            task: 15,
+            aux: 0x6000_0000,
+            in_kernel: false,
+        };
+        report_to(
+            sink,
+            AuditEvent::CpuStallDetected,
+            Level::Error,
+            1,
+            None,
+            10_000_000_000,
+            &diag,
+        );
+        let ev = &sink.snapshot()[0];
+        assert_eq!(field(ev, "context"), Some("user"));
     }
 
     #[test]

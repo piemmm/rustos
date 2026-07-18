@@ -458,7 +458,10 @@ that *owes* progress is judged — fail closed). See `plans/WATCHDOG.md`.
 
 Each cadence sample records what its CPU interrupted (PC, processor state,
 kernel-vs-user), so a detected lockup carries fresh "why" context: the locked
-CPU, the observer, how long it has been silent, the last-known PC and PSTATE.
+CPU, the observer, how long it has been silent, the last-known PC and PSTATE,
+and a `context` field naming whether that sample was in **kernel** code or a
+**user** task — the single most decisive clue for a wedge's "why" (an
+in-kernel spin versus a spinning user task).
 A detection then asks the port for a best-effort recovery
 (`WatchdogArch::request_recovery` — a reschedule for a soft lockup, a directed
 attention signal for a hard one), recorded with its honest outcome. Detection,
@@ -469,6 +472,21 @@ are installed or on a never-armed CPU (fail closed). The audit catalogue
 documents the `CPU_STALL_DETECTED` / `CPU_STALL_CLEARED`,
 `CPU_HARD_LOCKUP_DETECTED` / `CPU_HARD_LOCKUP_CLEARED`, and
 `CPU_LOCKUP_RECOVERY` records (`docs/src/architecture/kernel.md`).
+
+The watchdog cadence also enforces a **monopoly guard**: a lone CPU-bound
+*user* task is not a lockup (its own cadence sample keeps liveness fresh and a
+lone user task owes no scheduler progress), but because the preemption tick is
+competitor-gated it would otherwise never be forced back to the dispatch loop —
+withholding the CPU from housekeeping and the progress heartbeat, pegging a
+core (the monopolisation `AGENTS.md` §17.1 forbids). When `on_watchdog_tick`
+samples an Active CPU running a user task whose progress heartbeat is stale
+past `watchdog::DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS` (1 s), it requests a
+`preempt::request_forced_yield`; the return-to-user preempt point this same
+interrupt runs honours it in `preempt_current` **unconditionally** (the
+forced-yield latch bypasses the competitor gate), returning the task to the
+dispatcher for one housekeeping iteration before it resumes. Kernel code is
+never force-yielded (the kernel is non-preemptible), and no new timer is armed
+— it rides the always-on watchdog cadence, so the tickless invariant holds.
 
 The dispatch loop runs with **device interrupts enabled** — TAIRiX is a
 fully preemptive kernel (`AGENTS.md` §17.1). It calls

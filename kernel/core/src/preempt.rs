@@ -42,6 +42,29 @@
 //! re-evaluates and re-arms, so an unnecessary yield costs one bounded
 //! scheduler round-trip and is never wrong; a *missed* expiry is the
 //! starvation defect this module exists to prevent.
+//!
+//! # The forced-yield latch (a monopolising lone user task)
+//!
+//! The tick latch above is competitor-gated: a *lone* runnable user task
+//! with no competitor and nothing pending is deliberately left running,
+//! because rescheduling to the same sole task only churns the
+//! address-space/TLB switch. That is correct for scheduling, but it means
+//! a CPU-bound user task that never issues a syscall never returns to the
+//! dispatch loop at all: its per-dispatch housekeeping (the deferred-wake
+//! and console-transmit drains) and its progress/liveness heartbeats stop,
+//! and the task withholds the CPU indefinitely — the monopolisation the
+//! charter forbids.
+//!
+//! A second, *un-gated* latch closes that hole. The lockup watchdog's
+//! cadence sample — already firing on every CPU for liveness detection —
+//! calls [`request_forced_yield`] when it observes an `Active` CPU running
+//! a user task whose scheduler progress has been stale past a monopoly
+//! guard. [`preempt_current`] honours it at the same return-to-user point
+//! by suspending the task back to the dispatcher unconditionally (no
+//! competitor required), so the dispatch loop runs one iteration —
+//! stamping progress, draining housekeeping — before re-dispatching the
+//! task. It arms no new periodic timer: it rides the watchdog cadence that
+//! is already running, so the tickless invariant is untouched.
 
 use core::sync::atomic::Ordering;
 
@@ -58,8 +81,8 @@ use crate::kthread::reschedule_current;
 /// competitor the running task must be preempted for?
 ///
 /// `kernel/core` is the one place that names the concrete scheduler policy
-/// (§17.1), so it installs this once at boot over the live scheduler and
-/// the preempt path asks through it without naming the policy.
+/// (the modularity contract), so it installs this once at boot over the live
+/// scheduler and the preempt path asks through it without naming the policy.
 pub trait PreemptCompetitor: Sync {
     /// `true` if `cpu` has at least one runnable task besides the one it is
     /// currently running (an out-of-range `cpu` reports `false`).
@@ -161,6 +184,33 @@ pub fn take_preempt_pending(cpu: CpuId) -> bool {
     cpu_state::get(cpu).is_some_and(|state| state.preempt_pending.swap(false, Ordering::AcqRel))
 }
 
+/// Request a **forced** yield-to-scheduler for the user task currently
+/// running on `cpu`, even when it is the only runnable task there.
+///
+/// The watchdog cadence calls this when it samples an `Active` CPU running
+/// a user task that has withheld the CPU from the scheduler past the
+/// monopoly-guard window. Unlike [`note_preempt_tick`], the yield this
+/// requests is **not** gated on a runnable competitor: its purpose is
+/// precisely to return a lone CPU-bound task to the dispatcher so the
+/// dispatch loop's housekeeping (deferred-wake drain, console-transmit
+/// drain) and its progress/liveness heartbeats run again — the charter's
+/// guarantee that a runnable task can never monopolise a CPU by refusing
+/// to yield. It arms no new timer; it rides the watchdog cadence already
+/// firing on the CPU, so the tickless invariant is preserved. Pure
+/// accounting (one atomic store); an out-of-range `cpu` is dropped (fail
+/// closed).
+pub fn request_forced_yield(cpu: CpuId) {
+    if let Some(state) = cpu_state::get(cpu) {
+        state.force_yield.store(true, Ordering::Release);
+    }
+}
+
+/// Consume `cpu`'s forced-yield latch: `true` exactly once per request.
+#[must_use]
+fn take_forced_yield(cpu: CpuId) -> bool {
+    cpu_state::get(cpu).is_some_and(|state| state.force_yield.swap(false, Ordering::AcqRel))
+}
+
 /// Discard any tick latched on `cpu` before the scheduler's current
 /// dispatch decision.
 ///
@@ -172,6 +222,11 @@ pub fn take_preempt_pending(cpu: CpuId) -> bool {
 pub(crate) fn clear_preempt_pending(cpu: CpuId) {
     if let Some(state) = cpu_state::get(cpu) {
         state.preempt_pending.store(false, Ordering::Release);
+        // The dispatcher has just made a fresh decision, so a monopoly
+        // yield requested against the task it is switching away from is
+        // superseded too: the incoming task starts clean and earns its own
+        // monopoly-guard window from this point.
+        state.force_yield.store(false, Ordering::Release);
     }
 }
 
@@ -197,8 +252,27 @@ pub(crate) fn clear_preempt_pending(cpu: CpuId) {
 /// suspension, never on a spurious call.
 #[must_use]
 pub fn preempt_current(cpu: CpuId) -> bool {
-    if !take_preempt_pending(cpu) {
+    // Consume both latches on every visit so neither lingers to fire a
+    // spurious switch on a later, unrelated preempt point.
+    let tick_pending = take_preempt_pending(cpu);
+    let forced = take_forced_yield(cpu);
+    if !tick_pending && !forced {
         return false;
+    }
+    // A forced yield is *not* gated on a competitor: it exists precisely to
+    // return a lone CPU-bound user task to the dispatcher (so the dispatch
+    // loop's housekeeping and its progress/liveness heartbeats run again),
+    // which a competitor-gated tick would skip. It rides the watchdog
+    // cadence already firing on this CPU, so it arms no new timer.
+    if forced {
+        if !reschedule_current(cpu, RescheduleAction::Yield) {
+            keep_periodic_tick(cpu);
+            return false;
+        }
+        if let Some(state) = cpu_state::get(cpu) {
+            state.preemptions.fetch_add(1, Ordering::Relaxed);
+        }
+        return true;
     }
     // A fired tick owes a context switch only when it would change what
     // runs: a runnable competitor to switch to, or interrupt-context work
@@ -392,5 +466,48 @@ mod tests {
     #[test]
     fn preemption_count_out_of_range_cpu_reports_zero() {
         assert_eq!(preemption_count(u32::MAX), 0);
+    }
+
+    /// A forced yield is consumed exactly once and needs no competitor
+    /// gate: it exists precisely to preempt a *lone* task. In a host test
+    /// no user resume handle is published, so the suspension fails closed
+    /// (the counting-under-real-preemption path is the aarch64 QEMU
+    /// vertical), but the latch is still consumed and no phantom count is
+    /// recorded.
+    #[test]
+    fn a_forced_yield_is_consumed_and_needs_no_competitor() {
+        const CPU: CpuId = 57;
+        assert!(!take_forced_yield(CPU));
+        request_forced_yield(CPU);
+        assert!(!preempt_current(CPU));
+        assert!(!take_forced_yield(CPU));
+        assert_eq!(preemption_count(CPU), 0);
+    }
+
+    /// The dispatcher's `clear_preempt_pending` supersedes a forced yield
+    /// requested against the outgoing task, so the incoming task starts its
+    /// monopoly-guard window clean.
+    #[test]
+    fn clearing_supersedes_a_forced_yield() {
+        const CPU: CpuId = 58;
+        request_forced_yield(CPU);
+        clear_preempt_pending(CPU);
+        assert!(!take_forced_yield(CPU));
+    }
+
+    /// A forced yield fires even with no competitor and no latched tick —
+    /// the whole point is to preempt a lone task the competitor gate would
+    /// otherwise leave running.
+    #[test]
+    fn a_forced_yield_alone_reaches_the_reschedule_path() {
+        const CPU: CpuId = 59;
+        // No tick latched, no competitor: without the forced latch this
+        // would short-circuit to `false` before any reschedule attempt.
+        assert!(!take_preempt_pending(CPU));
+        request_forced_yield(CPU);
+        // Reaches the (host: fail-closed) reschedule path and consumes the
+        // latch; returns false only because no user task is published here.
+        assert!(!preempt_current(CPU));
+        assert!(!take_forced_yield(CPU));
     }
 }

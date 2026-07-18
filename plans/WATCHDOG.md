@@ -13,7 +13,15 @@ Two per-CPU heartbeats plus an activity class, all in
   (`watchdog::note_progress`): "the scheduler ran here". Soft-lockup basis.
 - **liveness** (`last_seen_ns`) — stamped by the port's non-maskable ~1 Hz
   cadence sample (`watchdog::on_watchdog_tick`): "this CPU still takes the
-  watchdog interrupt". Hard-lockup basis.
+  watchdog interrupt", *and* once per dispatch-loop iteration
+  (`watchdog::note_alive`): reaching the dispatcher is itself proof the CPU is
+  alive and taking interrupts (it either just woke from `wfi` by taking one, or
+  is running continuously). Hard-lockup basis. Both are needed: the cadence
+  sample covers a lone user task that never returns to the dispatcher, and the
+  dispatch-loop stamp restarts the liveness window when a CPU resumes work
+  after an idle park — without it a CPU returning to `Active` would carry the
+  stale heartbeat from *before* the park (its sample is not taken while parked)
+  and be falsely hard-locked the instant it republishes `Active`.
 - **activity** (`wd_activity`: Offline / Idle / Active) — published by the
   dispatch loop so only a CPU that *owes* progress is judged; a parked (idle)
   or not-yet-online CPU is never flagged (fail closed).
@@ -38,7 +46,39 @@ allocation-free, once-per-episode (latched), and self-closing (a recovery
 record on clear). Audit events: `CPU_STALL_DETECTED` (4080) / `_CLEARED`
 (4081), `CPU_HARD_LOCKUP_DETECTED` (4082) / `_CLEARED` (4083),
 `CPU_LOCKUP_RECOVERY` (4084) — carrying cpu, observer, stalled_ms, pc, pstate,
-task, and the recovery kind + outcome.
+task, `context` (whether the last-known sample was in **kernel** code or a
+**user** task — the most decisive clue for a wedge's "why"), and the recovery
+kind + outcome.
+
+## Monopoly guard: a lone CPU-bound user task (done)
+
+The ordinary preemption tick is competitor-gated (`preempt::preempt_current`):
+a *lone* runnable user task with no competitor is deliberately left running,
+because rescheduling to the same sole task only churns the address-space/TLB
+switch. Correct for scheduling — but a CPU-bound user task that never issues a
+syscall then never returns to the dispatch loop, so its per-dispatch
+housekeeping (deferred-wake and console-transmit drains) and its progress
+heartbeat stop and it withholds the CPU indefinitely (the monopolisation the
+charter forbids). It is *not* a lockup — its own ~1 Hz cadence sample keeps
+liveness fresh, and a lone user task owes no scheduler progress — so neither
+detector fires; it simply pegs a core.
+
+The watchdog cadence closes this. When `on_watchdog_tick` samples an `Active`
+CPU running a **user** task (`!in_kernel`) whose progress heartbeat is stale
+past `DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS` (1 s — well below the 10 s
+soft/hard thresholds), it calls `preempt::request_forced_yield`. The
+return-to-user preempt point this same interrupt runs honours the request in
+`preempt_current`, suspending the task back to the dispatcher **unconditionally**
+(the forced-yield latch is *not* competitor-gated, unlike `note_preempt_tick`).
+The dispatch loop then runs one iteration — re-stamping progress, draining
+housekeeping — before re-dispatching the task. Kernel code is never
+force-yielded (the kernel is non-preemptible). Crucially this arms **no new
+timer**: it rides the watchdog cadence already firing on the CPU, so the
+tickless invariant is preserved. Latch: `CpuState::force_yield`, cleared by the
+dispatcher's `clear_preempt_pending` so the incoming task earns a fresh guard
+window. Host-tested (`monopolises_cpu` predicate; `on_watchdog_tick` sets the
+latch for a monopolising user CPU only; `preempt_current` honours a forced
+yield with no competitor).
 
 Recovery is best-effort through the Arch HAL `WatchdogArch::request_recovery`
 (`kernel/arch/api/src/watchdog.rs`): a soft lockup → reschedule the offending

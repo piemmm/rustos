@@ -970,16 +970,27 @@ fn run_dispatch_loop<A: KernelArch>(
 ) {
     arch.set_device_irqs(true);
     loop {
-        // Stamp the stall-watchdog heartbeat: one loop iteration means the
-        // scheduler regained this CPU and is making a fresh decision, so a
-        // CPU that stops reaching here is a soft lockup the timer-tick
-        // `check_stall` will report. A single monotonic-counter read per
-        // dispatch, off any lock.
-        crate::watchdog::note_progress(cpu, arch.monotonic_ns(cpu));
-        // Publish this CPU as running work only *after* stamping a fresh
-        // progress heartbeat, so a cross-CPU watchdog scan can never catch
-        // it Active with a stale heartbeat inherited from a long idle park
-        // (which would be a false soft-lockup report).
+        // Stamp both watchdog heartbeats: one loop iteration means the
+        // scheduler regained this CPU and is making a fresh decision (a CPU
+        // that stops reaching here is a soft lockup the timer-tick
+        // `check_stall` will report), and reaching here at all is proof the
+        // CPU is alive and taking interrupts — it either just woke from
+        // `wfi` by taking one or is running continuously (a CPU that stops
+        // reaching here while still Active is a hard lockup). Two relaxed
+        // monotonic-counter reads' worth of stores per dispatch, off any
+        // lock.
+        let now_ns = arch.monotonic_ns(cpu);
+        crate::watchdog::note_progress(cpu, now_ns);
+        // Refresh the liveness heartbeat too: the non-maskable sample is
+        // only taken while this CPU runs, not while it is parked in `wfi`,
+        // so a CPU returning to work after a long idle park would otherwise
+        // carry a stale liveness heartbeat inherited from before the park.
+        crate::watchdog::note_alive(cpu, now_ns);
+        // Publish this CPU as running work only *after* stamping fresh
+        // progress *and* liveness heartbeats, so a cross-CPU watchdog scan
+        // can never catch it Active with a stale heartbeat inherited from a
+        // long idle park (which would be a false soft- or hard-lockup
+        // report).
         crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Active);
         // Retire any reschedule obligation left by the task that just
         // suspended before the policy makes its next decision. CFQ arms
