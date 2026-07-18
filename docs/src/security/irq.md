@@ -606,7 +606,11 @@ alongside the other freestanding integration crates.
   previous quarantine, `is_quarantined` is owner-checked, an
   uninstalled clock leaves accounting inert, and
   `block_until_ready` surfaces `WaitOutcome::Quarantined` without
-  yielding.
+  yielding. `owner_of_line` (the read-only, owner-agnostic lookup the
+  CPU-lockup watchdog uses to attribute a stuck controller line to the
+  driver that bound it) is covered too: it names a bound line's owner,
+  is `None` for an unbound line, and returns to `None` after the owner's
+  bindings are released.
 * `kernel/core::syscalls::tests` adds syscall-handler tests
   (mint / out-of-range / duplicate / forgery / timeout / pre-fired
   ready), an `exit_releases_every_irq_binding_owned_by_task` test

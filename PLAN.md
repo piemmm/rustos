@@ -2010,7 +2010,16 @@ order (one fully-gated increment each):
                    against the mock distributor). `stuck_state` distinguishes a
                    live storm (`active,enabled`) from a masked-but-asserted line
                    the kernel already contained (`pending,masked`), so the pin is
-                   unambiguous. A detection drives
+                   unambiguous. The observer also attributes the stuck id against
+                   the live kernel IRQ table (`IrqTable::owner_of_line` via the
+                   arch-neutral `watchdog::StuckOwnerResolver` seam installed over
+                   `&KernelState.irq`), rendering `stuck_owner=<task>` for a line
+                   a driver bound or `stuck_owner=unbound` for a spurious /
+                   kernel-contained line no driver owns — so a raw `stuck_irq=111`
+                   is decidable as "not the USB path" without a device tree.
+                   Omitted when no resolver is installed (never a claim it cannot
+                   make); host-tested via the pure `resolve_stuck_owner_with` +
+                   `owner_of_line`. A detection drives
                    a best-effort `WatchdogArch::request_recovery` (reschedule
                    for soft, directed attention for hard), recorded with its
                    honest outcome as `CPU_LOCKUP_RECOVERY` (4084). All paths

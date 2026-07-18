@@ -161,6 +161,26 @@ static REPORT_SINK: OnceCell<&'static (dyn Sink + Sync)> = OnceCell::new();
 /// it (a build with no pseudo-NMI channel never installs one).
 static RECOVERY: OnceCell<&'static (dyn WatchdogArch + Sync)> = OnceCell::new();
 
+/// Resolves a stuck controller line to the task that owns its IRQ binding.
+///
+/// The watchdog reads a raw interrupt id from the shared controller when it
+/// catches a hard lockup ([`WatchdogArch::stuck_interrupt`]); that id alone
+/// does not say *whose* device it is. This seam lets the arch-neutral
+/// watchdog attribute the line to the driver that bound it — turning
+/// `stuck_irq=<id>` into `stuck_irq=<id> stuck_owner=<task>` for a bound
+/// line, or `unbound` for a spurious/contained line no driver owns — without
+/// the watchdog naming the kernel IRQ table type. The kernel binary installs
+/// one backed by the live `IrqTable` ([`install_irq_owner`]).
+pub trait StuckOwnerResolver: Sync {
+    /// The task id that owns the binding for `line`, or `None` if `line` is
+    /// bound to no task. A read-only lookup: it grants no authority and
+    /// mutates nothing.
+    fn owner_of_line(&self, line: u32) -> Option<u64>;
+}
+
+/// The installed stuck-line owner resolver, or `None` before boot wires it.
+static IRQ_OWNER: OnceCell<&'static (dyn StuckOwnerResolver + Sync)> = OnceCell::new();
+
 /// Install the sink the watchdog reports lockups through. Idempotent by
 /// policy: the boot path installs exactly one; a later call is a benign
 /// no-op.
@@ -183,6 +203,18 @@ fn report_sink() -> Option<&'static (dyn Sink + Sync)> {
 /// The installed recovery handle, if any.
 fn recovery() -> Option<&'static (dyn WatchdogArch + Sync)> {
     RECOVERY.get().ok().flatten().copied()
+}
+
+/// Install the resolver that attributes a stuck controller line to the task
+/// that owns its IRQ binding (see [`StuckOwnerResolver`]). Idempotent; a
+/// build that never installs one simply omits the `stuck_owner` field.
+pub fn install_irq_owner(resolver: &'static (dyn StuckOwnerResolver + Sync)) {
+    let _ = IRQ_OWNER.set(resolver);
+}
+
+/// The installed stuck-line owner resolver, if any.
+fn irq_owner() -> Option<&'static (dyn StuckOwnerResolver + Sync)> {
+    IRQ_OWNER.get().ok().flatten().copied()
 }
 
 /// The outcome of one heartbeat evaluation on a CPU.
@@ -475,6 +507,7 @@ fn scan(observer: CpuId, now_ns: u64) {
                 let mut diag = Diag::snapshot(state);
                 diag.sample_stale = true;
                 diag.stuck = recovery().and_then(WatchdogArch::stuck_interrupt);
+                diag.stuck_owner = resolve_stuck_owner(diag.stuck);
                 report_lockup(
                     AuditEvent::CpuHardLockupDetected,
                     Level::Error,
@@ -619,6 +652,31 @@ struct Diag {
     /// hard-lockup path (the observer's cross-CPU read); a snapshot of the
     /// CPU's own context leaves it `None`.
     stuck: Option<StuckInterrupt>,
+    /// Who owns the [`Self::stuck`] line, resolved against the kernel IRQ
+    /// table on the hard-lockup path. It disambiguates the raw `stuck_irq`
+    /// id — the recurring "which device is this line?" question — by naming
+    /// the driver that bound it (`stuck_owner=<task>`), or reporting that no
+    /// driver owns it (`stuck_owner=unbound`, a spurious/contained line, so
+    /// the wedge is elsewhere). [`StuckOwner::Unknown`] (no stuck line, or no
+    /// resolver installed) renders nothing, so a record never claims an
+    /// attribution it does not have.
+    stuck_owner: StuckOwner,
+}
+
+/// Attribution of a stuck controller line to the task that owns its IRQ
+/// binding, resolved by the watchdog for a hard-lockup report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StuckOwner {
+    /// No stuck line, or no owner resolver installed: nothing is rendered,
+    /// so a record never claims an attribution it could not make.
+    Unknown,
+    /// The stuck line is bound to no task — a spurious/contained line no
+    /// driver owns (rendered `stuck_owner=unbound`), which says the wedge is
+    /// elsewhere, not this line.
+    Unbound,
+    /// The stuck line is bound to this task (rendered `stuck_owner=<hex>`) —
+    /// the driver whose device is asserting it.
+    Task(u64),
 }
 
 impl Diag {
@@ -630,6 +688,7 @@ impl Diag {
         in_kernel: false,
         sample_stale: false,
         stuck: None,
+        stuck_owner: StuckOwner::Unknown,
     };
 
     /// Whether this diagnosis carries a real captured sample (as opposed to
@@ -640,8 +699,8 @@ impl Diag {
     }
 
     /// Read a CPU's recorded last-known context. The observer-supplied
-    /// `sample_stale` / `stuck` fields default off; the hard-lockup
-    /// path sets them after the snapshot.
+    /// `sample_stale` / `stuck` / `stuck_owner` fields default off; the
+    /// hard-lockup path sets them after the snapshot.
     fn snapshot(state: &CpuState) -> Self {
         Self {
             pc: state.wd_ctx_pc.load(Ordering::Acquire),
@@ -650,7 +709,37 @@ impl Diag {
             in_kernel: state.wd_ctx_in_kernel.load(Ordering::Acquire),
             sample_stale: false,
             stuck: None,
+            stuck_owner: StuckOwner::Unknown,
         }
+    }
+}
+
+/// Attribute a stuck line to the driver that bound it, via the installed
+/// owner resolver. `None` (no stuck line) or an uninstalled resolver yields
+/// [`StuckOwner::Unknown`] so nothing is rendered — a report never claims an
+/// attribution it could not make. A stuck line the resolver finds unbound is
+/// [`StuckOwner::Unbound`] (a spurious/contained line, so the wedge is
+/// elsewhere); a bound line names its owning task.
+fn resolve_stuck_owner(stuck: Option<StuckInterrupt>) -> StuckOwner {
+    resolve_stuck_owner_with(stuck, irq_owner().map(|r| r as &dyn StuckOwnerResolver))
+}
+
+/// The pure core of [`resolve_stuck_owner`]: attribute `stuck` against the
+/// given `resolver`, split out so the mapping is host-tested with a fake
+/// resolver rather than the process-global install seam.
+fn resolve_stuck_owner_with(
+    stuck: Option<StuckInterrupt>,
+    resolver: Option<&dyn StuckOwnerResolver>,
+) -> StuckOwner {
+    let Some(stuck) = stuck else {
+        return StuckOwner::Unknown;
+    };
+    match resolver {
+        None => StuckOwner::Unknown,
+        Some(resolver) => match resolver.owner_of_line(stuck.intid) {
+            Some(task) => StuckOwner::Task(task),
+            None => StuckOwner::Unbound,
+        },
     }
 }
 
@@ -715,13 +804,14 @@ fn report_to(
 ) {
     let mut pc_buf = [0u8; 18];
     let mut aux_buf = [0u8; 18];
+    let mut owner_buf = [0u8; 18];
 
     // Build the field list on the stack. The order is stable so a reader
     // and a parser see the same shape every time.
-    let mut fields: [tairix_log::Field<'_>; 10] = [tairix_log::Field {
+    let mut fields: [tairix_log::Field<'_>; 11] = [tairix_log::Field {
         key: "cpu",
         value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
-    }; 10];
+    }; 11];
     let mut n = 1;
     if let Some(obs) = observer {
         fields[n] = tairix_log::Field {
@@ -790,6 +880,27 @@ fn report_to(
             value: tairix_log::FieldValue::Str(stuck_state_tag(stuck)),
         };
         n += 1;
+        // Who owns the stuck line — the driver whose device is asserting it
+        // (`<task>`), or `unbound` for a spurious/contained line no driver
+        // owns (so the wedge is elsewhere, not this line). Only rendered
+        // when the owner was actually resolved, never a claim we cannot make.
+        match diag.stuck_owner {
+            StuckOwner::Task(task) => {
+                fields[n] = tairix_log::Field {
+                    key: "stuck_owner",
+                    value: tairix_log::FieldValue::Str(hex0x(task, &mut owner_buf)),
+                };
+                n += 1;
+            }
+            StuckOwner::Unbound => {
+                fields[n] = tairix_log::Field {
+                    key: "stuck_owner",
+                    value: tairix_log::FieldValue::Str("unbound"),
+                };
+                n += 1;
+            }
+            StuckOwner::Unknown => {}
+        }
     }
     emit(sink, level, event, &fields[..n]);
 }
@@ -1199,6 +1310,7 @@ mod tests {
                 active: true,
                 enabled: true,
             }),
+            stuck_owner: StuckOwner::Task(13),
         };
         report_to(
             sink,
@@ -1229,6 +1341,9 @@ mod tests {
         assert_eq!(field(ev, "stuck_irq"), Some("37"));
         // The state pins whether it is a live storm or a contained line.
         assert_eq!(field(ev, "stuck_state"), Some("active,enabled"));
+        // A bound line names the driver that owns it, so a reader knows
+        // whose device is asserting it rather than a bare interrupt id.
+        assert_eq!(field(ev, "stuck_owner"), Some("0x000000000000000d"));
     }
 
     #[test]
@@ -1244,6 +1359,7 @@ mod tests {
             in_kernel: true,
             sample_stale: true,
             stuck: None,
+            stuck_owner: StuckOwner::Unknown,
         };
         report_to(
             sink,
@@ -1259,6 +1375,8 @@ mod tests {
         assert_eq!(field(ev, "sampled"), Some("pre_silence"));
         assert_eq!(field(ev, "stuck_irq"), None);
         assert_eq!(field(ev, "stuck_state"), None);
+        // No stuck line means no owner to attribute.
+        assert_eq!(field(ev, "stuck_owner"), None);
     }
 
     #[test]
@@ -1293,6 +1411,7 @@ mod tests {
                 active: false,
                 enabled: false,
             }),
+            stuck_owner: StuckOwner::Unbound,
         };
         report_to(
             sink,
@@ -1306,6 +1425,9 @@ mod tests {
         let ev = &sink.snapshot()[0];
         assert_eq!(field(ev, "stuck_irq"), Some("111"));
         assert_eq!(field(ev, "stuck_state"), Some("pending,masked"));
+        // Bound to no driver: the pinned real-hardware case. `unbound` tells
+        // a reader this contained line is not the wedge — look elsewhere.
+        assert_eq!(field(ev, "stuck_owner"), Some("unbound"));
     }
 
     #[test]
@@ -1318,6 +1440,7 @@ mod tests {
             in_kernel: false,
             sample_stale: false,
             stuck: None,
+            stuck_owner: StuckOwner::Unknown,
         };
         report_to(
             sink,
@@ -1362,6 +1485,45 @@ mod tests {
         assert_eq!(field(ev, "sampled"), None);
         assert_eq!(field(ev, "stuck_irq"), None);
         assert_eq!(field(ev, "stuck_state"), None);
+    }
+
+    #[test]
+    fn resolve_stuck_owner_attributes_a_bound_line_and_reports_unbound_otherwise() {
+        // A fake resolver standing in for the live IRQ table: line 42 is
+        // bound to task 7, every other line is unbound.
+        struct FakeOwner;
+        impl StuckOwnerResolver for FakeOwner {
+            fn owner_of_line(&self, line: u32) -> Option<u64> {
+                (line == 42).then_some(7)
+            }
+        }
+        let fake = FakeOwner;
+        let resolver: Option<&dyn StuckOwnerResolver> = Some(&fake);
+
+        let si = |intid| {
+            Some(StuckInterrupt {
+                intid,
+                active: false,
+                enabled: false,
+            })
+        };
+        // No stuck line: nothing to attribute (renders no owner).
+        assert_eq!(
+            resolve_stuck_owner_with(None, resolver),
+            StuckOwner::Unknown
+        );
+        // A stuck line bound to a driver names its task.
+        assert_eq!(
+            resolve_stuck_owner_with(si(42), resolver),
+            StuckOwner::Task(7)
+        );
+        // A stuck line no driver owns is unbound — the wedge is elsewhere.
+        assert_eq!(
+            resolve_stuck_owner_with(si(111), resolver),
+            StuckOwner::Unbound
+        );
+        // With no resolver installed at all, nothing is claimed.
+        assert_eq!(resolve_stuck_owner_with(si(42), None), StuckOwner::Unknown);
     }
 
     #[test]

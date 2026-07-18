@@ -422,6 +422,15 @@ impl<A: KernelArch + 'static> MonotonicClock for SchedWaitQueueArch<A> {
     }
 }
 
+impl crate::watchdog::StuckOwnerResolver for IrqTable {
+    fn owner_of_line(&self, line: u32) -> Option<u64> {
+        // The inherent `IrqTable::owner_of_line` returns the owning
+        // `TaskId`; expose only its raw id to the arch-neutral watchdog so
+        // a hard-lockup report can attribute a stuck line to its driver.
+        IrqTable::owner_of_line(self, line).map(|task| task.0)
+    }
+}
+
 impl<A: KernelArch + 'static> crate::preempt::PreemptCompetitor for SchedWaitQueueArch<A> {
     fn has_runnable_competitor(&self, cpu: CpuId) -> bool {
         // A competitor is a task queued runnable on `cpu` other than the
@@ -465,6 +474,13 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
     // source) instead of letting it peg a CPU. Set-once; a stray
     // re-install is a benign skip.
     let _ = state.irq.set_clock(wait_arch);
+    // Give the CPU-lockup watchdog the live IRQ table so a hard-lockup
+    // report can attribute the stuck controller line to the driver that
+    // bound it (`stuck_owner=<task>`), or say `unbound` for a spurious /
+    // contained line no driver owns. The boot-leaked `KernelState` outlives
+    // the kernel, so `&state.irq` is `'static`. Set-once; a stray re-install
+    // is a benign skip.
+    crate::watchdog::install_irq_owner(&state.irq);
     // The same leaked adapter answers the preempt path's "is there a
     // runnable competitor on this CPU?" query, so a fired quantum tick
     // reschedules only when a switch would change what runs (the tick

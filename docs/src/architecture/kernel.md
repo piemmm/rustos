@@ -286,9 +286,17 @@ that line is a live storm or a line already masked-and-contained, the record
 adds `stuck_state=<active|pending>,<enabled|masked>`: `active,enabled` is a
 handler in flight on an unmasked line (a real storm), while `pending,masked`
 is a line asserted but already contained by the kernel (the wedge is
-elsewhere). `stuck_irq`/`stuck_state` are omitted when no line is stuck (a
-pure IRQ-masked in-kernel spin), and a soft lockup — whose sample is live —
-carries neither marker. Every episode is reported **once**, never once per
+elsewhere). The raw id still does not say *whose* device the line is, so the
+record also attributes it against the live kernel IRQ table
+(`IrqTable::owner_of_line`): `stuck_owner=<task>` names the driver that bound
+the line, while `stuck_owner=unbound` marks a line no driver owns — a
+spurious or kernel-contained line, so the wedge is elsewhere (this is what
+tells a raw `stuck_irq=111` apart from the USB path). `stuck_owner` is
+omitted when the owner cannot be resolved (no resolver installed), so a
+record never claims an attribution it could not make. `stuck_irq` /
+`stuck_state` / `stuck_owner` are omitted when no line is stuck (a pure
+IRQ-masked in-kernel spin), and a soft lockup — whose sample is live —
+carries none of them. Every episode is reported **once**, never once per
 tick, and self-closes on recovery.
 
 `CPU_LOCKUP_RECOVERY` (a `Warn`) records the best-effort recovery the

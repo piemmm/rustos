@@ -73,6 +73,24 @@ per-CPU banked SGIs/PPIs are not, since the observer cannot read another CPU's
 banked state. `stuck_irq` is omitted when no line is stuck (a pure in-kernel
 spin with IRQs masked, not a storm).
 
+The raw id still does not say *whose* device the line is (a recurring source
+of confusion: a reported `stuck_irq=111` was neither the PCIe-MSI line nor any
+device in the pinned Pi 4 DTB). So the report attributes the line against the
+live kernel IRQ table: the observer resolves the stuck id through
+`IrqTable::owner_of_line` (a read-only, owner-agnostic lookup) via the
+arch-neutral `watchdog::StuckOwnerResolver` seam the boot path installs over
+`&KernelState.irq`. It renders `stuck_owner=<task>` for a line a driver bound,
+or `stuck_owner=unbound` for a line no driver owns — a spurious or
+kernel-contained line (the kernel-owned MSI-demux SPI included, since no user
+task binds it), which says the wedge is elsewhere, not this line. Because the
+GIC scan only reports real SPIs (≤ `MAX_INTID`) and a directly-bound SPI uses
+`line == INTID` in the table (MSI virtual lines live *above* `MAX_INTID` and
+are never scanned), the lookup by id is exact. `stuck_owner` is omitted when
+no resolver is installed, so a record never claims an attribution it could not
+make. Mapping host-tested via the pure `resolve_stuck_owner_with` and
+`IrqTable::owner_of_line`; the render (bound/`unbound`/omitted) is host-tested
+against the recording sink.
+
 ## Monopoly guard: a lone CPU-bound user task (done)
 
 The ordinary preemption tick is competitor-gated (`preempt::preempt_current`):

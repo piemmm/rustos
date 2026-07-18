@@ -596,6 +596,24 @@ impl IrqTable {
         Some(line)
     }
 
+    /// The task that owns the binding for `line`, or [`None`] if `line` is
+    /// bound to no task.
+    ///
+    /// A read-only, owner-agnostic lookup (no caller check): it answers
+    /// *who* a line belongs to, used by the CPU-lockup watchdog to attribute
+    /// a stuck controller line to the driver that owns it — turning a raw
+    /// interrupt id in a lockup report into `stuck_owner=<task>` for a bound
+    /// line, or `unbound` for a spurious/contained line no driver owns. It
+    /// grants no authority and mutates nothing.
+    #[must_use]
+    pub fn owner_of_line(&self, line: u32) -> Option<TaskId> {
+        self.inner
+            .read()
+            .entries
+            .get(&line)
+            .map(|entry| entry.owner)
+    }
+
     /// Fire `line`: mask the controller, then set the per-entry
     /// ready flag.
     ///
@@ -865,6 +883,21 @@ mod tests {
         assert_eq!(entry.line, 7);
         assert_eq!(entry.owner, TaskId(42));
         assert!(!t.ready_flag(7));
+    }
+
+    #[test]
+    fn owner_of_line_names_the_bound_task_and_is_none_when_unbound() {
+        let t = IrqTable::new(31);
+        // Unbound line: no owner.
+        assert_eq!(t.owner_of_line(7), None);
+        let _ = t.bind(7, TaskId(42)).expect("bind");
+        // Bound line: names the owner, without a caller check (any reader).
+        assert_eq!(t.owner_of_line(7), Some(TaskId(42)));
+        // A different, still-unbound line stays None.
+        assert_eq!(t.owner_of_line(8), None);
+        // Releasing the owner's bindings makes the line unbound again.
+        let _ = t.release_for(TaskId(42));
+        assert_eq!(t.owner_of_line(7), None);
     }
 
     #[test]
