@@ -34,7 +34,7 @@ use tairix_abi::net_ipc::{
     NetInterfaceStateRecord, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
-    reclaim_class_from_name, CpuLoadRecord, KernelMemoryStats, MemoryPressureStats,
+    reclaim_class_from_name, CpuLoadRecord, IrqRecord, KernelMemoryStats, MemoryPressureStats,
     NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId,
     SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
 };
@@ -138,6 +138,24 @@ fn resolve_state(
             (
                 InfoValue::new_str(Sensitivity::Public, &rendered),
                 Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+            )
+        }
+        // Whether one interrupt line is currently quarantined — the kernel's
+        // runaway-interrupt safety net having disabled it. Mutable state (a
+        // line becomes quarantined at runtime and clears on re-bind), so it
+        // is a `state:` reading. Gated on `CAP_SYSINFO_HW` like the IRQ
+        // ownership view it reads; an unknown line id fails closed.
+        ["irq", index, "quarantined"] => {
+            let line: u32 = index
+                .parse()
+                .map_err(|_| ResolveInfoError::UnknownSelector)?;
+            let record = irq_line(transport, line)?;
+            (
+                InfoValue::new_str(
+                    Sensitivity::Public,
+                    if record.is_quarantined() { "yes" } else { "no" },
+                ),
+                Authorization::Capability(CapabilityId::SYSINFO_HW),
             )
         }
         _ => return Err(ResolveInfoError::UnknownSelector),
@@ -275,6 +293,12 @@ fn resolve_info_value(
             };
             (value, Authorization::Capability(CapabilityId::SYSINFO_HW))
         }
+        // The driver task that owns one interrupt line, from the kernel IRQ
+        // table. The ownership view is cross-principal surface topology (it
+        // names which task each device's line belongs to), gated on
+        // `CAP_SYSINFO_HW` like the hardware tree and seat inventory; an
+        // unknown line id fails closed inside the helper.
+        ["irq", index, "owner"] => return resolve_irq_owner(transport, index),
         // A configured soft/hard bound on one of the caller's own resources.
         // The self-scoped `RESOURCE_LIMITS` query needs no capability and
         // answers only for the asking principal, so its own limits are public
@@ -407,6 +431,13 @@ fn resolve_stats(
         // from the compressed tier, from the same gated tier query that
         // carries the aggregate.
         ["mem", "pinned"] => pinned_bytes_metric(reference, now, transport),
+        // Total interrupts delivered across every bound line since boot, or
+        // one line's own total by its line id. A monotonic count, so a
+        // boot-reset counter. Gated on `CAP_SYSINFO_HW` like the IRQ table
+        // it reads (the ownership view is cross-principal surface topology);
+        // an unknown line id fails closed inside the helper.
+        ["irq", "count"] => irq_total_count_metric(reference, now, transport),
+        ["irq", index, "count"] => irq_line_count_metric(reference, now, transport, index),
         // The caller's own live usage of one of its limited resources: a
         // measurement, so a gauge (it rises and falls and never resets over
         // the life of the process). Byte-denominated resources report
@@ -720,6 +751,102 @@ fn query_cpu_loads(transport: &dyn Transport) -> Result<Vec<CpuLoadRecord>, Reso
     })
     .map_err(map_list_error)?;
     Ok(records)
+}
+
+/// Page through the kernel IRQ table (gated on `CAP_SYSINFO_HW`) through the
+/// shared paged walk.
+fn query_irqs(transport: &dyn Transport) -> Result<Vec<IrqRecord>, ResolveInfoError> {
+    let mut records = Vec::new();
+    kstats::for_each_irq(transport, |record| {
+        records.push(*record);
+        Ok(())
+    })
+    .map_err(map_list_error)?;
+    Ok(records)
+}
+
+/// The IRQ-table record for the bound interrupt `line`, or a fail-closed
+/// [`ResolveInfoError::UnknownSelector`] when no line with that id is bound
+/// (an unbound line is not a serviceable reference, exactly like a named CPU
+/// that does not exist).
+fn irq_line(transport: &dyn Transport, line: u32) -> Result<IrqRecord, ResolveInfoError> {
+    query_irqs(transport)?
+        .into_iter()
+        .find(|record| record.line == line)
+        .ok_or(ResolveInfoError::UnknownSelector)
+}
+
+/// Build one `CAP_SYSINFO_HW`-gated interrupt-count counter response (a
+/// monotonic per-line or aggregate total since boot).
+fn irq_count_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    name: &str,
+    count: u64,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let metric = Metric::new(
+        name,
+        MetricKind::Counter,
+        Unit::Count,
+        count,
+        now,
+        None,
+        ResetBehavior::Boot,
+    )
+    .map_err(|_| ResolveInfoError::Malformed)?;
+    envelope(
+        reference,
+        now,
+        Authorization::Capability(CapabilityId::SYSINFO_HW),
+        ResponsePayload::Metric(metric),
+    )
+}
+
+/// Resolve `info:irq/<line>/owner` to the driver task that owns the line.
+/// Split out of [`resolve_info_value`] so that arm stays a one-liner; a
+/// non-numeric or unbound line id fails closed.
+fn resolve_irq_owner(
+    transport: &dyn Transport,
+    index: &str,
+) -> Result<(InfoValue, Authorization), ResolveInfoError> {
+    let line: u32 = index
+        .parse()
+        .map_err(|_| ResolveInfoError::UnknownSelector)?;
+    let record = irq_line(transport, line)?;
+    let value = InfoValue::new_str(Sensitivity::Public, &record.owner.to_string())
+        .map_err(|_| ResolveInfoError::Malformed)?;
+    Ok((value, Authorization::Capability(CapabilityId::SYSINFO_HW)))
+}
+
+/// Resolve `stats:irq/count` to the aggregate interrupt total across every
+/// bound line since boot.
+fn irq_total_count_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let total = query_irqs(transport)?
+        .iter()
+        .fold(0u64, |acc, record| acc.saturating_add(record.count));
+    irq_count_metric(reference, now, "irq/count", total)
+}
+
+/// Resolve `stats:irq/<line>/count` to one line's own interrupt total; a
+/// non-numeric or unbound line id fails closed.
+fn irq_line_count_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+    index: &str,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let line: u32 = index
+        .parse()
+        .map_err(|_| ResolveInfoError::UnknownSelector)?;
+    let record = irq_line(transport, line)?;
+    let mut name = String::from("irq/");
+    name.push_str(index);
+    name.push_str("/count");
+    irq_count_metric(reference, now, &name, record.count)
 }
 
 /// Map a shared kernel-stats fetch failure onto the resolver's error
@@ -1116,10 +1243,10 @@ mod tests {
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, KernelMemoryStats, MemoryPressureStats,
-        NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-        ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        RECLAIM_CLASS_COUNT,
+        CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, KernelMemoryStats,
+        MemoryPressureStats, NetInterfaceListRequest, RamzipStats, ReclaimClassRecord,
+        ReclaimListRequest, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
@@ -1139,6 +1266,7 @@ mod tests {
         ramzip: RamzipStats,
         cpu_times: Vec<tairix_abi::sysinfo::CpuTimeRecord>,
         cpu_loads: Vec<CpuLoadRecord>,
+        irqs: Vec<IrqRecord>,
         deny: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -1223,6 +1351,25 @@ mod tests {
         ]
     }
 
+    /// Two bound interrupt lines: a healthy one and a quarantined one
+    /// (300000 fires total across the pair).
+    fn fixture_irqs() -> Vec<IrqRecord> {
+        alloc::vec![
+            IrqRecord {
+                line: 27,
+                flags: 0,
+                owner: 14,
+                count: 100_000,
+            },
+            IrqRecord {
+                line: 111,
+                flags: IRQ_FLAG_QUARANTINED,
+                owner: 13,
+                count: 200_000,
+            },
+        ]
+    }
+
     impl Fixture {
         fn new() -> Self {
             Self {
@@ -1278,6 +1425,7 @@ mod tests {
                 ramzip: fixture_ramzip(),
                 cpu_times: fixture_cpu_times(),
                 cpu_loads: fixture_cpu_loads(),
+                irqs: fixture_irqs(),
                 deny: None,
                 seen: RefCell::new(Vec::new()),
             }
@@ -1348,6 +1496,15 @@ mod tests {
                     let req = tairix_abi::sysinfo::CpuTimeListRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .cpu_times
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::IRQ_LIST => {
+                    let req = IrqListRequest::from_bytes(payload)?;
+                    let encoders: Vec<_> = self
+                        .irqs
                         .iter()
                         .map(|record| move || record.to_le_bytes())
                         .collect();
@@ -1889,6 +2046,72 @@ mod tests {
         denied.deny = Some(SysinfoQueryId::CPU_LOAD);
         assert_eq!(
             resolve_str("stats:cpu/switches", &denied),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
+    }
+
+    #[test]
+    fn irq_selectors_report_counts_owner_and_quarantine() {
+        let fixture = Fixture::new();
+
+        // Aggregate count across every line: a gated boot counter.
+        let response = resolve_str("stats:irq/count", &fixture).expect("resolves");
+        assert_eq!(
+            response.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_HW)
+        );
+        let ResponsePayload::Metric(metric) = &response.payload else {
+            panic!("expected a metric");
+        };
+        assert_eq!(metric.value, 300_000);
+        assert_eq!(metric.kind, MetricKind::Counter);
+
+        // One line's own count.
+        let response = resolve_str("stats:irq/111/count", &fixture).expect("resolves");
+        let ResponsePayload::Metric(metric) = &response.payload else {
+            panic!("expected a metric");
+        };
+        assert_eq!(metric.value, 200_000);
+        assert_eq!(metric.name(), "irq/111/count");
+
+        // The owning task of a line: a gated info fact.
+        let response = resolve_str("info:irq/27/owner", &fixture).expect("resolves");
+        assert_eq!(
+            response.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_HW)
+        );
+        let ResponsePayload::Info(value) = &response.payload else {
+            panic!("expected an info value");
+        };
+        assert_eq!(value.value(), "14");
+
+        // The quarantine state of a line: mutable, so a `state:` reading.
+        let response = resolve_str("state:irq/111/quarantined", &fixture).expect("resolves");
+        let ResponsePayload::State(value) = &response.payload else {
+            panic!("expected a state value");
+        };
+        assert_eq!(value.value(), "yes");
+        let response = resolve_str("state:irq/27/quarantined", &fixture).expect("resolves");
+        let ResponsePayload::State(value) = &response.payload else {
+            panic!("expected a state value");
+        };
+        assert_eq!(value.value(), "no");
+
+        // An unbound line id fails closed, never guessed.
+        assert_eq!(
+            resolve_str("stats:irq/999/count", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("info:irq/999/owner", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+
+        // A broker denial maps to the capability error, never a guess.
+        let mut denied = Fixture::new();
+        denied.deny = Some(SysinfoQueryId::IRQ_LIST);
+        assert_eq!(
+            resolve_str("stats:irq/count", &denied),
             Err(ResolveInfoError::CapabilityDenied)
         );
     }

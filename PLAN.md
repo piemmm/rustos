@@ -4933,7 +4933,17 @@ subcommands; the export rendezvous is the arch-neutral
 per-cache `Arc<CacheAccounting>` ledgers, and the seam a future live
 `ramzip` tier installs into — until then the query truthfully reports an
 idle tier), and `SchedulerPolicy` gained the `cpu_switches`/`queue_depth`
-observations both policies implement under conformance cover. ST2 (done)
+observations both policies implement under conformance cover. The bound
+kernel IRQ table is exported the same way: `IRQ_LIST` (id 19,
+`CAP_SYSINFO_HW`, audited — line ownership is cross-principal surface
+topology like the hardware tree/seat inventory) returns one `IrqRecord`
+per bound line (id, owning driver task, monotonic since-boot fire count,
+quarantine flag), read through the shared `tairix_procinfo::for_each_irq`
+walk by the `sysinfo irq` CLI subcommand, the `info:irq/<line>/owner` /
+`state:irq/<line>/quarantined` / `stats:irq[/<line>]/count` resolver
+selectors, and `sysmon`'s interrupt-lines panel — one definition, no
+divergence; the count already exists (the runaway-quarantine
+accounting), so serving it costs nothing steady-state. ST2 (done)
 landed the memory-pinning API behind `plans/SWAPSWAPSWAP.md` §5's "pinned"
 eligibility class: `mem_pin` (92, `CAP_MEM_PIN`, audited) / `mem_unpin`
 (93, ungated, audited) mark the caller's whole anonymous memory exempt from
@@ -4964,7 +4974,7 @@ the panel's stated reason, a hiccuping service never kills the observer),
 pins itself at startup with a graceful title-line refusal, and draws six
 summary lines (memory, pressure band + history strip, CPU, census) above
 a `p`-cycled scrollable detail panel (reclaim ledger, `ramzip` counters,
-per-CPU load, top consumers) on an event-driven bounded-wait loop with
+per-CPU load, interrupt lines, top consumers) on an event-driven bounded-wait loop with
 `+`/`-` interval keys; the four kernel-statistics fetches were hoisted
 into the shared `tairix_procinfo::kstats` (resolver retargeted), the
 GNU `-d` delay grammar into `tairix_curses::delay`, and the viewer figure

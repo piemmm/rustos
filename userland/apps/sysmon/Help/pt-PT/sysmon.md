@@ -28,7 +28,7 @@ controla-se com teclas dentro da sessão.
 
 - `q` — sair.
 - `p` — alternar o painel de detalhe: caches recuperáveis, nível
-  comprimido, carga por CPU, processos.
+  comprimido, carga por CPU, linhas de interrupção, processos.
 - `r` — atualizar agora.
 - `+` / `-` — alongar / encurtar o intervalo em um segundo, entre 0,1
   e 60 segundos.

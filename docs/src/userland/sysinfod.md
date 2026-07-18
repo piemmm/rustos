@@ -53,6 +53,15 @@ a privileged query without first passing its capability gate.
 | `RECLAIM_STATS`       | `CAP_SYSINFO_KERNEL` | yes     | packed `ReclaimClassRecord`s   |
 | `RAMZIP_STATS`        | `CAP_SYSINFO_KERNEL` | yes     | `RamzipStats`                  |
 | `CPU_LOAD`            | `CAP_SYSINFO_KERNEL` | yes     | packed `CpuLoadRecord`s        |
+| `IRQ_LIST`            | `CAP_SYSINFO_HW`     | yes     | packed `IrqRecord`s            |
+
+`IRQ_LIST` is gated on `CAP_SYSINFO_HW`, not `CAP_SYSINFO_KERNEL`, and
+audited: like `HARDWARE_TREE` and `SEAT_LIST` it names which driver task
+owns each physical interrupt line — cross-principal surface topology,
+not a self-scoped observer. Each `IrqRecord` carries the line id, the
+kernel-attested owning task, the monotonic interrupt count since boot
+(the classic `/proc/interrupts` per-line total), and a quarantine flag
+for a line the kernel's runaway-interrupt safety net has disabled.
 
 ## Response encoding
 

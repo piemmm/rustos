@@ -230,11 +230,14 @@ pub const TOP_MANIFEST: &[CapabilityId] = &[
 /// `CAP_SYSINFO_KERNEL` for the kernel-wide statistics every refresh
 /// issues (`KERNEL_MEMORY_STATS`, `MEMORY_PRESSURE`, `RECLAIM_STATS`,
 /// `RAMZIP_STATS`, `CPU_LOAD`), `CAP_SYSINFO_GLOBAL` for the all-process
-/// census, and `CAP_MEM_PIN` for the startup `mem_pin` that exempts the
-/// monitor's own memory from the swap tiers it observes
+/// census, `CAP_SYSINFO_HW` for the interrupt-lines panel's `IRQ_LIST`
+/// (which names which driver task owns each physical interrupt line —
+/// cross-principal surface topology, gated like the hardware tree and
+/// seat inventory), and `CAP_MEM_PIN` for the startup `mem_pin` that
+/// exempts the monitor's own memory from the swap tiers it observes
 /// (`plans/STRESSTEST.md` ST4). Each is an optional feature above the
 /// session baseline: armed only when the account ceiling carries it (an
-/// administrator's intersection keeps all three), degraded to the stated
+/// administrator's intersection keeps them all), degraded to the stated
 /// per-panel refusal — or an unpinned title-line notice — for everyone
 /// else while the session keeps running.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
@@ -244,6 +247,7 @@ pub const SYSMON_MANIFEST: &[CapabilityId] = &[
     CapabilityId::FS_ACCESS,
     CapabilityId::SYSINFO_GLOBAL,
     CapabilityId::SYSINFO_KERNEL,
+    CapabilityId::SYSINFO_HW,
     CapabilityId::MEM_PIN,
 ];
 
@@ -530,6 +534,7 @@ mod tests {
                 CapabilityId::FS_ACCESS,
                 CapabilityId::SYSINFO_GLOBAL,
                 CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
                 CapabilityId::MEM_PIN,
             ])
         );
@@ -681,12 +686,13 @@ mod tests {
             set(&[CapabilityId::SYSINFO_GLOBAL, CapabilityId::SYSINFO_KERNEL])
         );
         // sysmon: the kernel-wide statistics panels, the all-process
-        // census, and the startup self-pin.
+        // census, the interrupt-lines panel, and the startup self-pin.
         assert_eq!(
             above(SYSMON_MANIFEST),
             set(&[
                 CapabilityId::SYSINFO_GLOBAL,
                 CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
                 CapabilityId::MEM_PIN,
             ])
         );

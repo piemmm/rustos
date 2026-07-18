@@ -33,6 +33,9 @@ The queries:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — per-CPU run-queue depth, context switches, and preemptions
   (needs `CAP_SYSINFO_KERNEL`).
+- `irq`, `irqs` — the kernel IRQ table: one row per bound interrupt
+  line — its id, the owning driver task, the interrupt count since
+  boot, and whether the line is quarantined (needs `CAP_SYSINFO_HW`).
 - `help` — this command's own short help.
 
 With no query, the short help is shown.

@@ -28,7 +28,7 @@ con i tasti dentro la sessione.
 
 - `q` — uscire.
 - `p` — scorrere il pannello di dettaglio: cache recuperabili, livello
-  compresso, carico per CPU, processi.
+  compresso, carico per CPU, linee di interrupt, processi.
 - `r` — aggiornare subito.
 - `+` / `-` — allungare / accorciare l'intervallo di un secondo, tra
   0,1 e 60 secondi.

@@ -8,6 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use tairix_abi::sysinfo::{IrqRecord, IRQ_FLAG_QUARANTINED};
 use tairix_abi::IrqHandle;
 use tairix_kernel_sec::TaskId;
 use tairix_sync::{OnceCell, RwLock};
@@ -299,6 +300,16 @@ pub struct IrqTable {
     /// [`WaitStep::Quarantined`]; only a fresh [`IrqTable::bind`] clears
     /// it. Indexed by line.
     quarantined: Vec<AtomicBool>,
+    /// Per-line monotonic count of interrupts delivered since boot — the
+    /// `/proc/interrupts`-style per-line total the System Information IRQ
+    /// query reports. Bumped once per [`IrqTable::fire`] with a single
+    /// `Relaxed` add on the same lock-free interrupt-context path as the
+    /// rate accounting, so counting adds no measurable cost and never
+    /// blocks. It counts *every* edge the line takes — including strays and
+    /// storm fires — so the figure is an honest interrupt tally, and it is
+    /// never reset (a re-`bind` keeps the line's lifetime total). Indexed by
+    /// line.
+    fire_total: Vec<AtomicU64>,
     /// Per-line "fired since last consume" flags, kept **outside**
     /// [`Inner`]'s [`RwLock`] so [`IrqTable::fire`] — which runs in
     /// interrupt context — can record a wake-up with a single atomic
@@ -366,12 +377,14 @@ impl IrqTable {
         let mut storm_window_start_ns = Vec::with_capacity(slots);
         let mut storm_fire_count = Vec::with_capacity(slots);
         let mut quarantined = Vec::with_capacity(slots);
+        let mut fire_total = Vec::with_capacity(slots);
         for _ in 0..slots {
             ready.push(AtomicBool::new(false));
             bound.push(AtomicBool::new(false));
             storm_window_start_ns.push(AtomicU64::new(0));
             storm_fire_count.push(AtomicU32::new(0));
             quarantined.push(AtomicBool::new(false));
+            fire_total.push(AtomicU64::new(0));
         }
         Self {
             inner: RwLock::new(Inner {
@@ -385,6 +398,7 @@ impl IrqTable {
             storm_window_start_ns,
             storm_fire_count,
             quarantined,
+            fire_total,
             ready,
             bound,
         }
@@ -614,6 +628,44 @@ impl IrqTable {
             .map(|entry| entry.owner)
     }
 
+    /// The wire-encoded IRQ-table page starting at record offset `first`, at
+    /// most `max_records` whole [`IrqRecord`]s in ascending line order
+    /// (`IntrospectDomain::Irqs` paging: an offset past the end returns the
+    /// empty terminator).
+    ///
+    /// One record per *bound* line — the ownership view: line id, the
+    /// kernel-attested owning task, the monotonic fire count since boot, and
+    /// the quarantine flag. Read-only: it takes only the `Inner` read lock
+    /// and the lock-free per-line counters, mutates nothing, and grants no
+    /// authority. The bindings live in a `BTreeMap` keyed by line, so
+    /// iteration is already ascending and stable across paged calls.
+    #[must_use]
+    pub fn records(&self, first: u64, max_records: usize) -> Vec<u8> {
+        let skip = usize::try_from(first).unwrap_or(usize::MAX);
+        let inner = self.inner.read();
+        let mut out = Vec::new();
+        for entry in inner.entries.values().skip(skip).take(max_records) {
+            let index = entry.line as usize;
+            // Every bound line indexes a valid per-line slot (both are sized
+            // to `max_line + 1` and `bind` rejects an out-of-range line), so
+            // these reads never fall outside the vectors.
+            let count = self.fire_total[index].load(Ordering::Relaxed);
+            let flags = if self.quarantined[index].load(Ordering::Acquire) {
+                IRQ_FLAG_QUARANTINED
+            } else {
+                0
+            };
+            let record = IrqRecord {
+                line: entry.line,
+                flags,
+                owner: entry.owner.0,
+                count,
+            };
+            out.extend_from_slice(&record.to_le_bytes());
+        }
+        out
+    }
+
     /// Fire `line`: mask the controller, then set the per-entry
     /// ready flag.
     ///
@@ -656,6 +708,12 @@ impl IrqTable {
             // happened (or failed above); treat as a contained stray.
             return Ok(FireOutcome::Stray);
         };
+        // Count every edge this addressable line takes — bound, stray, or
+        // storm fire alike — so the reported per-line total is an honest
+        // interrupt tally. One `Relaxed` add on the lock-free path; never
+        // blocks (the `fire_total` slot exists for every addressable line,
+        // sized alongside `bound`).
+        self.fire_total[line as usize].fetch_add(1, Ordering::Relaxed);
         if !bound.load(Ordering::SeqCst) {
             // No binding — the mask still happened, the stray edge is
             // contained (and its arrival timing was already fed to the entropy
@@ -898,6 +956,65 @@ mod tests {
         // Releasing the owner's bindings makes the line unbound again.
         let _ = t.release_for(TaskId(42));
         assert_eq!(t.owner_of_line(7), None);
+    }
+
+    #[test]
+    fn records_report_bound_lines_with_counts_owners_and_paging() {
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let _ = t.bind(5, TaskId(7)).expect("bind 5");
+        let _ = t.bind(10, TaskId(9)).expect("bind 10");
+        // Fire line 5 three times, line 10 once. `fire_total` counts every
+        // edge on an addressable line.
+        for _ in 0..3 {
+            t.fire(5, &ctl).expect("fire 5");
+        }
+        t.fire(10, &ctl).expect("fire 10");
+
+        // The whole table: two records in ascending line order.
+        let blob = t.records(0, 16);
+        assert_eq!(blob.len(), 2 * IrqRecord::WIRE_LEN);
+        let first = IrqRecord::from_bytes(&blob[..IrqRecord::WIRE_LEN]).expect("decode 0");
+        let second = IrqRecord::from_bytes(&blob[IrqRecord::WIRE_LEN..]).expect("decode 1");
+        assert_eq!(first.line, 5);
+        assert_eq!(first.owner, 7);
+        assert_eq!(first.count, 3);
+        assert!(!first.is_quarantined());
+        assert_eq!(second.line, 10);
+        assert_eq!(second.owner, 9);
+        assert_eq!(second.count, 1);
+
+        // Paging: skip the first record, then a window past the end
+        // terminates empty.
+        let page = t.records(1, 16);
+        assert_eq!(page.len(), IrqRecord::WIRE_LEN);
+        let only = IrqRecord::from_bytes(&page).expect("decode page");
+        assert_eq!(only.line, 10);
+        assert!(t.records(2, 16).is_empty());
+        assert!(t.records(99, 16).is_empty());
+
+        // A limit of one takes only the first record.
+        let capped = t.records(0, 1);
+        assert_eq!(capped.len(), IrqRecord::WIRE_LEN);
+    }
+
+    #[test]
+    fn records_report_a_quarantined_line() {
+        let t = IrqTable::new(31);
+        t.set_clock(leak_clock(0)).expect("clock");
+        let ctl = MockController::ok();
+        let _ = t.bind(5, TaskId(7)).expect("bind");
+        // Drive the line past its storm budget within one window so it
+        // quarantines; the record must carry the flag.
+        for _ in 0..=STORM_FIRE_BUDGET {
+            let _ = t.fire(5, &ctl);
+        }
+        let blob = t.records(0, 16);
+        let record = IrqRecord::from_bytes(&blob[..IrqRecord::WIRE_LEN]).expect("decode");
+        assert_eq!(record.line, 5);
+        assert!(record.is_quarantined());
+        // Every edge is still counted, quarantined or not.
+        assert!(record.count >= u64::from(STORM_FIRE_BUDGET));
     }
 
     #[test]

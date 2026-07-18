@@ -5,10 +5,10 @@ use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
 use tairix_abi::sysinfo::{
     spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
-    HardwareTreeRequest, MountListRequest, MountRecord, NetInterfaceListRequest,
-    ProcessListRequest, ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-    SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
-    UserDirectoryRequest,
+    HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest, MountRecord,
+    NetInterfaceListRequest, ProcessListRequest, ProcessRecord, ReclaimClassRecord,
+    ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+    SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -177,6 +177,8 @@ fn dispatch(
         net_facts_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_INTERFACE_STATE {
         net_state_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::IRQ_LIST {
+        irq_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -398,6 +400,26 @@ fn cpu_time_list(
     )
 }
 
+/// Decode the [`IrqListRequest`], apply paging, and pack the selected
+/// [`IrqRecord`]s into `response`.
+fn irq_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = IrqListRequest::from_bytes(payload)?;
+    let records = source.irqs(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        IrqRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`SeatListRequest`], apply paging, and pack the selected
 /// [`SeatRecord`]s into `response`.
 fn seat_list(
@@ -510,13 +532,14 @@ mod tests {
     use tairix_abi::sysinfo::NetInterfaceListRequest;
     use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, HardwareTreeRequest,
-        KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability, MountListRequest,
-        MountRecord, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
-        ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-        UserDirectoryRequest, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT,
-        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
+        MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+        ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        UserDirectoryRecord, UserDirectoryRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
+        MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
+        SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{
@@ -829,6 +852,22 @@ mod tests {
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<NetInterfaceStateRecord>, Errno> {
             Ok(alloc::vec![fixture_net_state()])
+        }
+        fn irqs(&self, _caller: &Caller) -> Result<alloc::vec::Vec<IrqRecord>, Errno> {
+            Ok(alloc::vec![
+                IrqRecord {
+                    line: 27,
+                    flags: 0,
+                    owner: 14,
+                    count: 1234,
+                },
+                IrqRecord {
+                    line: 111,
+                    flags: IRQ_FLAG_QUARANTINED,
+                    owner: 13,
+                    count: 200_000,
+                },
+            ])
         }
         fn resource_limits(
             &self,
@@ -1494,6 +1533,65 @@ mod tests {
             flags: 0,
         };
         let req_end = request_bytes(SysinfoQueryId::SEAT_LIST, &slr_end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn irq_list_is_gated_audited_and_pages() {
+        // The served record is `Debug` (below the default `Info` filter),
+        // so widen the global filter to observe it.
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let request = IrqListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::IRQ_LIST, &request.to_le_bytes());
+        let mut resp = [0u8; 256];
+
+        // Denied without `CAP_SYSINFO_HW`; the refusal is logged.
+        let denied = Caps(&[]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_HW` holder: both lines,
+        // in order, with counts, owners, and the quarantine flag intact.
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * IrqRecord::WIRE_LEN);
+        let first = IrqRecord::from_bytes(&resp[..IrqRecord::WIRE_LEN]).unwrap();
+        let second = IrqRecord::from_bytes(&resp[IrqRecord::WIRE_LEN..n]).unwrap();
+        assert_eq!(first.line, 27);
+        assert_eq!(first.owner, 14);
+        assert_eq!(first.count, 1234);
+        assert!(!first.is_quarantined());
+        assert_eq!(second.line, 111);
+        assert_eq!(second.owner, 13);
+        assert!(second.is_quarantined());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+
+        // Paging past the last line returns the empty terminator.
+        let end = IrqListRequest {
+            offset: 2,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::IRQ_LIST, &end.to_le_bytes());
         assert_eq!(
             serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)

@@ -28,7 +28,7 @@ operandos: se controla con teclas dentro de la sesión.
 
 - `q` — salir.
 - `p` — alternar el panel de detalle: cachés recuperables, nivel
-  comprimido, carga por CPU, procesos.
+  comprimido, carga por CPU, líneas de interrupción, procesos.
 - `r` — refrescar ahora.
 - `+` / `-` — alargar / acortar el intervalo en un segundo, entre 0,1
   y 60 segundos.

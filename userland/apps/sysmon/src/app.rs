@@ -221,6 +221,7 @@ pub(crate) fn detail_lines(model: &Model) -> Vec<String> {
         Focus::Reclaim => reclaim_lines(model.snapshot()),
         Focus::Ramzip => ramzip_lines(model.snapshot()),
         Focus::Cpu => cpu_lines(model),
+        Focus::Irqs => irq_lines(model.snapshot()),
         Focus::Processes => process_lines(model),
     }
 }
@@ -350,6 +351,38 @@ fn cpu_lines(model: &Model) -> Vec<String> {
             queue,
             switches,
             preemptions
+        ));
+    }
+    lines
+}
+
+/// The IRQ table: one row per bound interrupt line, in ascending line
+/// order — the line id, the owning driver task, the interrupt count since
+/// boot, and whether the line is quarantined (the kernel's runaway-line
+/// safety net having disabled it). A refused `CAP_SYSINFO_HW` or a failed
+/// call shows the stated reason, never a fabricated table.
+fn irq_lines(snapshot: &Snapshot) -> Vec<String> {
+    let Some(records) = snapshot.irqs.ready() else {
+        return denied_lines(&snapshot.irqs);
+    };
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{:>4} {:>10} {:>14} {}",
+        "line", "owner", "count", "state"
+    ));
+    if records.is_empty() {
+        lines.push(String::from("no interrupt lines bound"));
+        return lines;
+    }
+    for record in records {
+        let state = if record.is_quarantined() {
+            "quarantined"
+        } else {
+            "active"
+        };
+        lines.push(format!(
+            "{:>4} {:>10} {:>14} {}",
+            record.line, record.owner, record.count, state
         ));
     }
     lines

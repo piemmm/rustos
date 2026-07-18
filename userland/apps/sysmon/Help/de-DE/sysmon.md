@@ -29,7 +29,7 @@ Sitzung gesteuert.
 
 - `q` — beenden.
 - `p` — das Detailfeld weiterschalten: zurückforderbare Caches, die
-  komprimierte Stufe, Last je CPU, Prozesse.
+  komprimierte Stufe, Last je CPU, Interrupt-Leitungen, Prozesse.
 - `r` — sofort auffrischen.
 - `+` / `-` — das Intervall um eine Sekunde verlängern / verkürzen,
   zwischen 0,1 und 60 Sekunden.

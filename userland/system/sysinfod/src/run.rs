@@ -54,7 +54,7 @@ mod program {
     };
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, IntrospectDomain,
-        KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord,
+        IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord,
         RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
         UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
         SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
@@ -262,6 +262,15 @@ mod program {
             _caller: &Caller,
         ) -> Result<Vec<NetInterfaceStateRecord>, Errno> {
             page_netstack(NetstackStatePage)
+        }
+
+        fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
+            let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
+            let mut records = Vec::new();
+            for chunk in bytes.chunks_exact(IrqRecord::WIRE_LEN) {
+                records.push(IrqRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
         }
 
         fn resource_limits(

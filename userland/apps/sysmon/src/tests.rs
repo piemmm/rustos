@@ -7,10 +7,10 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats,
-    LoadAverage, MemoryPressureStats, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
-    ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, Uptime,
-    RECLAIM_CLASS_COUNT,
+    CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, IrqListRequest, IrqRecord,
+    KernelMemoryStats, LoadAverage, MemoryPressureStats, ProcessListRequest, ProcessRecord,
+    ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId,
+    SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::{Duration64, Errno, ProcId};
 use tairix_curses::{Event, Screen, Size, Tty};
@@ -36,6 +36,7 @@ struct FakeService {
     reclaim: Option<Vec<ReclaimClassRecord>>,
     cpu_times: RefCell<Option<Vec<CpuTimeRecord>>>,
     cpu_loads: Option<Vec<CpuLoadRecord>>,
+    irqs: Option<Vec<IrqRecord>>,
     processes: RefCell<Vec<ProcessRecord>>,
     deny: RefCell<Vec<SysinfoQueryId>>,
 }
@@ -97,6 +98,20 @@ impl FakeService {
                     queue_depth: 0,
                     switches: 50,
                     preemptions: 2,
+                },
+            ]),
+            irqs: Some(vec![
+                IrqRecord {
+                    line: 27,
+                    flags: 0,
+                    owner: 14,
+                    count: 1234,
+                },
+                IrqRecord {
+                    line: 111,
+                    flags: IRQ_FLAG_QUARANTINED,
+                    owner: 13,
+                    count: 200_000,
                 },
             ]),
             processes: RefCell::new(vec![
@@ -202,6 +217,15 @@ impl Transport for FakeService {
                     return Err(Errno::NotFound);
                 };
                 let req = CpuTimeListRequest::from_bytes(payload)?;
+                Ok(page_bytes(records, req.offset, req.limit, |r| {
+                    r.to_le_bytes().to_vec()
+                }))
+            }
+            SysinfoQueryId::IRQ_LIST => {
+                let Some(records) = &self.irqs else {
+                    return Err(Errno::NotFound);
+                };
+                let req = IrqListRequest::from_bytes(payload)?;
                 Ok(page_bytes(records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
@@ -388,6 +412,7 @@ fn a_healthy_refresh_populates_every_panel() {
     );
     assert!(snapshot.ramzip.ready().is_some());
     assert_eq!(snapshot.cpu_loads.ready().map(Vec::len), Some(2));
+    assert_eq!(snapshot.irqs.ready().map(Vec::len), Some(2));
     assert_eq!(snapshot.processes.len(), 2);
     assert!(!snapshot.global_denied);
     assert_eq!(model.band_history(), &[2]);
@@ -401,6 +426,7 @@ fn each_denied_query_records_the_refusal_and_the_rest_still_serve() {
     service.deny(SysinfoQueryId::RECLAIM_STATS);
     service.deny(SysinfoQueryId::RAMZIP_STATS);
     service.deny(SysinfoQueryId::CPU_LOAD);
+    service.deny(SysinfoQueryId::IRQ_LIST);
     let mut model = Model::new(DEFAULT_DELAY_TENTHS);
     model.refresh(&service);
     let snapshot = model.snapshot();
@@ -409,6 +435,7 @@ fn each_denied_query_records_the_refusal_and_the_rest_still_serve() {
     assert!(snapshot.reclaim.is_denied());
     assert!(snapshot.ramzip.is_denied());
     assert!(snapshot.cpu_loads.is_denied());
+    assert!(snapshot.irqs.is_denied());
     // The ungated figures still serve; the session is alive.
     assert!(snapshot.uptime_ns.is_some());
     assert!(!model.cpu_busy().is_empty());
@@ -485,20 +512,26 @@ fn quit_refresh_and_unmapped_keys_report_their_actions() {
 }
 
 #[test]
-fn the_panel_key_cycles_all_four_panels_and_resets_scroll() {
+fn the_panel_key_cycles_every_panel_and_resets_scroll() {
     let (_service, mut model) = refreshed();
     assert_eq!(model.focus(), Focus::Reclaim);
     model.set_viewport(2);
     assert_eq!(model.handle_event(&Event::Down), Action::Redraw);
     assert_eq!(model.scroll(), 1);
     let mut seen = vec![model.focus()];
-    for _ in 0..3 {
+    for _ in 0..4 {
         assert_eq!(model.handle_event(&Event::Char('p')), Action::Redraw);
         seen.push(model.focus());
     }
     assert_eq!(
         seen,
-        vec![Focus::Reclaim, Focus::Ramzip, Focus::Cpu, Focus::Processes]
+        vec![
+            Focus::Reclaim,
+            Focus::Ramzip,
+            Focus::Cpu,
+            Focus::Irqs,
+            Focus::Processes
+        ]
     );
     // Scroll was reset by the first cycle.
     assert_eq!(model.scroll(), 0);
@@ -647,6 +680,12 @@ fn each_panel_renders_its_detail_lines() {
     assert!(contains(&out, b"switches"));
     let _ = model.handle_event(&Event::Char('p'));
     let out = rendered(&mut model);
+    assert!(contains(&out, b"interrupt lines"));
+    // The quarantined line 111 renders its owner, count, and state.
+    assert!(contains(&out, b"111"));
+    assert!(contains(&out, b"quarantined"));
+    let _ = model.handle_event(&Event::Char('p'));
+    let out = rendered(&mut model);
     assert!(contains(&out, b"processes"));
     assert!(contains(&out, b"%cpu"));
     assert!(contains(&out, b"shell"));
@@ -662,7 +701,7 @@ fn a_denied_global_census_renders_the_fallback_reason() {
     let out = rendered(&mut model);
     assert!(contains(&out, b"(own)"));
     // The processes panel opens with the full stated refusal.
-    for _ in 0..3 {
+    for _ in 0..4 {
         let _ = model.handle_event(&Event::Char('p'));
     }
     let out = rendered(&mut model);
@@ -735,6 +774,7 @@ fn run_survives_a_service_that_refuses_everything() {
         SysinfoQueryId::UPTIME,
         SysinfoQueryId::LOAD_AVERAGE,
         SysinfoQueryId::CPU_TIME_STATS,
+        SysinfoQueryId::IRQ_LIST,
     ] {
         service.deny(query);
     }
