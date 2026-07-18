@@ -4,8 +4,9 @@ ls — listar o conteúdo de diretórios
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -78,6 +79,19 @@ separados por uma linha em branco.
 - `-C` — listar em colunas, preenchidas de cima para baixo
   (predefinição num terminal).
 - `-S` — ordenar por tamanho, do maior para o menor.
+- `-U` — não ordenar; listar as entradas na ordem do diretório.
+- `-X` — ordenar por extensão do nome (o texto a partir do último
+  `.`), empates por nome.
+- `-v` — ordenação «versão» natural, de modo que `f2` precede `f10`;
+  empates por nome.
+- `-f` — não ordenar e mostrar todas as entradas: ativa `-a` e `-U` e
+  desativa `-l` e `-s`. Aplicado na sua posição, pelo que um
+  `-l`/`-s`/indicador de ordenação posterior o substitui.
+- `--sort=WORD` — escolher a chave de ordenação por nome: `none`
+  (`-U`), `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension`
+  (`-X`) ou `name`.
+- `--group-directories-first` — listar os diretórios antes das outras
+  entradas; os diretórios primeiro mesmo com `-r`.
 - `-w, --width <cols>` — definir a largura de saída em colunas;
   `0` significa ilimitada.
 - `-x` — listar em colunas, preenchidas da esquerda para a direita.

@@ -4,6 +4,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 use core::fmt::Write as _;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
@@ -234,9 +235,23 @@ fn selected_time(meta: &Metadata, field: TimeField) -> Time64 {
     }
 }
 
-/// Order `rows` by the selected sort key, reversed under `-r`.
+/// The file-name extension `-X` sorts on: the text from the last `.`
+/// (inclusive), or the empty string when the name has none — exactly what
+/// GNU compares (`strrchr(name, '.')`). A leading-dot name like `.bashrc`
+/// therefore has extension `.bashrc`, matching the GNU tool.
+fn extension(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(dot) => &name[dot..],
+        None => "",
+    }
+}
+
+/// Order `rows` by the selected sort key, reversed under `-r`, then — under
+/// `--group-directories-first` — float directories to the front.
 fn sort_rows(rows: &mut [(String, Metadata)], options: Options) {
     match options.sort {
+        // No sort: keep the directory (read) order the filesystem returned.
+        Sort::None => {}
         Sort::Name => rows.sort_by(|a, b| a.0.cmp(&b.0)),
         // Largest first, ties by name — the GNU `-S` order.
         Sort::Size => rows.sort_by(|a, b| b.1.size.cmp(&a.1.size).then_with(|| a.0.cmp(&b.0))),
@@ -246,9 +261,25 @@ fn sort_rows(rows: &mut [(String, Metadata)], options: Options) {
                 .cmp(&selected_time(&a.1, options.time_field))
                 .then_with(|| a.0.cmp(&b.0))
         }),
+        // By extension, ties by name — the GNU `-X` order.
+        Sort::Extension => rows.sort_by(|a, b| {
+            extension(&a.0)
+                .cmp(extension(&b.0))
+                .then_with(|| a.0.cmp(&b.0))
+        }),
+        // Natural version order, ties by name — the GNU `-v` order.
+        Sort::Version => rows.sort_by(|a, b| {
+            version::filevercmp(a.0.as_bytes(), b.0.as_bytes()).then_with(|| a.0.cmp(&b.0))
+        }),
     }
     if options.reverse {
         rows.reverse();
+    }
+    // Directories first is applied *after* the sort and the reverse, as a
+    // stable partition: it keeps the sorted order within each group and puts
+    // directories first regardless of `-r` — the GNU behaviour.
+    if options.group_directories_first {
+        rows.sort_by_key(|row| Reverse(row.1.kind.is_dir()));
     }
 }
 
@@ -843,6 +874,215 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
     let mut buf = [0u8; 512];
     if let Ok(len) = record.write_jsonl(&mut buf) {
         out.info(&buf[..len]);
+    }
+}
+
+/// Natural "version" ordering for the `-v` / `--sort=version` sort.
+///
+/// This is a faithful port of GNU gnulib's `filevercmp` (the ordering GNU
+/// `ls -v` and `sort -V` use), so a run of digits compares numerically —
+/// `f2` before `f10` — while surrounding text compares by the Debian
+/// version algorithm, with file suffixes (`.c`, `.tar.gz`) cut off for a
+/// first pass and restored for a tie-break. Operating on bytes in the C
+/// locale (ASCII classification) matches the reference exactly; a `~`
+/// sorts before everything, including the empty string.
+///
+/// The comparator is total and never panics: it only indexes within the
+/// slices it is given.
+mod version {
+    use core::cmp::Ordering;
+
+    /// The length of the longest suffix of `s` matching the GNU C-locale
+    /// regex `(\.[A-Za-z~][A-Za-z0-9~]*)*$`, but never all of a non-empty
+    /// `s`. This is the run of file extensions cut before the first pass.
+    fn file_prefixlen(s: &[u8]) -> usize {
+        let n = s.len();
+        let mut prefixlen = 0;
+        let mut i = 0;
+        loop {
+            if i == n {
+                return prefixlen;
+            }
+            i += 1;
+            prefixlen = i;
+            while i + 1 < n && s[i] == b'.' && (s[i + 1].is_ascii_alphabetic() || s[i + 1] == b'~')
+            {
+                i += 2;
+                while i < n && (s[i].is_ascii_alphanumeric() || s[i] == b'~') {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// The version-sort weight of `s`'s byte at `pos` (of length `len`): the
+    /// empty position sorts before every non-`~` byte, digits share a rank,
+    /// letters keep their byte value, `~` sorts before everything, and any
+    /// other byte sorts after all letters.
+    fn order(s: &[u8], pos: usize, len: usize) -> i32 {
+        if pos == len {
+            return -1;
+        }
+        let c = s[pos];
+        if c.is_ascii_digit() {
+            0
+        } else if c.is_ascii_alphabetic() {
+            i32::from(c)
+        } else if c == b'~' {
+            -2
+        } else {
+            // Non-alphanumeric, non-`~`: after every letter. `UCHAR_MAX` is
+            // 255, so this is `c + 256`, matching the reference weight.
+            i32::from(c) + 256
+        }
+    }
+
+    /// The Debian version comparison over the byte ranges `s1[..s1_len]` and
+    /// `s2[..s2_len]` (a port of gnulib's `verrevcmp`): non-digit runs
+    /// compare by [`order`], digit runs compare numerically ignoring leading
+    /// zeros.
+    fn verrevcmp(s1: &[u8], s1_len: usize, s2: &[u8], s2_len: usize) -> i32 {
+        let (mut p1, mut p2) = (0usize, 0usize);
+        while p1 < s1_len || p2 < s2_len {
+            let mut first_diff = 0i32;
+            while (p1 < s1_len && !s1[p1].is_ascii_digit())
+                || (p2 < s2_len && !s2[p2].is_ascii_digit())
+            {
+                let c1 = order(s1, p1, s1_len);
+                let c2 = order(s2, p2, s2_len);
+                if c1 != c2 {
+                    return c1 - c2;
+                }
+                p1 += 1;
+                p2 += 1;
+            }
+            while p1 < s1_len && s1[p1] == b'0' {
+                p1 += 1;
+            }
+            while p2 < s2_len && s2[p2] == b'0' {
+                p2 += 1;
+            }
+            while p1 < s1_len && p2 < s2_len && s1[p1].is_ascii_digit() && s2[p2].is_ascii_digit() {
+                if first_diff == 0 {
+                    first_diff = i32::from(s1[p1]) - i32::from(s2[p2]);
+                }
+                p1 += 1;
+                p2 += 1;
+            }
+            if p1 < s1_len && s1[p1].is_ascii_digit() {
+                return 1;
+            }
+            if p2 < s2_len && s2[p2].is_ascii_digit() {
+                return -1;
+            }
+            if first_diff != 0 {
+                return first_diff;
+            }
+        }
+        0
+    }
+
+    /// Compare version strings `a` and `b` (byte slices), returning their
+    /// [`Ordering`]. A faithful port of gnulib `filenvercmp`.
+    pub fn filevercmp(a: &[u8], b: &[u8]) -> Ordering {
+        raw(a, b).cmp(&0)
+    }
+
+    /// The signed comparison value, so the port reads like the reference.
+    fn raw(a: &[u8], b: &[u8]) -> i32 {
+        // Empty versions sort first.
+        if a.is_empty() {
+            return if b.is_empty() { 0 } else { -1 };
+        }
+        if b.is_empty() {
+            return 1;
+        }
+        // Leading ".": "." sorts first, then "..", then other dot-names,
+        // then the rest.
+        if a[0] == b'.' {
+            if b[0] != b'.' {
+                return -1;
+            }
+            let adot = a.len() == 1;
+            let bdot = b.len() == 1;
+            if adot {
+                return if bdot { 0 } else { -1 };
+            }
+            if bdot {
+                return 1;
+            }
+            let adotdot = a[1] == b'.' && a.len() == 2;
+            let bdotdot = b[1] == b'.' && b.len() == 2;
+            if adotdot {
+                return if bdotdot { 0 } else { -1 };
+            }
+            if bdotdot {
+                return 1;
+            }
+        } else if b[0] == b'.' {
+            return 1;
+        }
+        // Cut file suffixes for the first pass; restore them on a tie.
+        let apre = file_prefixlen(a);
+        let bpre = file_prefixlen(b);
+        let one_pass_only = apre == a.len() && bpre == b.len();
+        let result = verrevcmp(a, apre, b, bpre);
+        if result != 0 || one_pass_only {
+            result
+        } else {
+            verrevcmp(a, a.len(), b, b.len())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::filevercmp;
+        use core::cmp::Ordering;
+
+        fn cmp(a: &str, b: &str) -> Ordering {
+            filevercmp(a.as_bytes(), b.as_bytes())
+        }
+
+        #[test]
+        fn digit_runs_compare_numerically() {
+            assert_eq!(cmp("f2", "f10"), Ordering::Less);
+            assert_eq!(cmp("f10", "f2"), Ordering::Greater);
+            assert_eq!(cmp("file", "file"), Ordering::Equal);
+        }
+
+        #[test]
+        fn leading_zeros_are_ignored_in_a_numeric_run() {
+            assert_eq!(cmp("f008", "f8"), Ordering::Equal);
+            assert_eq!(cmp("f09", "f10"), Ordering::Less);
+        }
+
+        #[test]
+        fn tilde_sorts_before_everything() {
+            assert_eq!(cmp("f~", "f"), Ordering::Less);
+            assert_eq!(cmp("1.0~beta", "1.0"), Ordering::Less);
+        }
+
+        #[test]
+        fn dot_names_sort_first_in_order() {
+            assert_eq!(cmp(".", ".."), Ordering::Less);
+            assert_eq!(cmp("..", ".bashrc"), Ordering::Less);
+            assert_eq!(cmp(".bashrc", "bashrc"), Ordering::Less);
+        }
+
+        #[test]
+        fn suffixes_are_cut_then_restored_for_a_tie() {
+            // Same base, different extension: the suffix breaks the tie.
+            assert_eq!(cmp("hello.c", "hello.o"), Ordering::Less);
+            // Different version in the base wins over the suffix.
+            assert_eq!(cmp("hello-2.c", "hello-10.c"), Ordering::Less);
+        }
+
+        #[test]
+        fn the_empty_string_sorts_first() {
+            assert_eq!(cmp("", "a"), Ordering::Less);
+            assert_eq!(cmp("a", ""), Ordering::Greater);
+            assert_eq!(cmp("", ""), Ordering::Equal);
+        }
     }
 }
 
@@ -1582,6 +1822,166 @@ mod tests {
             Ok(())
         );
         assert_eq!(out.text(), "big\na-mid\nb-mid\nsmall\n");
+    }
+
+    #[test]
+    fn no_sort_keeps_directory_order() {
+        // `-U` lists entries in the order the directory stream returned them.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "c", FileKind::Regular, 0o644, 0)
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        sort: Sort::None,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "c\na\nb\n");
+    }
+
+    #[test]
+    fn extension_sort_orders_by_suffix_then_name() {
+        // No extension sorts first (empty suffix), then by suffix, ties by
+        // name — the GNU `-X` order.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "b.txt", FileKind::Regular, 0o644, 0)
+            .entry(".", "a.txt", FileKind::Regular, 0o644, 0)
+            .entry(".", "c.c", FileKind::Regular, 0o644, 0)
+            .entry(".", "readme", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        sort: Sort::Extension,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "readme\nc.c\na.txt\nb.txt\n");
+    }
+
+    #[test]
+    fn version_sort_orders_numerically() {
+        // `-v` compares digit runs numerically, so `f2` precedes `f10`.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "f10", FileKind::Regular, 0o644, 0)
+            .entry(".", "f2", FileKind::Regular, 0o644, 0)
+            .entry(".", "f1", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        sort: Sort::Version,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "f1\nf2\nf10\n");
+    }
+
+    #[test]
+    fn group_directories_first_floats_directories() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "afile", FileKind::Regular, 0o644, 0)
+            .entry(".", "zdir", FileKind::Directory, 0o755, 0)
+            .entry(".", "bfile", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        group_directories_first: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        // Directories first, then the name sort within each group.
+        assert_eq!(out.text(), "zdir\nafile\nbfile\n");
+    }
+
+    #[test]
+    fn group_directories_first_keeps_directories_first_under_reverse() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "adir", FileKind::Directory, 0o755, 0)
+            .entry(".", "zdir", FileKind::Directory, 0o755, 0)
+            .entry(".", "afile", FileKind::Regular, 0o644, 0)
+            .entry(".", "zfile", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        group_directories_first: true,
+                        reverse: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        // `-r` reverses within each group, but directories stay first.
+        assert_eq!(out.text(), "zdir\nadir\nzfile\nafile\n");
+    }
+
+    #[test]
+    fn f_shows_all_entries_in_directory_order() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", ".hidden", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "a", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        hidden: Hidden::All,
+                        sort: Sort::None,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), ".hidden\nb\na\n");
     }
 
     #[test]

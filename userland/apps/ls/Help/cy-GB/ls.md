@@ -4,8 +4,9 @@ ls — rhestru cynnwys cyfeiriaduron
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -81,6 +82,19 @@ llinell wag.
 - `-C` — rhestru mewn colofnau, wedi'u llenwi o'r brig i'r gwaelod
   (rhagosodiad ar derfynell).
 - `-S` — didoli yn ôl maint, y mwyaf yn gyntaf.
+- `-U` — peidio â didoli; rhestru cofnodion yn nhrefn y cyfeiriadur.
+- `-X` — didoli yn ôl estyniad enw (y testun o'r `.` olaf),
+  cydraddoldeb yn ôl enw.
+- `-v` — didoli «fersiwn» naturiol, fel bod `f2` o flaen `f10`;
+  cydraddoldeb yn ôl enw.
+- `-f` — peidio â didoli a dangos pob cofnod: yn galluogi `-a` a `-U`
+  ac yn analluogi `-l` a `-s`. Cymhwysir yn ei safle, felly bydd
+  `-l`/`-s`/baner ddidoli ddiweddarach yn ei ddisodli.
+- `--sort=WORD` — dewis yr allwedd ddidoli yn ôl enw: `none` (`-U`),
+  `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`),
+  neu `name`.
+- `--group-directories-first` — rhestru cyfeiriaduron cyn cofnodion
+  eraill; cyfeiriaduron yn gyntaf hyd yn oed gyda `-r`.
 - `-w, --width <cols>` — gosod lled yr allbwn mewn colofnau; mae `0`
   yn golygu diderfyn.
 - `-x` — rhestru mewn colofnau, wedi'u llenwi o'r chwith i'r dde.

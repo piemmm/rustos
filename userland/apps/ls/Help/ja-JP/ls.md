@@ -4,8 +4,9 @@ ls — ディレクトリの内容を一覧する
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -61,6 +62,19 @@ ls — ディレクトリの内容を一覧する
   （`-h` で換算）、ディレクトリ一覧ごとに `total` の行を付ける。
 - `-C` — 列で一覧表示し、上から下へ埋める（端末での既定）。
 - `-S` — サイズ順、大きいものから。
+- `-U` — 並べ替えず、ディレクトリの順序で一覧します。
+- `-X` — 拡張子（最後の `.` 以降）で並べ替えます。同じ場合は
+  名前順。
+- `-v` — 自然な「バージョン」順で並べ替え、`f2` は `f10` より
+  前になります。同じ場合は名前順。
+- `-f` — 並べ替えずすべての項目を表示します。`-a` と `-U` を
+  有効にし、`-l` と `-s` を無効にします。指定位置で適用される
+  ため、後続の `-l`/`-s`/並べ替えフラグが優先されます。
+- `--sort=WORD` — 並べ替えの基準を名前で選びます: `none`（`-U`）、
+  `size`（`-S`）、`time`（`-t`）、`version`（`-v`）、
+  `extension`（`-X`）、`name`。
+- `--group-directories-first` — 他の項目の前にディレクトリを一覧
+  します。`-r` を付けてもディレクトリが先になります。
 - `-w, --width <cols>` — 出力幅を桁数で指定する。`0` は無制限。
 - `-x` — 列で一覧表示し、左から右へ埋める。
 - `-1` — 一行に一つの名前（既定）。

@@ -47,11 +47,20 @@ pub enum Indicator {
 pub enum Sort {
     /// Lexicographic name order (the default).
     Name,
+    /// No sort: the directory (read) order the filesystem returns (`-U`,
+    /// `-f`, `--sort=none`). `-r` still reverses that order.
+    None,
     /// Largest size first, ties by name (`-S`).
     Size,
     /// Newest [selected timestamp](TimeField) first, ties by name (`-t`, and
     /// the GNU `-c`/`-u`-without-`-l` default).
     Time,
+    /// By file-name extension (the text from the last `.`), ties by name
+    /// (`-X`, `--sort=extension`).
+    Extension,
+    /// Natural "version" order (`-v`, `--sort=version`): the GNU `filevercmp`
+    /// ordering, so `f2` sorts before `f10`; ties by name.
+    Version,
 }
 
 /// Which of a node's four timestamps the long format shows and a time sort
@@ -134,6 +143,10 @@ pub struct Options {
     pub time_style: TimeStyle,
     /// Print each entry's stable node number (`-i` / `--inode`).
     pub inode: bool,
+    /// List directories before other entries, keeping the chosen sort within
+    /// each group (`--group-directories-first`). Directories come first
+    /// regardless of `-r` — the GNU behaviour.
+    pub group_directories_first: bool,
 }
 
 impl Options {
@@ -156,6 +169,7 @@ impl Options {
         time_field: TimeField::Modified,
         time_style: TimeStyle::Locale,
         inode: false,
+        group_directories_first: false,
     };
 }
 
@@ -180,8 +194,9 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is the GNU `ls` surface,
-/// `ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-/// `[--time-style=STYLE] [--full-time] [--] [path...]`:
+/// `ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+/// `[--time-style=STYLE] [--sort=WORD] [--full-time]`
+/// `[--group-directories-first] [--] [path...]`:
 ///
 /// * `-a` / `--all` — do not hide entries whose name begins with `.`.
 /// * `-A` / `--almost-all` — like `-a`, but never list `.` or `..`.
@@ -206,6 +221,16 @@ pub enum Command {
 ///   blocks (scaled by `-h`), with a `total` line per directory block.
 /// * `-S` — sort by size, largest first.
 /// * `-t` — sort by the selected timestamp, newest first.
+/// * `-U` — do not sort; list entries in directory order.
+/// * `-X` — sort by file-name extension, ties by name.
+/// * `-v` — natural "version" sort (`filevercmp`), ties by name.
+/// * `-f` — do not sort and show all entries: enables `-a` and `-U` and
+///   disables `-l` and `-s` (applied where it appears, so a later
+///   `-l`/`-s`/sort flag overrides it — the GNU order semantics).
+/// * `--sort=WORD` — the sort key by name: `none` (`-U`), `size` (`-S`),
+///   `time` (`-t`), `version` (`-v`), `extension` (`-X`), or `name`.
+/// * `--group-directories-first` — list directories before other entries;
+///   directories come first even under `-r`.
 /// * `-c` — use the metadata-change time (ctime): with `-l` show it, and
 ///   with `-t` sort by it; without `-l` sort by it.
 /// * `-u` — like `-c` but for the access time (atime).
@@ -352,6 +377,7 @@ fn apply_long<'a>(
         "numeric-uid-gid" => options.long = true,
         "quote-name" => options.quote = true,
         "size" => options.size = true,
+        "group-directories-first" => options.group_directories_first = true,
         "reverse" => options.reverse = true,
         "recursive" => options.recursive = true,
         "inode" => options.inode = true,
@@ -367,6 +393,10 @@ fn apply_long<'a>(
         }
         "time-style" => {
             options.time_style = parse_time_style(long_value(inline, args)?)?;
+            return Ok(false);
+        }
+        "sort" => {
+            state.explicit_sort = Some(parse_sort(long_value(inline, args)?)?);
             return Ok(false);
         }
         "width" => {
@@ -421,6 +451,17 @@ fn apply_short<'a>(
             's' => options.size = true,
             'S' => state.explicit_sort = Some(Sort::Size),
             't' => state.explicit_sort = Some(Sort::Time),
+            'U' => state.explicit_sort = Some(Sort::None),
+            'X' => state.explicit_sort = Some(Sort::Extension),
+            'v' => state.explicit_sort = Some(Sort::Version),
+            // `-f` enables `-a` and `-U` and turns off `-l`/`-s`, in order:
+            // a later long/size/sort flag in the same line overrides it.
+            'f' => {
+                options.hidden = Hidden::All;
+                options.long = false;
+                options.size = false;
+                state.explicit_sort = Some(Sort::None);
+            }
             'c' => {
                 options.time_field = TimeField::Changed;
                 state.time_selected = true;
@@ -456,6 +497,22 @@ fn apply_short<'a>(
 /// usage error, never a guessed-at width (fail closed).
 fn parse_width(raw: &str) -> Result<usize, LsError> {
     raw.parse::<usize>().map_err(|_| LsError::Usage)
+}
+
+/// Parse a `--sort=WORD` value into the [`Sort`] key it selects. The words
+/// are the GNU set (`none`/`size`/`time`/`version`/`extension`/`name`);
+/// anything else is a usage error (fail closed), never a silently ignored
+/// token.
+fn parse_sort(raw: &str) -> Result<Sort, LsError> {
+    match raw {
+        "none" => Ok(Sort::None),
+        "size" => Ok(Sort::Size),
+        "time" => Ok(Sort::Time),
+        "version" => Ok(Sort::Version),
+        "extension" => Ok(Sort::Extension),
+        "name" => Ok(Sort::Name),
+        _ => Err(LsError::Usage),
+    }
 }
 
 /// Parse a `--time=WORD` value into the timestamp it selects. The words are
@@ -931,6 +988,123 @@ mod tests {
     }
 
     #[test]
+    fn new_sort_flags_set_the_key() {
+        for (arg, sort) in [
+            ("-U", Sort::None),
+            ("-X", Sort::Extension),
+            ("-v", Sort::Version),
+        ] {
+            assert_eq!(
+                parse(&[arg]),
+                Ok(list(
+                    Options {
+                        sort,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn sort_word_selects_the_key_in_both_forms() {
+        for (word, sort) in [
+            ("none", Sort::None),
+            ("size", Sort::Size),
+            ("time", Sort::Time),
+            ("version", Sort::Version),
+            ("extension", Sort::Extension),
+            ("name", Sort::Name),
+        ] {
+            let inline = alloc::format!("--sort={word}");
+            assert_eq!(
+                parse(&[inline.as_str()]),
+                Ok(list(
+                    Options {
+                        sort,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{word}"
+            );
+            assert_eq!(
+                parse(&["--sort", word]),
+                Ok(list(
+                    Options {
+                        sort,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{word}"
+            );
+        }
+        assert_eq!(parse(&["--sort=bogus"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--sort"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn group_directories_first_parses() {
+        assert_eq!(
+            parse(&["--group-directories-first"]),
+            Ok(list(
+                Options {
+                    group_directories_first: true,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn f_shows_all_disables_long_and_size_and_stops_sorting() {
+        assert_eq!(
+            parse(&["-f"]),
+            Ok(list(
+                Options {
+                    hidden: Hidden::All,
+                    sort: Sort::None,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        // `-f` clears an earlier `-l`/`-s` and an earlier sort selection.
+        assert_eq!(
+            parse(&["-lsSf"]),
+            Ok(list(
+                Options {
+                    hidden: Hidden::All,
+                    sort: Sort::None,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn a_later_flag_overrides_f() {
+        // Order matters: `-l` and `-t` after `-f` win (the GNU semantics).
+        assert_eq!(
+            parse(&["-flt"]),
+            Ok(list(
+                Options {
+                    hidden: Hidden::All,
+                    long: true,
+                    sort: Sort::Time,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
     fn time_word_selects_the_field_in_both_forms() {
         for (args, field) in [
             (&["--time=atime"][..], TimeField::Accessed),
@@ -1076,6 +1250,12 @@ mod tests {
                 "`-s, --size`",
                 "`-S`",
                 "`-t`",
+                "`-U`",
+                "`-X`",
+                "`-v`",
+                "`-f`",
+                "`--sort=WORD`",
+                "`--group-directories-first`",
                 "`-c`",
                 "`-u`",
                 "`-i, --inode`",

@@ -4,8 +4,9 @@ ls — Verzeichnisinhalte auflisten
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -84,6 +85,19 @@ werden durch eine Leerzeile getrennt.
 - `-C` — Einträge in Spalten auflisten, von oben nach unten gefüllt
   (Standard am Terminal).
 - `-S` — nach Größe sortieren, die größte zuerst.
+- `-U` — nicht sortieren; Einträge in Verzeichnisreihenfolge auflisten.
+- `-X` — nach Dateiendung (Text ab dem letzten `.`) sortieren, bei
+  Gleichstand nach Namen.
+- `-v` — natürliche „Versions“-Sortierung, sodass `f2` vor `f10`
+  steht; bei Gleichstand nach Namen.
+- `-f` — nicht sortieren und alle Einträge zeigen: aktiviert `-a` und
+  `-U` und deaktiviert `-l` und `-s`. Wirkt an seiner Position, sodass
+  ein späteres `-l`/`-s`/Sortier-Flag es überschreibt.
+- `--sort=WORD` — Sortierschlüssel nach Name wählen: `none` (`-U`),
+  `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`)
+  oder `name`.
+- `--group-directories-first` — Verzeichnisse vor anderen Einträgen
+  auflisten; Verzeichnisse zuerst, auch mit `-r`.
 - `-w, --width <cols>` — die Ausgabebreite in Spalten festlegen;
   `0` bedeutet unbegrenzt.
 - `-x` — Einträge in Spalten auflisten, von links nach rechts gefüllt.

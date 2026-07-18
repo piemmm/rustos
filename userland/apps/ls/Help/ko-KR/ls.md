@@ -4,8 +4,9 @@ ls — 디렉터리 내용 나열하기
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -60,6 +61,19 @@ ls — 디렉터리 내용 나열하기
   인쇄하고(`-h`로 환산), 디렉터리 목록마다 `total` 줄을 붙입니다.
 - `-C` — 열로 나열하며 위에서 아래로 채웁니다(터미널의 기본값).
 - `-S` — 크기순, 큰 것부터 정렬합니다.
+- `-U` — 정렬하지 않고 디렉터리 순서대로 나열합니다.
+- `-X` — 파일 이름 확장자(마지막 `.` 이후 텍스트)로 정렬하며,
+  같으면 이름순입니다.
+- `-v` — 자연스러운 "버전" 정렬로 `f2`가 `f10`보다 앞서며,
+  같으면 이름순입니다.
+- `-f` — 정렬하지 않고 모든 항목을 표시합니다. `-a`와 `-U`를
+  켜고 `-l`과 `-s`를 끕니다. 나타난 위치에서 적용되므로
+  뒤의 `-l`/`-s`/정렬 플래그가 이를 무시합니다.
+- `--sort=WORD` — 정렬 키를 이름으로 선택합니다: `none`(`-U`),
+  `size`(`-S`), `time`(`-t`), `version`(`-v`), `extension`(`-X`),
+  `name`.
+- `--group-directories-first` — 디렉터리를 다른 항목보다 먼저
+  나열합니다. `-r`을 써도 디렉터리가 앞섭니다.
 - `-w, --width <cols>` — 출력 너비를 열 수로 설정합니다. `0`은
   무제한입니다.
 - `-x` — 열로 나열하며 왼쪽에서 오른쪽으로 채웁니다.

@@ -4,8 +4,9 @@ ls — list directory contents
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -15,10 +16,13 @@ listed as itself. With no operand the current directory (`.`) is
 listed.
 
 Entries are sorted by name (or by size, largest first, with `-S`; by
-timestamp, newest first, with `-t`; reversed with `-r`). When the
-output is a terminal they are laid out
-in columns sized to the terminal width, filled top-to-bottom (`-C`);
-when it is not (a pipe or a file), they are listed one name per line.
+timestamp, newest first, with `-t`; by extension with `-X`; by natural
+"version" order with `-v`; not at all — directory order — with `-U`;
+chosen by name with `--sort`; reversed with `-r`).
+`--group-directories-first` floats directories to the top of the sort.
+When the output is a terminal they are laid out in columns sized to the
+terminal width, filled top-to-bottom (`-C`); when it is not (a pipe or
+a file), they are listed one name per line.
 `-x` fills the columns left-to-right instead, `-m` lists them
 comma-separated, `-1` forces one per line, and `-w` sets the width
 explicitly. Entries whose name begins with `.` are hidden unless `-a`
@@ -80,6 +84,18 @@ separated by a blank line.
 - `-C` — list entries in columns, filled top-to-bottom (the default
   when the output is a terminal).
 - `-S` — sort by size, largest first.
+- `-U` — do not sort; list entries in directory order.
+- `-X` — sort by file-name extension (the text from the last `.`),
+  ties by name.
+- `-v` — natural "version" sort, so `f2` precedes `f10`; ties by name.
+- `-f` — do not sort and show all entries: enables `-a` and `-U` and
+  disables `-l` and `-s`. Applied where it appears, so a later
+  `-l`/`-s`/sort flag overrides it.
+- `--sort=WORD` — choose the sort key by name: `none` (`-U`), `size`
+  (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`), or
+  `name`.
+- `--group-directories-first` — list directories before other entries;
+  directories come first even under `-r`.
 - `-w, --width <cols>` — set the output width in columns; `0` means an
   unlimited line length. Without it the terminal's width is used, or
   80 when it cannot be determined.
@@ -95,6 +111,8 @@ separated by a blank line.
 - `ls -al /System` — long-format listing of `/System`, including
   hidden entries.
 - `ls -lhS` — long format, human-readable sizes, largest first.
+- `ls -v` — natural sort, so `f2` comes before `f10`.
+- `ls --group-directories-first` — directories first, then files.
 - `ls -R Documents` — recurse through `Documents`, one header per
   directory.
 - `ls -F` — mark directories with `/` and executables with `*`.

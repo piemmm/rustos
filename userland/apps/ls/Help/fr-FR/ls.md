@@ -4,8 +4,9 @@ ls — lister le contenu des répertoires
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -83,6 +84,19 @@ blocs sont séparés par une ligne vide.
 - `-C` — lister en colonnes, remplies de haut en bas (par défaut sur
   un terminal).
 - `-S` — trier par taille, la plus grande en premier.
+- `-U` — ne pas trier ; lister les entrées dans l'ordre du répertoire.
+- `-X` — trier par extension de nom (le texte à partir du dernier
+  `.`), à égalité par nom.
+- `-v` — tri « version » naturel, de sorte que `f2` précède `f10` ;
+  à égalité par nom.
+- `-f` — ne pas trier et afficher toutes les entrées : active `-a` et
+  `-U` et désactive `-l` et `-s`. Appliqué à sa position, donc un
+  `-l`/`-s`/indicateur de tri ultérieur le remplace.
+- `--sort=WORD` — choisir la clé de tri par nom : `none` (`-U`),
+  `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`)
+  ou `name`.
+- `--group-directories-first` — lister les répertoires avant les
+  autres entrées ; les répertoires en premier même avec `-r`.
 - `-w, --width <cols>` — définir la largeur de sortie en colonnes ;
   `0` signifie illimitée.
 - `-x` — lister en colonnes, remplies de gauche à droite.

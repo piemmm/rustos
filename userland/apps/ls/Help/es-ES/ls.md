@@ -4,8 +4,9 @@ ls — listar el contenido de los directorios
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -80,6 +81,19 @@ se separan con una línea en blanco.
 - `-C` — listar en columnas, rellenadas de arriba abajo
   (predeterminado en un terminal).
 - `-S` — ordenar por tamaño, el mayor primero.
+- `-U` — no ordenar; listar las entradas en el orden del directorio.
+- `-X` — ordenar por extensión del nombre (el texto desde el último
+  `.`), empates por nombre.
+- `-v` — orden «versión» natural, de modo que `f2` precede a `f10`;
+  empates por nombre.
+- `-f` — no ordenar y mostrar todas las entradas: activa `-a` y `-U`
+  y desactiva `-l` y `-s`. Se aplica en su posición, así que un
+  `-l`/`-s`/indicador de orden posterior lo anula.
+- `--sort=WORD` — elegir la clave de orden por nombre: `none` (`-U`),
+  `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`)
+  o `name`.
+- `--group-directories-first` — listar los directorios antes que las
+  demás entradas; los directorios primero incluso con `-r`.
 - `-w, --width <cols>` — fijar el ancho de salida en columnas;
   `0` significa ilimitado.
 - `-x` — listar en columnas, rellenadas de izquierda a derecha.

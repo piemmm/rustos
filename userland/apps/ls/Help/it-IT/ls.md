@@ -4,8 +4,9 @@ ls — elencare il contenuto delle directory
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -84,6 +85,19 @@ blocchi sono separati da una riga vuota.
 - `-C` — elencare in colonne, riempite dall'alto in basso
   (predefinito su un terminale).
 - `-S` — ordinare per dimensione, la più grande per prima.
+- `-U` — non ordinare; elencare le voci nell'ordine della directory.
+- `-X` — ordinare per estensione del nome (il testo dall'ultimo `.`),
+  a parità per nome.
+- `-v` — ordinamento «versione» naturale, così `f2` precede `f10`;
+  a parità per nome.
+- `-f` — non ordinare e mostrare tutte le voci: attiva `-a` e `-U` e
+  disattiva `-l` e `-s`. Applicato nella sua posizione, quindi un
+  successivo `-l`/`-s`/flag di ordinamento lo sovrascrive.
+- `--sort=WORD` — scegliere la chiave di ordinamento per nome: `none`
+  (`-U`), `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension`
+  (`-X`) o `name`.
+- `--group-directories-first` — elencare le directory prima delle
+  altre voci; le directory per prime anche con `-r`.
 - `-w, --width <cols>` — impostare la larghezza di output in colonne;
   `0` significa illimitata.
 - `-x` — elencare in colonne, riempite da sinistra a destra.

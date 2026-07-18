@@ -4,8 +4,9 @@ ls — 列出目录内容
 
 ## SYNOPSIS
 
-`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--full-time] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -53,6 +54,19 @@ ls — 列出目录内容
   每个目录列表带一行 `total`。
 - `-C` — 分列显示，自上而下填充（终端上的默认方式）。
 - `-S` — 按大小排序，最大的在前。
+- `-U` — 不排序；按目录顺序列出条目。
+- `-X` — 按文件名扩展名（最后一个 `.` 之后的文本）排序，
+  相同时按名称。
+- `-v` — 自然的“版本”排序，使 `f2` 排在 `f10` 之前；相同时
+  按名称。
+- `-f` — 不排序并显示所有条目：启用 `-a` 和 `-U`，禁用 `-l`
+  和 `-s`。在其出现处生效，因此后面的 `-l`/`-s`/排序标志会
+  覆盖它。
+- `--sort=WORD` — 按名称选择排序键：`none`（`-U`）、`size`
+  （`-S`）、`time`（`-t`）、`version`（`-v`）、`extension`
+  （`-X`）或 `name`。
+- `--group-directories-first` — 在其他条目之前列出目录；即使
+  使用 `-r`，目录也在前。
 - `-w, --width <cols>` — 设置输出宽度（列数）；`0` 表示不限。
 - `-x` — 分列显示，从左到右填充。
 - `-1` — 每行一个名字（默认）。

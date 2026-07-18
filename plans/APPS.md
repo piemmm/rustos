@@ -758,11 +758,16 @@ deliberately staged behind the floor work below).
 
 - **Stage A — GNU switches for the existing tools (done).** On the current
   floor: `cat` `-A -b -e -E -n -s -t -T -u -v` (bundled short flags, GNU
-  `^`/`M-` notation); `ls` `-a -A -C -d -F -g -h -l -m -n -o -p -Q -r -R -s -S -w -x -1`
+  `^`/`M-` notation); `ls` `-a -A -C -d -F -f -g -h -l -m -n -o -p -Q -r -R -s -S -U -v -w -x -X -1 --sort --group-directories-first`
   (`-h` takes the GNU human-readable meaning — short help is `-?`/`--help` —
   and the invented `--long` synonym is retired; long format shows numeric
   owner/group, the GNU numeric fallback, with no link-count column (the
-  VFS has no links yet) and the timestamp column added in Stage D; the
+  VFS has no links yet) and the timestamp column added in Stage D; the sort
+  key is name by default, `-S` size, `-t` time, `-X` extension, `-v` natural
+  version order (a faithful `filevercmp` port), `-U`/`-f` no sort (directory
+  order, `-f` also enabling `-a` and disabling `-l`/`-s`), or `--sort=WORD`
+  by name, with `--group-directories-first` floating directories to the top
+  regardless of `-r`; the
   default arrangement is GNU's
   multi-column — `-C` down, `-x` across, `-m` comma-wrapped, `-1` one per
   line, `-w`/`--width` overriding the width — when stdout is an attested

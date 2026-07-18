@@ -1040,7 +1040,9 @@ command app registered at `/System/Apps/ls.app/Run`, so the shell
 resolves the bare word `ls` to it). It inspects each of its path
 operands in order: a non-directory operand is listed by name, and a
 directory operand has its entries listed, sorted by name (by size under
-`-S`, or by timestamp newest-first under `-t`), unless `-d` names the
+`-S`, by timestamp newest-first under `-t`, by extension under `-X`, by
+natural version order under `-v`, or not at all — directory order —
+under `-U`/`-f`, chosen by name with `--sort`), unless `-d` names the
 directory itself. With no operand it lists the current directory (`.`).
 The option surface is the GNU `ls` set (`AGENTS.md` §16.7): `-a`/`-A`
 reveal dotfiles, `-l` (and `-n`/`-g`/`-o`) select the long format, `-h`
@@ -1051,8 +1053,10 @@ prefixes each entry with its **allocated** size in 1024-byte blocks (the
 real on-disk allocation the filesystem reports through `fs_stat`, never
 a value derived from the byte length) with a `total` line per directory
 listing (printed under `-l` too, as in the GNU tool), `-R` recurses,
-`-r` reverses, `-F`/`-p` append indicators, `-Q` quotes, and
-`-m`/`-1` pick the arrangement. `-?`/`--help` render the tool's own
+`-r` reverses, `--group-directories-first` floats directories to the top
+of the sort (even under `-r`), `-f` shows every entry unsorted (enabling
+`-a` and disabling `-l`/`-s`), `-F`/`-p` append indicators, `-Q` quotes,
+and `-m`/`-1` pick the arrangement. `-?`/`--help` render the tool's own
 short help from its bundled `Help/` tree through the shared `lib/help`
 engine (`plans/APPS.md` §4), in the locale the inherited `LANG` variable
 names, falling back to the usage banner when the tree is unavailable
@@ -1071,7 +1075,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD] [--time-style=STYLE] [--full-time] [--] [path...]
+ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--full-time] [--group-directories-first] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -1094,6 +1098,12 @@ ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD] [--time-style=STYLE] [--fu
 | `-s`, `--size`   | allocated size per entry, in 1024-byte blocks      |
 | `-S`             | sort by size, largest first                        |
 | `-t`             | sort by the selected timestamp, newest first       |
+| `-U`             | do not sort; list entries in directory order       |
+| `-X`             | sort by file-name extension, ties by name          |
+| `-v`             | natural version sort (`f2` before `f10`)           |
+| `-f`             | unsorted, show all; enables `-a`, disables `-l`/`-s` |
+| `--sort=WORD`    | sort key: `none`/`size`/`time`/`version`/`extension`/`name` |
+| `--group-directories-first` | list directories before other entries; first even under `-r` |
 | `-c`             | select/sort by the metadata-change time (ctime)    |
 | `-u`             | select/sort by the access time (atime)             |
 | `-i`, `--inode`  | print each entry's node number                     |
