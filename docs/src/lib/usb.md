@@ -51,7 +51,13 @@ build on the *same* engine without depending on each other — exactly the split
   and `engine_for(index)` is the per-device `UrbEngine` view the HCD's URB
   service drives — one interface's transfers can never reach another
   device's endpoints. Endpoint DCIs, packet sizes, and intervals are read
-  from each device's descriptors (never hard-coded).
+  from each device's descriptors (never hard-coded). A *successful*
+  zero-length completion (a ZLP — an idle or composite HID interface, e.g. a
+  wireless MMO mouse's extra collection, completing an armed transfer with no
+  data) is not a report and not a fault: `next_report` re-arms the endpoint
+  and returns `Ok(None)`, so the URB stays parked and a ZLP costs one
+  controller interrupt rather than a reply-and-resubmit spin; a genuine
+  per-report fault still surfaces after the ring is retired.
   `bring_up` is the arch-neutral bring-up orchestration the host-controller
   driver runs once: it powers all root ports, parks through the connect
   debounce, and attaches **every** connected root port (`attach_root_port`).

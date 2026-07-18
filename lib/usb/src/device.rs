@@ -5964,6 +5964,15 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
     /// endpoint re-armed for the next report (a single odd transfer must never
     /// silence the keyboard).
     ///
+    /// `Ok(Some(len))` is a delivered report of `len` bytes; `Ok(None)` is a
+    /// *successful* transfer that carried **zero** bytes (a zero-length
+    /// packet — a residual equal to the whole request). A ZLP is not a report
+    /// and not a fault: a composite/idle HID interface (a wireless MMO mouse's
+    /// extra collection) legitimately completes an interrupt-IN transfer with
+    /// no data. The caller re-arms and keeps the URB parked rather than
+    /// replying, so an idle or ZLP-streaming device neither spins the class
+    /// driver on empty completions nor is killed by a false fault.
+    ///
     /// # Errors
     ///
     /// [`DriverError::DeviceFault`] for an unexpected completion code, a
@@ -5974,7 +5983,7 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
         index: usize,
         event: Trb,
         buf: &mut [u8],
-    ) -> Result<usize, DriverError> {
+    ) -> Result<Option<usize>, DriverError> {
         let region = self.device(index).ok_or(DriverError::NotFound)?.region;
         let ring_base = self.phys_of(region.int_ring)?;
         let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
@@ -6010,12 +6019,18 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
         let len = REPORT_LEN
             .checked_sub(residual)
             .ok_or(DriverError::DeviceFault)?;
-        if len == 0 || len > buf.len() {
+        if len > buf.len() {
             return Err(DriverError::DeviceFault);
+        }
+        // A zero-length completion is a successful transfer that carried no
+        // report; it is neither delivered nor a fault (the caller re-arms and
+        // parks). Nothing is copied out.
+        if len == 0 {
+            return Ok(None);
         }
         self.dma
             .read(region.report_bufs + slot * REPORT_LEN, &mut buf[..len])?;
-        Ok(len)
+        Ok(Some(len))
     }
 
     /// Retire device `index`'s just-completed interrupt-IN transfer.
@@ -6425,9 +6440,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // device's entry rather than faulting the shared ring; drain it
         // first.
         if let Some(event) = pending {
-            let decoded = self.decode_transfer_report(index, event, buf);
-            self.retire_interrupt_transfer(index)?;
-            return decoded.map(Some);
+            return self.deliver_report_event(index, device_slot, int_dci, event, buf);
         }
         if in_flight == 0 {
             self.arm_report(index)?;
@@ -6447,14 +6460,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 _ => return Err(DriverError::DeviceFault),
             }
             if event.slot_id() == device_slot && event.endpoint_id() == int_dci {
-                // Decode this completed transfer first, then retire it
-                // unconditionally: an unexpected completion code or a
-                // malformed buffer mapping is surfaced as a per-report
-                // error, but the ring state must still advance so the next
-                // class URB can arm another transfer.
-                let decoded = self.decode_transfer_report(index, event, buf);
-                self.retire_interrupt_transfer(index)?;
-                return decoded.map(Some);
+                return self.deliver_report_event(index, device_slot, int_dci, event, buf);
             }
             // Another consumer's completion sharing the event ring (the hub
             // status-change, another device's report or bulk TD, a stale
@@ -6466,6 +6472,46 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             }
             return Err(DriverError::DeviceFault);
         }
+        Ok(None)
+    }
+
+    /// Decode one completed transfer `event` for device `index`'s interrupt
+    /// endpoint, retire it, and decide what the caller returns.
+    ///
+    /// The transfer is retired **unconditionally** first (so an unexpected
+    /// completion code or a malformed buffer mapping is surfaced as a
+    /// per-report error while the ring state still advances, letting the next
+    /// class URB arm another transfer — a single odd transfer must never
+    /// silence the device). Then:
+    ///
+    /// * `Ok(Some(len))` — a real report of `len` bytes landed in `buf`.
+    /// * `Ok(None)` — a *successful* zero-length completion (a ZLP): not a
+    ///   report. The endpoint is re-armed and the doorbell rung, so the URB
+    ///   stays outstanding (parked) rather than being replied to. An idle or
+    ///   ZLP-streaming HID interface (a composite MMO mouse's extra
+    ///   collection) therefore neither spins the class driver on empty
+    ///   completions nor is killed by a false fault — each ZLP costs one
+    ///   controller interrupt, never a busy-loop.
+    /// * `Err(_)` — a genuine per-report fault, surfaced after the retire.
+    fn deliver_report_event(
+        &mut self,
+        index: usize,
+        device_slot: u8,
+        int_dci: u8,
+        event: Trb,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        let decoded = self.decode_transfer_report(index, event, buf);
+        self.retire_interrupt_transfer(index)?;
+        if let Some(len) = decoded? {
+            return Ok(Some(len));
+        }
+        // A zero-length completion carried no report: re-arm the endpoint and
+        // hold the URB parked. Replying would only make the class driver
+        // re-submit at once (a spin); the next real report completes the
+        // still-outstanding URB instead.
+        self.arm_report(index)?;
+        self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
         Ok(None)
     }
 

@@ -4745,6 +4745,46 @@ fn reports_flow_through_the_report_source() {
 }
 
 #[test]
+fn a_zero_length_completion_parks_and_rearms_rather_than_faulting() {
+    // A composite/idle HID interface (a wireless MMO mouse's extra
+    // collection) can complete an interrupt-IN transfer with *no data* — a
+    // zero-length packet. Before this fix a ZLP decoded to a `DeviceFault`,
+    // so the HCD replied an error, the class driver counted a pump fault and
+    // exited fail-closed after a few, and `devmgr` reloaded it — a hot
+    // reload storm that pegged a core at boot. A ZLP must instead re-arm the
+    // endpoint and leave the URB parked (`Ok(None)`), so an idle or
+    // ZLP-streaming device costs one controller interrupt, never a spin, and
+    // is never killed. This fails before the fix (the ZLP returns
+    // `Err(DeviceFault)`) and passes after.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
+
+    let mut buf = [0u8; REPORT_LEN];
+    // Arm the first transfer, then complete it with an empty report (a
+    // ShortPacket whose residual is the whole request → zero bytes).
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    device.host_mut().pending_reports.push_back(alloc::vec![]);
+    device.host_mut().process_int_ring();
+    assert_eq!(
+        device.next_report(0, &mut buf),
+        Ok(None),
+        "a zero-length completion parks (re-armed), never a fault"
+    );
+
+    // The re-arm left a fresh transfer outstanding, so the next *real*
+    // report is still delivered — the endpoint did not go silent.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x01, 0x05, 0xFB]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(0, &mut buf), Ok(Some(3)));
+    assert_eq!(buf[..3], [0x01, 0x05, 0xFB]);
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+}
+
+#[test]
 fn report_source_rearms_across_the_ring_wrap() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);

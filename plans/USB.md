@@ -469,6 +469,21 @@ the live controller behaviour is host- and CI-proven first.
     this such an event matched no live endpoint and faulted the hub watch,
     silencing it so a later re-plug went unseen. The tolerance is cleared once a
     fresh device enumerates.
+  - **A zero-length interrupt-IN completion parks; it is not a report and not
+    a fault.** An idle or composite HID interface (a wireless MMO mouse's
+    extra collection) can complete an armed interrupt-IN transfer with no data
+    (a ZLP — a residual equal to the whole request). `decode_transfer_report`
+    returns `Ok(None)` for it and `next_report`'s `deliver_report_event`
+    re-arms the endpoint, rings the doorbell, and holds the URB outstanding
+    (`Ok(None)` → `Held`) rather than replying. So the class driver's blocking
+    `ipc_call` stays parked and a ZLP costs one controller interrupt, never a
+    reply-and-resubmit spin. Treating the ZLP as a `DeviceFault` (the prior
+    behaviour) made the HCD reply an error, the class driver exit fail-closed
+    after a few pump faults, and `devmgr` reload it — a hot reload storm that
+    pegged a core at boot behind a ZLP-streaming device. A genuine per-report
+    fault (a non-Success/ShortPacket completion code, or a residual larger
+    than the request) still surfaces after the ring is retired. Regression:
+    `a_zero_length_completion_parks_and_rearms_rather_than_faulting`.
   - **Root-port hot-plug is a per-port CSC scan, uniform for every port.**
     A connect or disconnect on any root port latches `PORTSC.CSC` (and
     posts the Port Status Change Event that raises the interrupt);
