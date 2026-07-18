@@ -24640,6 +24640,7 @@ mod tests {
                     uid: 1000,
                     gid: 1000,
                     id: tairix_abi::FileId::NONE,
+                    times: tairix_abi::NodeTimes::default(),
                 },
                 open_err: None,
                 log: std::sync::Mutex::new(Vec::new()),
@@ -25219,6 +25220,7 @@ mod tests {
             uid: 1000,
             gid: 1000,
             id: tairix_abi::FileId::NONE,
+            times: tairix_abi::NodeTimes::default(),
         };
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(
@@ -25302,6 +25304,7 @@ mod tests {
             uid: 1000,
             gid: 1000,
             id: file_id,
+            times: tairix_abi::NodeTimes::default(),
         };
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(

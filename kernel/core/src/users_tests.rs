@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    NodeTimes,
 };
 use tairix_abi::{CapabilityId, DriverError};
 use tairix_users::{
@@ -71,6 +72,7 @@ impl FilesystemRead for MockRoot {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             }),
             USERS if self.present => Ok(NodeInfo {
                 kind: if self.is_dir {
@@ -80,6 +82,7 @@ impl FilesystemRead for MockRoot {
                 },
                 size: self.reported_size,
                 allocated: self.reported_size,
+                times: NodeTimes::default(),
             }),
             _ => Err(DriverError::NotFound),
         }

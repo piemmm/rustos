@@ -16,7 +16,6 @@ use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
     NodeInfo as DriverNodeInfo, NodeKind as DriverNodeKind,
 };
-use tairix_abi::time::Time64;
 use tairix_abi::CapabilityId;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -203,7 +202,7 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut dyn FilesystemRead,
-    ) -> Result<Vec<(DriverNodeInfo, Time64, String)>, VfsError> {
+    ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new(fs, template).list(cred, &remainder)
     }
@@ -379,7 +378,7 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
-    ) -> Result<Vec<(DriverNodeInfo, Time64, String)>, VfsError> {
+    ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new_secured(fs, template).list(cred, &remainder)
     }

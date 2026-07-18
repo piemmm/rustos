@@ -2144,31 +2144,34 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   uint32_t max_height_px;\n\
          \x20   uint8_t per_layer_opacity;\n\
          } tairix_accel_caps_t;\n\n",
-    "/* Structural metadata about a filesystem node; `kind` is a TAIRIX_NODE_KIND_*. */\n\
-         typedef struct tairix_node_info {\n\
-         \x20   uint8_t kind;\n\
-         \x20   uint64_t size;\n\
-         \x20   uint64_t allocated;\n\
-         } tairix_node_info_t;\n\n",
-    "/* One directory entry; `node` is a NodeId (uint64_t). The entry carries the\n\
-         * child's full tairix_node_info_t, its last-modification instant (the epoch\n\
-         * when the backing stores no per-node stamp), and the opaque cursor that\n\
-         * resumes the listing after it (pass it back to read_dir; 0 starts a\n\
-         * listing). */\n\
-         typedef struct tairix_dir_entry {\n\
-         \x20   uint64_t node;\n\
-         \x20   tairix_node_info_t info;\n\
-         \x20   tairix_time64_t modified;\n\
-         \x20   uintptr_t name_len;\n\
-         \x20   uint64_t next_cursor;\n\
-         } tairix_dir_entry_t;\n\n",
-    "/* The four AGENTS.md sec.21 timestamps stored for a filesystem node. */\n\
+    "/* The four AGENTS.md sec.21 timestamps stored for a filesystem node. A\n\
+         * stamp the backing format does not keep is the epoch (never a\n\
+         * fabricated wall time). */\n\
          typedef struct tairix_node_times {\n\
          \x20   tairix_time64_t created;\n\
          \x20   tairix_time64_t modified;\n\
          \x20   tairix_time64_t accessed;\n\
          \x20   tairix_time64_t changed;\n\
          } tairix_node_times_t;\n\n",
+    "/* Structural metadata about a filesystem node; `kind` is a TAIRIX_NODE_KIND_*.\n\
+         * `times` carries the node's four timestamps, read in the same structural\n\
+         * read as kind/size. */\n\
+         typedef struct tairix_node_info {\n\
+         \x20   uint8_t kind;\n\
+         \x20   uint64_t size;\n\
+         \x20   uint64_t allocated;\n\
+         \x20   tairix_node_times_t times;\n\
+         } tairix_node_info_t;\n\n",
+    "/* One directory entry; `node` is a NodeId (uint64_t). The entry carries the\n\
+         * child's full tairix_node_info_t (including its timestamps) and the opaque\n\
+         * cursor that resumes the listing after it (pass it back to read_dir; 0\n\
+         * starts a listing). */\n\
+         typedef struct tairix_dir_entry {\n\
+         \x20   uint64_t node;\n\
+         \x20   tairix_node_info_t info;\n\
+         \x20   uintptr_t name_len;\n\
+         \x20   uint64_t next_cursor;\n\
+         } tairix_dir_entry_t;\n\n",
     "/* A mounted volume's space accounting, in whole blocks of block_size bytes.\n\
          * avail_blocks <= free_blocks <= total_blocks always holds; files/files_free\n\
          * are 0 when the format tracks no fixed inode table. */\n\
@@ -3964,8 +3967,8 @@ mod tests {
             ("tairix_driver.h", "} tairix_bus_device_t;", size_of::<BusDevice>(), 24, align_of::<BusDevice>(), 8),
             ("tairix_driver.h", "} tairix_display_mode_t;", size_of::<DisplayMode>(), 16, align_of::<DisplayMode>(), 4),
             ("tairix_driver.h", "} tairix_accel_caps_t;", size_of::<AccelCaps>(), 16, align_of::<AccelCaps>(), 4),
-            ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 24, align_of::<NodeInfo>(), 8),
-            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 64, align_of::<DirEntry>(), 8),
+            ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 88, align_of::<NodeInfo>(), 8),
+            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 112, align_of::<DirEntry>(), 8),
             ("tairix_driver.h", "} tairix_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
             ("tairix_driver.h", "} tairix_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
             ("tairix_driver.h", "} tairix_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),

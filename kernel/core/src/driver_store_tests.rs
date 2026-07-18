@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    NodeTimes,
 };
 use tairix_abi::driver::DriverError;
 
@@ -168,6 +169,7 @@ impl FilesystemRead for MockStore {
             kind: n.kind,
             size: n.reported_size.unwrap_or(n.content.len() as u64),
             allocated: n.content.len() as u64,
+            times: NodeTimes::default(),
         })
     }
 
@@ -220,7 +222,6 @@ impl FilesystemRead for MockStore {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(child_id),
             info,
-            modified: tairix_abi::time::Time64::UNIX_EPOCH,
             name_len,
             next_cursor: cursor + 1,
         }))

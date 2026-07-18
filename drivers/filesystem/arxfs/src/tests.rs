@@ -8,8 +8,7 @@
 use super::*;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemTimestamps, FilesystemWrite,
-    NodeKind,
+    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind,
 };
 use tairix_fsmeta::preset;
 
@@ -642,7 +641,10 @@ fn timestamps_round_trip_extreme_values() {
     fs.create(root, b"t", NodeKind::RegularFile)
         .expect("create");
     let node = fs.lookup(root, b"t").unwrap();
-    assert_eq!(fs.times(node).unwrap().created, old());
+    let times = fs.node_info(node).unwrap().times;
+    assert_eq!(times.created, old());
+    // ARXFS does not track access time: it is always the epoch.
+    assert_eq!(times.accessed, Time64::UNIX_EPOCH);
 
     // A far-future value survives a remount.
     let mut sec = Security::new(0o600, 1, 2);
@@ -653,7 +655,11 @@ fn timestamps_round_trip_extreme_values() {
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     let node = fs.lookup(fs.root(), b"t").unwrap();
     assert_eq!(fs.security(node).unwrap(), sec);
-    assert_eq!(fs.times(node).unwrap().changed, future());
+    // `changed` was stamped by `set_security` under the future clock, and the
+    // access time stays the epoch across the remount.
+    let times = fs.node_info(node).unwrap().times;
+    assert_eq!(times.changed, future());
+    assert_eq!(times.accessed, Time64::UNIX_EPOCH);
 }
 
 #[test]

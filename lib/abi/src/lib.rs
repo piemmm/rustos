@@ -70,6 +70,7 @@ pub use boot::{
     CPU_NAME_LEN,
 };
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
+pub use driver::filesystem::NodeTimes;
 pub use driver::{
     decode_bind_keys, BufferClass, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost,
     DriverKind, DriverManifest, DriverRegisterReply, MmioMapError, MmioMapper, MsiMessage, MsixBus,

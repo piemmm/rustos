@@ -604,14 +604,21 @@ renders.
 
 ## Timestamps (§21)
 
-Every inode stores four 64-bit-native `Time64` timestamps —
-`created`, `modified`, `accessed`, and `changed` — so absolute time is
+Each inode stores the three 64-bit-native `Time64` timestamps `arxfs`
+maintains — `created`, `modified`, and `changed` — so absolute time is
 never a seconds-only scalar and the full pre-1970 / post-2038 range
-round-trips without truncation (`AGENTS.md` §21). They are surfaced
-through the versioned `FilesystemTimestamps` trait
-(`times(node) -> NodeTimes`), a separate `abi-v1` extension alongside
-`FilesystemSecurity` — never a widening of `FilesystemRead` /
-`FilesystemWrite` (`AGENTS.md` §2.4 / §9).
+round-trips without truncation (`AGENTS.md` §21). **`arxfs` does not
+track access time (atime).** Updating a stamp on every read would defeat
+the copy-on-write model (a pure read would have to write metadata), so
+the format deliberately keeps no atime: it reports `accessed =
+Time64::UNIX_EPOCH` — the honest "no stamp" value, never a fabricated or
+stale time. The on-disk inode record reserves the 12-byte atime slot
+(written zero, ignored on read) so the surrounding offsets stay fixed.
+
+The three stamps travel **in `NodeInfo`** (`node_info` and `read_dir`
+both fill `NodeInfo::times`), read in the same structural read as the
+node's kind and size — there is no separate `FilesystemTimestamps` trait
+and no separate `DirEntry.modified` stamp (`AGENTS.md` §2.2).
 
 The driver stamps them from a clock seam installed with
 `ARXFS::with_clock(clock: fn() -> Time64)`; without it every stamp is
@@ -619,9 +626,9 @@ the Unix epoch, so a board with no wall clock yet keeps deterministic,
 in-range timestamps rather than panicking or inventing a time
 (`AGENTS.md` §2.9). The stamping follows the POSIX model:
 
-- **create** sets all four to the creation instant and bumps the parent
-  directory's `modified`/`changed`;
-- **write** advances `modified`/`accessed`/`changed`;
+- **create** sets `created`/`modified`/`changed` to the creation instant
+  and bumps the parent directory's `modified`/`changed`;
+- **write** advances `modified`/`changed`;
 - **truncate** advances `modified`/`changed`;
 - **set_security** advances only `changed` (a metadata change);
 - **remove** bumps the parent directory's `modified`/`changed`.

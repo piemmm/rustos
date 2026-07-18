@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::fs::{Mode, Path, Vfs, VfsError};
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, MountFlags, NodeId, NodeInfo, NodeKind,
+    DirEntry, FilesystemRead, MountFlags, NodeId, NodeInfo, NodeKind, NodeTimes,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_abi::time::Time64;
@@ -24,6 +24,14 @@ use crate::fs::memfs::{RwMockFs, ADMIN_GID, ADMIN_UID};
 /// The fixed last-modification stamp `MockFs` reports for every entry, so
 /// the tests can assert the stamp travels through the delegation unchanged.
 const MOCK_MODIFIED: Time64 = Time64::from_secs(1_234_567);
+/// The [`NodeTimes`] `MockFs` reports for every node (only `modified` is
+/// non-trivial, so the listing/stat stamp path is exercised end to end).
+const MOCK_TIMES: NodeTimes = NodeTimes {
+    created: Time64::UNIX_EPOCH,
+    modified: MOCK_MODIFIED,
+    accessed: Time64::UNIX_EPOCH,
+    changed: Time64::UNIX_EPOCH,
+};
 
 fn p(text: &str) -> Path {
     Path::parse(text).expect("valid path")
@@ -67,16 +75,19 @@ impl FilesystemRead for MockFs {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated: 0,
+                times: MOCK_TIMES,
             }),
             KERNEL => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: KERNEL_BODY.len() as u64,
                 allocated: KERNEL_BODY.len() as u64,
+                times: MOCK_TIMES,
             }),
             README => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: README_BODY.len() as u64,
                 allocated: README_BODY.len() as u64,
+                times: MOCK_TIMES,
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -142,7 +153,6 @@ impl FilesystemRead for MockFs {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(node),
             info,
-            modified: MOCK_MODIFIED,
             name_len: name.len(),
             next_cursor: cursor + 1,
         }))
@@ -165,11 +175,13 @@ impl FilesystemRead for BadFs {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             }),
             DOCS => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: 3,
                 allocated: 3,
+                times: NodeTimes::default(),
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -210,8 +222,8 @@ impl FilesystemRead for BadFs {
                 kind: NodeKind::RegularFile,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             },
-            modified: Time64::UNIX_EPOCH,
             name_len: 2,
             next_cursor: 1,
         }))
@@ -282,7 +294,7 @@ fn delegated_list_of_mount_point_lists_driver_root() {
         .expect("list mount root");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, _, name)| (info.kind, name))
+        .map(|(info, name)| (info.kind, name))
         .collect();
     assert_eq!(
         kinds,
@@ -304,7 +316,7 @@ fn delegated_list_of_subdir() {
         .expect("list subdir");
     let entries: Vec<(NodeKind, u64, Time64, String)> = names
         .into_iter()
-        .map(|(info, modified, name)| (info.kind, info.size, modified, name))
+        .map(|(info, name)| (info.kind, info.size, info.times.modified, name))
         .collect();
     // The listing carries the child's own size and modification stamp,
     // read once by the driver.
@@ -504,7 +516,7 @@ fn delegated_mkdir_then_create_inside() {
         .expect("list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, _, name)| (info.kind, name))
+        .map(|(info, name)| (info.kind, name))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("inner.bin"))]);
 }
@@ -744,11 +756,13 @@ impl FilesystemRead for SecMockFs {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             }),
             SECRET_FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: SECRET_BODY.len() as u64,
                 allocated: SECRET_BODY.len() as u64,
+                times: NodeTimes::default(),
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -797,8 +811,8 @@ impl FilesystemRead for SecMockFs {
                 kind: NodeKind::RegularFile,
                 size: SECRET_BODY.len() as u64,
                 allocated: SECRET_BODY.len() as u64,
+                times: NodeTimes::default(),
             },
-            modified: Time64::UNIX_EPOCH,
             name_len: name.len(),
             next_cursor: 1,
         }))
@@ -892,7 +906,7 @@ fn secured_list_of_mount_root_lists_driver_root() {
         .expect("secured list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, _, name)| (info.kind, name))
+        .map(|(info, name)| (info.kind, name))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("secret.txt"))]);
 }
@@ -1094,6 +1108,7 @@ impl FilesystemRead for StuckCursorFs {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             })
         } else {
             Err(DriverError::NotFound)
@@ -1129,8 +1144,8 @@ impl FilesystemRead for StuckCursorFs {
                 kind: NodeKind::RegularFile,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             },
-            modified: Time64::UNIX_EPOCH,
             name_len: 1,
             next_cursor: cursor,
         }))

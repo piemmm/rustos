@@ -70,8 +70,8 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, SecurityAcl, SecuritySubject,
-    VolumeStats,
+    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, SecurityAcl,
+    SecuritySubject, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -473,9 +473,12 @@ impl Layout {
 struct Inode {
     /// `i_mode`, including the type bits.
     mode: u16,
-    /// Last contents-modification instant, decoded from `i_mtime` (and
-    /// `i_mtime_extra` where the enlarged inode record carries it).
-    mtime: Time64,
+    /// The node's four timestamps, decoded from `i_atime`/`i_ctime`/
+    /// `i_mtime`/`i_crtime` (and their `_extra` nanosecond+epoch fields
+    /// where the enlarged inode record carries them). ext4 stores a real
+    /// access time, so `times.accessed` is meaningful here; `times.created`
+    /// is `i_crtime` when the record carries it, else the epoch.
+    times: NodeTimes,
     /// Owning user id (`i_uid` low half combined with the osd2 high half).
     uid: u32,
     /// Owning group id (`i_gid` low half combined with the osd2 high half).
@@ -885,10 +888,11 @@ impl<B: Block> Ext4<B> {
     /// Read and decode inode number `ino`.
     fn read_inode(&mut self, ino: u32) -> Result<Inode, DriverError> {
         let inode_offset = self.locate_inode(ino)?;
-        // 144 bytes covers the classic 128-byte record plus `i_extra_isize`
-        // (0x80) and `i_mtime_extra` (0x88..0x8C) of an enlarged record; the
-        // read never exceeds the volume's own inode record size.
-        let mut raw = [0u8; 144];
+        // 160 bytes covers the classic 128-byte record plus the enlarged
+        // record's `i_extra_isize` (0x80) and every extended-timestamp field
+        // through `i_crtime_extra` (0x94..0x98); the read never exceeds the
+        // volume's own inode record size.
+        let mut raw = [0u8; 160];
         let want = core::cmp::min(self.layout.inode_size as usize, raw.len());
         device_read(
             &mut self.block,
@@ -910,18 +914,39 @@ impl<B: Block> Ext4<B> {
         let file_acl = u64::from(le32(raw, 0x68)) | (u64::from(le16(raw, INODE_FILE_ACL_HI)) << 32);
         let mut block = [0u8; I_BLOCK_LEN];
         block.copy_from_slice(&raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + I_BLOCK_LEN]);
-        // `i_mtime_extra` is present when the enlarged record's
-        // `i_extra_isize` covers it (ext4 disk layout: the extra timestamp
-        // fields start at 0x84; mtime's is 0x88..0x8C).
-        let mtime_extra = if raw.len() >= 0x8C && usize::from(le16(raw, 0x80)) >= 0x8C - 128 {
-            Some(le32(raw, 0x88))
-        } else {
-            None
+        // The nanosecond+epoch `_extra` timestamp fields live in the
+        // enlarged inode record beyond the classic 128 bytes, present only
+        // when `i_extra_isize` (0x80) covers them: ctime_extra 0x84,
+        // mtime_extra 0x88, atime_extra 0x8C, crtime 0x90, crtime_extra
+        // 0x94 (ext4 disk layout).
+        let raw_len = raw.len();
+        let extra_isize = usize::from(le16(raw, 0x80));
+        let extra_at = |off: usize| -> Option<u32> {
+            if raw_len >= off + 4 && 128 + extra_isize >= off + 4 {
+                Some(le32(raw, off))
+            } else {
+                None
+            }
         };
-        let mtime = decode_inode_time(le32(raw, 0x10), mtime_extra)?;
+        let accessed = decode_inode_time(le32(raw, 0x08), extra_at(0x8C))?;
+        let changed = decode_inode_time(le32(raw, 0x0C), extra_at(0x84))?;
+        let modified = decode_inode_time(le32(raw, 0x10), extra_at(0x88))?;
+        // `i_crtime` (birth time) exists only in an enlarged record; absent,
+        // the node reports the epoch rather than a fabricated instant.
+        let created = if raw_len >= 0x94 && 128 + extra_isize >= 0x90 + 4 {
+            decode_inode_time(le32(raw, 0x90), extra_at(0x94))?
+        } else {
+            Time64::UNIX_EPOCH
+        };
+        let times = NodeTimes {
+            created,
+            modified,
+            accessed,
+            changed,
+        };
         Ok(Inode {
             mode,
-            mtime,
+            times,
             uid,
             gid,
             size: (size_hi << 32) | size_lo,
@@ -2538,6 +2563,7 @@ impl<B: Block> Ext4<B> {
             kind,
             size,
             allocated,
+            times: inode.times,
         })
     }
 }
@@ -2597,7 +2623,6 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(u64::from(found.ino)),
             info: self.inode_info(&child)?,
-            modified: child.mtime,
             name_len: found.name_len,
             next_cursor: found.next_cursor,
         }))

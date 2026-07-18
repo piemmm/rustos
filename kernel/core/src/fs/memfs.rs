@@ -19,10 +19,9 @@ use alloc::vec::Vec;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    VolumeStats,
+    NodeTimes, VolumeStats,
 };
 use tairix_abi::driver::DriverError;
-use tairix_abi::time::Time64;
 use tairix_fsmeta::{AttrFlags, AttrSet};
 
 /// Default owner uid baked into a freshly created node's security record.
@@ -140,16 +139,20 @@ impl FilesystemRead for RwMockFs {
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let idx = Self::index(node)?;
         match self.nodes.get(idx).ok_or(DriverError::NotFound)? {
+            // The in-RAM tree keeps no per-node stamps; the epoch is the
+            // documented "no stamp" value, never a fabricated wall time.
             RwNode::Dir(_) => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             }),
             RwNode::File(data) => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: data.len() as u64,
                 // Heap-backed: the bytes held are the storage occupied.
                 allocated: data.len() as u64,
+                times: NodeTimes::default(),
             }),
         }
     }
@@ -205,9 +208,6 @@ impl FilesystemRead for RwMockFs {
         Ok(Some(DirEntry {
             node: NodeId::from_raw(child as u64 + 1),
             info,
-            // The in-RAM tree keeps no per-node stamp; the epoch is the
-            // documented "no stamp" value, never a fabricated wall time.
-            modified: Time64::UNIX_EPOCH,
             name_len,
             next_cursor: cursor + 1,
         }))

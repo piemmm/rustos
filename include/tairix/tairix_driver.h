@@ -195,33 +195,36 @@ typedef struct tairix_accel_caps {
     uint8_t per_layer_opacity;
 } tairix_accel_caps_t;
 
-/* Structural metadata about a filesystem node; `kind` is a TAIRIX_NODE_KIND_*. */
-typedef struct tairix_node_info {
-    uint8_t kind;
-    uint64_t size;
-    uint64_t allocated;
-} tairix_node_info_t;
-
-/* One directory entry; `node` is a NodeId (uint64_t). The entry carries the
-* child's full tairix_node_info_t, its last-modification instant (the epoch
-* when the backing stores no per-node stamp), and the opaque cursor that
-* resumes the listing after it (pass it back to read_dir; 0 starts a
-* listing). */
-typedef struct tairix_dir_entry {
-    uint64_t node;
-    tairix_node_info_t info;
-    tairix_time64_t modified;
-    uintptr_t name_len;
-    uint64_t next_cursor;
-} tairix_dir_entry_t;
-
-/* The four AGENTS.md sec.21 timestamps stored for a filesystem node. */
+/* The four AGENTS.md sec.21 timestamps stored for a filesystem node. A
+* stamp the backing format does not keep is the epoch (never a
+* fabricated wall time). */
 typedef struct tairix_node_times {
     tairix_time64_t created;
     tairix_time64_t modified;
     tairix_time64_t accessed;
     tairix_time64_t changed;
 } tairix_node_times_t;
+
+/* Structural metadata about a filesystem node; `kind` is a TAIRIX_NODE_KIND_*.
+* `times` carries the node's four timestamps, read in the same structural
+* read as kind/size. */
+typedef struct tairix_node_info {
+    uint8_t kind;
+    uint64_t size;
+    uint64_t allocated;
+    tairix_node_times_t times;
+} tairix_node_info_t;
+
+/* One directory entry; `node` is a NodeId (uint64_t). The entry carries the
+* child's full tairix_node_info_t (including its timestamps) and the opaque
+* cursor that resumes the listing after it (pass it back to read_dir; 0
+* starts a listing). */
+typedef struct tairix_dir_entry {
+    uint64_t node;
+    tairix_node_info_t info;
+    uintptr_t name_len;
+    uint64_t next_cursor;
+} tairix_dir_entry_t;
 
 /* A mounted volume's space accounting, in whole blocks of block_size bytes.
 * avail_blocks <= free_blocks <= total_blocks always holds; files/files_free

@@ -24,8 +24,7 @@
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemTimestamps, FilesystemWrite,
-    NodeKind,
+    FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeKind,
 };
 use tairix_abi::DriverError;
 use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
@@ -131,7 +130,6 @@ fn walk(fs: &mut Adfs<MemBlock>) {
             let len = entry.name_len.min(name.len());
             let _ = fs.lookup(dir, &name[..len]);
             let _ = fs.node_info(entry.node);
-            let _ = fs.times(entry.node);
             let _ = fs.get_attr(entry.node, b"acorn.attr", &mut [0u8; 16]);
             if matches!(entry.info.kind, NodeKind::Directory) && depth < 8 {
                 stack.push((entry.node, depth + 1));
