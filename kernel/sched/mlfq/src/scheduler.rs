@@ -16,8 +16,8 @@ use crate::loom_compat::{fence, AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
-    CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
-    SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, ExitDisposition, Priority, SchedError, SchedResult, SchedulerArch,
+    SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
 };
 
 /// Per-CPU scheduler state.
@@ -504,39 +504,79 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     /// Terminate a task. Cancellation-safe; idempotent.
     ///
-    /// Also clears any per-CPU current-task slot whose entry equals
-    /// `id`, so the slot cannot point at an exited task by the time the
-    /// next syscall is issued on the affected CPU.
+    /// Returns an [`ExitDisposition`] describing the SMP ownership handoff:
+    /// a task that is still executing on another CPU is **never** reported
+    /// as reclaimable, because reclaiming its resources while its own code
+    /// still runs turns a legitimate access into a wild fault. See
+    /// [`SchedulerPolicy::exit`].
     ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if the id was never spawned.
-    pub fn exit(&self, id: TaskId) -> SchedResult<()> {
+    pub fn exit(&self, id: TaskId) -> SchedResult<ExitDisposition> {
         let task = self
             .tasks
             .read()
             .get(&id)
             .cloned()
             .ok_or(SchedError::NoSuchTask)?;
-        task.store_state(TaskState::Exited);
-        // Drop the closure eagerly. The registry entry stays until the
-        // scheduler's next step prunes it; this avoids racing with a
-        // dispatch that already has the `Arc`.
-        if let Some(mut guard) = task.body.try_lock() {
-            *guard = None;
+        // First termination request wins and owns the teardown; any repeat
+        // owes nothing, so reclaim runs exactly once even under a burst of
+        // kills against the same task.
+        if task.doomed.swap(true, Ordering::AcqRel) {
+            return Ok(ExitDisposition::AlreadyExited);
         }
-        // A task killed while it is the current task on some CPU is still
-        // physically executing that CPU's context: clearing the slot only
-        // updates bookkeeping. The CPU must be nudged into the scheduler so
-        // it drops the now-exited context and picks other work — otherwise a
-        // CPU-bound victim running alone on a tickless core (no quantum
-        // armed) never reaches a scheduling point and pegs that core
-        // indefinitely after it was told to die. The IPI is the same
-        // cross-CPU reschedule request spawn/unpark use; to the calling CPU
-        // it is a documented no-op.
-        if let Some(cpu) = self.clear_current_matching(id) {
-            self.arch.send_ipi(cpu);
+        // Already terminal (a self-exit, or a prior dispatch retired it):
+        // no teardown is owed to this caller.
+        if task.load_state() == TaskState::Exited {
+            return Ok(ExitDisposition::AlreadyExited);
         }
-        Ok(())
+        // The body lock is held for the entire time a dispatch executes
+        // this task — its user-mode run and any syscall handler nested
+        // inside that run. Acquiring it here therefore *proves* no CPU is
+        // currently executing the task, so we may retire it now and let the
+        // caller reclaim: the task can take no further fault. Drop the guard
+        // (end of this block) before touching the registry, so no lock-guard
+        // temporary outlives the `task` handle.
+        {
+            let Some(mut body) = task.body.try_lock() else {
+                // A dispatch owns the task right now (it is running its body
+                // on some CPU). It will observe the `doomed` mark when its
+                // body returns and perform the final `Exited` transition
+                // itself, so the killer must not reclaim yet. Nudge the
+                // running CPU into the scheduler so a CPU-bound victim alone
+                // on a tickless core (no quantum armed) is preempted
+                // promptly rather than running on after it was told to die;
+                // to the calling CPU the IPI is a documented no-op.
+                if let Some(cpu) = self.running_cpu_of(id) {
+                    self.arch.send_ipi(cpu);
+                }
+                return Ok(ExitDisposition::Deferred);
+            };
+            *body = None;
+            task.store_state(TaskState::Exited);
+        }
+        // Leave the now-`Exited` registry entry in place (a repeat `exit`
+        // finds it `AlreadyExited` via the `doomed` mark, so teardown is
+        // idempotent). Any stale run-queue entry is dropped when a later
+        // `step` picks it and `dispatch` observes `Exited`.
+        self.clear_current_matching(id);
+        Ok(ExitDisposition::Quiesced)
+    }
+
+    /// The CPU whose current-task slot equals `id`, or `None` when the task
+    /// is not the current task on any CPU. A non-clearing scan (unlike
+    /// [`Self::clear_current_matching`]): the exit path uses it only to
+    /// direct a preemption IPI at a still-running victim.
+    fn running_cpu_of(&self, id: TaskId) -> Option<CpuId> {
+        self.current.iter().enumerate().find_map(|(cpu, slot)| {
+            if slot.load(Ordering::Acquire) == id {
+                #[allow(clippy::cast_possible_truncation)]
+                // The slot index is bounded by the configured CPU count.
+                Some(cpu as CpuId)
+            } else {
+                None
+            }
+        })
     }
 
     /// Architecture-driven preemption entry point.
@@ -832,10 +872,23 @@ impl<A: SchedulerArch> Scheduler<A> {
 
         // Re-resolve external park/exit that may have raced with the body.
         let observed_state = task.load_state();
-        let effective = match (observed_state, action) {
-            (TaskState::Exited, _) | (_, TaskAction::Exit) => TaskAction::Exit,
-            (TaskState::Parked, _) | (_, TaskAction::Park) => TaskAction::Park,
-            _ => TaskAction::Yield,
+        // A termination requested while this task was executing
+        // ([`ExitDisposition::Deferred`]): this dispatch owns the final
+        // transition to quiescence. Retire the task rather than re-enqueue
+        // a body that has been told to die — *unless* it returned `Park`,
+        // which means it blocked inside a syscall handler and still holds
+        // kernel state only its own unwind can release; that kill is landed
+        // at the syscall boundary once the handler unwinds, so honour the
+        // park here and let the task be resumed to reach it.
+        let doomed = task.doomed.load(Ordering::Acquire);
+        let effective = if doomed && action != TaskAction::Park {
+            TaskAction::Exit
+        } else {
+            match (observed_state, action) {
+                (TaskState::Exited, _) | (_, TaskAction::Exit) => TaskAction::Exit,
+                (TaskState::Parked, _) | (_, TaskAction::Park) => TaskAction::Park,
+                _ => TaskAction::Yield,
+            }
         };
 
         match effective {
@@ -1199,7 +1252,7 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
         Scheduler::unpark(self, id)
     }
 
-    fn exit(&self, id: TaskId) -> SchedResult<()> {
+    fn exit(&self, id: TaskId) -> SchedResult<ExitDisposition> {
         Scheduler::exit(self, id)
     }
 
@@ -1302,24 +1355,56 @@ mod tests {
         assert_eq!(sched.step(0), Ok(StepOutcome::Idle));
     }
 
-    /// Killing a task that is the current task on a remote CPU must send
-    /// that CPU a reschedule IPI, so a CPU-bound victim is knocked off its
-    /// now-exited context promptly instead of running past its death.
+    /// Killing a task that is **executing its body** on a remote CPU must
+    /// defer teardown to that dispatch and nudge the CPU with a reschedule
+    /// IPI, so a CPU-bound victim is knocked off its context promptly
+    /// instead of running past its death — and is *not* reclaimed by the
+    /// killer while it is still on-CPU (the wild-fault fix). A held body
+    /// lock is what a live dispatch holds while a task runs, so it models
+    /// "still executing" faithfully.
     #[test]
-    fn exit_ipis_the_cpu_running_the_victim() {
+    fn exit_of_an_executing_victim_defers_and_ipis_without_reclaiming() {
         let (arch, sched) = mk(4);
         let id = sched
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("spawn");
+        let task = sched.tasks.read().get(&id).cloned().expect("task present");
+        let body_guard = task.body.lock();
         sched.set_current(2, id);
         let before = arch.ipi_count(2);
-        sched.exit(id).expect("exit");
+        assert_eq!(
+            sched.exit(id).expect("exit"),
+            ExitDisposition::Deferred,
+            "a still-executing victim is deferred, never reclaimed by the killer"
+        );
         assert_eq!(
             arch.ipi_count(2),
             before + 1,
             "exit must nudge the CPU running the victim"
         );
-        assert_eq!(sched.current_task(2), None);
+        assert!(sched.tasks.read().contains_key(&id), "not yet reclaimed");
+        assert_eq!(sched.current_task(2), Some(id));
+        assert_ne!(sched.state_of(id), TaskState::Exited, "not yet exited");
+        drop(body_guard);
+    }
+
+    /// Killing a task that is **not executing** quiesces it immediately:
+    /// the killer owns teardown, no IPI is owed, and the task is retired.
+    #[test]
+    fn exit_of_a_quiescent_task_reclaims_immediately() {
+        let (arch, sched) = mk(4);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        let before: u64 = (0..4).map(|c| arch.ipi_count(c)).sum();
+        assert_eq!(
+            sched.exit(id).expect("exit"),
+            ExitDisposition::Quiesced,
+            "a non-executing task is quiesced and owned by the killer"
+        );
+        let after: u64 = (0..4).map(|c| arch.ipi_count(c)).sum();
+        assert_eq!(before, after, "no running context, so no reschedule IPI");
+        assert_eq!(sched.state_of(id), TaskState::Exited);
     }
 
     /// Exiting a task that is not the current task on any CPU sends no IPI:

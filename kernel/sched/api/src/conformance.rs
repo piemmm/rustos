@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::arch::{CoreClass, TestArch};
 use crate::config::SchedulerConfig;
 use crate::error::SchedError;
-use crate::outcome::StepOutcome;
+use crate::outcome::{ExitDisposition, StepOutcome};
 use crate::policy::SchedulerPolicy;
 use crate::task::{Priority, TaskAction, TaskState};
 
@@ -388,8 +388,19 @@ fn lifecycle_error_codes<S: SchedulerPolicy<TestArch>>() {
     let id = sched
         .spawn(0, Priority::Normal, |_| TaskAction::Yield)
         .expect("spawn");
-    sched.exit(id).expect("first exit");
-    sched.exit(id).expect("exit is idempotent");
+    // A never-dispatched (Ready) task is not executing on any CPU, so the
+    // first `exit` quiesces it and the caller owns teardown; a repeat owes
+    // nothing (reclaim happens exactly once).
+    assert_eq!(
+        sched.exit(id),
+        Ok(ExitDisposition::Quiesced),
+        "first exit of a non-executing task quiesces it"
+    );
+    assert_eq!(
+        sched.exit(id),
+        Ok(ExitDisposition::AlreadyExited),
+        "a repeat exit owes no teardown (idempotent)"
+    );
     assert_eq!(sched.state_of(id), TaskState::Exited);
     assert_eq!(
         sched.on_timer_tick(7),

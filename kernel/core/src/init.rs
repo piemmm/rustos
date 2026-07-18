@@ -34,7 +34,7 @@ use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::PortRegistry;
 use tairix_kernel_irq::{IrqController, IrqTable, MonotonicClock};
 use tairix_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
-use tairix_kernel_sched_api::{Priority, StepOutcome};
+use tairix_kernel_sched_api::{ExitDisposition, Priority, StepOutcome};
 use tairix_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
 use tairix_log::{set_max_level, Field, Level, Sink};
 use tairix_sync::RwLock;
@@ -1045,7 +1045,15 @@ fn run_dispatch_loop<A: KernelArch>(
         match outcome {
             // A task ran. On the boot CPU, stop once every task has
             // exited so `kernel_main` halts; keep dispatching otherwise.
-            Ok(StepOutcome::Ran(_)) => {
+            Ok(StepOutcome::Ran(id)) => {
+                // If this dispatch just retired a task that was terminated
+                // while it executed (a signal kill or a driver unload of a
+                // still-running process), land the deferred teardown now:
+                // the task returned to this loop and executes nowhere, so
+                // reclaiming its resources can no longer race its own
+                // accesses into a wild fault. A task that was not killed
+                // while running makes this a single relaxed atomic read.
+                crate::procsignal::land_running_kill(id);
                 if matches!(role, DispatchRole::Boot) && scheduler.live_task_count() == 0 {
                     break;
                 }
@@ -1501,7 +1509,30 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // page-table frames. A parked driver (the common case — a driver
         // blocked in `irq_wait` / a served-endpoint park) drops immediately;
         // a vanished id is a benign no-op. Idempotent, never a panic.
-        let _ = self.scheduler.exit(sched_id);
+        //
+        // A driver whose process is *still executing* on another CPU cannot
+        // have its resources reclaimed here: withdrawing its address space
+        // while its own code still runs would turn a legitimate access into
+        // a wild fault (the same defect the signal-terminate path fixes). The
+        // scheduler reports such a driver `Deferred`; defer the whole
+        // teardown to the dispatch loop, which reclaims it once the driver's
+        // dispatch retires it (the scheduler already IPI'd that CPU). The
+        // unload is committed — audit it now — and the deferred reclaim runs
+        // the same shared task teardown this path performs inline.
+        if let Ok(ExitDisposition::Deferred) = self.scheduler.exit(sched_id) {
+            crate::procsignal::defer_plain_reclaim(sched_id);
+            let mut handle_buf = [0u8; 16];
+            emit(
+                self.audit,
+                Level::Info,
+                AuditEvent::DriverUnloaded,
+                &[Field {
+                    key: "handle",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(handle, &mut handle_buf)),
+                }],
+            );
+            return Ok(());
+        }
 
         // Withdraw the address-space-registry entry: reclaims the driver's
         // device-resource grants, standard streams, resource limits, and
@@ -2072,6 +2103,14 @@ fn run_phases<A: KernelArch>(
     // would park its peer forever). Set-once; a stray re-install is a
     // benign skip (this is the only caller).
     let _ = process_signal_concrete.install_task_reclaim(hook);
+    // Publish the same leaked signal producer as the dispatch loop's
+    // deferred-kill lander: when a task is terminated while it is still
+    // executing on another CPU, the terminate path defers the reap+reclaim
+    // and the dispatch loop lands it through this seam once the owning
+    // dispatch has retired the task (it executes nowhere by then, so the
+    // reclaim can no longer race its accesses into a wild fault). Set-once;
+    // a stray re-install is a benign skip (this is the only caller).
+    let _ = crate::procsignal::install_deferred_kill_lander(process_signal_concrete);
     phase_ready(log_sink, Phase::Syscall);
 
     // Phase 6 — Ipc. The named-port registry is composed into

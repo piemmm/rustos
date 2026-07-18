@@ -883,13 +883,47 @@ These hold at every API boundary:
 
    | observed state | body returned | effective action |
    | -------------- | ------------- | ---------------- |
+   | `doomed` (§5)  | not `Park`    | `Exit`           |
    | `Exited`       | *anything*    | `Exit`           |
    | *anything*     | `Exit`        | `Exit`           |
    | `Parked`       | *anything*    | `Park`           |
    | *anything*     | `Park`        | `Park`           |
    | otherwise      | `Yield`       | `Yield`          |
 
-5. **Task identity is stable.** `TaskId` values are never recycled
+5. **SMP quiescence and reclamation ownership.** `exit(id)` returns an
+   `ExitDisposition` so its caller can reclaim a task's resources
+   *safely* on SMP. Reclaiming a task's address space (or anything its
+   user code can still reach) while another CPU is still executing that
+   task turns a legitimate access into a wild fault, so `exit` never
+   reports a still-running task as reclaimable. The task's **body lock**
+   is held for the entire time a dispatch executes the task (its
+   user-mode run and any syscall handler nested inside it), so acquiring
+   it in `exit` *proves* no CPU is executing the task:
+
+   * `try_lock` **succeeds** → the task is quiescent: `exit` retires it
+     (drops the body, marks `Exited`) and returns
+     `ExitDisposition::Quiesced`. The caller owns teardown and reclaims
+     now.
+   * `try_lock` **fails** → a dispatch owns the task. `exit` marks it
+     `doomed` (a first-wins flag), IPIs the running CPU to force a prompt
+     reschedule, and returns `ExitDisposition::Deferred`. It does **not**
+     mark the task `Exited` — the owning dispatch performs that final
+     transition itself when its body returns (invariant 4), so no policy
+     ever exposes an `Exited` task that is still running. The caller must
+     **not** reclaim; the deferred teardown is landed by the kernel/core
+     dispatch loop (`land_running_kill`) once the task is quiescent.
+   * The task was already terminal (or a prior termination owns its
+     teardown) → `ExitDisposition::AlreadyExited`; reclaim runs exactly
+     once no matter how many kills arrive.
+
+   A `doomed` task that returns `Park` (it blocked mid-handler holding
+   kernel state) is **not** force-exited: its kill is landed at the
+   syscall boundary once the handler unwinds, so handler state is never
+   reclaimed under. `kernel/core` (`procsignal`) drives the caller side —
+   the signal-terminate path and the driver-unload path both branch on the
+   disposition; see the kernel signals doc.
+
+6. **Task identity is stable.** `TaskId` values are never recycled
    within a single scheduler instance. Stale references therefore
    produce `SchedError::NoSuchTask` rather than waking the wrong task.
 

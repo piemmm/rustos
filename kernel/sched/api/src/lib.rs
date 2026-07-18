@@ -35,6 +35,6 @@ pub use arch::TestArch;
 pub use arch::{CoreClass, CpuId, SchedulerArch};
 pub use config::SchedulerConfig;
 pub use error::{SchedError, SchedResult};
-pub use outcome::StepOutcome;
+pub use outcome::{ExitDisposition, StepOutcome};
 pub use policy::SchedulerPolicy;
 pub use task::{Priority, TaskAction, TaskContext, TaskId, TaskState};

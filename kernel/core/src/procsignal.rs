@@ -19,10 +19,10 @@
 //! place of the fail-closed floor.
 
 use alloc::collections::{BTreeMap, BTreeSet};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::{Errno, Signal};
-use tairix_kernel_sched_api::{SchedError, SchedulerArch, SchedulerPolicy};
+use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
 use tairix_kernel_sec::TaskId;
 use tairix_sync::once::OnceCell;
 use tairix_sync::SpinLock;
@@ -169,8 +169,33 @@ static KILL_GATE: SpinLock<KillGate> = SpinLock::new(KillGate {
 
 /// Mark `task` as inside a syscall dispatch. Paired with
 /// [`syscall_exit_take_kill`] by the dispatch hook around every syscall.
+///
+/// If a termination was deferred against this task while it was running in
+/// user mode ([`defer_running_kill`]) and it has now entered a syscall, the
+/// kill is migrated into the in-syscall gate here so the syscall boundary
+/// lands it after the handler unwinds — the handler may take locks the
+/// running-kill (dispatch-loop) path must never reclaim under. Taken before
+/// the gate lock so the two maps are never locked nested.
 pub fn syscall_enter(task: u64) {
-    KILL_GATE.lock().in_syscall.insert(task);
+    let migrated = take_running_kill(task);
+    match migrated {
+        Some(DeferredTeardown::Signalled(signal)) => {
+            let mut gate = KILL_GATE.lock();
+            gate.in_syscall.insert(task);
+            gate.pending.entry(task).or_insert(signal);
+        }
+        // A plain (driver-unload) teardown carries no signal for the kill
+        // gate; leave it deferred for the dispatch loop, which reclaims once
+        // the driver's dispatch retires it (honouring any `Park` in between
+        // so handler state is never reclaimed under).
+        Some(DeferredTeardown::Plain) => {
+            insert_deferred(task, DeferredTeardown::Plain);
+            KILL_GATE.lock().in_syscall.insert(task);
+        }
+        None => {
+            KILL_GATE.lock().in_syscall.insert(task);
+        }
+    }
 }
 
 /// Mark `task` as leaving its syscall dispatch and take any termination
@@ -206,6 +231,149 @@ pub fn clear_kill_gate(task: u64) {
     let mut gate = KILL_GATE.lock();
     gate.in_syscall.remove(&task);
     gate.pending.remove(&task);
+}
+
+/// Terminations deferred against tasks that were **executing in user mode**
+/// (not inside a syscall) when the kill was requested.
+///
+/// The kill gate above covers a task inside a syscall handler. A task
+/// running in EL0/user mode is a *different* deferral case: it holds no
+/// handler state, but it is still physically executing on another CPU, so
+/// reclaiming its address space now would turn its own legitimate accesses
+/// into wild faults. The scheduler reports such a victim
+/// [`ExitDisposition::Deferred`]; the signal producer records the pending
+/// termination here and the dispatch loop lands it
+/// ([`land_running_kill`]) once the owning dispatch has retired the task
+/// (the scheduler already IPI'd that CPU). Grows with live tasks, never a
+/// fixed ceiling; the shared task reclaim clears a dead task's entry.
+static RUNNING_KILLS: SpinLock<BTreeMap<u64, DeferredTeardown>> = SpinLock::new(BTreeMap::new());
+
+/// Count of entries in [`RUNNING_KILLS`], so the dispatch loop's
+/// per-dispatch [`land_running_kill`] check is a single relaxed atomic read
+/// on the hot path and only takes the lock when a teardown is actually
+/// pending (deferrals are rare — only during teardown).
+static PENDING_RUNNING_KILLS: AtomicUsize = AtomicUsize::new(0);
+
+/// What teardown a still-executing task owes once its owning dispatch
+/// retires it. Both kinds reclaim the task's kernel resources; they differ
+/// only in whether a parent's `wait` is also given a signalled-exit status.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeferredTeardown {
+    /// A terminating signal was delivered: record `128 + n` for the
+    /// parent's `wait` **and** reclaim (the signal-terminate path).
+    Signalled(Signal),
+    /// A non-signal teardown (an unloaded driver whose process was still
+    /// executing): reclaim its kernel resources only, no `wait` reap.
+    Plain,
+}
+
+/// Record a termination deferred against `task` while it was executing in
+/// user mode. First request wins: a later signal against an already-doomed
+/// task changes nothing (it is already dying at the same rendezvous),
+/// matching the immediate and in-syscall paths.
+pub fn defer_running_kill(task: u64, signal: Signal) {
+    insert_deferred(task, DeferredTeardown::Signalled(signal));
+}
+
+/// Record a non-signal teardown deferred against `task` (an unloaded driver
+/// still executing on another CPU): the dispatch loop reclaims its kernel
+/// resources once the owning dispatch retires it, without a `wait` reap.
+pub fn defer_plain_reclaim(task: u64) {
+    insert_deferred(task, DeferredTeardown::Plain);
+}
+
+/// Insert a deferred teardown, first-request-wins, keeping the pending
+/// counter in step.
+fn insert_deferred(task: u64, teardown: DeferredTeardown) {
+    // First request wins: an existing deferral is never overwritten, so a
+    // later kill against an already-doomed task changes neither the recorded
+    // teardown nor the count.
+    if let alloc::collections::btree_map::Entry::Vacant(slot) = RUNNING_KILLS.lock().entry(task) {
+        slot.insert(teardown);
+        PENDING_RUNNING_KILLS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Take (remove) any teardown deferred against `task`, returning it if
+/// present.
+fn take_running_kill(task: u64) -> Option<DeferredTeardown> {
+    let mut map = RUNNING_KILLS.lock();
+    let taken = map.remove(&task);
+    if taken.is_some() {
+        PENDING_RUNNING_KILLS.fetch_sub(1, Ordering::Relaxed);
+    }
+    taken
+}
+
+/// Drop `task`'s deferred running-kill on teardown. Idempotent; driven by
+/// the one shared task-reclaim path exactly like [`clear_kill_gate`], so a
+/// task that exits on its own (or faults) while a user-mode kill was
+/// deferred against it leaves no stale entry the dispatch loop could act on
+/// twice.
+pub fn clear_running_kill(task: u64) {
+    let _ = take_running_kill(task);
+}
+
+/// The seam through which the dispatch loop lands a deferred running-kill:
+/// records the signalled-exit status so the parent's `wait` reaps it and
+/// reclaims the task's kernel resources — the same reap+reclaim the
+/// immediate terminate path performs, but only *after* the task has
+/// stopped executing. Installed per boot by [`install_deferred_kill_lander`]
+/// (the leaked [`KernelProcessSignal`] holds both the wait producer and the
+/// reclaim seam), so the free-function dispatch loop can drive it without
+/// borrowing the producer directly.
+pub trait DeferredKillLander: Sync {
+    /// Land the deferred `teardown` against the now-quiescent `task`.
+    /// Idempotent from the caller's side (the deferral is taken from the
+    /// running-kill set exactly once before this is called).
+    fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown);
+}
+
+/// The one deferred-kill lander shared by the dispatch loop.
+static DEFERRED_KILL_LANDER: OnceCell<&'static (dyn DeferredKillLander + 'static)> =
+    OnceCell::new();
+
+/// Error returned when [`install_deferred_kill_lander`] is called twice.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct DeferredKillLanderAlreadyInstalled;
+
+/// Publish the [`DeferredKillLander`] the dispatch loop drives (the boot
+/// path's leaked signal producer). Set-once: a second call fails closed
+/// rather than re-pointing the live seam.
+///
+/// # Errors
+///
+/// [`DeferredKillLanderAlreadyInstalled`] if a lander was already installed.
+pub fn install_deferred_kill_lander(
+    lander: &'static (dyn DeferredKillLander + 'static),
+) -> Result<(), DeferredKillLanderAlreadyInstalled> {
+    DEFERRED_KILL_LANDER
+        .set(lander)
+        .map_err(|_| DeferredKillLanderAlreadyInstalled)
+}
+
+/// Land any termination deferred against `task` now that its owning
+/// dispatch has retired it (the task ran once and returned to the dispatch
+/// loop, so it is executing nowhere and holds no handler state). Called
+/// from the dispatch loop after every dispatched task.
+///
+/// The common case — a task that was not killed while running — is a single
+/// relaxed atomic read of the pending-teardown counter and no lock, so the
+/// hot path pays almost nothing. Idempotent: the pending signal is taken
+/// exactly once, and a self-exit/fault teardown already cleared the entry
+/// ([`clear_running_kill`]), so a normal exit lands nothing.
+pub fn land_running_kill(task: u64) {
+    if PENDING_RUNNING_KILLS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    // A lander must be installed before any deferred kill can be recorded;
+    // fail closed (leave the entry) rather than dropping the kill if not.
+    let Ok(Some(lander)) = DEFERRED_KILL_LANDER.get() else {
+        return;
+    };
+    if let Some(teardown) = take_running_kill(task) {
+        lander.land_deferred_teardown(TaskId(task), teardown);
+    }
 }
 
 /// Try to record a termination-request `signal` as `target`'s observable
@@ -560,16 +728,27 @@ where
     /// `128 + n`. A child the scheduler no longer knows fails closed with
     /// [`Errno::NotFound`] and records nothing (never a fabricated zombie).
     ///
-    /// A child currently **inside a syscall** is never destroyed mid-flight:
-    /// its handler may hold kernel state only its own unwind can release (a
-    /// mount's `SleepLock`, an in-flight block-I/O descriptor), so ending it
-    /// here would leak that state and wedge every later user of it. The kill
-    /// is instead deferred through the kill gate — recorded pending, the
-    /// child woken out of any park so an indefinite wait unwinds
-    /// (`Errno::Interrupted`) — and the syscall dispatch boundary lands it
-    /// the moment the handler has unwound. The delivery is complete from the
-    /// caller's perspective either way: the child is doomed and the parent's
-    /// `wait` reaps it when the exit is recorded.
+    /// A child that is not safe to reclaim *here* is never destroyed
+    /// mid-flight; the reap+reclaim is deferred to the point the child
+    /// reaches safely:
+    ///
+    /// * A child currently **inside a syscall** may hold kernel state only
+    ///   its own unwind can release (a mount's `SleepLock`, an in-flight
+    ///   block-I/O descriptor), so the kill is deferred through the kill
+    ///   gate — recorded pending, the child woken out of any park so an
+    ///   indefinite wait unwinds (`Errno::Interrupted`) — and the syscall
+    ///   dispatch boundary lands it once the handler has unwound.
+    /// * A child currently **executing in user mode on another CPU** holds
+    ///   no handler state, but reclaiming its address space while its own
+    ///   code still runs would turn a legitimate access into a wild fault.
+    ///   The scheduler reports it [`ExitDisposition::Deferred`]; the kill is
+    ///   recorded against the running-kill set and the dispatch loop lands
+    ///   it once the owning dispatch has retired the task.
+    ///
+    /// Either way the delivery is complete from the caller's perspective:
+    /// the child is doomed and the parent's `wait` reaps it when the exit is
+    /// recorded. Only a child that is neither in a syscall nor executing
+    /// ([`ExitDisposition::Quiesced`]) is reaped and reclaimed inline here.
     fn terminate(&self, child: TaskId, signal: Signal) -> Result<(), Errno> {
         {
             let mut gate = KILL_GATE.lock();
@@ -591,27 +770,81 @@ where
                 }
             }
         }
+        // A stopped child can be killed: lift its overlay entry so the set
+        // never accumulates entries for dead tasks, whichever disposition
+        // the scheduler reports.
         match self.scheduler.exit(child.0) {
-            Ok(()) => {
-                // A stopped child can be killed: lift its overlay entry so
-                // the set never accumulates entries for dead tasks.
+            Ok(ExitDisposition::Quiesced) => {
                 STOPPED_TASKS.lock().remove(&child.0);
-                // `termination_status` is `Some` for every terminating
-                // signal (Terminate/Kill/Interrupt); this arm is never
-                // reached for Continue or Stop.
-                if let Some(status) = signal.termination_status() {
-                    self.wait.record_signalled_exit(child, status);
-                }
-                // The victim never runs its own `exit` handler, so drive
-                // the shared teardown here: without it a killed task's
-                // capability record, IRQ bindings, endpoints, and open
-                // files (pipe ends whose peers park forever) would leak.
-                if let Ok(Some(hook)) = self.reclaim.get() {
-                    hook.reclaim(child.0);
-                }
+                self.land_termination(child, signal);
+                Ok(())
+            }
+            Ok(ExitDisposition::Deferred) => {
+                // The victim is still executing its body on another CPU.
+                // Reclaiming its resources now would race its own
+                // legitimate accesses into a wild fault, so defer the
+                // reap+reclaim: record the pending termination and let the
+                // dispatch loop land it once the owning dispatch has retired
+                // the task (the scheduler already IPI'd that CPU). The
+                // delivery is still complete from the caller's view — the
+                // child is doomed and its `wait` reap follows.
+                STOPPED_TASKS.lock().remove(&child.0);
+                defer_running_kill(child.0, signal);
+                Ok(())
+            }
+            Ok(ExitDisposition::AlreadyExited) => {
+                // A prior termination already owns this task's teardown, or
+                // it exited on its own between authorisation and here.
+                // Reclaim runs exactly once, so there is nothing to do.
+                STOPPED_TASKS.lock().remove(&child.0);
                 Ok(())
             }
             Err(_) => Err(Errno::NotFound),
+        }
+    }
+
+    /// Record the signalled-exit status and reclaim `child`'s kernel
+    /// resources — the teardown a killed task never runs itself. The one
+    /// definition shared by the immediate ([`ExitDisposition::Quiesced`])
+    /// terminate arm and the deferred dispatch-loop landing
+    /// ([`DeferredKillLander`]), so both death timings tear down identically.
+    fn land_termination(&self, child: TaskId, signal: Signal) {
+        // `termination_status` is `Some` for every terminating signal
+        // (Terminate/Kill/Interrupt); this is never reached for
+        // Continue or Stop.
+        if let Some(status) = signal.termination_status() {
+            self.wait.record_signalled_exit(child, status);
+        }
+        // The victim never runs its own `exit` handler, so drive the shared
+        // teardown here: without it a killed task's capability record, IRQ
+        // bindings, endpoints, and open files (pipe ends whose peers park
+        // forever) would leak.
+        if let Ok(Some(hook)) = self.reclaim.get() {
+            hook.reclaim(child.0);
+        }
+    }
+}
+
+impl<A, P> DeferredKillLander for KernelProcessSignal<A, P>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+    P: SchedulerPolicy<A> + Send + Sync + 'static,
+{
+    fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown) {
+        // The task has returned to the dispatch loop and executes nowhere,
+        // so the teardown deferred at request time is now safe.
+        match teardown {
+            // A signalled kill: the very reap+reclaim the immediate
+            // terminate path runs, one definition.
+            DeferredTeardown::Signalled(signal) => self.land_termination(task, signal),
+            // A driver unload whose process was still executing: reclaim its
+            // kernel resources only, with no `wait` reap (a driver is not a
+            // waited-for child).
+            DeferredTeardown::Plain => {
+                if let Ok(Some(hook)) = self.reclaim.get() {
+                    hook.reclaim(task.0);
+                }
+            }
         }
     }
 }
@@ -699,6 +932,19 @@ pub(crate) fn foreground_test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Every test that stops, continues, or terminates a child takes this lock.
 #[cfg(test)]
 pub(crate) fn stopped_overlay_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking holder does not corrupt the `()` state; continue.
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Serialises host tests that touch the process-global deferred-teardown
+/// state ([`RUNNING_KILLS`], [`PENDING_RUNNING_KILLS`], and the once-set
+/// [`DEFERRED_KILL_LANDER`]): they are keyed by numeric task id and share
+/// one lander, so two tests deferring/landing "their" task in parallel
+/// would race each other's entries.
+#[cfg(test)]
+pub(crate) fn running_kill_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // A panicking holder does not corrupt the `()` state; continue.
     LOCK.lock()
@@ -935,6 +1181,251 @@ mod tests {
 
         assert_eq!(signaller.signal(TaskId(7), child_pid, Signal::Kill), Ok(()));
         assert!(RECLAIMED.lock().contains(&child));
+    }
+
+    /// Deferring a user-mode kill records it (first-request-wins) and the
+    /// pending counter tracks it; `take` removes it and `clear` drops it
+    /// without landing. Pure facility bookkeeping on raw ids.
+    #[test]
+    fn defer_take_and_clear_a_running_kill_round_trip() {
+        let _g = running_kill_test_lock();
+        // Distinct ids no scheduler-backed test hands out.
+        let (a, b) = (0x00c0_ffe1, 0x00c0_ffe2);
+        let _ = take_running_kill(a);
+        let _ = take_running_kill(b);
+        let before = PENDING_RUNNING_KILLS.load(Ordering::Relaxed);
+
+        defer_running_kill(a, Signal::Kill);
+        // First request wins: a later signal against the same task is ignored.
+        defer_running_kill(a, Signal::Terminate);
+        assert_eq!(
+            PENDING_RUNNING_KILLS.load(Ordering::Relaxed),
+            before + 1,
+            "one entry, counted once despite the repeat"
+        );
+        assert_eq!(
+            take_running_kill(a),
+            Some(DeferredTeardown::Signalled(Signal::Kill)),
+            "the first-recorded signal is taken"
+        );
+        assert_eq!(take_running_kill(a), None, "taken exactly once");
+        assert_eq!(PENDING_RUNNING_KILLS.load(Ordering::Relaxed), before);
+
+        // `clear_running_kill` drops an entry without landing it (the
+        // self-exit/fault teardown path, so the dispatch loop never lands a
+        // kill for an already-reclaimed task).
+        defer_running_kill(b, Signal::Kill);
+        clear_running_kill(b);
+        assert_eq!(take_running_kill(b), None);
+        assert_eq!(PENDING_RUNNING_KILLS.load(Ordering::Relaxed), before);
+    }
+
+    /// A user-mode kill that later enters a syscall is migrated into the
+    /// in-syscall kill gate at `syscall_enter`, so the syscall boundary
+    /// lands it after the handler unwinds — a signalled kill goes to the
+    /// gate, a plain (driver-unload) teardown stays for the dispatch loop.
+    #[test]
+    fn syscall_enter_migrates_a_signalled_kill_but_keeps_a_plain_reclaim() {
+        let _g = running_kill_test_lock();
+        let (sig_id, plain_id) = (0x00c0_ffe3, 0x00c0_ffe4);
+        let _ = take_running_kill(sig_id);
+        let _ = take_running_kill(plain_id);
+
+        // A signalled kill migrates into the gate and out of RUNNING_KILLS.
+        defer_running_kill(sig_id, Signal::Terminate);
+        syscall_enter(sig_id);
+        assert_eq!(
+            take_running_kill(sig_id),
+            None,
+            "migrated out of RUNNING_KILLS"
+        );
+        assert!(kill_pending(sig_id), "now owed at the syscall boundary");
+        assert_eq!(syscall_exit_take_kill(sig_id), Some(Signal::Terminate));
+
+        // A plain reclaim carries no signal for the gate; it stays deferred
+        // for the dispatch loop.
+        defer_plain_reclaim(plain_id);
+        syscall_enter(plain_id);
+        assert!(!kill_pending(plain_id), "no signal handed to the gate");
+        assert_eq!(
+            take_running_kill(plain_id),
+            Some(DeferredTeardown::Plain),
+            "still deferred for the dispatch loop"
+        );
+        clear_kill_gate(plain_id);
+    }
+
+    /// Tasks the deterministic test lander reclaimed, and the signalled
+    /// statuses it reaped — kept as process-global sets so the `land`
+    /// end-to-end tests share one installed lander regardless of test order
+    /// (the global lander is set-once). Dedicated to these tests so they
+    /// never collide with the immediate-terminate test's [`RECLAIMED`].
+    static LAND_RECLAIMED: SpinLock<BTreeSet<u64>> = SpinLock::new(BTreeSet::new());
+    static LAND_REAPED: SpinLock<BTreeMap<u64, i32>> = SpinLock::new(BTreeMap::new());
+
+    /// A deterministic, self-contained [`DeferredKillLander`] for the
+    /// dispatch-loop end-to-end tests: it records what it reclaimed and any
+    /// signalled status it reaped, mirroring the real
+    /// [`KernelProcessSignal`] lander's Signalled-vs-Plain split without
+    /// depending on any one test's wait producer.
+    struct TestLander;
+    impl DeferredKillLander for TestLander {
+        fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown) {
+            match teardown {
+                DeferredTeardown::Signalled(signal) => {
+                    if let Some(status) = signal.termination_status() {
+                        LAND_REAPED.lock().insert(task.0, status);
+                    }
+                    LAND_RECLAIMED.lock().insert(task.0);
+                }
+                DeferredTeardown::Plain => {
+                    LAND_RECLAIMED.lock().insert(task.0);
+                }
+            }
+        }
+    }
+    static TEST_LANDER: TestLander = TestLander;
+
+    /// Ensure some deferred-kill lander is installed and report whether it
+    /// is our deterministic [`TestLander`]. The lander is a process-global
+    /// set-once cell: another suite (a full-boot init test) may have
+    /// installed the real producer first, in which case `land_running_kill`
+    /// still *consumes* the deferral (the assertion every land test makes)
+    /// but records its side effects elsewhere — so side-effect assertions
+    /// are gated on this returning `true`.
+    fn ensure_test_lander() -> bool {
+        static TEST_LANDER_INSTALLED: AtomicUsize = AtomicUsize::new(0);
+        if install_deferred_kill_lander(&TEST_LANDER).is_ok() {
+            TEST_LANDER_INSTALLED.store(1, Ordering::Relaxed);
+        }
+        TEST_LANDER_INSTALLED.load(Ordering::Relaxed) == 1
+    }
+
+    /// The headline wild-fault regression, kernel/core half: a termination
+    /// deferred while its target was executing is **not** landed at
+    /// terminate time, and is landed only when the dispatch loop calls
+    /// [`land_running_kill`] after the owning dispatch has retired the task
+    /// — which *consumes* the deferral exactly once (idempotent thereafter).
+    /// When our deterministic lander is the installed one, the reap+reclaim
+    /// side effects are asserted too.
+    #[test]
+    fn a_deferred_running_kill_lands_only_after_the_task_retires() {
+        let _g = running_kill_test_lock();
+        let ours = ensure_test_lander();
+        let child = 0x00c0_ffe5;
+        let _ = take_running_kill(child);
+        LAND_RECLAIMED.lock().remove(&child);
+        LAND_REAPED.lock().remove(&child);
+
+        // The scheduler reported the victim still-executing, so terminate
+        // deferred rather than landing: the entry is pending and untouched.
+        defer_running_kill(child, Signal::Kill);
+        assert!(!LAND_RECLAIMED.lock().contains(&child));
+
+        // The dispatch loop lands it once the task has retired (executes
+        // nowhere), consuming the deferral exactly once.
+        land_running_kill(child);
+        assert_eq!(take_running_kill(child), None, "the deferral was consumed");
+        if ours {
+            assert!(
+                LAND_RECLAIMED.lock().contains(&child),
+                "the retired victim is reclaimed by the dispatch loop"
+            );
+            assert_eq!(LAND_REAPED.lock().get(&child), Some(&137));
+        }
+
+        // Idempotent: nothing remains, so a second land is a no-op.
+        LAND_RECLAIMED.lock().remove(&child);
+        land_running_kill(child);
+        assert!(!LAND_RECLAIMED.lock().contains(&child));
+    }
+
+    /// A self-exit/fault teardown that ran [`clear_running_kill`] leaves the
+    /// dispatch loop nothing to land, so a deferred kill is never applied
+    /// twice against an already-reclaimed task.
+    #[test]
+    fn clearing_a_running_kill_stops_the_dispatch_loop_landing_it() {
+        let _g = running_kill_test_lock();
+        let ours = ensure_test_lander();
+        let child = 0x00c0_ffe6;
+        let _ = take_running_kill(child);
+        LAND_RECLAIMED.lock().remove(&child);
+
+        defer_running_kill(child, Signal::Kill);
+        clear_running_kill(child);
+        land_running_kill(child);
+        assert_eq!(take_running_kill(child), None, "nothing left to land");
+        if ours {
+            assert!(
+                !LAND_RECLAIMED.lock().contains(&child),
+                "a cleared deferral is never landed"
+            );
+        }
+    }
+
+    /// A plain (driver-unload) deferral lands as a reclaim only — no reap,
+    /// since a driver is not a waited-for child.
+    #[test]
+    fn a_deferred_plain_reclaim_lands_without_a_reap() {
+        let _g = running_kill_test_lock();
+        let ours = ensure_test_lander();
+        let driver = 0x00c0_ffe7;
+        let _ = take_running_kill(driver);
+        LAND_RECLAIMED.lock().remove(&driver);
+        LAND_REAPED.lock().remove(&driver);
+
+        defer_plain_reclaim(driver);
+        land_running_kill(driver);
+        assert_eq!(take_running_kill(driver), None, "the deferral was consumed");
+        if ours {
+            assert!(
+                LAND_RECLAIMED.lock().contains(&driver),
+                "a plain deferral reclaims the driver's resources"
+            );
+            assert!(
+                !LAND_REAPED.lock().contains_key(&driver),
+                "a driver is not a waited-for child, so nothing is reaped"
+            );
+        }
+    }
+
+    /// The real [`KernelProcessSignal`] lander maps a deferred `Signalled`
+    /// teardown to the same reap + reclaim the immediate terminate path runs
+    /// (one definition), and a `Plain` teardown to a reclaim only.
+    #[test]
+    fn the_signal_producer_lander_reaps_and_reclaims() {
+        let _overlay = stopped_overlay_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, _pid) = spawn_child(scheduler);
+        wait.register_child(TaskId(7), TaskId(child));
+        let signaller = KernelProcessSignal::new(wait, scheduler);
+        signaller
+            .install_task_reclaim(&RecordingReclaim)
+            .expect("first install on this producer");
+
+        // Signalled: reclaim the resources and record the kill's 137 status.
+        signaller.land_deferred_teardown(TaskId(child), DeferredTeardown::Signalled(Signal::Kill));
+        assert!(RECLAIMED.lock().contains(&child));
+        let pid = u32::try_from(child).expect("host task id fits u32");
+        assert_eq!(
+            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            Ok(WaitedChild {
+                pid,
+                status: WaitStatus::Exited(137)
+            })
+        );
+
+        // Plain: reclaim only, no reap (a second, unregistered driver id).
+        let driver = scheduler
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("driver task");
+        signaller.land_deferred_teardown(TaskId(driver), DeferredTeardown::Plain);
+        assert!(RECLAIMED.lock().contains(&driver));
+        assert_eq!(
+            wait.poll(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            Err(Errno::NotFound),
+            "a plain reclaim records no reap"
+        );
     }
 
     #[test]

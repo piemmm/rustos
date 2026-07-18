@@ -212,10 +212,12 @@ pub use preempt::{
 };
 pub use proc_id::{mint_proc_id, mint_proc_id_bootstrap};
 pub use procsignal::{
-    clear_intake, drain_pending_foreground, foreground_signal_installed, install_foreground_signal,
-    intake_disable, intake_enable, intake_enabled, intake_ready, intake_take,
-    queue_foreground_signal, task_is_stopped, ForegroundSignal, ForegroundSignalAlreadyInstalled,
-    KernelProcessSignal, NullProcessSignal, ProcessSignal, NULL_PROCESS_SIGNAL,
+    clear_intake, drain_pending_foreground, foreground_signal_installed,
+    install_deferred_kill_lander, install_foreground_signal, intake_disable, intake_enable,
+    intake_enabled, intake_ready, intake_take, land_running_kill, queue_foreground_signal,
+    task_is_stopped, DeferredKillLander, DeferredKillLanderAlreadyInstalled, DeferredTeardown,
+    ForegroundSignal, ForegroundSignalAlreadyInstalled, KernelProcessSignal, NullProcessSignal,
+    ProcessSignal, NULL_PROCESS_SIGNAL,
 };
 pub use procwait::{
     KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, WaitedChild,

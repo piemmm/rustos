@@ -91,6 +91,13 @@ pub(crate) struct TaskInner {
     /// parked" is never dropped. Mirrors Rust's `Thread` park/unpark token
     /// semantics.
     pub wake_pending: AtomicBool,
+    /// Termination request against a task that was still executing when
+    /// [`crate::Scheduler::exit`] was called. Set once (first request wins)
+    /// under the task's body lock discipline; the owning dispatch observes
+    /// it when its body returns and performs the final transition to
+    /// [`TaskState::Exited`] itself, so a task killed while running is never
+    /// reclaimed by the killer while it is still on-CPU.
+    pub doomed: AtomicBool,
 }
 
 impl TaskInner {
@@ -112,6 +119,7 @@ impl TaskInner {
             last_started: AtomicU64::new(0),
             body: SpinLock::new(Some(body)),
             wake_pending: AtomicBool::new(false),
+            doomed: AtomicBool::new(false),
         }
     }
 

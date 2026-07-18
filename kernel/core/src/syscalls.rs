@@ -1828,6 +1828,11 @@ where
         // task that exits on its own while a termination was deferred
         // against it (both raced) leaves no pending kill behind.
         crate::procsignal::clear_kill_gate(task.0);
+        // Drop any termination deferred against the task while it ran in
+        // user mode: a self-exit or fault teardown running here means the
+        // task is already being reclaimed, so the dispatch loop's later
+        // `land_running_kill` must find nothing and never reclaim twice.
+        crate::procsignal::clear_running_kill(task.0);
         // Prune the dead task's own child rows from the wait bookkeeping:
         // a dead parent can never reap, so a row it never collected — a
         // running orphan's link or an unreaped zombie — would be stranded

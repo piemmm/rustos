@@ -23,7 +23,7 @@ use alloc::sync::Arc;
 use crate::arch::{CpuId, SchedulerArch};
 use crate::config::SchedulerConfig;
 use crate::error::SchedResult;
-use crate::outcome::StepOutcome;
+use crate::outcome::{ExitDisposition, StepOutcome};
 use crate::task::{Priority, TaskAction, TaskContext, TaskId, TaskState};
 
 /// The architecture-neutral contract every TAIRiX scheduler implements.
@@ -108,9 +108,22 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
 
     /// Terminate a task. Cancellation-safe and idempotent.
     ///
+    /// Returns an [`ExitDisposition`] so the caller can reclaim the task's
+    /// resources **safely** on SMP. A task that is still executing on
+    /// another CPU must not have its resources reclaimed — doing so turns
+    /// the task's own legitimate accesses into wild faults — so `exit`
+    /// reports whether the task was already quiescent
+    /// ([`ExitDisposition::Quiesced`], caller reclaims now), still executing
+    /// ([`ExitDisposition::Deferred`], the owning dispatch retires it and
+    /// the caller must not reclaim), or already terminal
+    /// ([`ExitDisposition::AlreadyExited`], no teardown owed). A task
+    /// reported `Deferred` never reaches [`TaskState::Exited`] until its
+    /// dispatch returns to the scheduler, so no policy exposes an `Exited`
+    /// task that is still running.
+    ///
     /// # Errors
     /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
-    fn exit(&self, id: TaskId) -> SchedResult<()>;
+    fn exit(&self, id: TaskId) -> SchedResult<ExitDisposition>;
 
     /// Observation point the arch port's timer ISR calls after
     /// acknowledging the device-level interrupt source. Drives quantum
