@@ -4,10 +4,11 @@ ls — 列出目录内容
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -87,6 +88,28 @@ ls — 列出目录内容
 - `-x` — 分列显示，从左到右填充。
 - `-1` — 每行一个名字（默认）。
 - `-?` — 显示本命令自身的简短帮助（`--help` 是长形式）。
+
+- `--file-type` — 给目录追加 `/`，但不给可执行文件追加 `*`
+  （`--indicator-style=file-type`）。
+- `--indicator-style=WORD` — 按名称选择类型标记：`none`、`slash`
+  （`-p`）、`file-type`（`--file-type`）、`classify`（`-F`）。
+- `-G, --no-group` — 在长格式中省略组列。与 `-o` 不同，它本身
+  不选择长格式。
+- `--author` — 与 `-l` 一起，在所有者之后、组之前打印作者列
+  （所属用户）。
+- `--si` — 与 `-h` 类似，但用 1000 的幂（`1.1k`、`23M`）。
+- `-k, --kibibytes` — 对 `-s` 单元格和 `total` 行使用 1024 字节块
+  （已是默认，因此输出不变；大小选项优先）。
+- `--block-size=SIZE` — 按 SIZE 缩放文件大小和 `-s` 块：整数
+  （字节），或单位 `K`/`M`/`G`/`T`/`P`/`E`（1024）、`KiB` 形式
+  （1024）、`KB` 形式（1000），可选地带整数系数。
+- `--format=WORD` — 按名称选择排列：`long`（`-l`）/`verbose`、
+  `single-column`（`-1`）、`vertical`（`-C`）、`across`/`horizontal`
+  （`-x`）、`commas`（`-m`）。
+- `-T, --tabsize <cols>` — 设置列网格的制表位（默认 8）；`0`
+  仅用空格填充。
+- `--zero` — 每行以 NUL 而非换行结尾；还会选择单列、原样引用
+  和显示控制字符。
 
 ## EXAMPLES
 

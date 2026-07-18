@@ -4,10 +4,11 @@ ls — Verzeichnisinhalte auflisten
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -125,6 +126,32 @@ werden durch eine Leerzeile getrennt.
 - `-1` — ein Name pro Zeile (der Standard).
 - `-?` — die Kurzhilfe dieses Befehls anzeigen (`--help` ist die
   lange Form).
+
+- `--file-type` — `/` an Verzeichnisse anhängen, aber nie `*` an
+  ausführbare Dateien (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — das Kennzeichnungssuffix nach Name wählen:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) oder `classify`
+  (`-F`).
+- `-G, --no-group` — die Gruppenspalte im Langformat weglassen; wählt
+  anders als `-o` nicht selbst das Langformat.
+- `--author` — mit `-l` die Autorspalte (den besitzenden Benutzer)
+  nach dem Besitzer und vor der Gruppe ausgeben.
+- `--si` — wie `-h`, aber Zehnerpotenzen (1000), z. B. `1.1k`, `23M`.
+- `-k, --kibibytes` — 1024-Byte-Blöcke für die `-s`-Zellen und die
+  `total`-Zeile verwenden (bereits Standard; eine Größenoption hat
+  Vorrang).
+- `--block-size=SIZE` — die Dateigrößen und `-s`-Blöcke um SIZE
+  skalieren: eine ganze Zahl (Bytes) oder eine Einheit
+  `K`/`M`/`G`/`T`/`P`/`E` (1024), eine `KiB`-Einheit (1024) oder eine
+  `KB`-Einheit (1000), optional mit vorangestelltem Koeffizienten.
+- `--format=WORD` — die Anordnung nach Name wählen: `long` (`-l`) oder
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` oder
+  `horizontal` (`-x`) oder `commas` (`-m`).
+- `-T, --tabsize <cols>` — den Tabulatorschritt des Spaltengitters
+  setzen (Standard 8); `0` füllt nur mit Leerzeichen.
+- `--zero` — jede Ausgabezeile mit NUL statt Zeilenumbruch beenden;
+  wählt außerdem Einzelspalte, wörtliches Quoting und sichtbare
+  Steuerzeichen.
 
 ## EXAMPLES
 

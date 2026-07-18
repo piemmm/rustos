@@ -4,10 +4,11 @@ ls — ディレクトリの内容を一覧する
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -100,6 +101,28 @@ ls — ディレクトリの内容を一覧する
 - `-x` — 列で一覧表示し、左から右へ埋める。
 - `-1` — 一行に一つの名前（既定）。
 - `-?` — このコマンド自身の短いヘルプを表示する（長い形は `--help`）。
+
+- `--file-type` — ディレクトリに `/` を付けるが、実行可能ファイルに
+  `*` は付けない（`--indicator-style=file-type`）。
+- `--indicator-style=WORD` — 種別記号を名前で選ぶ：`none`、`slash`
+  （`-p`）、`file-type`（`--file-type`）、`classify`（`-F`）。
+- `-G, --no-group` — 長形式でグループ列を省く。`-o` と違い、それ
+  自体では長形式を選ばない。
+- `--author` — `-l` とともに、所有者の後・グループの前に作成者
+  列（所有ユーザー）を表示する。
+- `--si` — `-h` と同様だが 1000 のべき乗（`1.1k`、`23M`）。
+- `-k, --kibibytes` — `-s` のセルと `total` 行に 1024 バイトブロック
+  を使う（既定なので出力は変わらない。サイズ指定が優先される）。
+- `--block-size=SIZE` — ファイルサイズと `-s` ブロックを SIZE で
+  換算する：整数（バイト）、単位 `K`/`M`/`G`/`T`/`P`/`E`（1024）、
+  `KiB` 系（1024）、`KB` 系（1000）で、任意で整数の係数を付けられる。
+- `--format=WORD` — 並べ方を名前で選ぶ：`long`（`-l`）／`verbose`、
+  `single-column`（`-1`）、`vertical`（`-C`）、`across`／`horizontal`
+  （`-x`）、`commas`（`-m`）。
+- `-T, --tabsize <cols>` — 桁揃えのタブ幅を設定する（既定 8）。`0`
+  は空白のみで埋める。
+- `--zero` — 各行を改行ではなく NUL で終える。さらに単一列・その
+  ままの引用・制御文字の表示を選ぶ。
 
 ## EXAMPLES
 

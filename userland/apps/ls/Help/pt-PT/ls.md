@@ -4,10 +4,11 @@ ls — listar o conteúdo de diretórios
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -120,6 +121,32 @@ separados por uma linha em branco.
 - `-1` — um nome por linha (a omissão).
 - `-?` — mostrar a ajuda curta deste próprio comando (`--help` é a
   forma longa).
+
+- `--file-type` — acrescentar `/` aos diretórios, mas nunca `*` aos
+  executáveis (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — escolher o sufixo indicador por nome:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) ou `classify`
+  (`-F`).
+- `-G, --no-group` — omitir a coluna de grupo do formato longo; ao
+  contrário de `-o`, não seleciona o formato longo por si só.
+- `--author` — com `-l`, mostrar a coluna de autor (o utilizador
+  proprietário) depois do proprietário e antes do grupo.
+- `--si` — como `-h` mas em potências de 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — usar blocos de 1024 bytes para as células `-s`
+  e a linha `total` (já é o valor predefinido; uma opção de tamanho
+  tem prioridade).
+- `--block-size=SIZE` — escalar os tamanhos de ficheiro e os blocos
+  `-s` por SIZE: um inteiro (bytes), ou uma unidade `K`/`M`/`G`/`T`/`P`/
+  `E` (1024), uma unidade `KiB` (1024) ou uma unidade `KB` (1000),
+  opcionalmente com um coeficiente inteiro.
+- `--format=WORD` — escolher a disposição por nome: `long` (`-l`) ou
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` ou
+  `horizontal` (`-x`), ou `commas` (`-m`).
+- `-T, --tabsize <cols>` — definir o passo de tabulação da grelha de
+  colunas (predefinição 8); `0` preenche apenas com espaços.
+- `--zero` — terminar cada linha com NUL em vez de nova linha;
+  seleciona também a coluna única, a citação literal e os caracteres
+  de controlo visíveis.
 
 ## EXAMPLES
 

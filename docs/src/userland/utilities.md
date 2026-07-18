@@ -1075,7 +1075,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN] [--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--group-directories-first] [--] [path...]
+ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD] [--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--author] [--file-type] [--group-directories-first] [--zero] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -1085,9 +1085,17 @@ ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN] [--hide=PATTERN] [
 | `-C`             | columns filled top-to-bottom (terminal default)    |
 | `-d`, `--directory` | list directory operands themselves              |
 | `-F`, `--classify` | append `/` to directories, `*` to executables    |
+| `--file-type`    | append `/` to directories, never `*` (`--indicator-style=file-type`) |
+| `--indicator-style=WORD` | `none`/`slash` (`-p`)/`file-type`/`classify` (`-F`) |
 | `-g`             | long format without the owner column               |
-| `-h`, `--human-readable` | with `-l`, sizes like `1.1K`, `23M`        |
+| `-G`, `--no-group` | omit the group column (does not select `-l`)     |
+| `--author`       | with `-l`, print the author (owner) column         |
+| `-h`, `--human-readable` | human-readable sizes, base 1024 (`1.1K`, `23M`) |
+| `--si`           | human-readable sizes, base 1000 (`1.1k`, `23M`)    |
+| `-k`, `--kibibytes` | 1024-byte blocks for `-s`/`total` (the default) |
+| `--block-size=SIZE` | scale file and `-s` sizes by SIZE (int, or `K`/`KiB`/`KB`…) |
 | `-l`             | long format: mode, owner, group, size, then name   |
+| `--format=WORD`  | `long`/`verbose`/`single-column`/`vertical`/`across`/`horizontal`/`commas` |
 | `-m`             | comma-separated names, wrapped to the width        |
 | `-n`, `--numeric-uid-gid` | long format, numeric owner/group (same as `-l`) |
 | `-o`             | long format without the group column               |
@@ -1100,7 +1108,7 @@ ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN] [--hide=PATTERN] [
 | `--show-control-chars` | print nongraphic characters as-is (non-terminal default) |
 | `-r`, `--reverse` | reverse the sort order                            |
 | `-R`, `--recursive` | list subdirectories recursively                 |
-| `-s`, `--size`   | allocated size per entry, in 1024-byte blocks      |
+| `-s`, `--size`   | allocated size per entry, in blocks (scaled by `-h`/`--si`/`--block-size`) |
 | `-S`             | sort by size, largest first                        |
 | `-t`             | sort by the selected timestamp, newest first       |
 | `-U`             | do not sort; list entries in directory order       |
@@ -1118,9 +1126,11 @@ ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN] [--hide=PATTERN] [
 | `--time=WORD`    | timestamp shown/sorted: `atime`/`ctime`/`mtime`/`birth` |
 | `--time-style=STYLE` | `locale`/`long-iso`/`full-iso`/`iso` (no `+FORMAT`) |
 | `--full-time`    | like `-l --time-style=full-iso`                    |
+| `-T`, `--tabsize <cols>` | column tab stop (default 8; `0` = spaces)    |
 | `-w`, `--width <cols>` | output width in columns (`0` = unlimited)     |
 | `-x`             | columns filled left-to-right                       |
 | `-1`             | one name per line (default when not a terminal)    |
+| `--zero`         | NUL line terminator; implies single-column, literal, shown control chars |
 | `-?`, `--help`   | show the tool's short help (wins immediately)      |
 | `--`             | end option parsing; every later argument is a path |
 | *path*           | a file or directory to list                        |
@@ -1176,8 +1186,11 @@ prints the ten-character mode string (`d` for a directory, `-`
 otherwise, followed by the nine `rwx` permission bits), the numeric
 owner and group (omitted under `-g` / `-o`; account-name resolution
 would demand the capability-gated user database, so the GNU numeric
-fallback is the output), the size right-aligned across the block
-(scaled by `-h`), a timestamp, then the name. The timestamp is the
+fallback is the output), an optional `--author` column (the owning user
+repeated, since there is no separate author), the size right-aligned
+across the block, a timestamp, then the name. `-G` / `--no-group` drops
+the group column without selecting the long format (unlike `-o`). The
+timestamp is the
 modified time by default; `-c`, `-u`, and `--time` choose which of the
 four `NodeTimes` stamps is shown (and, with `-t`, sorted by), and
 `--time-style` / `--full-time` set its rendering — `locale` (the GNU
@@ -1205,8 +1218,31 @@ infrastructure. The default is resolved against the attested console:
 `shell-escape` at a terminal (with control characters hidden, `-q`) and
 `literal` otherwise (control characters shown, `--show-control-chars`);
 `-q` / `--show-control-chars` toggle whether the non-escaping styles show
-nongraphic characters as `?`. `-p`/`-F` append the indicator suffix
-after any closing quote.
+nongraphic characters as `?`. `-p` / `-F` / `--file-type` /
+`--indicator-style` append the indicator suffix after any closing quote
+(with the VFS's two kinds only directories take `/`; `-F` also stars an
+executable, `--file-type` never does).
+
+Sizes follow GNU's two independent scalings — one for the long-format
+file-size column, one for the `-s` allocation cells and the `total`
+line. `-h` (base 1024) and `--si` (base 1000) autoscale both, rounding
+up with the GNU letters (`K`/`M`/… vs the lowercase `k` kilo);
+`--block-size=SIZE` scales both by SIZE (a plain integer of bytes, or a
+`K`/`KiB`/`KB`/`M`/… unit, optionally with an integer coefficient — a
+bare unit prints its suffix, a coefficient suppresses it, and a
+malformed SIZE fails closed); `-k` / `--kibibytes` forces 1024-byte
+blocks for `-s`/`total` only (already the default — TAIRiX has no
+`BLOCK_SIZE` environment — so it confirms rather than changes, and any
+size option overrides it). The `total` scales the *summed* allocation,
+not the sum of the rounded per-entry cells, matching GNU. `-l` and
+`-1`/`-C`/`-x`/`-m` (and the `--format=WORD` words) are one last-wins
+arrangement state, with GNU's rule that `-1` has no effect after `-l`.
+`-T` / `--tabsize` sets the column tab stop (default 8; `0` pads with
+spaces only), advancing between columns with tabs by a faithful port of
+GNU's `indent`. `--zero` ends every entry line and the `total` with NUL
+instead of a newline (headers and the inter-block separator keep the
+newline), and defaults to a single column, literal quoting, and shown
+control characters.
 
 There is still **no link-count column** — the VFS has no hard links yet,
 so a fabricated count would be a lie; it will appear when links land
@@ -1265,8 +1301,10 @@ hidden-file filter with and without `-a`/`-A` (including the advisory
 record's content, its singular/plural message, the across-directories
 count, and its absence when nothing was hidden), a non-directory
 operand, the long format's mode string, owner/group columns (and their
-`-g`/`-o` omission), right-aligned plain and human-readable sizes, the
-long-format date column, the `-t` time sort (newest first, ties by name)
+`-g`/`-o` omission), the `--author` column, right-aligned plain and
+human-readable sizes, the `--si` / `--block-size` scalings and the
+`total`-scales-the-sum rule, the long-format date column, the `-t` time
+sort (newest first, ties by name)
 and its reverse, the `-c`/`-u`/`--time` time-field selection, the
 `locale`/`long-iso`/`full-iso`/`iso` `--time-style` renders (recent vs
 old), the `-i` node-number column, the `-B`/`-I`/`--hide` name filters
@@ -1277,7 +1315,9 @@ multi-operand layout (files first, then directory headers), recursive
 depth-first traversal with headers, reverse and size sorts, the comma
 arrangement, every quoting style (literal, C, escape, and the shell
 family incl. `$'…'` control-char splicing) with the tty-resolved default
-and `-q` masking, the `/` and `*` indicators, the
+and `-q` masking, the `/` and `*` indicators and `--file-type` (dir
+only, never the executable star), the tab-vs-space column padding under
+`-T8`/`-T0`, the `--zero` NUL terminator, the
 human-size rounding table, an empty directory, the short-help render and
 its usage-banner fallback, and the missing-operand, unreadable-directory,
 and dead-console fail-closed paths. `ls`'s help is authored on disk in

@@ -15,14 +15,16 @@ use tairix_help::{own_short_help, HelpSource};
 use tairix_vt::str_width;
 
 use crate::command::{
-    Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField, TimeStyle,
+    Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat, Sort,
+    TimeField, TimeStyle,
 };
 use crate::error::LsError;
 use crate::io::{Entry, Listing, Metadata, Output};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ls`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]";
+pub const USAGE: &str =
+    "usage: ls [-aACdFgGhklmnopQrRsSTtx1] [-w cols] [--block-size=SIZE] [--] [path...]";
 
 /// `ls`'s own command word: the short-help switches render its own Help
 /// document through the same engine as any other command's.
@@ -160,7 +162,7 @@ fn list(
         let mut rows = rows_for(&path, &entries, options, fs)?;
         sort_rows(&mut rows, options);
         open_block(&mut buf, &mut first, headered.then_some(path.as_str()));
-        if options.size || options.long {
+        if options.size || options.is_long() {
             render_total(&mut buf, &rows, options);
         }
         render_rows(&mut buf, &rows, options, format, width, now, quoting);
@@ -199,7 +201,7 @@ fn write_block(out: &dyn Output, buf: &mut String) -> Result<(), LsError> {
 /// everything else renders names straight off the one `read_dir`, so the
 /// per-entry `stat` is paid only when asked for.
 fn needs_stat(options: Options) -> bool {
-    options.long
+    options.is_long()
         || options.size
         || options.inode
         || options.sort == Sort::Size
@@ -320,33 +322,53 @@ fn open_block(buf: &mut String, first: &mut bool, header: Option<&str>) {
     }
 }
 
-/// The `-s` blocks cell for one entry: its allocated storage in
-/// 1024-byte units, rounded up (the GNU default block size), or the `-h`
-/// human form of the allocated bytes.
-fn blocks_cell(meta: Metadata, options: Options) -> String {
-    if options.human_readable {
-        human_size(meta.allocated)
+/// The character that ends each output line: NUL under `--zero`, else the
+/// newline. Headers and the inter-block separator always use the newline;
+/// only entry lines and the `total` line follow this, matching the GNU
+/// `--zero` layout.
+fn line_terminator(options: Options) -> char {
+    if options.zero {
+        '\0'
     } else {
-        format!("{}", meta.allocated.div_ceil(1024))
+        '\n'
     }
 }
 
+/// Render `bytes` in the given [`SizeFormat`]: the scaled, rounded-up count
+/// with any unit suffix, or the human autoscaled form. The one place a byte
+/// count becomes a displayed size, so the `-s` cells, the `total` line, and
+/// the long-format file-size column never diverge.
+fn render_size(format: SizeFormat, bytes: u64) -> String {
+    match format {
+        SizeFormat::Scaled { unit, suffix } => {
+            // `unit` is never zero (rejected at parse time); guard anyway so
+            // a future caller can never divide by zero.
+            let count = bytes.div_ceil(unit.max(1));
+            match suffix {
+                Some(suffix) => format!("{count}{}", suffix.text()),
+                None => format!("{count}"),
+            }
+        }
+        SizeFormat::Human { si } => human_size(bytes, if si { 1000 } else { 1024 }),
+    }
+}
+
+/// The `-s` blocks cell for one entry: its allocated storage rendered in the
+/// [`block_size`](Options::block_size) scaling.
+fn blocks_cell(meta: Metadata, options: Options) -> String {
+    render_size(options.block_size, meta.allocated)
+}
+
 /// The `total` line of one directory block, printed for every directory
-/// listing under `-l` or `-s` as in the GNU tool. Plain form: the sum of
-/// the entries' individual block counts (each rounded up, exactly as its
-/// `-s` cell renders). `-h` form: the human rendering of the summed
-/// allocated bytes.
+/// listing under `-l` or `-s` as in the GNU tool: the summed allocated bytes
+/// of the block's entries rendered once in the
+/// [`block_size`](Options::block_size) scaling (GNU sums the raw block
+/// counts, then scales, so the total is the scaling of the sum — not the sum
+/// of the per-entry cells).
 fn render_total(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
-    let rendered = if options.human_readable {
-        human_size(rows.iter().map(|(_, meta)| meta.allocated).sum())
-    } else {
-        let blocks: u64 = rows
-            .iter()
-            .map(|(_, meta)| meta.allocated.div_ceil(1024))
-            .sum();
-        format!("{blocks}")
-    };
-    let _ = writeln!(buf, "total {rendered}");
+    let total: u64 = rows.iter().map(|(_, meta)| meta.allocated).sum();
+    let _ = write!(buf, "total {}", render_size(options.block_size, total));
+    buf.push(line_terminator(options));
 }
 
 /// The conventional fallback output width when no width is given and the
@@ -357,15 +379,16 @@ const DEFAULT_WIDTH: usize = 80;
 const COLUMN_GAP: usize = 2;
 
 /// Resolve the effective arrangement for one listing. An explicit
-/// `-1`/`-C`/`-x`/`-m` wins; otherwise the GNU default is multiple columns
-/// when standard output is an attested terminal and one name per line when
-/// it is not (a pipe, a file, or an unattested console).
+/// `-l`/`-1`/`-C`/`-x`/`-m` (or `--format`) wins; `--zero` defaults to a
+/// single column; otherwise the GNU default is multiple columns when
+/// standard output is an attested terminal and one name per line when it is
+/// not (a pipe, a file, or an unattested console).
 fn resolve_format(options: Options, terminal: Option<usize>) -> Format {
     options.format.unwrap_or({
-        if terminal.is_some() {
-            Format::Columns
-        } else {
+        if options.zero || terminal.is_none() {
             Format::OnePerLine
+        } else {
+            Format::Columns
         }
     })
 }
@@ -394,11 +417,8 @@ fn render_rows(
     now: Time64,
     quoting: Quoting,
 ) {
-    if options.long {
-        render_long(buf, rows, options, now, quoting);
-        return;
-    }
     match format {
+        Format::Long => render_long(buf, rows, options, now, quoting),
         Format::OnePerLine => render_one_per_line(buf, rows, options, quoting),
         Format::Columns => render_grid(buf, rows, options, width, Fill::TopToBottom, quoting),
         Format::Across => render_grid(buf, rows, options, width, Fill::LeftToRight, quoting),
@@ -452,7 +472,7 @@ fn render_one_per_line(
             blocks_width,
             quoting,
         ));
-        buf.push('\n');
+        buf.push(line_terminator(options));
     }
 }
 
@@ -483,13 +503,14 @@ fn render_commas(
                 buf.push_str(", ");
             } else {
                 pos = 0;
-                buf.push_str(",\n");
+                buf.push(',');
+                buf.push(line_terminator(options));
             }
         }
         buf.push_str(&cell);
         pos += len;
     }
-    buf.push('\n');
+    buf.push(line_terminator(options));
 }
 
 /// The direction a column grid is filled.
@@ -538,17 +559,37 @@ fn render_grid(
             .find(|&col| cell_index(fill, row, col, layout.rows, layout.cols) < count);
         let Some(last_col) = last_col else { continue };
         // Present columns in a row are contiguous from 0 to `last_col` in
-        // both fill directions, so every index below is in range.
+        // both fill directions, so every index below is in range. `pos`
+        // tracks the current column position so the gap to the next column
+        // is advanced with tabs (up to `-T` tab stops) exactly as GNU does.
+        let mut pos = 0usize;
         for col in 0..=last_col {
             let index = cell_index(fill, row, col, layout.rows, layout.cols);
             buf.push_str(&cells[index]);
+            pos += widths[index];
             if col != last_col {
-                for _ in 0..layout.col_widths[col] + COLUMN_GAP - widths[index] {
-                    buf.push(' ');
-                }
+                let target = pos - widths[index] + layout.col_widths[col] + COLUMN_GAP;
+                indent(buf, pos, target, options.tabsize);
+                pos = target;
             }
         }
-        buf.push('\n');
+        buf.push(line_terminator(options));
+    }
+}
+
+/// Advance from column `from` to column `to`, emitting a tab whenever it
+/// lands the position at or past the next tab stop and a space otherwise — a
+/// direct port of the GNU `ls` `indent` routine. A `tabsize` of `0` pads
+/// with spaces only (`-T0`).
+fn indent(buf: &mut String, mut from: usize, to: usize, tabsize: usize) {
+    while from < to {
+        if tabsize != 0 && to / tabsize > (from + 1) / tabsize {
+            buf.push('\t');
+            from += tabsize - from % tabsize;
+        } else {
+            buf.push(' ');
+            from += 1;
+        }
     }
 }
 
@@ -667,13 +708,7 @@ fn render_long(
     now: Time64,
     quoting: Quoting,
 ) {
-    let size_cell = |meta: &Metadata| {
-        if options.human_readable {
-            human_size(meta.size)
-        } else {
-            format!("{}", meta.size)
-        }
-    };
+    let size_cell = |meta: &Metadata| render_size(options.file_size, meta.size);
     let date_cell = |meta: &Metadata| {
         render_time(
             selected_time(meta, options.time_field),
@@ -689,6 +724,9 @@ fn render_long(
     };
     let uid_width = width_of(|meta| format!("{}", meta.uid));
     let gid_width = width_of(|meta| format!("{}", meta.gid));
+    // The `--author` column repeats the owning user (TAIRiX has no separate
+    // author), so it is the same values and width as the owner column.
+    let author_width = uid_width;
     let size_width = rows
         .iter()
         .map(|(_, meta)| size_cell(meta).len())
@@ -717,16 +755,20 @@ fn render_long(
         if !options.hide_owner {
             let _ = write!(buf, " {:>uid_width$}", meta.uid);
         }
+        if options.author {
+            let _ = write!(buf, " {:>author_width$}", meta.uid);
+        }
         if !options.hide_group {
             let _ = write!(buf, " {:>gid_width$}", meta.gid);
         }
-        let _ = writeln!(
+        let _ = write!(
             buf,
             " {:>size_width$} {:<date_width$} {}",
             size_cell(meta),
             date_cell(meta),
             decorate(name, *meta, options, quoting)
         );
+        buf.push(line_terminator(options));
     }
 }
 
@@ -794,13 +836,15 @@ fn render_time(stamp: Time64, style: TimeStyle, now: Time64) -> String {
 }
 
 /// The rendered form of one name: quoted in the resolved [`Quoting`] style,
-/// with the `-p` / `-F` indicator suffix appended after the closing quote,
-/// as in the GNU tool.
+/// with the `-p` / `-F` / `--file-type` indicator suffix appended after the
+/// closing quote, as in the GNU tool. With the VFS's two kinds only
+/// directories carry a `/`; `-F` additionally marks executables with `*`,
+/// while `--file-type` never does.
 fn decorate(name: &str, meta: Metadata, options: Options, quoting: Quoting) -> String {
     let mut rendered = quoting.render(name);
     match options.indicator {
         Indicator::None => {}
-        Indicator::Slash => {
+        Indicator::Slash | Indicator::FileType => {
             if meta.kind.is_dir() {
                 rendered.push('/');
             }
@@ -831,9 +875,10 @@ impl Quoting {
     /// Resolve the GNU defaults against the attested console: `shell-escape`
     /// quoting with hidden control characters at a terminal, `literal` quoting
     /// with shown control characters otherwise. An explicit flag overrides
-    /// either axis.
+    /// either axis. `--zero` forces the `literal` / show-control defaults (the
+    /// GNU `--zero` posture), still overridable by an explicit quoting flag.
     fn resolve(options: Options, terminal: Option<usize>) -> Self {
-        let at_terminal = terminal.is_some();
+        let at_terminal = terminal.is_some() && !options.zero;
         Self {
             style: options.quoting.unwrap_or(if at_terminal {
                 QuotingStyle::ShellEscape
@@ -1033,27 +1078,32 @@ fn shell_name(name: &str, escape: bool, always: bool, hide_control: bool) -> Str
     out
 }
 
-/// `size` in the GNU `-h` form: plain bytes below 1024, then powers of
-/// 1024 as `K`, `M`, `G`, …, rounded up — one decimal place below 10, whole
-/// numbers from 10.
-fn human_size(size: u64) -> String {
-    const UNITS: [char; 6] = ['K', 'M', 'G', 'T', 'P', 'E'];
-    if size < 1024 {
+/// `size` in the GNU human-readable form for the given `base`: plain bytes
+/// below one unit, then powers of `base` rounded up — one decimal place
+/// below ten, whole numbers from ten. `base` is 1024 for `-h` (units `K`,
+/// `M`, …) or 1000 for `--si` (units `k`, `M`, …); only the kilo letter
+/// differs between the two, matching GNU.
+fn human_size(size: u64, base: u64) -> String {
+    const UNITS_1024: [char; 6] = ['K', 'M', 'G', 'T', 'P', 'E'];
+    const UNITS_1000: [char; 6] = ['k', 'M', 'G', 'T', 'P', 'E'];
+    let units = if base == 1000 { UNITS_1000 } else { UNITS_1024 };
+    let base = u128::from(base);
+    let size = u128::from(size);
+    if size < base {
         return format!("{size}");
     }
     let mut unit = 0;
-    let mut base: u128 = 1024;
-    let size = u128::from(size);
-    while unit + 1 < UNITS.len() && size >= base * 1024 {
-        base *= 1024;
+    let mut scale: u128 = base;
+    while unit + 1 < units.len() && size >= scale * base {
+        scale *= base;
         unit += 1;
     }
     // Tenths of a unit, rounded up (the GNU ceiling), e.g. 1025 -> `1.1K`.
-    let tenths = (size * 10).div_ceil(base);
+    let tenths = (size * 10).div_ceil(scale);
     if tenths < 100 {
-        format!("{}.{}{}", tenths / 10, tenths % 10, UNITS[unit])
+        format!("{}.{}{}", tenths / 10, tenths % 10, units[unit])
     } else {
-        format!("{}{}", size.div_ceil(base), UNITS[unit])
+        format!("{}{}", size.div_ceil(scale), units[unit])
     }
 }
 
@@ -1323,8 +1373,8 @@ mod version {
 mod tests {
     use super::{run, USAGE};
     use crate::command::{
-        Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField,
-        TimeStyle,
+        Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat, Sort,
+        TimeField, TimeStyle,
     };
     use crate::error::LsError;
     use crate::io::{Entry, Listing, Metadata, Output};
@@ -1663,7 +1713,7 @@ mod tests {
         list_with(
             Options {
                 hidden: if all { Hidden::All } else { Hidden::Skip },
-                long,
+                format: long.then_some(Format::Long),
                 ..Options::DEFAULT
             },
             paths,
@@ -2735,8 +2785,9 @@ mod tests {
             run_ls(
                 list_with(
                     Options {
-                        long: true,
-                        human_readable: true,
+                        format: Some(Format::Long),
+                        file_size: SizeFormat::Human { si: false },
+                        block_size: SizeFormat::Human { si: false },
                         ..Options::DEFAULT
                     },
                     &["."],
@@ -2765,7 +2816,7 @@ mod tests {
             run_ls(
                 list_with(
                     Options {
-                        long: true,
+                        format: Some(Format::Long),
                         hide_owner: true,
                         ..Options::DEFAULT
                     },
@@ -2785,7 +2836,7 @@ mod tests {
             run_ls(
                 list_with(
                     Options {
-                        long: true,
+                        format: Some(Format::Long),
                         hide_group: true,
                         ..Options::DEFAULT
                     },
@@ -2869,7 +2920,7 @@ mod tests {
             run_ls(
                 list_with(
                     Options {
-                        long: true,
+                        format: Some(Format::Long),
                         size: true,
                         ..Options::DEFAULT
                     },
@@ -2899,7 +2950,8 @@ mod tests {
                 list_with(
                     Options {
                         size: true,
-                        human_readable: true,
+                        file_size: SizeFormat::Human { si: false },
+                        block_size: SizeFormat::Human { si: false },
                         ..Options::DEFAULT
                     },
                     &["."],
@@ -2971,7 +3023,7 @@ mod tests {
             (1024 * 1024, "1.0M"),
             (u64::MAX, "16E"),
         ] {
-            assert_eq!(super::human_size(size), expected, "{size}");
+            assert_eq!(super::human_size(size, 1024), expected, "{size}");
         }
     }
 
@@ -3018,7 +3070,7 @@ mod tests {
             run_ls(
                 list_with(
                     Options {
-                        long: true,
+                        format: Some(Format::Long),
                         inode: true,
                         ..Options::DEFAULT
                     },
@@ -3103,7 +3155,7 @@ mod tests {
                 run_ls(
                     list_with(
                         Options {
-                            long: true,
+                            format: Some(Format::Long),
                             time_field: field,
                             ..Options::DEFAULT
                         },
@@ -3143,7 +3195,7 @@ mod tests {
                 run_ls(
                     list_with(
                         Options {
-                            long: true,
+                            format: Some(Format::Long),
                             time_style: style,
                             ..Options::DEFAULT
                         },
@@ -3182,7 +3234,7 @@ mod tests {
             run_ls(
                 list_with(
                     Options {
-                        long: true,
+                        format: Some(Format::Long),
                         time_style: TimeStyle::Iso,
                         ..Options::DEFAULT
                     },
@@ -3194,5 +3246,237 @@ mod tests {
             Ok(())
         );
         assert_eq!(out.text(), "total 0\n-rw-r--r-- 1000 100 0 2023-11-14 f\n");
+    }
+
+    #[test]
+    fn si_scales_the_long_size_in_powers_of_1000() {
+        // `--si` renders the long-format file size in base-1000 units, with
+        // the lowercase kilo letter GNU uses.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "f", FileKind::Regular, 0o644, 5000);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Long),
+                        file_size: SizeFormat::Human { si: true },
+                        block_size: SizeFormat::Human { si: true },
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            out.text(),
+            "total 5.0k\n-rw-r--r-- 1000 100 5.0k Jan  1  1970 f\n"
+        );
+    }
+
+    #[test]
+    fn block_size_scales_the_allocation_cells() {
+        // A 512-byte block size doubles the default 1024-block counts; the
+        // `-s` cell and `total` both use it.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry_alloc(".", "f", FileKind::Regular, 0o644, 5, 8192);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        size: true,
+                        block_size: SizeFormat::Scaled {
+                            unit: 512,
+                            suffix: None,
+                        },
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "total 16\n16 f\n");
+    }
+
+    #[test]
+    fn the_total_scales_the_summed_allocation_not_the_rounded_cells() {
+        // Two half-block files each round up to one 1024-block cell, but the
+        // total scales the *summed* allocation (1024 bytes -> 1 block), not
+        // the sum of the rounded cells (which would be 2) — the GNU rule.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry_alloc(".", "a", FileKind::Regular, 0o644, 1, 512)
+            .entry_alloc(".", "b", FileKind::Regular, 0o644, 1, 512);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        size: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "total 1\n1 a\n1 b\n");
+    }
+
+    #[test]
+    fn author_repeats_the_owner_column() {
+        // `--author` prints the owning user again, after the owner and
+        // before the group.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "f", FileKind::Regular, 0o644, 7);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Long),
+                        author: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            out.text(),
+            "total 1\n-rw-r--r-- 1000 1000 100 7 Jan  1  1970 f\n"
+        );
+    }
+
+    #[test]
+    fn file_type_marks_directories_but_never_executables() {
+        // `--file-type` appends `/` to directories and nothing to an
+        // executable, unlike `-F` which would append `*`.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "d", FileKind::Directory, 0o755, 0)
+            .entry(".", "exe", FileKind::Regular, 0o755, 0);
+        let file_type = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        indicator: Indicator::FileType,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &file_type,
+            ),
+            Ok(())
+        );
+        assert_eq!(file_type.text(), "d/\nexe\n");
+        // `-F` (classify) additionally stars the executable.
+        let classify = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        indicator: Indicator::Classify,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &classify,
+            ),
+            Ok(())
+        );
+        assert_eq!(classify.text(), "d/\nexe*\n");
+    }
+
+    #[test]
+    fn zero_terminates_every_line_with_nul() {
+        // `--zero` ends each entry line and the `total` with NUL; the header
+        // and inter-block separator keep the newline, matching GNU.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        zero: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a\0b\0");
+    }
+
+    #[test]
+    fn tabsize_advances_columns_with_tabs() {
+        // A column whose gap crosses a tab stop is padded with a tab under
+        // the default tab size and with spaces under `-T0` — a byte-for-byte
+        // match with GNU `ls -C -T8` / `-T0`.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "abcdef", FileKind::Regular, 0o644, 0)
+            .entry(".", "bb", FileKind::Regular, 0o644, 0)
+            .entry(".", "cc", FileKind::Regular, 0o644, 0)
+            .entry(".", "dd", FileKind::Regular, 0o644, 0);
+        let tabbed = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Columns),
+                        width: Some(12),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &tabbed,
+            ),
+            Ok(())
+        );
+        assert_eq!(tabbed.text(), "abcdef\tcc\nbb\tdd\n");
+        let spaced = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Columns),
+                        width: Some(12),
+                        tabsize: 0,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &spaced,
+            ),
+            Ok(())
+        );
+        assert_eq!(spaced.text(), "abcdef  cc\nbb      dd\n");
     }
 }

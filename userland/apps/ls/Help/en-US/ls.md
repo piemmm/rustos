@@ -4,10 +4,11 @@ ls — list directory contents
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -80,8 +81,8 @@ separated by a blank line.
 - `-F, --classify` — append `/` to directories and `*` to
   executables.
 - `-g` — long format without the owner column; implies `-l`.
-- `-h, --human-readable` — with `-l`, print sizes like `1.1K`,
-  `23M` (powers of 1024).
+- `-h, --human-readable` — print sizes like `1.1K`, `23M` (powers of
+  1024), for both the long-format file sizes and the `-s` blocks.
 - `-l` — long format: permission bits, owner, group, size, then
   name.
 - `-m` — comma-separated names, wrapped to the output width.
@@ -108,8 +109,9 @@ separated by a blank line.
   default when the output is not a terminal).
 - `-r, --reverse` — reverse the sort order.
 - `-R, --recursive` — list subdirectories recursively.
-- `-s, --size` — print each entry's allocated size in 1024-byte blocks
-  (scaled by `-h`), with a `total` line per directory listing.
+- `-s, --size` — print each entry's allocated size in blocks (scaled by
+  `-h` / `--si` / `--block-size` / `-k`), with a `total` line per
+  directory listing.
 - `-C` — list entries in columns, filled top-to-bottom (the default
   when the output is a terminal).
 - `-S` — sort by size, largest first.
@@ -133,6 +135,34 @@ separated by a blank line.
   terminal).
 - `-?` — show this command's own short help (`--help` is the long
   form).
+- `--file-type` — append `/` to directories, but never `*` to
+  executables (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — choose the indicator suffix by name:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`), or `classify`
+  (`-F`).
+- `-G, --no-group` — omit the group column from the long format. Unlike
+  `-o` it does not select the long format on its own.
+- `--author` — with `-l`, print the author column (the owning user,
+  since there is no separate author) after the owner and before the
+  group.
+- `--si` — like `-h` but powers of 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — use 1024-byte blocks for the `-s` cells and the
+  `total`. This is already the default, so it confirms the output
+  rather than changing it; a size option overrides it.
+- `--block-size=SIZE` — scale the long-format file sizes and the `-s`
+  blocks by SIZE: a plain integer (bytes), or a unit `K`/`M`/`G`/`T`/
+  `P`/`E` (1024-based), a `KiB`-style unit (1024-based), or a
+  `KB`-style unit (1000-based), optionally with a leading integer
+  coefficient. A bare unit prints its suffix; a coefficient suppresses
+  it. A malformed SIZE is an error.
+- `--format=WORD` — choose the arrangement by name: `long` (`-l`) or
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` or
+  `horizontal` (`-x`), or `commas` (`-m`).
+- `-T, --tabsize <cols>` — set the column-grid tab stop (default 8);
+  `0` pads columns with spaces only.
+- `--zero` — end each output line with NUL instead of newline; also
+  selects, unless overridden, the single-column arrangement, literal
+  quoting, and shown control characters.
 
 ## EXAMPLES
 

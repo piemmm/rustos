@@ -4,10 +4,11 @@ ls — вивести вміст каталогів
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -113,6 +114,33 @@ ls — вивести вміст каталогів
 - `-1` — одна назва на рядок (типова поведінка).
 - `-?` — показати коротку довідку цієї команди (`--help` — довга
   форма).
+
+- `--file-type` — додавати `/` до каталогів, але ніколи `*` до
+  виконуваних файлів (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — вибрати суфікс-індикатор за назвою:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) або `classify`
+  (`-F`).
+- `-G, --no-group` — не показувати стовпець групи в довгому
+  форматі; на відміну від `-o`, сам по собі не вмикає довгий
+  формат.
+- `--author` — з `-l` виводити стовпець автора (користувача-
+  власника) після власника й перед групою.
+- `--si` — як `-h`, але степені 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — використовувати блоки по 1024 байти для комірок
+  `-s` і рядка `total` (це вже типова поведінка; параметр
+  розміру має перевагу).
+- `--block-size=SIZE` — масштабувати розміри файлів і блоки `-s`
+  на SIZE: ціле число (байти) або одиниця `K`/`M`/`G`/`T`/`P`/
+  `E` (1024), одиниця `KiB` (1024) чи одиниця `KB` (1000), за
+  бажанням із цілим коефіцієнтом.
+- `--format=WORD` — вибрати компонування за назвою: `long` (`-l`) чи
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` чи
+  `horizontal` (`-x`) або `commas` (`-m`).
+- `-T, --tabsize <cols>` — задати крок табуляції сітки стовпців
+  (типово 8); `0` заповнює лише пробілами.
+- `--zero` — завершувати кожен рядок символом NUL замість
+  переходу рядка; також вмикає один стовпець, буквальне
+  лапкування та показ керівних символів.
 
 ## EXAMPLES
 

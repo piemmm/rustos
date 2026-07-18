@@ -4,10 +4,11 @@ ls — elencare il contenuto delle directory
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -125,6 +126,32 @@ blocchi sono separati da una riga vuota.
 - `-1` — un nome per riga (l'impostazione predefinita).
 - `-?` — mostrare la guida breve di questo comando (`--help` è la
   forma lunga).
+
+- `--file-type` — aggiungere `/` alle directory, ma mai `*` agli
+  eseguibili (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — scegliere il suffisso indicatore per nome:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) o `classify`
+  (`-F`).
+- `-G, --no-group` — omettere la colonna del gruppo nel formato lungo;
+  a differenza di `-o` non seleziona da solo il formato lungo.
+- `--author` — con `-l`, stampare la colonna autore (l'utente
+  proprietario) dopo il proprietario e prima del gruppo.
+- `--si` — come `-h` ma in potenze di 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — usare blocchi da 1024 byte per le celle `-s` e
+  la riga `total` (è già il valore predefinito; un'opzione di
+  dimensione ha la precedenza).
+- `--block-size=SIZE` — scalare le dimensioni dei file e i blocchi
+  `-s` di SIZE: un intero (byte), o un'unità `K`/`M`/`G`/`T`/`P`/`E`
+  (1024), un'unità `KiB` (1024) o un'unità `KB` (1000), facoltativamente
+  con un coefficiente intero.
+- `--format=WORD` — scegliere la disposizione per nome: `long` (`-l`) o
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` o
+  `horizontal` (`-x`), o `commas` (`-m`).
+- `-T, --tabsize <cols>` — impostare il passo di tabulazione della
+  griglia di colonne (predefinito 8); `0` riempie solo con spazi.
+- `--zero` — terminare ogni riga con NUL invece del ritorno a capo;
+  seleziona inoltre la colonna singola, la citazione letterale e i
+  caratteri di controllo visibili.
 
 ## EXAMPLES
 

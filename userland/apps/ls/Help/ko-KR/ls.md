@@ -4,10 +4,11 @@ ls — 디렉터리 내용 나열하기
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -102,6 +103,31 @@ ls — 디렉터리 내용 나열하기
 - `-1` — 한 줄에 이름 하나(기본값).
 - `-?` — 이 명령 자체의 짧은 도움말을 표시합니다(`--help`가 긴
   형식입니다).
+
+- `--file-type` — 디렉터리에 `/`를 붙이되 실행 파일에 `*`는
+  붙이지 않음(`--indicator-style=file-type`).
+- `--indicator-style=WORD` — 표시 접미사를 이름으로 선택:
+  `none`, `slash`(`-p`), `file-type`(`--file-type`),
+  `classify`(`-F`).
+- `-G, --no-group` — 긴 형식에서 그룹 열을 생략함. `-o`와 달리
+  그 자체로는 긴 형식을 선택하지 않음.
+- `--author` — `-l`과 함께 소유자 뒤, 그룹 앞에 작성자 열(소유
+  사용자)을 표시함.
+- `--si` — `-h`와 같지만 1000의 거듭제곱(`1.1k`, `23M`).
+- `-k, --kibibytes` — `-s` 셀과 `total` 줄에 1024바이트 블록을
+  사용함(이미 기본값이므로 출력은 바뀌지 않음. 크기 옵션이
+  우선함).
+- `--block-size=SIZE` — 파일 크기와 `-s` 블록을 SIZE로 환산함:
+  정수(바이트), 단위 `K`/`M`/`G`/`T`/`P`/`E`(1024), `KiB`
+  계열(1024), `KB` 계열(1000)이며 선택적으로 정수 계수를 붙일 수
+  있음.
+- `--format=WORD` — 배치를 이름으로 선택: `long`(`-l`)/`verbose`,
+  `single-column`(`-1`), `vertical`(`-C`), `across`/`horizontal`
+  (`-x`), `commas`(`-m`).
+- `-T, --tabsize <cols>` — 열 격자의 탭 폭을 설정함(기본 8). `0`은
+  공백으로만 채움.
+- `--zero` — 각 줄을 줄바꿈 대신 NUL로 끝냄. 또한 단일 열, 그대로
+  인용, 제어 문자 표시를 선택함.
 
 ## EXAMPLES
 

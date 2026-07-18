@@ -758,11 +758,11 @@ deliberately staged behind the floor work below).
 
 - **Stage A — GNU switches for the existing tools (done).** On the current
   floor: `cat` `-A -b -e -E -n -s -t -T -u -v` (bundled short flags, GNU
-  `^`/`M-` notation); `ls` `-a -A -b -B -C -d -F -f -g -h -I -l -m -N -n -o -p -Q -q -r -R -s -S -U -v -w -x -X -1 --sort --group-directories-first --quoting-style --show-control-chars --ignore --hide`
+  `^`/`M-` notation); `ls` `-a -A -b -B -C -d -F -f -g -G -h -i -I -k -l -m -N -n -o -p -Q -q -r -R -s -S -t -T -u -U -v -w -x -X -1 --sort --group-directories-first --quoting-style --show-control-chars --ignore --hide --si --author --file-type --block-size --format --indicator-style --time --time-style --full-time --inode --no-group --kibibytes --tabsize --zero`
   (`-h` takes the GNU human-readable meaning — short help is `-?`/`--help` —
   and the invented `--long` synonym is retired; long format shows numeric
   owner/group, the GNU numeric fallback, with no link-count column (the
-  VFS has no links yet) and the timestamp column added in Stage D; the sort
+  VFS has no links yet); the sort
   key is name by default, `-S` size, `-t` time, `-X` extension, `-v` natural
   version order (a faithful `filevercmp` port), `-U`/`-f` no sort (directory
   order, `-f` also enabling `-a` and disabling `-l`/`-s`), or `--sort=WORD`
@@ -787,6 +787,23 @@ deliberately staged behind the floor work below).
   `-a` nor `-A` is given, all compiled through the shared, fail-closed
   `lib/glob` matcher (a malformed pattern is a usage error) and applied
   silently — an explicit filter is never advertised on the omission stream;
+  size scaling is the GNU two-setting model — `-h` (base 1024) / `--si`
+  (base 1000) / `--block-size=SIZE` scale both the long file-size column
+  and the `-s` blocks, while `-k`/`--kibibytes` forces 1024-byte blocks for
+  `-s`/`total` only (already the default, no `BLOCK_SIZE` env, so it
+  confirms rather than changes; a size option overrides it), with the total
+  scaling the summed allocation not the sum of the rounded cells; the SIZE
+  grammar is GNU's (integer coefficient + `K`/`KiB`/`KB`… unit, suffix
+  printed only for a bare unit, malformed fails closed); `--format=WORD`
+  and `-l`/`-1`/`-C`/`-x`/`-m` are one last-wins arrangement state (with
+  GNU's `-1`-no-effect-after-`-l` rule), `--indicator-style=WORD` /
+  `--file-type` extend `-p`/`-F` (with only dir/regular kinds, `file-type`
+  appends `/` and never `*`), `-G`/`--no-group` drops the group column
+  without selecting `-l`, `--author` repeats the owner column, `-T`/
+  `--tabsize` (default 8, `0` = spaces) advances columns with tabs by a
+  faithful port of GNU's `indent`, and `--zero` NUL-terminates entry lines
+  and the `total` (headers/separators keep the newline), defaulting to
+  single-column + literal + shown control chars;
   `rm` `-d -f -i -I -r -v
   --preserve-root`/`--no-preserve-root` (prompt seam, GNU `removed …`
   wording); `cp` `-f -i -n -r -t -T -v`; `mv` `-f -i -n -t -T -v`

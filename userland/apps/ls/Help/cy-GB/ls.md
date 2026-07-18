@@ -4,10 +4,11 @@ ls — rhestru cynnwys cyfeiriaduron
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -123,6 +124,31 @@ llinell wag.
 - `-1` — un enw fesul llinell (y rhagosodiad).
 - `-?` — dangos cymorth byr y gorchymyn hwn ei hun (`--help` yw'r
   ffurf hir).
+
+- `--file-type` — atodi `/` at gyfeiriaduron, ond byth `*` at ffeiliau
+  gweithredadwy (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — dewis yr ôl-ddodiad dynodwr yn ôl enw:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) neu `classify`
+  (`-F`).
+- `-G, --no-group` — hepgor y golofn grŵp o'r fformat hir; yn wahanol
+  i `-o`, nid yw'n dewis y fformat hir ei hun.
+- `--author` — gyda `-l`, dangos y golofn awdur (y defnyddiwr piau) ar
+  ôl y perchennog ac o flaen y grŵp.
+- `--si` — fel `-h` ond pwêrau 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — defnyddio blociau 1024-beit ar gyfer celloedd
+  `-s` a'r llinell `total` (y rhagosodiad eisoes; mae opsiwn maint yn
+  drech).
+- `--block-size=SIZE` — graddio meintiau ffeiliau a blociau `-s` yn ôl
+  SIZE: cyfanrif (beitiau), neu uned `K`/`M`/`G`/`T`/`P`/`E` (1024),
+  uned `KiB` (1024) neu uned `KB` (1000), gyda chyfernod cyfanrif
+  dewisol.
+- `--format=WORD` — dewis y trefniant yn ôl enw: `long` (`-l`) neu
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` neu
+  `horizontal` (`-x`), neu `commas` (`-m`).
+- `-T, --tabsize <cols>` — gosod cam tab y grid colofnau (rhagosodiad
+  8); mae `0` yn llenwi â bylchau'n unig.
+- `--zero` — gorffen pob llinell â NUL yn lle llinell newydd; mae hefyd
+  yn dewis un golofn, dyfynnu llythrennol a nodau rheoli gweladwy.
 
 ## EXAMPLES
 

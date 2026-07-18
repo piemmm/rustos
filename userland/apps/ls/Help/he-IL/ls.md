@@ -4,10 +4,11 @@ ls — הצגת תוכן ספריות
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -106,6 +107,30 @@ ls — הצגת תוכן ספריות
 - `-1` — שם אחד בשורה (ברירת המחדל).
 - `-?` — הצגת העזרה הקצרה של פקודה זו עצמה (`--help` היא הצורה
   הארוכה).
+
+- `--file-type` — הוספת `/` לספריות, אך לעולם לא `*` לקבצים
+  בני-הרצה (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — בחירת סיומת המחוון לפי שם:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) או
+  `classify` (`-F`).
+- `-G, --no-group` — השמטת עמודת הקבוצה מהתסדיר הארוך;
+  בשונה מ-`-o`, אינו בוחר את התסדיר הארוך בעצמו.
+- `--author` — עם `-l`, הצגת עמודת המחבר (המשתמש הבעלים)
+  אחרי הבעלים ולפני הקבוצה.
+- `--si` — כמו `-h` אך בחזקות של 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — שימוש בבלוקים של 1024 בתים לתאי `-s`
+  ולשורת `total` (זו כבר ברירת המחדל; אפשרות גודל גוברת).
+- `--block-size=SIZE` — שינוי קנה המידה של גדלי הקבצים ובלוקי
+  `-s` לפי SIZE: מספר שלם (בתים), או יחידה `K`/`M`/`G`/`T`/`P`/
+  `E` (1024), יחידת `KiB` (1024) או יחידת `KB` (1000), עם מקדם
+  שלם רשות.
+- `--format=WORD` — בחירת הסידור לפי שם: `long` (`-l`) או
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`),
+  `across`/`horizontal` (`-x`) או `commas` (`-m`).
+- `-T, --tabsize <cols>` — קביעת צעד הטאב של רשת העמודות
+  (ברירת מחדל 8); `0` ממלא ברווחים בלבד.
+- `--zero` — סיום כל שורה ב-NUL במקום שורה חדשה; בוחר גם עמודה
+  יחידה, ציטוט מילולי והצגת תווי בקרה.
 
 ## EXAMPLES
 

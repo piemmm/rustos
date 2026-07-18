@@ -18,18 +18,29 @@ pub enum Hidden {
     All,
 }
 
-/// The non-long output arrangement.
+/// The output arrangement of one listing.
+///
+/// GNU `ls` keeps a *single* format state: the last of `-l` / `-1` / `-C` /
+/// `-x` / `-m` (and the `--format=WORD` words) wins, with one exception —
+/// `-1` has no effect after `-l` (so `-l -1` stays long). This one enum,
+/// rather than a separate `long` flag beside a column arrangement, is what
+/// makes that last-wins precedence expressible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
-    /// One name per line (`-1`).
+    /// The long format: mode, owner/group, size, timestamp, name — one
+    /// entry per line (`-l` / `-n` / `-g` / `-o` / `--format=long`).
+    Long,
+    /// One name per line (`-1` / `--format=single-column`).
     OnePerLine,
     /// Multiple columns filled top-to-bottom, sized to the terminal width
-    /// (`-C`; the GNU default when writing to a terminal).
+    /// (`-C` / `--format=vertical`; the GNU default when writing to a
+    /// terminal).
     Columns,
     /// Multiple columns filled left-to-right, sized to the terminal width
-    /// (`-x`).
+    /// (`-x` / `--format=across` / `--format=horizontal`).
     Across,
-    /// Names separated by `, `, wrapped to the terminal width (`-m`).
+    /// Names separated by `, `, wrapped to the terminal width (`-m` /
+    /// `--format=commas`).
     Commas,
 }
 
@@ -38,11 +49,117 @@ pub enum Format {
 pub enum Indicator {
     /// No suffix (the default).
     None,
-    /// `/` after directories (`-p`).
+    /// `/` after directories (`-p` / `--indicator-style=slash`).
     Slash,
-    /// `/` after directories and `*` after executables (`-F`).
+    /// A type indicator after every classifiable entry *except* executables
+    /// (`--file-type` / `--indicator-style=file-type`). With the VFS's two
+    /// kinds (regular file, directory) this appends `/` to directories and
+    /// nothing else; it differs from [`Classify`](Self::Classify) only in
+    /// never appending the executable `*`.
+    FileType,
+    /// `/` after directories and `*` after executables (`-F` / `--classify`
+    /// / `--indicator-style=classify`).
     Classify,
 }
+
+/// How a byte count is scaled and rendered as a size.
+///
+/// GNU `ls` keeps *two* of these independently: one for the long-format
+/// file-size column (`file_size`, default plain bytes) and one for the `-s`
+/// allocation cells and the `total` line (`block_size`, default 1024-byte
+/// units). `-h` / `--si` / `--block-size` set both; `-k` touches only the
+/// block scaling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SizeFormat {
+    /// Scale each byte count by `unit` (rounded up to whole units) and, when
+    /// `suffix` is present, print that unit suffix after the number. Plain
+    /// bytes are `unit == 1` with no suffix (the long-format default and
+    /// `--block-size=1`); the `-s` default is `unit == 1024`, no suffix.
+    Scaled {
+        /// The block size in bytes (never zero).
+        unit: u64,
+        /// The unit suffix to print, when the SIZE was a bare unit; GNU
+        /// prints none when a numeric coefficient was given.
+        suffix: Option<UnitSuffix>,
+    },
+    /// Autoscaling human-readable sizes: base 1024 (`-h`) or base 1000
+    /// (`--si`), rounded up, one decimal below ten.
+    Human {
+        /// Powers of 1000 (`--si`) rather than 1024 (`-h`).
+        si: bool,
+    },
+}
+
+/// A unit suffix printed after a [`SizeFormat::Scaled`] count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnitSuffix {
+    /// The power letter, uppercase: `K`, `M`, `G`, `T`, `P`, or `E`.
+    letter: u8,
+    /// Which spelling of the suffix to print.
+    form: SuffixForm,
+}
+
+/// The spelling of a [`UnitSuffix`], mirroring the three `--block-size`
+/// unit forms GNU accepts and echoes back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SuffixForm {
+    /// The bare power letter: `K`, `M`, … (a base-1024 unit like `K`).
+    Iec,
+    /// The IEC binary spelling: `KiB`, `MiB`, … (a `KiB`-form unit).
+    IecLong,
+    /// The SI decimal spelling: kilo `kB`, else `MB`, `GB`, … (a `kB`-form
+    /// unit, base 1000).
+    Si,
+}
+
+impl UnitSuffix {
+    /// The exact text GNU prints for this suffix.
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match (self.letter, self.form) {
+            (b'K', SuffixForm::Iec) => "K",
+            (b'K', SuffixForm::IecLong) => "KiB",
+            (b'K', SuffixForm::Si) => "kB",
+            (b'M', SuffixForm::Iec) => "M",
+            (b'M', SuffixForm::IecLong) => "MiB",
+            (b'M', SuffixForm::Si) => "MB",
+            (b'G', SuffixForm::Iec) => "G",
+            (b'G', SuffixForm::IecLong) => "GiB",
+            (b'G', SuffixForm::Si) => "GB",
+            (b'T', SuffixForm::Iec) => "T",
+            (b'T', SuffixForm::IecLong) => "TiB",
+            (b'T', SuffixForm::Si) => "TB",
+            (b'P', SuffixForm::Iec) => "P",
+            (b'P', SuffixForm::IecLong) => "PiB",
+            (b'P', SuffixForm::Si) => "PB",
+            (b'E', SuffixForm::Iec) => "E",
+            (b'E', SuffixForm::IecLong) => "EiB",
+            (b'E', SuffixForm::Si) => "EB",
+            // Every `letter` is set from the closed power table in
+            // `parse_block_size`, so no other pair is constructible.
+            _ => "",
+        }
+    }
+}
+
+impl SizeFormat {
+    /// Plain bytes: no scaling, no suffix. The long-format file-size default
+    /// and `--block-size=1`.
+    pub const BYTES: Self = Self::Scaled {
+        unit: 1,
+        suffix: None,
+    };
+
+    /// 1024-byte units with no suffix: the `-s` allocation / `total` default
+    /// (and `--block-size=1024` / `-k`).
+    pub const KIBI_BLOCKS: Self = Self::Scaled {
+        unit: 1024,
+        suffix: None,
+    };
+}
+
+/// The GNU default column tab stop (`-T` / `--tabsize`).
+pub const DEFAULT_TABSIZE: usize = 8;
 
 /// The key rows are ordered by.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,8 +255,6 @@ pub enum TimeStyle {
 pub struct Options {
     /// Which dot-entries the listing includes (`-a` / `-A`).
     pub hidden: Hidden,
-    /// Long format (`-l`; also implied by `-n`, `-g`, and `-o`).
-    pub long: bool,
     /// List directory operands themselves, not their contents (`-d`).
     pub directory: bool,
     /// Recurse into subdirectories (`-R`).
@@ -148,10 +263,13 @@ pub struct Options {
     pub reverse: bool,
     /// Sort key (`-S`).
     pub sort: Sort,
-    /// Non-long arrangement (`-1` / `-C` / `-x` / `-m`). `None` selects the
-    /// GNU default: multiple columns (`-C`) when the output is a terminal,
-    /// one name per line otherwise (decided against the attested console at
-    /// render time, not here).
+    /// The output arrangement (`-l` / `-1` / `-C` / `-x` / `-m` /
+    /// `--format`). `None` selects the GNU default, resolved against the
+    /// attested console at render time: multiple columns when the output is
+    /// a terminal (single column under `--zero`), one name per line
+    /// otherwise. The long format ([`Format::Long`]) is one of the values,
+    /// so its last-wins precedence against a column arrangement is captured
+    /// here rather than in a separate flag.
     pub format: Option<Format>,
     /// Explicit output width in columns (`-w` / `--width`); `Some(0)` means
     /// an unlimited line length. `None` takes the attested terminal width,
@@ -169,15 +287,28 @@ pub struct Options {
     /// `None` selects the GNU default: hide when the output is a terminal,
     /// show otherwise.
     pub hide_control_chars: Option<bool>,
-    /// Print each entry's allocated size in 1024-byte blocks (`-s`), plus
-    /// a `total` line per directory block.
+    /// Print each entry's allocated size in blocks (`-s`), plus a `total`
+    /// line per directory block. The block scaling is [`block_size`].
+    ///
+    /// [`block_size`]: Self::block_size
     pub size: bool,
-    /// Human-readable sizes in the long format (`-h`).
-    pub human_readable: bool,
+    /// How the long-format file-size column is scaled (`-h` / `--si` /
+    /// `--block-size`). Default: plain bytes.
+    pub file_size: SizeFormat,
+    /// How the `-s` allocation cells and the `total` line are scaled (`-h`
+    /// / `--si` / `--block-size` / `-k`). Default: 1024-byte units.
+    pub block_size: SizeFormat,
     /// Omit the owner column from the long format (`-g`).
     pub hide_owner: bool,
-    /// Omit the group column from the long format (`-o`).
+    /// Omit the group column from the long format (`-o` / `-G` /
+    /// `--no-group`). Note `-o` also selects the long format, whereas `-G`
+    /// only drops the column and has no effect outside the long format.
     pub hide_group: bool,
+    /// Print the author column in the long format (`--author`). TAIRiX has
+    /// no separate author, so — as on any normal system the GNU tool runs
+    /// on — the author is the owning user; the column repeats the numeric
+    /// owner, placed after the owner and before the group.
+    pub author: bool,
     /// Which timestamp the long format shows and `-t` sorts by (`-c` / `-u`
     /// / `--time`).
     pub time_field: TimeField,
@@ -190,6 +321,23 @@ pub struct Options {
     /// each group (`--group-directories-first`). Directories come first
     /// regardless of `-r` — the GNU behaviour.
     pub group_directories_first: bool,
+    /// Column-grid tab stop (`-T` / `--tabsize`); `0` pads columns with
+    /// spaces only. Default: 8. Only the `-C` / `-x` arrangements use it,
+    /// exactly as the GNU tool advances between columns with tabs.
+    pub tabsize: usize,
+    /// Terminate each output line with NUL instead of newline (`--zero`).
+    /// Also selects, as overridable defaults, the single-column
+    /// arrangement, literal quoting, and shown control characters — the GNU
+    /// `--zero` posture.
+    pub zero: bool,
+}
+
+impl Options {
+    /// Whether the long format ([`Format::Long`]) is selected.
+    #[must_use]
+    pub fn is_long(self) -> bool {
+        matches!(self.format, Some(Format::Long))
+    }
 }
 
 /// The name filters of one `ls` listing: the `-B` / `-I` / `--hide`
@@ -241,7 +389,6 @@ impl Options {
     /// The defaults of a bare `ls`.
     pub const DEFAULT: Self = Self {
         hidden: Hidden::Skip,
-        long: false,
         directory: false,
         recursive: false,
         reverse: false,
@@ -252,13 +399,17 @@ impl Options {
         quoting: None,
         hide_control_chars: None,
         size: false,
-        human_readable: false,
+        file_size: SizeFormat::BYTES,
+        block_size: SizeFormat::KIBI_BLOCKS,
         hide_owner: false,
         hide_group: false,
+        author: false,
         time_field: TimeField::Modified,
         time_style: TimeStyle::Locale,
         inode: false,
         group_directories_first: false,
+        tabsize: DEFAULT_TABSIZE,
+        zero: false,
     };
 }
 
@@ -285,9 +436,11 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is the GNU `ls` surface,
-/// `ls [-aABCcdFfghiIlmnopQrRsStUuvXx1] [-w cols] [-I PATTERN]`
+/// `ls [-aABCcdFfGghikIlmnopQrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+/// `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 /// `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-/// `[--full-time] [--group-directories-first] [--] [path...]`:
+/// `[--full-time] [--author] [--file-type] [--group-directories-first]`
+/// `[--zero] [--] [path...]`:
 ///
 /// * `-a` / `--all` — do not hide entries whose name begins with `.`.
 /// * `-A` / `--almost-all` — like `-a`, but never list `.` or `..`.
@@ -295,10 +448,33 @@ pub enum Command {
 /// * `-d` / `--directory` — list directory operands themselves.
 /// * `-F` / `--classify` — append `/` to directories and `*` to
 ///   executables.
+/// * `--file-type` / `--indicator-style=file-type` — append `/` to
+///   directories (and, on richer filesystems, a type indicator to other
+///   non-executables); like `-F` but never the executable `*`.
+/// * `--indicator-style=WORD` — the indicator suffix by name: `none`,
+///   `slash` (`-p`), `file-type` (`--file-type`), or `classify` (`-F`).
 /// * `-g` — long format without the owner column; implies `-l`.
-/// * `-h` / `--human-readable` — human-readable sizes in the long format
-///   (as in the GNU tool; short help is `-?` / `--help`).
+/// * `-G` / `--no-group` — omit the group column from the long format.
+///   Unlike `-o` it does *not* select the long format on its own.
+/// * `--author` — with the long format, print the author (the owning user)
+///   after the owner and before the group.
+/// * `-h` / `--human-readable` — human-readable sizes (base 1024, e.g.
+///   `4.9K`), for both the long-format file sizes and the `-s` blocks (as
+///   in the GNU tool; short help is `-?` / `--help`).
+/// * `--si` — like `-h` but powers of 1000 (e.g. `5.0k`).
+/// * `-k` / `--kibibytes` — use 1024-byte blocks for the `-s` cells and the
+///   directory `total` (TAIRiX's default, so this confirms rather than
+///   changes the output; a size option overrides it).
+/// * `--block-size=SIZE` — scale both the file sizes and the `-s` blocks by
+///   SIZE: a plain integer (bytes), or a unit `K`/`M`/`G`/`T`/`P`/`E`
+///   (1024-based), a `KiB`-form (1024-based), or a `KB`-form (1000-based),
+///   optionally with an integer coefficient. A bare unit prints its
+///   suffix; a coefficient suppresses it. A malformed SIZE is a usage
+///   error (fail closed).
 /// * `-l` — long format.
+/// * `--format=WORD` — the arrangement by name: `long` (`-l`) / `verbose`,
+///   `single-column` (`-1`), `vertical` (`-C`), `across` / `horizontal`
+///   (`-x`), or `commas` (`-m`).
 /// * `-m` — comma-separated names, wrapped to the output width.
 /// * `-n` / `--numeric-uid-gid` — long format with numeric owner and
 ///   group; implies `-l` (owner and group are always numeric here — see
@@ -322,8 +498,9 @@ pub enum Command {
 ///   default otherwise). Only affects the non-escaping styles.
 /// * `-r` / `--reverse` — reverse the sort order.
 /// * `-R` / `--recursive` — list subdirectories recursively.
-/// * `-s` / `--size` — print each entry's allocated size in 1024-byte
-///   blocks (scaled by `-h`), with a `total` line per directory block.
+/// * `-s` / `--size` — print each entry's allocated size in blocks (scaled
+///   by `-h` / `--si` / `--block-size` / `-k`), with a `total` line per
+///   directory block.
 /// * `-S` — sort by size, largest first.
 /// * `-t` — sort by the selected timestamp, newest first.
 /// * `-U` — do not sort; list entries in directory order.
@@ -357,9 +534,14 @@ pub enum Command {
 ///   `locale` (the default), `long-iso`, `full-iso`, or `iso`. A custom
 ///   `+FORMAT` style is refused (fail closed; a documented divergence).
 /// * `--full-time` — like `-l --time-style=full-iso`.
+/// * `-T` / `--tabsize <cols>` — set the column-grid tab stop (default 8;
+///   `0` pads with spaces only).
 /// * `-w` / `--width <cols>` — set the output width; `0` means unlimited.
 /// * `-x` — list entries in columns, filled left-to-right.
 /// * `-1` — one name per line.
+/// * `--zero` — end each output line with NUL, not newline; also selects
+///   (overridably) the single-column arrangement, literal quoting, and
+///   shown control characters.
 /// * `-?` / `--help` — the reserved short-help switches (plans/APPS.md §4;
 ///   they win immediately).
 /// * `--` — end option parsing; every later argument is a path.
@@ -369,11 +551,12 @@ pub enum Command {
 ///
 /// Short options may be combined into one argument (e.g. `-la` is
 /// `-l -a`); an unrecognised letter anywhere in such a cluster is a usage
-/// error. `-w` takes the rest of its cluster as its value (`-w80`), or the
-/// next argument (`-w 80`) when it ends the cluster. The last of
-/// `-1` / `-C` / `-x` / `-m` wins; any of `-l` / `-n` / `-g` / `-o`
-/// selects the long format regardless of order; the later of `-p` / `-F`
-/// wins.
+/// error. `-w`, `-T`, and `-I` each take the rest of their cluster as their
+/// value (`-w80`), or the next argument (`-w 80`) when they end the
+/// cluster. The last of `-l` / `-1` / `-C` / `-x` / `-m` (and the
+/// `--format` words) wins, with one GNU exception: `-1` has no effect
+/// after `-l` (so `-l -1` stays long). The later of `-p` / `-F` /
+/// `--file-type` / `--indicator-style` wins.
 ///
 /// With no path operand the single path is the current directory (`.`).
 ///
@@ -419,6 +602,7 @@ pub fn parse(args: &[&str]) -> Result<Command, LsError> {
         paths.push(String::from(arg));
     }
     state.resolve_sort();
+    state.resolve_sizes();
     if paths.is_empty() {
         paths.push(String::from("."));
     }
@@ -440,6 +624,13 @@ struct ParseState {
     filters: Filters,
     explicit_sort: Option<Sort>,
     time_selected: bool,
+    /// `-k` / `--kibibytes` was seen: force 1024-byte blocks for the `-s` /
+    /// `total` scaling unless a size option already set it.
+    kibibytes: bool,
+    /// A size option (`-h` / `--si` / `--block-size`) set the scaling, so
+    /// `-k` yields to it — the GNU precedence (`-k` never overrides an
+    /// explicit size choice).
+    size_explicit: bool,
 }
 
 impl Default for ParseState {
@@ -449,6 +640,8 @@ impl Default for ParseState {
             filters: Filters::default(),
             explicit_sort: None,
             time_selected: false,
+            kibibytes: false,
+            size_explicit: false,
         }
     }
 }
@@ -457,12 +650,24 @@ impl ParseState {
     /// Apply the GNU sort rule once the whole line has been parsed.
     fn resolve_sort(&mut self) {
         self.options.sort = self.explicit_sort.unwrap_or({
-            if self.time_selected && !self.options.long {
+            if self.time_selected && !self.options.is_long() {
                 Sort::Time
             } else {
                 Sort::Name
             }
         });
+    }
+
+    /// Apply the GNU `-k` rule once the whole line has been parsed: force
+    /// the block (`-s` / `total`) scaling to 1024-byte units, but only when
+    /// no `-h` / `--si` / `--block-size` already set it (an explicit size
+    /// choice always wins over `-k`). TAIRiX has no `BLOCK_SIZE` environment
+    /// default, so `-k` confirms the existing default rather than changing
+    /// it — the compatible, honest behaviour.
+    fn resolve_sizes(&mut self) {
+        if self.kibibytes && !self.size_explicit {
+            self.options.block_size = SizeFormat::KIBI_BLOCKS;
+        }
     }
 }
 
@@ -492,8 +697,21 @@ fn apply_long<'a>(
         "almost-all" => options.hidden = Hidden::AlmostAll,
         "directory" => options.directory = true,
         "classify" => options.indicator = Indicator::Classify,
-        "human-readable" => options.human_readable = true,
-        "numeric-uid-gid" => options.long = true,
+        "file-type" => options.indicator = Indicator::FileType,
+        "human-readable" => {
+            options.file_size = SizeFormat::Human { si: false };
+            options.block_size = SizeFormat::Human { si: false };
+            state.size_explicit = true;
+        }
+        "si" => {
+            options.file_size = SizeFormat::Human { si: true };
+            options.block_size = SizeFormat::Human { si: true };
+            state.size_explicit = true;
+        }
+        "kibibytes" => state.kibibytes = true,
+        "numeric-uid-gid" => options.format = Some(Format::Long),
+        "no-group" => options.hide_group = true,
+        "author" => options.author = true,
         "literal" => options.quoting = Some(QuotingStyle::Literal),
         "quote-name" => options.quoting = Some(QuotingStyle::C),
         "escape" => options.quoting = Some(QuotingStyle::Escape),
@@ -504,6 +722,7 @@ fn apply_long<'a>(
         "reverse" => options.reverse = true,
         "recursive" => options.recursive = true,
         "inode" => options.inode = true,
+        "zero" => options.zero = true,
         "ignore-backups" => state.filters.ignore_backups = true,
         "ignore" => {
             state
@@ -520,10 +739,29 @@ fn apply_long<'a>(
             return Ok(false);
         }
         "full-time" => {
-            options.long = true;
+            options.format = Some(Format::Long);
             options.time_style = TimeStyle::FullIso;
         }
         "help" => return Ok(true),
+        "block-size" => {
+            let size = parse_block_size(long_value(inline, args)?)?;
+            options.file_size = size;
+            options.block_size = size;
+            state.size_explicit = true;
+            return Ok(false);
+        }
+        "format" => {
+            options.format = Some(parse_format(long_value(inline, args)?)?);
+            return Ok(false);
+        }
+        "indicator-style" => {
+            options.indicator = parse_indicator_style(long_value(inline, args)?)?;
+            return Ok(false);
+        }
+        "tabsize" => {
+            options.tabsize = parse_width(long_value(inline, args)?)?;
+            return Ok(false);
+        }
         "time" => {
             options.time_field = parse_time_field(long_value(inline, args)?)?;
             state.time_selected = true;
@@ -574,16 +812,22 @@ fn apply_short<'a>(
             'd' => options.directory = true,
             'F' => options.indicator = Indicator::Classify,
             'g' => {
-                options.long = true;
+                options.format = Some(Format::Long);
                 options.hide_owner = true;
             }
-            'h' => options.human_readable = true,
+            'G' => options.hide_group = true,
+            'h' => {
+                options.file_size = SizeFormat::Human { si: false };
+                options.block_size = SizeFormat::Human { si: false };
+                state.size_explicit = true;
+            }
+            'k' => state.kibibytes = true,
             // `-n` selects the long format like `-l`; its numeric
             // owner/group is already the only output.
-            'l' | 'n' => options.long = true,
+            'l' | 'n' => options.format = Some(Format::Long),
             'm' => options.format = Some(Format::Commas),
             'o' => {
-                options.long = true;
+                options.format = Some(Format::Long);
                 options.hide_group = true;
             }
             'p' => options.indicator = Indicator::Slash,
@@ -603,7 +847,9 @@ fn apply_short<'a>(
             // a later long/size/sort flag in the same line overrides it.
             'f' => {
                 options.hidden = Hidden::All;
-                options.long = false;
+                if options.is_long() {
+                    options.format = None;
+                }
                 options.size = false;
                 state.explicit_sort = Some(Sort::None);
             }
@@ -643,8 +889,26 @@ fn apply_short<'a>(
                     .push(Pattern::new(raw).map_err(|_| LsError::Usage)?);
                 break;
             }
+            // `-T` takes a value like `-w`: the rest of the cluster, or the
+            // next argument when it ends the cluster.
+            'T' => {
+                let raw = if rest.is_empty() {
+                    *args.next().ok_or(LsError::Usage)?
+                } else {
+                    rest
+                };
+                options.tabsize = parse_width(raw)?;
+                break;
+            }
             'x' => options.format = Some(Format::Across),
-            '1' => options.format = Some(Format::OnePerLine),
+            // `-1` has no effect after `-l`: the long format wins (the GNU
+            // rule), so a column arrangement is only selected when the long
+            // format is not already chosen.
+            '1' => {
+                if !options.is_long() {
+                    options.format = Some(Format::OnePerLine);
+                }
+            }
             '?' => return Ok(true),
             _ => return Err(LsError::Usage),
         }
@@ -724,13 +988,106 @@ fn parse_quoting_style(raw: &str) -> Result<QuotingStyle, LsError> {
     }
 }
 
+/// Parse a `--format=WORD` value into the [`Format`] it selects. The words
+/// are the GNU set; anything else is a usage error (fail closed), never a
+/// silently ignored token.
+fn parse_format(raw: &str) -> Result<Format, LsError> {
+    match raw {
+        "long" | "verbose" => Ok(Format::Long),
+        "single-column" => Ok(Format::OnePerLine),
+        "vertical" => Ok(Format::Columns),
+        "across" | "horizontal" => Ok(Format::Across),
+        "commas" => Ok(Format::Commas),
+        _ => Err(LsError::Usage),
+    }
+}
+
+/// Parse an `--indicator-style=WORD` value into the [`Indicator`] it
+/// selects. The words are the GNU set; anything else is a usage error (fail
+/// closed), never a silently ignored token.
+fn parse_indicator_style(raw: &str) -> Result<Indicator, LsError> {
+    match raw {
+        "none" => Ok(Indicator::None),
+        "slash" => Ok(Indicator::Slash),
+        "file-type" => Ok(Indicator::FileType),
+        "classify" => Ok(Indicator::Classify),
+        _ => Err(LsError::Usage),
+    }
+}
+
+/// Parse a `--block-size=SIZE` value into a [`SizeFormat::Scaled`].
+///
+/// The grammar is GNU's: an optional decimal coefficient (at least `1`)
+/// followed by an optional unit. The unit letter is `K`/`M`/`G`/`T`/`P`/`E`
+/// (case-insensitive); it may be followed by `iB` (the binary spelling, e.g.
+/// `KiB` = 1024) or `B` (the decimal spelling, e.g. `kB` = 1000). A bare
+/// letter (no `iB`/`B`) is the binary unit (`K` = 1024). When a numeric
+/// coefficient is given, GNU prints no unit suffix; a bare unit prints its
+/// canonical suffix. A zero or missing coefficient, an unknown or malformed
+/// suffix, an empty value, or an overflow is a usage error (fail closed).
+fn parse_block_size(raw: &str) -> Result<SizeFormat, LsError> {
+    let digits_end = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
+    let (digits, unit) = raw.split_at(digits_end);
+    let has_coefficient = !digits.is_empty();
+    let coefficient: u64 = if has_coefficient {
+        // A leading `0` (or an overflow) is rejected: a block size is at
+        // least one byte.
+        match digits.parse::<u64>() {
+            Ok(value) if value >= 1 => value,
+            _ => return Err(LsError::Usage),
+        }
+    } else {
+        1
+    };
+
+    if unit.is_empty() {
+        // A bare number scales by that many bytes with no suffix
+        // (`--block-size=1024`); a completely empty SIZE is invalid.
+        if !has_coefficient {
+            return Err(LsError::Usage);
+        }
+        return Ok(SizeFormat::Scaled {
+            unit: coefficient,
+            suffix: None,
+        });
+    }
+
+    // The unit is a power letter optionally followed by `iB` or `B`.
+    let mut chars = unit.chars();
+    let letter = chars.next().ok_or(LsError::Usage)?;
+    let power = match letter.to_ascii_uppercase() {
+        'K' => 1u32,
+        'M' => 2,
+        'G' => 3,
+        'T' => 4,
+        'P' => 5,
+        'E' => 6,
+        _ => return Err(LsError::Usage),
+    };
+    let (base, form) = match chars.as_str() {
+        "" => (1024u64, SuffixForm::Iec),
+        "iB" => (1024, SuffixForm::IecLong),
+        "B" => (1000, SuffixForm::Si),
+        _ => return Err(LsError::Usage),
+    };
+    let multiplier = base.checked_pow(power).ok_or(LsError::Usage)?;
+    let unit = coefficient.checked_mul(multiplier).ok_or(LsError::Usage)?;
+    // GNU prints the unit suffix only for a bare unit (no coefficient).
+    let suffix = (!has_coefficient).then_some(UnitSuffix {
+        letter: letter.to_ascii_uppercase() as u8,
+        form,
+    });
+    Ok(SizeFormat::Scaled { unit, suffix })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField,
-        TimeStyle,
+        parse, Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat,
+        Sort, TimeField, TimeStyle,
     };
     use crate::error::LsError;
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
     use tairix_glob::Pattern;
@@ -767,8 +1124,9 @@ mod tests {
             parse(&["-lh"]),
             Ok(list(
                 Options {
-                    long: true,
-                    human_readable: true,
+                    format: Some(Format::Long),
+                    file_size: SizeFormat::Human { si: false },
+                    block_size: SizeFormat::Human { si: false },
                     ..Options::DEFAULT
                 },
                 &["."],
@@ -778,7 +1136,8 @@ mod tests {
             parse(&["--human-readable"]),
             Ok(list(
                 Options {
-                    human_readable: true,
+                    file_size: SizeFormat::Human { si: false },
+                    block_size: SizeFormat::Human { si: false },
                     ..Options::DEFAULT
                 },
                 &["."],
@@ -802,7 +1161,7 @@ mod tests {
             parse(&["-l"]),
             Ok(list(
                 Options {
-                    long: true,
+                    format: Some(Format::Long),
                     ..Options::DEFAULT
                 },
                 &["."],
@@ -813,7 +1172,7 @@ mod tests {
             Ok(list(
                 Options {
                     hidden: Hidden::All,
-                    long: true,
+                    format: Some(Format::Long),
                     ..Options::DEFAULT
                 },
                 &["."],
@@ -853,7 +1212,7 @@ mod tests {
             parse(&["-g"]),
             Ok(list(
                 Options {
-                    long: true,
+                    format: Some(Format::Long),
                     hide_owner: true,
                     ..Options::DEFAULT
                 },
@@ -864,7 +1223,7 @@ mod tests {
             parse(&["-o"]),
             Ok(list(
                 Options {
-                    long: true,
+                    format: Some(Format::Long),
                     hide_group: true,
                     ..Options::DEFAULT
                 },
@@ -880,7 +1239,7 @@ mod tests {
                 parse(&args),
                 Ok(list(
                     Options {
-                        long: true,
+                        format: Some(Format::Long),
                         ..Options::DEFAULT
                     },
                     &["."],
@@ -961,7 +1320,7 @@ mod tests {
             parse(&["-lw80"]),
             Ok(list(
                 Options {
-                    long: true,
+                    format: Some(Format::Long),
                     width: Some(80),
                     ..Options::DEFAULT
                 },
@@ -1241,7 +1600,7 @@ mod tests {
             parse(&["-lc"]),
             Ok(list(
                 Options {
-                    long: true,
+                    format: Some(Format::Long),
                     sort: Sort::Name,
                     time_field: TimeField::Changed,
                     ..Options::DEFAULT
@@ -1253,7 +1612,7 @@ mod tests {
             parse(&["-ltc"]),
             Ok(list(
                 Options {
-                    long: true,
+                    format: Some(Format::Long),
                     sort: Sort::Time,
                     time_field: TimeField::Changed,
                     ..Options::DEFAULT
@@ -1387,7 +1746,7 @@ mod tests {
             Ok(list(
                 Options {
                     hidden: Hidden::All,
-                    long: true,
+                    format: Some(Format::Long),
                     sort: Sort::Time,
                     ..Options::DEFAULT
                 },
@@ -1450,7 +1809,7 @@ mod tests {
             parse(&["--full-time"]),
             Ok(list(
                 Options {
-                    long: true,
+                    format: Some(Format::Long),
                     time_style: TimeStyle::FullIso,
                     ..Options::DEFAULT
                 },
@@ -1469,7 +1828,7 @@ mod tests {
             Ok(list(
                 Options {
                     hidden: Hidden::All,
-                    long: true,
+                    format: Some(Format::Long),
                     indicator: Indicator::Classify,
                     ..Options::DEFAULT
                 },
@@ -1573,6 +1932,321 @@ mod tests {
         assert_eq!(parse(&["--", "-l"]), Ok(list(Options::DEFAULT, &["-l"])));
     }
 
+    fn size_of(args: &[&str]) -> (SizeFormat, SizeFormat) {
+        match parse(args) {
+            Ok(Command::List { options, .. }) => (options.file_size, options.block_size),
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn human_readable_and_si_set_both_scalings() {
+        for args in [["-h"], ["--human-readable"]] {
+            assert_eq!(
+                size_of(&args),
+                (
+                    SizeFormat::Human { si: false },
+                    SizeFormat::Human { si: false }
+                )
+            );
+        }
+        assert_eq!(
+            size_of(&["--si"]),
+            (
+                SizeFormat::Human { si: true },
+                SizeFormat::Human { si: true }
+            )
+        );
+        // The last size flag wins for both scalings.
+        assert_eq!(
+            size_of(&["-h", "--si"]),
+            (
+                SizeFormat::Human { si: true },
+                SizeFormat::Human { si: true }
+            )
+        );
+    }
+
+    #[test]
+    fn kibibytes_confirms_the_default_and_yields_to_a_size_option() {
+        // `-k` alone leaves the defaults (bytes file / 1024-block).
+        assert_eq!(
+            size_of(&["-k"]),
+            (SizeFormat::BYTES, SizeFormat::KIBI_BLOCKS)
+        );
+        // `-k` never overrides an explicit `-h`, in either order.
+        for args in [["-h", "-k"], ["-k", "-h"]] {
+            assert_eq!(
+                size_of(&args),
+                (
+                    SizeFormat::Human { si: false },
+                    SizeFormat::Human { si: false }
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn block_size_scales_both_columns() {
+        // A plain integer scales by bytes with no suffix.
+        let scaled = SizeFormat::Scaled {
+            unit: 1024,
+            suffix: None,
+        };
+        assert_eq!(size_of(&["--block-size=1024"]), (scaled, scaled));
+        // `--block-size=1` is plain bytes.
+        assert_eq!(
+            size_of(&["--block-size=1"]),
+            (SizeFormat::BYTES, SizeFormat::BYTES)
+        );
+    }
+
+    #[test]
+    fn block_size_units_carry_their_suffix() {
+        // A bare unit keeps its canonical printed suffix; `KiB` and `kB`
+        // differ from `K` in spelling and base.
+        let cases: &[(&str, u64, &str)] = &[
+            ("K", 1024, "K"),
+            ("KiB", 1024, "KiB"),
+            ("kB", 1000, "kB"),
+            ("M", 1024 * 1024, "M"),
+            ("MiB", 1024 * 1024, "MiB"),
+            ("MB", 1_000_000, "MB"),
+            ("G", 1024 * 1024 * 1024, "G"),
+        ];
+        for &(word, unit, text) in cases {
+            let (file, block) = size_of(&[&format!("--block-size={word}")]);
+            match file {
+                SizeFormat::Scaled {
+                    unit: got,
+                    suffix: Some(suffix),
+                } => {
+                    assert_eq!(got, unit, "{word} unit");
+                    assert_eq!(suffix.text(), text, "{word} suffix");
+                }
+                other => panic!("{word} -> {other:?}"),
+            }
+            assert_eq!(file, block, "{word} scales both columns");
+        }
+    }
+
+    #[test]
+    fn block_size_coefficient_suppresses_the_suffix() {
+        // A coefficient multiplies the unit and drops the printed suffix.
+        assert_eq!(
+            size_of(&["--block-size=2K"]),
+            (
+                SizeFormat::Scaled {
+                    unit: 2048,
+                    suffix: None,
+                },
+                SizeFormat::Scaled {
+                    unit: 2048,
+                    suffix: None,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn a_malformed_block_size_is_a_usage_error() {
+        for bad in ["", "0", "-1", "1.5K", "1x", "foo", "b", "Ki", "KIB", "Kb"] {
+            assert_eq!(
+                parse(&[&format!("--block-size={bad}")]),
+                Err(LsError::Usage),
+                "--block-size={bad}"
+            );
+        }
+        // Missing value fails closed too.
+        assert_eq!(parse(&["--block-size"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn format_word_selects_the_arrangement() {
+        for (word, format) in [
+            ("long", Format::Long),
+            ("verbose", Format::Long),
+            ("single-column", Format::OnePerLine),
+            ("vertical", Format::Columns),
+            ("across", Format::Across),
+            ("horizontal", Format::Across),
+            ("commas", Format::Commas),
+        ] {
+            assert_eq!(
+                parse(&[&format!("--format={word}")]),
+                Ok(list(
+                    Options {
+                        format: Some(format),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{word}"
+            );
+        }
+        assert_eq!(parse(&["--format=bogus"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn one_per_line_has_no_effect_after_long() {
+        // The GNU rule: `-l -1` stays long, but `-l -C` becomes columns and
+        // `--format=single-column` overrides long unconditionally.
+        assert_eq!(
+            parse(&["-l", "-1"]),
+            Ok(list(
+                Options {
+                    format: Some(Format::Long),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(
+            parse(&["-l", "-C"]),
+            Ok(list(
+                Options {
+                    format: Some(Format::Columns),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(
+            parse(&["-l", "--format=single-column"]),
+            Ok(list(
+                Options {
+                    format: Some(Format::OnePerLine),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn indicator_style_and_file_type_select_the_suffix() {
+        for (word, indicator) in [
+            ("none", Indicator::None),
+            ("slash", Indicator::Slash),
+            ("file-type", Indicator::FileType),
+            ("classify", Indicator::Classify),
+        ] {
+            assert_eq!(
+                parse(&[&format!("--indicator-style={word}")]),
+                Ok(list(
+                    Options {
+                        indicator,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{word}"
+            );
+        }
+        assert_eq!(
+            parse(&["--file-type"]),
+            Ok(list(
+                Options {
+                    indicator: Indicator::FileType,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        // The later indicator flag wins.
+        assert_eq!(
+            parse(&["-F", "--file-type"]),
+            Ok(list(
+                Options {
+                    indicator: Indicator::FileType,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(parse(&["--indicator-style=bogus"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn no_group_drops_the_column_without_selecting_long() {
+        for args in [["-G"], ["--no-group"]] {
+            assert_eq!(
+                parse(&args),
+                Ok(list(
+                    Options {
+                        hide_group: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn author_sets_its_flag() {
+        assert_eq!(
+            parse(&["-l", "--author"]),
+            Ok(list(
+                Options {
+                    format: Some(Format::Long),
+                    author: true,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn tabsize_parses_in_every_spelling() {
+        for args in [
+            &["-T", "4"][..],
+            &["-T4"][..],
+            &["--tabsize", "4"][..],
+            &["--tabsize=4"][..],
+        ] {
+            assert_eq!(
+                parse(args),
+                Ok(list(
+                    Options {
+                        tabsize: 4,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{args:?}"
+            );
+        }
+        // `-T0` disables tabs; a bad value fails closed.
+        assert_eq!(
+            parse(&["-T0"]),
+            Ok(list(
+                Options {
+                    tabsize: 0,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(parse(&["-T", "wide"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--tabsize"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn zero_sets_its_flag() {
+        assert_eq!(
+            parse(&["--zero"]),
+            Ok(list(
+                Options {
+                    zero: true,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
     /// Every locale's `OPTIONS` section documents exactly the switches this
     /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
     /// language-neutral, so each translated document must carry the same
@@ -1582,7 +2256,6 @@ mod tests {
     #[test]
     fn help_documents_the_parser_switches() {
         extern crate std;
-        use alloc::format;
         use std::fs;
 
         let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
@@ -1595,9 +2268,17 @@ mod tests {
                 "`-A, --almost-all`",
                 "`-d, --directory`",
                 "`-F, --classify`",
+                "`--file-type`",
+                "`--indicator-style=WORD`",
                 "`-g`",
+                "`-G, --no-group`",
+                "`--author`",
                 "`-h, --human-readable`",
+                "`--si`",
+                "`-k, --kibibytes`",
+                "`--block-size=SIZE`",
                 "`-l`",
+                "`--format=WORD`",
                 "`-m`",
                 "`-n, --numeric-uid-gid`",
                 "`-o`",
@@ -1630,8 +2311,10 @@ mod tests {
                 "`--full-time`",
                 "`-C`",
                 "`-x`",
+                "`-T, --tabsize <cols>`",
                 "`-w, --width <cols>`",
                 "`-1`",
+                "`--zero`",
                 "`-?`",
             ] {
                 assert!(

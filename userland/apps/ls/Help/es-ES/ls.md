@@ -4,10 +4,11 @@ ls — listar el contenido de los directorios
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -122,6 +123,33 @@ se separan con una línea en blanco.
 - `-1` — un nombre por línea (el comportamiento predeterminado).
 - `-?` — mostrar la ayuda corta de este comando (`--help` es la
   forma larga).
+
+- `--file-type` — añadir `/` a los directorios, pero nunca `*` a los
+  ejecutables (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — elegir el sufijo indicador por nombre:
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) o `classify`
+  (`-F`).
+- `-G, --no-group` — omitir la columna de grupo del formato largo; a
+  diferencia de `-o`, no selecciona el formato largo por sí solo.
+- `--author` — con `-l`, mostrar la columna de autor (el usuario
+  propietario) después del propietario y antes del grupo.
+- `--si` — como `-h` pero en potencias de 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — usar bloques de 1024 bytes para las celdas `-s`
+  y la línea `total` (ya es el valor predeterminado; una opción de
+  tamaño tiene prioridad).
+- `--block-size=SIZE` — escalar los tamaños de archivo y los bloques
+  `-s` por SIZE: un entero (bytes), o una unidad `K`/`M`/`G`/`T`/`P`/
+  `E` (1024), una unidad `KiB` (1024) o una unidad `KB` (1000),
+  opcionalmente con un coeficiente entero.
+- `--format=WORD` — elegir la disposición por nombre: `long` (`-l`) o
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` u
+  `horizontal` (`-x`), o `commas` (`-m`).
+- `-T, --tabsize <cols>` — establecer el paso de tabulación de la
+  cuadrícula de columnas (8 por defecto); `0` rellena solo con
+  espacios.
+- `--zero` — terminar cada línea con NUL en lugar de nueva línea;
+  también selecciona una sola columna, entrecomillado literal y
+  caracteres de control visibles.
 
 ## EXAMPLES
 

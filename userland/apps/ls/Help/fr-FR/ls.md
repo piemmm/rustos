@@ -4,10 +4,11 @@ ls — lister le contenu des répertoires
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -126,6 +127,32 @@ blocs sont séparés par une ligne vide.
 - `-1` — un nom par ligne (le comportement par défaut).
 - `-?` — afficher l'aide courte de cette commande (`--help` est la
   forme longue).
+
+- `--file-type` — ajouter `/` aux répertoires, mais jamais `*` aux
+  exécutables (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — choisir le suffixe indicateur par nom :
+  `none`, `slash` (`-p`), `file-type` (`--file-type`) ou `classify`
+  (`-F`).
+- `-G, --no-group` — omettre la colonne de groupe du format long ;
+  contrairement à `-o`, ne sélectionne pas le format long à lui seul.
+- `--author` — avec `-l`, afficher la colonne auteur (l'utilisateur
+  propriétaire) après le propriétaire et avant le groupe.
+- `--si` — comme `-h` mais en puissances de 1000 (`1.1k`, `23M`).
+- `-k, --kibibytes` — utiliser des blocs de 1024 octets pour les
+  cellules `-s` et la ligne `total` (déjà la valeur par défaut ; une
+  option de taille l'emporte).
+- `--block-size=SIZE` — mettre à l'échelle les tailles de fichiers et
+  les blocs `-s` par SIZE : un entier (octets), ou une unité
+  `K`/`M`/`G`/`T`/`P`/`E` (1024), une unité `KiB` (1024) ou une unité
+  `KB` (1000), éventuellement avec un coefficient entier.
+- `--format=WORD` — choisir la disposition par nom : `long` (`-l`) ou
+  `verbose`, `single-column` (`-1`), `vertical` (`-C`), `across` ou
+  `horizontal` (`-x`), ou `commas` (`-m`).
+- `-T, --tabsize <cols>` — définir le pas de tabulation de la grille de
+  colonnes (8 par défaut) ; `0` remplit uniquement avec des espaces.
+- `--zero` — terminer chaque ligne par NUL au lieu d'un saut de ligne ;
+  sélectionne aussi la colonne unique, la citation littérale et
+  l'affichage des caractères de contrôle.
 
 ## EXAMPLES
 

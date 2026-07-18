@@ -4,10 +4,11 @@ ls — سرد محتويات الأدلة
 
 ## SYNOPSIS
 
-`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+`[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
-`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
-`[--] [path...]`
+`[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
+`[--group-directories-first] [--zero] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -107,6 +108,30 @@ ls — سرد محتويات الأدلة
 - `-1` — اسم واحد في كل سطر (الافتراضي).
 - `-?` — عرض المساعدة القصيرة لهذا الأمر نفسه (`--help` هي الصيغة
   الطويلة).
+
+- `--file-type` — إلحاق `/` بالمجلدات، لكن ليس `*` بالملفات
+  القابلة للتنفيذ (`--indicator-style=file-type`).
+- `--indicator-style=WORD` — اختيار لاحقة المؤشر بالاسم:
+  `none` أو `slash` (`-p`) أو `file-type` (`--file-type`) أو
+  `classify` (`-F`).
+- `-G, --no-group` — حذف عمود المجموعة من التنسيق الطويل؛
+  بخلاف `-o` لا يختار التنسيق الطويل بمفرده.
+- `--author` — مع `-l`، طباعة عمود المؤلف (المستخدم المالك)
+  بعد المالك وقبل المجموعة.
+- `--si` — مثل `-h` لكن بقوى 1000 (`1.1k`، `23M`).
+- `-k, --kibibytes` — استخدام كتل 1024 بايت لخلايا `-s` وسطر
+  `total` (هذا هو الافتراضي بالفعل؛ خيار الحجم له الأولوية).
+- `--block-size=SIZE` — تحجيم أحجام الملفات وكتل `-s` بمقدار SIZE:
+  عدد صحيح (بايت)، أو وحدة `K`/`M`/`G`/`T`/`P`/`E` (1024)، أو
+  وحدة `KiB` (1024)، أو وحدة `KB` (1000)، مع معامل عددي
+  اختياري.
+- `--format=WORD` — اختيار التخطيط بالاسم: `long` (`-l`) أو
+  `verbose`، `single-column` (`-1`)، `vertical` (`-C`)،
+  `across`/`horizontal` (`-x`)، أو `commas` (`-m`).
+- `-T, --tabsize <cols>` — تعيين خطوة الجدولة لشبكة الأعمدة
+  (الافتراضي 8)؛ `0` يملأ بالمسافات فقط.
+- `--zero` — إنهاء كل سطر بـ NUL بدلاً من سطر جديد؛ ويختار أيضًا
+  العمود الواحد والاقتباس الحرفي وإظهار أحرف التحكم.
 
 ## EXAMPLES
 
