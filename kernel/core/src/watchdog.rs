@@ -1,100 +1,157 @@
-//! Per-CPU stall watchdog: report to the debug console when a CPU stops
-//! making scheduler progress.
+//! First-class CPU-lockup watchdog: detect, diagnose, and try to recover
+//! from both *soft* and *hard* CPU lockups, and make each one loud on the
+//! debug console with enough context to explain the *why*.
 //!
 //! # What it detects
 //!
-//! A **CPU stall** here is a soft lockup: a CPU that keeps executing but
-//! does not return to the scheduler for far longer than any legitimate
-//! bounded operation should take — a runaway in-kernel loop, a task that
-//! never yields, a lock held across a wedged device access. The kernel is
-//! non-preemptible while in kernel mode, so such a CPU keeps its held
-//! locks and never reaches the dispatch loop; nothing else on that CPU
-//! runs. Left unreported it looks, from the outside, like the machine has
-//! silently seized. This watchdog makes it *loud* on the serial debug
-//! output (fail loud) so the stall is diagnosable instead of mysterious.
+//! * **Soft lockup** — a CPU that keeps taking interrupts but stops
+//!   returning to the scheduler for far longer than any bounded operation
+//!   should take: a runaway in-kernel loop, a task that never yields, a
+//!   lock held across a wedged access. The CPU is alive at the trap level,
+//!   so its own timer path can observe it.
+//! * **Hard lockup** — a CPU that has stopped taking even the
+//!   non-maskable watchdog sample while it is running work: wedged with
+//!   maskable interrupts masked, an interrupt storm, or a dead core.
+//!   The victim never runs its own tick, so **another** CPU must observe
+//!   it over a channel the victim cannot mask (the port's pseudo-NMI: the
+//!   aarch64 FIQ). This is the classic hard lockup a soft detector is
+//!   structurally blind to.
 //!
-//! # How it works — two sites, one clock
+//! # The two heartbeats and the activity state
 //!
-//! The mechanism is the tickless-kernel analogue of Linux's softlockup
-//! detector, adapted to TAIRiX's one-shot timer and dispatch loop:
+//! Every CPU keeps, in its per-CPU `CpuState`:
 //!
-//! * **Heartbeat** — the dispatch loop calls [`note_progress`] on every
-//!   iteration, stamping this CPU's per-CPU slot with the current
-//!   monotonic time. One loop iteration means the scheduler ran and made
-//!   a decision, exactly as a Linux watchdog thread getting scheduled
-//!   means its CPU is healthy.
-//! * **Check** — the port's timer-tick path calls [`check_stall`] on
-//!   every fired one-shot. Interrupts stay deliverable while in-kernel
-//!   code runs (the kernel is fully preemptive at the interrupt boundary,
-//!   even though it does not context-switch mid-syscall), so the tick
-//!   still fires on a CPU whose task is looping without yielding. The
-//!   check compares now against the last heartbeat: once the gap exceeds
-//!   [`DEFAULT_STALL_THRESHOLD_NS`] the CPU is stalled.
+//! * a **progress** heartbeat ([`note_progress`]), stamped once per
+//!   dispatch-loop iteration — "the scheduler ran here"; the soft-lockup
+//!   basis;
+//! * a **liveness** heartbeat ([`on_watchdog_tick`]), stamped by the
+//!   port's non-maskable cadence sample (~[`tairix_arch_api::WATCHDOG_CADENCE_NS`])
+//!   — "this CPU is still taking the pseudo-NMI"; the hard-lockup basis;
+//! * an **activity** class ([`set_activity`]) — `Active` while it runs the
+//!   dispatch loop or a task, `Idle` while parked in `wfi`, `Offline`
+//!   before it comes online or after it leaves. Only an `Active` CPU owes
+//!   progress, so a legitimately parked or not-yet-online CPU is never
+//!   judged (fail closed).
 //!
-//! Both sites read the *same* monotonic clock ([`crate::waitq::WaitQueueArch::now_ns`]
-//! / the arch `monotonic_ns`), so the comparison is exact.
+//! # How a lockup is judged
 //!
-//! # Reporting discipline
+//! * The port's cadence sample calls [`on_watchdog_tick`] on its own CPU:
+//!   it stamps liveness, records what it interrupted (PC, task, processor
+//!   state) as that CPU's last-known context — the raw "why" — then runs a
+//!   **cross-CPU scan** of every *other* CPU:
+//!   - liveness frozen past the hard threshold while `Active` → **hard
+//!     lockup** (only this path can see it);
+//!   - otherwise, progress frozen past the soft threshold while `Active`
+//!     **and last seen in the kernel** → **soft lockup** (a CPU wedged in
+//!     the kernel even when it is the only runnable task; a lone,
+//!     preemptible *user* task owes no progress and is never flagged).
+//! * The CPU's own armed timer tick also calls [`check_stall`], the
+//!   same-CPU soft check that catches a *contended* CPU whose preemption
+//!   stopped making progress. Both share the per-episode latch, so a
+//!   lockup is reported exactly once whichever path sees it first.
 //!
-//! * Each stall episode is reported **once** (a per-CPU latch), never once
-//!   per tick — a stalled CPU takes many ticks, and a report per tick
-//!   would itself flood the console.
-//! * When a reported-stalled CPU makes progress again, the recovery is
-//!   reported once too, so a stall that clears leaves an honest,
-//!   self-closing record rather than a dangling "stuck forever" line.
-//! * The report is **allocation-free and lock-free**: it renders into
-//!   stack buffers and writes through the installed `Sink`, whose serial
-//!   backing is safe to drive from interrupt context (it refuses same-CPU
-//!   re-entrancy and falls back to a bounded direct write). This is why
-//!   the check can run in the timer ISR — the one place a stall is
-//!   observable, because the dispatcher by definition is not running.
+//! # Diagnosis and recovery
 //!
-//! # Fail closed
+//! A detection renders a rich, allocation-free record — the locked CPU,
+//! the observer, how long it has been silent, the last-known interrupted
+//! PC and processor state, and the running task — then asks the port to
+//! break it out best-effort ([`tairix_arch_api::WatchdogArch`]): a
+//! reschedule for a soft lockup, a directed non-maskable attention
+//! interrupt for a hard one. The recovery attempt and its honest outcome
+//! are themselves on the audit trail; a genuinely wedged core is reported
+//! `Unrecoverable`, never silently.
 //!
-//! Before the report sink is installed (early boot, host tests of
-//! unrelated paths), or on a CPU whose heartbeat has never been stamped,
-//! or for an out-of-range CPU id, the watchdog makes no judgement and
-//! emits nothing — it never fabricates a stall and never panics.
+//! # Cost and safety
+//!
+//! The hot-path additions are single relaxed atomic stores (one per
+//! dispatch, one per cadence sample), so normal execution is unperturbed.
+//! Detection and reporting are lock-free and allocation-free, safe to run
+//! from the non-maskable sample path even while a target CPU holds
+//! arbitrary locks. Before the report sink / clock / recovery handles are
+//! installed, or on a never-armed CPU, the watchdog emits nothing and
+//! never panics (fail closed).
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use tairix_kernel_sched_api::CpuId;
+use tairix_arch_api::{CpuId, RecoveryOutcome, WatchdogArch, WatchdogKind, WatchdogSample};
 use tairix_log::{Level, Sink};
 use tairix_sync::once::OnceCell;
-use tairix_util::fmt::format_u64;
+use tairix_util::fmt::format_hex_u64;
 
 use crate::audit::{emit, AuditEvent};
 use crate::cpu_state::{self, CpuState};
 
-/// How long a CPU may run without any scheduler progress before it is
-/// reported stalled, in nanoseconds (10 seconds).
+/// How long an `Active` CPU may run without any scheduler progress before
+/// it is reported **soft**-locked, in nanoseconds (10 seconds).
 ///
-/// This is a diagnostic policy value, not a resource capacity: no correct
-/// bounded kernel operation withholds the CPU from the scheduler for ten
-/// seconds, so a gap this large is a genuine soft lockup rather than a
-/// long-but-legitimate wait. It is deliberately generous so a heavily
-/// loaded but healthy machine is never reported, while a truly wedged CPU
-/// still surfaces within seconds. It lives here, once, as the single
-/// definition every port's tick path checks against.
-pub const DEFAULT_STALL_THRESHOLD_NS: u64 = 10_000_000_000;
+/// A diagnostic policy value, not a resource capacity: no correct bounded
+/// kernel operation withholds the CPU from the scheduler for ten seconds,
+/// so a gap this large is a genuine soft lockup rather than a
+/// long-but-legitimate wait. Deliberately generous so a heavily loaded but
+/// healthy machine is never reported.
+pub const DEFAULT_SOFT_LOCKUP_THRESHOLD_NS: u64 = 10_000_000_000;
 
-/// Nanoseconds per millisecond, for rendering the human-facing stall
-/// duration.
+/// How long an `Active` CPU may go without taking its non-maskable
+/// watchdog sample before it is reported **hard**-locked, in nanoseconds
+/// (10 seconds).
+///
+/// The cadence sample fires ~once per second, so ten seconds is ~ten
+/// missed samples — well beyond any jitter, so a crossing means the CPU
+/// genuinely stopped taking the pseudo-NMI rather than merely running
+/// late. Diagnostic policy, not a capacity.
+pub const DEFAULT_HARD_LOCKUP_THRESHOLD_NS: u64 = 10_000_000_000;
+
+/// Nanoseconds per millisecond, for rendering the human-facing duration.
 const NS_PER_MS: u64 = 1_000_000;
 
+/// The watchdog activity class a CPU publishes so a cross-CPU check can
+/// tell a CPU that *owes* progress apart from one that legitimately does
+/// not. Encoded as the `u8` in `CpuState::wd_activity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchdogActivity {
+    /// Not yet online, or has left the dispatch loop for good. Never
+    /// judged.
+    Offline = 0,
+    /// Parked in `wfi` with nothing to run. Legitimately makes no
+    /// progress and takes no ticks; never judged.
+    Idle = 1,
+    /// Running the dispatch loop or a task; owes forward progress.
+    Active = 2,
+}
+
+impl WatchdogActivity {
+    /// Recover the activity class from its stored `u8`, defaulting to
+    /// [`Self::Offline`] for any unrecognised value (fail closed — an
+    /// unknown state is never judged).
+    #[must_use]
+    const fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Idle,
+            2 => Self::Active,
+            _ => Self::Offline,
+        }
+    }
+}
+
 /// The installed report sink, or `None` before the boot path wires it.
-///
-/// Set once per boot ([`install_report_sink`]). While unset the watchdog
-/// records heartbeats and detects stalls but emits nothing, so a build
-/// that never installs a sink (host tests of unrelated paths) leaves the
-/// reporting path a fail-safe no-op.
 static REPORT_SINK: OnceCell<&'static (dyn Sink + Sync)> = OnceCell::new();
 
-/// Install the sink the watchdog reports stalls through. Idempotent by
+/// The installed non-maskable recovery handle, or `None` before boot wires
+/// it (a build with no pseudo-NMI channel never installs one).
+static RECOVERY: OnceCell<&'static (dyn WatchdogArch + Sync)> = OnceCell::new();
+
+/// Install the sink the watchdog reports lockups through. Idempotent by
 /// policy: the boot path installs exactly one; a later call is a benign
 /// no-op.
 pub fn install_report_sink(sink: &'static (dyn Sink + Sync)) {
     let _ = REPORT_SINK.set(sink);
+}
+
+/// Install the architecture recovery handle the watchdog drives to break a
+/// locked-up CPU out of its lockup. Idempotent; a port with no pseudo-NMI
+/// channel simply never calls this and hard-lockup recovery stays inert.
+pub fn install_recovery(arch: &'static (dyn WatchdogArch + Sync)) {
+    let _ = RECOVERY.set(arch);
 }
 
 /// The report sink the watchdog currently emits through, if installed.
@@ -102,49 +159,59 @@ fn report_sink() -> Option<&'static (dyn Sink + Sync)> {
     REPORT_SINK.get().ok().flatten().copied()
 }
 
-/// The outcome of one watchdog sample on a CPU.
+/// The installed recovery handle, if any.
+fn recovery() -> Option<&'static (dyn WatchdogArch + Sync)> {
+    RECOVERY.get().ok().flatten().copied()
+}
+
+/// The outcome of one heartbeat evaluation on a CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sample {
-    /// The CPU's heartbeat has never been stamped — no dispatch has run
-    /// here yet, so the watchdog makes no judgement (fail closed).
+    /// The heartbeat has never been stamped — fail closed, no judgement.
     Unarmed,
-    /// Progress is recent (within the threshold): the CPU is healthy.
+    /// The heartbeat is recent (within the threshold): healthy.
     Healthy,
-    /// The CPU crossed the threshold and this is the first sample to
-    /// observe the episode: report a new stall. Carries the elapsed
-    /// no-progress duration in nanoseconds.
-    StallOnset(u64),
-    /// The CPU is stalled but the episode was already reported: stay
-    /// quiet (report each episode once, not once per tick).
-    StillStalled,
+    /// The threshold was crossed and this sample first observed the
+    /// episode: report it. Carries the elapsed gap in nanoseconds.
+    Onset(u64),
+    /// The threshold is crossed but the episode was already reported.
+    Still,
 }
 
-/// Classify `state` at time `now_ns` against `threshold_ns`, latching the
-/// per-CPU "already reported" flag so a crossed threshold reports exactly
-/// once per episode. Pure but for the latch swap; the caller does the I/O.
-fn sample(state: &CpuState, now_ns: u64, threshold_ns: u64) -> Sample {
-    let last = state.last_progress_ns.load(Ordering::Acquire);
-    if last == 0 {
+/// Evaluate one heartbeat `last_ts` against `now`/`threshold`, latching
+/// `reported` so a crossed threshold reports exactly once per episode.
+/// Pure but for the latch swap; the caller does the I/O.
+fn evaluate(last_ts: u64, reported: &AtomicBool, now: u64, threshold: u64) -> Sample {
+    if last_ts == 0 {
         return Sample::Unarmed;
     }
-    let elapsed = now_ns.saturating_sub(last);
-    if elapsed < threshold_ns {
+    let elapsed = now.saturating_sub(last_ts);
+    if elapsed < threshold {
         return Sample::Healthy;
     }
-    if state.stall_reported.swap(true, Ordering::AcqRel) {
-        Sample::StillStalled
+    if reported.swap(true, Ordering::AcqRel) {
+        Sample::Still
     } else {
-        Sample::StallOnset(elapsed)
+        Sample::Onset(elapsed)
     }
 }
 
-/// Stamp `state` with progress at `now_ns`, clearing the episode latch.
-///
-/// Returns `Some(stalled_ns)` when the CPU was in a *reported* stall and
-/// has now recovered (so the caller emits a recovery record), where
-/// `stalled_ns` is how long the CPU went without progress up to this
-/// recovery; returns `None` on the ordinary healthy path. A `0` reading
-/// is stamped as `1` so a stamped heartbeat is never mistaken for the
+/// Publish `cpu`'s watchdog activity class so the cross-CPU scan can tell
+/// a CPU that owes progress apart from one that legitimately does not.
+/// An out-of-range `cpu` is a no-op (fail closed).
+pub fn set_activity(cpu: CpuId, activity: WatchdogActivity) {
+    if let Some(state) = cpu_state::get(cpu) {
+        state.wd_activity.store(activity as u8, Ordering::Release);
+    }
+}
+
+// --- Heartbeats -----------------------------------------------------
+
+/// Stamp `state`'s progress heartbeat at `now_ns`, clearing the soft
+/// episode latch. Returns `Some(stalled_ns)` when the CPU was in a
+/// *reported* soft lockup and has now recovered (the caller emits a
+/// recovery record); `None` on the ordinary healthy path. A `0` reading is
+/// stamped as `1` so a stamped heartbeat is never mistaken for the
 /// "unarmed" sentinel.
 fn record_progress(state: &CpuState, now_ns: u64) -> Option<u64> {
     let prev = state
@@ -160,8 +227,8 @@ fn record_progress(state: &CpuState, now_ns: u64) -> Option<u64> {
 /// Record that the scheduler made progress on `cpu` at monotonic time
 /// `now_ns` (the dispatch loop calls this once per iteration).
 ///
-/// Pure accounting on the common path (one atomic store); it emits only
-/// on the rare edge where a previously-reported stall clears, so it is
+/// Pure accounting on the common path (one atomic store); it emits only on
+/// the rare edge where a previously-reported soft lockup clears, so it is
 /// cheap enough for the hot dispatch path. An out-of-range `cpu` is a
 /// no-op (fail closed).
 pub fn note_progress(cpu: CpuId, now_ns: u64) {
@@ -169,18 +236,169 @@ pub fn note_progress(cpu: CpuId, now_ns: u64) {
         return;
     };
     if let Some(stalled_ns) = record_progress(state, now_ns) {
-        report(cpu, AuditEvent::CpuStallCleared, stalled_ns);
+        report_lockup(
+            AuditEvent::CpuStallCleared,
+            Level::Warn,
+            cpu,
+            None,
+            stalled_ns,
+            &Diag::EMPTY,
+        );
     }
 }
 
-/// Check `cpu` for a stall from the port's timer-tick path.
+/// Stamp `state`'s liveness heartbeat at `now_ns` and record `sample` as
+/// its last-known context. Returns `Some(stalled_ns)` when the CPU was in
+/// a *reported* hard lockup and has now recovered.
+fn record_liveness(state: &CpuState, now_ns: u64, sample: &WatchdogSample) -> Option<u64> {
+    // Record the context first so a buddy that observes the fresh liveness
+    // heartbeat also sees a matching (or newer) context.
+    state.wd_ctx_pc.store(sample.pc, Ordering::Relaxed);
+    state.wd_ctx_task.store(sample.task, Ordering::Relaxed);
+    state.wd_ctx_aux.store(sample.aux, Ordering::Relaxed);
+    state
+        .wd_ctx_in_kernel
+        .store(sample.in_kernel, Ordering::Relaxed);
+    let prev = state.last_seen_ns.swap(now_ns.max(1), Ordering::Release);
+    if state.hard_reported.swap(false, Ordering::AcqRel) {
+        Some(now_ns.saturating_sub(prev))
+    } else {
+        None
+    }
+}
+
+// --- The non-maskable cadence sample --------------------------------
+
+/// Handle one non-maskable watchdog cadence sample taken *on* `cpu` at
+/// monotonic time `now_ns`, with `sample` describing what it interrupted.
 ///
-/// Reads the current monotonic time from the installed wait-queue arch
-/// hook (the same clock the heartbeat uses) and reports a newly detected
-/// stall through the installed sink. Safe to call from interrupt context:
-/// the sample is lock-free and the report path is allocation-free and
-/// interrupt-re-entrancy-safe. Before the clock hook or the report sink
-/// is installed, or for an out-of-range `cpu`, it is a fail-safe no-op.
+/// The port's pseudo-NMI cadence path (the aarch64 FIQ watchdog) calls
+/// this on its own CPU. It stamps this CPU's liveness heartbeat, records
+/// the sample as its last-known context (the raw "why"), reports a
+/// recovery if this CPU was previously hard-locked, and then runs the
+/// cross-CPU scan — the only place a *hard* lockup on another CPU becomes
+/// observable. Lock-free and allocation-free, safe to call from the
+/// non-maskable path. An out-of-range `cpu` still runs the scan (the CPU
+/// is simply not itself sampled), so a stray id never blinds the detector.
+pub fn on_watchdog_tick(cpu: CpuId, now_ns: u64, sample: &WatchdogSample) {
+    if let Some(state) = cpu_state::get(cpu) {
+        if let Some(stalled_ns) = record_liveness(state, now_ns, sample) {
+            report_lockup(
+                AuditEvent::CpuHardLockupCleared,
+                Level::Warn,
+                cpu,
+                None,
+                stalled_ns,
+                &Diag::EMPTY,
+            );
+        }
+    }
+    scan(cpu, now_ns);
+}
+
+/// The verdict of classifying one CPU during the cross-CPU scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Healthy, idle, offline, or an already-reported ongoing episode.
+    Quiet,
+    /// A newly detected hard lockup, carrying the silent gap in ns.
+    HardOnset(u64),
+    /// A newly detected soft lockup, carrying the no-progress gap in ns.
+    SoftOnset(u64),
+}
+
+/// Classify one CPU's `state` at `now_ns`, latching its per-episode flag so
+/// a crossing is reported exactly once. Pure but for the latch swap; the
+/// caller does the I/O. Only an `Active` CPU is judged; a hard lockup takes
+/// precedence over a soft one, and a soft lockup is only reported for a CPU
+/// last seen *in the kernel* (a lone preemptible user task owes no
+/// progress).
+fn classify(state: &CpuState, now_ns: u64) -> Verdict {
+    if WatchdogActivity::from_u8(state.wd_activity.load(Ordering::Acquire))
+        != WatchdogActivity::Active
+    {
+        return Verdict::Quiet;
+    }
+    match evaluate(
+        state.last_seen_ns.load(Ordering::Acquire),
+        &state.hard_reported,
+        now_ns,
+        DEFAULT_HARD_LOCKUP_THRESHOLD_NS,
+    ) {
+        Sample::Onset(elapsed) => return Verdict::HardOnset(elapsed),
+        // Still hard-locked (already reported): do not also raise a soft
+        // report for the same wedged CPU.
+        Sample::Still => return Verdict::Quiet,
+        Sample::Healthy | Sample::Unarmed => {}
+    }
+    if !state.wd_ctx_in_kernel.load(Ordering::Acquire) {
+        return Verdict::Quiet;
+    }
+    match evaluate(
+        state.last_progress_ns.load(Ordering::Acquire),
+        &state.stall_reported,
+        now_ns,
+        DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
+    ) {
+        Sample::Onset(elapsed) => Verdict::SoftOnset(elapsed),
+        _ => Verdict::Quiet,
+    }
+}
+
+/// Scan every CPU other than the `observer` for a lockup, reporting and
+/// attempting recovery for each newly detected episode.
+///
+/// Runs from the observer's non-maskable sample, so it can see a CPU that
+/// has stopped taking maskable interrupts entirely (a hard lockup) —
+/// exactly the case the victim's own timer path is blind to.
+fn scan(observer: CpuId, now_ns: u64) {
+    for (index, state) in cpu_state::states().iter().enumerate() {
+        // The observer is, by definition, alive — skip it.
+        if observer as usize == index {
+            continue;
+        }
+        let Ok(target) = CpuId::try_from(index) else {
+            continue;
+        };
+        match classify(state, now_ns) {
+            Verdict::HardOnset(elapsed) => {
+                let diag = Diag::snapshot(state);
+                report_lockup(
+                    AuditEvent::CpuHardLockupDetected,
+                    Level::Error,
+                    target,
+                    Some(observer),
+                    elapsed,
+                    &diag,
+                );
+                drive_recovery(target, WatchdogKind::Hard);
+            }
+            Verdict::SoftOnset(elapsed) => {
+                let diag = Diag::snapshot(state);
+                report_lockup(
+                    AuditEvent::CpuStallDetected,
+                    Level::Error,
+                    target,
+                    Some(observer),
+                    elapsed,
+                    &diag,
+                );
+                drive_recovery(target, WatchdogKind::Soft);
+            }
+            Verdict::Quiet => {}
+        }
+    }
+}
+
+/// Check `cpu` for a **soft** lockup from its own armed timer-tick path.
+///
+/// The same-CPU complement of the cross-CPU `scan`'s check: it catches a
+/// *contended* CPU whose preemption has stopped making scheduler progress
+/// (the tick only fires when the CPU has a competitor, so a lone
+/// preemptible task is never sampled here — no false positive). Reads the
+/// installed monotonic clock; before it, or for an out-of-range `cpu`, it
+/// is a fail-safe no-op. Shares the soft-episode latch with `scan`, so a
+/// soft lockup is reported exactly once whichever path sees it first.
 pub fn check_stall(cpu: CpuId) {
     let Some(now_ns) = crate::waitq::wait_now_ns() else {
         return;
@@ -188,44 +406,192 @@ pub fn check_stall(cpu: CpuId) {
     let Some(state) = cpu_state::get(cpu) else {
         return;
     };
-    if let Sample::StallOnset(elapsed_ns) = sample(state, now_ns, DEFAULT_STALL_THRESHOLD_NS) {
-        report(cpu, AuditEvent::CpuStallDetected, elapsed_ns);
+    let soft = evaluate(
+        state.last_progress_ns.load(Ordering::Acquire),
+        &state.stall_reported,
+        now_ns,
+        DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
+    );
+    if let Sample::Onset(elapsed) = soft {
+        let diag = Diag::snapshot(state);
+        report_lockup(
+            AuditEvent::CpuStallDetected,
+            Level::Error,
+            cpu,
+            None,
+            elapsed,
+            &diag,
+        );
     }
 }
 
-/// Emit one watchdog record through the installed sink, if any.
-fn report(cpu: CpuId, event: AuditEvent, elapsed_ns: u64) {
+// --- Recovery -------------------------------------------------------
+
+/// A short, fixed tag for a [`RecoveryOutcome`], for the audit record.
+fn outcome_tag(outcome: RecoveryOutcome) -> &'static str {
+    match outcome {
+        RecoveryOutcome::Rescheduled => "rescheduled",
+        RecoveryOutcome::AttentionRaised => "attention",
+        RecoveryOutcome::Unrecoverable => "unrecoverable",
+        RecoveryOutcome::Unsupported => "unsupported",
+    }
+}
+
+/// Ask the installed port to break `target` out of a `kind` lockup,
+/// best-effort, and record the attempt and its honest outcome. A build
+/// with no recovery handle records the attempt as `unsupported` rather
+/// than silently doing nothing.
+fn drive_recovery(target: CpuId, kind: WatchdogKind) {
+    let outcome = recovery().map_or(RecoveryOutcome::Unsupported, |arch| {
+        arch.request_recovery(target, kind)
+    });
     if let Some(sink) = report_sink() {
-        report_to(sink, cpu, event, elapsed_ns);
+        recovery_to(sink, target, kind, outcome);
     }
 }
 
-/// Render and emit one watchdog record through `sink`.
-///
-/// Allocation-free (stack buffers only) and lock-free, so it is safe on
-/// the timer ISR and the dispatch hot path alike. Split from [`report`]
-/// so host tests can drive the full render-and-emit path against a
+/// Render one recovery-attempt record through `sink`. Split from
+/// [`drive_recovery`] so host tests can drive the render against a
 /// recording sink without touching the process-wide install seam.
-fn report_to(sink: &dyn Sink, cpu: CpuId, event: AuditEvent, elapsed_ns: u64) {
-    let level = match event {
-        AuditEvent::CpuStallDetected => Level::Error,
-        _ => Level::Warn,
-    };
-    let mut cpu_buf = [0u8; 20];
-    let mut ms_buf = [0u8; 20];
-    let cpu_str = format_u64(u64::from(cpu), &mut cpu_buf);
-    let ms_str = format_u64(elapsed_ns / NS_PER_MS, &mut ms_buf);
+fn recovery_to(sink: &dyn Sink, target: CpuId, kind: WatchdogKind, outcome: RecoveryOutcome) {
     let fields = [
         tairix_log::Field {
             key: "cpu",
-            value: tairix_log::FieldValue::Str(cpu_str),
+            value: tairix_log::FieldValue::UnsignedInt(u64::from(target)),
         },
         tairix_log::Field {
-            key: "stalled_ms",
-            value: tairix_log::FieldValue::Str(ms_str),
+            key: "kind",
+            value: tairix_log::FieldValue::Str(kind.tag()),
+        },
+        tairix_log::Field {
+            key: "outcome",
+            value: tairix_log::FieldValue::Str(outcome_tag(outcome)),
         },
     ];
-    emit(sink, level, event, &fields);
+    emit(sink, Level::Warn, AuditEvent::CpuLockupRecovery, &fields);
+}
+
+// --- Diagnostics ("why") --------------------------------------------
+
+/// A snapshot of a CPU's last-known interrupted context — the raw "why" a
+/// lockup diagnosis renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Diag {
+    /// Last-known interrupted program counter (`0` = none).
+    pc: u64,
+    /// Last-known running task id ([`WatchdogSample::NO_TASK`] = none).
+    task: u64,
+    /// Last-known port-defined processor-state word (`0` = none).
+    aux: u64,
+}
+
+impl Diag {
+    /// An empty diagnosis (a recovery/clear record carries no context).
+    const EMPTY: Self = Self {
+        pc: 0,
+        task: WatchdogSample::NO_TASK,
+        aux: 0,
+    };
+
+    /// Read a CPU's recorded last-known context.
+    fn snapshot(state: &CpuState) -> Self {
+        Self {
+            pc: state.wd_ctx_pc.load(Ordering::Acquire),
+            task: state.wd_ctx_task.load(Ordering::Acquire),
+            aux: state.wd_ctx_aux.load(Ordering::Acquire),
+        }
+    }
+}
+
+/// Render `value` into `buf` as `0x`-prefixed 16-nibble lowercase hex.
+fn hex0x(value: u64, buf: &mut [u8; 18]) -> &str {
+    buf[0] = b'0';
+    buf[1] = b'x';
+    let mut hex = [0u8; 16];
+    let rendered = format_hex_u64(value, &mut hex);
+    let bytes = rendered.as_bytes();
+    buf[2..2 + bytes.len()].copy_from_slice(bytes);
+    core::str::from_utf8(&buf[..2 + bytes.len()]).unwrap_or("0x")
+}
+
+/// Emit one lockup record through the installed sink, if any.
+///
+/// Allocation-free (stack buffers only) and lock-free, so it is safe on
+/// the non-maskable sample path and the dispatch hot path alike. `observer`
+/// names the CPU that caught a cross-CPU lockup (a hard lockup, or a
+/// buddy-observed soft one); `None` for a same-CPU detection or a
+/// recovery/clear record. `diag` carries the last-known context for the
+/// "why"; a zero PC / no-task field is omitted so a record only ever
+/// carries context it actually has.
+fn report_lockup(
+    event: AuditEvent,
+    level: Level,
+    cpu: CpuId,
+    observer: Option<CpuId>,
+    elapsed_ns: u64,
+    diag: &Diag,
+) {
+    if let Some(sink) = report_sink() {
+        report_to(sink, event, level, cpu, observer, elapsed_ns, diag);
+    }
+}
+
+/// Render one lockup record through `sink`. Split from [`report_lockup`]
+/// so host tests can drive the full render against a recording sink
+/// without touching the process-wide install seam.
+fn report_to(
+    sink: &dyn Sink,
+    event: AuditEvent,
+    level: Level,
+    cpu: CpuId,
+    observer: Option<CpuId>,
+    elapsed_ns: u64,
+    diag: &Diag,
+) {
+    let mut pc_buf = [0u8; 18];
+    let mut aux_buf = [0u8; 18];
+
+    // Build the field list on the stack. The order is stable so a reader
+    // and a parser see the same shape every time.
+    let mut fields: [tairix_log::Field<'_>; 6] = [tairix_log::Field {
+        key: "cpu",
+        value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
+    }; 6];
+    let mut n = 1;
+    if let Some(obs) = observer {
+        fields[n] = tairix_log::Field {
+            key: "observer",
+            value: tairix_log::FieldValue::UnsignedInt(u64::from(obs)),
+        };
+        n += 1;
+    }
+    fields[n] = tairix_log::Field {
+        key: "stalled_ms",
+        value: tairix_log::FieldValue::UnsignedInt(elapsed_ns / NS_PER_MS),
+    };
+    n += 1;
+    if diag.pc != 0 {
+        fields[n] = tairix_log::Field {
+            key: "pc",
+            value: tairix_log::FieldValue::Str(hex0x(diag.pc, &mut pc_buf)),
+        };
+        n += 1;
+    }
+    if diag.task != WatchdogSample::NO_TASK {
+        fields[n] = tairix_log::Field {
+            key: "task",
+            value: tairix_log::FieldValue::UnsignedInt(diag.task),
+        };
+        n += 1;
+    }
+    if diag.aux != 0 {
+        fields[n] = tairix_log::Field {
+            key: "pstate",
+            value: tairix_log::FieldValue::Str(hex0x(diag.aux, &mut aux_buf)),
+        };
+        n += 1;
+    }
+    emit(sink, level, event, &fields[..n]);
 }
 
 #[cfg(test)]
@@ -234,113 +600,299 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
 
-    /// Reset a shared per-CPU test slot to the pristine "unarmed" state so
-    /// each test starts clean. Tests use disjoint CPU indices (like the
-    /// sibling `preempt` tests) so parallel threads never collide.
+    /// Reset a shared per-CPU test slot to the pristine state so each test
+    /// starts clean. Tests use disjoint CPU indices (like the sibling
+    /// `preempt` tests) so parallel threads never collide on a slot.
     fn reset(cpu: CpuId) -> &'static CpuState {
         let state = cpu_state::get(cpu).expect("test CPU slot exists");
         state.last_progress_ns.store(0, Ordering::Relaxed);
         state.stall_reported.store(false, Ordering::Relaxed);
+        state.last_seen_ns.store(0, Ordering::Relaxed);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Offline as u8, Ordering::Relaxed);
+        state.hard_reported.store(false, Ordering::Relaxed);
+        state.wd_ctx_pc.store(0, Ordering::Relaxed);
+        state.wd_ctx_task.store(u64::MAX, Ordering::Relaxed);
+        state.wd_ctx_aux.store(0, Ordering::Relaxed);
+        state.wd_ctx_in_kernel.store(false, Ordering::Relaxed);
         state
     }
 
+    fn field<'a>(ev: &'a crate::test_sink::CapturedEvent, key: &str) -> Option<&'a str> {
+        ev.fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    // --- The pure heartbeat evaluator -------------------------------
+
     #[test]
-    fn an_unarmed_cpu_is_never_judged_stalled() {
-        let state = reset(50);
-        assert_eq!(sample(state, 1_000_000_000, 10), Sample::Unarmed);
+    fn an_unarmed_heartbeat_is_never_judged() {
+        let latch = AtomicBool::new(false);
+        assert_eq!(evaluate(0, &latch, 1_000_000_000, 10), Sample::Unarmed);
     }
 
     #[test]
-    fn recent_progress_is_healthy() {
-        let state = reset(51);
-        assert_eq!(record_progress(state, 1_000), None);
-        assert_eq!(sample(state, 1_000 + 9, 10), Sample::Healthy);
+    fn recent_progress_is_healthy_and_the_boundary_is_inclusive() {
+        let latch = AtomicBool::new(false);
+        assert_eq!(evaluate(100, &latch, 109, 10), Sample::Healthy);
+        assert_eq!(evaluate(100, &latch, 110, 10), Sample::Onset(10));
     }
 
     #[test]
     fn crossing_the_threshold_reports_the_episode_once() {
-        let state = reset(52);
-        assert_eq!(record_progress(state, 1_000), None);
-        // First sample past the threshold: onset, carrying the elapsed gap.
-        assert_eq!(sample(state, 1_000 + 10, 10), Sample::StallOnset(10));
-        // Every later sample in the same episode stays quiet.
-        assert_eq!(sample(state, 1_000 + 50, 10), Sample::StillStalled);
-        assert_eq!(sample(state, 1_000 + 999, 10), Sample::StillStalled);
+        let latch = AtomicBool::new(false);
+        assert_eq!(evaluate(1_000, &latch, 1_010, 10), Sample::Onset(10));
+        assert_eq!(evaluate(1_000, &latch, 1_050, 10), Sample::Still);
+        assert_eq!(evaluate(1_000, &latch, 1_999, 10), Sample::Still);
     }
 
-    #[test]
-    fn the_threshold_boundary_is_inclusive() {
-        let state = reset(53);
-        record_progress(state, 100);
-        // Exactly at the threshold is stalled; one below is healthy.
-        assert_eq!(sample(state, 109, 10), Sample::Healthy);
-        assert_eq!(sample(state, 110, 10), Sample::StallOnset(10));
-    }
+    // --- Progress heartbeat + soft recovery -------------------------
 
     #[test]
-    fn progress_after_a_reported_stall_reports_recovery_once() {
-        let state = reset(54);
-        record_progress(state, 100);
-        assert_eq!(sample(state, 200, 10), Sample::StallOnset(100));
-        // Recovery: the gap up to recovery is reported exactly once.
+    fn progress_after_a_reported_soft_lockup_reports_recovery_once() {
+        let state = reset(40);
+        state.last_progress_ns.store(100, Ordering::Relaxed);
+        assert_eq!(
+            evaluate(100, &state.stall_reported, 200, 10),
+            Sample::Onset(100)
+        );
         assert_eq!(record_progress(state, 250), Some(150));
-        // A second progress with no intervening stall reports nothing.
         assert_eq!(record_progress(state, 260), None);
     }
 
     #[test]
-    fn progress_without_a_reported_stall_is_silent() {
-        let state = reset(55);
-        record_progress(state, 100);
-        // Healthy sample never latched the report flag, so progress is
-        // silent even though time advanced.
-        assert_eq!(sample(state, 105, 10), Sample::Healthy);
-        assert_eq!(record_progress(state, 110), None);
+    fn progress_without_a_reported_soft_lockup_is_silent() {
+        let state = reset(41);
+        assert_eq!(record_progress(state, 100), None);
     }
 
     #[test]
     fn a_stamped_heartbeat_is_never_the_unarmed_sentinel() {
-        let state = reset(56);
-        // A genuine zero reading must not read back as "unarmed".
+        let state = reset(42);
         record_progress(state, 0);
         assert_ne!(state.last_progress_ns.load(Ordering::Relaxed), 0);
-        assert_eq!(sample(state, 0, 10), Sample::Healthy);
     }
+
+    // --- Liveness heartbeat + context capture + hard recovery -------
+
+    #[test]
+    fn liveness_records_context_and_reports_hard_recovery_once() {
+        let state = reset(43);
+        let sample = WatchdogSample {
+            pc: 0xdead_beef,
+            task: 7,
+            aux: 0x3c5,
+            in_kernel: true,
+        };
+        // No prior hard report: healthy path, context captured.
+        assert_eq!(record_liveness(state, 1_000, &sample), None);
+        assert_eq!(state.wd_ctx_pc.load(Ordering::Relaxed), 0xdead_beef);
+        assert_eq!(state.wd_ctx_task.load(Ordering::Relaxed), 7);
+        assert_eq!(state.wd_ctx_aux.load(Ordering::Relaxed), 0x3c5);
+        assert!(state.wd_ctx_in_kernel.load(Ordering::Relaxed));
+        // A latched hard episode: the next liveness clears it and reports
+        // the recovery gap once.
+        state.hard_reported.store(true, Ordering::Relaxed);
+        assert_eq!(record_liveness(state, 1_500, &sample), Some(500));
+        assert_eq!(record_liveness(state, 1_600, &sample), None);
+    }
+
+    // --- Classification --------------------------------------------
+
+    #[test]
+    fn a_non_active_cpu_is_never_classified() {
+        let state = reset(44);
+        state.last_seen_ns.store(1, Ordering::Relaxed);
+        state.last_progress_ns.store(1, Ordering::Relaxed);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        // Idle and Offline: quiet even with ancient heartbeats.
+        for activity in [WatchdogActivity::Idle, WatchdogActivity::Offline] {
+            state.wd_activity.store(activity as u8, Ordering::Relaxed);
+            assert_eq!(classify(state, 1_000_000_000_000), Verdict::Quiet);
+        }
+    }
+
+    #[test]
+    fn an_active_cpu_that_stops_taking_the_sample_is_hard_locked() {
+        let state = reset(45);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        state.last_seen_ns.store(1_000, Ordering::Relaxed);
+        let now = 1_000 + DEFAULT_HARD_LOCKUP_THRESHOLD_NS;
+        assert_eq!(
+            classify(state, now),
+            Verdict::HardOnset(DEFAULT_HARD_LOCKUP_THRESHOLD_NS)
+        );
+        // Latched: a later scan of the same wedged CPU stays quiet.
+        assert_eq!(classify(state, now + 1_000), Verdict::Quiet);
+    }
+
+    #[test]
+    fn hard_lockup_takes_precedence_over_soft() {
+        let state = reset(46);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        // Both heartbeats are ancient, but liveness (hard) wins.
+        state.last_seen_ns.store(1, Ordering::Relaxed);
+        state.last_progress_ns.store(1, Ordering::Relaxed);
+        let now = 1 + DEFAULT_HARD_LOCKUP_THRESHOLD_NS + 5;
+        assert!(matches!(classify(state, now), Verdict::HardOnset(_)));
+        // The soft latch was never taken, so a subsequent same-CPU
+        // `check_stall` could still report the soft condition if the CPU
+        // somehow resumed taking samples but not dispatching.
+        assert!(!state.stall_reported.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_active_in_kernel_cpu_that_stops_dispatching_is_soft_locked() {
+        let state = reset(47);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        let now = 1_000 + DEFAULT_SOFT_LOCKUP_THRESHOLD_NS;
+        // Liveness fresh (not hard), progress ancient.
+        state.last_seen_ns.store(now, Ordering::Relaxed);
+        state.last_progress_ns.store(1_000, Ordering::Relaxed);
+        assert_eq!(
+            classify(state, now),
+            Verdict::SoftOnset(DEFAULT_SOFT_LOCKUP_THRESHOLD_NS)
+        );
+    }
+
+    #[test]
+    fn a_lone_user_task_is_never_soft_locked() {
+        let state = reset(48);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        // Last seen in *user* mode: no scheduler progress is owed.
+        state.wd_ctx_in_kernel.store(false, Ordering::Relaxed);
+        let now = 1_000 + DEFAULT_SOFT_LOCKUP_THRESHOLD_NS;
+        state.last_seen_ns.store(now, Ordering::Relaxed);
+        state.last_progress_ns.store(1_000, Ordering::Relaxed);
+        assert_eq!(classify(state, now), Verdict::Quiet);
+    }
+
+    #[test]
+    fn a_healthy_active_cpu_is_quiet() {
+        let state = reset(49);
+        state
+            .wd_activity
+            .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        let now = 1_000_000;
+        state.last_seen_ns.store(now, Ordering::Relaxed);
+        state.last_progress_ns.store(now, Ordering::Relaxed);
+        assert_eq!(classify(state, now), Verdict::Quiet);
+    }
+
+    // --- Public entry points fail closed ----------------------------
 
     #[test]
     fn public_entry_points_fail_closed_for_an_out_of_range_cpu() {
-        // No panic, no report: the slot lookup simply misses.
         note_progress(u32::MAX, 1_000);
         check_stall(u32::MAX);
+        set_activity(u32::MAX, WatchdogActivity::Active);
+        // An out-of-range sampling CPU still runs the scan harmlessly.
+        on_watchdog_tick(u32::MAX, 1_000, &WatchdogSample::EMPTY);
     }
 
     #[test]
-    fn report_renders_cpu_and_duration_fields() {
+    fn on_watchdog_tick_stamps_liveness_and_context() {
+        let state = reset(38);
+        let sample = WatchdogSample {
+            pc: 0x1234,
+            task: 9,
+            aux: 0x2c0,
+            in_kernel: true,
+        };
+        on_watchdog_tick(38, 5_000, &sample);
+        assert_ne!(state.last_seen_ns.load(Ordering::Relaxed), 0);
+        assert_eq!(state.wd_ctx_pc.load(Ordering::Relaxed), 0x1234);
+        assert_eq!(state.wd_ctx_task.load(Ordering::Relaxed), 9);
+    }
+
+    // --- Diagnostics rendering --------------------------------------
+
+    #[test]
+    fn hex0x_prefixes_and_pads_to_sixteen_nibbles() {
+        let mut buf = [0u8; 18];
+        assert_eq!(hex0x(0xabc, &mut buf), "0x0000000000000abc");
+    }
+
+    #[test]
+    fn a_hard_lockup_record_carries_the_full_diagnosis() {
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        report_to(sink, 3, AuditEvent::CpuStallDetected, 12_345_000_000);
+        let diag = Diag {
+            pc: 0xffff_0000_1234_5678,
+            task: 12,
+            aux: 0x3c5,
+        };
+        report_to(
+            sink,
+            AuditEvent::CpuHardLockupDetected,
+            Level::Error,
+            2,
+            Some(0),
+            7_000_000_000,
+            &diag,
+        );
         let events = sink.snapshot();
         assert_eq!(events.len(), 1);
         let ev = &events[0];
-        assert_eq!(ev.id, AuditEvent::CpuStallDetected.id());
+        assert_eq!(ev.id, AuditEvent::CpuHardLockupDetected.id());
         assert_eq!(ev.level, Level::Error);
-        let field = |key: &str| {
-            ev.fields
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.as_str())
-        };
-        assert_eq!(field("cpu"), Some("3"));
-        // 12_345_000_000 ns == 12345 ms.
-        assert_eq!(field("stalled_ms"), Some("12345"));
+        assert_eq!(field(ev, "cpu"), Some("2"));
+        assert_eq!(field(ev, "observer"), Some("0"));
+        assert_eq!(field(ev, "stalled_ms"), Some("7000"));
+        assert_eq!(field(ev, "pc"), Some("0xffff000012345678"));
+        assert_eq!(field(ev, "task"), Some("12"));
+        assert_eq!(field(ev, "pstate"), Some("0x00000000000003c5"));
     }
 
     #[test]
-    fn recovery_report_is_a_warning() {
+    fn a_record_omits_context_it_does_not_have() {
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        report_to(sink, 0, AuditEvent::CpuStallCleared, 0);
+        report_to(
+            sink,
+            AuditEvent::CpuStallCleared,
+            Level::Warn,
+            1,
+            None,
+            0,
+            &Diag::EMPTY,
+        );
         let events = sink.snapshot();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].level, Level::Warn);
-        assert_eq!(events[0].id, AuditEvent::CpuStallCleared.id());
+        let ev = &events[0];
+        assert_eq!(field(ev, "cpu"), Some("1"));
+        assert_eq!(field(ev, "stalled_ms"), Some("0"));
+        assert_eq!(field(ev, "observer"), None);
+        assert_eq!(field(ev, "pc"), None);
+        assert_eq!(field(ev, "task"), None);
+        assert_eq!(field(ev, "pstate"), None);
+    }
+
+    #[test]
+    fn a_recovery_record_names_the_kind_and_outcome() {
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        recovery_to(
+            sink,
+            3,
+            WatchdogKind::Hard,
+            RecoveryOutcome::AttentionRaised,
+        );
+        let events = sink.snapshot();
+        let ev = &events[0];
+        assert_eq!(ev.id, AuditEvent::CpuLockupRecovery.id());
+        assert_eq!(field(ev, "cpu"), Some("3"));
+        assert_eq!(field(ev, "kind"), Some("hard"));
+        assert_eq!(field(ev, "outcome"), Some("attention"));
     }
 }

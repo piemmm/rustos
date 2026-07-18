@@ -302,8 +302,9 @@ pub enum AuditEvent {
     ///
     /// Emitted from the port's timer-tick path the first time
     /// [`crate::watchdog::check_stall`] observes a CPU whose last dispatch
-    /// heartbeat is older than [`crate::watchdog::DEFAULT_STALL_THRESHOLD_NS`],
-    /// reported once per stall episode (never once per tick). The `cpu`
+    /// heartbeat is older than
+    /// [`crate::watchdog::DEFAULT_SOFT_LOCKUP_THRESHOLD_NS`], reported once
+    /// per stall episode (never once per tick). The `cpu`
     /// field names the stalled CPU and `stalled_ms` how long it has gone
     /// without progress. Both are diagnostic state, never secrets.
     CpuStallDetected,
@@ -316,6 +317,32 @@ pub enum AuditEvent {
     /// dangling "stuck" line. The `cpu` field names the recovered CPU and
     /// `stalled_ms` how long the episode lasted.
     CpuStallCleared,
+    /// A CPU stopped taking even the non-maskable watchdog sample while it
+    /// was running work — a **hard** lockup (`crate::watchdog`): wedged
+    /// with interrupts masked, an interrupt storm, or a dead core.
+    ///
+    /// Emitted by another CPU's cross-CPU watchdog scan, once per episode.
+    /// Carries the full diagnosis a post-mortem needs: the locked `cpu`,
+    /// the `observer` CPU that caught it, how long it has been silent
+    /// (`stalled_ms`), the last-known interrupted program counter (`pc`)
+    /// and processor state (`pstate`), and the `task` that was running —
+    /// the "what" and "why", never secrets.
+    CpuHardLockupDetected,
+    /// A CPU that was reported hard-locked resumed taking its non-maskable
+    /// watchdog sample (`crate::watchdog`) — it recovered.
+    ///
+    /// Emitted by the recovered CPU's own watchdog sample the first time it
+    /// runs again after a reported hard lockup, so the episode closes its
+    /// own record. Carries `cpu` and the `stalled_ms` the episode lasted.
+    CpuHardLockupCleared,
+    /// The watchdog asked the architecture port to break a locked-up CPU
+    /// out of its lockup (`crate::watchdog`), best-effort.
+    ///
+    /// Emitted alongside a detection, carrying the target `cpu`, the
+    /// lockup `kind` (`soft`/`hard`), and the `outcome` the port reported
+    /// (`rescheduled`/`attention`/`unrecoverable`/`unsupported`), so the
+    /// recovery attempt and its result are on the audit trail.
+    CpuLockupRecovery,
 }
 
 impl AuditEvent {
@@ -358,6 +385,9 @@ impl AuditEvent {
             Self::SecondaryCpuOnline => 4072,
             Self::CpuStallDetected => 4080,
             Self::CpuStallCleared => 4081,
+            Self::CpuHardLockupDetected => 4082,
+            Self::CpuHardLockupCleared => 4083,
+            Self::CpuLockupRecovery => 4084,
         })
     }
 
@@ -402,6 +432,9 @@ impl AuditEvent {
             Self::SecondaryCpuOnline => "secondary cpu online",
             Self::CpuStallDetected => "cpu stall detected",
             Self::CpuStallCleared => "cpu stall cleared",
+            Self::CpuHardLockupDetected => "cpu hard lockup detected",
+            Self::CpuHardLockupCleared => "cpu hard lockup cleared",
+            Self::CpuLockupRecovery => "cpu lockup recovery requested",
         }
     }
 }
@@ -458,6 +491,11 @@ mod tests {
             AuditEvent::SecondaryCpuStarted,
             AuditEvent::SecondaryCpuStartFailed,
             AuditEvent::SecondaryCpuOnline,
+            AuditEvent::CpuStallDetected,
+            AuditEvent::CpuStallCleared,
+            AuditEvent::CpuHardLockupDetected,
+            AuditEvent::CpuHardLockupCleared,
+            AuditEvent::CpuLockupRecovery,
         ] {
             let id = ev.id().0;
             assert!(
@@ -502,6 +540,11 @@ mod tests {
             AuditEvent::SecondaryCpuStarted.id().0,
             AuditEvent::SecondaryCpuStartFailed.id().0,
             AuditEvent::SecondaryCpuOnline.id().0,
+            AuditEvent::CpuStallDetected.id().0,
+            AuditEvent::CpuStallCleared.id().0,
+            AuditEvent::CpuHardLockupDetected.id().0,
+            AuditEvent::CpuHardLockupCleared.id().0,
+            AuditEvent::CpuLockupRecovery.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

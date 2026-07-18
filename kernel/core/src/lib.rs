@@ -251,6 +251,8 @@ pub use waitq::{
 };
 pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};
 pub use watchdog::{
-    check_stall, install_report_sink as install_watchdog_sink, note_progress,
-    DEFAULT_STALL_THRESHOLD_NS,
+    check_stall, install_recovery as install_watchdog_recovery,
+    install_report_sink as install_watchdog_sink, note_progress, on_watchdog_tick,
+    set_activity as set_watchdog_activity, WatchdogActivity, DEFAULT_HARD_LOCKUP_THRESHOLD_NS,
+    DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
 };

@@ -306,6 +306,23 @@ impl KernelArch for Aarch64BinArch {
         // audits — never a silent fallback.
         Some(&self.arch)
     }
+
+    fn watchdog_recovery(&self) -> Option<&'static (dyn tairix_arch_api::WatchdogArch + Sync)> {
+        // The GICv2 directed-SGI recovery handle: `kernel/core` drives it
+        // when the cross-CPU lockup scan detects a wedged CPU (a reschedule
+        // for a soft lockup, a best-effort attention SGI for a hard one).
+        // Only meaningful on the freestanding target where the GIC MMIO is
+        // live; a host build has no interrupt controller and leaves
+        // recovery inert (the detector still reports every lockup).
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            Some(&tairix_arch_aarch64::watchdog::AARCH64_WATCHDOG)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            None
+        }
+    }
 }
 
 // SAFETY-INVARIANT: `Aarch64BinArch::halt` returns the bottom type. The

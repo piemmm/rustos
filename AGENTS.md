@@ -1554,6 +1554,7 @@ You are not exempt from any rule above. In addition:
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
+    | CPU-lockup watchdog (soft/hard lockup detection, diagnostics, recovery, the Arch-HAL watchdog slice) | `plans/WATCHDOG.md` |
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md`; `plans/ARCHSUPPORT.md` (x86_64 product parity: image, storage floor, unlock/login, autoload, verticals) |
     | Raspberry Pi bring-up | `plans/PI.md` |
@@ -2106,9 +2107,11 @@ as non-negotiable as §2.
   context switch, MMU/page-table primitives, TLB shootdown (local and
   cross-CPU), IPI, timer, interrupt entry/exit, atomics/fences, per-CPU
   storage, side-channel mitigation (§19.1), memory tagging (§19.10), user
-  entry, SMP secondary bring-up, and early-boot platform discovery (which
+  entry, SMP secondary bring-up, early-boot platform discovery (which
   normalises each target's native source — ACPI / FDT / host query — into
-  the `lib/abi` hardware tree, §18.1/§18.2). Each slice carries a
+  the `lib/abi` hardware tree, §18.1/§18.2), and the lockup-watchdog
+  non-maskable liveness sample + cross-CPU recovery (`plans/WATCHDOG.md`).
+  Each slice carries a
   conformance vertical in `kernel/arch/api`. Adding to this surface
   requires a PLAN.md entry and updates this section; per-slice migration
   status lives in `plans/WIRING.md`, not here (§13).

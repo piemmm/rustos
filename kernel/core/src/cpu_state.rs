@@ -2,7 +2,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use tairix_kernel_mem::LiveUserSpace;
 use tairix_kernel_sched_api::TaskAction;
@@ -30,15 +30,51 @@ pub(crate) struct CpuState {
     pub(crate) live_space: SpinLock<Option<LiveSpacePtr>>,
     pub(crate) preempt_pending: AtomicBool,
     pub(crate) preemptions: AtomicU64,
-    /// Stall-watchdog heartbeat: the monotonic-ns timestamp of the last
-    /// observed scheduler progress on this CPU (`crate::watchdog`). `0`
+    /// Watchdog **scheduler-progress** heartbeat: the monotonic-ns
+    /// timestamp of the last observed scheduler progress on this CPU — the
+    /// dispatch loop stamps it once per iteration (`crate::watchdog`). `0`
     /// means "not yet armed" — no dispatch has run here, so the watchdog
-    /// makes no judgement (fail closed).
+    /// makes no judgement (fail closed). Basis for **soft**-lockup
+    /// detection (a CPU still taking its watchdog interrupt but no longer
+    /// returning to the scheduler).
     pub(crate) last_progress_ns: AtomicU64,
-    /// Whether an active stall episode has already been reported on this
-    /// CPU, so the tick-driven check reports each episode exactly once and
-    /// its recovery exactly once.
+    /// Whether an active **soft**-lockup episode has already been reported
+    /// on this CPU, so detection reports each episode exactly once and its
+    /// recovery exactly once (cross-CPU-safe via atomic swap).
     pub(crate) stall_reported: AtomicBool,
+    /// Watchdog **liveness** heartbeat: the monotonic-ns timestamp of the
+    /// last non-maskable watchdog sample taken *on* this CPU (the aarch64
+    /// FIQ watchdog stamps it every cadence tick). `0` means "not yet
+    /// armed". Basis for **hard**-lockup detection: a CPU that stops
+    /// advancing this while it is `WatchdogActivity::Active` is no longer
+    /// taking even the pseudo-NMI — wedged — and only another CPU can
+    /// observe it.
+    pub(crate) last_seen_ns: AtomicU64,
+    /// This CPU's watchdog activity class (a `WatchdogActivity` encoded
+    /// as `u8`), published by the dispatch loop so a cross-CPU check can
+    /// tell a legitimately parked (idle) or not-yet-online CPU apart from
+    /// one that is genuinely running work and therefore *owes* progress.
+    pub(crate) wd_activity: AtomicU8,
+    /// Whether an active **hard**-lockup episode has already been reported
+    /// for this CPU, so a buddy reports each episode exactly once and its
+    /// recovery exactly once.
+    pub(crate) hard_reported: AtomicBool,
+    /// Last-known interrupted program counter captured on this CPU by the
+    /// non-maskable watchdog sample — the "where" of a lockup diagnosis.
+    pub(crate) wd_ctx_pc: AtomicU64,
+    /// Last-known running task id captured alongside [`Self::wd_ctx_pc`]
+    /// ([`u64::MAX`] = none/kernel), so a lockup names the culprit task.
+    pub(crate) wd_ctx_task: AtomicU64,
+    /// Last-known architecture auxiliary word captured alongside
+    /// [`Self::wd_ctx_pc`] (aarch64 `SPSR_EL1`, so the diagnosis can decode
+    /// the interrupted exception level and mask state); `0` when unset.
+    pub(crate) wd_ctx_aux: AtomicU64,
+    /// Whether [`Self::wd_ctx_pc`] captured **kernel** code. A cross-CPU
+    /// soft-lockup check flags an Active CPU that stops making scheduler
+    /// progress only when it was last seen in the kernel: a CPU running a
+    /// lone, preemptible user task legitimately makes no scheduler progress
+    /// and must never be flagged.
+    pub(crate) wd_ctx_in_kernel: AtomicBool,
 }
 
 impl CpuState {
@@ -50,6 +86,13 @@ impl CpuState {
             preemptions: AtomicU64::new(0),
             last_progress_ns: AtomicU64::new(0),
             stall_reported: AtomicBool::new(false),
+            last_seen_ns: AtomicU64::new(0),
+            wd_activity: AtomicU8::new(0),
+            hard_reported: AtomicBool::new(false),
+            wd_ctx_pc: AtomicU64::new(0),
+            wd_ctx_task: AtomicU64::new(u64::MAX),
+            wd_ctx_aux: AtomicU64::new(0),
+            wd_ctx_in_kernel: AtomicBool::new(false),
         }
     }
 }
@@ -179,13 +222,26 @@ pub(crate) fn get(cpu: u32) -> Option<&'static CpuState> {
     }
 }
 
+/// The installed per-CPU state slots, or an empty slice before install.
+///
+/// The cross-CPU watchdog scan walks this to inspect every other CPU's
+/// heartbeats and activity; the slice is immutable for the boot lifetime
+/// (set-once), so reading it lock-free from the non-maskable watchdog path
+/// is sound.
+pub(crate) fn states() -> &'static [CpuState] {
+    #[cfg(any(test, feature = "test-arch"))]
+    {
+        &TEST_STATE
+    }
+    #[cfg(not(any(test, feature = "test-arch")))]
+    {
+        installed().unwrap_or(&[])
+    }
+}
+
 /// Sum the monotonic preemption counters across installed CPUs.
 pub(crate) fn total_preemptions() -> u64 {
-    #[cfg(any(test, feature = "test-arch"))]
-    let slots: &[CpuState] = &TEST_STATE;
-    #[cfg(not(any(test, feature = "test-arch")))]
-    let slots = installed().unwrap_or(&[]);
-    slots
+    states()
         .iter()
         .map(|slot| slot.preemptions.load(Ordering::Relaxed))
         .sum()
