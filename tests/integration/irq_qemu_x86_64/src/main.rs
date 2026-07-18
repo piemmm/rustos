@@ -355,7 +355,7 @@ mod kernel {
                     unsafe { cli() };
                     qemu_exit::exit_failure();
                 }
-                WaitStep::NotFound => {
+                WaitStep::NotFound | WaitStep::Quarantined => {
                     unsafe { cli() };
                     qemu_exit::exit_failure();
                 }

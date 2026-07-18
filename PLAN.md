@@ -2024,6 +2024,30 @@ order (one fully-gated increment each):
                    wire their own cadence + `WatchdogArch`. Design:
                    `docs/src/architecture/scheduler.md` +
                    `docs/src/architecture/kernel.md` audit catalogue.
+                 - **Runaway-interrupt quarantine — the storm root-cause fix
+                   (host-proven).** The `usb_mouse`/`xhci` "100% CPU" +
+                   hard-lockup symptom is a bound line (a wedged/never-quiesced
+                   controller, or a hostile device) that re-asserts every time
+                   the kernel re-arms it, pegging a CPU through the
+                   mask/wake/re-arm cycle; the "100% task" is just ISR-time
+                   attribution to whichever task sits on that core.
+                   `kernel/irq::IrqTable` now rate-limits each line: `fire`
+                   counts fires over a 1 s window (against a boot-installed
+                   lock-free `MonotonicClock` seam, `SchedWaitQueueArch`) and,
+                   past `STORM_FIRE_BUDGET` (100 000/window), **quarantines**
+                   the line — keeps it masked, stops delivering `ready`, and
+                   the parked `irq_wait`/`waitset_wait` waiter fails closed with
+                   `Errno::DeviceFault` (`WaitStep`/`WaitOutcome::Quarantined`).
+                   The disable is audited once at the syscall boundary as
+                   `IRQ_LINE_QUARANTINED` (4090, `line`+`task`); a fresh
+                   `irq_bind` clears it. Linux `note_interrupt` analogue for the
+                   user-space IRQ model; generous budget so a busy-but-healthy
+                   line never trips; inert until the clock installs (fail-open
+                   on the net, never on security). Design:
+                   `docs/src/security/irq.md` (Runaway-line quarantine) +
+                   `docs/src/architecture/kernel.md` (4090). The separate
+                   Pi-only question of *why* the VL805/xHCI re-asserts is now
+                   chased from this audit trail rather than a wedged core.
                - **P-6 — wait-queue §27 completeness rework (staged by the
                  2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
                  up to the §27 bar: the primitive P-2 landed is the thinnest slice

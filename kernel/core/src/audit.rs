@@ -343,6 +343,18 @@ pub enum AuditEvent {
     /// (`rescheduled`/`attention`/`unrecoverable`/`unsupported`), so the
     /// recovery attempt and its result are on the audit trail.
     CpuLockupRecovery,
+    /// A bound IRQ line fired past its rate budget and was **quarantined**
+    /// by the runaway-interrupt safety net (`kernel/irq`): the kernel kept
+    /// it masked and stopped delivering it, so a never-quiesced or hostile
+    /// source can no longer peg a CPU through the mask/wake/re-arm cycle.
+    ///
+    /// Emitted once, at the syscall boundary (task context) the instant a
+    /// waiter observes the quarantine — `irq_wait` directly or
+    /// `waitset_wait` for an IRQ member — rather than from the
+    /// interrupt-context `fire` path. Carries the `line` (never a secret)
+    /// and the owning `task`; the waiter's syscall then fails closed with
+    /// `Errno::Io`. A fresh `irq_bind` clears the quarantine.
+    IrqLineQuarantined,
 }
 
 impl AuditEvent {
@@ -388,6 +400,7 @@ impl AuditEvent {
             Self::CpuHardLockupDetected => 4082,
             Self::CpuHardLockupCleared => 4083,
             Self::CpuLockupRecovery => 4084,
+            Self::IrqLineQuarantined => 4090,
         })
     }
 
@@ -435,6 +448,7 @@ impl AuditEvent {
             Self::CpuHardLockupDetected => "cpu hard lockup detected",
             Self::CpuHardLockupCleared => "cpu hard lockup cleared",
             Self::CpuLockupRecovery => "cpu lockup recovery requested",
+            Self::IrqLineQuarantined => "irq line quarantined (runaway interrupt)",
         }
     }
 }
@@ -496,6 +510,7 @@ mod tests {
             AuditEvent::CpuHardLockupDetected,
             AuditEvent::CpuHardLockupCleared,
             AuditEvent::CpuLockupRecovery,
+            AuditEvent::IrqLineQuarantined,
         ] {
             let id = ev.id().0;
             assert!(
@@ -545,6 +560,7 @@ mod tests {
             AuditEvent::CpuHardLockupDetected.id().0,
             AuditEvent::CpuHardLockupCleared.id().0,
             AuditEvent::CpuLockupRecovery.id().0,
+            AuditEvent::IrqLineQuarantined.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

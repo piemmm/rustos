@@ -260,7 +260,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                     core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
                 }
             }
-            WaitStep::TimedOut | WaitStep::NotFound => {
+            WaitStep::TimedOut | WaitStep::NotFound | WaitStep::Quarantined => {
                 // Unreachable with an infinite deadline and a live handle,
                 // but fail closed rather than spin.
                 note(TEST_START, "unexpected wait-step outcome");

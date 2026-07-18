@@ -32,7 +32,7 @@ use tairix_abi::hwtree::HwResource;
 use tairix_abi::{BootFacts, DescriptorTable, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::PortRegistry;
-use tairix_kernel_irq::{IrqController, IrqTable};
+use tairix_kernel_irq::{IrqController, IrqTable, MonotonicClock};
 use tairix_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
 use tairix_kernel_sched_api::{Priority, StepOutcome};
 use tairix_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
@@ -411,6 +411,17 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
     }
 }
 
+impl<A: KernelArch + 'static> MonotonicClock for SchedWaitQueueArch<A> {
+    fn now_ns(&self) -> u64 {
+        // The runaway-interrupt safety net reads the same arch monotonic
+        // clock the timed-wake sweep does, at the CPU currently running the
+        // interrupt-context `IrqTable::fire`. Cross-CPU skew is immaterial
+        // to a coarse rate budget of 100 000 fires/second.
+        self.arch
+            .monotonic_ns(SchedulerArch::current_cpu(self.arch))
+    }
+}
+
 impl<A: KernelArch + 'static> crate::preempt::PreemptCompetitor for SchedWaitQueueArch<A> {
     fn has_runnable_competitor(&self, cpu: CpuId) -> bool {
         // A competitor is a task queued runnable on `cpu` other than the
@@ -448,6 +459,12 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
         arch: state.arch.as_ref(),
     }));
     let _ = crate::waitq::install_wait_arch(wait_arch);
+    // The same leaked adapter is the runaway-interrupt safety net's
+    // monotonic clock: installing it lets `IrqTable::fire` rate-account
+    // each line and quarantine a runaway one (a never-quiesced or hostile
+    // source) instead of letting it peg a CPU. Set-once; a stray
+    // re-install is a benign skip.
+    let _ = state.irq.set_clock(wait_arch);
     // The same leaked adapter answers the preempt path's "is there a
     // runnable competitor on this CPU?" query, so a fired quantum tick
     // reschedules only when a switch would change what runs (the tick

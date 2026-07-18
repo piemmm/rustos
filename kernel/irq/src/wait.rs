@@ -100,6 +100,11 @@ pub enum WaitOutcome {
     /// The handle was forged, or its binding was released while the
     /// loop was waiting.
     NotFound,
+    /// The bound line was quarantined by the runaway-interrupt safety net
+    /// (it fired past its rate budget), so the kernel disabled it. A
+    /// terminal, fail-closed outcome: the caller surfaces an error rather
+    /// than re-arming, which would immediately re-storm the line.
+    Quarantined,
     /// A cooperative yield aborted the wait before any of the above.
     Aborted(IrqWaitAbort),
 }
@@ -133,6 +138,7 @@ pub fn block_until_ready(
             WaitStep::Ready => return WaitOutcome::Ready,
             WaitStep::TimedOut => return WaitOutcome::TimedOut,
             WaitStep::NotFound => return WaitOutcome::NotFound,
+            WaitStep::Quarantined => return WaitOutcome::Quarantined,
             WaitStep::Continue => {
                 if let Err(abort) = waiter.yield_now() {
                     return WaitOutcome::Aborted(abort);
@@ -298,6 +304,39 @@ mod tests {
             block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
             WaitOutcome::Aborted(IrqWaitAbort::TaskVanished)
         );
+    }
+
+    #[test]
+    fn returns_quarantined_when_the_line_was_disabled_by_the_safety_net() {
+        use crate::table::MonotonicClock;
+        use core::sync::atomic::{AtomicU64, Ordering};
+
+        struct ZeroClock(AtomicU64);
+        impl MonotonicClock for ZeroClock {
+            fn now_ns(&self) -> u64 {
+                self.0.load(Ordering::Relaxed)
+            }
+        }
+
+        let table = IrqTable::new(31);
+        // Freeze time so every fire lands in one window and the budget trips.
+        table
+            .set_clock(std::boxed::Box::leak(std::boxed::Box::new(ZeroClock(
+                AtomicU64::new(0),
+            ))))
+            .expect("clock installs once");
+        let out = table.bind(7, TaskId(1)).unwrap();
+        for _ in 0..=crate::table::STORM_FIRE_BUDGET {
+            let _ = table.fire(7, &OkController);
+        }
+        // The blocking loop surfaces the quarantine terminally, without ever
+        // yielding: the driver fails closed instead of re-arming into a storm.
+        let waiter = TestWaiter::new(1);
+        assert_eq!(
+            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
+            WaitOutcome::Quarantined
+        );
+        assert_eq!(waiter.yield_calls.get(), 0);
     }
 
     #[test]

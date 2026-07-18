@@ -267,9 +267,10 @@ impl CompletionWait for Emmc2Completion {
         // aborted wait) fails the transfer closed.
         match self.waiter.park_wait(UNLOCK_TASK, EMMC2_SILENCE_BUDGET_NS) {
             WaitOutcome::Ready => CompletionSignal::Fired,
-            WaitOutcome::TimedOut | WaitOutcome::NotFound | WaitOutcome::Aborted(_) => {
-                CompletionSignal::TimedOut
-            }
+            WaitOutcome::TimedOut
+            | WaitOutcome::NotFound
+            | WaitOutcome::Quarantined
+            | WaitOutcome::Aborted(_) => CompletionSignal::TimedOut,
         }
     }
 }

@@ -318,7 +318,10 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                 }
                 // Unreachable with an infinite deadline and a live handle;
                 // leave `WOKEN` clear so the drain reports failure.
-                WaitOutcome::TimedOut | WaitOutcome::NotFound | WaitOutcome::Aborted(_) => {}
+                WaitOutcome::TimedOut
+                | WaitOutcome::NotFound
+                | WaitOutcome::Quarantined
+                | WaitOutcome::Aborted(_) => {}
             }
         },
     );

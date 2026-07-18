@@ -6,7 +6,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::IrqHandle;
 use tairix_kernel_sec::TaskId;
@@ -103,6 +103,14 @@ pub enum WaitStep {
     /// The handle does not belong to the caller (forged), or the
     /// binding has been released since the last poll.
     NotFound,
+    /// The bound line was **quarantined**: it fired far faster than any
+    /// real device serviced through the user-space round-trip could, so
+    /// [`IrqTable::fire`] disabled it (kept it masked, stopped delivering
+    /// wakes) to stop it monopolising a CPU. A terminal, fail-closed
+    /// outcome: the waiter must surface an error rather than re-arm and
+    /// re-park, since re-arming would immediately re-storm. The binding is
+    /// cleared for the line's next [`IrqTable::bind`].
+    Quarantined,
 }
 
 /// Outcome of an [`IrqTable::bind`] success path.
@@ -128,6 +136,16 @@ pub enum FireOutcome {
     /// driver claims). The mask write still happened so the
     /// stray edge does not re-fire; ready was not touched.
     Stray,
+    /// The line fired past its rate budget within the accounting window and
+    /// has been **quarantined**: the mask write happened (so it stays
+    /// contained) but the ready flag was deliberately **not** set — a
+    /// quarantined line delivers no further wakes until it is rebound. This
+    /// is the runaway-interrupt safety net: a device (or user-space driver)
+    /// that re-asserts a line as fast as the kernel can mask/wake it would
+    /// otherwise peg a CPU, so the kernel disables the line and lets its
+    /// waiter fail closed rather than spin. The dispatch caller emits the
+    /// audit record; the parked waiter observes [`WaitStep::Quarantined`].
+    Quarantined,
 }
 
 /// Placeholder [`IrqController`] for architecture ports without a
@@ -199,6 +217,52 @@ pub trait IrqDispatchObserver: Sync {
     fn on_irq(&self, line: u32);
 }
 
+/// Monotonic-clock seam the runaway-interrupt safety net reads.
+///
+/// [`IrqTable::fire`] runs in interrupt context and must stay wait-free, so
+/// the rate-accounting clock is injected as a set-once, lock-free hook (like
+/// [`IrqDispatchObserver`]) rather than threaded through every architecture's
+/// dispatch call site. `kernel/irq` keeps no architecture dependency: the
+/// kernel binary installs one whose `now_ns` reads the arch monotonic timer.
+/// Until a clock is installed, rate accounting is inert (a line is never
+/// quarantined), so a host test or an early-boot fire behaves exactly as
+/// before.
+///
+/// # Contract
+///
+/// * It runs in **interrupt context**: it must be wait-free and must never
+///   block, take a lock, allocate, or panic.
+/// * `now_ns` must be non-decreasing on a given CPU; the accounting tolerates
+///   cross-CPU skew (it is a coarse safety net, not a precise meter).
+/// * The [`Sync`] supertrait lets a `&'static dyn MonotonicClock` be shared
+///   across CPUs, which every SMP IRQ path requires.
+pub trait MonotonicClock: Sync {
+    /// Current kernel monotonic time in nanoseconds.
+    fn now_ns(&self) -> u64;
+}
+
+/// Length of the sliding window over which a line's fires are counted, in
+/// nanoseconds (1 second). Chosen with [`STORM_FIRE_BUDGET`] so the trip
+/// threshold is a sustained *rate* no correctly-serviced device reaches.
+pub(crate) const STORM_WINDOW_NS: u64 = 1_000_000_000;
+
+/// Maximum fires one line may take within a [`STORM_WINDOW_NS`] window before
+/// it is quarantined.
+///
+/// This is a **safety net against a runaway line**, not a throughput cap.
+/// Under mask-before-wake a bound line can only re-fire *after* its
+/// user-space driver drains the completion and the kernel re-arms it, so
+/// every legitimate interrupt costs a full user-space round-trip (syscall →
+/// driver work → syscall). No real device driven that way sustains anywhere
+/// near 100 000 interrupts per second on one line; a line that does is
+/// re-asserting with no work being done (a wedged controller, a
+/// never-quiesced source, or a hostile device), i.e. exactly the storm that
+/// would otherwise peg a CPU. The budget is deliberately generous so a busy
+/// but healthy line never trips, mirroring Linux's `note_interrupt`
+/// spurious-IRQ disable in spirit while fitting this kernel's userspace-IRQ
+/// model.
+pub(crate) const STORM_FIRE_BUDGET: u32 = 100_000;
+
 /// Kernel IRQ table.
 ///
 /// One per running kernel. Interior synchronisation through a
@@ -215,6 +279,26 @@ pub struct IrqTable {
     /// wait-free; empty until the kernel installs the entropy observer at
     /// boot, and a no-op when empty.
     observer: OnceCell<&'static dyn IrqDispatchObserver>,
+    /// Set-once, lock-free-read monotonic clock the runaway-interrupt
+    /// safety net reads from the interrupt-context [`IrqTable::fire`] path
+    /// (see [`MonotonicClock`]). Empty until the kernel installs it at
+    /// boot; while empty, rate accounting is inert (no line is
+    /// quarantined), so early-boot fires and host tests are unaffected.
+    clock: OnceCell<&'static dyn MonotonicClock>,
+    /// Per-line start of the current fire-accounting window (arch monotonic
+    /// ns), paired with [`Self::storm_fire_count`]. Lock-free like
+    /// [`Self::ready`] so [`IrqTable::fire`] never blocks. Indexed by line.
+    storm_window_start_ns: Vec<AtomicU64>,
+    /// Per-line count of fires observed in the current window. When it
+    /// exceeds [`STORM_FIRE_BUDGET`] the line is quarantined. Indexed by
+    /// line.
+    storm_fire_count: Vec<AtomicU32>,
+    /// Per-line sticky "this line was quarantined" flag. Once set,
+    /// [`IrqTable::fire`] stops delivering wakes for the line (it stays
+    /// masked) and [`IrqTable::try_wait_step`] reports
+    /// [`WaitStep::Quarantined`]; only a fresh [`IrqTable::bind`] clears
+    /// it. Indexed by line.
+    quarantined: Vec<AtomicBool>,
     /// Per-line "fired since last consume" flags, kept **outside**
     /// [`Inner`]'s [`RwLock`] so [`IrqTable::fire`] — which runs in
     /// interrupt context — can record a wake-up with a single atomic
@@ -279,9 +363,15 @@ impl IrqTable {
         let slots = (max_line as usize).saturating_add(1);
         let mut ready = Vec::with_capacity(slots);
         let mut bound = Vec::with_capacity(slots);
+        let mut storm_window_start_ns = Vec::with_capacity(slots);
+        let mut storm_fire_count = Vec::with_capacity(slots);
+        let mut quarantined = Vec::with_capacity(slots);
         for _ in 0..slots {
             ready.push(AtomicBool::new(false));
             bound.push(AtomicBool::new(false));
+            storm_window_start_ns.push(AtomicU64::new(0));
+            storm_fire_count.push(AtomicU32::new(0));
+            quarantined.push(AtomicBool::new(false));
         }
         Self {
             inner: RwLock::new(Inner {
@@ -291,9 +381,32 @@ impl IrqTable {
             }),
             max_line,
             observer: OnceCell::new(),
+            clock: OnceCell::new(),
+            storm_window_start_ns,
+            storm_fire_count,
+            quarantined,
             ready,
             bound,
         }
+    }
+
+    /// Install the set-once monotonic clock the runaway-interrupt safety net
+    /// reads (see [`MonotonicClock`]).
+    ///
+    /// Called **exactly once** at boot, after the arch timer is discovered.
+    /// Until it is installed, [`IrqTable::fire`] performs no rate accounting
+    /// and no line is ever quarantined, so an early-boot interrupt behaves
+    /// exactly as before.
+    ///
+    /// # Errors
+    ///
+    /// [`ObserverAlreadyInstalled`] if a clock is already installed — a
+    /// second install is a defect (set-once), not a runtime condition.
+    pub fn set_clock(
+        &self,
+        clock: &'static dyn MonotonicClock,
+    ) -> Result<(), ObserverAlreadyInstalled> {
+        self.clock.set(clock).map_err(|_| ObserverAlreadyInstalled)
     }
 
     /// Install the set-once interrupt-dispatch observer (see
@@ -366,10 +479,16 @@ impl IrqTable {
         g.entries.insert(line, entry);
         g.by_handle.insert(raw, line);
         // Reset the lock-free flags for this line, then publish the
-        // binding. The store order (clear `ready`, set `bound` last)
-        // means `fire` only ever observes `bound == true` for a line
-        // whose `ready` slot was already initialised.
+        // binding. The store order (clear `ready`, clear the storm
+        // accounting + quarantine, set `bound` last) means `fire` only
+        // ever observes `bound == true` for a line whose `ready` slot and
+        // rate-accounting were already re-initialised. Clearing
+        // `quarantined` here is what lets a driver recover a previously
+        // stormed line: a fresh bind starts it clean.
         self.ready[line as usize].store(false, Ordering::SeqCst);
+        self.storm_window_start_ns[line as usize].store(0, Ordering::SeqCst);
+        self.storm_fire_count[line as usize].store(0, Ordering::SeqCst);
+        self.quarantined[line as usize].store(false, Ordering::SeqCst);
         self.bound[line as usize].store(true, Ordering::SeqCst);
         Ok(BindOutcome { handle, line })
     }
@@ -387,7 +506,7 @@ impl IrqTable {
     ///
     /// # Ordering
     ///
-    /// The check order is documented to make the forgery /
+    /// The check order is documented to make the forgery / quarantine /
     /// timeout /  ready hierarchy explicit:
     ///
     /// 1. Look up by handle. If the handle is unknown or its
@@ -395,14 +514,18 @@ impl IrqTable {
     ///    [`WaitStep::NotFound`]. The forgery check beats every
     ///    other check (identify before any
     ///    state-touching transition).
-    /// 2. If `ready` is set, clear it and return
+    /// 2. If the line has been quarantined by the runaway-interrupt
+    ///    safety net, return [`WaitStep::Quarantined`] (terminal,
+    ///    fail-closed). A quarantined line never delivers a `ready`, so
+    ///    this cannot mask a real fire.
+    /// 3. If `ready` is set, clear it and return
     ///    [`WaitStep::Ready`]. The ready flag wins over a
     ///    near-simultaneous deadline because the wake-up did
     ///    happen — surfacing `TimedOut` here would silently drop
     ///    a successful interrupt.
-    /// 3. If `now_ns >= deadline_ns`, return
+    /// 4. If `now_ns >= deadline_ns`, return
     ///    [`WaitStep::TimedOut`].
-    /// 4. Otherwise [`WaitStep::Continue`].
+    /// 5. Otherwise [`WaitStep::Continue`].
     #[must_use]
     pub fn try_wait_step(
         &self,
@@ -433,6 +556,14 @@ impl IrqTable {
             }
             line
         };
+        // A quarantined line is terminal and fail-closed: the runaway
+        // safety net disabled it, so report it before anything else (a
+        // real fire cannot have out-raced the quarantine — `fire` stops
+        // setting `ready` the moment it quarantines). The waiter surfaces
+        // an error instead of re-arming, which would immediately re-storm.
+        if self.quarantined[line as usize].load(Ordering::Acquire) {
+            return WaitStep::Quarantined;
+        }
         // The ready flag wins over a near-simultaneous deadline: a
         // wake-up that happened must not be masked by `TimedOut`. The
         // `swap` consumes the flag with `SeqCst`, pairing with the
@@ -514,11 +645,80 @@ impl IrqTable {
             // arch-port audit observer can record stray-IRQ rate.
             return Ok(FireOutcome::Stray);
         }
+        // Runaway-line safety net: the line stays masked (done above) but
+        // stops being re-armed/re-delivered once it fires past its rate
+        // budget, so a never-quiesced or hostile source cannot peg a CPU
+        // through the mask/wake/re-arm cycle. A line already quarantined
+        // never re-delivers.
+        if self.note_fire_and_quarantined(line as usize) {
+            return Ok(FireOutcome::Quarantined);
+        }
         // `mask` issued a `SeqCst` fence before returning; setting
         // `ready` after it preserves the mask-before-wake invariant a
         // `try_wait_step` consumer observes through the paired load.
         self.ready[line as usize].store(true, Ordering::SeqCst);
         Ok(FireOutcome::Marked)
+    }
+
+    /// Record one fire of `line` against its sliding-window rate budget and
+    /// report whether the line is now (or already) **quarantined**.
+    ///
+    /// Runs in interrupt context from [`Self::fire`], so it is wait-free:
+    /// it reads the set-once [`MonotonicClock`] and the per-line atomics
+    /// only, never a lock. Until a clock is installed it is inert and
+    /// returns `false` (accounting off), so an early-boot fire and a host
+    /// test without an installed clock behave exactly as before.
+    ///
+    /// The window is a coarse safety net, not a precise meter: cross-CPU
+    /// races on the count merely shift the trip point by a few fires, which
+    /// is immaterial against a [`STORM_FIRE_BUDGET`] of 100 000. Once the
+    /// sticky quarantine flag is set it stays set until the next
+    /// [`Self::bind`] clears it.
+    fn note_fire_and_quarantined(&self, line: usize) -> bool {
+        if self.quarantined[line].load(Ordering::Acquire) {
+            return true;
+        }
+        let Ok(Some(clock)) = self.clock.get() else {
+            // No clock installed yet: accounting is inert (fail *open* on
+            // the safety net, never on security — the line is still masked
+            // and delivered normally).
+            return false;
+        };
+        let now = clock.now_ns();
+        let start = self.storm_window_start_ns[line].load(Ordering::Relaxed);
+        // A fresh window (first fire, or the previous one elapsed) resets
+        // the count to this fire and starts the clock again.
+        if now.saturating_sub(start) >= STORM_WINDOW_NS {
+            self.storm_window_start_ns[line].store(now, Ordering::Relaxed);
+            self.storm_fire_count[line].store(1, Ordering::Relaxed);
+            return false;
+        }
+        let count = self.storm_fire_count[line]
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if count > STORM_FIRE_BUDGET {
+            // Trip: keep the line masked (already masked by `fire`) and
+            // deliver no wake. The parked waiter observes
+            // `WaitStep::Quarantined` on its next poll and fails closed.
+            self.quarantined[line].store(true, Ordering::Release);
+            return true;
+        }
+        false
+    }
+
+    /// Whether the line bound to `handle` for `caller` has been
+    /// quarantined by the runaway-line safety net.
+    ///
+    /// Owner-checked like [`Self::line_for`] (identify before acting): a
+    /// forged or foreign handle, or an unknown line, reports `false`. Used
+    /// by the wait-set path to fail a quarantined IRQ member closed rather
+    /// than re-arm and re-storm it. A pure read, safe from any context.
+    #[must_use]
+    pub fn is_quarantined(&self, handle: IrqHandle, caller: TaskId) -> bool {
+        match self.line_for(handle, caller) {
+            Some(line) => self.quarantined[line as usize].load(Ordering::Acquire),
+            None => false,
+        }
     }
 
     /// Drop every binding owned by `task`.
@@ -538,9 +738,15 @@ impl IrqTable {
             if let Some(entry) = g.entries.remove(&line) {
                 g.by_handle.remove(&entry.handle.as_u64());
                 // Clear the binding's lock-free flags so a late edge
-                // on the now-unbound line is reported as a stray.
+                // on the now-unbound line is reported as a stray, and
+                // reset the runaway accounting so a future rebind starts
+                // clean (bind resets these too; clearing here keeps a
+                // released line's state tidy in the meantime).
                 self.bound[line as usize].store(false, Ordering::SeqCst);
                 self.ready[line as usize].store(false, Ordering::SeqCst);
+                self.quarantined[line as usize].store(false, Ordering::SeqCst);
+                self.storm_fire_count[line as usize].store(0, Ordering::SeqCst);
+                self.storm_window_start_ns[line as usize].store(0, Ordering::SeqCst);
             }
         }
         ReleaseOutcome { released }
@@ -944,5 +1150,138 @@ mod tests {
         let ctl = MockController::ok();
         let _ = t.bind(3, TaskId(1)).unwrap();
         assert_eq!(t.fire(3, &ctl), Ok(FireOutcome::Marked));
+    }
+
+    /// Test monotonic clock with a settable time, so the runaway-line
+    /// rate accounting can be driven deterministically. Interior-atomic so
+    /// it is `Sync`, mirroring the production clock's shape.
+    struct MockClock {
+        now: AtomicU64,
+    }
+
+    impl MockClock {
+        fn at(now: u64) -> Self {
+            Self {
+                now: AtomicU64::new(now),
+            }
+        }
+        fn set(&self, now: u64) {
+            self.now.store(now, Ordering::Relaxed);
+        }
+    }
+
+    impl MonotonicClock for MockClock {
+        fn now_ns(&self) -> u64 {
+            self.now.load(Ordering::Relaxed)
+        }
+    }
+
+    fn leak_clock(now: u64) -> &'static MockClock {
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(MockClock::at(now)))
+    }
+
+    #[test]
+    fn without_a_clock_a_line_is_never_quarantined() {
+        // Rate accounting is inert until a clock is installed: even far past
+        // the budget every fire is delivered exactly as before.
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let out = t.bind(7, TaskId(1)).unwrap();
+        for _ in 0..(STORM_FIRE_BUDGET + 10) {
+            assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+        }
+        assert_eq!(
+            t.try_wait_step(out.handle, TaskId(1), 0, u64::MAX),
+            WaitStep::Ready
+        );
+        assert!(!t.is_quarantined(out.handle, TaskId(1)));
+    }
+
+    #[test]
+    fn a_line_firing_past_its_budget_in_one_window_is_quarantined() {
+        let t = IrqTable::new(31);
+        t.set_clock(leak_clock(0)).expect("clock installs once");
+        let ctl = MockController::ok();
+        let out = t.bind(7, TaskId(1)).unwrap();
+        // Every fire lands at the same instant (one window). The budget-th
+        // is still delivered; the one past it trips the quarantine.
+        for _ in 0..STORM_FIRE_BUDGET {
+            assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+        }
+        assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Quarantined));
+        // The tripping fire delivered no wake, and the waiter observes the
+        // terminal, fail-closed quarantine rather than a ready or a spin.
+        assert!(t.is_quarantined(out.handle, TaskId(1)));
+        assert_eq!(
+            t.try_wait_step(out.handle, TaskId(1), 0, u64::MAX),
+            WaitStep::Quarantined
+        );
+        // A quarantined line keeps reporting quarantined and never re-delivers.
+        assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Quarantined));
+    }
+
+    #[test]
+    fn fires_spread_across_windows_never_trip_the_budget() {
+        // A busy-but-healthy line: it fires the full budget, then the window
+        // rolls over and the count resets, so it is never quarantined.
+        let t = IrqTable::new(31);
+        let clock = leak_clock(0);
+        t.set_clock(clock).expect("clock installs once");
+        let ctl = MockController::ok();
+        let out = t.bind(7, TaskId(1)).unwrap();
+        for window in 0..4u64 {
+            clock.set(window * STORM_WINDOW_NS);
+            for _ in 0..STORM_FIRE_BUDGET {
+                assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+                // Consume the ready flag each time, mirroring a driver that
+                // services every interrupt (so `fire` re-sets it next round).
+                let _ = t.try_wait_step(out.handle, TaskId(1), 0, u64::MAX);
+            }
+        }
+        assert!(!t.is_quarantined(out.handle, TaskId(1)));
+    }
+
+    #[test]
+    fn a_fresh_bind_clears_a_previous_quarantine() {
+        let t = IrqTable::new(31);
+        t.set_clock(leak_clock(0)).expect("clock installs once");
+        let ctl = MockController::ok();
+        let first = t.bind(7, TaskId(1)).unwrap();
+        for _ in 0..=STORM_FIRE_BUDGET {
+            let _ = t.fire(7, &ctl);
+        }
+        assert!(t.is_quarantined(first.handle, TaskId(1)));
+        // The driver releases and rebinds the line to recover it.
+        t.release_for(TaskId(1));
+        let second = t.bind(7, TaskId(1)).unwrap();
+        assert!(!t.is_quarantined(second.handle, TaskId(1)));
+        assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+        assert_eq!(
+            t.try_wait_step(second.handle, TaskId(1), 0, u64::MAX),
+            WaitStep::Ready
+        );
+    }
+
+    #[test]
+    fn is_quarantined_owner_checks_and_ignores_unknown_handles() {
+        let t = IrqTable::new(31);
+        t.set_clock(leak_clock(0)).expect("clock installs once");
+        let ctl = MockController::ok();
+        let out = t.bind(7, TaskId(1)).unwrap();
+        for _ in 0..=STORM_FIRE_BUDGET {
+            let _ = t.fire(7, &ctl);
+        }
+        // Owner sees the quarantine; a foreign task and a forged handle do
+        // not (identify before acting).
+        assert!(t.is_quarantined(out.handle, TaskId(1)));
+        assert!(!t.is_quarantined(out.handle, TaskId(2)));
+        assert!(!t.is_quarantined(IrqHandle::from_raw(0xDEAD), TaskId(1)));
+    }
+
+    #[test]
+    fn set_clock_is_set_once() {
+        let t = IrqTable::new(31);
+        assert_eq!(t.set_clock(leak_clock(0)), Ok(()));
+        assert_eq!(t.set_clock(leak_clock(0)), Err(ObserverAlreadyInstalled));
     }
 }

@@ -1141,6 +1141,33 @@ where
         }
     }
 
+    /// Emit the [`AuditEvent::IrqLineQuarantined`] record when the
+    /// runaway-interrupt safety net disabled a line, naming the `line`
+    /// (never a secret) and the owning `task`. Called at the syscall
+    /// boundary (task context) by both `irq_wait` and `waitset_wait`, so
+    /// the interrupt-context `fire` path stays lock-free. A line the
+    /// handle no longer resolves to (`None`) is still reported so the
+    /// disable is never silent.
+    fn emit_irq_quarantined(&self, line: Option<u32>, task: u64) {
+        crate::audit::emit(
+            self.audit,
+            tairix_log::Level::Warn,
+            AuditEvent::IrqLineQuarantined,
+            &[
+                Field {
+                    key: "line",
+                    value: line.map_or(tairix_log::FieldValue::Null, |l| {
+                        tairix_log::FieldValue::UnsignedInt(u64::from(l))
+                    }),
+                },
+                Field {
+                    key: "task",
+                    value: tairix_log::FieldValue::UnsignedInt(task),
+                },
+            ],
+        );
+    }
+
     /// Copy `dst.len()` bytes in from the caller's user buffer at `uaddr`,
     /// resolving demand-paged file-mapping and demand-grown stack misses
     /// on the way — the one fault-aware `copy_in` every syscall handler
@@ -3205,6 +3232,16 @@ where
         match outcome {
             WaitOutcome::Ready => Ok(0),
             WaitOutcome::TimedOut => Err(Errno::TimedOut),
+            // The runaway-interrupt safety net disabled this line (it
+            // fired past its rate budget). Record it now, at the syscall
+            // boundary (task context, safe to log), and fail the driver
+            // closed with `DeviceFault`: the device is unhealthy, and
+            // re-arming would immediately re-storm. A fresh `irq_bind`
+            // clears the quarantine.
+            WaitOutcome::Quarantined => {
+                self.emit_irq_quarantined(waiter.line, task);
+                Err(Errno::DeviceFault)
+            }
             // A forged / released handle and a vanished task both map
             // to `Errno::NotFound`: `NoSuchTask` cannot happen here
             // (`CallerContext` is built from the live scheduler
@@ -6363,6 +6400,27 @@ where
         // post-write IRQ-edge consume.
         let outcome: Result<(WaitSourceKind, u64, u64), Errno> = loop {
             let now = self.arch.monotonic_ns(cpu);
+            // A quarantined IRQ member is terminal: the runaway-interrupt
+            // safety net disabled its line, so it will never fire again.
+            // Fail the whole wait closed with `DeviceFault` (recording the
+            // disable) rather than parking forever on a dead line or
+            // re-arming it into another storm. Checked before the readiness
+            // scan so a quarantine that lands mid-wait is caught promptly.
+            let quarantined_line = members.iter().find_map(|m| {
+                if m.kind != WaitSourceKind::Irq {
+                    return None;
+                }
+                let handle = IrqHandle::from_raw(m.id);
+                if self.irq.is_quarantined(handle, caller.task_id) {
+                    self.irq.line_for(handle, caller.task_id)
+                } else {
+                    None
+                }
+            });
+            if let Some(line) = quarantined_line {
+                self.emit_irq_quarantined(Some(line), sched_task);
+                break Err(Errno::DeviceFault);
+            }
             let mut ready: Option<(WaitSourceKind, u64, u64)> = None;
             // Scan in registration order; first ready wins. Each member's
             // readiness is the non-consuming, caller-re-checked peek of
@@ -10400,6 +10458,76 @@ mod tests {
         // is consumed on the first iteration (per the
         // ordering contract: ready beats timeout in a tie).
         assert_eq!(h.irq_wait(&ctx, IrqHandle::from_raw(raw), 0), Ok(0));
+    }
+
+    /// A line that storms past its rate budget is quarantined by the
+    /// runaway-interrupt safety net: `irq_wait` fails the driver closed with
+    /// `DeviceFault` and the disable is recorded on the audit log. Without
+    /// this net a never-quiesced line would peg a CPU through the
+    /// mask/wake/re-arm cycle.
+    #[test]
+    fn irq_wait_reports_a_quarantined_line_as_device_fault() {
+        // A frozen clock so every fire lands in one accounting window and
+        // the rate budget is reached deterministically.
+        struct FrozenClock;
+        impl tairix_kernel_irq::MonotonicClock for FrozenClock {
+            fn now_ns(&self) -> u64 {
+                0
+            }
+        }
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let permissive = PermissiveController;
+
+        irq.set_clock(Box::leak(Box::new(FrozenClock)))
+            .expect("clock installs once");
+
+        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let raw = h.irq_bind(&ctx, 5).expect("bind");
+        let handle = IrqHandle::from_raw(raw);
+
+        // Storm the line (bounded so the test can never hang) until the
+        // safety net quarantines it, independent of the exact budget.
+        let mut fired = 0u32;
+        while !irq.is_quarantined(handle, ctx.task_id) && fired < 1_000_000 {
+            let _ = irq.fire(5, &permissive);
+            fired += 1;
+        }
+        assert!(
+            irq.is_quarantined(handle, ctx.task_id),
+            "a storming line must be quarantined"
+        );
+
+        sink.clear();
+        // The driver's wait fails closed with `DeviceFault` (the device is
+        // unhealthy), never a spin or a hang.
+        assert_eq!(h.irq_wait(&ctx, handle, 0), Err(Errno::DeviceFault));
+        // The disable is on the audit log, naming the line.
+        let quarantine = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id.0 == 4090)
+            .expect("IrqLineQuarantined audit record emitted");
+        assert!(quarantine
+            .fields
+            .iter()
+            .any(|(k, v)| k == "line" && v == "5"));
     }
 
     /// `exit` releases every IRQ binding the exiting task held.

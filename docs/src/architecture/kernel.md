@@ -224,6 +224,26 @@ record under the `log` phase and halts.
 | 4082 | Error | `CPU_HARD_LOCKUP_DETECTED`  | audit  |
 | 4083 | Warn  | `CPU_HARD_LOCKUP_CLEARED`   | audit  |
 | 4084 | Warn  | `CPU_LOCKUP_RECOVERY`       | audit  |
+| 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
+
+`IRQ_LINE_QUARANTINED` is the runaway-interrupt safety net
+(`tairix_kernel_irq`). Under mask-before-wake a bound line can only re-fire
+after its user-space driver drains the completion and the kernel re-arms it,
+so every legitimate interrupt costs a full user-space round-trip; a line
+that instead fires past a generous rate budget (over 100 000 fires in a
+one-second window) is re-asserting with no work being done — a wedged or
+never-quiesced controller, or a hostile device — and would otherwise peg a
+CPU through the mask/wake/re-arm cycle. `IrqTable::fire` counts each line's
+fires (using the boot-installed monotonic clock) and, on exceeding the
+budget, **quarantines** it: the line is kept masked, no further wake is
+delivered, and its `irq_wait` / `waitset_wait` waiter fails closed with
+`Errno::DeviceFault`. The record is emitted **once** at that syscall
+boundary (task context, so the interrupt-context `fire` path stays
+lock-free), naming the `line` and owning `task`; a fresh `irq_bind` clears
+the quarantine so a driver can recover the line. This is the kernel's
+analogue of Linux's `note_interrupt` spurious-IRQ disable, adapted to the
+user-space IRQ model, and is what turns the "usb_mouse / xhci pegged at 100%
+CPU" storm into a bounded, logged, fail-closed event.
 
 These five records are the first-class CPU-lockup watchdog
 (`tairix_kernel_core::watchdog`; design `plans/WATCHDOG.md`), which catches

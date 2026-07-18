@@ -397,7 +397,7 @@ mod kernel {
                 WaitStep::Ready => break true,
                 // SAFETY: see `hlt`.
                 WaitStep::Continue => unsafe { hlt() },
-                WaitStep::TimedOut | WaitStep::NotFound => break false,
+                WaitStep::TimedOut | WaitStep::NotFound | WaitStep::Quarantined => break false,
             }
         };
         // SAFETY: see `cli`.

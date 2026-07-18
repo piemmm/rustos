@@ -74,7 +74,7 @@ mod wait;
 pub use error::{IrqError, MaskError};
 pub use table::{
     BindOutcome, FireOutcome, IrqController, IrqDispatchObserver, IrqEntry, IrqTable,
-    ObserverAlreadyInstalled, ReleaseOutcome, UnsupportedController, WaitStep,
+    MonotonicClock, ObserverAlreadyInstalled, ReleaseOutcome, UnsupportedController, WaitStep,
     UNSUPPORTED_CONTROLLER,
 };
 pub use wait::{block_until_ready, IrqWaitAbort, IrqWaiter, WaitOutcome};

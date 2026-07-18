@@ -119,6 +119,48 @@ the kernel "I am ready for the next edge". This sequencing is the
 load-bearing safety invariant of the entire user-space IRQ path; the
 follow-up session's kernel-side test plan exercises it directly.
 
+## Runaway-line quarantine (safety net)
+
+Mask-before-wake stops a single edge from re-entering the trap path while
+the driver drains, but it does not by itself stop a line that *keeps*
+re-asserting every time the kernel re-arms it: a wedged or never-quiesced
+controller (a USB host controller whose interrupt condition the driver's
+acknowledge did not clear), or a hostile device, can drive the
+mask → wake → drain → re-arm → re-assert cycle indefinitely and peg the CPU
+that services it — the observed "usb_mouse / xhci pegged at 100% CPU"
+symptom, and a hard-lockup trigger when it coincides with an in-kernel park.
+
+The kernel therefore rate-limits each line. Under mask-before-wake a bound
+line can only re-fire *after* its user-space driver drains the completion
+and the kernel re-arms it, so every legitimate interrupt costs a full
+user-space round-trip (syscall → driver work → syscall). No real device
+driven that way sustains anywhere near 100 000 interrupts per second on one
+line; a line that does is re-asserting with no work being done.
+`IrqTable::fire` counts each line's fires over a one-second sliding window
+(using a boot-installed monotonic clock, read lock-free from interrupt
+context) and, on exceeding `STORM_FIRE_BUDGET` (100 000) fires in a window,
+**quarantines** the line:
+
+* the line is kept masked (it stays contained) and **no further wake is
+  delivered** — `fire` stops setting `ready`;
+* the parked waiter observes `WaitStep::Quarantined` and its `irq_wait` /
+  `waitset_wait` syscall **fails closed** with `Errno::DeviceFault` (the
+  device is unhealthy), rather than re-arming into another storm;
+* the disable is recorded once on the audit log as `IRQ_LINE_QUARANTINED`
+  (id 4090), emitted at the syscall boundary (task context, so `fire` stays
+  lock-free), naming the `line` and owning `task`;
+* a fresh `irq_bind` clears the quarantine, so a driver that recovers its
+  device can rebind the line.
+
+This is the kernel's analogue of Linux's `note_interrupt` spurious-IRQ
+disable, adapted to the user-space IRQ model. The budget is deliberately
+generous so a busy-but-healthy line (serviced with real work each round,
+whose fires spread across windows) never trips; only a genuine runaway does.
+Until the monotonic clock is installed at boot the accounting is inert (no
+line is ever quarantined), so early-boot interrupts behave exactly as
+before — fail-open on the *net*, never on security (the line is still masked
+and delivered normally).
+
 ## Out of scope for this contract
 
 * **IRQ raising / masking by user space.** Neither syscall grants the
@@ -553,15 +595,25 @@ alongside the other freestanding integration crates.
 
 ### Test coverage
 
-* `kernel/irq` ships 18 unit tests covering bind / duplicate
+* `kernel/irq` unit tests cover bind / duplicate
   refusal / out-of-range refusal / ready-after-fire / timeout /
   forgery (no binding, wrong caller) / mask-before-wake ordering /
   controller errors / stray-IRQ containment / release_for
-  semantics / handle-uniqueness across rebinds.
-* `kernel/core::syscalls::tests` adds 6 syscall-handler tests
+  semantics / handle-uniqueness across rebinds, plus the
+  runaway-line quarantine: a storm past the rate budget in one
+  window trips it (no ready delivered, `WaitStep::Quarantined`),
+  fires spread across windows never trip it, a fresh bind clears a
+  previous quarantine, `is_quarantined` is owner-checked, an
+  uninstalled clock leaves accounting inert, and
+  `block_until_ready` surfaces `WaitOutcome::Quarantined` without
+  yielding.
+* `kernel/core::syscalls::tests` adds syscall-handler tests
   (mint / out-of-range / duplicate / forgery / timeout / pre-fired
-  ready) plus an `exit_releases_every_irq_binding_owned_by_task`
-  test that asserts the `exit` ↔ `release_for` ordering.
+  ready), an `exit_releases_every_irq_binding_owned_by_task` test
+  asserting the `exit` ↔ `release_for` ordering, and
+  `irq_wait_reports_a_quarantined_line_as_device_fault` proving a
+  quarantined line fails the waiter closed with `DeviceFault` and
+  emits the `IRQ_LINE_QUARANTINED` audit record naming the line.
 * `kernel/tairix-kernel::ioapic_controller` adds host tests for
   `program_pin`, `mask`, `unmask`, `read_pin_low`, multi-IO-APIC
   routing, the mask-before-wake ordering against a
