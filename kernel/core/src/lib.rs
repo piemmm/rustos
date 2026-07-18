@@ -120,6 +120,7 @@ pub mod users;
 pub mod waitq;
 pub mod waitset;
 pub mod wallclock;
+pub mod watchdog;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_arch;
@@ -249,3 +250,7 @@ pub use waitq::{
     IRQ_WAITQ, NO_DEADLINE, PROCWAIT_WAITQ, SEAT_INPUT_WAITQ, SERVE_WAITQ,
 };
 pub use wallclock::{KernelWallClock, NullWallClock, WallClockSource, NULL_WALL_CLOCK};
+pub use watchdog::{
+    check_stall, install_report_sink as install_watchdog_sink, note_progress,
+    DEFAULT_STALL_THRESHOLD_NS,
+};

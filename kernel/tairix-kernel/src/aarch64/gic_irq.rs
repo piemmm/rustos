@@ -965,6 +965,11 @@ extern "C" fn production_ipi_dispatch(cpu: tairix_arch_api::CpuId) {
 extern "C" fn production_tick_dispatch(cpu: tairix_arch_api::CpuId) {
     tairix_kernel_core::note_preempt_tick(cpu);
     tairix_kernel_core::timed_wake_sweep();
+    // Sample the stall watchdog: a tick still fires on a CPU whose task is
+    // looping without returning to the scheduler (interrupts stay
+    // deliverable in-kernel), so this is where a soft lockup on `cpu`
+    // becomes observable and is reported.
+    tairix_kernel_core::check_stall(cpu);
 }
 
 /// Set up tickless timer-driven preemption on the boot CPU: register the

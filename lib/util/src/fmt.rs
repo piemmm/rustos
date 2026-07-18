@@ -84,6 +84,38 @@ pub fn format_usize(value: usize, buf: &mut [u8; 12]) -> &str {
     format_i32(clamped, buf)
 }
 
+/// Render `value` into `buf` as decimal text and return the populated
+/// sub-slice.
+///
+/// Full-range and total: every `u64` — including `u64::MAX`
+/// (`"18446744073709551615"`, 20 digits) — renders without clamping,
+/// panicking, or allocating. Unlike [`format_usize`] this never saturates
+/// and is `usize`-width-independent, so a 64-bit quantity (a duration in
+/// milliseconds, a byte count) is rendered faithfully on every target,
+/// including the 32-bit `usize` of `wasm32`.
+#[must_use]
+pub fn format_u64(value: u64, buf: &mut [u8; 20]) -> &str {
+    let mut n = value;
+    let mut pos = buf.len();
+    if n == 0 {
+        pos -= 1;
+        buf[pos] = b'0';
+    } else {
+        while n > 0 {
+            pos -= 1;
+            // `n % 10` is in `0..=9`, the cast to `u8` is lossless.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                buf[pos] = b'0' + (n % 10) as u8;
+            }
+            n /= 10;
+        }
+    }
+    // SAFETY-INVARIANT: every byte written above is `b'0'..=b'9'`, so the
+    // slice is valid UTF-8 by construction. Confirmed by the unit tests.
+    core::str::from_utf8(&buf[pos..]).unwrap_or("?")
+}
+
 /// Render `value` into `buf` as a fixed-width 16-nibble lowercase hex
 /// string and return the populated sub-slice.
 ///
@@ -107,7 +139,7 @@ pub fn format_hex_u64(value: u64, buf: &mut [u8; 16]) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_hex_u64, format_i32, format_usize};
+    use super::{format_hex_u64, format_i32, format_u64, format_usize};
 
     #[test]
     fn format_i32_zero() {
@@ -153,6 +185,33 @@ mod tests {
     fn format_usize_normal_value() {
         let mut buf = [0u8; 12];
         assert_eq!(format_usize(42, &mut buf), "42");
+    }
+
+    #[test]
+    fn format_u64_zero() {
+        let mut buf = [0u8; 20];
+        assert_eq!(format_u64(0, &mut buf), "0");
+    }
+
+    #[test]
+    fn format_u64_normal_value() {
+        let mut buf = [0u8; 20];
+        assert_eq!(format_u64(1_234_567_890, &mut buf), "1234567890");
+    }
+
+    #[test]
+    fn format_u64_above_usize32_and_i32_max_is_not_clamped() {
+        let mut buf = [0u8; 20];
+        // Well beyond `i32::MAX`/`u32::MAX`, so it would clamp or truncate
+        // through the `usize`/`i32` formatters: the full-range renderer
+        // must reproduce it exactly.
+        assert_eq!(format_u64(10_000_000_000, &mut buf), "10000000000");
+    }
+
+    #[test]
+    fn format_u64_max() {
+        let mut buf = [0u8; 20];
+        assert_eq!(format_u64(u64::MAX, &mut buf), "18446744073709551615");
     }
 
     #[test]

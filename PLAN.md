@@ -1974,6 +1974,28 @@ order (one fully-gated increment each):
                    is bounded by the remainder of one syscall (each syscall's
                    in-kernel work is itself bounded, e.g. `console_write`'s
                    4 KiB clamp). Design: `docs/src/architecture/scheduler.md`.
+                 - **CPU-stall watchdog — DONE (host-proven).** A soft-lockup
+                   detector reports on the serial/console debug output when a
+                   CPU stops making scheduler progress — a runaway in-kernel
+                   loop, a task that never yields, a lock held across a wedged
+                   access. `kernel/core::watchdog` keeps a per-CPU heartbeat
+                   stamped once per dispatch-loop iteration
+                   (`note_progress`, using the dispatch loop as the tickless
+                   analogue of Linux's watchdog thread); the ports' per-tick
+                   timer callback samples it (`check_stall`) — the tick still
+                   fires on a CPU looping in-kernel because interrupts stay
+                   deliverable (P-5). A gap past
+                   `DEFAULT_STALL_THRESHOLD_NS` (10 s) emits
+                   `CPU_STALL_DETECTED` (id 4080) once per episode, with `cpu`
+                   and `stalled_ms`, and `CPU_STALL_CLEARED` (4081) once when
+                   the CPU dispatches again. Detection and the report are
+                   lock-free/allocation-free (safe in the timer ISR, the only
+                   place a stall is observable), and fail closed before the
+                   clock/sink hooks are installed or on a never-dispatched CPU.
+                   Wired on aarch64/x86_64/riscv64 tick paths; wasm32 inherits
+                   it when its production tick path is wired. Design:
+                   `docs/src/architecture/scheduler.md` +
+                   `docs/src/architecture/kernel.md` audit catalogue.
                - **P-6 — wait-queue §27 completeness rework (staged by the
                  2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
                  up to the §27 bar: the primitive P-2 landed is the thinnest slice

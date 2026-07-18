@@ -297,6 +297,25 @@ pub enum AuditEvent {
     /// [`crate::smp::run_secondary`], after its per-CPU hardware init and
     /// before its first dispatch, with its dense `cpu` id.
     SecondaryCpuOnline,
+    /// A CPU stopped making scheduler progress for longer than the stall
+    /// threshold — a soft lockup (`crate::watchdog`).
+    ///
+    /// Emitted from the port's timer-tick path the first time
+    /// [`crate::watchdog::check_stall`] observes a CPU whose last dispatch
+    /// heartbeat is older than [`crate::watchdog::DEFAULT_STALL_THRESHOLD_NS`],
+    /// reported once per stall episode (never once per tick). The `cpu`
+    /// field names the stalled CPU and `stalled_ms` how long it has gone
+    /// without progress. Both are diagnostic state, never secrets.
+    CpuStallDetected,
+    /// A CPU that was reported stalled resumed making scheduler progress
+    /// (`crate::watchdog`).
+    ///
+    /// Emitted from the dispatch loop by [`crate::watchdog::note_progress`]
+    /// the first time a previously-reported stalled CPU dispatches again,
+    /// so a cleared stall closes its own record rather than leaving a
+    /// dangling "stuck" line. The `cpu` field names the recovered CPU and
+    /// `stalled_ms` how long the episode lasted.
+    CpuStallCleared,
 }
 
 impl AuditEvent {
@@ -337,6 +356,8 @@ impl AuditEvent {
             Self::SecondaryCpuStarted => 4070,
             Self::SecondaryCpuStartFailed => 4071,
             Self::SecondaryCpuOnline => 4072,
+            Self::CpuStallDetected => 4080,
+            Self::CpuStallCleared => 4081,
         })
     }
 
@@ -379,6 +400,8 @@ impl AuditEvent {
             Self::SecondaryCpuStarted => "secondary cpu start requested",
             Self::SecondaryCpuStartFailed => "secondary cpu start failed",
             Self::SecondaryCpuOnline => "secondary cpu online",
+            Self::CpuStallDetected => "cpu stall detected",
+            Self::CpuStallCleared => "cpu stall cleared",
         }
     }
 }

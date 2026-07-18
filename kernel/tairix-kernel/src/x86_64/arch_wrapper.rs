@@ -169,6 +169,11 @@ extern "C" fn production_preempt_dispatch(cpu: CpuId) {
 extern "C" fn production_tick_dispatch(cpu: CpuId) {
     tairix_kernel_core::note_preempt_tick(cpu);
     tairix_kernel_core::timed_wake_sweep();
+    // Sample the stall watchdog: a tick still fires on a CPU whose task is
+    // looping without returning to the scheduler (interrupts stay
+    // deliverable in ring 0), so this is where a soft lockup on `cpu`
+    // becomes observable and is reported.
+    tairix_kernel_core::check_stall(cpu);
 }
 
 /// Read the [`IrqTable`] published into `IRQ_TABLE_SLOT` by

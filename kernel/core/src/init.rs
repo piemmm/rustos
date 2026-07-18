@@ -970,6 +970,12 @@ fn run_dispatch_loop<A: KernelArch>(
 ) {
     arch.set_device_irqs(true);
     loop {
+        // Stamp the stall-watchdog heartbeat: one loop iteration means the
+        // scheduler regained this CPU and is making a fresh decision, so a
+        // CPU that stops reaching here is a soft lockup the timer-tick
+        // `check_stall` will report. A single monotonic-counter read per
+        // dispatch, off any lock.
+        crate::watchdog::note_progress(cpu, arch.monotonic_ns(cpu));
         // Retire any reschedule obligation left by the task that just
         // suspended before the policy makes its next decision. CFQ arms
         // the incoming task's one-shot inside `step`; clearing later in
@@ -1765,6 +1771,14 @@ fn run_phases<A: KernelArch>(
     // timed wake paths reach the live scheduler + arch (factored out to
     // keep this function within the line budget).
     publish_wait_queue_arch(state);
+
+    // Give the stall watchdog its report channel: a CPU that stops making
+    // scheduler progress is reported on the same serial/console sink the
+    // panic path uses, so a soft lockup is loud rather than a silent seize.
+    // Until this point the watchdog records heartbeats but stays quiet
+    // (fail-safe); the wait-queue hook installed just above supplies the
+    // monotonic clock its tick-driven check reads.
+    crate::watchdog::install_report_sink(audit_sink);
 
     // Wrap every boot-installed console's input half in the blocking
     // adapter (the stream backing owns blocking, never

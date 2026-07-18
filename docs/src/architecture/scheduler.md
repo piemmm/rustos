@@ -431,6 +431,24 @@ no-op, so a non-preemptive port inherits the explicit-wake path only; the
 host `TestArch` records each call so the wait syscalls' re-arm epilogues
 are asserted directly.
 
+The same per-tick callback also samples the **CPU stall watchdog**
+(`kernel/core::watchdog::check_stall`). Because interrupts stay deliverable
+while in-kernel code runs (below), the preemption tick still fires on a CPU
+whose task is looping without ever returning to the scheduler — a soft
+lockup. The dispatch loop stamps a per-CPU heartbeat once per iteration
+(`watchdog::note_progress`, the tickless analogue of a Linux watchdog
+thread being scheduled); when the tick observes a heartbeat older than
+`watchdog::DEFAULT_STALL_THRESHOLD_NS` (10 s) it reports the stall once —
+on the same serial/console sink the panic path uses — with the CPU id and
+how long it has gone without progress, and reports the recovery once when
+that CPU dispatches again. Detection and the report are lock-free and
+allocation-free, so they are safe in the timer ISR (the only place a stall
+is observable, since the dispatcher by definition is not running), and the
+watchdog stays silent before its clock/sink hooks are installed or on a CPU
+that has never dispatched (fail closed — it never fabricates a stall). The
+audit catalogue documents the `CPU_STALL_DETECTED` / `CPU_STALL_CLEARED`
+records (`docs/src/architecture/kernel.md`).
+
 The dispatch loop runs with **device interrupts enabled** — TAIRiX is a
 fully preemptive kernel (`AGENTS.md` §17.1). It calls
 [`KernelArch::set_device_irqs(true)`] before steady-state dispatching **and
