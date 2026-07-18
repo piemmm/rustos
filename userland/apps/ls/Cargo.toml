@@ -42,6 +42,11 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # layout measures glyph widths through the shared definition every cell grid
 # uses — never a second width table (§2.2).
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The one civil-date calendar (`CivilTime`): the long-format date column and
+# `-t` time sort decompose a `Time64` through the shared breakdown every
+# date-rendering consumer uses (login clock, fstree stamp), never a second
+# copy of the day/time arithmetic (§2.2).
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the `fs_*` file

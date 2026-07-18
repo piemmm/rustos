@@ -4,7 +4,9 @@ ls — listar el contenido de los directorios
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -14,7 +16,8 @@ cualquier otro operando se lista tal cual. Sin operandos se lista el
 directorio actual (`.`).
 
 Las entradas se ordenan por nombre (o por tamaño, la mayor primero,
-con `-S`; invertidas con `-r`), un nombre por línea de forma
+con `-S`; por marca de tiempo, la más reciente primero, con `-t`;
+invertidas con `-r`), un nombre por línea de forma
 predeterminada. Las entradas cuyo nombre empieza por `.` se ocultan
 salvo que se dé `-a` o `-A`; cuando se ocultan entradas, se emite una
 nota en el flujo de información estándar (fd 3), nunca en la lista
@@ -25,10 +28,13 @@ propietario y el grupo, el tamaño y luego el nombre. El propietario y
 el grupo son identificadores numéricos: resolver nombres de cuentas
 exige la base de datos de usuarios protegida por capacidad, que un
 listado no debe exigir; la salida coincide por tanto con el repliegue
-numérico de la herramienta GNU (`-n` produce lo mismo). No hay columna
-de número de enlaces ni de marca de tiempo porque el contrato del
-sistema de archivos aún no lleva enlaces duros ni marcas de tiempo;
-las columnas aparecerán cuando lo haga.
+numérico de la herramienta GNU (`-n` produce lo mismo). La columna de
+marca de tiempo muestra la hora de modificación de forma
+predeterminada; `-c`, `-u` y `--time` eligen cuál de las cuatro marcas
+se muestra (y por cuál se ordena), y `--time-style` — o `--full-time`
+— fija su formato. Aún no hay columna de número de enlaces porque el
+contrato del sistema de archivos todavía no lleva enlaces duros;
+aparecerá cuando lo haga.
 
 Cuando se dan varios operandos — y siempre bajo `-R` — la lista de
 cada directorio va precedida de un encabezado `ruta:`, y los bloques
@@ -36,6 +42,18 @@ se separan con una línea en blanco.
 
 ## OPTIONS
 
+- `-t` — ordenar por la marca de tiempo mostrada, la más reciente
+  primero.
+- `-c` — usar la hora de cambio de metadatos (ctime): con `-l`
+  mostrarla y con `-t` ordenar por ella; sin `-l`, ordenar por ella.
+- `-u` — como `-c`, pero la hora de acceso (atime).
+- `-i, --inode` — mostrar el número de nodo de cada entrada.
+- `--time=WORD` — qué marca mostrar y por cuál ordenar: `atime`
+  (`access`, `use`), `ctime` (`status`), `mtime` (`modification`) o
+  `birth` (`creation`).
+- `--time-style=STYLE` — formato de la marca: `locale` (predeterminado),
+  `long-iso`, `full-iso` o `iso`. Un `+FORMAT` propio no se admite.
+- `--full-time` — como `-l --time-style=full-iso`.
 - `-a, --all` — no ocultar las entradas cuyo nombre empieza por `.`.
 - `-A, --almost-all` — como `-a`, pero sin listar nunca `.` ni `..`.
 - `-d, --directory` — listar los operandos de directorio en sí, no su
@@ -63,6 +81,19 @@ se separan con una línea en blanco.
 - `-C` — listar en columnas, rellenadas de arriba abajo
   (predeterminado en un terminal).
 - `-S` — ordenar por tamaño, el mayor primero.
+- `-U` — no ordenar; listar las entradas en el orden del directorio.
+- `-X` — ordenar por extensión del nombre (el texto desde el último
+  `.`), empates por nombre.
+- `-v` — orden «versión» natural, de modo que `f2` precede a `f10`;
+  empates por nombre.
+- `-f` — no ordenar y mostrar todas las entradas: activa `-a` y `-U`
+  y desactiva `-l` y `-s`. Se aplica en su posición, así que un
+  `-l`/`-s`/indicador de orden posterior lo anula.
+- `--sort=WORD` — elegir la clave de orden por nombre: `none` (`-U`),
+  `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`)
+  o `name`.
+- `--group-directories-first` — listar los directorios antes que las
+  demás entradas; los directorios primero incluso con `-r`.
 - `-w, --width <cols>` — fijar el ancho de salida en columnas;
   `0` significa ilimitado.
 - `-x` — listar en columnas, rellenadas de izquierda a derecha.

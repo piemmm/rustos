@@ -4,7 +4,9 @@ ls — list directory contents
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -13,10 +15,14 @@ listed (unless `-d` names the directory itself), any other operand is
 listed as itself. With no operand the current directory (`.`) is
 listed.
 
-Entries are sorted by name (or by size, largest first, with `-S`;
-reversed with `-r`). When the output is a terminal they are laid out
-in columns sized to the terminal width, filled top-to-bottom (`-C`);
-when it is not (a pipe or a file), they are listed one name per line.
+Entries are sorted by name (or by size, largest first, with `-S`; by
+timestamp, newest first, with `-t`; by extension with `-X`; by natural
+"version" order with `-v`; not at all — directory order — with `-U`;
+chosen by name with `--sort`; reversed with `-r`).
+`--group-directories-first` floats directories to the top of the sort.
+When the output is a terminal they are laid out in columns sized to the
+terminal width, filled top-to-bottom (`-C`); when it is not (a pipe or
+a file), they are listed one name per line.
 `-x` fills the columns left-to-right instead, `-m` lists them
 comma-separated, `-1` forces one per line, and `-w` sets the width
 explicitly. Entries whose name begins with `.` are hidden unless `-a`
@@ -24,13 +30,15 @@ or `-A` is given; when entries are hidden, a note is emitted on the
 standard information stream (fd 3), never in the listing itself.
 
 The long format (`-l`) renders the type and permission bits, the
-owner and group, the size, then the name. Owner and group are numeric
-ids: resolving account names requires the capability-gated user
-database, which a listing must not demand, so the output matches the
-GNU tool's numeric fallback (`-n` renders identically). There is no
-link-count or timestamp column because the filesystem contract does
-not carry hard links or timestamps yet; the columns will appear when
-it does.
+owner and group, the size, a timestamp, then the name. Owner and
+group are numeric ids: resolving account names requires the
+capability-gated user database, which a listing must not demand, so
+the output matches the GNU tool's numeric fallback (`-n` renders
+identically). The timestamp is the modified time by default; `-c`,
+`-u`, and `--time` select which of the four timestamps is shown (and
+sorted by), and `--time-style` — or `--full-time` — sets its format.
+There is still no link-count column because the filesystem contract
+does not carry hard links yet; it will appear when it does.
 
 When more than one operand is given — and always under `-R` — each
 directory's listing is preceded by a `path:` header, and blocks are
@@ -38,6 +46,18 @@ separated by a blank line.
 
 ## OPTIONS
 
+- `-t` — sort by the timestamp shown, newest first.
+- `-c` — use the metadata-change time (ctime): with `-l` show it, and
+  with `-t` sort by it; without `-l`, sort by it.
+- `-u` — like `-c`, but the access time (atime).
+- `-i, --inode` — print each entry's node number.
+- `--time=WORD` — which timestamp to show and sort by: `atime`
+  (`access`, `use`), `ctime` (`status`), `mtime` (`modification`), or
+  `birth` (`creation`).
+- `--time-style=STYLE` — timestamp format: `locale` (the default),
+  `long-iso`, `full-iso`, or `iso`. A custom `+FORMAT` is not
+  supported.
+- `--full-time` — like `-l --time-style=full-iso`.
 - `-a, --all` — do not hide entries whose name begins with `.`.
 - `-A, --almost-all` — like `-a`, but never list `.` or `..`.
 - `-d, --directory` — list directory operands themselves, not their
@@ -64,6 +84,18 @@ separated by a blank line.
 - `-C` — list entries in columns, filled top-to-bottom (the default
   when the output is a terminal).
 - `-S` — sort by size, largest first.
+- `-U` — do not sort; list entries in directory order.
+- `-X` — sort by file-name extension (the text from the last `.`),
+  ties by name.
+- `-v` — natural "version" sort, so `f2` precedes `f10`; ties by name.
+- `-f` — do not sort and show all entries: enables `-a` and `-U` and
+  disables `-l` and `-s`. Applied where it appears, so a later
+  `-l`/`-s`/sort flag overrides it.
+- `--sort=WORD` — choose the sort key by name: `none` (`-U`), `size`
+  (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`), or
+  `name`.
+- `--group-directories-first` — list directories before other entries;
+  directories come first even under `-r`.
 - `-w, --width <cols>` — set the output width in columns; `0` means an
   unlimited line length. Without it the terminal's width is used, or
   80 when it cannot be determined.
@@ -79,6 +111,8 @@ separated by a blank line.
 - `ls -al /System` — long-format listing of `/System`, including
   hidden entries.
 - `ls -lhS` — long format, human-readable sizes, largest first.
+- `ls -v` — natural sort, so `f2` comes before `f10`.
+- `ls --group-directories-first` — directories first, then files.
 - `ls -R Documents` — recurse through `Documents`, one header per
   directory.
 - `ls -F` — mark directories with `/` and executables with `*`.

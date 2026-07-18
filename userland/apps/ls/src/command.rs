@@ -47,8 +47,50 @@ pub enum Indicator {
 pub enum Sort {
     /// Lexicographic name order (the default).
     Name,
+    /// No sort: the directory (read) order the filesystem returns (`-U`,
+    /// `-f`, `--sort=none`). `-r` still reverses that order.
+    None,
     /// Largest size first, ties by name (`-S`).
     Size,
+    /// Newest [selected timestamp](TimeField) first, ties by name (`-t`, and
+    /// the GNU `-c`/`-u`-without-`-l` default).
+    Time,
+    /// By file-name extension (the text from the last `.`), ties by name
+    /// (`-X`, `--sort=extension`).
+    Extension,
+    /// Natural "version" order (`-v`, `--sort=version`): the GNU `filevercmp`
+    /// ordering, so `f2` sorts before `f10`; ties by name.
+    Version,
+}
+
+/// Which of a node's four timestamps the long format shows and a time sort
+/// (`-t`) orders by.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimeField {
+    /// Last contents-modification time (mtime) — the default.
+    Modified,
+    /// Last access time (atime) — `-u` / `--time=atime`.
+    Accessed,
+    /// Last metadata-change time (ctime) — `-c` / `--time=ctime`.
+    Changed,
+    /// Creation time — `--time=birth`.
+    Created,
+}
+
+/// How a timestamp is rendered in the long format.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimeStyle {
+    /// The GNU default: `Mon DD HH:MM` for a stamp within the last six
+    /// months, `Mon DD  YYYY` for an older or future one.
+    Locale,
+    /// `YYYY-MM-DD HH:MM` (`--time-style=long-iso`).
+    LongIso,
+    /// `YYYY-MM-DD HH:MM:SS.NNNNNNNNN +0000` (`--time-style=full-iso`, and
+    /// `--full-time`).
+    FullIso,
+    /// `MM-DD HH:MM` for a recent stamp, `YYYY-MM-DD` otherwise
+    /// (`--time-style=iso`).
+    Iso,
 }
 
 /// The full option set of one `ls` listing.
@@ -93,6 +135,18 @@ pub struct Options {
     pub hide_owner: bool,
     /// Omit the group column from the long format (`-o`).
     pub hide_group: bool,
+    /// Which timestamp the long format shows and `-t` sorts by (`-c` / `-u`
+    /// / `--time`).
+    pub time_field: TimeField,
+    /// How the long-format timestamp is rendered (`--time-style` /
+    /// `--full-time`).
+    pub time_style: TimeStyle,
+    /// Print each entry's stable node number (`-i` / `--inode`).
+    pub inode: bool,
+    /// List directories before other entries, keeping the chosen sort within
+    /// each group (`--group-directories-first`). Directories come first
+    /// regardless of `-r` — the GNU behaviour.
+    pub group_directories_first: bool,
 }
 
 impl Options {
@@ -112,6 +166,10 @@ impl Options {
         human_readable: false,
         hide_owner: false,
         hide_group: false,
+        time_field: TimeField::Modified,
+        time_style: TimeStyle::Locale,
+        inode: false,
+        group_directories_first: false,
     };
 }
 
@@ -136,7 +194,9 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is the GNU `ls` surface,
-/// `ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`:
+/// `ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+/// `[--time-style=STYLE] [--sort=WORD] [--full-time]`
+/// `[--group-directories-first] [--] [path...]`:
 ///
 /// * `-a` / `--all` — do not hide entries whose name begins with `.`.
 /// * `-A` / `--almost-all` — like `-a`, but never list `.` or `..`.
@@ -160,6 +220,28 @@ pub enum Command {
 /// * `-s` / `--size` — print each entry's allocated size in 1024-byte
 ///   blocks (scaled by `-h`), with a `total` line per directory block.
 /// * `-S` — sort by size, largest first.
+/// * `-t` — sort by the selected timestamp, newest first.
+/// * `-U` — do not sort; list entries in directory order.
+/// * `-X` — sort by file-name extension, ties by name.
+/// * `-v` — natural "version" sort (`filevercmp`), ties by name.
+/// * `-f` — do not sort and show all entries: enables `-a` and `-U` and
+///   disables `-l` and `-s` (applied where it appears, so a later
+///   `-l`/`-s`/sort flag overrides it — the GNU order semantics).
+/// * `--sort=WORD` — the sort key by name: `none` (`-U`), `size` (`-S`),
+///   `time` (`-t`), `version` (`-v`), `extension` (`-X`), or `name`.
+/// * `--group-directories-first` — list directories before other entries;
+///   directories come first even under `-r`.
+/// * `-c` — use the metadata-change time (ctime): with `-l` show it, and
+///   with `-t` sort by it; without `-l` sort by it.
+/// * `-u` — like `-c` but for the access time (atime).
+/// * `--time=WORD` — which timestamp to show and sort by: `atime`
+///   (`access` / `use`), `ctime` (`status`), `mtime` (`modification`), or
+///   `birth` (`creation`).
+/// * `-i` / `--inode` — print each entry's stable node number.
+/// * `--time-style=STYLE` — how the long-format timestamp is rendered:
+///   `locale` (the default), `long-iso`, `full-iso`, or `iso`. A custom
+///   `+FORMAT` style is refused (fail closed; a documented divergence).
+/// * `--full-time` — like `-l --time-style=full-iso`.
 /// * `-w` / `--width <cols>` — set the output width; `0` means unlimited.
 /// * `-x` — list entries in columns, filled left-to-right.
 /// * `-1` — one name per line.
@@ -183,10 +265,11 @@ pub enum Command {
 /// # Errors
 ///
 /// [`LsError::Usage`] for any unrecognised option before `--`, a `-w` /
-/// `--width` without a valid non-negative integer value, or a value given
-/// to a long option that takes none.
+/// `--width` without a valid non-negative integer value, an unknown
+/// `--time` / `--time-style` word (including a custom `+FORMAT`), or a
+/// value given to a long option that takes none.
 pub fn parse(args: &[&str]) -> Result<Command, LsError> {
-    let mut options = Options::DEFAULT;
+    let mut state = ParseState::default();
     let mut paths = Vec::new();
     let mut options_done = false;
     let mut args = args.iter();
@@ -204,91 +287,208 @@ pub fn parse(args: &[&str]) -> Result<Command, LsError> {
                 Some((key, value)) => (key, Some(value)),
                 None => (name, None),
             };
-            match key {
-                "all" => options.hidden = Hidden::All,
-                "almost-all" => options.hidden = Hidden::AlmostAll,
-                "directory" => options.directory = true,
-                "classify" => options.indicator = Indicator::Classify,
-                "human-readable" => options.human_readable = true,
-                "numeric-uid-gid" => options.long = true,
-                "quote-name" => options.quote = true,
-                "size" => options.size = true,
-                "reverse" => options.reverse = true,
-                "recursive" => options.recursive = true,
-                "help" => return Ok(Command::Help),
-                "width" => {
-                    let raw = match inline {
-                        Some(value) => value,
-                        None => *args.next().ok_or(LsError::Usage)?,
-                    };
-                    options.width = Some(parse_width(raw)?);
-                    continue;
-                }
-                _ => return Err(LsError::Usage),
-            }
-            // A value on a long option that takes none (`--all=x`) is a
-            // usage error, not a silently ignored token.
-            if inline.is_some() {
-                return Err(LsError::Usage);
+            if apply_long(key, inline, &mut state, &mut args)? {
+                return Ok(Command::Help);
             }
             continue;
         }
         // A short-option cluster is a leading `-` followed by at least one
         // letter (the bare `-` is a path, not an option).
         if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-            let mut rest = letters;
-            while let Some(letter) = rest.chars().next() {
-                rest = &rest[letter.len_utf8()..];
-                match letter {
-                    'a' => options.hidden = Hidden::All,
-                    'A' => options.hidden = Hidden::AlmostAll,
-                    'C' => options.format = Some(Format::Columns),
-                    'd' => options.directory = true,
-                    'F' => options.indicator = Indicator::Classify,
-                    'g' => {
-                        options.long = true;
-                        options.hide_owner = true;
-                    }
-                    'h' => options.human_readable = true,
-                    // `-n` selects the long format like `-l`; its
-                    // numeric owner/group is already the only output.
-                    'l' | 'n' => options.long = true,
-                    'm' => options.format = Some(Format::Commas),
-                    'o' => {
-                        options.long = true;
-                        options.hide_group = true;
-                    }
-                    'p' => options.indicator = Indicator::Slash,
-                    'Q' => options.quote = true,
-                    'r' => options.reverse = true,
-                    'R' => options.recursive = true,
-                    's' => options.size = true,
-                    'S' => options.sort = Sort::Size,
-                    // `-w` takes a value: the rest of the cluster, or the
-                    // next argument when it ends the cluster.
-                    'w' => {
-                        let raw = if rest.is_empty() {
-                            *args.next().ok_or(LsError::Usage)?
-                        } else {
-                            rest
-                        };
-                        options.width = Some(parse_width(raw)?);
-                        break;
-                    }
-                    'x' => options.format = Some(Format::Across),
-                    '1' => options.format = Some(Format::OnePerLine),
-                    '?' => return Ok(Command::Help),
-                    _ => return Err(LsError::Usage),
-                }
+            if apply_short(letters, &mut state, &mut args)? {
+                return Ok(Command::Help);
             }
             continue;
         }
         paths.push(String::from(arg));
     }
+    state.resolve_sort();
     if paths.is_empty() {
         paths.push(String::from("."));
     }
-    Ok(Command::List { options, paths })
+    Ok(Command::List {
+        options: state.options,
+        paths,
+    })
+}
+
+/// The mutable accumulator threaded through option parsing.
+///
+/// Sort selection is resolved after the whole line is parsed: an explicit
+/// `-t` / `-S` wins; otherwise a `-c` / `-u` / `--time` time selection sorts
+/// by that time *unless* `-l` is present — the GNU rule, which depends on
+/// flags that may appear in any order.
+struct ParseState {
+    options: Options,
+    explicit_sort: Option<Sort>,
+    time_selected: bool,
+}
+
+impl Default for ParseState {
+    fn default() -> Self {
+        Self {
+            options: Options::DEFAULT,
+            explicit_sort: None,
+            time_selected: false,
+        }
+    }
+}
+
+impl ParseState {
+    /// Apply the GNU sort rule once the whole line has been parsed.
+    fn resolve_sort(&mut self) {
+        self.options.sort = self.explicit_sort.unwrap_or({
+            if self.time_selected && !self.options.long {
+                Sort::Time
+            } else {
+                Sort::Name
+            }
+        });
+    }
+}
+
+/// Read a long option's value, taking it from the inline `--opt=value` form
+/// or the following argument. A missing value is a usage error (fail closed).
+fn long_value<'a>(
+    inline: Option<&'a str>,
+    args: &mut core::slice::Iter<'a, &'a str>,
+) -> Result<&'a str, LsError> {
+    match inline {
+        Some(value) => Ok(value),
+        None => Ok(*args.next().ok_or(LsError::Usage)?),
+    }
+}
+
+/// Apply one `--long` option. Returns `Ok(true)` when the option requests
+/// short help (`--help`), so the caller returns [`Command::Help`].
+fn apply_long<'a>(
+    key: &str,
+    inline: Option<&'a str>,
+    state: &mut ParseState,
+    args: &mut core::slice::Iter<'a, &'a str>,
+) -> Result<bool, LsError> {
+    let options = &mut state.options;
+    match key {
+        "all" => options.hidden = Hidden::All,
+        "almost-all" => options.hidden = Hidden::AlmostAll,
+        "directory" => options.directory = true,
+        "classify" => options.indicator = Indicator::Classify,
+        "human-readable" => options.human_readable = true,
+        "numeric-uid-gid" => options.long = true,
+        "quote-name" => options.quote = true,
+        "size" => options.size = true,
+        "group-directories-first" => options.group_directories_first = true,
+        "reverse" => options.reverse = true,
+        "recursive" => options.recursive = true,
+        "inode" => options.inode = true,
+        "full-time" => {
+            options.long = true;
+            options.time_style = TimeStyle::FullIso;
+        }
+        "help" => return Ok(true),
+        "time" => {
+            options.time_field = parse_time_field(long_value(inline, args)?)?;
+            state.time_selected = true;
+            return Ok(false);
+        }
+        "time-style" => {
+            options.time_style = parse_time_style(long_value(inline, args)?)?;
+            return Ok(false);
+        }
+        "sort" => {
+            state.explicit_sort = Some(parse_sort(long_value(inline, args)?)?);
+            return Ok(false);
+        }
+        "width" => {
+            options.width = Some(parse_width(long_value(inline, args)?)?);
+            return Ok(false);
+        }
+        _ => return Err(LsError::Usage),
+    }
+    // A value on a long option that takes none (`--all=x`) is a usage error,
+    // not a silently ignored token.
+    if inline.is_some() {
+        return Err(LsError::Usage);
+    }
+    Ok(false)
+}
+
+/// Apply one short-option cluster (`-la`, `-w80`, …). Returns `Ok(true)`
+/// when the cluster requests short help (`-?`), so the caller returns
+/// [`Command::Help`].
+fn apply_short<'a>(
+    letters: &'a str,
+    state: &mut ParseState,
+    args: &mut core::slice::Iter<'a, &'a str>,
+) -> Result<bool, LsError> {
+    let options = &mut state.options;
+    let mut rest = letters;
+    while let Some(letter) = rest.chars().next() {
+        rest = &rest[letter.len_utf8()..];
+        match letter {
+            'a' => options.hidden = Hidden::All,
+            'A' => options.hidden = Hidden::AlmostAll,
+            'C' => options.format = Some(Format::Columns),
+            'd' => options.directory = true,
+            'F' => options.indicator = Indicator::Classify,
+            'g' => {
+                options.long = true;
+                options.hide_owner = true;
+            }
+            'h' => options.human_readable = true,
+            // `-n` selects the long format like `-l`; its numeric
+            // owner/group is already the only output.
+            'l' | 'n' => options.long = true,
+            'm' => options.format = Some(Format::Commas),
+            'o' => {
+                options.long = true;
+                options.hide_group = true;
+            }
+            'p' => options.indicator = Indicator::Slash,
+            'Q' => options.quote = true,
+            'r' => options.reverse = true,
+            'R' => options.recursive = true,
+            's' => options.size = true,
+            'S' => state.explicit_sort = Some(Sort::Size),
+            't' => state.explicit_sort = Some(Sort::Time),
+            'U' => state.explicit_sort = Some(Sort::None),
+            'X' => state.explicit_sort = Some(Sort::Extension),
+            'v' => state.explicit_sort = Some(Sort::Version),
+            // `-f` enables `-a` and `-U` and turns off `-l`/`-s`, in order:
+            // a later long/size/sort flag in the same line overrides it.
+            'f' => {
+                options.hidden = Hidden::All;
+                options.long = false;
+                options.size = false;
+                state.explicit_sort = Some(Sort::None);
+            }
+            'c' => {
+                options.time_field = TimeField::Changed;
+                state.time_selected = true;
+            }
+            'u' => {
+                options.time_field = TimeField::Accessed;
+                state.time_selected = true;
+            }
+            'i' => options.inode = true,
+            // `-w` takes a value: the rest of the cluster, or the next
+            // argument when it ends the cluster.
+            'w' => {
+                let raw = if rest.is_empty() {
+                    *args.next().ok_or(LsError::Usage)?
+                } else {
+                    rest
+                };
+                options.width = Some(parse_width(raw)?);
+                break;
+            }
+            'x' => options.format = Some(Format::Across),
+            '1' => options.format = Some(Format::OnePerLine),
+            '?' => return Ok(true),
+            _ => return Err(LsError::Usage),
+        }
+    }
+    Ok(false)
 }
 
 /// Parse a `-w` / `--width` value: a non-negative decimal integer, where
@@ -299,9 +499,54 @@ fn parse_width(raw: &str) -> Result<usize, LsError> {
     raw.parse::<usize>().map_err(|_| LsError::Usage)
 }
 
+/// Parse a `--sort=WORD` value into the [`Sort`] key it selects. The words
+/// are the GNU set (`none`/`size`/`time`/`version`/`extension`/`name`);
+/// anything else is a usage error (fail closed), never a silently ignored
+/// token.
+fn parse_sort(raw: &str) -> Result<Sort, LsError> {
+    match raw {
+        "none" => Ok(Sort::None),
+        "size" => Ok(Sort::Size),
+        "time" => Ok(Sort::Time),
+        "version" => Ok(Sort::Version),
+        "extension" => Ok(Sort::Extension),
+        "name" => Ok(Sort::Name),
+        _ => Err(LsError::Usage),
+    }
+}
+
+/// Parse a `--time=WORD` value into the timestamp it selects. The words are
+/// the GNU set; anything else is a usage error (fail closed), never a
+/// silently ignored token.
+fn parse_time_field(raw: &str) -> Result<TimeField, LsError> {
+    match raw {
+        "atime" | "access" | "use" => Ok(TimeField::Accessed),
+        "ctime" | "status" => Ok(TimeField::Changed),
+        "mtime" | "modification" => Ok(TimeField::Modified),
+        "birth" | "creation" => Ok(TimeField::Created),
+        _ => Err(LsError::Usage),
+    }
+}
+
+/// Parse a `--time-style=WORD` value into a [`TimeStyle`].
+///
+/// The named GNU styles are supported. A custom `+FORMAT` style is refused
+/// (a documented divergence, fail closed): a `strftime`-style formatter is
+/// deferred until the `date` command that will share it exists, rather than
+/// shipped here for one consumer. Any other word is a usage error.
+fn parse_time_style(raw: &str) -> Result<TimeStyle, LsError> {
+    match raw {
+        "full-iso" => Ok(TimeStyle::FullIso),
+        "long-iso" => Ok(TimeStyle::LongIso),
+        "iso" => Ok(TimeStyle::Iso),
+        "locale" => Ok(TimeStyle::Locale),
+        _ => Err(LsError::Usage),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command, Format, Hidden, Indicator, Options, Sort};
+    use super::{parse, Command, Format, Hidden, Indicator, Options, Sort, TimeField, TimeStyle};
     use crate::error::LsError;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -643,6 +888,289 @@ mod tests {
     }
 
     #[test]
+    fn inode_flag_parses_in_both_spellings() {
+        for args in [["-i"], ["--inode"]] {
+            assert_eq!(
+                parse(&args),
+                Ok(list(
+                    Options {
+                        inode: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn time_sort_and_time_fields_parse() {
+        // `-t` sorts by time; `-u` / `-c` pick the access / change time and,
+        // without `-l`, also make the sort a time sort (the GNU rule).
+        assert_eq!(
+            parse(&["-t"]),
+            Ok(list(
+                Options {
+                    sort: Sort::Time,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(
+            parse(&["-u"]),
+            Ok(list(
+                Options {
+                    sort: Sort::Time,
+                    time_field: TimeField::Accessed,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(
+            parse(&["-c"]),
+            Ok(list(
+                Options {
+                    sort: Sort::Time,
+                    time_field: TimeField::Changed,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn the_long_format_holds_the_c_and_u_sort_at_name() {
+        // With `-l`, `-c` / `-u` choose the shown time but leave the sort by
+        // name; only an explicit `-t` makes it a time sort.
+        assert_eq!(
+            parse(&["-lc"]),
+            Ok(list(
+                Options {
+                    long: true,
+                    sort: Sort::Name,
+                    time_field: TimeField::Changed,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(
+            parse(&["-ltc"]),
+            Ok(list(
+                Options {
+                    long: true,
+                    sort: Sort::Time,
+                    time_field: TimeField::Changed,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn explicit_sort_wins_over_the_time_field_default() {
+        // `-S` is an explicit sort, so `-c` only picks the time field.
+        assert_eq!(
+            parse(&["-cS"]),
+            Ok(list(
+                Options {
+                    sort: Sort::Size,
+                    time_field: TimeField::Changed,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn new_sort_flags_set_the_key() {
+        for (arg, sort) in [
+            ("-U", Sort::None),
+            ("-X", Sort::Extension),
+            ("-v", Sort::Version),
+        ] {
+            assert_eq!(
+                parse(&[arg]),
+                Ok(list(
+                    Options {
+                        sort,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn sort_word_selects_the_key_in_both_forms() {
+        for (word, sort) in [
+            ("none", Sort::None),
+            ("size", Sort::Size),
+            ("time", Sort::Time),
+            ("version", Sort::Version),
+            ("extension", Sort::Extension),
+            ("name", Sort::Name),
+        ] {
+            let inline = alloc::format!("--sort={word}");
+            assert_eq!(
+                parse(&[inline.as_str()]),
+                Ok(list(
+                    Options {
+                        sort,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{word}"
+            );
+            assert_eq!(
+                parse(&["--sort", word]),
+                Ok(list(
+                    Options {
+                        sort,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{word}"
+            );
+        }
+        assert_eq!(parse(&["--sort=bogus"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--sort"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn group_directories_first_parses() {
+        assert_eq!(
+            parse(&["--group-directories-first"]),
+            Ok(list(
+                Options {
+                    group_directories_first: true,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn f_shows_all_disables_long_and_size_and_stops_sorting() {
+        assert_eq!(
+            parse(&["-f"]),
+            Ok(list(
+                Options {
+                    hidden: Hidden::All,
+                    sort: Sort::None,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        // `-f` clears an earlier `-l`/`-s` and an earlier sort selection.
+        assert_eq!(
+            parse(&["-lsSf"]),
+            Ok(list(
+                Options {
+                    hidden: Hidden::All,
+                    sort: Sort::None,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn a_later_flag_overrides_f() {
+        // Order matters: `-l` and `-t` after `-f` win (the GNU semantics).
+        assert_eq!(
+            parse(&["-flt"]),
+            Ok(list(
+                Options {
+                    hidden: Hidden::All,
+                    long: true,
+                    sort: Sort::Time,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+    }
+
+    #[test]
+    fn time_word_selects_the_field_in_both_forms() {
+        for (args, field) in [
+            (&["--time=atime"][..], TimeField::Accessed),
+            (&["--time", "access"][..], TimeField::Accessed),
+            (&["--time=ctime"][..], TimeField::Changed),
+            (&["--time=status"][..], TimeField::Changed),
+            (&["--time=mtime"][..], TimeField::Modified),
+            (&["--time=birth"][..], TimeField::Created),
+        ] {
+            // Without `-l`, selecting a time makes the sort a time sort.
+            assert_eq!(
+                parse(args),
+                Ok(list(
+                    Options {
+                        sort: Sort::Time,
+                        time_field: field,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{args:?}"
+            );
+        }
+        assert_eq!(parse(&["--time=bogus"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--time"]), Err(LsError::Usage));
+    }
+
+    #[test]
+    fn time_style_and_full_time_parse() {
+        for (word, style) in [
+            ("locale", TimeStyle::Locale),
+            ("long-iso", TimeStyle::LongIso),
+            ("full-iso", TimeStyle::FullIso),
+            ("iso", TimeStyle::Iso),
+        ] {
+            let arg = alloc::format!("--time-style={word}");
+            assert_eq!(
+                parse(&[arg.as_str()]),
+                Ok(list(
+                    Options {
+                        time_style: style,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{word}"
+            );
+        }
+        // `--full-time` is `-l --time-style=full-iso`.
+        assert_eq!(
+            parse(&["--full-time"]),
+            Ok(list(
+                Options {
+                    long: true,
+                    time_style: TimeStyle::FullIso,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        // A custom `+FORMAT` and an unknown word both fail closed.
+        assert_eq!(parse(&["--time-style=+%Y"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--time-style=bogus"]), Err(LsError::Usage));
+    }
+
+    #[test]
     fn clustered_short_options_set_all_their_fields() {
         assert_eq!(
             parse(&["-laF", "dir"]),
@@ -721,6 +1249,19 @@ mod tests {
                 "`-R, --recursive`",
                 "`-s, --size`",
                 "`-S`",
+                "`-t`",
+                "`-U`",
+                "`-X`",
+                "`-v`",
+                "`-f`",
+                "`--sort=WORD`",
+                "`--group-directories-first`",
+                "`-c`",
+                "`-u`",
+                "`-i, --inode`",
+                "`--time=WORD`",
+                "`--time-style=STYLE`",
+                "`--full-time`",
                 "`-C`",
                 "`-x`",
                 "`-w, --width <cols>`",

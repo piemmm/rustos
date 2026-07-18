@@ -4,7 +4,9 @@ ls — lister le contenu des répertoires
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -26,9 +28,12 @@ le groupe sont des identifiants numériques : résoudre les noms de
 comptes exige la base d'utilisateurs protégée par capacité, qu'une
 liste ne doit pas exiger ; la sortie correspond donc au repli
 numérique de l'outil GNU (`-n` produit la même chose). Il n'y a pas de
-colonne de nombre de liens ni d'horodatage car le contrat du système
-de fichiers ne porte pas encore de liens physiques ni d'horodatages ;
-les colonnes apparaîtront quand ce sera le cas.
+colonne d'horodatage affiche l'heure de modification par défaut ;
+`-c`, `-u` et `--time` choisissent laquelle des quatre marques est
+affichée (et sert au tri), et `--time-style` — ou `--full-time` —
+fixe son format. Il n'y a pas encore de colonne de nombre de liens
+car le contrat du système de fichiers ne porte pas encore de liens
+physiques ; elle apparaîtra quand ce sera le cas.
 
 Quand plusieurs opérandes sont donnés — et toujours sous `-R` — la
 liste de chaque répertoire est précédée d'un en-tête `chemin:`, et les
@@ -36,6 +41,19 @@ blocs sont séparés par une ligne vide.
 
 ## OPTIONS
 
+- `-t` — trier par l'horodatage affiché, le plus récent en premier.
+- `-c` — utiliser l'heure de changement de métadonnées (ctime) : avec
+  `-l` l'afficher et avec `-t` trier par elle ; sans `-l`, trier par
+  elle.
+- `-u` — comme `-c`, mais l'heure d'accès (atime).
+- `-i, --inode` — afficher le numéro de nœud de chaque entrée.
+- `--time=WORD` — quel horodatage afficher et selon lequel trier :
+  `atime` (`access`, `use`), `ctime` (`status`), `mtime`
+  (`modification`) ou `birth` (`creation`).
+- `--time-style=STYLE` — format de l'horodatage : `locale` (par
+  défaut), `long-iso`, `full-iso` ou `iso`. Un `+FORMAT` personnalisé
+  n'est pas pris en charge.
+- `--full-time` — comme `-l --time-style=full-iso`.
 - `-a, --all` — ne pas masquer les entrées dont le nom commence par
   `.`.
 - `-A, --almost-all` — comme `-a`, mais sans jamais lister `.` ni
@@ -66,6 +84,19 @@ blocs sont séparés par une ligne vide.
 - `-C` — lister en colonnes, remplies de haut en bas (par défaut sur
   un terminal).
 - `-S` — trier par taille, la plus grande en premier.
+- `-U` — ne pas trier ; lister les entrées dans l'ordre du répertoire.
+- `-X` — trier par extension de nom (le texte à partir du dernier
+  `.`), à égalité par nom.
+- `-v` — tri « version » naturel, de sorte que `f2` précède `f10` ;
+  à égalité par nom.
+- `-f` — ne pas trier et afficher toutes les entrées : active `-a` et
+  `-U` et désactive `-l` et `-s`. Appliqué à sa position, donc un
+  `-l`/`-s`/indicateur de tri ultérieur le remplace.
+- `--sort=WORD` — choisir la clé de tri par nom : `none` (`-U`),
+  `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`)
+  ou `name`.
+- `--group-directories-first` — lister les répertoires avant les
+  autres entrées ; les répertoires en premier même avec `-r`.
 - `-w, --width <cols>` — définir la largeur de sortie en colonnes ;
   `0` signifie illimitée.
 - `-x` — lister en colonnes, remplies de gauche à droite.

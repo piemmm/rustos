@@ -870,10 +870,5 @@ fn format_stamp(stamp: Time64) -> String {
     if stamp == Time64::UNIX_EPOCH {
         return String::from("-");
     }
-    let days = stamp.secs().div_euclid(86_400);
-    let tod = stamp.secs().rem_euclid(86_400);
-    let (year, month, day) = tairix_fsmeta::calendar::civil_from_days(days);
-    let hour = tod / 3_600;
-    let minute = (tod % 3_600) / 60;
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
+    tairix_fsmeta::calendar::CivilTime::from_time64(stamp).iso_minute()
 }

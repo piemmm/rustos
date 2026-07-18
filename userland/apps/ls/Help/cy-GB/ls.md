@@ -4,7 +4,9 @@ ls — rhestru cynnwys cyfeiriaduron
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--full-time]`
+`[--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -14,7 +16,8 @@ a rhestrir unrhyw operand arall fel ef ei hun. Heb operand, rhestrir
 y cyfeiriadur cyfredol (`.`).
 
 Trefnir y cofnodion yn ôl enw (neu yn ôl maint, y mwyaf yn gyntaf,
-gydag `-S`; gwrthdroir gydag `-r`), un enw fesul llinell yn
+gydag `-S`; yn ôl stamp amser, y diweddaraf yn gyntaf, gydag `-t`;
+gwrthdroir gydag `-r`), un enw fesul llinell yn
 ragosodedig. Cuddir cofnodion y mae eu henw'n dechrau â `.` oni roddir
 `-a` neu `-A`; pan guddir cofnodion, cyhoeddir nodyn ar y ffrwd
 gwybodaeth safonol (fd 3), byth yn y rhestriad ei hun.
@@ -24,9 +27,12 @@ perchennog a'r grŵp, y maint, yna'r enw. IDau rhifol yw'r perchennog
 a'r grŵp: byddai datrys enwau cyfrifon yn gofyn am y gronfa ddata
 defnyddwyr a warchodir gan allu, na ddylai rhestriad ei mynnu, felly
 mae'r allbwn yn cyfateb i ateb rhifol yr offeryn GNU (mae `-n` yn
-rendro'n unfath). Nid oes colofn cyfrif cysylltau na stampiau amser am
-nad yw cytundeb y system ffeiliau'n cario cysylltau caled na stampiau
-amser eto; ymddengys y colofnau pan wnaiff.
+rendro'n unfath). Mae'r golofn stamp amser yn dangos yr amser addasu
+yn ragosodedig; mae `-c`, `-u` a `--time` yn dewis pa un o'r pedwar
+stamp a ddangosir (ac a ddefnyddir i drefnu), ac mae `--time-style`
+(neu `--full-time`) yn gosod ei fformat. Nid oes colofn cyfrif
+cysylltau eto am nad yw cytundeb y system ffeiliau'n cario cysylltau
+caled eto; ymddengys pan wnaiff.
 
 Pan roddir mwy nag un operand — a bob amser o dan `-R` — rhagflaenir
 rhestriad pob cyfeiriadur gan bennawd `path:`, a gwahenir y blociau â
@@ -34,6 +40,19 @@ llinell wag.
 
 ## OPTIONS
 
+- `-t` — didoli yn ôl y stamp amser a ddangosir, y diweddaraf yn
+  gyntaf.
+- `-c` — defnyddio amser newid metadata (ctime): gydag `-l` ei
+  ddangos a chydag `-t` didoli yn ôl hynny; heb `-l`, didoli yn ôl
+  hynny.
+- `-u` — fel `-c`, ond yr amser cyrchu (atime).
+- `-i, --inode` — argraffu rhif nod pob cofnod.
+- `--time=WORD` — pa stamp amser i'w ddangos ac i drefnu yn ôl:
+  `atime` (`access`, `use`), `ctime` (`status`), `mtime`
+  (`modification`) neu `birth` (`creation`).
+- `--time-style=STYLE` — fformat y stamp amser: `locale` (rhagosodiad),
+  `long-iso`, `full-iso`, `iso`. Ni chefnogir `+FORMAT` personol.
+- `--full-time` — fel `-l --time-style=full-iso`.
 - `-a, --all` — peidio â chuddio cofnodion y mae eu henw'n dechrau â
   `.`.
 - `-A, --almost-all` — fel `-a`, ond peidio byth â rhestru `.` na
@@ -63,6 +82,19 @@ llinell wag.
 - `-C` — rhestru mewn colofnau, wedi'u llenwi o'r brig i'r gwaelod
   (rhagosodiad ar derfynell).
 - `-S` — didoli yn ôl maint, y mwyaf yn gyntaf.
+- `-U` — peidio â didoli; rhestru cofnodion yn nhrefn y cyfeiriadur.
+- `-X` — didoli yn ôl estyniad enw (y testun o'r `.` olaf),
+  cydraddoldeb yn ôl enw.
+- `-v` — didoli «fersiwn» naturiol, fel bod `f2` o flaen `f10`;
+  cydraddoldeb yn ôl enw.
+- `-f` — peidio â didoli a dangos pob cofnod: yn galluogi `-a` a `-U`
+  ac yn analluogi `-l` a `-s`. Cymhwysir yn ei safle, felly bydd
+  `-l`/`-s`/baner ddidoli ddiweddarach yn ei ddisodli.
+- `--sort=WORD` — dewis yr allwedd ddidoli yn ôl enw: `none` (`-U`),
+  `size` (`-S`), `time` (`-t`), `version` (`-v`), `extension` (`-X`),
+  neu `name`.
+- `--group-directories-first` — rhestru cyfeiriaduron cyn cofnodion
+  eraill; cyfeiriaduron yn gyntaf hyd yn oed gyda `-r`.
 - `-w, --width <cols>` — gosod lled yr allbwn mewn colofnau; mae `0`
   yn golygu diderfyn.
 - `-x` — rhestru mewn colofnau, wedi'u llenwi o'r chwith i'r dde.
