@@ -8,7 +8,7 @@ ls — 列出目录内容
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -111,6 +111,12 @@ ls — 列出目录内容
 - `--zero` — 每行以 NUL 而非换行结尾；还会选择单列、原样引用
   和显示控制字符。
 
+- `--color[=WHEN]` — 按类型为名称着色（目录、可执行文件、普通
+  文件）。`WHEN` 为 `auto`（默认：仅当输出为已确认的终端时
+  着色）、`always`（即使不是也着色，例如串行控制台）或
+  `never`；不带 `WHEN` 的 `--color` 等同于 `always`。管道或
+  重定向的输出从不着色。
+
 ## EXAMPLES
 
 - `ls` — 列出当前目录。
@@ -129,6 +135,9 @@ ls — 列出目录内容
 ## ENVIRONMENT
 
 - `LANG` — 简短帮助的首选区域设置（BCP-47 标签，例如 `zh-CN`）。
+
+- `TERM` — 终端类型，决定 `--color` 输出的颜色深度。未设置或
+  无颜色的 `TERM` 在 `auto` 下输出纯文本。
 
 ## SEE ALSO
 

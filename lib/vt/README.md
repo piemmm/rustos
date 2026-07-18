@@ -13,6 +13,12 @@ TAIRiX's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
 - a shared [`Cell`] / [`Attributes`] representation reused by both the
   *consumer* (the terminal emulator's `Grid`) and the *emitter* (the curses
   renderer),
+- the standard semantic colour **scheme** (`scheme::Role` / `scheme::Style`):
+  the one role-to-SGR palette (heading, directory, executable, error, …) every
+  colour-capable tool names roles from instead of raw colour numbers, so the
+  scheme evolves as data. It holds the ideal colours only; degrading them to a
+  terminal's depth is `lib/curses`'s one `downgrade` (truecolour → 256 → 16 →
+  mono),
 - the character display-width vocabulary (`width::char_width` / `is_wide` /
   `str_width` / `truncate_to_width` and the wide-glyph `CONTINUATION` cell
   marker): the one East-Asian-Wide/fullwidth/emoji table every cell grid

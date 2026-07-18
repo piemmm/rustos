@@ -21,6 +21,12 @@ terminal is data plus a capability test, not new control flow.
 - `from_term(&str) -> TermType` — parses an untrusted `TERM`, **failing
   closed** to `dumb` on an unknown or empty value (`AGENTS.md` §2.9, §5.4)
   and never reading a file derived from `TERM`.
+- `ColorChoice` / `resolve_color(choice, attested, term)` — the one shared
+  `--color[=WHEN]` decision every colour-capable command app uses (`AGENTS.md`
+  §2.2): `never` is plain, `auto` colours only an attested colour terminal,
+  and `always` colours even an unattested console at an `Ansi16` floor. It is
+  pure (the caller supplies the attestation and `TERM`); a `None` result means
+  emit no escape sequences.
 
 ## One vocabulary
 

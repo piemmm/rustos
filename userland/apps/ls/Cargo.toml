@@ -42,6 +42,14 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # layout measures glyph widths through the shared definition every cell grid
 # uses — never a second width table (§2.2).
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The one terminal-capability judgement: `TERM` → colour depth, and the
+# shared `--color[=WHEN]` (`ColorChoice`/`resolve_color`) decision every
+# colour-capable tool uses — never a per-tool colour probe (§2.2).
+tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
+# The one colour-depth downgrade (`downgrade`): a scheme colour the terminal
+# cannot render is reduced through the single shared path (truecolour → 256 →
+# 16 → mono), never a second quantiser (§2.2).
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 # The one civil-date calendar (`CivilTime`): the long-format date column and
 # `-t` time sort decompose a `Time64` through the shared breakdown every
 # date-rendering consumer uses (login clock, fstree stamp), never a second

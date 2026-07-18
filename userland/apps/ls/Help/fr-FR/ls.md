@@ -8,7 +8,7 @@ ls — lister le contenu des répertoires
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -154,6 +154,13 @@ blocs sont séparés par une ligne vide.
   sélectionne aussi la colonne unique, la citation littérale et
   l'affichage des caractères de contrôle.
 
+- `--color[=WHEN]` — colorer les noms selon leur type (répertoires,
+  exécutables, fichiers simples). `WHEN` vaut `auto` (par défaut :
+  colorer seulement quand la sortie est un terminal attesté), `always`
+  (colorer même sinon, p. ex. une console série) ou `never` ; `--color`
+  sans `WHEN` équivaut à `always`. La sortie redirigée ou dans un tube
+  n'est jamais colorée.
+
 ## EXAMPLES
 
 - `ls` — lister le répertoire courant.
@@ -179,6 +186,10 @@ blocs sont séparés par une ligne vide.
 
 - `LANG` — la locale préférée pour l'aide courte (une étiquette BCP-47
   telle que `fr-FR`).
+
+- `TERM` — le type de terminal, qui détermine la profondeur de couleur
+  de la sortie `--color`. Un `TERM` absent ou sans couleur produit du
+  texte simple avec `auto`.
 
 ## SEE ALSO
 

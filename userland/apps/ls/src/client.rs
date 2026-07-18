@@ -10,9 +10,11 @@ use core::fmt::Write as _;
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::time::Time64;
 use tairix_abi::NodeTimes;
+use tairix_curses::downgrade;
 use tairix_fsmeta::calendar::CivilTime;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_vt::str_width;
+use tairix_termcap::{ColorChoice, ColorDepth};
+use tairix_vt::{encode_into, str_width, Op, Role, Sgr};
 
 use crate::command::{
     Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat, Sort,
@@ -32,8 +34,10 @@ const OWN_WORD: &str = "ls";
 
 /// Run one [`Command`], inspecting its paths through `fs` and writing the
 /// rendered listing to `out`. `locale` is the user's `LANG` preference, if
-/// set; `help` is the tool's own `Help/` tree, read by the short-help
-/// switches.
+/// set; `term` is the user's `TERM` value, if set, which decides the colour
+/// depth `--color` output renders at (`None`, or a mono `TERM`, yields plain
+/// output under `auto`); `help` is the tool's own `Help/` tree, read by the
+/// short-help switches.
 ///
 /// Non-directory operands are listed first (by name), then each directory
 /// operand has its entries listed, sorted by name. When more than one operand
@@ -53,6 +57,7 @@ pub fn run(
     command: Command,
     locale: Option<&str>,
     now: Time64,
+    term: Option<&str>,
     fs: &dyn Listing,
     help: &dyn HelpSource,
     out: &dyn Output,
@@ -63,7 +68,7 @@ pub fn run(
             options,
             filters,
             paths,
-        } => list(options, &filters, &paths, now, fs, out),
+        } => list(options, &filters, &paths, now, term, fs, out),
     }
 }
 
@@ -98,9 +103,18 @@ fn list(
     filters: &Filters,
     paths: &[String],
     now: Time64,
+    term: Option<&str>,
     fs: &dyn Listing,
     out: &dyn Output,
 ) -> Result<(), LsError> {
+    // The attested console width is the one signal that decides the GNU
+    // arrangement, the quoting default, and (with `--color` and `TERM`) the
+    // colour. It is read once here and reused for all three.
+    let terminal = out.terminal_width();
+    // The colour decision is made once, up front. When colour is active it
+    // forces a per-entry `stat` (the kind and execute bit decide the
+    // colour), exactly as the GNU tool stats when colouring.
+    let painter = Painter::resolve(options.color, terminal, term);
     let mut files: Vec<(String, Metadata)> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
     for path in paths {
@@ -120,10 +134,16 @@ fn list(
     // terminal, one name per line otherwise — decided against the attested
     // console, never guessed. The column budget is the given width, the
     // attested width, or the conventional 80.
-    let terminal = out.terminal_width();
     let format = resolve_format(options, terminal);
     let width = resolve_width(options, terminal);
     let quoting = Quoting::resolve(options, terminal);
+    // The wall clock, quoting style, and colour painter are resolved once and
+    // threaded together through rendering.
+    let ctx = RenderCtx {
+        now,
+        quoting,
+        painter,
+    };
     let mut buf = String::new();
     let mut first = true;
     let mut hidden_omitted: u64 = 0;
@@ -133,7 +153,7 @@ fn list(
         open_block(&mut buf, &mut first, None);
         // No `total` line: the GNU tool totals directory listings only,
         // never the loose file-operand block.
-        render_rows(&mut buf, &files, options, format, width, now, quoting);
+        render_rows(&mut buf, &files, options, format, width, ctx);
         write_block(out, &mut buf)?;
     }
     // A depth-first worklist: operands are pushed reversed so they pop in
@@ -159,13 +179,13 @@ fn list(
         }
         let show_hidden = options.hidden != Hidden::Skip;
         entries.retain(|entry| !filters.suppresses(&entry.name, show_hidden));
-        let mut rows = rows_for(&path, &entries, options, fs)?;
+        let mut rows = rows_for(&path, &entries, options, painter.is_active(), fs)?;
         sort_rows(&mut rows, options);
         open_block(&mut buf, &mut first, headered.then_some(path.as_str()));
         if options.size || options.is_long() {
             render_total(&mut buf, &rows, options);
         }
-        render_rows(&mut buf, &rows, options, format, width, now, quoting);
+        render_rows(&mut buf, &rows, options, format, width, ctx);
         write_block(out, &mut buf)?;
         if options.recursive {
             // `.`/`..` never recurse — a listing must terminate even when
@@ -197,16 +217,18 @@ fn write_block(out: &dyn Output, buf: &mut String) -> Result<(), LsError> {
 ///
 /// The long format renders mode/owner/group/size/date, `-s` renders
 /// allocated blocks, `-i` renders the node number, a size or time sort
-/// compares those fields, and `-F` needs the mode's execute bits for `*` —
-/// everything else renders names straight off the one `read_dir`, so the
-/// per-entry `stat` is paid only when asked for.
-fn needs_stat(options: Options) -> bool {
+/// compares those fields, `-F` needs the mode's execute bits for `*`, and
+/// active colour needs them for the executable role — everything else
+/// renders names straight off the one `read_dir`, so the per-entry `stat` is
+/// paid only when asked for.
+fn needs_stat(options: Options, color_active: bool) -> bool {
     options.is_long()
         || options.size
         || options.inode
         || options.sort == Sort::Size
         || options.sort == Sort::Time
         || options.indicator == Indicator::Classify
+        || color_active
 }
 
 /// The rendered rows of one directory block: each entry's name, with its
@@ -215,11 +237,12 @@ fn rows_for(
     dir: &str,
     entries: &[Entry],
     options: Options,
+    color_active: bool,
     fs: &dyn Listing,
 ) -> Result<Vec<(String, Metadata)>, LsError> {
     let mut rows = Vec::with_capacity(entries.len());
     for entry in entries {
-        let meta = if needs_stat(options) {
+        let meta = if needs_stat(options, color_active) {
             fs.stat(&join(dir, &entry.name)).map_err(LsError::Stat)?
         } else {
             // The kind from the directory stream stands in and the zeroed
@@ -405,6 +428,18 @@ fn resolve_width(options: Options, terminal: Option<usize>) -> usize {
     }
 }
 
+/// The presentation decisions resolved once per listing and threaded through
+/// rendering together: the wall clock (for the relative-date window), the
+/// name-quoting style, and the colour painter. Bundling them keeps the render
+/// entry point's argument list small and guarantees every arrangement sees the
+/// same decisions.
+#[derive(Clone, Copy)]
+struct RenderCtx {
+    now: Time64,
+    quoting: Quoting,
+    painter: Painter,
+}
+
 /// Render `rows` into `buf` in the resolved `format`, wrapping column and
 /// comma arrangements to `width`. The long format (`-l`) ignores `format`
 /// and `width` — it is always one entry per line.
@@ -414,23 +449,61 @@ fn render_rows(
     options: Options,
     format: Format,
     width: usize,
-    now: Time64,
-    quoting: Quoting,
+    ctx: RenderCtx,
 ) {
+    let RenderCtx {
+        now,
+        quoting,
+        painter,
+    } = ctx;
     match format {
-        Format::Long => render_long(buf, rows, options, now, quoting),
-        Format::OnePerLine => render_one_per_line(buf, rows, options, quoting),
-        Format::Columns => render_grid(buf, rows, options, width, Fill::TopToBottom, quoting),
-        Format::Across => render_grid(buf, rows, options, width, Fill::LeftToRight, quoting),
-        Format::Commas => render_commas(buf, rows, options, width, quoting),
+        Format::Long => render_long(buf, rows, options, now, quoting, painter),
+        Format::OnePerLine => render_one_per_line(buf, rows, options, quoting, painter),
+        Format::Columns => {
+            render_grid(
+                buf,
+                rows,
+                options,
+                width,
+                Fill::TopToBottom,
+                quoting,
+                painter,
+            );
+        }
+        Format::Across => {
+            render_grid(
+                buf,
+                rows,
+                options,
+                width,
+                Fill::LeftToRight,
+                quoting,
+                painter,
+            );
+        }
+        Format::Commas => render_commas(buf, rows, options, width, quoting, painter),
     }
+}
+
+/// A rendered listing cell: the bytes to emit (which may carry colour SGR
+/// sequences) and the cell's *plain* display width — the width the terminal
+/// actually shows, with any zero-width escape sequences excluded.
+///
+/// Keeping the width beside the text is what lets colour be byte-identical to
+/// the plain render apart from the SGR sequences: every column-layout
+/// calculation reads [`RenderedCell::width`], never `str_width` over the
+/// possibly-coloured [`RenderedCell::text`], so escape bytes never shift a
+/// column.
+struct RenderedCell {
+    text: String,
+    width: usize,
 }
 
 /// The rendered form of one entry as it appears in a listing cell: its
 /// `-i` inode prefix (right-aligned to `inode_width`) then its `-s`
 /// allocated-blocks prefix (right-aligned to `blocks_width`), each `0` for
-/// no prefix, followed by the decorated name. The inode precedes the
-/// blocks, as in the GNU tool.
+/// no prefix, followed by the decorated (and, under colour, painted) name.
+/// The inode precedes the blocks, as in the GNU tool.
 fn entry_cell(
     name: &str,
     meta: Metadata,
@@ -438,18 +511,25 @@ fn entry_cell(
     inode_width: usize,
     blocks_width: usize,
     quoting: Quoting,
-) -> String {
-    let mut cell = String::new();
+    painter: Painter,
+) -> RenderedCell {
+    let mut text = String::new();
     // Writing into a `String` is infallible, so the `fmt::Result`s are
     // discarded deliberately.
     if options.inode {
-        let _ = write!(cell, "{:>inode_width$} ", meta.inode);
+        let _ = write!(text, "{:>inode_width$} ", meta.inode);
     }
     if options.size {
-        let _ = write!(cell, "{:>blocks_width$} ", blocks_cell(meta, options));
+        let _ = write!(text, "{:>blocks_width$} ", blocks_cell(meta, options));
     }
-    cell.push_str(&decorate(name, meta, options, quoting));
-    cell
+    // The prefixes are plain ASCII, so their display width is their length.
+    let prefix_width = str_width(&text);
+    let name_cell = decorate(name, meta, options, quoting, painter);
+    text.push_str(&name_cell.text);
+    RenderedCell {
+        text,
+        width: prefix_width + name_cell.width,
+    }
 }
 
 /// Render one entry per line — the `-1` arrangement and the non-terminal
@@ -460,18 +540,25 @@ fn render_one_per_line(
     rows: &[(String, Metadata)],
     options: Options,
     quoting: Quoting,
+    painter: Painter,
 ) {
     let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
     for (name, meta) in rows {
-        buf.push_str(&entry_cell(
-            name,
-            *meta,
-            options,
-            inode_width,
-            blocks_width,
-            quoting,
-        ));
+        // The name is last on the line, so its (possibly coloured) text is
+        // appended verbatim — no column depends on its width here.
+        buf.push_str(
+            &entry_cell(
+                name,
+                *meta,
+                options,
+                inode_width,
+                blocks_width,
+                quoting,
+                painter,
+            )
+            .text,
+        );
         buf.push(line_terminator(options));
     }
 }
@@ -485,6 +572,7 @@ fn render_commas(
     options: Options,
     width: usize,
     quoting: Quoting,
+    painter: Painter,
 ) {
     if rows.is_empty() {
         return;
@@ -493,8 +581,9 @@ fn render_commas(
     // inline), so the cell is built with zero prefix widths.
     let mut pos = 0usize;
     for (index, (name, meta)) in rows.iter().enumerate() {
-        let cell = entry_cell(name, *meta, options, 0, 0, quoting);
-        let len = str_width(&cell);
+        let cell = entry_cell(name, *meta, options, 0, 0, quoting, painter);
+        // Wrap on the cell's plain display width, never the escape bytes.
+        let len = cell.width;
         if index > 0 {
             // Keep the entry on the current line only if it and the `, `
             // separator still fit; otherwise break after the comma.
@@ -507,7 +596,7 @@ fn render_commas(
                 buf.push(line_terminator(options));
             }
         }
-        buf.push_str(&cell);
+        buf.push_str(&cell.text);
         pos += len;
     }
     buf.push(line_terminator(options));
@@ -537,6 +626,7 @@ fn render_grid(
     width: usize,
     fill: Fill,
     quoting: Quoting,
+    painter: Painter,
 ) {
     let count = rows.len();
     if count == 0 {
@@ -544,11 +634,24 @@ fn render_grid(
     }
     let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
-    let cells: Vec<String> = rows
+    let cells: Vec<RenderedCell> = rows
         .iter()
-        .map(|(name, meta)| entry_cell(name, *meta, options, inode_width, blocks_width, quoting))
+        .map(|(name, meta)| {
+            entry_cell(
+                name,
+                *meta,
+                options,
+                inode_width,
+                blocks_width,
+                quoting,
+                painter,
+            )
+        })
         .collect();
-    let widths: Vec<usize> = cells.iter().map(|cell| str_width(cell)).collect();
+    // The grid is laid out on each cell's *plain* display width, so a
+    // coloured cell occupies exactly the columns its uncoloured form would —
+    // the escape bytes are zero-width padding the layout never sees.
+    let widths: Vec<usize> = cells.iter().map(|cell| cell.width).collect();
 
     let layout = grid_layout(&widths, width, fill);
     for row in 0..layout.rows {
@@ -565,7 +668,7 @@ fn render_grid(
         let mut pos = 0usize;
         for col in 0..=last_col {
             let index = cell_index(fill, row, col, layout.rows, layout.cols);
-            buf.push_str(&cells[index]);
+            buf.push_str(&cells[index].text);
             pos += widths[index];
             if col != last_col {
                 let target = pos - widths[index] + layout.col_widths[col] + COLUMN_GAP;
@@ -707,6 +810,7 @@ fn render_long(
     options: Options,
     now: Time64,
     quoting: Quoting,
+    painter: Painter,
 ) {
     let size_cell = |meta: &Metadata| render_size(options.file_size, meta.size);
     let date_cell = |meta: &Metadata| {
@@ -761,12 +865,14 @@ fn render_long(
         if !options.hide_group {
             let _ = write!(buf, " {:>gid_width$}", meta.gid);
         }
+        // The name is the last field on the line, so its (possibly coloured)
+        // text is emitted verbatim — no column follows it to be shifted.
         let _ = write!(
             buf,
             " {:>size_width$} {:<date_width$} {}",
             size_cell(meta),
             date_cell(meta),
-            decorate(name, *meta, options, quoting)
+            decorate(name, *meta, options, quoting, painter).text
         );
         buf.push(line_terminator(options));
     }
@@ -835,29 +941,111 @@ fn render_time(stamp: Time64, style: TimeStyle, now: Time64) -> String {
     }
 }
 
-/// The rendered form of one name: quoted in the resolved [`Quoting`] style,
-/// with the `-p` / `-F` / `--file-type` indicator suffix appended after the
-/// closing quote, as in the GNU tool. With the VFS's two kinds only
-/// directories carry a `/`; `-F` additionally marks executables with `*`,
-/// while `--file-type` never does.
-fn decorate(name: &str, meta: Metadata, options: Options, quoting: Quoting) -> String {
-    let mut rendered = quoting.render(name);
-    match options.indicator {
-        Indicator::None => {}
-        Indicator::Slash | Indicator::FileType => {
-            if meta.kind.is_dir() {
-                rendered.push('/');
-            }
-        }
+/// The rendered form of one name: quoted in the resolved [`Quoting`] style
+/// and, when colour is active, painted in its kind's scheme role; the `-p` /
+/// `-F` / `--file-type` indicator suffix is appended *after* the closing
+/// quote (and after the colour reset), uncoloured, exactly as in the GNU
+/// tool. With the VFS's two kinds only directories carry a `/`; `-F`
+/// additionally marks executables with `*`, while `--file-type` never does.
+///
+/// The returned [`RenderedCell`] carries the plain display width — the
+/// quoted name plus any suffix — so colour never shifts a column.
+fn decorate(
+    name: &str,
+    meta: Metadata,
+    options: Options,
+    quoting: Quoting,
+    painter: Painter,
+) -> RenderedCell {
+    let quoted = quoting.render(name);
+    let mut width = str_width(&quoted);
+    // Colour wraps only the name text; the indicator suffix is appended
+    // afterwards, outside the colour, as the GNU tool does by default.
+    let mut text = painter.paint(role_for(meta), &quoted);
+    let suffix = match options.indicator {
+        Indicator::None => None,
+        Indicator::Slash | Indicator::FileType => meta.kind.is_dir().then_some('/'),
         Indicator::Classify => {
             if meta.kind.is_dir() {
-                rendered.push('/');
+                Some('/')
             } else if meta.mode & 0o111 != 0 {
-                rendered.push('*');
+                Some('*')
+            } else {
+                None
             }
         }
+    };
+    if let Some(suffix) = suffix {
+        text.push(suffix);
+        width += 1;
     }
-    rendered
+    RenderedCell { text, width }
+}
+
+/// The scheme [`Role`] a file's colour comes from, or [`None`] for a plain
+/// (uncoloured) regular file. Directories take the directory role;
+/// executable regular files take the executable role. The VFS exposes only
+/// these two kinds today, so the mapping is deliberately small.
+fn role_for(meta: Metadata) -> Option<Role> {
+    if meta.kind.is_dir() {
+        Some(Role::Directory)
+    } else if meta.mode & 0o111 != 0 {
+        Some(Role::Executable)
+    } else {
+        None
+    }
+}
+
+/// The resolved colour decision for one listing: the depth to render at, or
+/// [`None`] for plain output. Built once from `--color`, the attested
+/// console, and `TERM`, then threaded through rendering so the policy lives
+/// in one place and every cell decides identically.
+#[derive(Clone, Copy)]
+struct Painter {
+    depth: Option<ColorDepth>,
+}
+
+impl Painter {
+    /// Resolve the colour decision through the one shared policy: the
+    /// `--color` choice, whether standard output is an attested terminal, and
+    /// the `TERM` value. A [`None`] depth means plain output.
+    fn resolve(choice: ColorChoice, terminal: Option<usize>, term: Option<&str>) -> Self {
+        Self {
+            depth: choice.resolve(terminal.is_some(), term),
+        }
+    }
+
+    /// Whether colour is active, so the caller forces the per-entry `stat`
+    /// the executable role needs.
+    fn is_active(self) -> bool {
+        self.depth.is_some()
+    }
+
+    /// Wrap `text` in the SGR sequences for `role`, or return it unchanged
+    /// when colour is off, the role is plain, or the role names no colour.
+    ///
+    /// The role's ideal colour is degraded to the terminal's depth through
+    /// the one shared `downgrade`, so a truecolour scheme entry still renders
+    /// on a 16-colour terminal and none is emitted a terminal cannot show.
+    fn paint(self, role: Option<Role>, text: &str) -> String {
+        let (Some(depth), Some(role)) = (self.depth, role) else {
+            return String::from(text);
+        };
+        let mut style = role.style();
+        style.foreground = downgrade(style.foreground, depth);
+        if style.is_plain() {
+            return String::from(text);
+        }
+        // The SGR bytes are ASCII, so the assembled buffer is valid UTF-8.
+        let mut bytes = Vec::new();
+        let (sgrs, count) = style.open();
+        for &sgr in &sgrs[..count] {
+            encode_into(&Op::Sgr(sgr), &mut bytes);
+        }
+        bytes.extend_from_slice(text.as_bytes());
+        encode_into(&Op::Sgr(Sgr::Reset), &mut bytes);
+        String::from_utf8(bytes).unwrap_or_else(|_| String::from(text))
+    }
 }
 
 /// A resolved name-quoting decision: the concrete [`QuotingStyle`] and
@@ -1378,6 +1566,7 @@ mod tests {
     };
     use crate::error::LsError;
     use crate::io::{Entry, Listing, Metadata, Output};
+    use alloc::format;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
@@ -1386,6 +1575,7 @@ mod tests {
     use tairix_abi::{Errno, NodeTimes};
     use tairix_glob::Pattern;
     use tairix_help::{HelpSource, SourceError};
+    use tairix_termcap::ColorChoice;
 
     /// An in-memory tree: a stat table keyed by path plus, for directories,
     /// the entries that path's `read_dir` returns.
@@ -1721,14 +1911,28 @@ mod tests {
     }
 
     fn run_ls(command: Command, fs: &dyn Listing, out: &Recorder) -> Result<(), LsError> {
-        run(command, None, NOW, fs, &NoHelp, out)
+        run(command, None, NOW, None, fs, &NoHelp, out)
+    }
+
+    /// Run a listing with an explicit `TERM`, for the colour tests. The
+    /// attestation still comes from the `Recorder`'s `terminal_width`.
+    fn run_ls_term(
+        command: Command,
+        term: Option<&str>,
+        fs: &dyn Listing,
+        out: &Recorder,
+    ) -> Result<(), LsError> {
+        run(command, None, NOW, term, fs, &NoHelp, out)
     }
 
     #[test]
     fn help_renders_the_short_help_from_the_document() {
         let fs = TreeFs::new();
         let out = Recorder::new();
-        assert_eq!(run(Command::Help, None, NOW, &fs, &OneDoc, &out), Ok(()));
+        assert_eq!(
+            run(Command::Help, None, NOW, None, &fs, &OneDoc, &out),
+            Ok(())
+        );
         let text = out.text();
         assert!(text.contains("ls — list directory contents"), "{text}");
         assert!(text.contains("ls [-a] [-l] [--] [path...]"), "{text}");
@@ -1738,7 +1942,10 @@ mod tests {
     fn help_falls_back_to_the_usage_banner_without_a_tree() {
         let fs = TreeFs::new();
         let out = Recorder::new();
-        assert_eq!(run(Command::Help, None, NOW, &fs, &NoHelp, &out), Ok(()));
+        assert_eq!(
+            run(Command::Help, None, NOW, None, &fs, &NoHelp, &out),
+            Ok(())
+        );
         let mut expected = String::from(USAGE);
         expected.push('\n');
         assert_eq!(out.text(), expected);
@@ -3478,5 +3685,179 @@ mod tests {
             Ok(())
         );
         assert_eq!(spaced.text(), "abcdef  cc\nbb      dd\n");
+    }
+
+    /// A small fixture with the three colour cases: a directory, an
+    /// executable regular file, and a plain regular file.
+    fn colour_fixture() -> TreeFs {
+        TreeFs::new()
+            .dir(".")
+            .entry(".", "file.txt", FileKind::Regular, 0o644, 0)
+            .entry(".", "prog", FileKind::Regular, 0o755, 0)
+            .entry(".", "sub", FileKind::Directory, 0o755, 0)
+    }
+
+    // The standard-scheme SGR runs for the two coloured `ls` roles: a
+    // directory (bold + bright blue) and an executable (bold + green), each
+    // closed by a reset. Written literally here so the test pins the exact
+    // bytes a terminal receives, independent of the scheme's builders.
+    const DIR_ON: &str = "\u{1b}[1m\u{1b}[94m";
+    const EXE_ON: &str = "\u{1b}[1m\u{1b}[32m";
+    const OFF: &str = "\u{1b}[0m";
+
+    /// Strip every `CSI … m` SGR sequence from `text`, leaving the plain
+    /// bytes a mono terminal (or a pipe) would see.
+    fn strip_sgr(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                // Skip `[` … `m` (the only escapes `ls` emits are SGR).
+                for esc in chars.by_ref() {
+                    if esc == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn color_always_paints_each_kind_by_role() {
+        let out = Recorder::new();
+        run_ls_term(
+            list_with(
+                Options {
+                    color: ColorChoice::Always,
+                    format: Some(Format::OnePerLine),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ),
+            Some("xterm-256color"),
+            &colour_fixture(),
+            &out,
+        )
+        .expect("listing succeeds");
+        // Plain regular file uncoloured; executable green; directory blue.
+        assert_eq!(
+            out.text(),
+            format!("file.txt\n{EXE_ON}prog{OFF}\n{DIR_ON}sub{OFF}\n")
+        );
+    }
+
+    #[test]
+    fn color_never_stays_plain_even_at_a_colour_terminal() {
+        let out = Recorder::terminal(80);
+        run_ls_term(
+            list_with(
+                Options {
+                    color: ColorChoice::Never,
+                    format: Some(Format::OnePerLine),
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ),
+            Some("xterm-256color"),
+            &colour_fixture(),
+            &out,
+        )
+        .expect("listing succeeds");
+        assert_eq!(out.text(), "file.txt\nprog\nsub\n");
+    }
+
+    #[test]
+    fn color_auto_colours_only_an_attested_colour_terminal() {
+        let coloured = format!("file.txt\n{EXE_ON}prog{OFF}\n{DIR_ON}sub{OFF}\n");
+        let plain = "file.txt\nprog\nsub\n";
+        let opts = Options {
+            color: ColorChoice::Auto,
+            format: Some(Format::OnePerLine),
+            ..Options::DEFAULT
+        };
+        // Attested + colour TERM → coloured.
+        let attested = Recorder::terminal(80);
+        run_ls_term(
+            list_with(opts, &["."]),
+            Some("xterm-256color"),
+            &colour_fixture(),
+            &attested,
+        )
+        .expect("listing succeeds");
+        assert_eq!(attested.text(), coloured);
+        // Attested but no/unknown TERM → plain (never guessed).
+        let no_term = Recorder::terminal(80);
+        run_ls_term(list_with(opts, &["."]), None, &colour_fixture(), &no_term)
+            .expect("listing succeeds");
+        assert_eq!(no_term.text(), plain);
+        // Not attested (piped) → plain regardless of TERM.
+        let piped = Recorder::new();
+        run_ls_term(
+            list_with(opts, &["."]),
+            Some("xterm-256color"),
+            &colour_fixture(),
+            &piped,
+        )
+        .expect("listing succeeds");
+        assert_eq!(piped.text(), plain);
+    }
+
+    #[test]
+    fn colour_never_changes_the_column_layout() {
+        // A coloured grid, stripped of its SGR sequences, is byte-identical
+        // to the plain grid: colour shifts no column.
+        let opts = |color| Options {
+            color,
+            format: Some(Format::Columns),
+            width: Some(40),
+            ..Options::DEFAULT
+        };
+        let coloured = Recorder::terminal(40);
+        run_ls_term(
+            list_with(opts(ColorChoice::Always), &["."]),
+            Some("xterm-256color"),
+            &colour_fixture(),
+            &coloured,
+        )
+        .expect("listing succeeds");
+        let plain = Recorder::terminal(40);
+        run_ls_term(
+            list_with(opts(ColorChoice::Never), &["."]),
+            Some("xterm-256color"),
+            &colour_fixture(),
+            &plain,
+        )
+        .expect("listing succeeds");
+        assert!(coloured.text().contains(DIR_ON), "colour was emitted");
+        assert_eq!(strip_sgr(&coloured.text()), plain.text());
+    }
+
+    #[test]
+    fn colour_paints_the_name_but_not_the_indicator_suffix() {
+        // Under `-F` the `/` and `*` suffixes are appended outside the colour
+        // (after the reset), as the GNU tool does by default.
+        let out = Recorder::new();
+        run_ls_term(
+            list_with(
+                Options {
+                    color: ColorChoice::Always,
+                    format: Some(Format::OnePerLine),
+                    indicator: Indicator::Classify,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ),
+            Some("xterm-256color"),
+            &colour_fixture(),
+            &out,
+        )
+        .expect("listing succeeds");
+        assert_eq!(
+            out.text(),
+            format!("file.txt\n{EXE_ON}prog{OFF}*\n{DIR_ON}sub{OFF}/\n")
+        );
     }
 }

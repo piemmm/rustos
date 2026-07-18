@@ -8,7 +8,7 @@ ls — ディレクトリの内容を一覧する
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -124,6 +124,13 @@ ls — ディレクトリの内容を一覧する
 - `--zero` — 各行を改行ではなく NUL で終える。さらに単一列・その
   ままの引用・制御文字の表示を選ぶ。
 
+- `--color[=WHEN]` — 名前を種類ごとに色付けする（ディレクトリ、
+  実行可能ファイル、通常ファイル）。`WHEN` は `auto`（既定:
+  出力が確認済みの端末のときのみ色付け）、`always`（そうで
+  なくても色付け、例: シリアルコンソール）、`never` のいずれか。
+  `WHEN` を省いた `--color` は `always` を意味する。パイプや
+  リダイレクトされた出力は決して色付けされない。
+
 ## EXAMPLES
 
 - `ls` — 現在のディレクトリを一覧する。
@@ -145,6 +152,9 @@ ls — ディレクトリの内容を一覧する
 ## ENVIRONMENT
 
 - `LANG` — 短いヘルプの優先ロケール（`ja-JP` のような BCP-47 タグ）。
+
+- `TERM` — 端末の種類。`--color` 出力の色数を決める。未設定
+  または色なしの `TERM` では `auto` は素のテキストを出力する。
 
 ## SEE ALSO
 

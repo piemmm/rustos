@@ -538,3 +538,60 @@ fn str_width_sums_glyph_widths_and_truncation_keeps_glyphs_whole() {
     assert_eq!(truncate_to_width("a世b", 3), "a世");
     assert_eq!(truncate_to_width("abc", 10), "abc");
 }
+
+#[test]
+fn every_scheme_role_opens_round_trippable_sgr_operations() {
+    use crate::scheme::Role;
+    // Each role's opening SGRs, wrapped as `Op::Sgr`, must encode and parse
+    // straight back — the scheme emits nothing outside the shared vocabulary.
+    for role in Role::ALL {
+        let (sgrs, count) = role.style().open();
+        let ops: Vec<Op> = sgrs[..count].iter().map(|&sgr| Op::Sgr(sgr)).collect();
+        assert_eq!(parse_all(&encode_all(&ops)), ops, "role {role:?}");
+    }
+}
+
+#[test]
+fn a_directory_role_opens_bold_then_its_colour() {
+    use crate::scheme::Role;
+    let (sgrs, count) = Role::Directory.style().open();
+    assert_eq!(
+        &sgrs[..count],
+        &[
+            Sgr::Bold,
+            Sgr::Foreground(Color::Basic(BasicColor::BrightBlue))
+        ]
+    );
+}
+
+#[test]
+fn a_plain_style_opens_no_operations_and_reports_plain() {
+    use crate::scheme::Style;
+    assert!(Style::plain().is_plain());
+    let (_, count) = Style::plain().open();
+    assert_eq!(count, 0);
+    // A coloured or attributed style is not plain.
+    assert!(!crate::scheme::Role::Directory.style().is_plain());
+    assert!(!crate::scheme::Role::Emphasis.style().is_plain());
+}
+
+#[test]
+fn attributes_open_before_colour_in_canonical_order() {
+    use crate::scheme::Style;
+    let style = Style::new(Color::Basic(BasicColor::Red))
+        .bold()
+        .dim()
+        .italic()
+        .underline();
+    let (sgrs, count) = style.open();
+    assert_eq!(
+        &sgrs[..count],
+        &[
+            Sgr::Bold,
+            Sgr::Dim,
+            Sgr::Italic,
+            Sgr::Underline,
+            Sgr::Foreground(Color::Basic(BasicColor::Red)),
+        ]
+    );
+}

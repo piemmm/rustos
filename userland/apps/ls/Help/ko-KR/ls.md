@@ -8,7 +8,7 @@ ls — 디렉터리 내용 나열하기
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -129,6 +129,13 @@ ls — 디렉터리 내용 나열하기
 - `--zero` — 각 줄을 줄바꿈 대신 NUL로 끝냄. 또한 단일 열, 그대로
   인용, 제어 문자 표시를 선택함.
 
+- `--color[=WHEN]` — 이름을 종류별로 색칠한다(디렉터리,
+  실행 파일, 일반 파일). `WHEN` 은 `auto`(기본값: 출력이
+  확인된 터미널일 때만 색칠), `always`(아닐 때도 색칠,
+  예: 직렬 콘솔), `never` 중 하나이다. `WHEN` 없는 `--color`
+  는 `always` 를 뜻한다. 파이프되거나 리다이렉션된
+  출력은 절대 색칠해지지 않는다.
+
 ## EXAMPLES
 
 - `ls` — 현재 디렉터리를 나열합니다.
@@ -150,6 +157,10 @@ ls — 디렉터리 내용 나열하기
 ## ENVIRONMENT
 
 - `LANG` — 짧은 도움말의 선호 로캘(`ko-KR` 같은 BCP-47 태그).
+
+- `TERM` — 터미널 종류로, `--color` 출력의 색 깊이를 결정한다.
+  설정되지 않았거나 색이 없는 `TERM` 은 `auto` 에서 일반
+  텍스트를 출력한다.
 
 ## SEE ALSO
 
