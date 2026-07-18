@@ -22,6 +22,14 @@
 //!   size formatting, consumed by the `du` and `df` command apps
 //!   (`plans/APPS.md`), so the size grammar and ceiling-rounding rules
 //!   exist in exactly one place.
+//! * [`count`] — GNU coreutils count-with-multiplier-suffix parsing
+//!   (`-c`/`-n` values), consumed by the `head` and `tail` command apps
+//!   (`plans/APPS.md` §12.1 Stage C), so the GNU multiplier alphabet
+//!   exists in exactly one place.
+//! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
+//!   windows, consumed by the `head` and `tail` command apps
+//!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
+//!   mechanics exist in exactly one place.
 //!
 //! The flat device-tree (FDT) parser that once lived here has been folded
 //! into the single shared `lib/fdt` reader, which now owns the generic
@@ -38,5 +46,7 @@ extern crate alloc;
 
 pub mod cfloat;
 pub mod cnum;
+pub mod count;
 pub mod fmt;
 pub mod size;
+pub mod tailwindow;

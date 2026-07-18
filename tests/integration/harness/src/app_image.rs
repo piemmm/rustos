@@ -586,6 +586,7 @@ mod tests {
                 "sysinfo",
                 "sysinfod",
                 "sysmon",
+                "tail",
                 "tee",
                 "terminal",
                 "top",

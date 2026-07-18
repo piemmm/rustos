@@ -179,6 +179,7 @@ members = [
     "userland/apps/setcap",
     "userland/apps/stress",
     "userland/apps/sysmon",
+    "userland/apps/tail",
     "userland/apps/tee",
     "userland/apps/terminal",
     "userland/apps/top",

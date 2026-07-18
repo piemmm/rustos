@@ -941,8 +941,27 @@ behind the floor work below).
   stay `elsh` builtins for now (`pwd` needs the shell's cwd state, and
   the shell resolves builtins first, so a store bundle of either would
   be unreachable duplication); moving them out is decided when the
-  builtin/bundle split is revisited. Remaining first batch:
-  `tail`, `env`, `sleep`,
+  builtin/bundle split is revisited. **Done: `tail`** — a full
+  self-contained store bundle (console-write + console-read +
+  `CAP_FS_ACCESS`, store-only) with the GNU surface implementable on
+  the current floor: `-n`/`-c` with the leading `+` "from unit N" form
+  and the multiplier alphabet, `-q`/`-v`/`-z`, the obsolete
+  first-argument `{+,-}COUNT[bcl]` form, headers, and permutation.
+  Landing it hoisted the two mechanisms `head` already carried into
+  `lib/util` for the second consumer: `tairix_util::count` (the GNU
+  `-c`/`-n` count-with-multiplier grammar) and
+  `tairix_util::tailwindow` (the bounded rolling last-N `ByteWindow`/
+  `LineWindow` — `head`'s elide and `tail`'s last-N are the two
+  policies over one mechanism), and `head` was refactored onto both.
+  `tail` emits one advisory `omission` record on fd 3 when it drops
+  leading content (`text.leading_lines_omitted` /
+  `text.leading_bytes_omitted`). One documented divergence: the follow
+  family (`-f`/`-F`/`--follow`/`--retry`/`--pid`/`--sleep-interval`/
+  `--max-unchanged-stats` and the obsolete trailing `f`) is staged
+  behind a missing file-change wake source — reported as an
+  unrecognised option, never a busy-poll or silent no-op (the `tee -i`
+  precedent). Remaining first batch:
+  `env`, `sleep`,
   `date`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
@@ -1119,7 +1138,7 @@ both landed; `plans/SHELL.md` command execution):
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
    `dirname`, `edit`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
-   `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
+   `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `tail`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
    `users`, `wc`, `whoami`, `yes`, and `elsh` each author their thirteen-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
@@ -1147,10 +1166,13 @@ both landed; `plans/SHELL.md` command execution):
    `sysinfo processes --all` — over the shared
    `tairix_procinfo::Output::info` fd 3 seam, fail-closed on an argv
    token that would break the record's JSON); advisory-only, never
-   changing exit status. The remaining registered commands were surveyed
-   and have nothing non-obvious to add today: `cat` and `users` omit
-   nothing from stdout, and a per-refresh record from full-screen `top`
-   would be the progress spam §20.1 forbids. A future command adds its
+   changing exit status. `tail` emits an `omission` record
+   (`text.leading_lines_omitted` / `text.leading_bytes_omitted`) when it
+   drops the leading content its window/skip discards, over its own
+   injected fd 3 `Info` seam. The remaining registered commands were
+   surveyed and have nothing non-obvious to add today: `cat` and `users`
+   omit nothing from stdout, and a per-refresh record from full-screen
+   `top` would be the progress spam §20.1 forbids. A future command adds its
    record in the change that creates the omission/summary, through a
    shared definition when two tools share the behaviour.
 

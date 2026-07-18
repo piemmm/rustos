@@ -1,22 +1,23 @@
-//! The shapes of a parsed `head` command line, and their parser.
+//! The shapes of a parsed `tail` command line, and their parser.
 //!
-//! The grammar is the GNU `head` surface: `-c`/`--bytes` and `-n`/`--lines`
-//! (each taking a count with an optional leading `-` meaning "all but the
-//! last COUNT" and an optional multiplier suffix), `-q`/`-v` header control,
-//! `-z` NUL line delimiters, the reserved `-h`/`-?`/`--help` short-help
-//! switches, `--` end-of-options, and the obsolete `-COUNT[bkm][lqvz]` form
-//! accepted only as the first argument — exactly the forms the GNU tool
-//! accepts, so a user or script that knows GNU `head` finds this one
-//! familiar.
+//! The grammar is the GNU `tail` surface: `-c`/`--bytes` and `-n`/`--lines`
+//! (each taking a count with an optional leading `+` meaning "start at unit
+//! N" or `-` meaning "the last N units", plus the GNU multiplier suffix
+//! alphabet), `-q`/`-v` header control, `-z` NUL line delimiters, the
+//! reserved `-h`/`-?`/`--help` short-help switches, `--` end-of-options, and
+//! the obsolete `{+,-}COUNT[bcl]` form accepted only as the first argument.
+//! The follow family (`-f`/`-F`/`--follow`/`--retry`/`--pid`/
+//! `--sleep-interval`/`--max-unchanged-stats`) is deliberately absent — see
+//! the crate docs — so it surfaces as an unrecognised option.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_util::count::{parse_decimal, parse_suffixed};
 
-use crate::error::HeadError;
+use crate::error::TailError;
 
-/// One input of a `head` run.
+/// One input of a `tail` run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Source {
     /// Standard input: the `-` operand, and the default when no operand is
@@ -26,12 +27,12 @@ pub enum Source {
     Path(String),
 }
 
-/// What is counted, and how much of it to keep.
+/// What is counted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Count {
-    /// The first (or, eliding, all but the last) `n` lines.
+    /// Lines (delimited by newline, or NUL under `-z`).
     Lines(u64),
-    /// The first (or, eliding, all but the last) `n` bytes.
+    /// Bytes.
     Bytes(u64),
 }
 
@@ -46,14 +47,14 @@ pub enum HeaderMode {
     Always,
 }
 
-/// A parsed, runnable `head` invocation.
+/// A parsed, runnable `tail` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Job {
     /// How much of each source to emit.
     pub count: Count,
-    /// `true` when the count came with a leading `-`: emit everything
-    /// *except* the last `count` units.
-    pub elide: bool,
+    /// `true` when the count came with a leading `+`: emit from unit `count`
+    /// (1-based) to the end, rather than the last `count` units.
+    pub from_start: bool,
     /// `-z`: lines are NUL-delimited instead of newline-delimited.
     pub zero: bool,
     /// Header policy for multi-source output.
@@ -63,13 +64,12 @@ pub struct Job {
     pub sources: Vec<Source>,
 }
 
-/// One thing the `head` tool can do.
+/// One thing the `tail` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     /// Emit the selected part of each source.
-    Head(Job),
-    /// Render `head`'s own short help (`-h`/`-?`/`--help`) through the same
-    /// engine as any other command's short help (plans/APPS.md §4).
+    Tail(Job),
+    /// Render `tail`'s own short help (`-h`/`-?`/`--help`).
     Help,
 }
 
@@ -81,16 +81,16 @@ const DEFAULT_LINES: u64 = 10;
 ///
 /// Options and operands may be interleaved (the GNU permutation); `--` ends
 /// option parsing; a lone `-` is the standard-input operand. The obsolete
-/// `-COUNT[bkm][lqvz]` form is honoured only as the first argument, exactly
-/// as in the GNU tool; a digit in any later option cluster is the GNU
-/// "invalid trailing option" diagnostic.
+/// `{+,-}COUNT[bcl]` form is honoured only as the first argument, exactly as
+/// in the GNU tool; a digit in any later option cluster is the GNU "invalid
+/// trailing option" diagnostic.
 ///
 /// # Errors
 ///
-/// The [`HeadError`] usage variants, mirroring the GNU diagnostics.
-pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
+/// The [`TailError`] usage variants, mirroring the GNU diagnostics.
+pub fn parse(args: &[&str]) -> Result<Command, TailError> {
     let mut count: Option<Count> = None;
-    let mut elide = false;
+    let mut from_start = false;
     let mut zero = false;
     let mut headers = HeaderMode::MultipleFiles;
     let mut sources: Vec<Source> = Vec::new();
@@ -98,7 +98,7 @@ pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
 
     let mut rest = args;
     if let Some(first) = args.first() {
-        if let Some(parsed) = parse_obsolete(first, &mut zero, &mut headers)? {
+        if let Some(parsed) = parse_obsolete(first, &mut from_start)? {
             count = Some(parsed);
             rest = &args[1..];
         }
@@ -124,24 +124,24 @@ pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
                     let lines = arg == "--lines";
                     index += 1;
                     let Some(&value) = rest.get(index) else {
-                        return Err(HeadError::MissingValue(if lines {
+                        return Err(TailError::MissingValue(if lines {
                             "--lines"
                         } else {
                             "--bytes"
                         }));
                     };
-                    count = Some(parse_value(value, lines, &mut elide)?);
+                    count = Some(parse_value(value, lines, &mut from_start)?);
                 }
                 _ if arg.starts_with("--bytes=") => {
                     let value = &arg["--bytes=".len()..];
-                    count = Some(parse_value(value, false, &mut elide)?);
+                    count = Some(parse_value(value, false, &mut from_start)?);
                 }
                 _ if arg.starts_with("--lines=") => {
                     let value = &arg["--lines=".len()..];
-                    count = Some(parse_value(value, true, &mut elide)?);
+                    count = Some(parse_value(value, true, &mut from_start)?);
                 }
                 _ if arg.starts_with("--") => {
-                    return Err(HeadError::UnknownLong(String::from(arg)))
+                    return Err(TailError::UnknownLong(String::from(arg)))
                 }
                 _ => {
                     let help = parse_cluster(
@@ -149,7 +149,7 @@ pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
                         rest,
                         &mut index,
                         &mut count,
-                        &mut elide,
+                        &mut from_start,
                         &mut zero,
                         &mut headers,
                     )?;
@@ -165,28 +165,28 @@ pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
     if sources.is_empty() {
         sources.push(Source::Stdin);
     }
-    Ok(Command::Head(Job {
+    Ok(Command::Tail(Job {
         count: count.unwrap_or(Count::Lines(DEFAULT_LINES)),
-        elide,
+        from_start,
         zero,
         headers,
         sources,
     }))
 }
 
-/// Parse one short-option cluster (`-qn3`, `-vz`, …): `q`/`v`/`z` are
-/// flags, `-c`/`-n` consume the rest of the token (or the next argument,
-/// advancing `index`) as their value, and `?` is the reserved short-help
-/// switch. Returns `Ok(true)` when the cluster asks for help.
+/// Parse one short-option cluster (`-qn3`, `-vz`, …): `q`/`v`/`z` are flags,
+/// `-c`/`-n` consume the rest of the token (or the next argument, advancing
+/// `index`) as their value, and `?` is the reserved short-help switch.
+/// Returns `Ok(true)` when the cluster asks for help.
 fn parse_cluster(
     arg: &str,
     rest: &[&str],
     index: &mut usize,
     count: &mut Option<Count>,
-    elide: &mut bool,
+    from_start: &mut bool,
     zero: &mut bool,
     headers: &mut HeaderMode,
-) -> Result<bool, HeadError> {
+) -> Result<bool, TailError> {
     for (offset, flag) in arg[1..].char_indices() {
         match flag {
             'q' => *headers = HeaderMode::Never,
@@ -200,36 +200,34 @@ fn parse_cluster(
                     match rest.get(*index) {
                         Some(&value) => value,
                         None => {
-                            return Err(HeadError::MissingValue(if lines { "-n" } else { "-c" }))
+                            return Err(TailError::MissingValue(if lines { "-n" } else { "-c" }))
                         }
                     }
                 } else {
                     tail
                 };
-                *count = Some(parse_value(value, lines, elide)?);
+                *count = Some(parse_value(value, lines, from_start)?);
                 return Ok(false);
             }
             '?' => return Ok(true),
-            _ if flag.is_ascii_digit() => return Err(HeadError::InvalidTrailing(flag)),
-            _ => return Err(HeadError::UnknownShort(flag)),
+            _ if flag.is_ascii_digit() => return Err(TailError::InvalidTrailing(flag)),
+            _ => return Err(TailError::UnknownShort(flag)),
         }
     }
     Ok(false)
 }
 
-/// Parse the obsolete `-COUNT[bkm][lqvz]...` first argument, mutating the
-/// header/delimiter state its trailing letters set. Returns `Ok(None)` when
-/// `first` is not that form (no dash-digit prefix), so the caller falls
-/// through to ordinary option parsing.
-fn parse_obsolete(
-    first: &str,
-    zero: &mut bool,
-    headers: &mut HeaderMode,
-) -> Result<Option<Count>, HeadError> {
-    let mut chars = first.chars();
-    if chars.next() != Some('-') {
-        return Ok(None);
-    }
+/// Parse the obsolete `{+,-}COUNT[bcl]` first argument. `+` selects the
+/// from-start posture, `-` the last-N posture; `b` counts 512-byte blocks
+/// (bytes), `c` counts bytes, `l` counts lines (the default). Returns
+/// `Ok(None)` when `first` is not that form, so the caller falls through to
+/// ordinary option parsing.
+fn parse_obsolete(first: &str, from_start: &mut bool) -> Result<Option<Count>, TailError> {
+    let sign = match first.chars().next() {
+        Some('+') => true,
+        Some('-') => false,
+        _ => return Ok(None),
+    };
     let body = &first[1..];
     if !body.starts_with(|c: char| c.is_ascii_digit()) {
         return Ok(None);
@@ -251,24 +249,17 @@ fn parse_obsolete(
                 lines = false;
                 multiplier = 512;
             }
-            'k' => {
-                lines = false;
-                multiplier = 1024;
+            'l' => {
+                lines = true;
+                multiplier = 1;
             }
-            'm' => {
-                lines = false;
-                multiplier = 1024 * 1024;
-            }
-            'l' => lines = true,
-            'q' => *headers = HeaderMode::Never,
-            'v' => *headers = HeaderMode::Always,
-            'z' => *zero = true,
-            _ => return Err(HeadError::InvalidTrailing(letter)),
+            _ => return Err(TailError::InvalidTrailing(letter)),
         }
     }
 
     let value = parse_decimal(digits).ok_or_else(|| invalid(digits, lines))?;
     let units = value.saturating_mul(multiplier);
+    *from_start = sign;
     Ok(Some(if lines {
         Count::Lines(units)
     } else {
@@ -276,21 +267,22 @@ fn parse_obsolete(
     }))
 }
 
-/// Parse a `-c`/`-n` value: an optional leading `-` (elide from the end,
-/// recorded in `elide`) or `+`, decimal digits, and an optional multiplier
-/// suffix from the GNU alphabet (`b` = 512; `k`/`K`/`m`/`M`/`G`/`T`/`P`/
-/// `E`/`Z`/`Y`/`R`/`Q` = powers of 1024, or of 1000 with a trailing `B`,
-/// or of 1024 with a trailing `iB`).
+/// Parse a `-c`/`-n` value: an optional leading `+` (start at unit N,
+/// recorded in `from_start`) or `-` (the last N), decimal digits, and an
+/// optional multiplier suffix from the GNU alphabet.
 ///
-/// `elide` is reassigned on every call — the last `-c`/`-n` decides, as in
-/// the GNU tool — so `-n -3 -n 4` ends up not eliding.
-fn parse_value(text: &str, lines: bool, elide: &mut bool) -> Result<Count, HeadError> {
-    let unsigned = if let Some(rest) = text.strip_prefix('-') {
-        *elide = true;
+/// `from_start` is reassigned on every call — the last `-c`/`-n` decides, as
+/// in the GNU tool.
+fn parse_value(text: &str, lines: bool, from_start: &mut bool) -> Result<Count, TailError> {
+    let unsigned = if let Some(rest) = text.strip_prefix('+') {
+        *from_start = true;
+        rest
+    } else if let Some(rest) = text.strip_prefix('-') {
+        *from_start = false;
         rest
     } else {
-        *elide = false;
-        text.strip_prefix('+').unwrap_or(text)
+        *from_start = false;
+        text
     };
     let units = parse_suffixed(unsigned).ok_or_else(|| invalid(text, lines))?;
     Ok(if lines {
@@ -301,32 +293,31 @@ fn parse_value(text: &str, lines: bool, elide: &mut bool) -> Result<Count, HeadE
 }
 
 /// The invalid-count error for the unit being parsed.
-fn invalid(text: &str, lines: bool) -> HeadError {
+fn invalid(text: &str, lines: bool) -> TailError {
     if lines {
-        HeadError::InvalidLines(String::from(text))
+        TailError::InvalidLines(String::from(text))
     } else {
-        HeadError::InvalidBytes(String::from(text))
+        TailError::InvalidBytes(String::from(text))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::string::String;
-    use alloc::vec;
 
     use super::{parse, Command, Count, HeaderMode, Job, Source};
-    use crate::error::HeadError;
+    use crate::error::TailError;
 
     fn job(
         count: Count,
-        elide: bool,
+        from_start: bool,
         zero: bool,
         headers: HeaderMode,
         sources: &[Source],
     ) -> Command {
-        Command::Head(Job {
+        Command::Tail(Job {
             count,
-            elide,
+            from_start,
             zero,
             headers,
             sources: sources.to_vec(),
@@ -410,54 +401,56 @@ mod tests {
     }
 
     #[test]
-    fn leading_minus_elides_from_the_end() {
+    fn plus_prefix_selects_from_start() {
         assert_eq!(
-            parse(&["-n", "-2", "f"]),
+            parse(&["-n", "+5", "f"]),
+            Ok(job(
+                Count::Lines(5),
+                true,
+                false,
+                HeaderMode::MultipleFiles,
+                &[path("f")]
+            ))
+        );
+        assert_eq!(
+            parse(&["-c", "+5", "f"]),
+            Ok(job(
+                Count::Bytes(5),
+                true,
+                false,
+                HeaderMode::MultipleFiles,
+                &[path("f")]
+            ))
+        );
+    }
+
+    #[test]
+    fn leading_minus_is_the_last_n_posture() {
+        // Both `-n 2` and `-n -2` mean "the last two lines".
+        assert_eq!(parse(&["-n", "2"]), parse(&["-n", "-2"]));
+        assert_eq!(
+            parse(&["-n", "-2"]),
             Ok(job(
                 Count::Lines(2),
-                true,
-                false,
-                HeaderMode::MultipleFiles,
-                &[path("f")]
-            ))
-        );
-        assert_eq!(
-            parse(&["-c", "-0", "f"]),
-            Ok(job(
-                Count::Bytes(0),
-                true,
-                false,
-                HeaderMode::MultipleFiles,
-                &[path("f")]
-            ))
-        );
-    }
-
-    #[test]
-    fn the_last_count_decides_eliding() {
-        // As in the GNU tool, each `-n`/`-c` reassigns the elide flag.
-        assert_eq!(
-            parse(&["-n", "-3", "-n", "4", "f"]),
-            Ok(job(
-                Count::Lines(4),
-                false,
-                false,
-                HeaderMode::MultipleFiles,
-                &[path("f")]
-            ))
-        );
-    }
-
-    #[test]
-    fn plus_prefix_is_accepted() {
-        assert_eq!(
-            parse(&["-n", "+4"]),
-            Ok(job(
-                Count::Lines(4),
                 false,
                 false,
                 HeaderMode::MultipleFiles,
                 &[Source::Stdin]
+            ))
+        );
+    }
+
+    #[test]
+    fn the_last_count_decides_the_posture() {
+        // Each `-n`/`-c` reassigns the from-start flag.
+        assert_eq!(
+            parse(&["-n", "+3", "-n", "4", "f"]),
+            Ok(job(
+                Count::Lines(4),
+                false,
+                false,
+                HeaderMode::MultipleFiles,
+                &[path("f")]
             ))
         );
     }
@@ -468,7 +461,6 @@ mod tests {
         assert_eq!(parse(&["-c", "2K"]), parse(&["-c", "2048"]));
         assert_eq!(parse(&["-c", "1kB"]), parse(&["-c", "1000"]));
         assert_eq!(parse(&["-c", "1MiB"]), parse(&["-c", "1048576"]));
-        assert_eq!(parse(&["-c", "3MB"]), parse(&["-c", "3000000"]));
         // A count beyond u64 saturates: larger than any possible input.
         assert_eq!(
             parse(&["-c", "99Y"]),
@@ -480,15 +472,15 @@ mod tests {
     fn invalid_counts_are_diagnosed_per_unit() {
         assert_eq!(
             parse(&["-n", "x"]),
-            Err(HeadError::InvalidLines(String::from("x")))
+            Err(TailError::InvalidLines(String::from("x")))
         );
         assert_eq!(
             parse(&["-c", "5J"]),
-            Err(HeadError::InvalidBytes(String::from("5J")))
+            Err(TailError::InvalidBytes(String::from("5J")))
         );
         assert_eq!(
             parse(&["-c", ""]),
-            Err(HeadError::InvalidBytes(String::new()))
+            Err(TailError::InvalidBytes(String::new()))
         );
     }
 
@@ -553,6 +545,16 @@ mod tests {
             ))
         );
         assert_eq!(
+            parse(&["+5", "f"]),
+            Ok(job(
+                Count::Lines(5),
+                true,
+                false,
+                HeaderMode::MultipleFiles,
+                &[path("f")]
+            ))
+        );
+        assert_eq!(
             parse(&["-5c", "f"]),
             Ok(job(
                 Count::Bytes(5),
@@ -563,35 +565,39 @@ mod tests {
             ))
         );
         assert_eq!(
-            parse(&["-2kqz"]),
+            parse(&["+5c", "f"]),
             Ok(job(
-                Count::Bytes(2048),
-                false,
+                Count::Bytes(5),
                 true,
-                HeaderMode::Never,
-                &[Source::Stdin]
-            ))
-        );
-        // `l` restores line counting but, as in the GNU tool, an earlier
-        // multiplier letter still scales the number (`-3bl` is 1536 lines).
-        assert_eq!(
-            parse(&["-3bl"]),
-            Ok(job(
-                Count::Lines(1536),
-                false,
                 false,
                 HeaderMode::MultipleFiles,
-                &[Source::Stdin]
+                &[path("f")]
             ))
         );
-        assert_eq!(parse(&["-5x"]), Err(HeadError::InvalidTrailing('x')));
+        // `b` counts 512-byte blocks (bytes); `l` restores line counting.
+        assert_eq!(parse(&["-2b"]), parse(&["-c", "1024"]));
+        assert_eq!(parse(&["-3l"]), parse(&["-n", "3"]));
+        // A follow suffix (`f`) is staged, so it is an invalid trailing
+        // letter rather than a silently-accepted no-op.
+        assert_eq!(parse(&["-5f"]), Err(TailError::InvalidTrailing('f')));
+        assert_eq!(parse(&["-5x"]), Err(TailError::InvalidTrailing('x')));
     }
 
     #[test]
     fn obsolete_form_is_first_argument_only() {
-        // Not the first argument: a digit in a cluster is the GNU
-        // "invalid trailing option" diagnostic.
-        assert_eq!(parse(&["-q", "-5"]), Err(HeadError::InvalidTrailing('5')));
+        // Not the first argument: `+5` is a file operand and a digit in a
+        // cluster is the GNU "invalid trailing option" diagnostic.
+        assert_eq!(
+            parse(&["f", "+5"]),
+            Ok(job(
+                Count::Lines(10),
+                false,
+                false,
+                HeaderMode::MultipleFiles,
+                &[path("f"), path("+5")]
+            ))
+        );
+        assert_eq!(parse(&["-q", "-5"]), Err(TailError::InvalidTrailing('5')));
     }
 
     #[test]
@@ -617,18 +623,39 @@ mod tests {
     }
 
     #[test]
+    fn the_follow_family_is_a_staged_unknown_option() {
+        // The follow family is deliberately not implemented (no file-change
+        // wake source), so it is reported as unrecognised rather than
+        // silently ignored.
+        assert_eq!(parse(&["-f"]), Err(TailError::UnknownShort('f')));
+        assert_eq!(parse(&["-F"]), Err(TailError::UnknownShort('F')));
+        assert_eq!(
+            parse(&["--follow"]),
+            Err(TailError::UnknownLong(String::from("--follow")))
+        );
+        assert_eq!(
+            parse(&["--retry"]),
+            Err(TailError::UnknownLong(String::from("--retry")))
+        );
+        assert_eq!(
+            parse(&["--pid=1"]),
+            Err(TailError::UnknownLong(String::from("--pid=1")))
+        );
+    }
+
+    #[test]
     fn unknown_options_are_usage_errors() {
         assert_eq!(
             parse(&["--frob"]),
-            Err(HeadError::UnknownLong(String::from("--frob")))
+            Err(TailError::UnknownLong(String::from("--frob")))
         );
-        assert_eq!(parse(&["-x"]), Err(HeadError::UnknownShort('x')));
+        assert_eq!(parse(&["-x"]), Err(TailError::UnknownShort('x')));
     }
 
     #[test]
     fn missing_values_are_diagnosed() {
-        assert_eq!(parse(&["-n"]), Err(HeadError::MissingValue("-n")));
-        assert_eq!(parse(&["--bytes"]), Err(HeadError::MissingValue("--bytes")));
+        assert_eq!(parse(&["-n"]), Err(TailError::MissingValue("-n")));
+        assert_eq!(parse(&["--bytes"]), Err(TailError::MissingValue("--bytes")));
     }
 
     #[test]
@@ -641,17 +668,6 @@ mod tests {
                 false,
                 HeaderMode::Never,
                 &[path("f")]
-            ))
-        );
-        let sources = vec![path("f"), path("g")];
-        assert_eq!(
-            parse(&["f", "-n2", "g"]),
-            Ok(job(
-                Count::Lines(2),
-                false,
-                false,
-                HeaderMode::MultipleFiles,
-                &sources
             ))
         );
     }

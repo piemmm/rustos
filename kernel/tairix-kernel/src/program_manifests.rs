@@ -909,6 +909,7 @@ mod tests {
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
             ("sysmon", AppKind::Command, SYSMON_MANIFEST),
+            ("tail", AppKind::Command, FILE_TOOL_REQUEST),
             ("tee", AppKind::Command, FILE_TOOL_REQUEST),
             ("terminal", AppKind::Command, TERMINAL_REQUEST),
             ("top", AppKind::Command, TOP_MANIFEST),

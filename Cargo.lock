@@ -1300,6 +1300,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1970,6 +1971,16 @@ dependencies = [
  "tairix-rt",
  "tairix-termcap",
  "tairix-vt",
+]
+
+[[package]]
+name = "tairix-tail"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]

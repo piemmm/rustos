@@ -36,6 +36,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The shared bounded rolling last-N windows (`ByteWindow`/`LineWindow`): the
+# elide modes (`-c -N`/`-n -N`) emit everything but the retained tail, the
+# one mechanism the `tail` tool also builds on (plans/APPS.md §12.1).
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, and the

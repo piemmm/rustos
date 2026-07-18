@@ -125,9 +125,14 @@ Do **not** begin a stage before all its listed dependencies are complete.
   scaling, and human-readable renderings; the `du` + `df` command apps,
   `plans/APPS.md` Stage C), `cfloat` (the C-locale printf float renderer;
   the `seq` + `printf` command apps, hoisted out of `seq` when `printf`
-  became the second consumer), and `cnum` (the C-locale `strtod` scanner
+  became the second consumer), `cnum` (the C-locale `strtod` scanner
   with longest-prefix `endptr` semantics and exact hex-float rounding;
-  the same two apps).
+  the same two apps), `count` (the GNU `-c`/`-n` count-with-multiplier
+  grammar; the `head` + `tail` command apps, hoisted out of `head` when
+  `tail` became the second consumer), and `tailwindow` (the bounded
+  rolling "keep the last N bytes/lines" windows; the `head` + `tail`
+  command apps — `head`'s `-c -N`/`-n -N` elide modes and `tail`'s
+  `-c N`/`-n N` last-N modes are the two policies over one mechanism).
 - The cross-checked `syscalls.rs` ↔ `table.rs` pair is reserved for Stage 2
   so `cargo xtask abi-check` always sees both halves.
 

@@ -1,12 +1,11 @@
 //! The streaming engine: emit the selected part of each source.
 
-use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::vec;
-use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::tailwindow::{ByteWindow, LineWindow};
 
 use crate::command::{Command, Count, HeaderMode, Job, Source};
 use crate::error::HeadError;
@@ -35,9 +34,9 @@ enum Engine {
     /// `-n N`: everything through the `remaining`-th delimiter.
     FirstLines { remaining: u64, delim: u8 },
     /// `-c -N`: everything but the last `keep` bytes.
-    ElideBytes(TailRing),
+    ElideBytes(ByteWindow),
     /// `-n -N`: everything but the last `keep` lines.
-    ElideLines(TailLines),
+    ElideLines(LineWindow),
 }
 
 impl Engine {
@@ -49,8 +48,8 @@ impl Engine {
                 remaining: n,
                 delim,
             },
-            (Count::Bytes(n), true) => Self::ElideBytes(TailRing::new(n)),
-            (Count::Lines(n), true) => Self::ElideLines(TailLines::new(n, delim)),
+            (Count::Bytes(n), true) => Self::ElideBytes(ByteWindow::new(n)),
+            (Count::Lines(n), true) => Self::ElideLines(LineWindow::new(n, delim)),
         }
     }
 
@@ -90,8 +89,11 @@ impl Engine {
                 }
                 out.write_all(chunk)
             }
-            Self::ElideBytes(ring) => ring.push(chunk, out),
-            Self::ElideLines(tail) => tail.push(chunk, out),
+            // The elide modes emit whatever ages out of the retained tail
+            // and drop the tail itself at end-of-source (that is the
+            // elision), so the aged-out sink is the output stream.
+            Self::ElideBytes(ring) => ring.push(chunk, |aged| out.write_all(aged)),
+            Self::ElideLines(tail) => tail.push(chunk, |aged| out.write_all(aged)),
         }
     }
 
@@ -101,140 +103,10 @@ impl Engine {
     fn finish(self, out: &dyn Output) -> Result<(), Errno> {
         match self {
             Self::FirstBytes { .. } | Self::FirstLines { .. } | Self::ElideBytes(_) => Ok(()),
-            Self::ElideLines(tail) => tail.finish(out),
+            // The unterminated final fragment counts as a line; settle it
+            // and drop the retained window (the elided tail).
+            Self::ElideLines(mut tail) => tail.finish_partial(|aged| out.write_all(aged)),
         }
-    }
-}
-
-/// The rolling tail buffer of the elide-bytes mode: retains the most recent
-/// `keep` bytes and emits every byte that ages out of that window. Memory
-/// is bounded by the smaller of `keep` and the bytes actually seen; each
-/// pushed byte is copied O(1) times.
-struct TailRing {
-    keep: usize,
-    buf: Vec<u8>,
-    /// Index of the oldest byte once `buf` has filled to `keep` (before
-    /// that, `buf` is a plain in-order prefix and `start` is `0`).
-    start: usize,
-}
-
-impl TailRing {
-    fn new(keep: u64) -> Self {
-        Self {
-            // A keep larger than any addressable buffer behaves as
-            // "retain everything": nothing is ever emitted, exactly the
-            // semantics of eliding more than the input can hold.
-            keep: usize::try_from(keep).unwrap_or(usize::MAX),
-            buf: Vec::new(),
-            start: 0,
-        }
-    }
-
-    fn push(&mut self, chunk: &[u8], out: &dyn Output) -> Result<(), Errno> {
-        if self.keep == 0 {
-            return out.write_all(chunk);
-        }
-        if chunk.len() >= self.keep {
-            // The chunk alone covers the whole window: everything buffered,
-            // and the chunk's own prefix, ages out at once. In circular
-            // order the oldest bytes run from `start` to the end, then
-            // wrap to the front.
-            let (wrapped, oldest) = self.buf.split_at(self.start.min(self.buf.len()));
-            out.write_all(oldest)?;
-            out.write_all(wrapped)?;
-            out.write_all(&chunk[..chunk.len() - self.keep])?;
-            self.buf.clear();
-            self.buf
-                .extend_from_slice(&chunk[chunk.len() - self.keep..]);
-            self.start = 0;
-            return Ok(());
-        }
-        if self.buf.len() < self.keep {
-            let total = self.buf.len() + chunk.len();
-            if total <= self.keep {
-                self.buf.extend_from_slice(chunk);
-                return Ok(());
-            }
-            // Filling-to-full transition: the front of the linear buffer
-            // ages out, the remainder plus the chunk is exactly the window.
-            let excess = total - self.keep;
-            out.write_all(&self.buf[..excess])?;
-            let mut window = Vec::with_capacity(self.keep);
-            window.extend_from_slice(&self.buf[excess..]);
-            window.extend_from_slice(chunk);
-            self.buf = window;
-            self.start = 0;
-            return Ok(());
-        }
-        // Full circular window: exactly `chunk.len()` oldest bytes age out
-        // and the chunk overwrites their slots.
-        let len = chunk.len();
-        let first_span = len.min(self.keep - self.start);
-        out.write_all(&self.buf[self.start..self.start + first_span])?;
-        if len > first_span {
-            out.write_all(&self.buf[..len - first_span])?;
-        }
-        self.buf[self.start..self.start + first_span].copy_from_slice(&chunk[..first_span]);
-        if len > first_span {
-            self.buf[..len - first_span].copy_from_slice(&chunk[first_span..]);
-        }
-        self.start = (self.start + len) % self.keep;
-        Ok(())
-    }
-}
-
-/// The pending-line queue of the elide-lines mode: retains the most recent
-/// `keep` complete lines (plus the growing partial line) and emits every
-/// line that ages out. The unterminated final fragment counts as a line at
-/// end-of-input, as in the GNU tool.
-struct TailLines {
-    keep: usize,
-    delim: u8,
-    queue: VecDeque<Vec<u8>>,
-    partial: Vec<u8>,
-}
-
-impl TailLines {
-    fn new(keep: u64, delim: u8) -> Self {
-        Self {
-            keep: usize::try_from(keep).unwrap_or(usize::MAX),
-            delim,
-            queue: VecDeque::new(),
-            partial: Vec::new(),
-        }
-    }
-
-    fn push(&mut self, chunk: &[u8], out: &dyn Output) -> Result<(), Errno> {
-        let mut rest = chunk;
-        while let Some(pos) = rest.iter().position(|&b| b == self.delim) {
-            self.partial.extend_from_slice(&rest[..=pos]);
-            let line = core::mem::take(&mut self.partial);
-            self.queue.push_back(line);
-            self.age_out(out)?;
-            rest = &rest[pos + 1..];
-        }
-        self.partial.extend_from_slice(rest);
-        Ok(())
-    }
-
-    fn finish(mut self, out: &dyn Output) -> Result<(), Errno> {
-        if !self.partial.is_empty() {
-            let line = core::mem::take(&mut self.partial);
-            self.queue.push_back(line);
-            self.age_out(out)?;
-        }
-        Ok(())
-    }
-
-    /// Emit the oldest queued line once the queue exceeds the retained
-    /// window. The queue can exceed `keep` by at most one line per push,
-    /// so a single pop restores the invariant.
-    fn age_out(&mut self, out: &dyn Output) -> Result<(), Errno> {
-        if self.queue.len() > self.keep {
-            let aged = self.queue.pop_front().unwrap_or_default();
-            out.write_all(&aged)?;
-        }
-        Ok(())
     }
 }
 
@@ -404,7 +276,7 @@ mod tests {
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
 
-    use super::{run, TailRing, USAGE};
+    use super::{run, USAGE};
     use crate::command::{parse, Command};
     use crate::error::HeadError;
     use crate::io::{FileSource, Input, Output};
@@ -730,28 +602,6 @@ mod tests {
                 assert!(
                     text.contains(switch),
                     "{locale}/head.md must document {switch}"
-                );
-            }
-        }
-    }
-
-    /// The ring emits exactly the stream minus its final `keep` bytes for
-    /// every chunking pattern, including chunks larger than the window.
-    #[test]
-    fn tail_ring_matches_the_reference_for_varied_chunkings() {
-        let data: Vec<u8> = (0u16..251).map(|v| (v % 251) as u8).collect();
-        for keep in [0usize, 1, 3, 7, 64, 250, 251, 300] {
-            for chunk in [1usize, 2, 3, 5, 8, 63, 64, 65, 251] {
-                let out = Sink::default();
-                let mut ring = TailRing::new(keep as u64);
-                for piece in data.chunks(chunk) {
-                    ring.push(piece, &out).expect("sink never fails");
-                }
-                let expected = &data[..data.len().saturating_sub(keep)];
-                assert_eq!(
-                    out.bytes(),
-                    expected,
-                    "keep={keep} chunk={chunk} diverged from the reference"
                 );
             }
         }
