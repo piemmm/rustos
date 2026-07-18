@@ -7,15 +7,38 @@
 //! reserved `-h`/`-?`/`--help` short-help switches, `--` end-of-options, and
 //! the obsolete `{+,-}COUNT[bcl]` form accepted only as the first argument.
 //! The follow family (`-f`/`-F`/`--follow`/`--retry`/`--pid`/
-//! `--sleep-interval`/`--max-unchanged-stats`) is deliberately absent — see
-//! the crate docs — so it surfaces as an unrecognised option.
+//! `--sleep-interval`/`--max-unchanged-stats`, and the obsolete trailing
+//! `f`) is supported: `tail` blocks off-CPU on the kernel's file-change
+//! wait source and re-emits appended data as each source grows, never a
+//! busy poll.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::cnum::scan_double;
 use tairix_util::count::{parse_decimal, parse_suffixed};
 
 use crate::error::TailError;
+
+/// The default `--sleep-interval`, one second, in nanoseconds — the GNU
+/// default `--pid`/rotation re-check cadence.
+pub const DEFAULT_SLEEP_NS: u64 = 1_000_000_000;
+
+/// The default `--max-unchanged-stats`: after this many consecutive
+/// re-check cycles with no change, a `--follow=name` source is reopened by
+/// name (the GNU default is 5).
+pub const DEFAULT_MAX_UNCHANGED: u64 = 5;
+
+/// How `tail` follows a source after the initial output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Follow {
+    /// `-f`/`--follow`/`--follow=descriptor`: follow the open file by
+    /// descriptor — a rename or move keeps following the same node.
+    Descriptor,
+    /// `-F`/`--follow=name` (and `--follow --retry`): follow the *name* — a
+    /// rotation (the name replaced by a new file) reopens the new file.
+    Name,
+}
 
 /// One input of a `tail` run.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +82,20 @@ pub struct Job {
     pub zero: bool,
     /// Header policy for multi-source output.
     pub headers: HeaderMode,
+    /// Follow mode, if any (`-f`/`-F`); [`None`] for a one-shot `tail`.
+    pub follow: Option<Follow>,
+    /// `--retry`: keep trying to open a source that is initially
+    /// inaccessible. Implied by `-F`.
+    pub retry: bool,
+    /// `--pid=PID`: with a follow mode, stop once process `PID` dies.
+    pub pid: Option<u64>,
+    /// `--sleep-interval` in nanoseconds: the cadence at which a follow with
+    /// `--pid` re-checks the process, and a `--follow=name` source with no
+    /// wake source (an inaccessible name) is retried.
+    pub sleep_ns: u64,
+    /// `--max-unchanged-stats`: consecutive unchanged re-check cycles before
+    /// a `--follow=name` source is reopened by name.
+    pub max_unchanged: u64,
     /// The inputs, in command-line order. Never empty (the no-operand
     /// default is a single [`Source::Stdin`]).
     pub sources: Vec<Source>,
@@ -88,17 +125,25 @@ const DEFAULT_LINES: u64 = 10;
 /// # Errors
 ///
 /// The [`TailError`] usage variants, mirroring the GNU diagnostics.
+// The GNU option grammar is a single flat dispatch over the whole switch
+// set; splitting it would scatter one cohesive decision across helpers.
+#[allow(clippy::too_many_lines)]
 pub fn parse(args: &[&str]) -> Result<Command, TailError> {
     let mut count: Option<Count> = None;
     let mut from_start = false;
     let mut zero = false;
     let mut headers = HeaderMode::MultipleFiles;
+    let mut follow: Option<Follow> = None;
+    let mut retry = false;
+    let mut pid: Option<u64> = None;
+    let mut sleep_ns = DEFAULT_SLEEP_NS;
+    let mut max_unchanged = DEFAULT_MAX_UNCHANGED;
     let mut sources: Vec<Source> = Vec::new();
     let mut options_done = false;
 
     let mut rest = args;
     if let Some(first) = args.first() {
-        if let Some(parsed) = parse_obsolete(first, &mut from_start)? {
+        if let Some(parsed) = parse_obsolete(first, &mut from_start, &mut follow)? {
             count = Some(parsed);
             rest = &args[1..];
         }
@@ -120,6 +165,42 @@ pub fn parse(args: &[&str]) -> Result<Command, TailError> {
                 "--quiet" | "--silent" => headers = HeaderMode::Never,
                 "--verbose" => headers = HeaderMode::Always,
                 "--zero-terminated" => zero = true,
+                // `--follow` alone follows by descriptor; `--follow=name`
+                // follows the name (a later `-F`/`--follow=name` upgrades it).
+                "--follow" => follow = Some(follow.unwrap_or(Follow::Descriptor)),
+                "--follow=descriptor" => follow = Some(Follow::Descriptor),
+                "--follow=name" => follow = Some(Follow::Name),
+                "--retry" => retry = true,
+                _ if arg.starts_with("--pid=") => {
+                    pid = Some(parse_pid(&arg["--pid=".len()..])?);
+                }
+                "--pid" => {
+                    index += 1;
+                    let Some(&value) = rest.get(index) else {
+                        return Err(TailError::MissingValue("--pid"));
+                    };
+                    pid = Some(parse_pid(value)?);
+                }
+                _ if arg.starts_with("--sleep-interval=") => {
+                    sleep_ns = parse_sleep(&arg["--sleep-interval=".len()..])?;
+                }
+                "--sleep-interval" => {
+                    index += 1;
+                    let Some(&value) = rest.get(index) else {
+                        return Err(TailError::MissingValue("--sleep-interval"));
+                    };
+                    sleep_ns = parse_sleep(value)?;
+                }
+                _ if arg.starts_with("--max-unchanged-stats=") => {
+                    max_unchanged = parse_max(&arg["--max-unchanged-stats=".len()..])?;
+                }
+                "--max-unchanged-stats" => {
+                    index += 1;
+                    let Some(&value) = rest.get(index) else {
+                        return Err(TailError::MissingValue("--max-unchanged-stats"));
+                    };
+                    max_unchanged = parse_max(value)?;
+                }
                 "--bytes" | "--lines" => {
                     let lines = arg == "--lines";
                     index += 1;
@@ -152,6 +233,8 @@ pub fn parse(args: &[&str]) -> Result<Command, TailError> {
                         &mut from_start,
                         &mut zero,
                         &mut headers,
+                        &mut follow,
+                        &mut retry,
                     )?;
                     if help {
                         return Ok(Command::Help);
@@ -165,19 +248,68 @@ pub fn parse(args: &[&str]) -> Result<Command, TailError> {
     if sources.is_empty() {
         sources.push(Source::Stdin);
     }
+    // `-F` is `--follow=name --retry`: the name form implies retry.
+    if follow == Some(Follow::Name) {
+        retry = true;
+    }
     Ok(Command::Tail(Job {
         count: count.unwrap_or(Count::Lines(DEFAULT_LINES)),
         from_start,
         zero,
         headers,
+        follow,
+        retry,
+        pid,
+        sleep_ns,
+        max_unchanged,
         sources,
     }))
+}
+
+/// Parse a `--pid` value: a plain non-negative decimal process id.
+fn parse_pid(text: &str) -> Result<u64, TailError> {
+    parse_decimal(text).ok_or_else(|| TailError::InvalidPid(String::from(text)))
+}
+
+/// Parse a `--sleep-interval` value: a non-negative C-locale number of
+/// seconds (fractional allowed, as in the GNU tool), converted to whole
+/// nanoseconds. The whole token must be consumed — trailing junk is invalid.
+fn parse_sleep(text: &str) -> Result<u64, TailError> {
+    let invalid = || TailError::InvalidSleep(String::from(text));
+    let (secs, used) = scan_double(text).ok_or_else(invalid)?;
+    if used != text.len() || !secs.is_finite() || secs < 0.0 {
+        return Err(invalid());
+    }
+    // Convert seconds to whole nanoseconds. The float conversions are
+    // deliberate: sub-nanosecond precision is meaningless for a poll
+    // interval (floored), the value is already checked non-negative, and an
+    // interval too large for `u64` nanoseconds saturates rather than wraps.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let nanos = {
+        let scaled = secs * 1_000_000_000.0;
+        if scaled >= u64::MAX as f64 {
+            u64::MAX
+        } else {
+            scaled as u64
+        }
+    };
+    Ok(nanos)
+}
+
+/// Parse a `--max-unchanged-stats` value: a plain non-negative decimal.
+fn parse_max(text: &str) -> Result<u64, TailError> {
+    parse_decimal(text).ok_or_else(|| TailError::InvalidMaxUnchanged(String::from(text)))
 }
 
 /// Parse one short-option cluster (`-qn3`, `-vz`, …): `q`/`v`/`z` are flags,
 /// `-c`/`-n` consume the rest of the token (or the next argument, advancing
 /// `index`) as their value, and `?` is the reserved short-help switch.
 /// Returns `Ok(true)` when the cluster asks for help.
+#[allow(clippy::too_many_arguments)]
 fn parse_cluster(
     arg: &str,
     rest: &[&str],
@@ -186,12 +318,21 @@ fn parse_cluster(
     from_start: &mut bool,
     zero: &mut bool,
     headers: &mut HeaderMode,
+    follow: &mut Option<Follow>,
+    retry: &mut bool,
 ) -> Result<bool, TailError> {
     for (offset, flag) in arg[1..].char_indices() {
         match flag {
             'q' => *headers = HeaderMode::Never,
             'v' => *headers = HeaderMode::Always,
             'z' => *zero = true,
+            // `-f` follows by descriptor; `-F` follows by name and retries.
+            // A `-fF` cluster ends on the stronger name form, as in GNU.
+            'f' => *follow = Some(follow.unwrap_or(Follow::Descriptor)),
+            'F' => {
+                *follow = Some(Follow::Name);
+                *retry = true;
+            }
             'c' | 'n' => {
                 let lines = flag == 'n';
                 let tail = &arg[1 + offset + flag.len_utf8()..];
@@ -222,7 +363,11 @@ fn parse_cluster(
 /// (bytes), `c` counts bytes, `l` counts lines (the default). Returns
 /// `Ok(None)` when `first` is not that form, so the caller falls through to
 /// ordinary option parsing.
-fn parse_obsolete(first: &str, from_start: &mut bool) -> Result<Option<Count>, TailError> {
+fn parse_obsolete(
+    first: &str,
+    from_start: &mut bool,
+    follow: &mut Option<Follow>,
+) -> Result<Option<Count>, TailError> {
     let sign = match first.chars().next() {
         Some('+') => true,
         Some('-') => false,
@@ -253,6 +398,9 @@ fn parse_obsolete(first: &str, from_start: &mut bool) -> Result<Option<Count>, T
                 lines = true;
                 multiplier = 1;
             }
+            // The historical BSD `tail -Nf` form: a trailing `f` on the
+            // obsolete first argument requests follow-by-descriptor.
+            'f' => *follow = Some(follow.unwrap_or(Follow::Descriptor)),
             _ => return Err(TailError::InvalidTrailing(letter)),
         }
     }
@@ -305,7 +453,10 @@ fn invalid(text: &str, lines: bool) -> TailError {
 mod tests {
     use alloc::string::String;
 
-    use super::{parse, Command, Count, HeaderMode, Job, Source};
+    use super::{
+        parse, Command, Count, Follow, HeaderMode, Job, Source, DEFAULT_MAX_UNCHANGED,
+        DEFAULT_SLEEP_NS,
+    };
     use crate::error::TailError;
 
     fn job(
@@ -320,8 +471,22 @@ mod tests {
             from_start,
             zero,
             headers,
+            follow: None,
+            retry: false,
+            pid: None,
+            sleep_ns: DEFAULT_SLEEP_NS,
+            max_unchanged: DEFAULT_MAX_UNCHANGED,
             sources: sources.to_vec(),
         })
+    }
+
+    /// The [`Job`] inside a parsed `Command::Tail`, for the follow-family
+    /// tests that assert on the follow fields directly.
+    fn tail_job(args: &[&str]) -> Job {
+        match parse(args).expect("fixture parses") {
+            Command::Tail(job) => job,
+            Command::Help => panic!("expected a tail job, got help"),
+        }
     }
 
     fn path(name: &str) -> Source {
@@ -577,9 +742,11 @@ mod tests {
         // `b` counts 512-byte blocks (bytes); `l` restores line counting.
         assert_eq!(parse(&["-2b"]), parse(&["-c", "1024"]));
         assert_eq!(parse(&["-3l"]), parse(&["-n", "3"]));
-        // A follow suffix (`f`) is staged, so it is an invalid trailing
-        // letter rather than a silently-accepted no-op.
-        assert_eq!(parse(&["-5f"]), Err(TailError::InvalidTrailing('f')));
+        // The historical BSD `-Nf` form: last N lines and follow.
+        let job = tail_job(&["-5f"]);
+        assert_eq!(job.count, Count::Lines(5));
+        assert_eq!(job.follow, Some(Follow::Descriptor));
+        // A letter the obsolete form does not accept is still invalid.
         assert_eq!(parse(&["-5x"]), Err(TailError::InvalidTrailing('x')));
     }
 
@@ -623,23 +790,76 @@ mod tests {
     }
 
     #[test]
-    fn the_follow_family_is_a_staged_unknown_option() {
-        // The follow family is deliberately not implemented (no file-change
-        // wake source), so it is reported as unrecognised rather than
-        // silently ignored.
-        assert_eq!(parse(&["-f"]), Err(TailError::UnknownShort('f')));
-        assert_eq!(parse(&["-F"]), Err(TailError::UnknownShort('F')));
+    fn follow_family_is_parsed() {
+        // `-f` / `--follow` / `--follow=descriptor` follow by descriptor.
+        for args in [&["-f"][..], &["--follow"][..], &["--follow=descriptor"][..]] {
+            let job = tail_job(args);
+            assert_eq!(job.follow, Some(Follow::Descriptor), "{args:?}");
+            assert!(!job.retry, "{args:?}");
+        }
+        // `-F` / `--follow=name` follow by name and imply `--retry`.
+        for args in [&["-F"][..], &["--follow=name"][..]] {
+            let job = tail_job(args);
+            assert_eq!(job.follow, Some(Follow::Name), "{args:?}");
+            assert!(job.retry, "name-follow implies retry ({args:?})");
+        }
+        // `--follow --retry` upgrades to the name form's retry without
+        // changing the descriptor mode.
+        let job = tail_job(&["--follow", "--retry"]);
+        assert_eq!(job.follow, Some(Follow::Descriptor));
+        assert!(job.retry);
+        // `-fF` clusters to the stronger name form.
+        let job = tail_job(&["-fF"]);
+        assert_eq!(job.follow, Some(Follow::Name));
+        assert!(job.retry);
+    }
+
+    #[test]
+    fn pid_sleep_and_max_unchanged_parse() {
+        let job = tail_job(&["-f", "--pid=1234"]);
+        assert_eq!(job.pid, Some(1234));
+        // Space-separated and `=`-joined forms agree.
+        assert_eq!(tail_job(&["-f", "--pid", "9"]).pid, Some(9));
+        // Fractional seconds convert to nanoseconds.
         assert_eq!(
-            parse(&["--follow"]),
-            Err(TailError::UnknownLong(String::from("--follow")))
+            tail_job(&["-f", "--sleep-interval=0.5"]).sleep_ns,
+            500_000_000
         );
         assert_eq!(
-            parse(&["--retry"]),
-            Err(TailError::UnknownLong(String::from("--retry")))
+            tail_job(&["-f", "--sleep-interval", "2"]).sleep_ns,
+            2_000_000_000
         );
         assert_eq!(
-            parse(&["--pid=1"]),
-            Err(TailError::UnknownLong(String::from("--pid=1")))
+            tail_job(&["-F", "--max-unchanged-stats=3"]).max_unchanged,
+            3
+        );
+        // Defaults when unspecified.
+        let job = tail_job(&["-f"]);
+        assert_eq!(job.sleep_ns, DEFAULT_SLEEP_NS);
+        assert_eq!(job.max_unchanged, DEFAULT_MAX_UNCHANGED);
+    }
+
+    #[test]
+    fn follow_family_rejects_bad_values() {
+        assert_eq!(
+            parse(&["-f", "--pid=x"]),
+            Err(TailError::InvalidPid(String::from("x")))
+        );
+        assert_eq!(
+            parse(&["-f", "--sleep-interval=-1"]),
+            Err(TailError::InvalidSleep(String::from("-1")))
+        );
+        assert_eq!(
+            parse(&["-f", "--sleep-interval=1x"]),
+            Err(TailError::InvalidSleep(String::from("1x")))
+        );
+        assert_eq!(
+            parse(&["-F", "--max-unchanged-stats=y"]),
+            Err(TailError::InvalidMaxUnchanged(String::from("y")))
+        );
+        assert_eq!(
+            parse(&["-f", "--pid"]),
+            Err(TailError::MissingValue("--pid"))
         );
     }
 

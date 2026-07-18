@@ -16,6 +16,25 @@ code:
 **Work in progress.** - There is a long way to go before this project is ready
 for prime time, if it ever will be. <span style="color:red">**Do not expect anything to work yet, Do *not* use it.**</span>
 
+## Screenshots
+
+Early days, but here is TAIRiX running (aarch64, Raspberry Pi image booted in
+QEMU). Click a thumbnail for the full-size image.
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/screenshots/boot-filesystem-unlock.png"><img src="docs/screenshots/boot-filesystem-unlock.png" alt="Boot: encrypted filesystem unlock" width="140"></a><br><sub>Filesystem unlock</sub></td>
+    <td align="center"><a href="docs/screenshots/user-login.png"><img src="docs/screenshots/user-login.png" alt="User login" width="140"></a><br><sub>User login</sub></td>
+    <td align="center"><a href="docs/screenshots/booted-and-logged-in.png"><img src="docs/screenshots/booted-and-logged-in.png" alt="Booted and logged in" width="140"></a><br><sub>Logged in</sub></td>
+    <td align="center"><a href="docs/screenshots/basic-desktop.png"><img src="docs/screenshots/basic-desktop.png" alt="Basic desktop" width="140"></a><br><sub>basic desktop PoC</sub></td>
+    <td align="center"><a href="docs/screenshots/top.app.png"><img src="docs/screenshots/top.app.png" alt="The top app" width="140"></a><br><sub>top app</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/screenshots/wide-character-support-korean.png"><img src="docs/screenshots/wide-character-support-korean.png" alt="Wide-character (Korean) text support" width="140"></a><br><sub>Korean text</sub></td>
+    <td align="center"><a href="docs/screenshots/japanese-text.png"><img src="docs/screenshots/japanese-text.png" alt="Japanese text support" width="140"></a><br><sub>Japanese text</sub></td>
+  </tr>
+</table>
+
 ## Feature / architecture support
 
 Per-architecture state of features whose support varies by target. Legend:

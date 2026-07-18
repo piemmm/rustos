@@ -25,11 +25,14 @@ multiplica por potencias de 1024; con `B` por potencias de 1000; con
 La forma histórica de primer argumento `tail -num` / `tail +num` (con una
 letra final `b`/`c`/`l` opcional) se acepta, como en la herramienta GNU.
 
-El modo de seguimiento (`-f`, `-F`, `--follow`, `--retry`, `--pid`,
-`--sleep-interval`, `--max-unchanged-stats`) aún no está disponible y se
-informa como una opción desconocida: necesita una fuente de despertar
-ante cambios de archivo que el sistema todavía no expone, y no se
-entrega una espera activa en su lugar.
+El modo de seguimiento mantiene cada archivo abierto e imprime los
+datos nuevos a medida que crece; se bloquea hasta que el archivo
+cambia, nunca con espera activa. `-f` sigue el descriptor; `-F` sigue
+el nombre y reabre un archivo rotado, y `--retry` espera a que
+aparezca un nombre. `--pid=PID` termina el seguimiento cuando el
+proceso finaliza (comprobado cada `--sleep-interval` segundos, por
+defecto 1; `--max-unchanged-stats` por defecto 5). Un truncamiento se
+informa y el archivo se sigue desde su nuevo inicio.
 
 Cuando no se muestra contenido inicial, se escribe un registro
 informativo en el flujo de información estándar (fd 3); nunca cambia la
@@ -47,6 +50,13 @@ en la salida de error y la ejecución continúa con el siguiente archivo.
 - `-v, --verbose` — mostrar siempre los encabezados `==> file <==`.
 - `-z, --zero-terminated` — las líneas se delimitan con NUL en lugar de
   salto de línea.
+- `-f, --follow[=descriptor]` — seguir por descriptor, imprimiendo los datos añadidos.
+- `-F` — seguir por nombre (`--follow=name --retry`); reabrir un archivo rotado.
+- `--follow=name` — seguir el nombre en lugar del descriptor.
+- `--retry` — seguir intentando abrir un archivo que aún no existe.
+- `--pid <PID>` — detener el seguimiento cuando el proceso `PID` muere.
+- `--sleep-interval <N>` — segundos entre comprobaciones (por defecto 1).
+- `--max-unchanged-stats <N>` — ciclos sin cambios antes de que `-F` reexamine el nombre (por defecto 5).
 - `-h, -?` — mostrar la ayuda breve de esta orden.
 
 ## EXAMPLES

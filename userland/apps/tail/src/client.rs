@@ -10,7 +10,7 @@ use tairix_util::tailwindow::{ByteWindow, LineWindow};
 
 use crate::command::{Command, Count, HeaderMode, Job, Source};
 use crate::error::TailError;
-use crate::io::{FileSource, Info, Input, Output};
+use crate::io::{FileSource, Info, Input, Output, Watcher};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `tail`'s own Help tree is unavailable.
@@ -24,15 +24,15 @@ const OWN_WORD: &str = "tail";
 /// per-call buffer so a source of any size streams through a constant amount
 /// of memory (the last-N modes additionally retain the requested window,
 /// exactly as much as the format demands).
-const READ_CHUNK: usize = 4096;
+pub(crate) const READ_CHUNK: usize = 4096;
 
 /// One source's selection state machine, plus the running tally of leading
 /// units it dropped (for the fd-3 advisory).
-struct Engine {
+pub(crate) struct Engine {
     mode: Mode,
     /// Leading units (lines or bytes) not shown: aged out of the last-N
     /// window, or skipped by the from-start posture.
-    omitted: u64,
+    pub(crate) omitted: u64,
 }
 
 /// What a source's engine is doing.
@@ -49,7 +49,7 @@ enum Mode {
 }
 
 impl Engine {
-    fn new(job: &Job) -> Self {
+    pub(crate) fn new(job: &Job) -> Self {
         let delim = if job.zero { 0 } else { b'\n' };
         let mode = match (job.count, job.from_start) {
             (Count::Bytes(n), false) => Mode::LastBytes(ByteWindow::new(n)),
@@ -69,7 +69,7 @@ impl Engine {
 
     /// Feed the next chunk, writing whatever the mode emits now and counting
     /// the leading units it drops.
-    fn feed(&mut self, chunk: &[u8], out: &dyn Output) -> Result<(), Errno> {
+    pub(crate) fn feed(&mut self, chunk: &[u8], out: &dyn Output) -> Result<(), Errno> {
         let Engine { mode, omitted } = self;
         match mode {
             // The last-N modes drop what ages out of the retained window
@@ -124,7 +124,7 @@ impl Engine {
 
     /// The source is exhausted: emit whatever the last-N modes still hold.
     /// The unterminated final fragment counts as a line, as in the GNU tool.
-    fn finish(&mut self, out: &dyn Output) -> Result<(), Errno> {
+    pub(crate) fn finish(&mut self, out: &dyn Output) -> Result<(), Errno> {
         let Engine { mode, omitted } = self;
         match mode {
             Mode::LastBytes(window) => window.drain(|bytes| out.write_all(bytes)),
@@ -160,6 +160,7 @@ pub fn run(
     locale: Option<&str>,
     files: &dyn FileSource,
     stdin: &dyn Input,
+    watcher: &dyn Watcher,
     help: &dyn HelpSource,
     out: &dyn Output,
     err: &dyn Output,
@@ -174,6 +175,13 @@ pub fn run(
         }
         Command::Tail(job) => job,
     };
+
+    // A follow (`-f`/`-F`) keeps the sources open and re-emits appended data
+    // as they grow, blocking on the kernel's file-change wait source between
+    // emissions — never a busy poll.
+    if let Some(mode) = job.follow {
+        return crate::follow::run_follow(&job, mode, watcher, stdin, out, err, info);
+    }
 
     let show_headers = match job.headers {
         HeaderMode::Always => true,
@@ -216,7 +224,11 @@ pub fn run(
 
 /// The `==> name <==` banner, preceded by a blank line for every header
 /// after the first, exactly as the GNU tool separates multi-file output.
-fn write_header(out: &dyn Output, name: &str, header_written: &mut bool) -> Result<(), Errno> {
+pub(crate) fn write_header(
+    out: &dyn Output,
+    name: &str,
+    header_written: &mut bool,
+) -> Result<(), Errno> {
     let banner = if *header_written {
         format!("\n==> {name} <==\n")
     } else {
@@ -228,7 +240,7 @@ fn write_header(out: &dyn Output, name: &str, header_written: &mut bool) -> Resu
 
 /// Serve standard input. A read failure is diagnosed and ends this source;
 /// the caller moves on. Returns `(served-cleanly, leading-units-omitted)`.
-fn serve_stdin(
+pub(crate) fn serve_stdin(
     job: &Job,
     stdin: &dyn Input,
     out: &dyn Output,
@@ -300,7 +312,7 @@ fn serve_path(
 /// Emit the fd-3 advisory that leading content was not shown: a tool or user
 /// then knows the output is a tail view and is not exhaustive. Advisory only
 /// — never affects the output, ordering, or exit status.
-fn emit_omission_record(info: &dyn Info, omitted: u64, lines: bool, from_start: bool) {
+pub(crate) fn emit_omission_record(info: &dyn Info, omitted: u64, lines: bool, from_start: bool) {
     let (unit, units) = if lines {
         ("line", "lines")
     } else {
@@ -340,7 +352,7 @@ fn emit_omission_record(info: &dyn Info, omitted: u64, lines: bool, from_start: 
 
 /// One `tail: …` diagnostic line on the error stream. A failure to report is
 /// itself fatal — the tool never continues silently.
-fn diagnose(err: &dyn Output, message: &str) -> Result<(), TailError> {
+pub(crate) fn diagnose(err: &dyn Output, message: &str) -> Result<(), TailError> {
     err.write_all(format!("tail: {message}\n").as_bytes())
         .map_err(TailError::Output)
 }
@@ -474,6 +486,37 @@ mod tests {
         }
     }
 
+    /// A watcher the non-follow tests never invoke: every method fails
+    /// closed, so a stray call would surface rather than silently pass.
+    struct NoWatch;
+
+    impl crate::io::Watcher for NoWatch {
+        fn open(&self, _path: &str) -> Result<u64, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn open_dir(&self, _path: &str) -> Result<u64, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn close(&self, _handle: u64) {}
+        fn read_at(&self, _handle: u64, _offset: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn meta(&self, _handle: u64) -> Result<crate::io::Meta, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn meta_path(&self, _path: &str) -> Result<crate::io::Meta, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn watch(&self, _handle: u64) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn unwatch(&self, _handle: u64) {}
+        fn block(&self, _timeout_ns: u64) {}
+        fn pid_alive(&self, _pid: u64) -> bool {
+            false
+        }
+    }
+
     /// A bundle with no help documents, so the short help falls back to the
     /// usage banner.
     struct NoHelp;
@@ -511,6 +554,7 @@ mod tests {
             None,
             files,
             stdin,
+            &NoWatch,
             &NoHelp,
             &out,
             &err,
@@ -724,6 +768,7 @@ mod tests {
             None,
             &files,
             &stdin,
+            &NoWatch,
             &NoHelp,
             &BrokenSink,
             &Sink::default(),

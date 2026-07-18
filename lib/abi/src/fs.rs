@@ -284,11 +284,60 @@ impl UnlinkFlags {
     }
 }
 
+/// The stable, system-wide identity of a filesystem node.
+///
+/// A node is identified by the pair `(volume, node)`: `volume` is the
+/// 16-byte identifier of the mounted volume the node lives on (the value the
+/// mount was registered with), and `node` is that volume's driver-assigned
+/// node number (its `NodeId`). The pair is stable across renames — a rename
+/// preserves the node's identity — so two paths that resolve to the same
+/// `FileId` name the same file, and a path whose `FileId` changed between two
+/// stats has been replaced by a different file at that name (log rotation).
+///
+/// `tail -f`/`-F` uses it to distinguish "the file I am following grew" from
+/// "a different file now sits at this name", and the kernel keys its
+/// file-change notification (the [`crate::WaitSourceKind::File`] wait source)
+/// on it so a write wakes only the watchers of *that* node, never every
+/// watcher on every write.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct FileId {
+    /// The 16-byte identifier of the mounted volume the node lives on.
+    pub volume: [u8; 16],
+    /// The volume's driver-assigned node number.
+    pub node: u64,
+}
+
+impl FileId {
+    /// The all-zero identity: no volume, node `0`. Reported for a node whose
+    /// backing has no distinct identity to offer (the fail-closed default);
+    /// never equal to a real mounted node, whose volume id is non-zero.
+    pub const NONE: Self = Self {
+        volume: [0u8; 16],
+        node: 0,
+    };
+
+    /// Whether this is the [`FileId::NONE`] placeholder rather than a real
+    /// node identity.
+    #[must_use]
+    pub const fn is_none(self) -> bool {
+        // A `const fn` cannot iterate a slice, so fold the 16 bytes by hand.
+        let mut i = 0;
+        while i < self.volume.len() {
+            if self.volume[i] != 0 {
+                return false;
+            }
+            i += 1;
+        }
+        self.node == 0
+    }
+}
+
 /// The structural metadata `fs_stat` reports for an inode.
 ///
 /// Carries only what the userland contract exposes: the node kind, its byte
-/// size, its allocated on-disk bytes, the POSIX mode bits, and the owning
-/// uid/gid. The kernel fills it
+/// size, its allocated on-disk bytes, the POSIX mode bits, the owning
+/// uid/gid, and its stable system-wide [`FileId`]. The kernel fills it
 /// from the VFS's authorised view of the node; a program never reads it from
 /// a `/proc`-style file (there is none).
 #[repr(C)]
@@ -309,15 +358,19 @@ pub struct FileStat {
     pub uid: u32,
     /// Owning group id.
     pub gid: u32,
+    /// The node's stable system-wide identity, for distinguishing "this file
+    /// grew" from "a different file now sits at this name" (log rotation),
+    /// and the key the kernel's file-change notification uses.
+    pub id: FileId,
 }
 
 impl FileStat {
     /// Encoded size of a [`FileStat`] on the wire.
     ///
     /// `kind(1)` + `pad(7)` + `size(8)` + `allocated(8)` + `mode(4)` +
-    /// `uid(4)` + `gid(4)`, padded to a multiple of 8 for natural alignment
-    /// of the `u64` fields.
-    pub const WIRE_LEN: usize = 40;
+    /// `uid(4)` + `gid(4)` + `id.volume(16)` + `id.node(8)`, padded to a
+    /// multiple of 8 for natural alignment of the `u64` fields.
+    pub const WIRE_LEN: usize = 64;
 
     /// Encode `self` into the first [`FileStat::WIRE_LEN`] bytes of `out`.
     ///
@@ -336,6 +389,8 @@ impl FileStat {
         put_u32(out, 24, self.mode);
         put_u32(out, 28, self.uid);
         put_u32(out, 32, self.gid);
+        out[40..56].copy_from_slice(&self.id.volume);
+        put_u64(out, 56, self.id.node);
         Ok(Self::WIRE_LEN)
     }
 
@@ -352,6 +407,8 @@ impl FileStat {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
+        let mut volume = [0u8; 16];
+        volume.copy_from_slice(&bytes[40..56]);
         Ok(Self {
             kind: FileKind::from_u8(bytes[0])?,
             size: read_u64(bytes, 8),
@@ -359,6 +416,10 @@ impl FileStat {
             mode: read_u32(bytes, 24),
             uid: read_u32(bytes, 28),
             gid: read_u32(bytes, 32),
+            id: FileId {
+                volume,
+                node: read_u64(bytes, 56),
+            },
         })
     }
 }
@@ -543,7 +604,9 @@ impl core::iter::FusedIterator for DirEntries<'_> {}
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_NAME_MAX};
+    use super::{
+        DirEntries, DirEntry, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_NAME_MAX,
+    };
     use crate::time::Time64;
     use crate::Errno;
     use alloc::vec;
@@ -626,6 +689,10 @@ mod tests {
             mode: 0o644,
             uid: 1000,
             gid: 1000,
+            id: FileId {
+                volume: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                node: 0xDEAD_BEEF_0BAD_F00D,
+            },
         };
         let mut buf = [0u8; FileStat::WIRE_LEN];
         assert_eq!(stat.encode(&mut buf), Ok(FileStat::WIRE_LEN));
@@ -641,6 +708,7 @@ mod tests {
             mode: 0o755,
             uid: 0,
             gid: 0,
+            id: FileId::NONE,
         };
         let mut tiny = [0u8; FileStat::WIRE_LEN - 1];
         assert_eq!(stat.encode(&mut tiny), Err(Errno::BufferTooSmall));

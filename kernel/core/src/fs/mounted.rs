@@ -48,12 +48,13 @@ use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::time::Time64;
 use tairix_abi::{
-    CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
+    CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
 use tairix_sync::{OnceCell, RwLock, SpinLock};
 
+use crate::fswatch;
 use crate::sleeplock::SleepLock;
 
 use super::path::Path;
@@ -292,6 +293,19 @@ impl<F: 'static> LateFilesystem<F> {
             .find(|e| e.handle == handle)
             .map(|e| Arc::clone(&e.driver))
             .ok_or(Errno::NotImplemented)
+    }
+
+    /// The stable published volume identity registered for `handle`, or the
+    /// all-zero id when the handle names no registered volume (or one
+    /// registered without a published id). The volume half of a node's
+    /// system-wide [`tairix_abi::FileId`].
+    pub fn volume_id(&self, handle: DriverHandle) -> [u8; 16] {
+        let handle = handle.as_u64();
+        self.drivers
+            .lock()
+            .iter()
+            .find(|e| e.handle == handle)
+            .map_or([0u8; 16], |e| e.volume_id)
     }
 
     /// Every registered driver, for a whole-system `sync`.
@@ -594,6 +608,61 @@ fn file_kind(kind: DriverNodeKind) -> FileKind {
     }
 }
 
+/// The parent directory of an absolute `path`, or `None` for the root
+/// itself.
+///
+/// Used to key the file-change notification of a namespace mutation
+/// (create/remove/rename) on the *directory* whose entries changed, so a
+/// `tail -F` watching a directory descriptor wakes on a rotation there.
+fn parent_path(path: &str) -> Option<&str> {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) => Some("/"),
+        Some(idx) => Some(&trimmed[..idx]),
+        None => None,
+    }
+}
+
+impl<F> MountedFilesystemService<F>
+where
+    F: FilesystemRead
+        + FilesystemWrite
+        + FilesystemSecurity
+        + FilesystemStats
+        + FilesystemAttrsProvider
+        + Send
+        + 'static,
+{
+    /// Fire the file-change notification for the node at `path` (a content
+    /// change: a write, a truncate). Best-effort and gated by
+    /// [`fswatch::watchers_present`], so a system with no watcher pays only
+    /// one relaxed atomic load; a stat failure (a raced removal) simply
+    /// skips the notify rather than failing the mutation that already
+    /// succeeded.
+    fn note_path(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) {
+        if !fswatch::watchers_present() {
+            return;
+        }
+        if let Ok(stat) = self.stat(uid, caps, path) {
+            if !stat.id.is_none() {
+                fswatch::note_change(stat.id);
+            }
+        }
+    }
+
+    /// Fire the file-change notification for the *parent directory* of
+    /// `path` (a namespace change under it: a create, remove, or rename),
+    /// so a directory watcher wakes on the change to its entries.
+    fn note_parent(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) {
+        if !fswatch::watchers_present() {
+            return;
+        }
+        if let Some(parent) = parent_path(path) {
+            self.note_path(uid, caps, parent);
+        }
+    }
+}
+
 impl<F> FilesystemService for MountedFilesystemService<F>
 where
     F: FilesystemRead
@@ -611,7 +680,10 @@ where
         path: &str,
         flags: OpenFlags,
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        // The closure reports what the open changed so the notify fires only
+        // on a real mutation: `(created, truncated)` — a plain open of an
+        // existing file changes nothing and wakes no watcher.
+        let (created, truncated) = self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             match vfs.stat_via_secured(cred, path, fs) {
                 Ok(info) => {
                     // An exclusive create demands the path not already exist.
@@ -632,10 +704,11 @@ where
                     // Truncate-on-open zeroes the file; it requires write
                     // access (enforced at `OpenFlags::from_bits`) and is
                     // authorised by the secured truncate.
-                    if flags.contains(OpenFlags::TRUNCATE) {
+                    let truncated = flags.contains(OpenFlags::TRUNCATE);
+                    if truncated {
                         vfs.truncate_via_secured(cred, path, fs, 0)?;
                     }
-                    Ok(())
+                    Ok((false, truncated))
                 }
                 // A missing path is created only when asked, and `open` only
                 // ever creates a regular file (directories are made by
@@ -645,11 +718,22 @@ where
                     if flags.contains(OpenFlags::DIRECTORY) {
                         return Err(VfsError::NotADirectory);
                     }
-                    vfs.create_via_secured(cred, path, fs)
+                    vfs.create_via_secured(cred, path, fs)?;
+                    Ok((true, false))
                 }
                 Err(err) => Err(err),
             }
-        })
+        })?;
+        // A create adds a name under the parent directory (a rotation a
+        // `tail -F` watches for); a truncate-on-open resets the file's own
+        // content (a change a `tail -f` re-reads through).
+        if created {
+            self.note_parent(uid, caps, path);
+        }
+        if truncated {
+            self.note_path(uid, caps, path);
+        }
+        Ok(())
     }
 
     fn read(
@@ -674,7 +758,7 @@ where
         append: bool,
         data: &[u8],
     ) -> Result<usize, Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        let written = self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             // An append write ignores the supplied offset and writes at the
             // current end of file (the journal-append posture), resolved under
             // the same lock so the size cannot change before the write.
@@ -684,7 +768,12 @@ where
                 offset
             };
             vfs.write_via_secured(cred, path, fs, offset, data)
-        })
+        })?;
+        // The file's content changed — wake any descriptor following it.
+        if written > 0 {
+            self.note_path(uid, caps, path);
+        }
+        Ok(written)
     }
 
     fn readdir(
@@ -744,6 +833,13 @@ where
     fn stat(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             let info = vfs.stat_via_secured(cred, path, fs)?;
+            // Pair the driver's node number with the covering mount's volume
+            // id to form the node's system-wide identity.
+            let volume = vfs
+                .mounts()
+                .resolve(path)
+                .backing()
+                .map_or([0u8; 16], |handle| self.mount.volume_id(handle));
             Ok(FileStat {
                 kind: file_kind(info.kind),
                 size: info.size,
@@ -751,6 +847,10 @@ where
                 mode: u32::from(info.meta.mode.bits()),
                 uid: info.meta.owner.0,
                 gid: info.meta.group.0,
+                id: FileId {
+                    volume,
+                    node: info.node,
+                },
             })
         })
     }
@@ -764,7 +864,11 @@ where
     ) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.truncate_via_secured(cred, path, fs, size)
-        })
+        })?;
+        // The file's content (length) changed — wake any descriptor
+        // following it (a shrink is how `tail -f` learns of a truncation).
+        self.note_path(uid, caps, path);
+        Ok(())
     }
 
     fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
@@ -785,7 +889,10 @@ where
     fn mkdir(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.mkdir_via_secured(cred, path, fs)
-        })
+        })?;
+        // A new name appeared under the parent directory.
+        self.note_parent(uid, caps, path);
+        Ok(())
     }
 
     fn unlink(
@@ -797,7 +904,11 @@ where
     ) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.remove_via_secured(cred, path, fs, flags.is_directory_only())
-        })
+        })?;
+        // A name disappeared from the parent directory (a rotation a
+        // `tail -F` watches for).
+        self.note_parent(uid, caps, path);
+        Ok(())
     }
 
     fn rename(
@@ -813,6 +924,9 @@ where
         // (`rename_via_secured` refuses a cross-mount move), so the source
         // path's covering-mount driver serves the whole operation.
         let vfs = self.mount.vfs()?;
+        // Keep the caller's original path strings for the post-op notify
+        // (the parsed `Path`s below shadow the `&str` parameters).
+        let (src_str, dst_str) = (src, dst);
         // The same owned-snapshot resolution as `with_secured`: no table
         // borrow is held across the operation.
         let (gid, supplementary_gids) = self.identity.resolve_groups(uid)?;
@@ -825,9 +939,18 @@ where
             supplementary_gids: &supplementary_gids,
             caps,
         };
-        let mut fs = driver.lock();
-        vfs.rename_via_secured(&cred, &src, &dst, &mut *fs)
-            .map_err(VfsError::to_errno)
+        {
+            let mut fs = driver.lock();
+            vfs.rename_via_secured(&cred, &src, &dst, &mut *fs)
+                .map_err(VfsError::to_errno)?;
+        }
+        // A rename removes a name from the source directory and adds one to
+        // the destination directory; both entry sets changed. (`src`/`dst`
+        // are the caller's original path strings, which is what the notify
+        // helpers re-resolve.)
+        self.note_parent(uid, caps, src_str);
+        self.note_parent(uid, caps, dst_str);
+        Ok(())
     }
 
     fn set_mode(

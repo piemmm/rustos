@@ -955,12 +955,24 @@ behind the floor work below).
   policies over one mechanism), and `head` was refactored onto both.
   `tail` emits one advisory `omission` record on fd 3 when it drops
   leading content (`text.leading_lines_omitted` /
-  `text.leading_bytes_omitted`). One documented divergence: the follow
-  family (`-f`/`-F`/`--follow`/`--retry`/`--pid`/`--sleep-interval`/
-  `--max-unchanged-stats` and the obsolete trailing `f`) is staged
-  behind a missing file-change wake source — reported as an
-  unrecognised option, never a busy-poll or silent no-op (the `tee -i`
-  precedent). **Done: `sleep`** — a full self-contained store bundle
+  `text.leading_bytes_omitted`). The follow family is **implemented in
+  full** (`-f`/`-F`/`--follow[=descriptor|name]`/`--retry`/`--pid`/
+  `--sleep-interval`/`--max-unchanged-stats` and the obsolete trailing
+  `f`): a follow blocks off-CPU on a new kernel file-change wait source
+  and re-emits appended data as each file grows, handling truncation,
+  rotation (name follow reopens the replaced file), retry of an absent
+  name, and `--pid` termination — never a busy poll. Landing it added
+  the wake source: a stable node identity `tairix_abi::FileId`
+  `{volume, node}` carried on `FileStat`, a `WaitSourceKind::File`
+  wait-set member keyed on it (fd-resolved, edge-triggered on a
+  per-`FileId` change generation), the `kernel/core::fswatch` registry
+  (targeted wakes, a `watchers_present` fast path so an unwatched write
+  pays only one atomic load), and the change hooks at the
+  `MountedFilesystemService` mutation choke points (write/truncate → the
+  file's id, create/unlink/rename/mkdir → the parent directory's id).
+  `--pid` liveness reuses the System Information process list
+  (`tairix_procinfo`); a process the caller cannot observe reads as gone
+  (fail closed, documented). **Done: `sleep`** — a full self-contained store bundle
   (console-write + `CAP_FS_ACCESS`, store-only) with the complete GNU
   surface: it pauses for the sum of its `NUMBER[SUFFIX]` operands (`s`/`m`/
   `h`/`d`, seconds the default), each a C-locale float scanned through the

@@ -670,6 +670,7 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
         mode: 0o644,
         uid: 1000,
         gid: 1000,
+        id: tairix_abi::FileId::NONE,
     }
     .encode(&mut stat)
     .expect("a well-formed FileStat encodes");

@@ -56,6 +56,12 @@ pub struct DelegatedInfo {
     pub allocated: u64,
     /// The permission metadata applied to the node.
     pub meta: Metadata,
+    /// The driver's stable node number for the resolved node (its
+    /// [`NodeId`] raw value). Paired with the covering mount's volume id it
+    /// forms the node's system-wide [`tairix_abi::FileId`], which
+    /// distinguishes "this file grew" from "a different file now sits at
+    /// this name" and keys the file-change notification.
+    pub node: u64,
 }
 
 /// Maps a [`DriverError`] from the read surface onto the VFS error type.
@@ -481,12 +487,13 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         cred: &Credentials<'_>,
         components: &[String],
     ) -> Result<DelegatedInfo, VfsError> {
-        let (_, info, meta) = self.resolve(cred, components)?;
+        let (node, info, meta) = self.resolve(cred, components)?;
         Ok(DelegatedInfo {
             kind: info.kind,
             size: info.size,
             allocated: info.allocated,
             meta,
+            node: node.raw(),
         })
     }
 

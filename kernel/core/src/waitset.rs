@@ -35,7 +35,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, WaitSourceKind};
+use tairix_abi::{Errno, FileId, WaitSourceKind};
 use tairix_sync::SpinLock;
 
 /// One registered source of a wait-set.
@@ -49,6 +49,15 @@ pub struct Member {
     /// The caller's opaque token, reported back by a successful wait when this
     /// member is the one found ready.
     pub token: u64,
+    /// For a [`WaitSourceKind::File`] member: the stable identity of the node
+    /// the descriptor named at add time, keyed on by the change-notification
+    /// registry. [`FileId::NONE`] for every other kind.
+    pub file: FileId,
+    /// For a [`WaitSourceKind::File`] member: the change generation last
+    /// observed. The member is ready when the node's current generation
+    /// differs from this; reporting it ready advances this to the current
+    /// generation (the edge consume). Unused (`0`) for every other kind.
+    pub observed: u64,
 }
 
 /// A caller-owned wait-set: the owning task and its growable membership.
@@ -142,14 +151,54 @@ pub fn add(owner: u64, handle: u64, member: Member) -> Result<(), Errno> {
 /// * [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`, or if
 ///   no member with that `(kind, id)` is registered.
 pub fn remove(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> Result<(), Errno> {
-    with_owned(owner, handle, |set| {
+    // Collect the removed File member's identity under the set lock, then
+    // drop its file-change watch after releasing the lock (so the fswatch
+    // registry lock is never taken nested under this one).
+    let removed_file = with_owned(owner, handle, |set| {
         let before = set.members.len();
-        set.members.retain(|m| !(m.kind == kind && m.id == id));
+        let mut file = None;
+        set.members.retain(|m| {
+            let matches = m.kind == kind && m.id == id;
+            if matches && m.kind == WaitSourceKind::File {
+                file = Some(m.file);
+            }
+            !matches
+        });
         if set.members.len() == before {
             return Err(Errno::NotFound);
         }
-        Ok(())
-    })?
+        Ok(file)
+    })??;
+    if let Some(file) = removed_file {
+        crate::fswatch::watch_remove(file);
+    }
+    Ok(())
+}
+
+/// Record the change generation a [`WaitSourceKind::File`] member last
+/// observed (the edge consume performed when the member is reported ready).
+/// A no-op if the member is absent — the owner may have removed it between
+/// the readiness scan and this update.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`.
+pub fn advance_observed(
+    owner: u64,
+    handle: u64,
+    kind: WaitSourceKind,
+    id: u64,
+    observed: u64,
+) -> Result<(), Errno> {
+    with_owned(owner, handle, |set| {
+        if let Some(member) = set
+            .members
+            .iter_mut()
+            .find(|m| m.kind == kind && m.id == id)
+        {
+            member.observed = observed;
+        }
+    })
 }
 
 /// Snapshot the members of the owner's wait-set `handle`.
@@ -174,10 +223,31 @@ pub fn members(owner: u64, handle: u64) -> Result<Vec<Member>, Errno> {
 /// and IRQ lines the task owns, which are reclaimed by their own teardown), so
 /// dropping the sets is the whole reclamation. Idempotent.
 pub fn release_owned_by(owner: u64) -> usize {
-    let mut g = WAIT_SETS.lock();
-    let before = g.sets.len();
-    g.sets.retain(|_, set| set.owner != owner);
-    before - g.sets.len()
+    // Collect the File members' identities while dropping the owner's sets,
+    // then release each one's file-change watch after the lock is dropped so
+    // the watch_add/watch_remove pairing survives task teardown.
+    let (removed, files) = {
+        let mut g = WAIT_SETS.lock();
+        let before = g.sets.len();
+        let mut files: Vec<FileId> = Vec::new();
+        g.sets.retain(|_, set| {
+            if set.owner == owner {
+                for member in &set.members {
+                    if member.kind == WaitSourceKind::File {
+                        files.push(member.file);
+                    }
+                }
+                false
+            } else {
+                true
+            }
+        });
+        (before - g.sets.len(), files)
+    };
+    for file in files {
+        crate::fswatch::watch_remove(file);
+    }
+    removed
 }
 
 /// `true` if `handle` is a live wait-set owned by `owner`. Diagnostic / test
@@ -200,6 +270,8 @@ mod tests {
             kind: WaitSourceKind::Endpoint,
             id,
             token,
+            file: FileId::NONE,
+            observed: 0,
         }
     }
 
@@ -249,6 +321,8 @@ mod tests {
                     kind: WaitSourceKind::Irq,
                     id: 5,
                     token: 55,
+                    file: FileId::NONE,
+                    observed: 0,
                 }
             ),
             Ok(()),

@@ -289,6 +289,7 @@ impl FilesystemService for FixtureFs {
             mode: 0o444,
             uid: 0,
             gid: 0,
+            id: tairix_abi::FileId::NONE,
         })
     }
 

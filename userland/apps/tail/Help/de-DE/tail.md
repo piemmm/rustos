@@ -26,11 +26,7 @@ Die historische Erst-Argument-Form `tail -num` / `tail +num` (mit einem
 optionalen abschließenden Buchstaben `b`/`c`/`l`) wird akzeptiert, wie im
 GNU-Werkzeug.
 
-Der Folgemodus (`-f`, `-F`, `--follow`, `--retry`, `--pid`,
-`--sleep-interval`, `--max-unchanged-stats`) ist noch nicht verfügbar
-und wird als unbekannte Option gemeldet: er benötigt eine
-Aufweck-Quelle bei Dateiänderungen, die das System noch nicht bietet,
-und es wird kein aktives Warten an ihrer Stelle geliefert.
+Der Folgemodus hält jede Datei geöffnet und gibt neue Daten aus, sobald sie wächst; er blockiert, bis sich die Datei ändert — nie aktives Warten. `-f` folgt dem Deskriptor; `-F` folgt dem Namen und öffnet eine rotierte Datei erneut, und `--retry` wartet, bis ein Name erscheint. `--pid=PID` beendet den Folgemodus, wenn der Prozess endet (geprüft alle `--sleep-interval` Sekunden, Standard 1; `--max-unchanged-stats` Standard 5). Eine Kürzung wird gemeldet und der Datei ab ihrem neuen Anfang gefolgt.
 
 Wenn führender Inhalt nicht angezeigt wird, wird ein Hinweisdatensatz
 auf den Standard-Informationsstrom (fd 3) geschrieben; er ändert nie die
@@ -48,6 +44,13 @@ fort.
 - `-v, --verbose` — die Kopfzeilen `==> file <==` immer ausgeben.
 - `-z, --zero-terminated` — Zeilen sind NUL-getrennt statt
   zeilenumbruchgetrennt.
+- `-f, --follow[=descriptor]` — dem Deskriptor folgen und angehängte Daten ausgeben.
+- `-F` — dem Namen folgen (`--follow=name --retry`); rotierte Datei erneut öffnen.
+- `--follow=name` — dem Namen statt dem Deskriptor folgen.
+- `--retry` — weiter versuchen, eine noch fehlende Datei zu öffnen.
+- `--pid <PID>` — den Folgemodus beenden, wenn Prozess `PID` endet.
+- `--sleep-interval <N>` — Sekunden zwischen den Prüfungen (Standard 1).
+- `--max-unchanged-stats <N>` — ruhige Zyklen, bevor `-F` den Namen erneut prüft (Standard 5).
 - `-h, -?` — die eigene Kurzhilfe dieses Befehls anzeigen.
 
 ## EXAMPLES

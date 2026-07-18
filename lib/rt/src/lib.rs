@@ -5747,6 +5747,7 @@ mod tests {
             mode: 0o644,
             uid: 1000,
             gid: 1000,
+            id: tairix_abi::FileId::NONE,
         };
         let mut wire = [0u8; FileStat::WIRE_LEN];
         stat.encode(&mut wire).expect("encode");
