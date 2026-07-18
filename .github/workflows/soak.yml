@@ -35,7 +35,7 @@ name: soak
 # `schedule` (which always runs from the base repo's default branch, never a
 # fork) and on `workflow_dispatch` — never on `pull_request`/`pull_request_target`.
 # Every job is additionally gated (see the job `if:` below) to the owner
-# (`piemmm`) in the canonical `piemmm/tairix` repo, so a fork or any other
+# (`piemmm`) in the canonical `piemmm/rustos` repo, so a fork or any other
 # actor manually dispatching is refused before any step runs.
 on:
   schedule:
@@ -88,7 +88,7 @@ jobs:
     # Fail closed: only the owner in the canonical repo may execute on the
     # self-hosted runner. Refuses forks (different `github.repository`) and any
     # non-owner actor (e.g. a collaborator's manual dispatch) before checkout.
-    if: github.repository == 'piemmm/tairix' && github.actor == 'piemmm'
+    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
     # Dedicated `soak` label so the window runs on its own runner instance and
     # never queues `ci.yml` (which uses the bare `[self-hosted, linux]`) behind
     # it; the two run concurrently on the same host (see the runner README for
