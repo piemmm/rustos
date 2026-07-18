@@ -51,7 +51,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use tairix_arch_api::{CpuId, RecoveryOutcome, WatchdogArch, WatchdogKind};
+use tairix_arch_api::{CpuId, RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind};
 
 /// GIC INTID of the EL1 **virtual** generic-timer private-peripheral
 /// interrupt (the ARM Generic Timer raises the virtual timer on PPI 27).
@@ -260,6 +260,24 @@ impl WatchdogArch for Watchdog {
             WatchdogKind::Hard => RecoveryOutcome::AttentionRaised,
         }
     }
+
+    fn stuck_interrupt(&self) -> Option<StuckInterrupt> {
+        // The observer reads the distributor's globally-shared status: a
+        // device SPI stuck active (its handler never completing, or the
+        // line storming) is the "why" the hard-locked CPU's own stale
+        // sample cannot give. SGIs/PPIs are banked per CPU and so are not
+        // observable from here — only shared SPIs. The reply carries the
+        // line's active/enabled state so a live storm is told apart from a
+        // masked-but-asserted line.
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            crate::gic::stuck_spi()
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -318,5 +336,13 @@ mod tests {
             tairix_arch_api::watchdog::conformance::run_all(&AARCH64_WATCHDOG, 0),
             Ok(())
         );
+    }
+
+    #[test]
+    fn stuck_interrupt_is_none_off_metal() {
+        // The distributor read is metal-only (it touches real GIC MMIO);
+        // on the host the handle honestly reports no stuck line rather than
+        // fabricating one, exactly as the recovery SGI compiles out.
+        assert_eq!(AARCH64_WATCHDOG.stuck_interrupt(), None);
     }
 }
