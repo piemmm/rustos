@@ -8,7 +8,7 @@ ls — Verzeichnisinhalte auflisten
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -153,6 +153,13 @@ werden durch eine Leerzeile getrennt.
   wählt außerdem Einzelspalte, wörtliches Quoting und sichtbare
   Steuerzeichen.
 
+- `--color[=WHEN]` — Namen nach Art einfärben (Verzeichnisse,
+  ausführbare Dateien, einfache Dateien). `WHEN` ist `auto` (die
+  Vorgabe: nur einfärben, wenn die Ausgabe ein bestätigtes Terminal
+  ist), `always` (auch sonst einfärben, z. B. eine serielle Konsole)
+  oder `never`; `--color` ohne `WHEN` bedeutet `always`. Weitergeleitete
+  oder umgeleitete Ausgabe wird nie eingefärbt.
+
 ## EXAMPLES
 
 - `ls` — das aktuelle Verzeichnis auflisten.
@@ -178,6 +185,10 @@ werden durch eine Leerzeile getrennt.
 
 - `LANG` — die bevorzugte Locale für die Kurzhilfe (ein BCP-47-Tag
   wie `de-DE`).
+
+- `TERM` — der Terminaltyp, der die Farbtiefe der `--color`-Ausgabe
+  bestimmt. Ein nicht gesetztes oder farbloses `TERM` gibt unter `auto`
+  einfachen Text aus.
 
 ## SEE ALSO
 

@@ -188,3 +188,50 @@ fn no_record_emits_a_sequence_absent_from_vt() {
         }
     }
 }
+
+#[test]
+fn resolve_color_never_is_always_plain() {
+    use crate::{resolve_color, ColorChoice};
+    assert_eq!(
+        resolve_color(ColorChoice::Never, true, Some("xterm-256color")),
+        None
+    );
+    assert_eq!(resolve_color(ColorChoice::Never, false, Some("dumb")), None);
+}
+
+#[test]
+fn resolve_color_auto_colours_only_an_attested_colour_terminal() {
+    use crate::{resolve_color, ColorChoice};
+    // Attested + colour TERM → colour at that depth.
+    assert_eq!(
+        resolve_color(ColorChoice::Auto, true, Some("xterm-256color")),
+        Some(ColorDepth::Indexed256)
+    );
+    // Attested but a mono TERM (or unset) → plain, never guessed.
+    assert_eq!(resolve_color(ColorChoice::Auto, true, Some("vt100")), None);
+    assert_eq!(resolve_color(ColorChoice::Auto, true, None), None);
+    // Not attested (piped / unattestable) → plain regardless of TERM.
+    assert_eq!(
+        resolve_color(ColorChoice::Auto, false, Some("xterm-256color")),
+        None
+    );
+}
+
+#[test]
+fn resolve_color_always_colours_even_unattested_with_an_ansi16_floor() {
+    use crate::{resolve_color, ColorChoice};
+    // Unattested but forced: at least the 16 ANSI colours.
+    assert_eq!(
+        resolve_color(ColorChoice::Always, false, Some("dumb")),
+        Some(ColorDepth::Ansi16)
+    );
+    assert_eq!(
+        resolve_color(ColorChoice::Always, false, None),
+        Some(ColorDepth::Ansi16)
+    );
+    // A richer TERM keeps its depth under `always`.
+    assert_eq!(
+        resolve_color(ColorChoice::Always, false, Some("alacritty")),
+        Some(ColorDepth::TrueColor)
+    );
+}

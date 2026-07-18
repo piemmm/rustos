@@ -74,6 +74,28 @@ fn main() {
 }
 ```
 
+## The `--color[=WHEN]` decision
+
+`resolve_color(choice, attested, term)` is the one shared decision every
+colour-capable command app makes, so a piped `ls` and a piped `grep` decide
+identically (`AGENTS.md` §2.2). Three inputs fold into one answer — the
+`--color` switch (`ColorChoice`), whether standard output is a kernel-attested
+terminal, and the `TERM` value — and the result is the `ColorDepth` to render
+at, or `None` for plain output:
+
+- `ColorChoice::Never` — always plain.
+- `ColorChoice::Auto` — colour only an attested terminal, at its `TERM` depth;
+  an unattested console, or one whose `TERM` renders no colour, stays plain
+  (colour never guesses — fail closed, §5.4).
+- `ColorChoice::Always` — colour regardless of attestation, never below
+  `ColorDepth::Ansi16`, so `--color=always` on a `dumb` or unset console still
+  emits the universally-safe 16 ANSI colours.
+
+The function is pure — the caller supplies the attestation and `TERM`; it reads
+no environment and touches no syscall — and the colours themselves come from
+`tairix_vt::scheme`, degraded to the returned depth by `lib/curses`'s one
+`downgrade`.
+
 ## Layering and testing
 
 `lib/termcap` depends on `tairix-vt` and `lib/*` only — never on `kernel/*`,

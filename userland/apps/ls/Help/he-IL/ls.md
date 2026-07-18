@@ -8,7 +8,7 @@ ls — הצגת תוכן ספריות
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -132,6 +132,13 @@ ls — הצגת תוכן ספריות
 - `--zero` — סיום כל שורה ב-NUL במקום שורה חדשה; בוחר גם עמודה
   יחידה, ציטוט מילולי והצגת תווי בקרה.
 
+- `--color[=WHEN]` — צביעת שמות לפי סוג (תיקיות, קבצים
+  ניתנים להרצה, קבצים רגילים). `WHEN` הוא `auto`
+  (בררת המחדל: צביעה רק כאשר הפלט הוא מסוף מאומת),
+  `always` (צביעה גם כאשר אינו כזה, למשל מסוף טורי),
+  או `never`‏; `--color` ללא `WHEN` פירושו `always`. פלט
+  בצינור או בהפניה לעולם אינו נצבע.
+
 ## EXAMPLES
 
 - `ls` — הצגת הספרייה הנוכחית.
@@ -152,6 +159,10 @@ ls — הצגת תוכן ספריות
 ## ENVIRONMENT
 
 - `LANG` — האזור המועדף לעזרה הקצרה (תג BCP-47 כגון `he-IL`).
+
+- `TERM` — סוג המסוף, הקובע את עומק הצבע של פלט `--color`.
+  ערך `TERM` שאינו מוגדר או חסר צבע מפיק טקסט רגיל עם
+  `auto`.
 
 ## SEE ALSO
 

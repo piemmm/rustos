@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_glob::Pattern;
+use tairix_termcap::ColorChoice;
 
 use crate::error::LsError;
 
@@ -330,6 +331,12 @@ pub struct Options {
     /// arrangement, literal quoting, and shown control characters — the GNU
     /// `--zero` posture.
     pub zero: bool,
+    /// When to colourise names by kind (`--color[=WHEN]`). The default is
+    /// [`ColorChoice::Auto`]: colour at an attested colour terminal, plain
+    /// when piped, redirected, or on a console the kernel cannot attest. The
+    /// concrete colour depth is resolved against `TERM` at render time; this
+    /// field only records *when*.
+    pub color: ColorChoice,
 }
 
 impl Options {
@@ -410,6 +417,7 @@ impl Options {
         group_directories_first: false,
         tabsize: DEFAULT_TABSIZE,
         zero: false,
+        color: ColorChoice::Auto,
     };
 }
 
@@ -685,6 +693,9 @@ fn long_value<'a>(
 
 /// Apply one `--long` option. Returns `Ok(true)` when the option requests
 /// short help (`--help`), so the caller returns [`Command::Help`].
+// One flat long-option dispatch match; splitting it would scatter the option
+// table across helpers for no gain.
+#[allow(clippy::too_many_lines)]
 fn apply_long<'a>(
     key: &str,
     inline: Option<&'a str>,
@@ -781,6 +792,10 @@ fn apply_long<'a>(
         }
         "width" => {
             options.width = Some(parse_width(long_value(inline, args)?)?);
+            return Ok(false);
+        }
+        "color" | "colour" => {
+            options.color = parse_color_when(inline)?;
             return Ok(false);
         }
         _ => return Err(LsError::Usage),
@@ -988,6 +1003,26 @@ fn parse_quoting_style(raw: &str) -> Result<QuotingStyle, LsError> {
     }
 }
 
+/// Parse a `--color[=WHEN]` value into a [`ColorChoice`].
+///
+/// `WHEN` is optional: a bare `--color` (no inline value) means `always`, the
+/// GNU rule — and, since the value is optional, `--color` never consumes the
+/// following argument. The GNU synonym sets are accepted for an explicit
+/// value: `never`/`no`/`none`, `always`/`yes`/`force`, and `auto`/`tty`/
+/// `if-tty`. The British `--colour` spelling maps here too. Any other word is
+/// a usage error (fail closed), never a silently ignored token.
+fn parse_color_when(inline: Option<&str>) -> Result<ColorChoice, LsError> {
+    let Some(word) = inline else {
+        return Ok(ColorChoice::Always);
+    };
+    match word {
+        "never" | "no" | "none" => Ok(ColorChoice::Never),
+        "always" | "yes" | "force" => Ok(ColorChoice::Always),
+        "auto" | "tty" | "if-tty" => Ok(ColorChoice::Auto),
+        _ => Err(LsError::Usage),
+    }
+}
+
 /// Parse a `--format=WORD` value into the [`Format`] it selects. The words
 /// are the GNU set; anything else is a usage error (fail closed), never a
 /// silently ignored token.
@@ -1083,8 +1118,8 @@ fn parse_block_size(raw: &str) -> Result<SizeFormat, LsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat,
-        Sort, TimeField, TimeStyle,
+        parse, ColorChoice, Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle,
+        SizeFormat, Sort, TimeField, TimeStyle,
     };
     use crate::error::LsError;
     use alloc::format;
@@ -2247,6 +2282,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn color_when_parses_in_every_spelling_and_bare_means_always() {
+        // The default is `auto`.
+        assert_eq!(parse(&["."]).unwrap(), list(Options::DEFAULT, &["."]));
+        let cases = [
+            (&["--color"][..], ColorChoice::Always),
+            (&["--colour"][..], ColorChoice::Always),
+            (&["--color=always"][..], ColorChoice::Always),
+            (&["--color=yes"][..], ColorChoice::Always),
+            (&["--color=force"][..], ColorChoice::Always),
+            (&["--color=never"][..], ColorChoice::Never),
+            (&["--color=no"][..], ColorChoice::Never),
+            (&["--color=none"][..], ColorChoice::Never),
+            (&["--color=auto"][..], ColorChoice::Auto),
+            (&["--color=tty"][..], ColorChoice::Auto),
+            (&["--color=if-tty"][..], ColorChoice::Auto),
+        ];
+        for (args, expected) in cases {
+            assert_eq!(
+                parse(args),
+                Ok(list(
+                    Options {
+                        color: expected,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                )),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_color_does_not_consume_the_next_argument() {
+        // `--color` takes an optional value, so a following path is a path,
+        // never swallowed as the WHEN word.
+        assert_eq!(
+            parse(&["--color", "dir"]),
+            Ok(list(
+                Options {
+                    color: ColorChoice::Always,
+                    ..Options::DEFAULT
+                },
+                &["dir"],
+            ))
+        );
+    }
+
+    #[test]
+    fn a_bad_color_when_is_a_usage_error() {
+        assert_eq!(parse(&["--color=maybe"]), Err(LsError::Usage));
+    }
+
     /// Every locale's `OPTIONS` section documents exactly the switches this
     /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
     /// language-neutral, so each translated document must carry the same
@@ -2315,6 +2403,7 @@ mod tests {
                 "`-w, --width <cols>`",
                 "`-1`",
                 "`--zero`",
+                "`--color[=WHEN]`",
                 "`-?`",
             ] {
                 assert!(

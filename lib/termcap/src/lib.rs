@@ -46,6 +46,7 @@
 extern crate alloc;
 
 pub mod capabilities;
+pub mod color;
 pub mod term_type;
 
 #[cfg(test)]
@@ -54,4 +55,5 @@ mod tests;
 pub use capabilities::{
     ArrowKeys, Capabilities, ColorDepth, KeyInput, MouseReporting, MouseSupport,
 };
+pub use color::{resolve_color, ColorChoice};
 pub use term_type::{from_term, TermType};

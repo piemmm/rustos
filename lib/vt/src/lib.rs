@@ -64,6 +64,7 @@ pub mod line;
 pub mod mouse;
 pub mod op;
 pub mod parse;
+pub mod scheme;
 pub mod secret;
 pub mod width;
 
@@ -79,5 +80,6 @@ pub use line::{EraseSeq, LineEditor, LineFeed};
 pub use mouse::{MouseButton, MouseMode, MouseReport};
 pub use op::{EraseMode, Op, Title, MAX_TITLE};
 pub use parse::Parser;
+pub use scheme::{Role, Style};
 pub use secret::{SecretIndicator, SecretInput, SECRET_TICK_NS};
 pub use width::{char_width, is_wide, str_width, truncate_to_width, CONTINUATION};

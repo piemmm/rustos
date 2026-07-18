@@ -1075,7 +1075,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD] [--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--author] [--file-type] [--group-directories-first] [--zero] [--] [path...]
+ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD] [--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--author] [--file-type] [--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -1131,6 +1131,7 @@ ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size=S
 | `-x`             | columns filled left-to-right                       |
 | `-1`             | one name per line (default when not a terminal)    |
 | `--zero`         | NUL line terminator; implies single-column, literal, shown control chars |
+| `--color[=WHEN]` | colour names by kind: `auto` (default), `always`, `never` (bare = `always`) |
 | `-?`, `--help`   | show the tool's short help (wins immediately)      |
 | `--`             | end option parsing; every later argument is a path |
 | *path*           | a file or directory to list                        |
@@ -1244,6 +1245,24 @@ instead of a newline (headers and the inter-block separator keep the
 newline), and defaults to a single column, literal quoting, and shown
 control characters.
 
+At a colour terminal names are coloured by kind through the standard
+`tairix_vt::scheme` palette — directories in the directory role
+(bold blue), executable regular files in the executable role (bold
+green), plain files uncoloured. `--color[=WHEN]` chooses when: `auto`
+(the default) colours only when standard output is a kernel-attested
+terminal, `always` colours even an unattested console (a serial or
+remote session) at a 16-colour floor, and `never` is plain; a bare
+`--color` means `always`. The depth is resolved from `TERM` through
+`lib/termcap`'s shared `resolve_color`, and a scheme colour the terminal
+cannot show is degraded through `lib/curses`'s one `downgrade`. Colour is
+presentation only: it wraps just the name text (the indicator suffix
+stays uncoloured), all column widths are computed on the *plain* text, so
+a piped or redirected listing — which fails the attestation and renders
+plain under `auto` — is byte-for-byte identical to the coloured one apart
+from the SGR escape sequences, never shifting a column, the ordering, or
+the exit status. When colour is active every entry is stat'd (the kind
+and execute bit decide its colour), exactly as the GNU tool does.
+
 There is still **no link-count column** — the VFS has no hard links yet,
 so a fabricated count would be a lie; it will appear when links land
 (Stage E). `-i` prefixes each entry (short and long) with its stable
@@ -1317,7 +1336,10 @@ arrangement, every quoting style (literal, C, escape, and the shell
 family incl. `$'…'` control-char splicing) with the tty-resolved default
 and `-q` masking, the `/` and `*` indicators and `--file-type` (dir
 only, never the executable star), the tab-vs-space column padding under
-`-T8`/`-T0`, the `--zero` NUL terminator, the
+`-T8`/`-T0`, the `--zero` NUL terminator, the `--color` colouring by kind
+(`always`/`never`/`auto` gated on the attestation and `TERM`, the name
+coloured but not the indicator suffix, and the coloured grid stripped of
+its SGR being byte-identical to the plain grid), the
 human-size rounding table, an empty directory, the short-help render and
 its usage-banner fallback, and the missing-operand, unreadable-directory,
 and dead-console fail-closed paths. `ls`'s help is authored on disk in

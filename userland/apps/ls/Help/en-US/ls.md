@@ -8,7 +8,7 @@ ls — list directory contents
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -48,6 +48,13 @@ paste back into a shell: at a terminal the default is `shell-escape`
 shown as `$'…'` escapes), and elsewhere it is `literal` (names
 verbatim). `-N`, `-Q`, `-b`, and `--quoting-style` choose the style,
 and `-q` shows control characters as `?`.
+
+At a colour terminal names are coloured by kind — directories,
+executables, and plain files each in the standard scheme's role —
+controlled by `--color`. Colour is presentation only: it is added to the
+terminal render and never to piped or redirected output, which is
+byte-for-byte identical to the plain listing apart from the escape
+sequences, so it never changes columns, ordering, or a script's view.
 
 When more than one operand is given — and always under `-R` — each
 directory's listing is preceded by a `path:` header, and blocks are
@@ -164,6 +171,12 @@ separated by a blank line.
   selects, unless overridden, the single-column arrangement, literal
   quoting, and shown control characters.
 
+- `--color[=WHEN]` — colourise names by kind (directories, executables,
+  plain files). `WHEN` is `auto` (the default: colour only when the
+  output is an attested terminal), `always` (colour even when it is not,
+  e.g. a serial console), or `never`; `--color` with no `WHEN` means
+  `always`. Piped or redirected output is never coloured.
+
 ## EXAMPLES
 
 - `ls` — list the current directory.
@@ -189,6 +202,10 @@ separated by a blank line.
 
 - `LANG` — the preferred locale for the short help (a BCP-47 tag such
   as `fr-FR`).
+
+- `TERM` — the terminal type, which decides the colour depth of
+  `--color` output. An unset or colourless `TERM` renders plain under
+  `auto`.
 
 ## SEE ALSO
 

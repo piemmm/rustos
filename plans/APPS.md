@@ -1052,7 +1052,10 @@ deliberately staged behind the floor work below).
 
 ## 12.2 Terminal colour, the standard scheme, and box drawing
 
-**Status: planned** (deliverable 9). Binding design for how command apps and
+**Status: in progress** (deliverable 9): the shared `tairix_vt::scheme`
+palette, the one `tairix_termcap::resolve_color` `--color[=WHEN]` decision, and
+the first adoption (`ls` file kinds) have landed; `lib/help`'s coloured renders,
+`fstree`, and box drawing remain. Binding design for how command apps and
 full-screen curses apps use colour, emphasis, and box drawing. Everything here
 rides the one terminal vocabulary (`lib/vt`), capability database
 (`lib/termcap`), and screen model (`lib/curses`) of `plans/CURSES.md` — no
@@ -1287,31 +1290,39 @@ both landed; `plans/SHELL.md` command execution):
    superseded by this on-disk-bundle model.
 
 9. **The standard colour scheme, coloured renders, and box drawing
-   (§12.2)** — **planned.** One properly-gated staging:
-   - The shared semantic-role palette — one definition beside the `lib/vt`
-     SGR vocabulary it maps onto (home confirmed, and the crate docs /
-     `docs/src/` page updated, in the implementing change), with the
-     §12.2 eye-strain / aesthetic / colourblind requirements reviewed on
-     the concrete colour choices and the `lib/termcap` depth downgrade
-     (truecolour → 256 → 16 → mono) unit-tested per role.
-   - The one shared "colour to a terminal only" decision: the console
-     attestation the `man` pager already uses, exposed as a single helper
-     every colour-capable tool imports (never a per-tool probe, §2.2),
-     plus the GNU `--color[=WHEN]` switch surface (`auto` default,
-     `always`, `never`) for the tools whose GNU counterpart has it
-     (§1.1), and — staged behind it — the finer "stdout is an interactive
-     terminal" attestation for consoles the kernel does not own (serial),
-     which lands with its own kernel/ABI design, never guessed at.
-   - `lib/help`'s coloured `render_full`/`render_short` (headings,
-     emphasis, literal/code, switch keys through the scheme's roles),
-     inherited by `man` and every command's short help at once.
-   - Adoption in the existing colour-appropriate tools (`ls` file kinds,
-     `fstree` structure and its tree rules through `lib/curses`'s
-     U+2500–U+257F box glyphs, and each future tool — e.g. `grep` — in
-     the change that lands it), each with tests asserting the piped
-     render is byte-identical minus the SGR sequences and carries no
-     escape codes, and each tool's `Help/` trees updated in the same
-     change (§8.1).
+   (§12.2)** — **in progress.** One properly-gated staging:
+   - **Done — the shared semantic-role palette.** `tairix_vt::scheme`
+     (`Role` → `Style`, home confirmed beside the SGR vocabulary; crate
+     docs + `docs/src/lib/vt.md` updated) maps the §12.2 roles onto the
+     16 ANSI colours, reinforcing the red/green roles (error/success)
+     with bold so no distinction rests on hue alone. `Style::open`
+     yields the ordered `Sgr` ops; the ideal colours degrade to a
+     terminal's depth through `lib/curses`'s one `downgrade`
+     (truecolour → 256 → 16 → mono), unit-tested.
+   - **Done — the one shared "colour to a terminal only" decision.**
+     `tairix_termcap::resolve_color(ColorChoice, attested, term)` folds
+     the `--color[=WHEN]` switch (`auto` default, `always`, `never`), the
+     console attestation the `man` pager uses (`Output::terminal_width`),
+     and `TERM` into one depth-or-plain answer every colour-capable tool
+     imports (never a per-tool probe, §2.2); a piped/unattested console
+     renders plain under `auto`, and `always` colours at an `Ansi16`
+     floor. The finer "stdout is an interactive terminal" attestation for
+     consoles the kernel does not own (serial) remains staged behind it,
+     to land with its own kernel/ABI design, never guessed at.
+   - **Done — first adoption: `ls` file kinds.** Directories and
+     executables are coloured through the scheme; the name is painted but
+     not the indicator suffix, all layout is computed on the plain width,
+     and tests assert the piped render is byte-identical minus the SGR
+     sequences. All thirteen `Help/*/ls.md`, the switch-drift pin, and
+     `docs/src/userland/utilities.md` document `--color`.
+   - **Remaining.** `lib/help`'s coloured `render_full`/`render_short`
+     (headings, emphasis, literal/code, switch keys through the scheme's
+     roles), inherited by `man` and every command's short help at once;
+     and adoption in the other colour-appropriate tools (`fstree`
+     structure and its tree rules through `lib/curses`'s U+2500–U+257F box
+     glyphs, and each future tool — e.g. `grep`), each in the change that
+     lands it, with the same piped-render-is-plain tests and its `Help/`
+     trees updated in the same change (§8.1).
 
 Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
 "Charter Amendments" section, §13):

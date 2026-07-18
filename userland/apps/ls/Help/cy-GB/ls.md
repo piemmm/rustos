@@ -8,7 +8,7 @@ ls — rhestru cynnwys cyfeiriaduron
 `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 `[--quoting-style=STYLE] [--full-time] [--author] [--file-type]`
-`[--group-directories-first] [--zero] [--] [path...]`
+`[--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -150,6 +150,13 @@ llinell wag.
 - `--zero` — gorffen pob llinell â NUL yn lle llinell newydd; mae hefyd
   yn dewis un golofn, dyfynnu llythrennol a nodau rheoli gweladwy.
 
+- `--color[=WHEN]` — lliwio enwau yn ôl math (cyfeiriaduron, ffeiliau
+  gweithredadwy, ffeiliau cyffredin). `auto` yw `WHEN` (y rhagosodiad:
+  lliwio dim ond pan fo'r allbwn yn derfynell ardystiedig), `always`
+  (lliwio hyd yn oed pan nad yw, e.e. consol cyfresol), neu `never`;
+  mae `--color` heb `WHEN` yn golygu `always`. Ni chaiff allbwn wedi'i
+  biblinellu na'i ailgyfeirio ei liwio byth.
+
 ## EXAMPLES
 
 - `ls` — rhestru'r cyfeiriadur cyfredol.
@@ -173,6 +180,10 @@ llinell wag.
 
 - `LANG` — y locale a ffefrir ar gyfer y cymorth byr (tag BCP-47 fel
   `cy-GB`).
+
+- `TERM` — y math o derfynell, sy'n penderfynu dyfnder lliw allbwn
+  `--color`. Mae `TERM` heb ei osod neu heb liw yn rhoi testun plaen
+  gyda `auto`.
 
 ## SEE ALSO
 

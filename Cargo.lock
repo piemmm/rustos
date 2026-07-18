@@ -1638,10 +1638,12 @@ name = "tairix-ls"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-curses",
  "tairix-fsmeta",
  "tairix-glob",
  "tairix-help",
  "tairix-rt",
+ "tairix-termcap",
  "tairix-vt",
 ]
 

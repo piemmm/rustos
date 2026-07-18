@@ -148,6 +148,10 @@ mod program {
             }
         };
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        // The `TERM` preference decides the colour depth of `--color` output.
+        // An unset or non-UTF-8 value reads as `None`, so `auto` renders plain
+        // — colour is never guessed at.
+        let term = tairix_rt::env_var(b"TERM").and_then(|raw| core::str::from_utf8(raw).ok());
         // The current wall-clock instant decides the default (`locale`) and
         // `iso` date styles' recent/old window. An unset or unreadable clock
         // reads as the epoch, so every stamp renders in the "old" long form
@@ -161,6 +165,7 @@ mod program {
             command,
             locale,
             now,
+            term,
             &RtListing,
             &BundleHelp::new("ls"),
             &RtOutput,
