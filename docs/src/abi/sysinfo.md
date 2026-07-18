@@ -47,6 +47,9 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `RECLAIM_STATS`         | `CAP_SYSINFO_KERNEL`   | yes     |
 | `RAMZIP_STATS`          | `CAP_SYSINFO_KERNEL`   | yes     |
 | `CPU_LOAD`              | `CAP_SYSINFO_KERNEL`   | yes     |
+| `NET_INTERFACE_FACTS`   | `CAP_SYSINFO_HW`       | yes     |
+| `NET_INTERFACE_STATE`   | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -118,6 +121,17 @@ and audited — because each exposes kernel-wide operational state:
   observation — so it moves under load even on the tickless default
   policy (EEVDF), which takes no periodic scheduler tick. All are kernel
   internals, hence the gate the utilisation split does not carry.
+
+`IRQ_LIST` is gated like `SEAT_LIST` and `HARDWARE_TREE` — on
+`CAP_SYSINFO_HW`, and audited — because each `IrqRecord` names which
+driver task owns a physical interrupt line: cross-principal surface
+topology, not a self-scoped observer. The list carries one record per
+*bound* line, in ascending line order, paged by an `IrqListRequest`. The
+per-line `count` is monotonic since boot (the classic `/proc/interrupts`
+total, not reset when a line is re-bound), and `flags` reports the line's
+containment state (`IRQ_FLAG_QUARANTINED` for a line the kernel's
+runaway-interrupt safety net has disabled). It exposes no per-principal
+secret beyond the ownership the hardware view already carries.
 
 ## Wire framing
 
@@ -220,6 +234,15 @@ testable against in-memory fixtures.
   request payload; its response is exactly `LimitKind::COUNT` records in
   discriminant order ([`RESOURCE_LIMITS_REPORT_LEN`] bytes), read
   positionally. See [Resource limits and scalability](../architecture/resource-limits.md).
+- [`IrqListRequest`] — `offset`/`limit` pagination for the `IRQ_LIST`
+  query (a reserved `flags` field, zero in `sysinfo-v1`), structurally
+  parallel to [`MountListRequest`].
+- [`IrqRecord`] — one bound interrupt line: the architecture-defined
+  `line` id, the kernel-attested `owner` task, the monotonic `count` of
+  interrupts delivered since boot, and a `flags` bitmap
+  ([`IRQ_FLAG_QUARANTINED`]). A `from_bytes` fails closed on an undefined
+  `flags` bit, so an unknown record shape is refused whole rather than
+  half-interpreted.
 
 Every payload is `#[repr(C)]`, allocation-free, and exposes a
 `to_le_bytes`/`from_bytes` pair; every `from_bytes` is exercised by the
@@ -268,3 +291,6 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`encode_reply_err`]: ../../tairix_abi/sysinfo/fn.encode_reply_err.html
 [`decode_reply`]: ../../tairix_abi/sysinfo/fn.decode_reply.html
 [`IntrospectDomain`]: ../../tairix_abi/sysinfo/enum.IntrospectDomain.html
+[`IrqListRequest`]: ../../tairix_abi/sysinfo/struct.IrqListRequest.html
+[`IrqRecord`]: ../../tairix_abi/sysinfo/struct.IrqRecord.html
+[`IRQ_FLAG_QUARANTINED`]: ../../tairix_abi/sysinfo/constant.IRQ_FLAG_QUARANTINED.html

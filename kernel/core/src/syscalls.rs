@@ -77,8 +77,8 @@ use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuTimeRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord,
-    UserDirectoryRecord,
+    CpuLoadRecord, CpuTimeRecord, IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord,
+    SeatRecord, UserDirectoryRecord,
 };
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
@@ -4976,6 +4976,18 @@ where
                 }
                 let max_records = out_cap / CpuLoadRecord::WIRE_LEN;
                 self.introspect.cpu_load(arg, max_records)?
+            }
+            IntrospectDomain::Irqs => {
+                if out_cap < IrqRecord::WIRE_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                let max_records = out_cap / IrqRecord::WIRE_LEN;
+                // Served from the kernel's own IRQ table rather than the
+                // introspect seam: the binding table lives in this crate, so
+                // the one definition answers directly (like the seat
+                // registry). Pages by whole record in ascending line order;
+                // an offset past the end returns the empty terminator.
+                self.irq.records(arg, max_records)
             }
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,

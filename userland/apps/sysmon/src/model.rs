@@ -12,13 +12,13 @@
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, ProcessRecord, RamzipStats,
-    ReclaimClassRecord, SysinfoQueryId, Uptime,
+    CpuLoadRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, ProcessRecord,
+    RamzipStats, ReclaimClassRecord, SysinfoQueryId, Uptime,
 };
 use tairix_curses::Event;
 use tairix_procinfo::{
-    call, for_each_cpu_load, for_each_cpu_time, for_each_process, for_each_reclaim_class,
-    memory_pressure, ramzip_stats, CallError, ListError, Transport,
+    call, for_each_cpu_load, for_each_cpu_time, for_each_irq, for_each_process,
+    for_each_reclaim_class, memory_pressure, ramzip_stats, CallError, ListError, Transport,
 };
 
 use crate::command::{DELAY_STEP_TENTHS, MAX_DELAY_TENTHS, MIN_DELAY_TENTHS};
@@ -86,6 +86,8 @@ pub enum Focus {
     Ramzip,
     /// The per-CPU load table (`CPU_LOAD` + the `CPU_TIME_STATS` split).
     Cpu,
+    /// The kernel IRQ table: one row per bound interrupt line (`IRQ_LIST`).
+    Irqs,
     /// The process census and top consumers (the process lists).
     Processes,
 }
@@ -97,7 +99,8 @@ impl Focus {
         match self {
             Focus::Reclaim => Focus::Ramzip,
             Focus::Ramzip => Focus::Cpu,
-            Focus::Cpu => Focus::Processes,
+            Focus::Cpu => Focus::Irqs,
+            Focus::Irqs => Focus::Processes,
             Focus::Processes => Focus::Reclaim,
         }
     }
@@ -109,6 +112,7 @@ impl Focus {
             Focus::Reclaim => "reclaimable caches",
             Focus::Ramzip => "compressed tier (ramzip)",
             Focus::Cpu => "per-cpu load",
+            Focus::Irqs => "interrupt lines",
             Focus::Processes => "processes",
         }
     }
@@ -168,6 +172,10 @@ pub struct Snapshot {
     pub ramzip: Gauge<RamzipStats>,
     /// The per-CPU scheduler load records (`CPU_LOAD`, gated).
     pub cpu_loads: Gauge<Vec<CpuLoadRecord>>,
+    /// The kernel IRQ table, one record per bound line (`IRQ_LIST`, gated on
+    /// `CAP_SYSINFO_HW`): the line id, owning driver task, monotonic fire
+    /// count since boot, and quarantine flag.
+    pub irqs: Gauge<Vec<IrqRecord>>,
     /// The process records backing the census and top-consumer lists: the
     /// system-wide list when `CAP_SYSINFO_GLOBAL` is held, else the
     /// caller's own with [`Snapshot::global_denied`] recorded.
@@ -187,6 +195,7 @@ impl Default for Snapshot {
             reclaim: Gauge::Unavailable,
             ramzip: Gauge::Unavailable,
             cpu_loads: Gauge::Unavailable,
+            irqs: Gauge::Unavailable,
             processes: Vec::new(),
             global_denied: false,
         }
@@ -370,6 +379,18 @@ impl Model {
             load_records,
         );
 
+        // The per-line fire counts already exist in the kernel IRQ table (the
+        // runaway-interrupt safety net accounts every edge), so reading them
+        // adds no steady-state cost — only this paged query per refresh.
+        let mut irq_records = Vec::new();
+        let irqs = gauge_walk(
+            for_each_irq(transport, |record| {
+                irq_records.push(*record);
+                Ok(())
+            }),
+            irq_records,
+        );
+
         self.sample_cpu_times(transport);
 
         let (processes, global_denied) = Self::sample_processes(transport);
@@ -402,6 +423,7 @@ impl Model {
             reclaim,
             ramzip,
             cpu_loads,
+            irqs,
             processes,
             global_denied,
         };

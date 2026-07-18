@@ -36,6 +36,10 @@ Le interrogazioni:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — profondità della coda, cambi di contesto e prelazioni per CPU
   (richiede `CAP_SYSINFO_KERNEL`).
+- `irq`, `irqs` — la tabella IRQ del kernel: una riga per ogni linea di
+  interrupt associata — il suo id, il task del driver proprietario, il
+  numero di interrupt dall'avvio e se la linea è in quarantena (richiede
+  `CAP_SYSINFO_HW`).
 - `help` — la guida breve di questo comando.
 
 Senza interrogazione viene mostrata la guida breve.

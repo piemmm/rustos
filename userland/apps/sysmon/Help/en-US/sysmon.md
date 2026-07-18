@@ -12,9 +12,9 @@ Shows a live, full-screen view of the kernel's memory and load through
 the System Information API: physical memory, the kernel heap, the
 memory-pressure band with its history, the reclaimable-cache ledger,
 the `ramzip` compressed tier, the pinned-memory aggregate, per-CPU
-load, and a process census. It is built to stay usable while the
-system is under deliberate stress, and is quiescent between refreshes
-at idle.
+load, the kernel IRQ table, and a process census. It is built to stay
+usable while the system is under deliberate stress, and is quiescent
+between refreshes at idle.
 
 At startup the monitor pins its own memory (`mem_pin`, requiring
 `CAP_MEM_PIN`) so it never stalls on its own page fault-in under the
@@ -28,7 +28,7 @@ operands: it is controlled with keys pressed inside the session.
 
 - `q` — quit.
 - `p` — cycle the detail panel: reclaimable caches, the compressed
-  tier, per-CPU load, processes.
+  tier, per-CPU load, interrupt lines, processes.
 - `r` — refresh now.
 - `+` / `-` — lengthen / shorten the refresh interval by one second,
   between 0.1 and 60 seconds.
@@ -44,11 +44,15 @@ critical); the aggregate CPU line; and the task census.
 
 Every figure travels through the System Information API — there is no
 `/proc` to scrape. The kernel-wide statistics queries need
-`CAP_SYSINFO_KERNEL`, and the all-process census needs
-`CAP_SYSINFO_GLOBAL`: a caller without one sees that panel's refusal
-spelled out while the rest of the session continues. The full
-interactive process list is `top`'s job; the processes panel here
-shows the census and the top consumers by `%CPU` and by memory only.
+`CAP_SYSINFO_KERNEL`, the interrupt-lines panel needs `CAP_SYSINFO_HW`
+(it names which driver owns each line), and the all-process census
+needs `CAP_SYSINFO_GLOBAL`: a caller without one sees that panel's
+refusal spelled out while the rest of the session continues. The
+interrupt panel shows one row per bound line — its id, the owning
+driver task, the interrupt count since boot, and whether the line is
+quarantined. The full interactive process list is `top`'s job; the
+processes panel here shows the census and the top consumers by `%CPU`
+and by memory only.
 
 ## OPTIONS
 

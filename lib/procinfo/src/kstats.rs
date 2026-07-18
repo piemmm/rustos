@@ -15,8 +15,8 @@
 //! load-bearing for a session).
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuLoadRequest, MemoryPressureStats, RamzipStats, ReclaimClassRecord,
-    ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
+    CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureStats, RamzipStats,
+    ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 
@@ -150,11 +150,60 @@ pub fn for_each_cpu_load(
     )
 }
 
+/// Number of [`IrqRecord`]s requested per IRQ-table page.
+///
+/// A page bounds the reply size without bounding how many interrupt lines
+/// the machine may bind; [`for_each_irq`] walks pages until a short page
+/// ends the list.
+pub const IRQ_PAGE: u16 = 64;
+
+/// Page through the kernel IRQ table ([`SysinfoQueryId::IRQ_LIST`]) and hand
+/// each decoded [`IrqRecord`] to `sink`, in ascending line order — one
+/// record per bound line (line id, owning driver task, monotonic fire count
+/// since boot, quarantine flag).
+///
+/// Gated on `CAP_SYSINFO_HW` by `sysinfod` (the table names which task owns
+/// each interrupt line — cross-principal surface topology, like the seat
+/// inventory), so a denial surfaces as
+/// [`CallError::PermissionDenied`]. The
+/// walk **fails closed**: a reply that is not a whole number of records, or
+/// a record that does not decode, is rejected rather than partially
+/// delivered.
+///
+/// # Errors
+///
+/// As [`for_each_cpu_load`].
+pub fn for_each_irq(
+    transport: &dyn Transport,
+    mut sink: impl FnMut(&IrqRecord) -> Result<(), Errno>,
+) -> Result<(), ListError> {
+    walk_pages(
+        transport,
+        SysinfoQueryId::IRQ_LIST,
+        IrqRecord::WIRE_LEN,
+        IRQ_PAGE,
+        |offset, limit| {
+            IrqListRequest {
+                offset,
+                limit,
+                flags: 0,
+            }
+            .to_le_bytes()
+            .to_vec()
+        },
+        |chunk| {
+            let record = IrqRecord::from_bytes(chunk)
+                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+            sink(&record).map_err(ListError::Sink)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        for_each_cpu_load, for_each_reclaim_class, memory_pressure, ramzip_stats, CPU_LOAD_PAGE,
-        RECLAIM_PAGE,
+        for_each_cpu_load, for_each_irq, for_each_reclaim_class, memory_pressure, ramzip_stats,
+        CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -162,8 +211,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, MemoryPressureStats, RamzipStats, ReclaimClassRecord,
-        ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, RECLAIM_CLASS_COUNT,
+        CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureStats, RamzipStats,
+        ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader,
+        RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::Errno;
 
@@ -175,6 +225,7 @@ mod tests {
         ramzip: RamzipStats,
         reclaim: Vec<ReclaimClassRecord>,
         loads: Vec<CpuLoadRecord>,
+        irqs: Vec<IrqRecord>,
         deny: Option<SysinfoQueryId>,
         malformed: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
@@ -204,6 +255,20 @@ mod tests {
                     ..RamzipStats::default()
                 },
                 reclaim,
+                irqs: alloc::vec![
+                    IrqRecord {
+                        line: 27,
+                        flags: 0,
+                        owner: 14,
+                        count: 1234,
+                    },
+                    IrqRecord {
+                        line: 111,
+                        flags: 0,
+                        owner: 13,
+                        count: 200_000,
+                    },
+                ],
                 loads: alloc::vec![
                     CpuLoadRecord {
                         cpu: 0,
@@ -251,6 +316,12 @@ mod tests {
                 SysinfoQueryId::CPU_LOAD => {
                     let req = CpuLoadRequest::from_bytes(payload)?;
                     Ok(page(&self.loads, req.offset, req.limit, |r| {
+                        r.to_le_bytes().to_vec()
+                    }))
+                }
+                SysinfoQueryId::IRQ_LIST => {
+                    let req = IrqListRequest::from_bytes(payload)?;
+                    Ok(page(&self.irqs, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     }))
                 }
@@ -384,5 +455,60 @@ mod tests {
     #[test]
     fn reclaim_page_covers_the_class_set() {
         assert!(usize::from(RECLAIM_PAGE) >= RECLAIM_CLASS_COUNT);
+    }
+
+    #[test]
+    fn irq_walk_yields_records_in_line_order_with_counts_and_flags() {
+        let fixture = Fixture::new();
+        let seen = RefCell::new(Vec::new());
+        for_each_irq(&fixture, |record| {
+            seen.borrow_mut().push(*record);
+            Ok(())
+        })
+        .expect("walk");
+        let got = seen.into_inner();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].line, 27);
+        assert_eq!(got[0].owner, 14);
+        assert_eq!(got[0].count, 1234);
+        assert_eq!(got[1].line, 111);
+        assert_eq!(got[1].count, 200_000);
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::IRQ_LIST]
+        );
+    }
+
+    #[test]
+    fn irq_walk_pages_until_short() {
+        let mut fixture = Fixture::new();
+        fixture.irqs.clear();
+        for line in 0..=u32::from(IRQ_PAGE) {
+            fixture.irqs.push(IrqRecord {
+                line,
+                flags: 0,
+                owner: 1,
+                count: u64::from(line),
+            });
+        }
+        let count = RefCell::new(0usize);
+        for_each_irq(&fixture, |_| {
+            *count.borrow_mut() += 1;
+            Ok(())
+        })
+        .expect("walk");
+        assert_eq!(*count.borrow(), usize::from(IRQ_PAGE) + 1);
+        // Two pages: the full page plus the short trailer.
+        assert_eq!(fixture.seen.borrow().len(), 2);
+    }
+
+    #[test]
+    fn irq_walk_denial_fails_closed() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::IRQ_LIST);
+        assert_eq!(
+            for_each_irq(&fixture, |_| Ok(())),
+            Err(ListError::Call(CallError::PermissionDenied))
+        );
     }
 }

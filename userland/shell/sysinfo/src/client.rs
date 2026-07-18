@@ -16,7 +16,7 @@ use tairix_abi::{Errno, LimitKind};
 
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
-    call, emit_self_scope_omission, fetch_tree, for_each_process, render_limit_bound,
+    call, emit_self_scope_omission, fetch_tree, for_each_irq, for_each_process, render_limit_bound,
     render_process, Output, Transport, PROCESS_HEADER,
 };
 
@@ -40,6 +40,7 @@ queries:
   reclaim             reclaimable-cache ledger per class (needs CAP_SYSINFO_KERNEL)
   ramzip              compressed-tier counters (needs CAP_SYSINFO_KERNEL)
   cpu                 per-CPU queue depth, switches, preemptions (needs CAP_SYSINFO_KERNEL)
+  irq                 IRQ table: line, owner, count, quarantine (needs CAP_SYSINFO_HW)
   help, -h, -?        show this help";
 
 /// `sysinfo`'s own command word: the short-help switches render its own
@@ -78,6 +79,7 @@ pub fn run(
         Command::Reclaim => run_reclaim(transport, out),
         Command::Ramzip => run_ramzip(transport, out),
         Command::CpuLoad => run_cpu_load(transport, out),
+        Command::Irqs => run_irqs(transport, out),
     }
 }
 
@@ -438,6 +440,28 @@ fn run_cpu_load(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
         }
         offset = offset.saturating_add(u32::from(PAGE));
     }
+}
+
+/// Fetch and render the kernel IRQ table, one aligned row per bound line:
+/// the line id, the owning driver task, the interrupt count since boot, and
+/// whether the line is quarantined. The paged walk, the fail-closed decode,
+/// and the `CAP_SYSINFO_HW` gate are the shared `lib/procinfo` helper (the
+/// same record `sysmon` reads); the CLI supplies only the header and the
+/// per-row rendering.
+fn run_irqs(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(out, "line  owner       count         state")?;
+    for_each_irq(transport, |record| {
+        let state = if record.is_quarantined() {
+            "quarantined"
+        } else {
+            "active"
+        };
+        out.write_line(&format!(
+            "{:<4}  task {:<6}  {:>10}  {}",
+            record.line, record.owner, record.count, state,
+        ))
+    })
+    .map_err(SysinfoError::from)
 }
 
 /// Render `bytes` as lowercase hex with no separators.

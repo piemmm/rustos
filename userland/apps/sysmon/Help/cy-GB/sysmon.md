@@ -27,7 +27,7 @@ monitor yn cymryd operandau: fe'i rheolir â bysellau o fewn y sesiwn.
 
 - `q` — gadael.
 - `p` — cylchu'r panel manylion: storfeydd adferadwy, yr haen
-  gywasgedig, llwyth pob CPU, prosesau.
+  gywasgedig, llwyth pob CPU, llinellau ymyrraeth, prosesau.
 - `r` — adnewyddu nawr.
 - `+` / `-` — ymestyn / byrhau'r cyfwng o un eiliad, rhwng 0.1 a 60
   eiliad.

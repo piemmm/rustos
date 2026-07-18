@@ -28,6 +28,9 @@ sysinfo — 查询系统信息
 - `ramzip` — 压缩内存层的计数器（需要 `CAP_SYSINFO_KERNEL`）。
 - `cpu` — 每个 CPU 的运行队列深度、上下文切换与抢占次数（需要
   `CAP_SYSINFO_KERNEL`）。
+- `irq`、`irqs` — 内核 IRQ 表：每条已绑定的中断线一行——其编号、拥有它的
+  驱动任务、自启动以来的中断次数，以及该线是否被隔离（需要
+  `CAP_SYSINFO_HW`）。
 - `help` — 本命令自身的简短帮助。
 
 不带查询时显示简短帮助。

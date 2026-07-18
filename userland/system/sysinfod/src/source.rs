@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetInterfaceStateRecord};
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord,
-    ProcessRecord, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
+    CpuLoadRecord, CpuTimeRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
+    MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
     SystemIdentity, Uptime, UserDirectoryRecord,
 };
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin};
@@ -240,4 +240,16 @@ pub trait SysinfoSource {
     /// `netstack` service's broker read; the owned list is returned
     /// whole and [`crate::serve`] applies the `offset`/`limit` paging.
     fn net_interface_state(&self, caller: &Caller) -> Result<Vec<NetInterfaceStateRecord>, Errno>;
+
+    /// Return the kernel IRQ table: one record per bound interrupt line,
+    /// in ascending line order.
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed: like
+    /// [`seats`](Self::seats) and [`hardware_tree`](Self::hardware_tree),
+    /// the table names which task owns each physical interrupt line —
+    /// cross-principal surface topology, not a self-scoped observer. The
+    /// owned list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged calls
+    /// (ascending line order is).
+    fn irqs(&self, caller: &Caller) -> Result<Vec<IrqRecord>, Errno>;
 }

@@ -35,6 +35,10 @@ Yr ymholiadau:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — dyfnder ciw rhedeg, newidiadau cyd-destun a rhagachubion fesul
   CPU (angen `CAP_SYSINFO_KERNEL`).
+- `irq`, `irqs` — tabl IRQ y cnewyllyn: un rhes fesul llinell ymyrraeth
+  rwymedig — ei rhif, y dasg gyrrwr sy'n berchen arni, nifer yr
+  ymyriadau ers cychwyn, ac a yw'r llinell dan gwarantîn (angen
+  `CAP_SYSINFO_HW`).
 - `help` — cymorth byr y gorchymyn hwn ei hun.
 
 Heb ymholiad, dangosir y cymorth byr.

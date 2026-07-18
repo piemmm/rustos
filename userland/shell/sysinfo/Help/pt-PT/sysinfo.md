@@ -35,6 +35,10 @@ As consultas:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — profundidade da fila, mudanças de contexto e preempções por
   CPU (necessita `CAP_SYSINFO_KERNEL`).
+- `irq`, `irqs` — a tabela de IRQ do núcleo: uma linha por cada linha de
+  interrupção associada — o seu id, a tarefa do controlador proprietária,
+  o número de interrupções desde o arranque e se a linha está em
+  quarentena (necessita `CAP_SYSINFO_HW`).
 - `help` — a ajuda curta deste próprio comando.
 
 Sem consulta, mostra-se a ajuda curta.

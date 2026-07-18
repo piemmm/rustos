@@ -200,6 +200,20 @@ impl SysinfoQueryId {
     /// observer (`plans/NETWORK.md` §5: `state:net`).
     pub const NET_INTERFACE_STATE: Self = Self(18);
 
+    /// List the kernel IRQ table: one [`IrqRecord`] per bound interrupt
+    /// line (line id, the owning driver task, the monotonic fire count
+    /// since boot, and whether the line is quarantined), paged by an
+    /// [`IrqListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited: like
+    /// [`Self::HARDWARE_TREE`] and [`Self::SEAT_LIST`], the table names
+    /// which task owns each physical interrupt line — cross-principal
+    /// surface topology, not a self-scoped observer. The per-line fire
+    /// count is the counter a driver's own device asserts; it exposes no
+    /// per-principal secret beyond the ownership the hardware view already
+    /// carries.
+    pub const IRQ_LIST: Self = Self(19);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -282,6 +296,10 @@ pub enum IntrospectDomain {
     /// [`CpuLoadRecord`], with the syscall's `arg` naming the record offset
     /// to page from.
     CpuLoad = 13,
+    /// The kernel IRQ table: every bound interrupt line, one packed
+    /// [`IrqRecord`], with the syscall's `arg` naming the record offset to
+    /// page from.
+    Irqs = 14,
 }
 
 impl IntrospectDomain {
@@ -310,6 +328,7 @@ impl IntrospectDomain {
             11 => Ok(Self::Reclaim),
             12 => Ok(Self::Ramzip),
             13 => Ok(Self::CpuLoad),
+            14 => Ok(Self::Irqs),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -476,6 +495,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         id: SysinfoQueryId::NET_INTERFACE_STATE,
         name: "net_interface_state",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::IRQ_LIST,
+        name: "irq_list",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
         audit: true,
     },
 ];
@@ -2850,6 +2875,130 @@ impl CpuLoadRecord {
     }
 }
 
+/// Request payload for [`SysinfoQueryId::IRQ_LIST`].
+///
+/// Identical paging shape to [`SeatListRequest`]: `offset` names the first
+/// interrupt-record index to return and `limit` bounds the page.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct IrqListRequest {
+    /// Index of the first interrupt record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl IrqListRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
+    /// a reserved flag bit is set (fail closed on an unknown request shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// [`IrqRecord::flags`] bit: the line is **quarantined** — the kernel's
+/// runaway-interrupt safety net disabled it after it fired far faster than
+/// any correctly-serviced device could, so it is kept masked and delivers
+/// no further wakes until it is re-bound. A set bit is the machine-readable
+/// form of the `stuck_owner` attribution a lockup report carries.
+pub const IRQ_FLAG_QUARANTINED: u32 = 1 << 0;
+
+/// One bound interrupt line's state inside a [`SysinfoQueryId::IRQ_LIST`]
+/// response.
+///
+/// Every field is filled from the kernel's own IRQ table — the
+/// kernel-attested owning task, never a caller claim. The list carries one
+/// record per *bound* line, in ascending line order, so a client walking it
+/// never skips or repeats a record. `count` is monotonic since boot (it is
+/// not reset when a line is re-bound), the classic `/proc/interrupts`-style
+/// per-line total; `flags` reports the line's containment state
+/// ([`IRQ_FLAG_QUARANTINED`]).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct IrqRecord {
+    /// The architecture-defined interrupt line id.
+    pub line: u32,
+    /// Line state bits ([`IRQ_FLAG_QUARANTINED`]); other bits reserved zero.
+    pub flags: u32,
+    /// The kernel-attested task id of the driver that bound this line.
+    pub owner: u64,
+    /// Monotonic count of interrupts delivered on this line since boot.
+    pub count: u64,
+}
+
+impl IrqRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 24;
+
+    /// Whether the line is quarantined (see [`IRQ_FLAG_QUARANTINED`]).
+    #[must_use]
+    pub const fn is_quarantined(&self) -> bool {
+        self.flags & IRQ_FLAG_QUARANTINED != 0
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.line);
+        put_u32(&mut out, 4, self.flags);
+        put_u64(&mut out, 8, self.owner);
+        put_u64(&mut out, 16, self.count);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::BadMagic`] if a reserved `flags` bit is set (fail closed
+    ///   on an unknown record shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u32(bytes, 4);
+        if flags & !IRQ_FLAG_QUARANTINED != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            line: read_u32(bytes, 0),
+            flags,
+            owner: read_u64(bytes, 8),
+            count: read_u64(bytes, 16),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2864,6 +3013,7 @@ mod tests {
         SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
+    use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
     use crate::rlimit::{LimitKind, ResourceLimit};
@@ -2889,6 +3039,7 @@ mod tests {
         assert_eq!(SysinfoQueryId::CPU_LOAD.as_u16(), 16);
         assert_eq!(SysinfoQueryId::NET_INTERFACE_FACTS.as_u16(), 17);
         assert_eq!(SysinfoQueryId::NET_INTERFACE_STATE.as_u16(), 18);
+        assert_eq!(SysinfoQueryId::IRQ_LIST.as_u16(), 19);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 
@@ -2944,12 +3095,13 @@ mod tests {
             (11, IntrospectDomain::Reclaim),
             (12, IntrospectDomain::Ramzip),
             (13, IntrospectDomain::CpuLoad),
+            (14, IntrospectDomain::Irqs),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(14), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(15), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -3113,6 +3265,15 @@ mod tests {
             Some(CapabilityId::SYSINFO_HW)
         );
         assert!(spec_for(SysinfoQueryId::SEAT_LIST).unwrap().audit);
+        // The IRQ table names which task owns each interrupt line: gated
+        // like the hardware tree and seat inventory, and audited.
+        assert_eq!(
+            spec_for(SysinfoQueryId::IRQ_LIST)
+                .unwrap()
+                .required_capability,
+            Some(CapabilityId::SYSINFO_HW)
+        );
+        assert!(spec_for(SysinfoQueryId::IRQ_LIST).unwrap().audit);
         // The four kernel-statistics queries share KERNEL_MEMORY_STATS's
         // boundary: gated on CAP_SYSINFO_KERNEL and audited.
         for id in [
@@ -3977,5 +4138,54 @@ mod tests {
         let mut bytes = record.to_le_bytes();
         bytes[4] = 1;
         assert_eq!(CpuLoadRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn irq_list_request_round_trips_and_rejects_reserved() {
+        let req = IrqListRequest {
+            offset: 2,
+            limit: 16,
+            flags: 0,
+        };
+        assert_eq!(IrqListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(IrqListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        assert_eq!(
+            IrqListRequest::from_bytes(&[0u8; IrqListRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn irq_record_round_trips_and_reports_quarantine() {
+        let record = IrqRecord {
+            line: 111,
+            flags: IRQ_FLAG_QUARANTINED,
+            owner: 13,
+            count: 1_000_000,
+        };
+        let decoded = IrqRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, record);
+        assert!(decoded.is_quarantined());
+
+        // A healthy, high-count line: no flag bits set.
+        let healthy = IrqRecord {
+            line: 27,
+            flags: 0,
+            owner: 5,
+            count: 9_999,
+        };
+        assert_eq!(IrqRecord::from_bytes(&healthy.to_le_bytes()), Ok(healthy));
+        assert!(!healthy.is_quarantined());
+
+        assert_eq!(
+            IrqRecord::from_bytes(&[0u8; IrqRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // An undefined flag bit fails closed on an unknown record shape.
+        let mut bytes = record.to_le_bytes();
+        bytes[4] = 0x02;
+        assert_eq!(IrqRecord::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 }

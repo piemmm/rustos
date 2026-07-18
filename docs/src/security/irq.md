@@ -161,6 +161,40 @@ line is ever quarantined), so early-boot interrupts behave exactly as
 before — fail-open on the *net*, never on security (the line is still masked
 and delivered normally).
 
+## Observability (the IRQ table through the System Information API)
+
+The bound IRQ table is readable, like every other piece of live system
+state, only through the System Information API — never a `/proc`-style
+file (`AGENTS.md` §16.6). The `IRQ_LIST` query returns one `IrqRecord`
+per bound line — the line id, the kernel-attested owning driver task,
+the monotonic interrupt count since boot (the classic
+`/proc/interrupts` per-line total), and the `IRQ_FLAG_QUARANTINED`
+flag — paged by an `IrqListRequest`. It is gated on `CAP_SYSINFO_HW`
+and audited, exactly like the hardware tree and seat inventory: it
+names which task owns each physical interrupt line, cross-principal
+surface topology, not a self-scoped observer. The count already exists
+(the quarantine rate-accounting above increments it on every edge), so
+serving it adds no steady-state cost.
+
+The one record is served by `sysinfod` and read through the shared
+`tairix_procinfo` walk (`for_each_irq`), so every consumer sees the same
+definition and none re-implements it:
+
+* `sysinfo irq` (equivalently `irqs`) prints the table, one aligned row
+  per line;
+* the resource-reference resolver answers `info:irq/<line>/owner` (the
+  owning task), `state:irq/<line>/quarantined` (yes/no), and
+  `stats:irq/count` (the aggregate since-boot total) or
+  `stats:irq/<line>/count` (one line's total) — each gated on
+  `CAP_SYSINFO_HW`, fail-closed on an unbound line id;
+* the `sysmon` monitor's interrupt-lines panel shows the live table
+  alongside its memory and load panels.
+
+The count is monotonic since boot (it is not reset when a line is
+re-bound), and a quarantined line reports the same disable the
+`IRQ_LINE_QUARANTINED` audit event (4090) and a lockup report's
+`stuck_owner` attribution carry.
+
 ## Out of scope for this contract
 
 * **IRQ raising / masking by user space.** Neither syscall grants the

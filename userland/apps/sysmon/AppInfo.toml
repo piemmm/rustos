@@ -13,12 +13,17 @@
 # GLOBAL_PROCESS_LIST — optional features above the session baseline, armed
 # only when the launching account's ceiling carries them (an administrator)
 # and degraded to a stated refusal for everyone else while the rest of the
-# session continues. CAP_MEM_PIN because the monitor pins its own memory at
-# startup (mem_pin) so it never stalls on its own page fault-in under the
-# very pressure it observes; a refused pin is reported on the status line
-# and the session continues unpinned — the pin is incidental, never fatal.
+# session continues. CAP_SYSINFO_HW because the interrupt-lines panel issues
+# IRQ_LIST, which names which driver task owns each physical interrupt line
+# (cross-principal surface topology, gated like the hardware tree and seat
+# inventory) — likewise an optional panel above the baseline, degraded to a
+# stated refusal when the launching account lacks it. CAP_MEM_PIN because the
+# monitor pins its own memory at startup (mem_pin) so it never stalls on its
+# own page fault-in under the very pressure it observes; a refused pin is
+# reported on the status line and the session continues unpinned — the pin is
+# incidental, never fatal.
 id = "os.tairix.sysmon"
 name = "sysmon"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_MEM_PIN"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW", "CAP_MEM_PIN"]

@@ -5,10 +5,11 @@ system app-store command app that watches every aspect of the kernel's
 memory and load through the System Information API, full screen and
 live: physical memory, the kernel heap, the memory-pressure band with a
 scrolling history strip, the reclaimable-cache ledger, the `ramzip`
-compressed tier, the pinned-memory aggregate, per-CPU load, and a
-process census. Its primary function is observing a machine under
-deliberate stress; at idle it is quiescent between refreshes (the input
-wait is bounded by the refresh interval — never a poll loop).
+compressed tier, the pinned-memory aggregate, per-CPU load, the kernel
+IRQ table, and a process census. Its primary function is observing a
+machine under deliberate stress; at idle it is quiescent between
+refreshes (the input wait is bounded by the refresh interval — never a
+poll loop).
 
 ## Self-pinning
 
@@ -24,16 +25,18 @@ action still fails closed; only the session survives.
 
 Every figure travels through `sysinfo-v1` — there is no `/proc`. The
 four kernel-statistics fetches (`MEMORY_PRESSURE`, `RECLAIM_STATS`,
-`RAMZIP_STATS`, `CPU_LOAD`) are the shared `tairix_procinfo::kstats`
-walks — the same definitions the `info:`/`stats:` resolver uses, so the
-two consumers can never diverge. `KERNEL_MEMORY_STATS`, the ungated
+`RAMZIP_STATS`, `CPU_LOAD`) and the `IRQ_LIST` interrupt-table fetch are
+the shared `tairix_procinfo::kstats` walks — the same definitions the
+`info:`/`stats:` resolver and the `sysinfo` CLI use, so the consumers
+can never diverge. `KERNEL_MEMORY_STATS`, the ungated
 `UPTIME`/`LOAD_AVERAGE`/`CPU_TIME_STATS`, and the process lists round
 out the panels.
 
 Each query degrades independently: a capability refusal
 (`CAP_SYSINFO_KERNEL` for the kernel-wide statistics,
-`CAP_SYSINFO_GLOBAL` for the all-process census) renders as that
-panel's spelled-out refusal, a failed call as the figure's honest
+`CAP_SYSINFO_GLOBAL` for the all-process census, `CAP_SYSINFO_HW` for
+the interrupt-lines panel) renders as that panel's spelled-out refusal,
+a failed call as the figure's honest
 absence — the session continues either way. The monitor's only fatal
 failure is the terminal itself: a hiccuping or refusing service must
 never kill the observer built to run under stress.
@@ -47,10 +50,12 @@ strip (`.` normal, `-` mild, `=` moderate, `#` severe, `!` critical,
 one glyph per refresh, bounded at 120 samples), the aggregate CPU line
 (interval busy share plus the summed switch/preemption counters), and
 the task census — sit above a scrollable detail panel the `p` key
-cycles through four views: the reclaim ledger table, the `ramzip`
-counter block, the per-CPU load table, and the process top consumers
-(by `%CPU` over the interval and by resident bytes; the full
-interactive list remains `top`'s job).
+cycles through five views: the reclaim ledger table, the `ramzip`
+counter block, the per-CPU load table, the interrupt-lines table (one
+row per bound line — its id, the owning driver task, the interrupt
+count since boot, and whether the line is quarantined), and the process
+top consumers (by `%CPU` over the interval and by resident bytes; the
+full interactive list remains `top`'s job).
 
 Keys follow the `top` conventions: `q` quit, `r` refresh now, `p`
 cycle the panel, `+`/`-` lengthen/shorten the refresh interval by one
@@ -75,6 +80,6 @@ with `q`, and gets the shell prompt back on an intact screen.
 
 The bundle is a full self-contained `.app`: signed `AppInfo` requesting
 `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, `CAP_FS_ACCESS`,
-`CAP_SYSINFO_KERNEL`, `CAP_SYSINFO_GLOBAL`, and `CAP_MEM_PIN`, the
-`Run` rxe, and a thirteen-locale `Help/` tree (`en-US` canonical) that
-`man` and the `-h` short help read from disk.
+`CAP_SYSINFO_KERNEL`, `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_HW`, and
+`CAP_MEM_PIN`, the `Run` rxe, and a thirteen-locale `Help/` tree
+(`en-US` canonical) that `man` and the `-h` short help read from disk.

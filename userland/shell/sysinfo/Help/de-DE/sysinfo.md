@@ -35,6 +35,10 @@ Die Abfragen:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — Warteschlangentiefe, Kontextwechsel und Präemptionen je CPU
   (benötigt `CAP_SYSINFO_KERNEL`).
+- `irq`, `irqs` — die IRQ-Tabelle des Kernels: eine Zeile je gebundener
+  Interrupt-Leitung — ihre Kennung, die besitzende Treiber-Task, die
+  Anzahl der Interrupts seit dem Start und ob die Leitung unter
+  Quarantäne steht (benötigt `CAP_SYSINFO_HW`).
 - `help` — die Kurzhilfe dieses Befehls.
 
 Ohne Abfrage wird die Kurzhilfe angezeigt.

@@ -44,6 +44,11 @@ pub enum Command {
     /// Read the per-CPU scheduler load figures, one row per CPU
     /// (`CPU_LOAD`, gated on `CAP_SYSINFO_KERNEL`).
     CpuLoad,
+    /// List the kernel IRQ table, one row per bound interrupt line — the
+    /// line id, the owning driver task, the interrupt count since boot, and
+    /// whether the line is quarantined (`IRQ_LIST`, which the service gates
+    /// on `CAP_SYSINFO_HW`).
+    Irqs,
     /// Render `sysinfo`'s own short help (`help`/`-h`/`-?`/`--help`): the
     /// `NAME`, `SYNOPSIS`, and compact `OPTIONS` of its Help document,
     /// through the same engine as any other command's short help
@@ -76,6 +81,7 @@ pub enum Command {
 /// | `reclaim`             | [`Command::Reclaim`]             |
 /// | `ramzip`              | [`Command::Ramzip`]              |
 /// | `cpu`                 | [`Command::CpuLoad`]             |
+/// | `irq`, `irqs`         | [`Command::Irqs`]                |
 ///
 /// # Errors
 ///
@@ -97,6 +103,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "reclaim" => no_more(rest).map(|()| Command::Reclaim),
         "ramzip" => no_more(rest).map(|()| Command::Ramzip),
         "cpu" => no_more(rest).map(|()| Command::CpuLoad),
+        "irq" | "irqs" => no_more(rest).map(|()| Command::Irqs),
         _ => Err(SysinfoError::Usage),
     }
 }
@@ -166,6 +173,8 @@ mod tests {
         assert_eq!(parse(&["reclaim"]), Ok(Command::Reclaim));
         assert_eq!(parse(&["ramzip"]), Ok(Command::Ramzip));
         assert_eq!(parse(&["cpu"]), Ok(Command::CpuLoad));
+        assert_eq!(parse(&["irq"]), Ok(Command::Irqs));
+        assert_eq!(parse(&["irqs"]), Ok(Command::Irqs));
     }
 
     #[test]
@@ -185,6 +194,7 @@ mod tests {
         assert_eq!(parse(&["seats", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["pressure", "now"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["cpu", "0"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["irq", "0"]), Err(SysinfoError::Usage));
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this
