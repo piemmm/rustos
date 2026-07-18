@@ -216,6 +216,33 @@ record under the `log` phase and halts.
 | 4061 | Info  | `ENTROPY_RESERVE_UNSEEDED`  | audit  |
 | 4062 | Info  | `BOOT_ID_MINTED`            | audit  |
 | 4063 | Info  | `BOOT_ID_UNAVAILABLE`       | audit  |
+| 4070 | Info  | `SECONDARY_CPU_STARTED`     | audit  |
+| 4071 | Error | `SECONDARY_CPU_START_FAILED`| audit  |
+| 4072 | Info  | `SECONDARY_CPU_ONLINE`      | audit  |
+| 4080 | Error | `CPU_STALL_DETECTED`        | audit  |
+| 4081 | Warn  | `CPU_STALL_CLEARED`         | audit  |
+
+The `CPU_STALL_*` pair is the per-CPU stall watchdog
+(`tairix_kernel_core::watchdog`). `CPU_STALL_DETECTED` is emitted the
+first time the port's timer-tick path (`watchdog::check_stall`) observes a
+CPU whose last dispatch-loop heartbeat is older than the stall threshold
+(`watchdog::DEFAULT_STALL_THRESHOLD_NS`, 10 s) — a soft lockup: a CPU that
+keeps executing but stops returning to the scheduler (a runaway in-kernel
+loop, a task that never yields, a lock held across a wedged access). It is
+reported **once per episode**, never once per tick, with fields `cpu` (the
+stalled CPU) and `stalled_ms` (how long it has gone without progress).
+`CPU_STALL_CLEARED` (a `Warn`) closes the record when that CPU dispatches
+again, carrying the total episode duration, so a stall that resolves is
+self-closing rather than a dangling line. The heartbeat is stamped once
+per dispatch-loop iteration (`watchdog::note_progress`) — the tickless
+analogue of Linux's softlockup detector, using TAIRiX's dispatch loop as
+the "watchdog thread" and the preemption timer tick as the sampler.
+Detection and reporting are lock-free and allocation-free, so the check
+runs safely in the timer ISR — the one place a stall is observable,
+because the dispatcher by definition is not running. Before the report
+sink and the monotonic-clock hook are installed, or on a CPU whose
+heartbeat has never been stamped, the watchdog stays silent (fail closed):
+it never fabricates a stall and never panics.
 
 `INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /
 §20, `plans/PI.md` P11). The `key_inject` syscall handler emits it the

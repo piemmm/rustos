@@ -30,6 +30,15 @@ pub(crate) struct CpuState {
     pub(crate) live_space: SpinLock<Option<LiveSpacePtr>>,
     pub(crate) preempt_pending: AtomicBool,
     pub(crate) preemptions: AtomicU64,
+    /// Stall-watchdog heartbeat: the monotonic-ns timestamp of the last
+    /// observed scheduler progress on this CPU (`crate::watchdog`). `0`
+    /// means "not yet armed" — no dispatch has run here, so the watchdog
+    /// makes no judgement (fail closed).
+    pub(crate) last_progress_ns: AtomicU64,
+    /// Whether an active stall episode has already been reported on this
+    /// CPU, so the tick-driven check reports each episode exactly once and
+    /// its recovery exactly once.
+    pub(crate) stall_reported: AtomicBool,
 }
 
 impl CpuState {
@@ -39,6 +48,8 @@ impl CpuState {
             live_space: SpinLock::new(None),
             preempt_pending: AtomicBool::new(false),
             preemptions: AtomicU64::new(0),
+            last_progress_ns: AtomicU64::new(0),
+            stall_reported: AtomicBool::new(false),
         }
     }
 }
