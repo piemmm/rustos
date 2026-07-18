@@ -38,6 +38,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md §4, §6).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The one character display-width table (`str_width`), so the multi-column
+# layout measures glyph widths through the shared definition every cell grid
+# uses — never a second width table (§2.2).
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the `fs_*` file

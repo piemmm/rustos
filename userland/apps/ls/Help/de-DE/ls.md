@@ -4,7 +4,7 @@ ls — Verzeichnisinhalte auflisten
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
+`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -49,7 +49,7 @@ werden durch eine Leerzeile getrennt.
   ausgeben (Potenzen von 1024).
 - `-l` — langes Format: Berechtigungsbits, Besitzer, Gruppe, Größe,
   dann Name.
-- `-m` — durch Kommas getrennte Namen auf einer Zeile.
+- `-m` — durch Kommas getrennte Namen, auf die Breite umgebrochen.
 - `-n, --numeric-uid-gid` — langes Format mit numerischem Besitzer
   und numerischer Gruppe; impliziert `-l`. Besitzer und Gruppe sind
   hier immer numerisch (siehe oben), also identisch zu `-l`.
@@ -63,7 +63,12 @@ werden durch eine Leerzeile getrennt.
 - `-s, --size` — die belegte Größe jedes Eintrags in 1024-Byte-Blöcken
   ausgeben (mit `-h` skaliert), mit einer `total`-Zeile je aufgelistetem
   Verzeichnis.
+- `-C` — Einträge in Spalten auflisten, von oben nach unten gefüllt
+  (Standard am Terminal).
 - `-S` — nach Größe sortieren, die größte zuerst.
+- `-w, --width <cols>` — die Ausgabebreite in Spalten festlegen;
+  `0` bedeutet unbegrenzt.
+- `-x` — Einträge in Spalten auflisten, von links nach rechts gefüllt.
 - `-1` — ein Name pro Zeile (der Standard).
 - `-?` — die Kurzhilfe dieses Befehls anzeigen (`--help` ist die
   lange Form).

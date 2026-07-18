@@ -89,4 +89,18 @@ pub trait Output {
     /// contract, so a missing consumer or short write is silently a no-op
     /// and never affects the listing or the exit status.
     fn info(&self, record: &[u8]);
+
+    /// The character-cell width of the terminal backing standard output, if
+    /// it is an attestable text console; `None` when standard output is a
+    /// pipe, a file, or a console whose width the kernel cannot attest (a
+    /// UART / remote terminal).
+    ///
+    /// This is the single signal that decides the GNU default arrangement:
+    /// multiple columns (`-C`) when output is a terminal, one name per line
+    /// otherwise. It also supplies the column budget when a width is not
+    /// given with `-w` / `--width`. It is derived from the kernel's
+    /// fail-closed geometry attestation, so an unattested console reports
+    /// `None` and the listing degrades to plain one-per-line output rather
+    /// than guessing a width.
+    fn terminal_width(&self) -> Option<usize>;
 }

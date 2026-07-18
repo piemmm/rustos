@@ -4,7 +4,7 @@ ls — elencare il contenuto delle directory
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
+`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -48,7 +48,7 @@ blocchi sono separati da una riga vuota.
   `1.1K`, `23M` (potenze di 1024).
 - `-l` — formato lungo: bit dei permessi, proprietario, gruppo,
   dimensione e poi nome.
-- `-m` — nomi separati da virgole su una riga.
+- `-m` — nomi separati da virgole, distribuiti sulla larghezza.
 - `-n, --numeric-uid-gid` — formato lungo con proprietario e gruppo
   numerici; implica `-l`. Proprietario e gruppo sono sempre numerici
   qui (vedi sopra), quindi coincide con `-l`.
@@ -62,7 +62,12 @@ blocchi sono separati da una riga vuota.
 - `-s, --size` — stampare la dimensione allocata di ogni voce in blocchi
   da 1024 byte (scalata con `-h`), con una riga `total` per ogni
   directory elencata.
+- `-C` — elencare in colonne, riempite dall'alto in basso
+  (predefinito su un terminale).
 - `-S` — ordinare per dimensione, la più grande per prima.
+- `-w, --width <cols>` — impostare la larghezza di output in colonne;
+  `0` significa illimitata.
+- `-x` — elencare in colonne, riempite da sinistra a destra.
 - `-1` — un nome per riga (l'impostazione predefinita).
 - `-?` — mostrare la guida breve di questo comando (`--help` è la
   forma lunga).

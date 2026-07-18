@@ -111,6 +111,17 @@ mod program {
             // short write is never an error a listing depends on.
             let _ = StdInfo.write_all(record);
         }
+
+        fn terminal_width(&self) -> Option<usize> {
+            // The kernel attests a width only for a console whose grid it
+            // owns (a framebuffer text console); a pipe, a file, or a
+            // byte-stream (UART) console fails the probe closed, so the
+            // listing degrades to plain one-per-line output rather than
+            // guessing a width — the GNU rule, and no ambient authority.
+            tairix_rt::terminal_size(tairix_abi::STDOUT)
+                .ok()
+                .map(|size| usize::from(size.cols()))
+        }
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime

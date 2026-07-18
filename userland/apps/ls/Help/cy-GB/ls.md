@@ -4,7 +4,7 @@ ls — rhestru cynnwys cyfeiriaduron
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
+`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -47,7 +47,7 @@ llinell wag.
   `23M` (pwerau 1024).
 - `-l` — fformat hir: didau caniatâd, perchennog, grŵp, maint, yna'r
   enw.
-- `-m` — enwau wedi'u gwahanu â choma ar un llinell.
+- `-m` — enwau wedi'u gwahanu â choma, wedi'u lapio i'r lled.
 - `-n, --numeric-uid-gid` — fformat hir gyda pherchennog a grŵp
   rhifol; mae'n awgrymu `-l`. Mae'r perchennog a'r grŵp bob amser yn
   rhifol yma (gweler uchod), felly mae'n cyfateb i `-l`.
@@ -60,7 +60,12 @@ llinell wag.
 - `-s, --size` — argraffu maint neilltuedig pob cofnod mewn blociau
   1024-beit (wedi'i raddio gan `-h`), gyda llinell `total` fesul
   rhestriad cyfeiriadur.
+- `-C` — rhestru mewn colofnau, wedi'u llenwi o'r brig i'r gwaelod
+  (rhagosodiad ar derfynell).
 - `-S` — didoli yn ôl maint, y mwyaf yn gyntaf.
+- `-w, --width <cols>` — gosod lled yr allbwn mewn colofnau; mae `0`
+  yn golygu diderfyn.
+- `-x` — rhestru mewn colofnau, wedi'u llenwi o'r chwith i'r dde.
 - `-1` — un enw fesul llinell (y rhagosodiad).
 - `-?` — dangos cymorth byr y gorchymyn hwn ei hun (`--help` yw'r
   ffurf hir).

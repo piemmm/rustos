@@ -4,7 +4,7 @@ ls — listar o conteúdo de diretórios
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
+`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -45,7 +45,7 @@ separados por uma linha em branco.
   `23M` (potências de 1024).
 - `-l` — formato longo: bits de permissão, dono, grupo, tamanho e
   depois o nome.
-- `-m` — nomes separados por vírgulas numa linha.
+- `-m` — nomes separados por vírgulas, ajustados à largura.
 - `-n, --numeric-uid-gid` — formato longo com dono e grupo numéricos;
   implica `-l`. Aqui o dono e o grupo são sempre numéricos (ver
   acima), pelo que corresponde a `-l`.
@@ -58,7 +58,12 @@ separados por uma linha em branco.
 - `-s, --size` — imprimir o tamanho alocado de cada entrada em blocos
   de 1024 bytes (escalado por `-h`), com uma linha `total` por listagem
   de diretório.
+- `-C` — listar em colunas, preenchidas de cima para baixo
+  (predefinição num terminal).
 - `-S` — ordenar por tamanho, do maior para o menor.
+- `-w, --width <cols>` — definir a largura de saída em colunas;
+  `0` significa ilimitada.
+- `-x` — listar em colunas, preenchidas da esquerda para a direita.
 - `-1` — um nome por linha (a omissão).
 - `-?` — mostrar a ajuda curta deste próprio comando (`--help` é a
   forma longa).

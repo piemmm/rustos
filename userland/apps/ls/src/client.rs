@@ -8,6 +8,7 @@ use core::fmt::Write as _;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_help::{own_short_help, HelpSource};
+use tairix_vt::str_width;
 
 use crate::command::{Command, Format, Hidden, Indicator, Options, Sort};
 use crate::error::LsError;
@@ -15,7 +16,7 @@ use crate::io::{Entry, Listing, Metadata, Output};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ls`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: ls [-aAdFghlmnopQrRsS1] [--] [path...]";
+pub const USAGE: &str = "usage: ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]";
 
 /// `ls`'s own command word: the short-help switches render its own Help
 /// document through the same engine as any other command's.
@@ -100,6 +101,13 @@ fn list(
     // always when recursing (the reader must know which directory each
     // block describes).
     let headered = paths.len() > 1 || options.recursive;
+    // The GNU arrangement rule: multiple columns when writing to a
+    // terminal, one name per line otherwise — decided against the attested
+    // console, never guessed. The column budget is the given width, the
+    // attested width, or the conventional 80.
+    let terminal = out.terminal_width();
+    let format = resolve_format(options, terminal);
+    let width = resolve_width(options, terminal);
     let mut buf = String::new();
     let mut first = true;
     let mut hidden_omitted: u64 = 0;
@@ -109,7 +117,7 @@ fn list(
         open_block(&mut buf, &mut first, None);
         // No `total` line: the GNU tool totals directory listings only,
         // never the loose file-operand block.
-        render_rows(&mut buf, &files, options);
+        render_rows(&mut buf, &files, options, format, width);
         write_block(out, &mut buf)?;
     }
     // A depth-first worklist: operands are pushed reversed so they pop in
@@ -134,7 +142,7 @@ fn list(
         if options.size || options.long {
             render_total(&mut buf, &rows, options);
         }
-        render_rows(&mut buf, &rows, options);
+        render_rows(&mut buf, &rows, options, format, width);
         write_block(out, &mut buf)?;
         if options.recursive {
             // `.`/`..` never recurse — a listing must terminate even when
@@ -267,40 +275,232 @@ fn render_total(buf: &mut String, rows: &[(String, Metadata)], options: Options)
     let _ = writeln!(buf, "total {rendered}");
 }
 
-/// Render `rows` into `buf`: the long format when selected, otherwise one
-/// name per line or the `-m` comma arrangement, each prefixed by its
-/// blocks cell under `-s`.
-fn render_rows(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+/// The conventional fallback output width when no width is given and the
+/// console cannot be attested (the GNU default).
+const DEFAULT_WIDTH: usize = 80;
+
+/// The blank columns between two grid columns (the GNU column gap).
+const COLUMN_GAP: usize = 2;
+
+/// Resolve the effective arrangement for one listing. An explicit
+/// `-1`/`-C`/`-x`/`-m` wins; otherwise the GNU default is multiple columns
+/// when standard output is an attested terminal and one name per line when
+/// it is not (a pipe, a file, or an unattested console).
+fn resolve_format(options: Options, terminal: Option<usize>) -> Format {
+    options.format.unwrap_or({
+        if terminal.is_some() {
+            Format::Columns
+        } else {
+            Format::OnePerLine
+        }
+    })
+}
+
+/// Resolve the column budget: the explicit `-w`/`--width` value, else the
+/// attested terminal width, else the conventional 80. A width of `0` is the
+/// GNU "unlimited line length" value, represented here as the maximum so a
+/// column arrangement lays every entry on one line.
+fn resolve_width(options: Options, terminal: Option<usize>) -> usize {
+    match options.width.or(terminal) {
+        Some(0) => usize::MAX,
+        Some(cols) => cols,
+        None => DEFAULT_WIDTH,
+    }
+}
+
+/// Render `rows` into `buf` in the resolved `format`, wrapping column and
+/// comma arrangements to `width`. The long format (`-l`) ignores `format`
+/// and `width` — it is always one entry per line.
+fn render_rows(
+    buf: &mut String,
+    rows: &[(String, Metadata)],
+    options: Options,
+    format: Format,
+    width: usize,
+) {
     if options.long {
         render_long(buf, rows, options);
         return;
     }
-    match options.format {
-        Format::OnePerLine => {
-            let blocks_width = size_column_width(rows, options);
-            for (name, meta) in rows {
-                if options.size {
-                    let _ = write!(buf, "{:>blocks_width$} ", blocks_cell(*meta, options));
-                }
-                buf.push_str(&decorate(name, *meta, options));
-                buf.push('\n');
+    match format {
+        Format::OnePerLine => render_one_per_line(buf, rows, options),
+        Format::Columns => render_grid(buf, rows, options, width, Fill::TopToBottom),
+        Format::Across => render_grid(buf, rows, options, width, Fill::LeftToRight),
+        Format::Commas => render_commas(buf, rows, options, width),
+    }
+}
+
+/// The rendered form of one entry as it appears in a listing cell: its
+/// `-s` allocated-blocks prefix (right-aligned to `blocks_width`, `0` for
+/// no prefix) followed by the decorated name.
+fn entry_cell(name: &str, meta: Metadata, options: Options, blocks_width: usize) -> String {
+    let mut cell = String::new();
+    if options.size {
+        // Writing into a `String` is infallible, so the `fmt::Result` is
+        // discarded deliberately.
+        let _ = write!(cell, "{:>blocks_width$} ", blocks_cell(meta, options));
+    }
+    cell.push_str(&decorate(name, meta, options));
+    cell
+}
+
+/// Render one entry per line — the `-1` arrangement and the non-terminal
+/// default. Each line carries its `-s` blocks cell, right-aligned to the
+/// block's width, when `-s` is set.
+fn render_one_per_line(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+    let blocks_width = size_column_width(rows, options);
+    for (name, meta) in rows {
+        buf.push_str(&entry_cell(name, *meta, options, blocks_width));
+        buf.push('\n');
+    }
+}
+
+/// The `-m` comma arrangement: names separated by `, `, wrapped so no line
+/// exceeds `width`. The comma stays at the end of a full line and the next
+/// line begins with the name, no leading space — the GNU `-m` layout.
+fn render_commas(buf: &mut String, rows: &[(String, Metadata)], options: Options, width: usize) {
+    if rows.is_empty() {
+        return;
+    }
+    // `-m` does not pad the `-s` blocks cell (GNU prints it inline), so the
+    // cell is built with a zero block width.
+    let mut pos = 0usize;
+    for (index, (name, meta)) in rows.iter().enumerate() {
+        let cell = entry_cell(name, *meta, options, 0);
+        let len = str_width(&cell);
+        if index > 0 {
+            // Keep the entry on the current line only if it and the `, `
+            // separator still fit; otherwise break after the comma.
+            if pos.saturating_add(len).saturating_add(COLUMN_GAP) < width {
+                pos += COLUMN_GAP;
+                buf.push_str(", ");
+            } else {
+                pos = 0;
+                buf.push_str(",\n");
             }
         }
-        Format::Commas => {
-            if rows.is_empty() {
-                return;
-            }
-            for (index, (name, meta)) in rows.iter().enumerate() {
-                if index > 0 {
-                    buf.push_str(", ");
+        buf.push_str(&cell);
+        pos += len;
+    }
+    buf.push('\n');
+}
+
+/// The direction a column grid is filled.
+#[derive(Clone, Copy)]
+enum Fill {
+    /// Down each column, then across (`-C`).
+    TopToBottom,
+    /// Across each row, then down (`-x`).
+    LeftToRight,
+}
+
+/// Render `rows` as a multi-column grid wrapped to `width`, filled in the
+/// `fill` direction — the GNU `-C` / `-x` arrangements.
+///
+/// The grid uses the greatest number of columns whose padded widths plus
+/// the inter-column gaps fit `width`, exactly as the GNU tool sizes its
+/// columns; a single column is the always-valid fallback. Cells are
+/// left-justified and padded to their column's width, and the last cell on
+/// each line carries no trailing padding.
+fn render_grid(
+    buf: &mut String,
+    rows: &[(String, Metadata)],
+    options: Options,
+    width: usize,
+    fill: Fill,
+) {
+    let count = rows.len();
+    if count == 0 {
+        return;
+    }
+    let blocks_width = size_column_width(rows, options);
+    let cells: Vec<String> = rows
+        .iter()
+        .map(|(name, meta)| entry_cell(name, *meta, options, blocks_width))
+        .collect();
+    let widths: Vec<usize> = cells.iter().map(|cell| str_width(cell)).collect();
+
+    let layout = grid_layout(&widths, width, fill);
+    for row in 0..layout.rows {
+        // The last present column index in this row decides which cell ends
+        // the line (and so carries no trailing pad).
+        let last_col = (0..layout.cols)
+            .rev()
+            .find(|&col| cell_index(fill, row, col, layout.rows, layout.cols) < count);
+        let Some(last_col) = last_col else { continue };
+        // Present columns in a row are contiguous from 0 to `last_col` in
+        // both fill directions, so every index below is in range.
+        for col in 0..=last_col {
+            let index = cell_index(fill, row, col, layout.rows, layout.cols);
+            buf.push_str(&cells[index]);
+            if col != last_col {
+                for _ in 0..layout.col_widths[col] + COLUMN_GAP - widths[index] {
+                    buf.push(' ');
                 }
-                if options.size {
-                    let _ = write!(buf, "{} ", blocks_cell(*meta, options));
-                }
-                buf.push_str(&decorate(name, *meta, options));
             }
-            buf.push('\n');
         }
+        buf.push('\n');
+    }
+}
+
+/// The flattened index of the cell at (`row`, `col`) in a `rows`×`cols`
+/// grid filled in the `fill` direction.
+fn cell_index(fill: Fill, row: usize, col: usize, rows: usize, cols: usize) -> usize {
+    match fill {
+        Fill::TopToBottom => col * rows + row,
+        Fill::LeftToRight => row * cols + col,
+    }
+}
+
+/// A chosen grid arrangement: its row and column counts and each column's
+/// content width (the widest cell in that column).
+struct GridLayout {
+    rows: usize,
+    cols: usize,
+    col_widths: Vec<usize>,
+}
+
+/// Choose the grid arrangement for cells of the given display `widths`: the
+/// greatest column count whose padded columns fit `width`, filled in the
+/// `fill` direction. A single column always fits and is the fallback.
+fn grid_layout(widths: &[usize], width: usize, fill: Fill) -> GridLayout {
+    let count = widths.len();
+    // A column needs at least one character plus the gap, so no more than
+    // this many columns can ever fit; `saturating_add` guards the unlimited
+    // (`usize::MAX`) width.
+    let max_cols = width
+        .saturating_add(COLUMN_GAP)
+        .checked_div(1 + COLUMN_GAP)
+        .unwrap_or(count)
+        .clamp(1, count);
+    for cols in (1..=max_cols).rev() {
+        let rows = count.div_ceil(cols);
+        // The candidate column count can leave the last row short; the real
+        // column count is what `rows` rows actually hold.
+        let real_cols = count.div_ceil(rows);
+        let mut col_widths = alloc::vec![0usize; real_cols];
+        for (index, &cell_width) in widths.iter().enumerate() {
+            let col = match fill {
+                Fill::TopToBottom => index / rows,
+                Fill::LeftToRight => index % real_cols,
+            };
+            col_widths[col] = col_widths[col].max(cell_width);
+        }
+        let total: usize = col_widths.iter().sum::<usize>() + COLUMN_GAP * (real_cols - 1);
+        if real_cols == 1 || total <= width {
+            return GridLayout {
+                rows,
+                cols: real_cols,
+                col_widths,
+            };
+        }
+    }
+    // Unreachable in practice — `cols == 1` always satisfies the test above
+    // — but a single column is the correct total fallback.
+    GridLayout {
+        rows: count,
+        cols: 1,
+        col_widths: alloc::vec![widths.iter().copied().max().unwrap_or(0)],
     }
 }
 
@@ -682,6 +882,10 @@ mod tests {
         chunks: RefCell<Vec<Vec<u8>>>,
         records: RefCell<Vec<Vec<u8>>>,
         fail: bool,
+        /// The width [`Output::terminal_width`] reports; `None` models a
+        /// non-terminal stdout (a pipe/file), which is the default the
+        /// non-column tests rely on.
+        width: Option<usize>,
     }
 
     impl Recorder {
@@ -690,6 +894,19 @@ mod tests {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
                 fail: false,
+                width: None,
+            }
+        }
+
+        /// A recorder that reports an attested terminal of `cols` columns,
+        /// so the listing takes the GNU multi-column default and wraps to
+        /// that width.
+        fn terminal(cols: usize) -> Self {
+            Self {
+                chunks: RefCell::new(Vec::new()),
+                records: RefCell::new(Vec::new()),
+                fail: false,
+                width: Some(cols),
             }
         }
 
@@ -698,6 +915,7 @@ mod tests {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
                 fail: true,
+                width: None,
             }
         }
 
@@ -734,6 +952,10 @@ mod tests {
 
         fn info(&self, record: &[u8]) {
             self.records.borrow_mut().push(record.to_vec());
+        }
+
+        fn terminal_width(&self) -> Option<usize> {
+            self.width
         }
     }
 
@@ -1164,7 +1386,7 @@ mod tests {
             run_ls(
                 list_with(
                     Options {
-                        format: Format::Commas,
+                        format: Some(Format::Commas),
                         ..Options::DEFAULT
                     },
                     &["."],
@@ -1175,6 +1397,203 @@ mod tests {
             Ok(())
         );
         assert_eq!(out.text(), "a, b, c\n");
+    }
+
+    #[test]
+    fn a_terminal_defaults_to_vertical_columns() {
+        // The GNU default on a terminal: multiple columns filled
+        // top-to-bottom, sized to the attested width.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0)
+            .entry(".", "d", FileKind::Regular, 0o644, 0)
+            .entry(".", "e", FileKind::Regular, 0o644, 0);
+        let out = Recorder::terminal(6);
+        assert_eq!(
+            run_ls(list_with(Options::DEFAULT, &["."]), &fs, &out),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a  d\nb  e\nc\n");
+    }
+
+    #[test]
+    fn a_wide_terminal_lays_a_small_listing_on_one_row() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0);
+        let out = Recorder::terminal(80);
+        assert_eq!(
+            run_ls(list_with(Options::DEFAULT, &["."]), &fs, &out),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a  b  c\n");
+    }
+
+    #[test]
+    fn columns_align_to_the_widest_entry_in_each_column() {
+        // Vertical fill: column 0 holds `alpha`/`c`, column 1 holds
+        // `bb`/`dd`, each column padded to its own widest entry.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "alpha", FileKind::Regular, 0o644, 0)
+            .entry(".", "bb", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0)
+            .entry(".", "dd", FileKind::Regular, 0o644, 0);
+        let out = Recorder::terminal(12);
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Columns),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        // rows = 2, cols = 2; column 0 width 5 (`alpha`), column 1 the last
+        // on each line and so unpadded.
+        assert_eq!(out.text(), "alpha  c\nbb     dd\n");
+    }
+
+    #[test]
+    fn across_fills_left_to_right() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0)
+            .entry(".", "d", FileKind::Regular, 0o644, 0)
+            .entry(".", "e", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Across),
+                        width: Some(6),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a  b\nc  d\ne\n");
+    }
+
+    #[test]
+    fn explicit_one_per_line_overrides_the_terminal_default() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0);
+        let out = Recorder::terminal(80);
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::OnePerLine),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a\nb\n");
+    }
+
+    #[test]
+    fn a_narrow_width_falls_back_to_a_single_column() {
+        // No column pair fits, so the grid degrades to one entry per line —
+        // never a crash or an overlong line.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "longname", FileKind::Regular, 0o644, 0)
+            .entry(".", "another", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Columns),
+                        width: Some(3),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "another\nlongname\n");
+    }
+
+    #[test]
+    fn commas_wrap_to_the_width() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0)
+            .entry(".", "d", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Commas),
+                        width: Some(5),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a, b,\nc, d\n");
+    }
+
+    #[test]
+    fn an_unlimited_width_lays_columns_on_one_row() {
+        // `-w 0` is the GNU "unlimited line length": one row across.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        format: Some(Format::Columns),
+                        width: Some(0),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a  b  c\n");
     }
 
     #[test]
@@ -1444,7 +1863,7 @@ mod tests {
                 list_with(
                     Options {
                         size: true,
-                        format: Format::Commas,
+                        format: Some(Format::Commas),
                         ..Options::DEFAULT
                     },
                     &["."],

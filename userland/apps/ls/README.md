@@ -9,7 +9,9 @@ names the directory itself. With no operand it lists the current
 directory (`.`). The option surface follows GNU coreutils (`AGENTS.md`
 §16.7): `-a`/`-A` reveal dotfiles, `-l` (and `-n`/`-g`/`-o`) select the
 long format, `-h` scales sizes, `-R` recurses, `-r` reverses, `-F`/`-p`
-append indicators, `-Q` quotes, and `-m`/`-1` pick the arrangement.
+append indicators, `-Q` quotes, and `-C`/`-x`/`-m`/`-1` (with `-w` for
+the width) pick the arrangement. The default is GNU's: multiple columns
+when output is a terminal, one name per line otherwise.
 `-?`/`--help` render the tool's own short help from its bundled `Help/`
 tree through the shared `lib/help` engine (`plans/APPS.md` §4).
 
@@ -24,26 +26,38 @@ authorises every path per-inode under the caller's attested identity.
 ## Usage
 
 ```
-ls [-aAdFghlmnopQrRS1] [--] [path...]
+ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]
 
   -a, --all              do not hide entries whose name begins with `.`
   -A, --almost-all       like -a, but never list `.` or `..`
+  -C                     columns, filled top-to-bottom (terminal default)
   -d, --directory        list directory operands themselves
   -F, --classify         append `/` to directories, `*` to executables
   -g                     long format without the owner column
   -h, --human-readable   with -l, sizes like `1.1K`, `23M`
   -l                     long format: mode, owner, group, size, name
-  -m                     comma-separated names
+  -m                     comma-separated names, wrapped to the width
   -n, --numeric-uid-gid  long format, numeric owner/group (same as -l)
   -o                     long format without the group column
   -p                     append `/` to directories
   -Q, --quote-name       double-quote each name
   -r, --reverse          reverse the sort order
   -R, --recursive        list subdirectories recursively
+  -s, --size             allocated blocks per entry, with a `total` line
   -S                     sort by size, largest first
-  -1                     one name per line (the default)
+  -w, --width <cols>     output width in columns (0 = unlimited)
+  -x                     columns, filled left-to-right
+  -1                     one name per line (default when not a terminal)
   -?                     show this command's short help (also `--help`)
 ```
+
+When output is a terminal, entries are laid out in columns sized to the
+attested terminal width (`-C`, the default); when output is a pipe or a
+file, they are listed one per line. `-x` fills across, `-m` lists them
+comma-separated, and `-w`/`--width` overrides the width (attested width,
+else 80). The width is only ever read from the kernel's fail-closed
+geometry attestation — an unattested console degrades to one-per-line
+rather than guessing.
 
 With no path operand `ls` lists the current directory. Short options may
 be combined (e.g. `-la`). `--` ends option parsing: every later argument

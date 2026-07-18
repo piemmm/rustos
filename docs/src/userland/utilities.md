@@ -1068,19 +1068,20 @@ identity.
 ### Grammar
 
 ```
-ls [-aAdFghlmnopQrRsS1] [--] [path...]
+ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
 |------------------|----------------------------------------------------|
 | `-a`, `--all`    | include entries whose name begins with `.`         |
 | `-A`, `--almost-all` | like `-a`, but never list `.` or `..`          |
+| `-C`             | columns filled top-to-bottom (terminal default)    |
 | `-d`, `--directory` | list directory operands themselves              |
 | `-F`, `--classify` | append `/` to directories, `*` to executables    |
 | `-g`             | long format without the owner column               |
 | `-h`, `--human-readable` | with `-l`, sizes like `1.1K`, `23M`        |
 | `-l`             | long format: mode, owner, group, size, then name   |
-| `-m`             | comma-separated names on one line                  |
+| `-m`             | comma-separated names, wrapped to the width        |
 | `-n`, `--numeric-uid-gid` | long format, numeric owner/group (same as `-l`) |
 | `-o`             | long format without the group column               |
 | `-p`             | append `/` to directories                          |
@@ -1089,7 +1090,9 @@ ls [-aAdFghlmnopQrRsS1] [--] [path...]
 | `-R`, `--recursive` | list subdirectories recursively                 |
 | `-s`, `--size`   | allocated size per entry, in 1024-byte blocks      |
 | `-S`             | sort by size, largest first                        |
-| `-1`             | one name per line (the default)                    |
+| `-w`, `--width <cols>` | output width in columns (`0` = unlimited)     |
+| `-x`             | columns filled left-to-right                       |
+| `-1`             | one name per line (default when not a terminal)    |
 | `-?`, `--help`   | show the tool's short help (wins immediately)      |
 | `--`             | end option parsing; every later argument is a path |
 | *path*           | a file or directory to list                        |
@@ -1130,8 +1133,17 @@ When several operands are given, non-directory operands are listed first
 preceded by a `path:` header and separated from the previous block by a
 blank line — the POSIX model. A single directory operand is listed
 without a header; under `-R` every directory block is headered and
-subdirectories follow depth-first in rendered order. The short format
-prints one name per line (`-m` joins them with `, `); the long format
+subdirectories follow depth-first in rendered order. When output is a
+terminal the short format lays entries in columns sized to the attested
+terminal width, filled top-to-bottom (`-C`, the default); when output
+is a pipe or a file it prints one name per line. `-x` fills the columns
+left-to-right, `-m` joins the names with `, ` wrapped to the width, `-1`
+forces one per line, and `-w`/`--width` sets the width explicitly (the
+attested width otherwise, or 80 when it cannot be determined — the
+width is read only from the kernel's fail-closed geometry attestation,
+never guessed). Cell widths are measured through the shared
+`tairix_vt::str_width` table, so a double-width glyph never shifts a
+column. The long format
 prints the ten-character mode string (`d` for a directory, `-`
 otherwise, followed by the nine `rwx` permission bits), the numeric
 owner and group (omitted under `-g` / `-o`; account-name resolution

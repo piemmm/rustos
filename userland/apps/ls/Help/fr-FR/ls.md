@@ -4,7 +4,7 @@ ls — lister le contenu des répertoires
 
 ## SYNOPSIS
 
-`ls [-aAdFghlmnopQrRsS1] [--] [path...]`
+`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -49,7 +49,7 @@ blocs sont séparés par une ligne vide.
   `1.1K`, `23M` (puissances de 1024).
 - `-l` — format long : bits de permission, propriétaire, groupe,
   taille, puis nom.
-- `-m` — noms séparés par des virgules sur une ligne.
+- `-m` — noms séparés par des virgules, répartis sur la largeur.
 - `-n, --numeric-uid-gid` — format long avec propriétaire et groupe
   numériques ; implique `-l`. Le propriétaire et le groupe sont
   toujours numériques ici (voir ci-dessus), donc identique à `-l`.
@@ -63,7 +63,12 @@ blocs sont séparés par une ligne vide.
 - `-s, --size` — afficher la taille allouée de chaque entrée en blocs de
   1024 octets (mise à l'échelle avec `-h`), avec une ligne `total` par
   répertoire listé.
+- `-C` — lister en colonnes, remplies de haut en bas (par défaut sur
+  un terminal).
 - `-S` — trier par taille, la plus grande en premier.
+- `-w, --width <cols>` — définir la largeur de sortie en colonnes ;
+  `0` signifie illimitée.
+- `-x` — lister en colonnes, remplies de gauche à droite.
 - `-1` — un nom par ligne (le comportement par défaut).
 - `-?` — afficher l'aide courte de cette commande (`--help` est la
   forme longue).

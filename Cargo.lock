@@ -1639,6 +1639,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-vt",
 ]
 
 [[package]]
