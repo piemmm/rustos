@@ -4,7 +4,8 @@ ls — elencare il contenuto delle directory
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--full-time] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -14,7 +15,8 @@ stessa), qualsiasi altro operando è elencato così com'è. Senza
 operandi viene elencata la directory corrente (`.`).
 
 Le voci sono ordinate per nome (o per dimensione, la più grande per
-prima, con `-S`; invertite con `-r`), un nome per riga per
+prima, con `-S`; per marca temporale, la più recente per prima, con
+`-t`; invertite con `-r`), un nome per riga per
 impostazione predefinita. Le voci il cui nome inizia con `.` sono
 nascoste salvo che sia dato `-a` o `-A`; quando delle voci vengono
 nascoste, una nota è emessa sul flusso informativo standard (fd 3),
@@ -25,10 +27,13 @@ proprietario e il gruppo, la dimensione e poi il nome. Proprietario e
 gruppo sono identificatori numerici: risolvere i nomi degli account
 richiede il database utenti protetto da capacità, che un elenco non
 deve pretendere; l'output corrisponde quindi al ripiego numerico
-dello strumento GNU (`-n` produce lo stesso). Non ci sono colonne per
-il numero di collegamenti né per le marche temporali perché il
-contratto del file system non porta ancora collegamenti fisici né
-marche temporali; le colonne compariranno quando lo farà.
+dello strumento GNU (`-n` produce lo stesso). La colonna della marca
+temporale mostra l'ora di modifica per impostazione predefinita;
+`-c`, `-u` e `--time` scelgono quale delle quattro marche è mostrata
+(e usata per l'ordinamento), e `--time-style` — o `--full-time` — ne
+fissa il formato. Non c'è ancora una colonna per il numero di
+collegamenti perché il contratto del file system non porta ancora
+collegamenti fisici; comparirà quando lo farà.
 
 Quando sono dati più operandi — e sempre sotto `-R` — l'elenco di
 ogni directory è preceduto da un'intestazione `percorso:`, e i
@@ -36,6 +41,20 @@ blocchi sono separati da una riga vuota.
 
 ## OPTIONS
 
+- `-t` — ordinare per la marca temporale mostrata, la più recente per
+  prima.
+- `-c` — usare l'ora di modifica dei metadati (ctime): con `-l`
+  mostrarla e con `-t` ordinare per essa; senza `-l`, ordinare per
+  essa.
+- `-u` — come `-c`, ma l'ora di accesso (atime).
+- `-i, --inode` — stampare il numero di nodo di ogni voce.
+- `--time=WORD` — quale marca mostrare e per quale ordinare: `atime`
+  (`access`, `use`), `ctime` (`status`), `mtime` (`modification`) o
+  `birth` (`creation`).
+- `--time-style=STYLE` — formato della marca: `locale` (predefinito),
+  `long-iso`, `full-iso` o `iso`. Un `+FORMAT` personalizzato non è
+  supportato.
+- `--full-time` — come `-l --time-style=full-iso`.
 - `-a, --all` — non nascondere le voci il cui nome inizia con `.`.
 - `-A, --almost-all` — come `-a`, ma senza mai elencare `.` o `..`.
 - `-d, --directory` — elencare gli operandi directory stessi, non il

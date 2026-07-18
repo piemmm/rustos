@@ -4,7 +4,8 @@ ls — listar o conteúdo de diretórios
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--full-time] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -14,7 +15,8 @@ qualquer outro operando é listado como ele próprio. Sem operando,
 lista-se o diretório atual (`.`).
 
 As entradas são ordenadas por nome (ou por tamanho, do maior para o
-menor, com `-S`; invertidas com `-r`), um nome por linha por omissão.
+menor, com `-S`; por data, a mais recente primeiro, com `-t`;
+invertidas com `-r`), um nome por linha por omissão.
 As entradas cujo nome começa por `.` são ocultadas salvo se `-a` ou
 `-A` for dado; quando há entradas ocultadas, emite-se uma nota no
 fluxo de informação padrão (fd 3), nunca na própria listagem.
@@ -24,9 +26,12 @@ o grupo, o tamanho e depois o nome. O dono e o grupo são ids numéricos:
 resolver nomes de conta exigiria a base de dados de utilizadores
 protegida por capacidade, que uma listagem não deve exigir, pelo que a
 saída corresponde ao recurso numérico da ferramenta GNU (`-n` produz o
-mesmo). Não há coluna de contagem de ligações nem de datas porque o
-contrato do sistema de ficheiros ainda não transporta ligações rígidas
-nem datas; as colunas aparecerão quando o fizer.
+mesmo). A coluna de data mostra a hora de modificação por omissão;
+`-c`, `-u` e `--time` escolhem qual das quatro datas é mostrada (e por
+qual se ordena), e `--time-style` — ou `--full-time` — define o seu
+formato. Ainda não há coluna de contagem de ligações porque o contrato
+do sistema de ficheiros ainda não transporta ligações rígidas;
+aparecerá quando o fizer.
 
 Quando é dado mais de um operando — e sempre com `-R` — a listagem de
 cada diretório é precedida por um cabeçalho `path:` e os blocos são
@@ -34,6 +39,18 @@ separados por uma linha em branco.
 
 ## OPTIONS
 
+- `-t` — ordenar pela data mostrada, a mais recente primeiro.
+- `-c` — usar a hora de alteração de metadados (ctime): com `-l`
+  mostrá-la e com `-t` ordenar por ela; sem `-l`, ordenar por ela.
+- `-u` — como `-c`, mas a hora de acesso (atime).
+- `-i, --inode` — imprimir o número de nó de cada entrada.
+- `--time=WORD` — que data mostrar e por qual ordenar: `atime`
+  (`access`, `use`), `ctime` (`status`), `mtime` (`modification`) ou
+  `birth` (`creation`).
+- `--time-style=STYLE` — formato da data: `locale` (predefinição),
+  `long-iso`, `full-iso` ou `iso`. Um `+FORMAT` próprio não é
+  suportado.
+- `--full-time` — como `-l --time-style=full-iso`.
 - `-a, --all` — não ocultar as entradas cujo nome começa por `.`.
 - `-A, --almost-all` — como `-a`, mas nunca listar `.` nem `..`.
 - `-d, --directory` — listar os próprios operandos de diretório, não o

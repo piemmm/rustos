@@ -751,18 +751,19 @@ invocation.
 The maintainer-approved staging that brings every `/System/Apps` command to
 the GNU coreutils surface and fills in the missing commands. Each stage is
 one properly-gated change; a stage's switch set is bounded by what the
-platform floor can honestly implement (userland `FileStat` carries
-kind/size/mode/uid/gid only — no timestamps, and the VFS has no symbolic or
-hard links — so time- and link-dependent behaviour is deliberately staged
-behind the floor work below).
+platform floor can honestly implement (userland `FileStat` now carries
+`NodeTimes` — four `Time64` stamps — as well as kind/size/mode/uid/gid, but
+the VFS still has no symbolic or hard links — so link-dependent behaviour is
+deliberately staged behind the floor work below).
 
 - **Stage A — GNU switches for the existing tools (done).** On the current
   floor: `cat` `-A -b -e -E -n -s -t -T -u -v` (bundled short flags, GNU
   `^`/`M-` notation); `ls` `-a -A -C -d -F -g -h -l -m -n -o -p -Q -r -R -s -S -w -x -1`
   (`-h` takes the GNU human-readable meaning — short help is `-?`/`--help` —
   and the invented `--long` synonym is retired; long format shows numeric
-  owner/group, the GNU numeric fallback, with no link-count/timestamp
-  columns until the floor carries them; the default arrangement is GNU's
+  owner/group, the GNU numeric fallback, with no link-count column (the
+  VFS has no links yet) and the timestamp column added in Stage D; the
+  default arrangement is GNU's
   multi-column — `-C` down, `-x` across, `-m` comma-wrapped, `-1` one per
   line, `-w`/`--width` overriding the width — when stdout is an attested
   console, decided against the kernel's fail-closed geometry attestation
@@ -993,10 +994,22 @@ behind the floor work below).
   `sha256sum`/`cksum`, `base64`). Each is a full self-contained
   bundle (§16.5) with tests and a thirteen-locale `Help/` tree; anything a
   shell builtin duplicates moves out of `elsh` where applicable.
-- **Stage D — filesystem timestamps (planned).** Plumb the driver-level
-  `NodeTimes` (four `Time64` stamps) through `fs_stat`/`FileStat` (an
-  in-place `abi-v1` evolution), then `touch`, `ls -l` dates and `-t`/`-u`/
-  `-c` sorts, `cp -p`/`-u`, `mv -u`, `date -r`.
+- **Stage D — filesystem timestamps (in progress).** The driver-level
+  `NodeTimes` (four `Time64` stamps) is plumbed through
+  `fs_stat`/`FileStat` as an in-place `abi-v1` evolution (`FileStat` now
+  embeds `NodeTimes`, `WIRE_LEN` 64→112; the driver `NodeInfo` carries
+  `times` and the old optional `FilesystemTimestamps` trait and separate
+  `DirEntry.modified` stamp are deleted). **Done: `ls`** long-format date
+  column, the `-t` time sort, the `-c`/`-u`/`--time` time-field selection,
+  the `locale`/`long-iso`/`full-iso`/`iso` `--time-style` renders and
+  `--full-time`, and the `-i`/`--inode` node-number column. `ls`
+  decomposes a stamp through the one shared civil-date breakdown
+  (`tairix_fsmeta::calendar::CivilTime`, which the login clock and
+  `fstree`'s stamp column now share too, §2.2); a custom
+  `--time-style=+FORMAT` is refused (fail closed) until the `date` command
+  that will share a `strftime` engine exists. ARXFS does not track atime
+  (reports `accessed` = epoch). **Remaining:** `touch`, `cp -p`/`-u`,
+  `mv -u`, `date -r`.
 - **Stage E — VFS links (planned; separate design).** Symbolic/hard-link
   support in the VFS and ARXFS, then `ln`, `readlink`, `link`, `unlink`,
   `ls -L/-H`, `cp -l/-s/-d/-a`, `stat`'s link fields.

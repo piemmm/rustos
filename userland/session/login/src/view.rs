@@ -182,12 +182,7 @@ fn label_attributes() -> Attributes {
 
 /// Render `t` as a minute-granular clock line, `YYYY-MM-DD HH:MM` (UTC).
 fn format_clock(t: Time64) -> String {
-    let days = t.secs().div_euclid(86_400);
-    let second_of_day = t.secs().rem_euclid(86_400);
-    let (year, month, day) = tairix_fsmeta::calendar::civil_from_days(days);
-    let hour = second_of_day / 3_600;
-    let minute = (second_of_day % 3_600) / 60;
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
+    tairix_fsmeta::calendar::CivilTime::from_time64(t).iso_minute()
 }
 
 /// Render a fixed-point load value as `W.CC`.

@@ -7,10 +7,13 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::time::Time64;
+use tairix_abi::NodeTimes;
+use tairix_fsmeta::calendar::CivilTime;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_vt::str_width;
 
-use crate::command::{Command, Format, Hidden, Indicator, Options, Sort};
+use crate::command::{Command, Format, Hidden, Indicator, Options, Sort, TimeField, TimeStyle};
 use crate::error::LsError;
 use crate::io::{Entry, Listing, Metadata, Output};
 
@@ -44,13 +47,14 @@ const OWN_WORD: &str = "ls";
 pub fn run(
     command: Command,
     locale: Option<&str>,
+    now: Time64,
     fs: &dyn Listing,
     help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), LsError> {
     match command {
         Command::Help => short_help(locale, help, out),
-        Command::List { options, paths } => list(options, &paths, fs, out),
+        Command::List { options, paths } => list(options, &paths, now, fs, out),
     }
 }
 
@@ -83,6 +87,7 @@ fn short_help(
 fn list(
     options: Options,
     paths: &[String],
+    now: Time64,
     fs: &dyn Listing,
     out: &dyn Output,
 ) -> Result<(), LsError> {
@@ -117,7 +122,7 @@ fn list(
         open_block(&mut buf, &mut first, None);
         // No `total` line: the GNU tool totals directory listings only,
         // never the loose file-operand block.
-        render_rows(&mut buf, &files, options, format, width);
+        render_rows(&mut buf, &files, options, format, width, now);
         write_block(out, &mut buf)?;
     }
     // A depth-first worklist: operands are pushed reversed so they pop in
@@ -142,7 +147,7 @@ fn list(
         if options.size || options.long {
             render_total(&mut buf, &rows, options);
         }
-        render_rows(&mut buf, &rows, options, format, width);
+        render_rows(&mut buf, &rows, options, format, width, now);
         write_block(out, &mut buf)?;
         if options.recursive {
             // `.`/`..` never recurse — a listing must terminate even when
@@ -172,14 +177,17 @@ fn write_block(out: &dyn Output, buf: &mut String) -> Result<(), LsError> {
 
 /// Whether rendering under `options` needs each entry's full metadata.
 ///
-/// The long format renders mode/owner/group/size, `-s` renders allocated
-/// blocks, a size sort compares sizes, and `-F` needs the mode's execute
-/// bits for `*` — everything else renders names straight off the one
-/// `read_dir`, so the per-entry `stat` is paid only when asked for.
+/// The long format renders mode/owner/group/size/date, `-s` renders
+/// allocated blocks, `-i` renders the node number, a size or time sort
+/// compares those fields, and `-F` needs the mode's execute bits for `*` —
+/// everything else renders names straight off the one `read_dir`, so the
+/// per-entry `stat` is paid only when asked for.
 fn needs_stat(options: Options) -> bool {
     options.long
         || options.size
+        || options.inode
         || options.sort == Sort::Size
+        || options.sort == Sort::Time
         || options.indicator == Indicator::Classify
 }
 
@@ -205,11 +213,25 @@ fn rows_for(
                 allocated: 0,
                 uid: 0,
                 gid: 0,
+                inode: 0,
+                times: NodeTimes::default(),
             }
         };
         rows.push((entry.name.clone(), meta));
     }
     Ok(rows)
+}
+
+/// The timestamp `options` selects for the long-format date column and the
+/// `-t` sort: modified (the default), accessed (`-u`), changed (`-c`), or
+/// created (`--time=birth`).
+fn selected_time(meta: &Metadata, field: TimeField) -> Time64 {
+    match field {
+        TimeField::Modified => meta.times.modified,
+        TimeField::Accessed => meta.times.accessed,
+        TimeField::Changed => meta.times.changed,
+        TimeField::Created => meta.times.created,
+    }
 }
 
 /// Order `rows` by the selected sort key, reversed under `-r`.
@@ -218,6 +240,12 @@ fn sort_rows(rows: &mut [(String, Metadata)], options: Options) {
         Sort::Name => rows.sort_by(|a, b| a.0.cmp(&b.0)),
         // Largest first, ties by name — the GNU `-S` order.
         Sort::Size => rows.sort_by(|a, b| b.1.size.cmp(&a.1.size).then_with(|| a.0.cmp(&b.0))),
+        // Newest first, ties by name — the GNU `-t` order.
+        Sort::Time => rows.sort_by(|a, b| {
+            selected_time(&b.1, options.time_field)
+                .cmp(&selected_time(&a.1, options.time_field))
+                .then_with(|| a.0.cmp(&b.0))
+        }),
     }
     if options.reverse {
         rows.reverse();
@@ -317,9 +345,10 @@ fn render_rows(
     options: Options,
     format: Format,
     width: usize,
+    now: Time64,
 ) {
     if options.long {
-        render_long(buf, rows, options);
+        render_long(buf, rows, options, now);
         return;
     }
     match format {
@@ -331,13 +360,24 @@ fn render_rows(
 }
 
 /// The rendered form of one entry as it appears in a listing cell: its
-/// `-s` allocated-blocks prefix (right-aligned to `blocks_width`, `0` for
-/// no prefix) followed by the decorated name.
-fn entry_cell(name: &str, meta: Metadata, options: Options, blocks_width: usize) -> String {
+/// `-i` inode prefix (right-aligned to `inode_width`) then its `-s`
+/// allocated-blocks prefix (right-aligned to `blocks_width`), each `0` for
+/// no prefix, followed by the decorated name. The inode precedes the
+/// blocks, as in the GNU tool.
+fn entry_cell(
+    name: &str,
+    meta: Metadata,
+    options: Options,
+    inode_width: usize,
+    blocks_width: usize,
+) -> String {
     let mut cell = String::new();
+    // Writing into a `String` is infallible, so the `fmt::Result`s are
+    // discarded deliberately.
+    if options.inode {
+        let _ = write!(cell, "{:>inode_width$} ", meta.inode);
+    }
     if options.size {
-        // Writing into a `String` is infallible, so the `fmt::Result` is
-        // discarded deliberately.
         let _ = write!(cell, "{:>blocks_width$} ", blocks_cell(meta, options));
     }
     cell.push_str(&decorate(name, meta, options));
@@ -348,9 +388,10 @@ fn entry_cell(name: &str, meta: Metadata, options: Options, blocks_width: usize)
 /// default. Each line carries its `-s` blocks cell, right-aligned to the
 /// block's width, when `-s` is set.
 fn render_one_per_line(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+    let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
     for (name, meta) in rows {
-        buf.push_str(&entry_cell(name, *meta, options, blocks_width));
+        buf.push_str(&entry_cell(name, *meta, options, inode_width, blocks_width));
         buf.push('\n');
     }
 }
@@ -362,11 +403,11 @@ fn render_commas(buf: &mut String, rows: &[(String, Metadata)], options: Options
     if rows.is_empty() {
         return;
     }
-    // `-m` does not pad the `-s` blocks cell (GNU prints it inline), so the
-    // cell is built with a zero block width.
+    // `-m` does not pad the `-i` inode or `-s` blocks cell (GNU prints them
+    // inline), so the cell is built with zero prefix widths.
     let mut pos = 0usize;
     for (index, (name, meta)) in rows.iter().enumerate() {
-        let cell = entry_cell(name, *meta, options, 0);
+        let cell = entry_cell(name, *meta, options, 0, 0);
         let len = str_width(&cell);
         if index > 0 {
             // Keep the entry on the current line only if it and the `, `
@@ -413,10 +454,11 @@ fn render_grid(
     if count == 0 {
         return;
     }
+    let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
     let cells: Vec<String> = rows
         .iter()
-        .map(|(name, meta)| entry_cell(name, *meta, options, blocks_width))
+        .map(|(name, meta)| entry_cell(name, *meta, options, inode_width, blocks_width))
         .collect();
     let widths: Vec<usize> = cells.iter().map(|cell| str_width(cell)).collect();
 
@@ -504,6 +546,28 @@ fn grid_layout(widths: &[usize], width: usize, fill: Fill) -> GridLayout {
     }
 }
 
+/// Width of the widest `-i` inode cell in `rows` (0 when `-i` is off).
+fn inode_column_width(rows: &[(String, Metadata)], options: Options) -> usize {
+    if !options.inode {
+        return 0;
+    }
+    rows.iter()
+        .map(|(_, meta)| decimal_len(meta.inode))
+        .max()
+        .unwrap_or(1)
+}
+
+/// Digits in the decimal rendering of `value` (at least one, for `0`).
+fn decimal_len(value: u64) -> usize {
+    let mut digits = 1;
+    let mut rest = value;
+    while rest >= 10 {
+        rest /= 10;
+        digits += 1;
+    }
+    digits
+}
+
 /// Width of the widest `-s` blocks cell in `rows` (0 when `-s` is off).
 fn size_column_width(rows: &[(String, Metadata)], options: Options) -> usize {
     if !options.size {
@@ -515,22 +579,34 @@ fn size_column_width(rows: &[(String, Metadata)], options: Options) -> usize {
         .unwrap_or(1)
 }
 
-/// Render the long format: mode, numeric owner and group (unless hidden by
-/// `-g` / `-o`), size, then the decorated name, with each numeric column
-/// right-aligned to its block-wide width.
+/// Render the long format: the optional `-i` inode and `-s` blocks columns,
+/// then mode, numeric owner and group (unless hidden by `-g` / `-o`), size,
+/// the selected timestamp, and finally the decorated name, with each
+/// numeric column right-aligned and the date column padded so the names
+/// align.
 ///
 /// Owner and group are numeric ids: resolving names needs the
 /// capability-gated user database, which a listing must not demand — the
 /// GNU tool falls back to numbers for exactly this case (`-n` renders the
-/// same). There is no link count or timestamp column because the
-/// filesystem contract carries neither yet (see the Help document).
-fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+/// same). There is **no link-count column**: the VFS has no hard links yet,
+/// so a fabricated count would be a lie — a documented divergence from GNU
+/// (see the Help document). The timestamp column shows the time selected by
+/// `-c` / `-u` / `--time` (modified by default), rendered in the style
+/// chosen by `--time-style` / `--full-time`.
+fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options, now: Time64) {
     let size_cell = |meta: &Metadata| {
         if options.human_readable {
             human_size(meta.size)
         } else {
             format!("{}", meta.size)
         }
+    };
+    let date_cell = |meta: &Metadata| {
+        render_time(
+            selected_time(meta, options.time_field),
+            options.time_style,
+            now,
+        )
     };
     let width_of = |cell: fn(&Metadata) -> String| {
         rows.iter()
@@ -545,10 +621,22 @@ fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options) 
         .map(|(_, meta)| size_cell(meta).len())
         .max()
         .unwrap_or(1);
+    // The date column is padded to its widest rendering so the names align;
+    // within one style every row is the same width except `iso`, whose
+    // recent and old forms differ.
+    let date_width = rows
+        .iter()
+        .map(|(_, meta)| date_cell(meta).len())
+        .max()
+        .unwrap_or(0);
+    let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
     for (name, meta) in rows {
         // Writing into a `String` is infallible, so the `fmt::Result` is
         // discarded deliberately.
+        if options.inode {
+            let _ = write!(buf, "{:>inode_width$} ", meta.inode);
+        }
         if options.size {
             let _ = write!(buf, "{:>blocks_width$} ", blocks_cell(*meta, options));
         }
@@ -561,10 +649,74 @@ fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options) 
         }
         let _ = writeln!(
             buf,
-            " {:>size_width$} {}",
+            " {:>size_width$} {:<date_width$} {}",
             size_cell(meta),
+            date_cell(meta),
             decorate(name, *meta, options)
         );
+    }
+}
+
+/// Month abbreviations for the `locale` time style (the C-locale English
+/// names GNU `ls` prints without a locale).
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The GNU "recent" window, in seconds: half of the mean Gregorian year
+/// (`31_556_952 / 2`). A stamp within the last six months renders with a
+/// time-of-day; an older — or future — one renders with a year.
+const RECENT_WINDOW_SECS: i64 = 31_556_952 / 2;
+
+/// Whether `stamp` falls in the GNU "recent" window relative to `now`: at or
+/// before `now` and no more than six months earlier. A future stamp is not
+/// recent. When the clock is unset (`now` is the epoch) essentially every
+/// real stamp is "old", so the long form (with a year) is shown — never a
+/// guessed time-of-day.
+fn is_recent(stamp: Time64, now: Time64) -> bool {
+    let stamp_secs = stamp.secs();
+    let now_secs = now.secs();
+    stamp_secs <= now_secs && now_secs.saturating_sub(stamp_secs) <= RECENT_WINDOW_SECS
+}
+
+/// Render `stamp` in the requested [`TimeStyle`]. `now` decides the
+/// recent/old split of the `locale` and `iso` styles. All fields are UTC;
+/// the `full-iso` zone is therefore always `+0000`.
+fn render_time(stamp: Time64, style: TimeStyle, now: Time64) -> String {
+    let civil = CivilTime::from_time64(stamp);
+    let month_name = MONTHS[civil.month as usize - 1];
+    match style {
+        TimeStyle::Locale => {
+            if is_recent(stamp, now) {
+                format!(
+                    "{month_name} {:>2} {:02}:{:02}",
+                    civil.day, civil.hour, civil.minute
+                )
+            } else {
+                format!("{month_name} {:>2}  {:04}", civil.day, civil.year)
+            }
+        }
+        TimeStyle::LongIso => civil.iso_minute(),
+        TimeStyle::FullIso => format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09} +0000",
+            civil.year,
+            civil.month,
+            civil.day,
+            civil.hour,
+            civil.minute,
+            civil.second,
+            stamp.subsec_nanos(),
+        ),
+        TimeStyle::Iso => {
+            if is_recent(stamp, now) {
+                format!(
+                    "{:02}-{:02} {:02}:{:02}",
+                    civil.month, civil.day, civil.hour, civil.minute
+                )
+            } else {
+                format!("{:04}-{:02}-{:02}", civil.year, civil.month, civil.day)
+            }
+        }
     }
 }
 
@@ -697,14 +849,15 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
 #[cfg(test)]
 mod tests {
     use super::{run, USAGE};
-    use crate::command::{Command, Format, Hidden, Indicator, Options, Sort};
+    use crate::command::{Command, Format, Hidden, Indicator, Options, Sort, TimeField, TimeStyle};
     use crate::error::LsError;
     use crate::io::{Entry, Listing, Metadata, Output};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::fs::FileKind;
-    use tairix_abi::Errno;
+    use tairix_abi::time::Time64;
+    use tairix_abi::{Errno, NodeTimes};
     use tairix_help::{HelpSource, SourceError};
 
     /// An in-memory tree: a stat table keyed by path plus, for directories,
@@ -732,6 +885,8 @@ mod tests {
                     allocated: size,
                     uid: UID,
                     gid: GID,
+                    inode: 0,
+                    times: NodeTimes::default(),
                 },
             ));
             self
@@ -747,6 +902,8 @@ mod tests {
                     allocated: 0,
                     uid: UID,
                     gid: GID,
+                    inode: 0,
+                    times: NodeTimes::default(),
                 },
             ));
             self.dirs.push((path.to_string(), Vec::new()));
@@ -792,6 +949,37 @@ mod tests {
                     allocated,
                     uid: UID,
                     gid: GID,
+                    inode: 0,
+                    times: NodeTimes::default(),
+                },
+            ));
+            self
+        }
+
+        /// Declare a regular-file entry with an explicit node number and
+        /// timestamps, for the `-i`, `-t`, and long-format date tests.
+        fn timed_entry(mut self, dir: &str, name: &str, inode: u64, times: NodeTimes) -> Self {
+            let children = self
+                .dirs
+                .iter_mut()
+                .find(|(d, _)| d == dir)
+                .map(|(_, c)| c)
+                .expect("directory must be declared before its entries");
+            children.push(Entry {
+                name: name.to_string(),
+                kind: FileKind::Regular,
+            });
+            self.stat.push((
+                super::join(dir, name),
+                Metadata {
+                    kind: FileKind::Regular,
+                    mode: 0o644,
+                    size: 0,
+                    allocated: 0,
+                    uid: UID,
+                    gid: GID,
+                    inode,
+                    times,
                 },
             ));
             self
@@ -829,6 +1017,8 @@ mod tests {
                 allocated: 0,
                 uid: UID,
                 gid: GID,
+                inode: 0,
+                times: NodeTimes::default(),
             })
         }
 
@@ -964,6 +1154,22 @@ mod tests {
     const UID: u32 = 1000;
     const GID: u32 = 100;
 
+    /// A fixed "now" for the date tests: 2024-06-15T12:00:00Z. Stamps are
+    /// chosen relative to it so the recent/old split is deterministic.
+    const NOW: Time64 = Time64::from_secs(1_718_452_800);
+
+    /// A [`NodeTimes`] whose four stamps are all `secs` seconds since the
+    /// epoch — the common case where a test cares only about one instant.
+    fn stamps(secs: i64) -> NodeTimes {
+        let t = Time64::from_secs(secs);
+        NodeTimes {
+            created: t,
+            modified: t,
+            accessed: t,
+            changed: t,
+        }
+    }
+
     fn list_with(options: Options, paths: &[&str]) -> Command {
         Command::List {
             options,
@@ -983,14 +1189,14 @@ mod tests {
     }
 
     fn run_ls(command: Command, fs: &dyn Listing, out: &Recorder) -> Result<(), LsError> {
-        run(command, None, fs, &NoHelp, out)
+        run(command, None, NOW, fs, &NoHelp, out)
     }
 
     #[test]
     fn help_renders_the_short_help_from_the_document() {
         let fs = TreeFs::new();
         let out = Recorder::new();
-        assert_eq!(run(Command::Help, None, &fs, &OneDoc, &out), Ok(()));
+        assert_eq!(run(Command::Help, None, NOW, &fs, &OneDoc, &out), Ok(()));
         let text = out.text();
         assert!(text.contains("ls — list directory contents"), "{text}");
         assert!(text.contains("ls [-a] [-l] [--] [path...]"), "{text}");
@@ -1000,7 +1206,7 @@ mod tests {
     fn help_falls_back_to_the_usage_banner_without_a_tree() {
         let fs = TreeFs::new();
         let out = Recorder::new();
-        assert_eq!(run(Command::Help, None, &fs, &NoHelp, &out), Ok(()));
+        assert_eq!(run(Command::Help, None, NOW, &fs, &NoHelp, &out), Ok(()));
         let mut expected = String::from(USAGE);
         expected.push('\n');
         assert_eq!(out.text(), expected);
@@ -1105,7 +1311,8 @@ mod tests {
         assert_eq!(run_ls(list(false, true, &["."]), &fs, &out), Ok(()));
         assert_eq!(
             out.text(),
-            "total 5\ndrwxr-xr-x 1000 100 4096 d\n-rw-r--r-- 1000 100    7 f\n"
+            "total 5\ndrwxr-xr-x 1000 100 4096 Jan  1  1970 d\n\
+             -rw-r--r-- 1000 100    7 Jan  1  1970 f\n"
         );
     }
 
@@ -1117,7 +1324,10 @@ mod tests {
             .entry("dir/", "f", FileKind::Regular, 0o600, 3);
         let out = Recorder::new();
         assert_eq!(run_ls(list(false, true, &["dir/"]), &fs, &out), Ok(()));
-        assert_eq!(out.text(), "total 1\n-rw------- 1000 100 3 f\n");
+        assert_eq!(
+            out.text(),
+            "total 1\n-rw------- 1000 100 3 Jan  1  1970 f\n"
+        );
     }
 
     #[test]
@@ -1695,9 +1905,9 @@ mod tests {
         assert_eq!(
             out.text(),
             "total 11M\n\
-             -rw-r--r-- 1000 100  500 a\n\
-             -rw-r--r-- 1000 100 1.1K b\n\
-             -rw-r--r-- 1000 100  10M c\n"
+             -rw-r--r-- 1000 100  500 Jan  1  1970 a\n\
+             -rw-r--r-- 1000 100 1.1K Jan  1  1970 b\n\
+             -rw-r--r-- 1000 100  10M Jan  1  1970 c\n"
         );
     }
 
@@ -1722,7 +1932,10 @@ mod tests {
             ),
             Ok(())
         );
-        assert_eq!(hidden_owner.text(), "total 1\n-rw-r--r-- 100 7 f\n");
+        assert_eq!(
+            hidden_owner.text(),
+            "total 1\n-rw-r--r-- 100 7 Jan  1  1970 f\n"
+        );
         let hidden_group = Recorder::new();
         assert_eq!(
             run_ls(
@@ -1739,7 +1952,10 @@ mod tests {
             ),
             Ok(())
         );
-        assert_eq!(hidden_group.text(), "total 1\n-rw-r--r-- 1000 7 f\n");
+        assert_eq!(
+            hidden_group.text(),
+            "total 1\n-rw-r--r-- 1000 7 Jan  1  1970 f\n"
+        );
     }
 
     #[test]
@@ -1822,7 +2038,8 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "total 5\n4 drwxr-xr-x 1000 100 4096 d\n1 -rw-r--r-- 1000 100    7 f\n"
+            "total 5\n4 drwxr-xr-x 1000 100 4096 Jan  1  1970 d\n\
+             1 -rw-r--r-- 1000 100    7 Jan  1  1970 f\n"
         );
     }
 
@@ -1912,5 +2129,226 @@ mod tests {
         ] {
             assert_eq!(super::human_size(size), expected, "{size}");
         }
+    }
+
+    // Stamps used across the time tests, relative to `NOW` (2024-06-15):
+    // `RECENT` is within six months (renders a time-of-day), `OLD` is not
+    // (renders a year).
+    const RECENT: i64 = 1_715_000_000; // 2024-05-06 12:53:20 UTC
+    const OLD: i64 = 1_700_000_000; // 2023-11-14 22:13:20 UTC
+    const MID: i64 = 1_709_214_367; // 2024-02-29 13:46:07 UTC
+
+    #[test]
+    fn inode_column_prefixes_names_right_aligned() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .timed_entry(".", "a", 42, stamps(0))
+            .timed_entry(".", "b", 7, stamps(0));
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        inode: true,
+                        format: Some(Format::OnePerLine),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        // The inode column is right-aligned to the widest number (`42`).
+        assert_eq!(out.text(), "42 a\n 7 b\n");
+    }
+
+    #[test]
+    fn inode_prefixes_the_long_format_before_the_mode() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .timed_entry(".", "f", 1234, stamps(RECENT));
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        long: true,
+                        inode: true,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            out.text(),
+            "total 0\n1234 -rw-r--r-- 1000 100 0 May  6 12:53 f\n"
+        );
+    }
+
+    #[test]
+    fn time_sort_orders_newest_first_ties_by_name() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .timed_entry(".", "old", 1, stamps(OLD))
+            .timed_entry(".", "new", 2, stamps(RECENT))
+            .timed_entry(".", "mid", 3, stamps(MID));
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        sort: Sort::Time,
+                        format: Some(Format::OnePerLine),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "new\nmid\nold\n");
+    }
+
+    #[test]
+    fn reverse_time_sort_orders_oldest_first() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .timed_entry(".", "old", 1, stamps(OLD))
+            .timed_entry(".", "new", 2, stamps(RECENT));
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        sort: Sort::Time,
+                        reverse: true,
+                        format: Some(Format::OnePerLine),
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "old\nnew\n");
+    }
+
+    #[test]
+    fn the_long_format_shows_the_selected_timestamp() {
+        // Distinct stamps per field so the column proves which one is shown.
+        let times = NodeTimes {
+            created: Time64::from_secs(0),
+            modified: Time64::from_secs(OLD),
+            accessed: Time64::from_secs(RECENT),
+            changed: Time64::from_secs(MID),
+        };
+        let fs = TreeFs::new().dir(".").timed_entry(".", "f", 0, times);
+        let long = |field| {
+            let out = Recorder::new();
+            assert_eq!(
+                run_ls(
+                    list_with(
+                        Options {
+                            long: true,
+                            time_field: field,
+                            ..Options::DEFAULT
+                        },
+                        &["."],
+                    ),
+                    &fs,
+                    &out,
+                ),
+                Ok(())
+            );
+            out.text()
+        };
+        // Modified (the default) is old → a year; accessed and changed are
+        // recent → a time-of-day.
+        assert_eq!(
+            long(TimeField::Modified),
+            "total 0\n-rw-r--r-- 1000 100 0 Nov 14  2023 f\n"
+        );
+        assert_eq!(
+            long(TimeField::Accessed),
+            "total 0\n-rw-r--r-- 1000 100 0 May  6 12:53 f\n"
+        );
+        assert_eq!(
+            long(TimeField::Changed),
+            "total 0\n-rw-r--r-- 1000 100 0 Feb 29 13:46 f\n"
+        );
+    }
+
+    #[test]
+    fn time_styles_render_the_recent_stamp_each_way() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .timed_entry(".", "f", 0, stamps(RECENT));
+        let styled = |style| {
+            let out = Recorder::new();
+            assert_eq!(
+                run_ls(
+                    list_with(
+                        Options {
+                            long: true,
+                            time_style: style,
+                            ..Options::DEFAULT
+                        },
+                        &["."],
+                    ),
+                    &fs,
+                    &out,
+                ),
+                Ok(())
+            );
+            out.text()
+        };
+        assert_eq!(
+            styled(TimeStyle::Locale),
+            "total 0\n-rw-r--r-- 1000 100 0 May  6 12:53 f\n"
+        );
+        assert_eq!(
+            styled(TimeStyle::LongIso),
+            "total 0\n-rw-r--r-- 1000 100 0 2024-05-06 12:53 f\n"
+        );
+        assert_eq!(
+            styled(TimeStyle::FullIso),
+            "total 0\n-rw-r--r-- 1000 100 0 2024-05-06 12:53:20.000000000 +0000 f\n"
+        );
+        assert_eq!(
+            styled(TimeStyle::Iso),
+            "total 0\n-rw-r--r-- 1000 100 0 05-06 12:53 f\n"
+        );
+    }
+
+    #[test]
+    fn the_iso_style_shows_a_year_for_an_old_stamp() {
+        let fs = TreeFs::new().dir(".").timed_entry(".", "f", 0, stamps(OLD));
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list_with(
+                    Options {
+                        long: true,
+                        time_style: TimeStyle::Iso,
+                        ..Options::DEFAULT
+                    },
+                    &["."],
+                ),
+                &fs,
+                &out,
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "total 0\n-rw-r--r-- 1000 100 0 2023-11-14 f\n");
     }
 }

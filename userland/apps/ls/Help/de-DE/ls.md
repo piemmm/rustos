@@ -4,7 +4,8 @@ ls — Verzeichnisinhalte auflisten
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--full-time] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -15,7 +16,8 @@ selbst gelistet. Ohne Operand wird das aktuelle Verzeichnis (`.`)
 gelistet.
 
 Einträge werden nach Namen sortiert (oder mit `-S` nach Größe, die
-größte zuerst; mit `-r` umgekehrt), standardmäßig ein Name pro Zeile.
+größte zuerst; mit `-t` nach Zeit, die neueste zuerst; mit `-r`
+umgekehrt), standardmäßig ein Name pro Zeile.
 Einträge, deren Name mit `.` beginnt, werden ausgeblendet, sofern
 nicht `-a` oder `-A` angegeben ist; werden Einträge ausgeblendet,
 erscheint ein Hinweis auf dem Standard-Informationsstrom (fd 3),
@@ -26,10 +28,13 @@ Besitzer und die Gruppe, die Größe und dann den Namen. Besitzer und
 Gruppe sind numerische Ids: das Auflösen von Kontonamen erfordert die
 fähigkeitsgeschützte Benutzerdatenbank, die eine Auflistung nicht
 verlangen darf; die Ausgabe entspricht daher dem numerischen
-Rückfall des GNU-Werkzeugs (`-n` liefert dasselbe). Es gibt keine
-Spalten für Link-Anzahl oder Zeitstempel, weil der
-Dateisystem-Vertrag noch keine harten Links oder Zeitstempel trägt;
-die Spalten erscheinen, sobald er es tut.
+Rückfall des GNU-Werkzeugs (`-n` liefert dasselbe). Die
+Zeitstempelspalte zeigt standardmäßig die Änderungszeit; `-c`, `-u`
+und `--time` wählen, welcher der vier Zeitstempel angezeigt (und
+wonach sortiert) wird, und `--time-style` — oder `--full-time` — legt
+sein Format fest. Es gibt weiterhin keine Spalte für die Link-Anzahl,
+weil der Dateisystem-Vertrag noch keine harten Links trägt; sie
+erscheint, sobald er es tut.
 
 Bei mehreren Operanden — und stets unter `-R` — wird jeder
 Verzeichnisliste eine `pfad:`-Kopfzeile vorangestellt, und Blöcke
@@ -37,6 +42,19 @@ werden durch eine Leerzeile getrennt.
 
 ## OPTIONS
 
+- `-t` — nach dem angezeigten Zeitstempel sortieren, den neuesten
+  zuerst.
+- `-c` — die Metadaten-Änderungszeit (ctime) verwenden: mit `-l`
+  anzeigen und mit `-t` danach sortieren; ohne `-l` danach sortieren.
+- `-u` — wie `-c`, aber die Zugriffszeit (atime).
+- `-i, --inode` — die Knotennummer jedes Eintrags ausgeben.
+- `--time=WORD` — welcher Zeitstempel angezeigt und wonach sortiert
+  wird: `atime` (`access`, `use`), `ctime` (`status`), `mtime`
+  (`modification`) oder `birth` (`creation`).
+- `--time-style=STYLE` — Zeitstempelformat: `locale` (Standard),
+  `long-iso`, `full-iso` oder `iso`. Ein eigenes `+FORMAT` wird nicht
+  unterstützt.
+- `--full-time` — wie `-l --time-style=full-iso`.
 - `-a, --all` — Einträge, deren Name mit `.` beginnt, nicht
   ausblenden.
 - `-A, --almost-all` — wie `-a`, aber `.` und `..` niemals auflisten.

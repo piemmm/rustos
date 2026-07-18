@@ -38,6 +38,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::{DirEntries, OpenFlags};
+    use tairix_abi::time::Time64;
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_ls::{parse, run, Entry, Listing, Metadata, Output, USAGE};
@@ -65,6 +66,8 @@ mod program {
                 allocated: stat.allocated,
                 uid: stat.uid,
                 gid: stat.gid,
+                inode: stat.id.node,
+                times: stat.times,
             })
         }
 
@@ -145,11 +148,19 @@ mod program {
             }
         };
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        // The current wall-clock instant decides the default (`locale`) and
+        // `iso` date styles' recent/old window. An unset or unreadable clock
+        // reads as the epoch, so every stamp renders in the "old" long form
+        // rather than a guessed-at "recent" time — never a fabricated now.
+        let now = tairix_rt::wall_time()
+            .map(|reading| reading.time())
+            .unwrap_or(Time64::UNIX_EPOCH);
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(
             command,
             locale,
+            now,
             &RtListing,
             &BundleHelp::new("ls"),
             &RtOutput,

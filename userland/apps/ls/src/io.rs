@@ -14,11 +14,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use tairix_abi::fs::FileKind;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, NodeTimes};
 
-/// The metadata `ls` renders for a path: its kind, permission bits, and
-/// size — the [`tairix_abi::fs::FileStat`] fields the listing actually
-/// shows.
+/// The metadata `ls` renders for a path: its kind, permission bits, size,
+/// stable node number, and four timestamps — the
+/// [`tairix_abi::fs::FileStat`] fields the listing actually shows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metadata {
     /// What kind of object the path is.
@@ -36,6 +36,13 @@ pub struct Metadata {
     pub uid: u32,
     /// The owning group id, rendered numerically by the long format.
     pub gid: u32,
+    /// The node's stable per-volume number (`FileStat::id.node`), rendered
+    /// by `-i` / `--inode`.
+    pub inode: u64,
+    /// The node's four `Time64` timestamps (created/modified/accessed/
+    /// changed). The long format renders one of them (selected by
+    /// `-c`/`-u`/`--time`) and `-t` sorts by it.
+    pub times: NodeTimes,
 }
 
 /// One directory entry: a name and its kind — exactly what the kernel's

@@ -1039,11 +1039,14 @@ short-help fallback, and the locale switch-drift pin.
 command app registered at `/System/Apps/ls.app/Run`, so the shell
 resolves the bare word `ls` to it). It inspects each of its path
 operands in order: a non-directory operand is listed by name, and a
-directory operand has its entries listed, sorted by name (or by size
-under `-S`), unless `-d` names the directory itself. With no operand it
-lists the current directory (`.`). The option surface is the GNU `ls`
-set (`AGENTS.md` §16.7): `-a`/`-A` reveal dotfiles, `-l` (and
-`-n`/`-g`/`-o`) select the long format, `-h` scales its sizes, `-s`
+directory operand has its entries listed, sorted by name (by size under
+`-S`, or by timestamp newest-first under `-t`), unless `-d` names the
+directory itself. With no operand it lists the current directory (`.`).
+The option surface is the GNU `ls` set (`AGENTS.md` §16.7): `-a`/`-A`
+reveal dotfiles, `-l` (and `-n`/`-g`/`-o`) select the long format, `-h`
+scales its sizes, `-i` prefixes the node number, `-c`/`-u`/`--time`
+select which timestamp the long format shows and `-t` sorts by,
+`--time-style`/`--full-time` set its rendering, `-s`
 prefixes each entry with its **allocated** size in 1024-byte blocks (the
 real on-disk allocation the filesystem reports through `fs_stat`, never
 a value derived from the byte length) with a `total` line per directory
@@ -1068,7 +1071,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]
+ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD] [--time-style=STYLE] [--full-time] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -1090,6 +1093,13 @@ ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]
 | `-R`, `--recursive` | list subdirectories recursively                 |
 | `-s`, `--size`   | allocated size per entry, in 1024-byte blocks      |
 | `-S`             | sort by size, largest first                        |
+| `-t`             | sort by the selected timestamp, newest first       |
+| `-c`             | select/sort by the metadata-change time (ctime)    |
+| `-u`             | select/sort by the access time (atime)             |
+| `-i`, `--inode`  | print each entry's node number                     |
+| `--time=WORD`    | timestamp shown/sorted: `atime`/`ctime`/`mtime`/`birth` |
+| `--time-style=STYLE` | `locale`/`long-iso`/`full-iso`/`iso` (no `+FORMAT`) |
+| `--full-time`    | like `-l --time-style=full-iso`                    |
 | `-w`, `--width <cols>` | output width in columns (`0` = unlimited)     |
 | `-x`             | columns filled left-to-right                       |
 | `-1`             | one name per line (default when not a terminal)    |
@@ -1149,9 +1159,19 @@ otherwise, followed by the nine `rwx` permission bits), the numeric
 owner and group (omitted under `-g` / `-o`; account-name resolution
 would demand the capability-gated user database, so the GNU numeric
 fallback is the output), the size right-aligned across the block
-(scaled by `-h`), then the name. There is no link-count or timestamp
-column: the filesystem contract carries neither hard links nor
-timestamps yet, and the columns will appear when it does. `-Q` renders
+(scaled by `-h`), a timestamp, then the name. The timestamp is the
+modified time by default; `-c`, `-u`, and `--time` choose which of the
+four `NodeTimes` stamps is shown (and, with `-t`, sorted by), and
+`--time-style` / `--full-time` set its rendering — `locale` (the GNU
+default: a time-of-day for a stamp within the last six months, a year
+otherwise, decided against the wall clock), `long-iso`, `full-iso`, or
+`iso`; a custom `+FORMAT` is refused (fail closed) until a shared
+`strftime` engine lands with `date`. The stamp is decomposed through the
+one shared civil-date breakdown (`tairix_fsmeta::calendar::CivilTime`).
+There is still **no link-count column** — the VFS has no hard links yet,
+so a fabricated count would be a lie; it will appear when links land
+(Stage E). `-i` prefixes each entry (short and long) with its stable
+node number, right-aligned. `-Q` renders
 each name double-quoted with GNU C-style escapes; `-p`/`-F` append the
 indicator suffix after the closing quote.
 
@@ -1193,7 +1213,11 @@ hidden-file filter with and without `-a`/`-A` (including the advisory
 record's content, its singular/plural message, the across-directories
 count, and its absence when nothing was hidden), a non-directory
 operand, the long format's mode string, owner/group columns (and their
-`-g`/`-o` omission), and right-aligned plain and human-readable sizes,
+`-g`/`-o` omission), right-aligned plain and human-readable sizes, the
+long-format date column, the `-t` time sort (newest first, ties by name)
+and its reverse, the `-c`/`-u`/`--time` time-field selection, the
+`locale`/`long-iso`/`full-iso`/`iso` `--time-style` renders (recent vs
+old), and the `-i` node-number column,
 the per-entry stat under a slash-terminated operand, single- and
 multi-operand layout (files first, then directory headers), recursive
 depth-first traversal with headers, reverse and size sorts, the comma

@@ -4,7 +4,8 @@ ls — list directory contents
 
 ## SYNOPSIS
 
-`ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]`
+`ls [-aACcdFghilmnopQrRsStux1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--full-time] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -13,8 +14,9 @@ listed (unless `-d` names the directory itself), any other operand is
 listed as itself. With no operand the current directory (`.`) is
 listed.
 
-Entries are sorted by name (or by size, largest first, with `-S`;
-reversed with `-r`). When the output is a terminal they are laid out
+Entries are sorted by name (or by size, largest first, with `-S`; by
+timestamp, newest first, with `-t`; reversed with `-r`). When the
+output is a terminal they are laid out
 in columns sized to the terminal width, filled top-to-bottom (`-C`);
 when it is not (a pipe or a file), they are listed one name per line.
 `-x` fills the columns left-to-right instead, `-m` lists them
@@ -24,13 +26,15 @@ or `-A` is given; when entries are hidden, a note is emitted on the
 standard information stream (fd 3), never in the listing itself.
 
 The long format (`-l`) renders the type and permission bits, the
-owner and group, the size, then the name. Owner and group are numeric
-ids: resolving account names requires the capability-gated user
-database, which a listing must not demand, so the output matches the
-GNU tool's numeric fallback (`-n` renders identically). There is no
-link-count or timestamp column because the filesystem contract does
-not carry hard links or timestamps yet; the columns will appear when
-it does.
+owner and group, the size, a timestamp, then the name. Owner and
+group are numeric ids: resolving account names requires the
+capability-gated user database, which a listing must not demand, so
+the output matches the GNU tool's numeric fallback (`-n` renders
+identically). The timestamp is the modified time by default; `-c`,
+`-u`, and `--time` select which of the four timestamps is shown (and
+sorted by), and `--time-style` — or `--full-time` — sets its format.
+There is still no link-count column because the filesystem contract
+does not carry hard links yet; it will appear when it does.
 
 When more than one operand is given — and always under `-R` — each
 directory's listing is preceded by a `path:` header, and blocks are
@@ -38,6 +42,18 @@ separated by a blank line.
 
 ## OPTIONS
 
+- `-t` — sort by the timestamp shown, newest first.
+- `-c` — use the metadata-change time (ctime): with `-l` show it, and
+  with `-t` sort by it; without `-l`, sort by it.
+- `-u` — like `-c`, but the access time (atime).
+- `-i, --inode` — print each entry's node number.
+- `--time=WORD` — which timestamp to show and sort by: `atime`
+  (`access`, `use`), `ctime` (`status`), `mtime` (`modification`), or
+  `birth` (`creation`).
+- `--time-style=STYLE` — timestamp format: `locale` (the default),
+  `long-iso`, `full-iso`, or `iso`. A custom `+FORMAT` is not
+  supported.
+- `--full-time` — like `-l --time-style=full-iso`.
 - `-a, --all` — do not hide entries whose name begins with `.`.
 - `-A, --almost-all` — like `-a`, but never list `.` or `..`.
 - `-d, --directory` — list directory operands themselves, not their
