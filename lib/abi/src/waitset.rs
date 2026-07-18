@@ -134,6 +134,26 @@ pub enum WaitSourceKind {
     /// (`plans/STRESSTEST.md` ST3: the stress controller parks here to
     /// catch `^C` and tear its workers down).
     Signal = 6,
+    /// A path-backed open descriptor of the caller's **own** open table —
+    /// a regular file or a directory (its `id` is that descriptor number).
+    /// Adding the member is owner- and descriptor-checked against the
+    /// calling task's open table: the descriptor must be a path-backed
+    /// handle the caller has open — a resource- or pipe-backed descriptor,
+    /// an unopened number, or another task's descriptor all refuse with the
+    /// same oracle-free `NotFound` the other kinds use. Ready when the
+    /// node the descriptor names has *changed* since the member was added
+    /// or last reported ready: a write or truncate to a file, or a create,
+    /// remove, or rename under a directory. Readiness is **edge-triggered**
+    /// on the node's change generation — reporting the member ready advances
+    /// the member's observed generation to the current one, so the next
+    /// wait blocks until the node changes *again* (a followed file that
+    /// grows twice fires twice, and one that never changes never fires).
+    /// The kernel keys the notification on the node's stable
+    /// [`crate::FileId`], so a write wakes only the descriptors watching
+    /// *that* node, never every file watcher on every write (`tail -f`
+    /// parks here for its file's growth and its directory's rotation,
+    /// never a poll loop).
+    File = 7,
 }
 
 impl WaitSourceKind {
@@ -158,6 +178,7 @@ impl WaitSourceKind {
             4 => Ok(Self::Port),
             5 => Ok(Self::Stream),
             6 => Ok(Self::Signal),
+            7 => Ok(Self::File),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -186,10 +207,11 @@ mod tests {
             WaitSourceKind::Port,
             WaitSourceKind::Stream,
             WaitSourceKind::Signal,
+            WaitSourceKind::File,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(7), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(8), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -204,6 +226,7 @@ mod tests {
         assert_eq!(WaitSourceKind::Port.as_u32(), 4);
         assert_eq!(WaitSourceKind::Stream.as_u32(), 5);
         assert_eq!(WaitSourceKind::Signal.as_u32(), 6);
+        assert_eq!(WaitSourceKind::File.as_u32(), 7);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

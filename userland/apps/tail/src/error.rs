@@ -13,14 +13,9 @@ use tairix_abi::Errno;
 /// operand, exactly as the GNU tool does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TailError {
-    /// An unrecognised long option; carries the token. The follow family
-    /// (`--follow`, `--retry`, `--pid`, `--sleep-interval`,
-    /// `--max-unchanged-stats`) is deliberately absent — see the crate docs
-    /// — so it surfaces here.
+    /// An unrecognised long option; carries the token.
     UnknownLong(String),
-    /// An unrecognised short option; carries the flag character. `-f`/`-F`
-    /// are deliberately absent (the staged follow family), so they surface
-    /// here.
+    /// An unrecognised short option; carries the flag character.
     UnknownShort(char),
     /// The `-n`/`--lines` value was not a valid count; carries the text.
     InvalidLines(String),
@@ -33,6 +28,15 @@ pub enum TailError {
     /// `-c`/`-n` (or their long forms) were given without a value; carries
     /// the option's spelling for the diagnostic.
     MissingValue(&'static str),
+    /// `--pid` was given a value that is not a valid process id; carries the
+    /// text.
+    InvalidPid(String),
+    /// `--sleep-interval` was given a value that is not a valid non-negative
+    /// number of seconds; carries the text.
+    InvalidSleep(String),
+    /// `--max-unchanged-stats` was given a value that is not a valid count;
+    /// carries the text.
+    InvalidMaxUnchanged(String),
     /// Writing to standard output (or the diagnostic stream) failed.
     /// Carries the underlying [`Errno`].
     Output(Errno),
@@ -48,6 +52,14 @@ impl fmt::Display for TailError {
             Self::InvalidTrailing(flag) => write!(f, "invalid trailing option -- {flag}"),
             Self::MissingValue(option) => {
                 write!(f, "option '{option}' requires an argument")
+            }
+            Self::InvalidPid(text) => write!(f, "invalid PID: '{text}'"),
+            Self::InvalidSleep(text) => write!(f, "invalid number of seconds: '{text}'"),
+            Self::InvalidMaxUnchanged(text) => {
+                write!(
+                    f,
+                    "invalid maximum number of unchanged stats between opens: '{text}'"
+                )
             }
             Self::Output(errno) => write!(f, "write error: {errno}"),
         }

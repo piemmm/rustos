@@ -27,11 +27,14 @@ La forme historique en premier argument `tail -num` / `tail +num` (avec
 une lettre finale `b`/`c`/`l` facultative) est acceptée, comme dans
 l'outil GNU.
 
-Le mode suivi (`-f`, `-F`, `--follow`, `--retry`, `--pid`,
-`--sleep-interval`, `--max-unchanged-stats`) n'est pas encore
-disponible et est signalé comme une option inconnue : il nécessite une
-source de réveil sur changement de fichier que le système n'expose pas
-encore, et aucune attente active n'est fournie à sa place.
+Le mode suivi garde chaque fichier ouvert et affiche les nouvelles
+données à mesure qu'il grandit ; il se bloque jusqu'à ce que le
+fichier change — jamais d'attente active. `-f` suit le descripteur ;
+`-F` suit le nom et rouvre un fichier après rotation, et `--retry`
+attend qu'un nom apparaisse. `--pid=PID` arrête le suivi à la fin du
+processus (vérifié toutes les `--sleep-interval` secondes, 1 par
+défaut ; `--max-unchanged-stats` 5 par défaut). Une troncature est
+signalée et le fichier est suivi depuis son nouveau début.
 
 Quand du contenu en tête n'est pas affiché, un enregistrement
 consultatif est écrit sur le flux d'information standard (fd 3) ; il ne
@@ -50,6 +53,13 @@ suivant.
 - `-v, --verbose` — toujours afficher les en-têtes `==> file <==`.
 - `-z, --zero-terminated` — les lignes sont délimitées par NUL au lieu
   du saut de ligne.
+- `-f, --follow[=descriptor]` — suivre par descripteur, en affichant les données ajoutées.
+- `-F` — suivre par nom (`--follow=name --retry`) ; rouvrir un fichier après rotation.
+- `--follow=name` — suivre le nom plutôt que le descripteur.
+- `--retry` — continuer d'essayer d'ouvrir un fichier pas encore présent.
+- `--pid <PID>` — arrêter le suivi quand le processus `PID` meurt.
+- `--sleep-interval <N>` — secondes entre les vérifications (1 par défaut).
+- `--max-unchanged-stats <N>` — cycles sans changement avant que `-F` revérifie le nom (5 par défaut).
 - `-h, -?` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES

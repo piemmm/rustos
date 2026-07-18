@@ -34,19 +34,23 @@
 //! This is the seam discipline of the other userland crates (`head`'s
 //! `FileSource`/`Input`/`Output`, `ls`'s advisory `info`).
 //!
-//! # Follow mode is staged, not stubbed
+//! # Follow mode
 //!
-//! The GNU follow family (`-f`, `-F`, `--follow`, `--retry`, `--pid`,
-//! `--sleep-interval`, `--max-unchanged-stats`, and the obsolete trailing
-//! `f`) is deliberately **not** implemented. Following a growing file needs a
-//! kernel wake source that fires when a file changes, and the userland
-//! runtime has none today; polling in a tight loop is the busy-wait the
-//! charter forbids, and a fixed-interval re-poll needs a file-change
-//! notification the platform does not yet expose. Rather than ship a
-//! busy-poll or a silent no-op, the follow switches are reported as
-//! unrecognised options until that wake source exists (the same staging the
-//! `tee -i` and `mkdir -m` switches use). Everything else GNU `tail` does on
-//! the current floor is implemented in full.
+//! The full GNU follow family (`-f`, `-F`, `--follow[=descriptor|name]`,
+//! `--retry`, `--pid`, `--sleep-interval`, `--max-unchanged-stats`, and the
+//! obsolete trailing `f`) is implemented. A follow keeps each source open
+//! and re-emits appended data as the file grows, blocking off-CPU on the
+//! kernel's file-change wait source ([`WaitSourceKind::File`] over a
+//! wait-set) between emissions — never a busy poll. `-f` follows by
+//! descriptor (a rename keeps following the same node); `-F` follows by
+//! name (watching the parent directory so a log rotation reopens the new
+//! file), detects truncation (the file shrinking) and rotation, and
+//! `--retry`s a name that is not yet present. `--pid` ends the follow when
+//! the given process dies, re-checked each `--sleep-interval`. The follow
+//! engine reaches the outside world through the [`Watcher`] seam, so it too
+//! runs against an in-memory fake with no kernel.
+//!
+//! [`WaitSourceKind::File`]: tairix_abi::WaitSourceKind::File
 //!
 //! # Fail closed
 //!
@@ -88,9 +92,10 @@ extern crate alloc;
 pub mod client;
 pub mod command;
 pub mod error;
+pub mod follow;
 pub mod io;
 
 pub use client::{run, USAGE};
-pub use command::{parse, Command, Count, HeaderMode, Job, Source};
+pub use command::{parse, Command, Count, Follow, HeaderMode, Job, Source};
 pub use error::TailError;
-pub use io::{FileSource, Info, Input, Output};
+pub use io::{FileSource, Info, Input, Meta, Output, Watcher};

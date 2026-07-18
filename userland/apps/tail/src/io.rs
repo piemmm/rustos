@@ -6,7 +6,99 @@
 //! with no kernel, mirroring the seam design of the other userland tools
 //! (`head`'s `FileSource`/`Input`/`Output`, `ls`'s advisory `info`).
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, FileId};
+
+/// The identity and current length of a filesystem node, as the follow
+/// engine observes it.
+///
+/// The engine compares [`Meta`]s across time to tell the three things
+/// `tail -f`/`-F` must distinguish: the file *grew* (size increased, same
+/// [`FileId`]), was *truncated* (size shrank below the read offset), or was
+/// *rotated* (a different [`FileId`] now sits at the same name).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Meta {
+    /// The node's stable system-wide identity.
+    pub id: FileId,
+    /// The node's current length in bytes.
+    pub size: u64,
+}
+
+/// The seam through which `tail -f`/`-F` follows its sources: persistent
+/// open handles, a kernel-backed change-wait, and process liveness.
+///
+/// Handles are opaque `u64` ids so the whole seam is object-safe and the
+/// follow engine in [`crate::client`] runs against an in-memory fake with no
+/// kernel. The production implementation ([`crate::run`]) backs a handle
+/// with an owned descriptor and [`block`](Watcher::block) with a wait-set of
+/// [`WaitSourceKind::File`](tairix_abi::WaitSourceKind::File) members, so a
+/// follow parks off-CPU until a watched node changes — never a busy poll.
+pub trait Watcher {
+    /// Open `path` (a regular file) for reading, returning an opaque handle.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the open raises (e.g. [`Errno::NotFound`]).
+    fn open(&self, path: &str) -> Result<u64, Errno>;
+
+    /// Open `path` as a directory, returning an opaque handle. Used to watch
+    /// a followed name's parent directory so a rotation there wakes the
+    /// engine immediately.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the open raises.
+    fn open_dir(&self, path: &str) -> Result<u64, Errno>;
+
+    /// Release the descriptor behind `handle` (and stop watching it).
+    /// Idempotent against a stale handle.
+    fn close(&self, handle: u64);
+
+    /// Read up to `buf.len()` bytes of `handle` starting at `offset`,
+    /// returning the number read (`0` at end of file).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the read raises.
+    fn read_at(&self, handle: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// The identity and size of the node behind `handle`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the stat raises.
+    fn meta(&self, handle: u64) -> Result<Meta, Errno>;
+
+    /// The identity and size of the node currently at `path` (a fresh
+    /// by-name resolution, for detecting rotation and for `--retry`).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the stat raises (e.g. [`Errno::NotFound`] for a name
+    /// that does not currently resolve).
+    fn meta_path(&self, path: &str) -> Result<Meta, Errno>;
+
+    /// Begin watching `handle` for changes (idempotent). A subsequent
+    /// [`block`](Watcher::block) parks until this — or any other watched
+    /// handle — changes.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the watch registration raises.
+    fn watch(&self, handle: u64) -> Result<(), Errno>;
+
+    /// Stop watching `handle` (idempotent).
+    fn unwatch(&self, handle: u64);
+
+    /// Park until a watched handle may have changed, or `timeout_ns`
+    /// nanoseconds elapse (`u64::MAX` for no timeout). A spurious return is
+    /// harmless — the caller re-reads every source and re-parks.
+    fn block(&self, timeout_ns: u64);
+
+    /// Whether process `pid` is still observably alive. A process the caller
+    /// cannot observe reads as not alive (fail closed), which ends a
+    /// `--pid` follow rather than waiting forever on an invisible process.
+    fn pid_alive(&self, pid: u64) -> bool;
+}
 
 /// Reads a byte range of a named file.
 ///

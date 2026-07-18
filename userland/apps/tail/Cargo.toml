@@ -51,3 +51,9 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
 # own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The `--pid` follow option ends the follow when a process dies; the shared
+# System Information process-list client (the one `ps`/`top` use) supplies
+# the liveness check over the `sysinfod` IPC transport.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+    "program",
+] }

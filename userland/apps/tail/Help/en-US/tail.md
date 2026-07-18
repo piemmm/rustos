@@ -24,11 +24,17 @@ by powers of 1024; with `B` by powers of 1000; with `iB` by powers of
 The historical first-argument form `tail -num` / `tail +num` (with an
 optional trailing `b`/`c`/`l` letter) is accepted, as in the GNU tool.
 
-Follow mode (`-f`, `-F`, `--follow`, `--retry`, `--pid`,
-`--sleep-interval`, `--max-unchanged-stats`) is not yet available and
-is reported as an unrecognised option: it needs a file-change wake
-source the system does not expose yet, and a busy-poll is not shipped
-in its place.
+Follow mode keeps each file open and prints new data as the file grows.
+`-f` follows the open file by descriptor — a rename or move keeps
+following the same file. `-F` follows the *name*: when the file is
+rotated (renamed away and a new file put in its place) it reopens the
+new file, and `--retry` keeps trying a name that is not there yet. A
+follow blocks until the file actually changes — it never spins the CPU.
+`--pid=PID` ends the follow once process `PID` exits, checked every
+`--sleep-interval` (seconds, default 1). `--max-unchanged-stats=N`
+controls how many quiet cycles pass before `-F` re-checks the name for
+a rotation (default 5). A truncation (the file shrinking) is reported
+and the file is re-followed from its new start.
 
 When leading content is not shown, an advisory record is written to the
 standard information stream (fd 3); it never changes the output or the
@@ -45,6 +51,17 @@ and the run continues with the next file.
 - `-v, --verbose` — always print the `==> file <==` headers.
 - `-z, --zero-terminated` — lines are NUL-delimited instead of
   newline-delimited.
+- `-f, --follow[=descriptor]` — keep the file open and print data as it
+  is appended, following it by descriptor.
+- `-F` — follow by name (`--follow=name --retry`): reopen the file when
+  it is rotated.
+- `--follow=name` — follow the name rather than the descriptor.
+- `--retry` — keep trying to open a file that is not yet accessible.
+- `--pid <PID>` — with a follow, stop once process `PID` dies.
+- `--sleep-interval <N>` — seconds between `--pid`/rotation re-checks
+  (fractions allowed; default 1).
+- `--max-unchanged-stats <N>` — quiet cycles before `-F` re-checks the
+  name for a rotation (default 5).
 - `-h, -?` — show this command's own short help.
 
 ## EXAMPLES
@@ -54,6 +71,11 @@ and the run continues with the next file.
   under its header.
 - `tail -c 1K image` — print the last 1024 bytes of `image`.
 - `tail -n +5 notes` — print `notes` from its 5th line to the end.
+- `tail -f log.txt` — print the last 10 lines, then new lines as they
+  are written.
+- `tail -F /System/Logs/system` — follow the system log across
+  rotations.
+- `tail -f --pid 1234 out` — follow `out` until process 1234 exits.
 
 ## EXIT STATUS
 

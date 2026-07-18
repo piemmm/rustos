@@ -83,6 +83,7 @@ pub mod dispatch_slot;
 pub mod driver_store;
 pub mod filemap;
 pub mod fs;
+pub mod fswatch;
 pub mod groups;
 pub mod hwtree;
 pub mod init;

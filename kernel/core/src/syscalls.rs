@@ -82,7 +82,7 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
-    Errno, FdWire, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
+    Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
     OpenFlags, PortName, ProcId, ProcessStart, RandomFlags, ResourceLimit, Signal, SignalIntakeOp,
     SpawnAttach, StreamMode, SyscallNumber, Time64, UnlinkFlags, WaitFlags, WaitSetOp,
     WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
@@ -1869,6 +1869,14 @@ where
             // `signal_intake(Take)`, so a still-pending intake re-reports
             // on the next wait.
             WaitSourceKind::Signal => m.id == 0 && crate::procsignal::intake_ready(sched_task),
+            // The node the descriptor named at add time has changed since
+            // this member last observed it — an edge peek against the
+            // per-`FileId` change generation. The generation is keyed on the
+            // node's stable identity, not the descriptor, so a followed file
+            // that grows (or a watched directory whose entries change) makes
+            // exactly its watchers ready. The wait loop advances the observed
+            // generation when it reports the member (the edge consume).
+            WaitSourceKind::File => crate::fswatch::current_generation(m.file) != m.observed,
         }
     }
 
@@ -6082,6 +6090,10 @@ where
         Ok(crate::waitset::create(caller.task_id.0))
     }
 
+    // One dispatch owner-checks the resource each wait-set member names
+    // against the caller before recording it; splitting the per-kind checks
+    // would scatter this security-critical resolution across helpers.
+    #[allow(clippy::too_many_lines)]
     fn waitset_ctl(
         &self,
         caller: &CallerContext<'_>,
@@ -6097,6 +6109,9 @@ where
         let kind = WaitSourceKind::from_u32(kind)?;
         match op {
             WaitSetOp::Add => {
+                // For a File member, the node identity resolved from the
+                // caller's descriptor below; `NONE` for every other kind.
+                let mut member_file = FileId::NONE;
                 // Resolve and owner-check the *resource* the member names
                 // against the kernel-trusted caller before recording it: a
                 // wait-set may observe only resources the caller already holds
@@ -6200,13 +6215,76 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::File => {
+                        // A wait-set may observe a file only through the
+                        // caller's **own** open table: `id` must be a
+                        // descriptor number holding a path-backed handle (a
+                        // file or directory). A resource- or pipe-backed
+                        // descriptor, an unopened number, an id outside the
+                        // descriptor width, and another task's descriptor all
+                        // collapse to the same oracle-free `NotFound` the
+                        // other kinds use. The node's stable identity is
+                        // resolved under the caller's attested credentials
+                        // (the same per-inode read check `fs_stat` applies),
+                        // so a path the caller may not reach also refuses.
+                        let Ok(fd) = u32::try_from(id) else {
+                            return Err(Errno::NotFound);
+                        };
+                        let path = {
+                            let Some(handle) =
+                                self.aspaces.read().open_file_entry(caller.task_id, fd)
+                            else {
+                                return Err(Errno::NotFound);
+                            };
+                            match handle.path() {
+                                Some(path) => String::from(path),
+                                None => return Err(Errno::NotFound),
+                            }
+                        };
+                        let uid = caller.caps.owner().0;
+                        // A stat refusal (a raced removal, a permission
+                        // denial) collapses onto the same `NotFound`; a
+                        // backing with no distinct identity is not watchable.
+                        let Ok(stat) = self.filesystem.stat(uid, caller.caps.effective(), &path)
+                        else {
+                            return Err(Errno::NotFound);
+                        };
+                        if stat.id.is_none() {
+                            return Err(Errno::NotFound);
+                        }
+                        member_file = stat.id;
+                    }
                 }
+                // Record the member first; only on a successful, non-
+                // duplicate add do we register the file-change watch, so a
+                // rejected add never leaks a watch registration.
                 crate::waitset::add(
                     caller.task_id.0,
                     set,
-                    crate::waitset::Member { kind, id, token },
-                )
-                .map(|()| 0)
+                    crate::waitset::Member {
+                        kind,
+                        id,
+                        token,
+                        file: member_file,
+                        observed: 0,
+                    },
+                )?;
+                if kind == WaitSourceKind::File {
+                    // Registering the watch creates (or refcounts) the node's
+                    // change entry and returns its current generation as the
+                    // member's baseline, so a change after this point makes
+                    // the member ready and no earlier change is spuriously
+                    // reported.
+                    let baseline = crate::fswatch::watch_add(member_file);
+                    let _ = crate::waitset::advance_observed(
+                        caller.task_id.0,
+                        set,
+                        WaitSourceKind::File,
+                        id,
+                        baseline,
+                    );
+                }
+                Ok(0)
             }
             // Removing a member only edits the caller's own set; the registry
             // owner-checks the set and fails closed if the member is absent.
@@ -6214,6 +6292,10 @@ where
         }
     }
 
+    // The single park loop: register on every wake channel the set's members
+    // need, scan readiness, park, and consume the winner's edge in one place
+    // so the register-before-park lost-wake interlock is not split apart.
+    #[allow(clippy::too_many_lines)]
     fn waitset_wait(
         &self,
         caller: &CallerContext<'_>,
@@ -6265,6 +6347,16 @@ where
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        // A File member has no per-kind wait-queue: the fswatch registry
+        // unparks this task directly when the node it watches changes. Register
+        // this task against each watched node *before* the first scan so a
+        // change in the register/park window is not lost (the deadline is
+        // still enforced through the `IRQ_WAITQ` registration above).
+        for m in &members {
+            if m.kind == WaitSourceKind::File {
+                crate::fswatch::park_add(m.file, sched_task);
+            }
         }
 
         // `(kind, id, token)` of the ready member; `id`/`kind` drive the
@@ -6341,6 +6433,11 @@ where
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
         }
+        for m in &members {
+            if m.kind == WaitSourceKind::File {
+                crate::fswatch::park_remove(m.file, sched_task);
+            }
+        }
         // Re-point the one-shot at the nearest deadline any remaining waiter
         // on *any* timed wait-queue needs (or clear it) so a finished wait
         // leaves no stale arming and drops no other queue's pending wake.
@@ -6374,6 +6471,26 @@ where
             let _ = self
                 .irq
                 .try_wait_step(IrqHandle::from_raw(id), caller.task_id, now, u64::MAX);
+        }
+        // Consume a File winner's edge: advance the member's observed
+        // generation to the node's current one, so the next wait blocks until
+        // the node changes *again* rather than re-reporting the same change.
+        // The watcher always reads to end-of-file, so advancing past a change
+        // that raced in after the scan loses no data.
+        if kind == WaitSourceKind::File {
+            if let Some(m) = members
+                .iter()
+                .find(|m| m.kind == WaitSourceKind::File && m.id == id)
+            {
+                let generation = crate::fswatch::current_generation(m.file);
+                let _ = crate::waitset::advance_observed(
+                    caller.task_id.0,
+                    set,
+                    WaitSourceKind::File,
+                    id,
+                    generation,
+                );
+            }
         }
         Ok(0)
     }
@@ -22958,8 +23075,9 @@ mod tests {
             h.waitset_ctl(&ctx, set, 7, WS_KIND_IRQ, line, 0),
             Err(Errno::OutOfRange)
         );
+        // Kind 8 is past the last defined `WaitSourceKind` (`File` = 7).
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, 7, line, 0),
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, 8, line, 0),
             Err(Errno::OutOfRange)
         );
 
@@ -24521,6 +24639,7 @@ mod tests {
                     mode: 0o644,
                     uid: 1000,
                     gid: 1000,
+                    id: tairix_abi::FileId::NONE,
                 },
                 open_err: None,
                 log: std::sync::Mutex::new(Vec::new()),
@@ -25099,6 +25218,7 @@ mod tests {
             mode: 0o640,
             uid: 1000,
             gid: 1000,
+            id: tairix_abi::FileId::NONE,
         };
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(
@@ -25140,6 +25260,94 @@ mod tests {
             h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN),
             Err(Errno::NotFound)
         );
+    }
+
+    /// A `WaitSourceKind::File` member resolves an open path-backed
+    /// descriptor to its node identity, is not ready until that node's
+    /// change generation advances (`fswatch::note_change`), then reports the
+    /// member once and consumes the edge — the `tail -f` wake path.
+    #[test]
+    fn waitset_file_member_reports_a_node_change_and_consumes_the_edge() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let file_id = tairix_abi::FileId {
+            volume: [9u8; 16],
+            node: 42,
+        };
+        let mut mock = RecordingFs::new();
+        mock.stat = FileStat {
+            kind: FileKind::Regular,
+            size: 0,
+            allocated: 0,
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+            id: file_id,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let member = u64::from(fd);
+        let set = h.waitset_create(&ctx).expect("create");
+        let kind = WaitSourceKind::File.as_u32();
+        // Add the File member; a duplicate `(kind, fd)` is refused.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, kind, member, 0xF1),
+            Ok(0)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, kind, member, 0x99),
+            Err(Errno::AlreadyExists)
+        );
+        // No change yet: a zero-timeout wait expires.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1000), Err(Errno::TimedOut));
+        // The node changes: the member becomes ready and reports its token.
+        crate::fswatch::note_change(file_id);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1000), Ok(0));
+        let token = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; 8];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                u64::from_le_bytes(buf)
+            })
+            .expect("caller space");
+        assert_eq!(token, 0xF1, "the ready File member's token is reported");
+        // The edge was consumed: the next wait expires until a further change.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1000), Err(Errno::TimedOut));
+
+        // Removing the member drops the watch; teardown leaves no registry
+        // entry (the `fswatch` refcount returned to zero).
+        assert_eq!(h.waitset_ctl(&ctx, set, WS_OP_DEL, kind, member, 0), Ok(0));
+        assert_eq!(crate::fswatch::current_generation(file_id), 0);
+        assert_eq!(crate::waitset::release_owned_by(2), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
 
     /// `fs_chdir` re-authorises the target as a searchable directory through

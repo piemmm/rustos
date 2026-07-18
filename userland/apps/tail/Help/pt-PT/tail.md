@@ -24,11 +24,7 @@ letra sozinha multiplica por potências de 1024; com `B` por potências de
 A forma histórica em primeiro argumento `tail -num` / `tail +num` (com uma
 letra final `b`/`c`/`l` opcional) é aceite, tal como na ferramenta GNU.
 
-O modo de seguimento (`-f`, `-F`, `--follow`, `--retry`, `--pid`,
-`--sleep-interval`, `--max-unchanged-stats`) ainda não está disponível e
-é reportado como uma opção desconhecida: precisa de uma fonte de
-despertar em mudanças de ficheiro que o sistema ainda não expõe, e não é
-fornecida uma espera ativa no seu lugar.
+O modo de seguimento mantém cada ficheiro aberto e imprime os dados novos à medida que cresce; bloqueia até o ficheiro mudar — nunca com espera ativa. `-f` segue o descritor; `-F` segue o nome e reabre um ficheiro rodado, e `--retry` espera que um nome apareça. `--pid=PID` termina o seguimento quando o processo termina (verificado a cada `--sleep-interval` segundos, 1 por omissão; `--max-unchanged-stats` 5 por omissão). Um truncamento é reportado e o ficheiro seguido a partir do seu novo início.
 
 Quando conteúdo inicial não é mostrado, é escrito um registo informativo
 no fluxo de informação padrão (fd 3); nunca altera a saída nem o estado
@@ -45,6 +41,13 @@ e a execução continua com o ficheiro seguinte.
 - `-v, --verbose` — imprimir sempre os cabeçalhos `==> file <==`.
 - `-z, --zero-terminated` — as linhas são delimitadas por NUL em vez da
   mudança de linha.
+- `-f, --follow[=descriptor]` — seguir por descritor, imprimindo os dados acrescentados.
+- `-F` — seguir por nome (`--follow=name --retry`); reabrir um ficheiro rodado.
+- `--follow=name` — seguir o nome em vez do descritor.
+- `--retry` — continuar a tentar abrir um ficheiro ainda inexistente.
+- `--pid <PID>` — parar o seguimento quando o processo `PID` morre.
+- `--sleep-interval <N>` — segundos entre as verificações (1 por omissão).
+- `--max-unchanged-stats <N>` — ciclos parados antes de `-F` reverificar o nome (5 por omissão).
 - `-h, -?` — mostrar a ajuda breve deste comando.
 
 ## EXAMPLES
