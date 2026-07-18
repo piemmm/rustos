@@ -1075,7 +1075,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--group-directories-first] [--] [path...]
+ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN] [--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--group-directories-first] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -1112,6 +1112,9 @@ ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD] [--time-style=STYLE
 | `-c`             | select/sort by the metadata-change time (ctime)    |
 | `-u`             | select/sort by the access time (atime)             |
 | `-i`, `--inode`  | print each entry's node number                     |
+| `-B`, `--ignore-backups` | do not list names ending in `~` (every mode)   |
+| `-I`, `--ignore=PATTERN` | do not list names matching the glob (repeatable; every mode) |
+| `--hide=PATTERN` | like `--ignore`, but suppressed by `-a` / `-A`      |
 | `--time=WORD`    | timestamp shown/sorted: `atime`/`ctime`/`mtime`/`birth` |
 | `--time-style=STYLE` | `locale`/`long-iso`/`full-iso`/`iso` (no `+FORMAT`) |
 | `--full-time`    | like `-l --time-style=full-iso`                    |
@@ -1210,6 +1213,20 @@ so a fabricated count would be a lie; it will appear when links land
 (Stage E). `-i` prefixes each entry (short and long) with its stable
 node number, right-aligned.
 
+Entries can be filtered out by name, following GNU's `file_ignored`
+order. `-B` / `--ignore-backups` drops names ending in `~` in every
+dotfile mode (a direct suffix test — a backup is hidden even under `-a`,
+and no leading-`.` glob special case is needed). `-I` /
+`--ignore=PATTERN` (repeatable) drops names matching the glob in every
+mode, while `--hide=PATTERN` (repeatable) drops matches only when neither
+`-a` nor `-A` is given — an explicit "show hidden" wins over `--hide`, the
+GNU rule. Both patterns compile through the shared `lib/glob` matcher (in
+which `*` / `?` also match a leading `.`, a documented divergence from
+GNU's `fnmatch(FNM_PERIOD)`); a malformed pattern is a `LsError::Usage`
+error, never a filter that silently matches nothing. These filters are
+applied silently — unlike the default dotfile filter, an explicitly
+requested one emits no omission record.
+
 ### Advisory output (`stdinfo`, fd 3)
 
 When the default dotfile filter hides entries, `ls` emits the canonical
@@ -1252,7 +1269,9 @@ operand, the long format's mode string, owner/group columns (and their
 long-format date column, the `-t` time sort (newest first, ties by name)
 and its reverse, the `-c`/`-u`/`--time` time-field selection, the
 `locale`/`long-iso`/`full-iso`/`iso` `--time-style` renders (recent vs
-old), and the `-i` node-number column,
+old), the `-i` node-number column, the `-B`/`-I`/`--hide` name filters
+(backups dropped in every mode, `-I` applied under `-a`, `--hide`
+yielding to `-a`, and a malformed pattern as a usage error),
 the per-entry stat under a slash-terminated operand, single- and
 multi-operand layout (files first, then directory headers), recursive
 depth-first traversal with headers, reverse and size sorts, the comma

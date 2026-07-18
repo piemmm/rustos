@@ -4,9 +4,10 @@ ls — list directory contents
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -58,6 +59,13 @@ separated by a blank line.
   with `-t` sort by it; without `-l`, sort by it.
 - `-u` — like `-c`, but the access time (atime).
 - `-i, --inode` — print each entry's node number.
+- `-B, --ignore-backups` — do not list entries whose name ends with
+  `~`, in every mode (backups are hidden even under `-a`).
+- `-I, --ignore=PATTERN` — do not list entries matching the shell glob
+  `PATTERN` (repeatable); applies in every mode. `*` and `?` also match
+  a leading `.`.
+- `--hide=PATTERN` — like `--ignore`, but has no effect when `-a` or
+  `-A` is given.
 - `--time=WORD` — which timestamp to show and sort by: `atime`
   (`access`, `use`), `ctime` (`status`), `mtime` (`modification`), or
   `birth` (`creation`).

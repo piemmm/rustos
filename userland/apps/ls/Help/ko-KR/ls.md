@@ -4,9 +4,10 @@ ls — 디렉터리 내용 나열하기
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -34,6 +35,12 @@ ls — 디렉터리 내용 나열하기
 - `-c` — 메타데이터 변경 시간(ctime)을 씁니다. `-l`과 함께면 표시하고 `-t`와 함께면 그것으로 정렬하며, `-l`이 없으면 그것으로 정렬합니다.
 - `-u` — `-c`와 같지만 접근 시간(atime)입니다.
 - `-i, --inode` — 각 항목의 노드 번호를 인쇄합니다.
+- `-B, --ignore-backups` — 이름이 `~`로 끝나는 항목을 모든 모드에서
+  나열하지 않습니다(백업은 `-a`에서도 숨겨집니다).
+- `-I, --ignore=PATTERN` — 셸 glob `PATTERN`과 일치하는 항목을 나열하지
+  않습니다(반복 가능). 모든 모드에서 적용됩니다.
+- `--hide=PATTERN` — `--ignore`와 같지만 `-a` 또는 `-A`가 지정되면
+  효과가 없습니다.
 - `--time=WORD` — 표시하고 정렬에 쓸 시간 기록: `atime`(`access`, `use`), `ctime`(`status`), `mtime`(`modification`) 또는 `birth`(`creation`).
 - `--time-style=STYLE` — 시간 기록 형식: `locale`(기본), `long-iso`, `full-iso`, `iso`. 사용자 지정 `+FORMAT`은 지원하지 않습니다.
 - `--full-time` — `-l --time-style=full-iso`과 같습니다.

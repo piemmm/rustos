@@ -4,9 +4,10 @@ ls — rhestru cynnwys cyfeiriaduron
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -47,6 +48,12 @@ llinell wag.
   hynny.
 - `-u` — fel `-c`, ond yr amser cyrchu (atime).
 - `-i, --inode` — argraffu rhif nod pob cofnod.
+- `-B, --ignore-backups` — peidio â rhestru cofnodion sy'n gorffen â
+  `~`, ym mhob modd (cuddir copïau wrth gefn hyd yn oed gyda `-a`).
+- `-I, --ignore=PATTERN` — peidio â rhestru cofnodion sy'n cyfateb i'r
+  patrwm glob `PATTERN` (ailadroddadwy); yn berthnasol ym mhob modd.
+- `--hide=PATTERN` — fel `--ignore`, ond heb effaith pan roddir `-a`
+  neu `-A`.
 - `--time=WORD` — pa stamp amser i'w ddangos ac i drefnu yn ôl:
   `atime` (`access`, `use`), `ctime` (`status`), `mtime`
   (`modification`) neu `birth` (`creation`).

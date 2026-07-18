@@ -4,9 +4,10 @@ ls — 列出目录内容
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -30,6 +31,11 @@ ls — 列出目录内容
 - `-c` — 使用元数据更改时间（ctime）：带 `-l` 时显示它，带 `-t` 时据它排序；不带 `-l` 时据它排序。
 - `-u` — 类似 `-c`，但为访问时间（atime）。
 - `-i, --inode` — 打印每个条目的节点号。
+- `-B, --ignore-backups` — 不列出名称以 `~` 结尾的条目，在所有模式
+  下生效（即使使用 `-a` 也会隐藏备份）。
+- `-I, --ignore=PATTERN` — 不列出与 shell 通配符 `PATTERN` 匹配的条目
+  （可重复）；在所有模式下生效。
+- `--hide=PATTERN` — 与 `--ignore` 相同，但当指定 `-a` 或 `-A` 时无效。
 - `--time=WORD` — 要显示并据以排序的时间戳：`atime`（`access`、`use`）、`ctime`（`status`）、`mtime`（`modification`）或 `birth`（`creation`）。
 - `--time-style=STYLE` — 时间戳格式：`locale`（默认）、`long-iso`、`full-iso`、`iso`。不支持自定义 `+FORMAT`。
 - `--full-time` — 等同 `-l --time-style=full-iso`。

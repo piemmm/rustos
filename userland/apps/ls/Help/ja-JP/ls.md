@@ -4,9 +4,10 @@ ls — ディレクトリの内容を一覧する
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -35,6 +36,12 @@ ls — ディレクトリの内容を一覧する
 - `-c` — メタデータ変更時刻（ctime）を使う。`-l` では表示し、`-t` ではそれで並べ替える。`-l` がなければそれで並べ替える。
 - `-u` — `-c` と同様だが、アクセス時刻（atime）。
 - `-i, --inode` — 各項目のノード番号を印字する。
+- `-B, --ignore-backups` — 名前が `~` で終わる項目を、すべてのモードで
+  表示しない（バックアップは `-a` でも隠される）。
+- `-I, --ignore=PATTERN` — シェルグロブ `PATTERN` に一致する項目を表示
+  しない（繰り返し可）。すべてのモードで適用される。
+- `--hide=PATTERN` — `--ignore` と同様だが、`-a` または `-A` が指定
+  された場合は効果がない。
 - `--time=WORD` — どのタイムスタンプを表示・並べ替えに使うか。`atime`（`access`、`use`）、`ctime`（`status`）、`mtime`（`modification`）、または `birth`（`creation`）。
 - `--time-style=STYLE` — タイムスタンプの書式。`locale`（既定）、`long-iso`、`full-iso`、`iso`。独自の `+FORMAT` は非対応。
 - `--full-time` — `-l --time-style=full-iso` と同じ。

@@ -15,7 +15,7 @@ use tairix_help::{own_short_help, HelpSource};
 use tairix_vt::str_width;
 
 use crate::command::{
-    Command, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField, TimeStyle,
+    Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField, TimeStyle,
 };
 use crate::error::LsError;
 use crate::io::{Entry, Listing, Metadata, Output};
@@ -57,7 +57,11 @@ pub fn run(
 ) -> Result<(), LsError> {
     match command {
         Command::Help => short_help(locale, help, out),
-        Command::List { options, paths } => list(options, &paths, now, fs, out),
+        Command::List {
+            options,
+            filters,
+            paths,
+        } => list(options, &filters, &paths, now, fs, out),
     }
 }
 
@@ -89,6 +93,7 @@ fn short_help(
 /// end on the advisory stream — never in the listing itself.
 fn list(
     options: Options,
+    filters: &Filters,
     paths: &[String],
     now: Time64,
     fs: &dyn Listing,
@@ -136,15 +141,22 @@ fn list(
     let mut pending = dirs;
     while let Some(path) = pending.pop() {
         let mut entries = fs.read_dir(&path).map_err(LsError::Read)?;
+        // Two filtering stages, in GNU's order. First the default dotfile
+        // rule, whose omissions are counted for the advisory record (a
+        // surprising, non-requested hiding). Then the explicit `-B`/`-I`/
+        // `--hide` name filters, which the user asked for and so are applied
+        // silently — never advertised as an omission.
+        let before_dotfiles = entries.len();
         match options.hidden {
-            Hidden::Skip => {
-                let before = entries.len();
-                entries.retain(|entry| !entry.name.starts_with('.'));
-                hidden_omitted += (before - entries.len()) as u64;
-            }
+            Hidden::Skip => entries.retain(|entry| !entry.name.starts_with('.')),
             Hidden::AlmostAll => entries.retain(|entry| entry.name != "." && entry.name != ".."),
             Hidden::All => {}
         }
+        if options.hidden == Hidden::Skip {
+            hidden_omitted += (before_dotfiles - entries.len()) as u64;
+        }
+        let show_hidden = options.hidden != Hidden::Skip;
+        entries.retain(|entry| !filters.suppresses(&entry.name, show_hidden));
         let mut rows = rows_for(&path, &entries, options, fs)?;
         sort_rows(&mut rows, options);
         open_block(&mut buf, &mut first, headered.then_some(path.as_str()));
@@ -1311,7 +1323,8 @@ mod version {
 mod tests {
     use super::{run, USAGE};
     use crate::command::{
-        Command, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField, TimeStyle,
+        Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField,
+        TimeStyle,
     };
     use crate::error::LsError;
     use crate::io::{Entry, Listing, Metadata, Output};
@@ -1321,6 +1334,7 @@ mod tests {
     use tairix_abi::fs::FileKind;
     use tairix_abi::time::Time64;
     use tairix_abi::{Errno, NodeTimes};
+    use tairix_glob::Pattern;
     use tairix_help::{HelpSource, SourceError};
 
     /// An in-memory tree: a stat table keyed by path plus, for directories,
@@ -1634,8 +1648,13 @@ mod tests {
     }
 
     fn list_with(options: Options, paths: &[&str]) -> Command {
+        listing_with(options, Filters::default(), paths)
+    }
+
+    fn listing_with(options: Options, filters: Filters, paths: &[&str]) -> Command {
         Command::List {
             options,
+            filters,
             paths: paths.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
         }
     }
@@ -1762,6 +1781,114 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(run_ls(list(false, false, &["a.txt"]), &fs, &out), Ok(()));
         assert_eq!(out.text(), "a.txt\n");
+    }
+
+    #[test]
+    fn ignore_backups_hides_tilde_names_and_emits_no_record() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b~", FileKind::Regular, 0o644, 0)
+            .entry(".", "c", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        let filters = Filters {
+            ignore_backups: true,
+            ..Filters::default()
+        };
+        assert_eq!(
+            run_ls(listing_with(Options::DEFAULT, filters, &["."]), &fs, &out),
+            Ok(())
+        );
+        assert_eq!(out.text(), "a\nc\n");
+        // An explicitly requested filter is not advertised as an omission.
+        assert!(out.records().is_empty());
+    }
+
+    #[test]
+    fn ignore_backups_hides_backups_even_among_hidden_entries() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a", FileKind::Regular, 0o644, 0)
+            .entry(".", "b~", FileKind::Regular, 0o644, 0)
+            .entry(".", ".x~", FileKind::Regular, 0o644, 0)
+            .entry(".", ".y", FileKind::Regular, 0o644, 0);
+        let out = Recorder::new();
+        let options = Options {
+            hidden: Hidden::All,
+            ..Options::DEFAULT
+        };
+        let filters = Filters {
+            ignore_backups: true,
+            ..Filters::default()
+        };
+        assert_eq!(
+            run_ls(listing_with(options, filters, &["."]), &fs, &out),
+            Ok(())
+        );
+        // `-a` shows `.y`, but both backups (`b~` and the hidden `.x~`) are
+        // gone: `-B` applies in every dotfile mode.
+        assert_eq!(out.text(), ".y\na\n");
+    }
+
+    #[test]
+    fn ignore_pattern_suppresses_matches_in_every_mode() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", ".hidden", FileKind::Regular, 0o644, 0)
+            .entry(".", "keep.txt", FileKind::Regular, 0o644, 0)
+            .entry(".", "drop.o", FileKind::Regular, 0o644, 0)
+            .entry(".", "also.o", FileKind::Regular, 0o644, 0);
+        let options = Options {
+            hidden: Hidden::All,
+            ..Options::DEFAULT
+        };
+        let filters = Filters {
+            ignore: alloc::vec![Pattern::new("*.o").expect("valid glob")],
+            ..Filters::default()
+        };
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(listing_with(options, filters, &["."]), &fs, &out),
+            Ok(())
+        );
+        // `-I` applies under `-a` too: the object files are gone, the
+        // dotfile stays.
+        assert_eq!(out.text(), ".hidden\nkeep.txt\n");
+    }
+
+    #[test]
+    fn hide_pattern_yields_to_show_hidden() {
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "keep", FileKind::Regular, 0o644, 0)
+            .entry(".", "skip.tmp", FileKind::Regular, 0o644, 0);
+        let filters = Filters {
+            hide: alloc::vec![Pattern::new("*.tmp").expect("valid glob")],
+            ..Filters::default()
+        };
+        // Without `-a`, `--hide` suppresses the match.
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                listing_with(Options::DEFAULT, filters.clone(), &["."]),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.text(), "keep\n");
+
+        // With `-a`, `--hide` has no effect (the GNU rule).
+        let out = Recorder::new();
+        let options = Options {
+            hidden: Hidden::All,
+            ..Options::DEFAULT
+        };
+        assert_eq!(
+            run_ls(listing_with(options, filters, &["."]), &fs, &out),
+            Ok(())
+        );
+        assert_eq!(out.text(), "keep\nskip.tmp\n");
     }
 
     #[test]

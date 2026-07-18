@@ -4,9 +4,10 @@ ls — הצגת תוכן ספריות
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -39,6 +40,11 @@ ls — הצגת תוכן ספריות
   `-t` למיין לפיה; בלי `-l` למיין לפיה.
 - `-u` — כמו `-c`, אך זמן הגישה (atime).
 - `-i, --inode` — הדפסת מספר הצומת של כל רשומה.
+- `-B, --ignore-backups` — לא להציג רשומות ששמן מסתיים ב-`~`, בכל
+  המצבים (גיבויים מוסתרים גם עם `-a`).
+- `-I, --ignore=PATTERN` — לא להציג רשומות התואמות לתבנית
+  glob `PATTERN` (ניתן לחזור עליו); חל בכל המצבים.
+- `--hide=PATTERN` — כמו `--ignore`, אך ללא השפעה כאשר ניתן `-a` או `-A`.
 - `--time=WORD` — איזו חותמת זמן להציג ולמיין לפיה: `atime`
   (`access`, `use`), `ctime` (`status`), `mtime` (`modification`) או
   `birth` (`creation`).

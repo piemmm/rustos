@@ -4,9 +4,10 @@ ls — سرد محتويات الأدلة
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -39,6 +40,11 @@ ls — سرد محتويات الأدلة
   ومع `-t` يُفرز به؛ وبدون `-l` يُفرز به.
 - `-u` — مثل `-c`، لكن وقت الوصول (atime).
 - `-i, --inode` — طباعة رقم العقدة لكل مدخل.
+- `-B, --ignore-backups` — عدم إدراج المدخلات التي ينتهي اسمها بـ `~`،
+  في كل الأوضاع (تُخفى النسخ الاحتياطية حتى مع `-a`).
+- `-I, --ignore=PATTERN` — عدم إدراج المدخلات المطابقة لنمط
+  glob `PATTERN` (قابل للتكرار)؛ يُطبّق في كل الأوضاع.
+- `--hide=PATTERN` — مثل `--ignore`، لكن بلا أثر عند تحديد `-a` أو `-A`.
 - `--time=WORD` — أي طابع زمني يُعرض ويُفرز به: `atime` (`access`،
   `use`)، `ctime` (`status`)، `mtime` (`modification`) أو `birth`
   (`creation`).

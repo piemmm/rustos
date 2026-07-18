@@ -4,9 +4,10 @@ ls — Verzeichnisinhalte auflisten
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -49,6 +50,12 @@ werden durch eine Leerzeile getrennt.
   anzeigen und mit `-t` danach sortieren; ohne `-l` danach sortieren.
 - `-u` — wie `-c`, aber die Zugriffszeit (atime).
 - `-i, --inode` — die Knotennummer jedes Eintrags ausgeben.
+- `-B, --ignore-backups` — Einträge, deren Name mit `~` endet, nicht
+  auflisten, in jedem Modus (Sicherungen sind auch unter `-a` verborgen).
+- `-I, --ignore=PATTERN` — Einträge, die auf das Shell-Glob `PATTERN`
+  passen, nicht auflisten (wiederholbar); gilt in jedem Modus.
+- `--hide=PATTERN` — wie `--ignore`, aber ohne Wirkung, wenn `-a` oder
+  `-A` angegeben ist.
 - `--time=WORD` — welcher Zeitstempel angezeigt und wonach sortiert
   wird: `atime` (`access`, `use`), `ctime` (`status`), `mtime`
   (`modification`) oder `birth` (`creation`).

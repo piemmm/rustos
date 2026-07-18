@@ -4,9 +4,10 @@ ls — вивести вміст каталогів
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -42,6 +43,12 @@ ls — вивести вміст каталогів
 - `-c` — використовувати час зміни метаданих (ctime): з `-l` показувати його, а з `-t` сортувати за ним; без `-l` сортувати за ним.
 - `-u` — як `-c`, але час доступу (atime).
 - `-i, --inode` — виводити номер вузла кожного запису.
+- `-B, --ignore-backups` — не показувати записи, назва яких закінчується
+  на `~`, у будь-якому режимі (резервні копії приховані навіть із `-a`).
+- `-I, --ignore=PATTERN` — не показувати записи, що відповідають шаблону
+  glob `PATTERN` (можна повторювати); діє в будь-якому режимі.
+- `--hide=PATTERN` — як `--ignore`, але не діє, коли задано `-a` або
+  `-A`.
 - `--time=WORD` — яку часову позначку показувати й за якою сортувати: `atime` (`access`, `use`), `ctime` (`status`), `mtime` (`modification`) або `birth` (`creation`).
 - `--time-style=STYLE` — формат часової позначки: `locale` (типово), `long-iso`, `full-iso`, `iso`. Власний `+FORMAT` не підтримується.
 - `--full-time` — те саме, що `-l --time-style=full-iso`.

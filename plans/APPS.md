@@ -758,7 +758,7 @@ deliberately staged behind the floor work below).
 
 - **Stage A — GNU switches for the existing tools (done).** On the current
   floor: `cat` `-A -b -e -E -n -s -t -T -u -v` (bundled short flags, GNU
-  `^`/`M-` notation); `ls` `-a -A -b -C -d -F -f -g -h -l -m -N -n -o -p -Q -q -r -R -s -S -U -v -w -x -X -1 --sort --group-directories-first --quoting-style --show-control-chars`
+  `^`/`M-` notation); `ls` `-a -A -b -B -C -d -F -f -g -h -I -l -m -N -n -o -p -Q -q -r -R -s -S -U -v -w -x -X -1 --sort --group-directories-first --quoting-style --show-control-chars --ignore --hide`
   (`-h` takes the GNU human-readable meaning — short help is `-?`/`--help` —
   and the invented `--long` synonym is retired; long format shows numeric
   owner/group, the GNU numeric fallback, with no link-count column (the
@@ -780,6 +780,13 @@ deliberately staged behind the floor work below).
   refused, fail closed, like `--time-style=+FORMAT`), defaulting to
   `shell-escape` at an attested terminal and `literal` otherwise, with
   `-q`/`--show-control-chars` toggling the `?` control-char masking);
+  name filters follow GNU's `file_ignored` order — `-B`/`--ignore-backups`
+  drops names ending in `~` in every mode (a direct suffix test, not a
+  glob), `-I`/`--ignore=PATTERN` (repeatable) drops matches in every
+  mode, and `--hide=PATTERN` (repeatable) drops matches only when neither
+  `-a` nor `-A` is given, all compiled through the shared, fail-closed
+  `lib/glob` matcher (a malformed pattern is a usage error) and applied
+  silently — an explicit filter is never advertised on the omission stream;
   `rm` `-d -f -i -I -r -v
   --preserve-root`/`--no-preserve-root` (prompt seam, GNU `removed …`
   wording); `cp` `-f -i -n -r -t -T -v`; `mv` `-f -i -n -t -T -v`

@@ -4,9 +4,10 @@ ls — listar o conteúdo de diretórios
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -45,6 +46,12 @@ separados por uma linha em branco.
   mostrá-la e com `-t` ordenar por ela; sem `-l`, ordenar por ela.
 - `-u` — como `-c`, mas a hora de acesso (atime).
 - `-i, --inode` — imprimir o número de nó de cada entrada.
+- `-B, --ignore-backups` — não listar as entradas cujo nome termina em
+  `~`, em todos os modos (as cópias são ocultadas mesmo com `-a`).
+- `-I, --ignore=PATTERN` — não listar as entradas que correspondam ao
+  glob `PATTERN` (repetível); aplica-se em todos os modos.
+- `--hide=PATTERN` — como `--ignore`, mas sem efeito quando `-a` ou `-A`
+  é indicado.
 - `--time=WORD` — que data mostrar e por qual ordenar: `atime`
   (`access`, `use`), `ctime` (`status`), `mtime` (`modification`) ou
   `birth` (`creation`).

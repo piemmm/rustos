@@ -4,9 +4,10 @@ ls — elencare il contenuto delle directory
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -49,6 +50,12 @@ blocchi sono separati da una riga vuota.
   essa.
 - `-u` — come `-c`, ma l'ora di accesso (atime).
 - `-i, --inode` — stampare il numero di nodo di ogni voce.
+- `-B, --ignore-backups` — non elencare le voci il cui nome termina con
+  `~`, in ogni modalità (i backup sono nascosti anche con `-a`).
+- `-I, --ignore=PATTERN` — non elencare le voci che corrispondono al
+  glob `PATTERN` (ripetibile); si applica in ogni modalità.
+- `--hide=PATTERN` — come `--ignore`, ma senza effetto quando è indicato
+  `-a` o `-A`.
 - `--time=WORD` — quale marca mostrare e per quale ordinare: `atime`
   (`access`, `use`), `ctime` (`status`), `mtime` (`modification`) o
   `birth` (`creation`).

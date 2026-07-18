@@ -47,6 +47,10 @@ tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # date-rendering consumer uses (login clock, fstree stamp), never a second
 # copy of the day/time arithmetic (§2.2).
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# The one filename-glob matcher: the `-I`/`--ignore` and `--hide` patterns
+# compile through the shared, bounded, fail-closed matcher the shell's
+# filename generation uses — never a second glob engine (§2.2).
+tairix-glob = { path = "../../../lib/glob", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the `fs_*` file

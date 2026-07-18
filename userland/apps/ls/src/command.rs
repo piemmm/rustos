@@ -3,6 +3,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_glob::Pattern;
+
 use crate::error::LsError;
 
 /// Which entries a directory listing includes.
@@ -190,6 +192,51 @@ pub struct Options {
     pub group_directories_first: bool,
 }
 
+/// The name filters of one `ls` listing: the `-B` / `-I` / `--hide`
+/// switches that suppress directory entries by name.
+///
+/// These are kept apart from [`Options`] on purpose. [`Options`] is a small
+/// `Copy` value threaded through the whole render/sort/format pipeline;
+/// these filters own a `Vec` of compiled patterns and are consulted in
+/// exactly one place — the per-directory filtering step in the listing
+/// engine. Folding the owned patterns into [`Options`] would strip its
+/// `Copy`-ness and force every render helper to borrow a `Vec` it never
+/// reads, so the filters travel beside [`Options`], not inside it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Filters {
+    /// Do not list entries whose name ends with `~` (`-B` /
+    /// `--ignore-backups`), in every dotfile mode — a backup is filtered
+    /// even when `-a` shows hidden entries. A direct suffix test, not a
+    /// glob, so it needs no leading-`.` special case.
+    pub ignore_backups: bool,
+    /// Do not list entries whose name matches any of these glob patterns
+    /// (`-I PATTERN` / `--ignore=PATTERN`, repeatable). Applied in every
+    /// dotfile mode.
+    pub ignore: Vec<Pattern>,
+    /// Do not list entries whose name matches any of these glob patterns
+    /// (`--hide=PATTERN`, repeatable), **unless** `-a` or `-A` is given —
+    /// the GNU rule that `--hide` yields to an explicit "show hidden".
+    pub hide: Vec<Pattern>,
+}
+
+impl Filters {
+    /// Whether `name` is suppressed by these filters, given whether the
+    /// listing is showing hidden entries (`show_hidden` is true under `-a`
+    /// or `-A`). Mirrors GNU's `file_ignored`: `-B` and `-I` patterns apply
+    /// always; `--hide` patterns apply only when hidden entries are
+    /// otherwise shown by default (i.e. not under `-a` / `-A`).
+    #[must_use]
+    pub fn suppresses(&self, name: &str, show_hidden: bool) -> bool {
+        if self.ignore_backups && name.ends_with('~') {
+            return true;
+        }
+        if self.ignore.iter().any(|pattern| pattern.matches(name)) {
+            return true;
+        }
+        !show_hidden && self.hide.iter().any(|pattern| pattern.matches(name))
+    }
+}
+
 impl Options {
     /// The defaults of a bare `ls`.
     pub const DEFAULT: Self = Self {
@@ -222,6 +269,8 @@ pub enum Command {
     List {
         /// The listing options.
         options: Options,
+        /// The name filters (`-B` / `-I` / `--hide`) suppressing entries.
+        filters: Filters,
         /// The paths to list, in order. Never empty: an empty command line
         /// yields the single path `.`.
         paths: Vec<String>,
@@ -236,9 +285,9 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is the GNU `ls` surface,
-/// `ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-/// `[--time-style=STYLE] [--sort=WORD] [--full-time]`
-/// `[--group-directories-first] [--] [path...]`:
+/// `ls [-aABCcdFfghiIlmnopQrRsStUuvXx1] [-w cols] [-I PATTERN]`
+/// `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+/// `[--full-time] [--group-directories-first] [--] [path...]`:
 ///
 /// * `-a` / `--all` — do not hide entries whose name begins with `.`.
 /// * `-A` / `--almost-all` — like `-a`, but never list `.` or `..`.
@@ -294,6 +343,16 @@ pub enum Command {
 ///   (`access` / `use`), `ctime` (`status`), `mtime` (`modification`), or
 ///   `birth` (`creation`).
 /// * `-i` / `--inode` — print each entry's stable node number.
+/// * `-B` / `--ignore-backups` — do not list entries whose name ends with
+///   `~`, in every dotfile mode (a backup is hidden even under `-a`).
+/// * `-I PATTERN` / `--ignore=PATTERN` — do not list entries matching the
+///   glob `PATTERN` (repeatable); applied in every dotfile mode.
+/// * `--hide=PATTERN` — like `--ignore`, but has no effect when `-a` or
+///   `-A` is given (the GNU rule that an explicit "show hidden" wins).
+///   `-I` and `--hide` patterns are the shared `tairix_glob` matcher, in
+///   which `*` / `?` also match a leading `.` (a documented divergence
+///   from GNU's `fnmatch(FNM_PERIOD)`); a malformed pattern is a usage
+///   error (fail closed).
 /// * `--time-style=STYLE` — how the long-format timestamp is rendered:
 ///   `locale` (the default), `long-iso`, `full-iso`, or `iso`. A custom
 ///   `+FORMAT` style is refused (fail closed; a documented divergence).
@@ -365,6 +424,7 @@ pub fn parse(args: &[&str]) -> Result<Command, LsError> {
     }
     Ok(Command::List {
         options: state.options,
+        filters: state.filters,
         paths,
     })
 }
@@ -377,6 +437,7 @@ pub fn parse(args: &[&str]) -> Result<Command, LsError> {
 /// flags that may appear in any order.
 struct ParseState {
     options: Options,
+    filters: Filters,
     explicit_sort: Option<Sort>,
     time_selected: bool,
 }
@@ -385,6 +446,7 @@ impl Default for ParseState {
     fn default() -> Self {
         Self {
             options: Options::DEFAULT,
+            filters: Filters::default(),
             explicit_sort: None,
             time_selected: false,
         }
@@ -442,6 +504,21 @@ fn apply_long<'a>(
         "reverse" => options.reverse = true,
         "recursive" => options.recursive = true,
         "inode" => options.inode = true,
+        "ignore-backups" => state.filters.ignore_backups = true,
+        "ignore" => {
+            state
+                .filters
+                .ignore
+                .push(Pattern::new(long_value(inline, args)?).map_err(|_| LsError::Usage)?);
+            return Ok(false);
+        }
+        "hide" => {
+            state
+                .filters
+                .hide
+                .push(Pattern::new(long_value(inline, args)?).map_err(|_| LsError::Usage)?);
+            return Ok(false);
+        }
         "full-time" => {
             options.long = true;
             options.time_style = TimeStyle::FullIso;
@@ -539,6 +616,7 @@ fn apply_short<'a>(
                 state.time_selected = true;
             }
             'i' => options.inode = true,
+            'B' => state.filters.ignore_backups = true,
             // `-w` takes a value: the rest of the cluster, or the next
             // argument when it ends the cluster.
             'w' => {
@@ -548,6 +626,21 @@ fn apply_short<'a>(
                     rest
                 };
                 options.width = Some(parse_width(raw)?);
+                break;
+            }
+            // `-I` takes a value like `-w`: the rest of the cluster, or the
+            // next argument when it ends the cluster. A malformed pattern is
+            // a usage error, never a silently ignored filter (fail closed).
+            'I' => {
+                let raw = if rest.is_empty() {
+                    *args.next().ok_or(LsError::Usage)?
+                } else {
+                    rest
+                };
+                state
+                    .filters
+                    .ignore
+                    .push(Pattern::new(raw).map_err(|_| LsError::Usage)?);
                 break;
             }
             'x' => options.format = Some(Format::Across),
@@ -634,16 +727,22 @@ fn parse_quoting_style(raw: &str) -> Result<QuotingStyle, LsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, Command, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField,
+        parse, Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField,
         TimeStyle,
     };
     use crate::error::LsError;
     use alloc::string::String;
     use alloc::vec::Vec;
+    use tairix_glob::Pattern;
 
     fn list(options: Options, paths: &[&str]) -> Command {
+        listing(options, Filters::default(), paths)
+    }
+
+    fn listing(options: Options, filters: Filters, paths: &[&str]) -> Command {
         Command::List {
             options,
+            filters,
             paths: paths.iter().map(|p| String::from(*p)).collect::<Vec<_>>(),
         }
     }
@@ -1380,6 +1479,72 @@ mod tests {
     }
 
     #[test]
+    fn ignore_backups_parses_in_both_spellings() {
+        let filters = Filters {
+            ignore_backups: true,
+            ..Filters::default()
+        };
+        assert_eq!(
+            parse(&["-B"]),
+            Ok(listing(Options::DEFAULT, filters.clone(), &["."]))
+        );
+        assert_eq!(
+            parse(&["--ignore-backups"]),
+            Ok(listing(Options::DEFAULT, filters, &["."]))
+        );
+    }
+
+    #[test]
+    fn ignore_patterns_collect_in_order_from_both_spellings() {
+        let filters = Filters {
+            ignore: alloc::vec![
+                Pattern::new("*.o").expect("valid glob"),
+                Pattern::new("tmp*").expect("valid glob"),
+            ],
+            ..Filters::default()
+        };
+        assert_eq!(
+            parse(&["-I", "*.o", "--ignore=tmp*"]),
+            Ok(listing(Options::DEFAULT, filters, &["."]))
+        );
+    }
+
+    #[test]
+    fn ignore_takes_its_value_from_the_cluster_tail() {
+        let filters = Filters {
+            ignore: alloc::vec![Pattern::new("*.tmp").expect("valid glob")],
+            ..Filters::default()
+        };
+        assert_eq!(
+            parse(&["-I*.tmp"]),
+            Ok(listing(Options::DEFAULT, filters, &["."]))
+        );
+    }
+
+    #[test]
+    fn hide_patterns_are_separate_from_ignore() {
+        let filters = Filters {
+            hide: alloc::vec![Pattern::new("*~").expect("valid glob")],
+            ..Filters::default()
+        };
+        assert_eq!(
+            parse(&["--hide=*~"]),
+            Ok(listing(Options::DEFAULT, filters, &["."]))
+        );
+    }
+
+    #[test]
+    fn a_malformed_or_missing_ignore_pattern_is_a_usage_error() {
+        // A malformed glob fails closed rather than becoming a filter that
+        // silently matches nothing.
+        assert_eq!(parse(&["-I", "["]), Err(LsError::Usage));
+        assert_eq!(parse(&["--hide=[a-"]), Err(LsError::Usage));
+        // A value-taking option with no value fails closed.
+        assert_eq!(parse(&["-I"]), Err(LsError::Usage));
+        assert_eq!(parse(&["--ignore"]), Err(LsError::Usage));
+    }
+
+    #[test]
     fn paths_preserve_order() {
         assert_eq!(
             parse(&["a", "b", "c"]),
@@ -1457,6 +1622,9 @@ mod tests {
                 "`-c`",
                 "`-u`",
                 "`-i, --inode`",
+                "`-B, --ignore-backups`",
+                "`-I, --ignore=PATTERN`",
+                "`--hide=PATTERN`",
                 "`--time=WORD`",
                 "`--time-style=STYLE`",
                 "`--full-time`",

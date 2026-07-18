@@ -4,9 +4,10 @@ ls — lister le contenu des répertoires
 
 ## SYNOPSIS
 
-`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
-`[--full-time] [--group-directories-first] [--] [path...]`
+`ls [-aABbCcdFfghiIlmNnopQqrRsStUuvXx1] [-w cols] [-I PATTERN]`
+`[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
+`[--quoting-style=STYLE] [--full-time] [--group-directories-first]`
+`[--] [path...]`
 
 ## DESCRIPTION
 
@@ -47,6 +48,13 @@ blocs sont séparés par une ligne vide.
   elle.
 - `-u` — comme `-c`, mais l'heure d'accès (atime).
 - `-i, --inode` — afficher le numéro de nœud de chaque entrée.
+- `-B, --ignore-backups` — ne pas lister les entrées dont le nom se
+  termine par `~`, dans tous les modes (les sauvegardes sont masquées
+  même avec `-a`).
+- `-I, --ignore=PATTERN` — ne pas lister les entrées correspondant au
+  motif glob `PATTERN` (répétable) ; s'applique dans tous les modes.
+- `--hide=PATTERN` — comme `--ignore`, mais sans effet lorsque `-a` ou
+  `-A` est fourni.
 - `--time=WORD` — quel horodatage afficher et selon lequel trier :
   `atime` (`access`, `use`), `ctime` (`status`), `mtime`
   (`modification`) ou `birth` (`creation`).
