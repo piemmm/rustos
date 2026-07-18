@@ -188,6 +188,10 @@ impl Block for MemBlock {
             critical_warning: false,
         }))
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Low byte of `x`, without a narrowing `as` cast.

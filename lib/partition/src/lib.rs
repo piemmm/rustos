@@ -336,6 +336,13 @@ impl<B: Block> Block for PartitionBlock<B> {
         self.inner.write_blocks(inner_lba, buf)
     }
 
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // A device cache flush is whole-device, not window-scoped: forward
+        // it straight to the inner device so a filesystem confined to this
+        // partition still makes its writes durable.
+        self.inner.flush()
+    }
+
     fn read_blocks_with_class(
         &mut self,
         lba: u64,

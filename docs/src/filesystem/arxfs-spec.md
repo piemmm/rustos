@@ -661,6 +661,20 @@ After power loss, mount selects the highest valid committed root. A partial
 transaction is ignored. Full `arxfs check` is not required for ordinary crash
 recovery.
 
+**Durability vs. consistency.** Crash *consistency* — the guarantee above —
+holds without any device flush: a torn root never authenticates (its checksum
+and inline commit record are validated together), so the ring falls back to
+the previous committed generation, and a superblock slot published before its
+root reached the medium simply selects an unverifiable root that is skipped.
+*Durability* — a caller's write surviving power loss on demand — is a separate
+guarantee delivered by `fs_sync`: the two `flush` steps above, and the
+filesystem's `flush`, force the backing device's **volatile write cache** to
+stable media through the block driver's `Block::flush` (virtio-blk
+`VIRTIO_BLK_T_FLUSH`, SCSI `SYNCHRONIZE CACHE`), which returns only once the
+device confirms the commit and fails closed otherwise. A completed write is
+therefore consistent immediately but not proven durable until a flush lands;
+`fs_sync` is that barrier.
+
 Discard may never destroy data reachable from retained roots.
 
 ---

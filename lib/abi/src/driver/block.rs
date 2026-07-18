@@ -186,6 +186,49 @@ pub trait Block {
     /// [`DriverHandle`]: crate::driver::DriverHandle
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError>;
 
+    /// Force every write this device has already accepted out of any
+    /// volatile write cache and onto stable media, returning only once
+    /// the device reports the data durable.
+    ///
+    /// This is the durability primitive behind `fs_sync`: a filesystem's
+    /// own sync forces its metadata and data to the device with the
+    /// ordinary write path, then calls this to make those bytes survive
+    /// power loss. Writing "through" to the device is **not** enough — a
+    /// completed [`Self::write_blocks`] only means the device *accepted*
+    /// the write; the bytes may still sit in the device's volatile cache
+    /// until a flush commits them (virtio-blk `VIRTIO_BLK_T_FLUSH`, SCSI
+    /// `SYNCHRONIZE CACHE`, `NVMe` `FLUSH`).
+    ///
+    /// The method is **required**, with no default, precisely so no
+    /// implementation can silently omit durability: every device declares
+    /// its behaviour explicitly.
+    ///
+    /// * A **leaf device with no volatile write cache** (a RAM disk, a
+    ///   device whose write path already blocks until the medium reports
+    ///   the write programmed) implements this as `Ok(())` — there is
+    ///   nothing left to commit — and says so in its doc comment.
+    /// * A **device with a volatile cache** issues its hardware
+    ///   cache-flush command and fails closed if the device cannot
+    ///   confirm the commit.
+    /// * A **wrapper** ([`Self`] over another `Block`: a partition window,
+    ///   a block cache, a shared handle) MUST first make its own buffered
+    ///   writes reach the inner device, then forward to the inner
+    ///   [`Self::flush`]. A wrapper that returns `Ok(())` without
+    ///   forwarding is a durability bug, not an optimisation.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the device cannot confirm the
+    ///   cache is committed to stable media. The caller fails the sync
+    ///   closed rather than reporting durability it cannot vouch for.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn flush(&mut self) -> Result<(), DriverError>;
+
     /// Read `buf.len() / block_size` blocks starting at `lba`,
     /// declaring the payload's sensitivity class.
     ///
@@ -356,6 +399,10 @@ impl<B: Block + ?Sized> Block for &mut B {
         (**self).write_blocks(lba, buf)
     }
 
+    fn flush(&mut self) -> Result<(), DriverError> {
+        (**self).flush()
+    }
+
     fn read_blocks_with_class(
         &mut self,
         lba: u64,
@@ -434,6 +481,12 @@ mod tests {
             };
             let start = lba_usize * bs;
             self.store[start..start + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+
+        // A RAM-backed test device has no volatile cache: a completed
+        // write is already durable, so flush has nothing to commit.
+        fn flush(&mut self) -> Result<(), DriverError> {
             Ok(())
         }
     }
@@ -581,6 +634,9 @@ mod tests {
             }
             Ok(())
         }
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -684,6 +740,9 @@ mod tests {
             }
             Ok(())
         }
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -731,6 +790,9 @@ mod tests {
         }
         fn device_health(&self) -> Result<DeviceHealth, DriverError> {
             Ok(DeviceHealth::Available(self.snapshot))
+        }
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
         }
     }
 
@@ -785,5 +847,69 @@ mod tests {
             dev.read_blocks(100, &mut buf),
             Err(DriverError::LengthOutOfRange)
         );
+    }
+
+    /// A device that counts flushes and can fail closed, so the `&mut B`
+    /// forwarding is observably a real forward and not a swallowed no-op.
+    struct FlushCountingBlock {
+        geo: BlockGeometry,
+        flushes: usize,
+        fail: bool,
+    }
+
+    impl Block for FlushCountingBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(self.geo)
+        }
+        fn read_blocks(&mut self, _lba: u64, _buf: &mut [u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn flush(&mut self) -> Result<(), DriverError> {
+            self.flushes += 1;
+            if self.fail {
+                Err(DriverError::DeviceFault)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn mut_ref_forwards_flush_to_the_inner_device() {
+        let mut dev = FlushCountingBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 4,
+            },
+            flushes: 0,
+            fail: false,
+        };
+        {
+            // `&mut &mut _` selects the `impl Block for &mut B` forwarding
+            // impl, so this exercises the wrapper, not the leaf directly.
+            let mut window = &mut dev;
+            assert!(Block::flush(&mut window).is_ok());
+        }
+        assert_eq!(dev.flushes, 1);
+    }
+
+    #[test]
+    fn mut_ref_forwards_a_flush_failure_fail_closed() {
+        let mut dev = FlushCountingBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 4,
+            },
+            flushes: 0,
+            fail: true,
+        };
+        {
+            let mut window = &mut dev;
+            assert_eq!(Block::flush(&mut window), Err(DriverError::DeviceFault));
+        }
+        assert_eq!(dev.flushes, 1);
     }
 }

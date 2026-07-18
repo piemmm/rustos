@@ -63,6 +63,10 @@ impl Block for MemDisk {
         self.data[at..end].copy_from_slice(data);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 struct MockHost {

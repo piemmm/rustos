@@ -96,6 +96,10 @@ impl Block for MemBlock {
         self.store[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Low byte of `x`, without a narrowing `as` cast.

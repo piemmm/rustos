@@ -165,6 +165,10 @@ impl Block for RamBlock {
         self.data[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// The served device: image bytes plus a flush counter.

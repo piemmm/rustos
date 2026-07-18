@@ -248,6 +248,10 @@ mod tests {
             self.store[start..end].copy_from_slice(buf);
             Ok(())
         }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
     }
 
     fn mount() -> Fat32<VecBlock> {

@@ -269,6 +269,23 @@ operations with no meaning for a resource. Because `fs_read` / `fs_write` /
 dispatcher into the handler (a path-backed descriptor still requires
 `CAP_FS_ACCESS`), so reading `sys:random` never demands filesystem access.
 
+`fs_sync` (no. 53) is the **durability barrier** a program calls before it
+treats its data as safe against power loss. It is a real guarantee, not a
+cosmetic no-op: the mounted volume pushes any buffered metadata and data to
+its block device and then forces the device's own **volatile write cache** to
+stable media (virtio-blk `VIRTIO_BLK_T_FLUSH`, SCSI `SYNCHRONIZE CACHE`),
+returning only once the device confirms the commit. A completed `fs_write`
+alone does *not* imply durability — the device may hold the bytes in a
+volatile cache until a flush lands — which is why `fs_sync` exists as a
+distinct call. It fails closed (`Io`/`DeviceFault`) on a device that cannot
+confirm the commit rather than reporting durability it cannot vouch for. The
+device-flush primitive is one definition on the `Block` driver trait
+(`Block::flush`), forwarded through every block wrapper (partition window,
+block cache, shared handle, the removable-volume journal) so a filesystem
+confined to a partition still reaches the real device. The fd only proves the
+caller holds a live handle on the mounted volume; the flush itself is
+volume-wide, so a resource-backed descriptor fails closed (`OutOfRange`).
+
 ### Capability matrix
 
 The dispatcher consults `kernel/sec`'s `TaskCapabilities::has` against

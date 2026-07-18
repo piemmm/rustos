@@ -573,18 +573,6 @@ fn driver_error(err: Errno) -> DriverError {
     }
 }
 
-/// Commit-to-medium seam the block service drives for
-/// [`tairix_abi::blkio::BlkOp::Flush`]; the [`Block`] trait carries no
-/// flush, so the per-LUN handle adds it explicitly.
-pub trait Flush {
-    /// Commit every completed write to the medium.
-    ///
-    /// # Errors
-    ///
-    /// A [`DriverError`] from the device.
-    fn flush(&mut self) -> Result<(), DriverError>;
-}
-
 /// One logical unit exposed as a [`Block`] device: the per-LUN view the
 /// block service serves (`plans/DEVICES.md` D2 target shape).
 pub struct LunBlock<'a, T: ScsiTransport> {
@@ -711,10 +699,11 @@ impl<T: ScsiTransport> Block for LunBlock<'_, T> {
         }
         result
     }
-}
 
-impl<T: ScsiTransport> Flush for LunBlock<'_, T> {
     fn flush(&mut self) -> Result<(), DriverError> {
+        // Commit the device's volatile write cache via SCSI SYNCHRONIZE
+        // CACHE (a no-op on a UFI unit that has none). The block service
+        // drives this for `BlkOp::Flush`.
         self.device
             .synchronize_cache(self.lun)
             .map_err(driver_error)

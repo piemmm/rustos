@@ -296,14 +296,6 @@ impl BlkClient {
     }
 }
 
-impl crate::fs::retained::FlushBlock for BlkClient {
-    /// The blkio flush operation — SCSI `SYNCHRONIZE CACHE` on the USB
-    /// mass-storage path — as the journal wrapper's commit hook.
-    fn flush(&mut self) -> Result<(), DriverError> {
-        BlkClient::flush(self)
-    }
-}
-
 impl Block for BlkClient {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
@@ -358,6 +350,13 @@ impl Block for BlkClient {
             lba += u64::from(blocks);
         }
         Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // The durability path: issue the blkio flush (SCSI `SYNCHRONIZE
+        // CACHE` on the USB mass-storage path) so the device commits its
+        // volatile cache to the medium.
+        BlkClient::flush(self)
     }
 }
 

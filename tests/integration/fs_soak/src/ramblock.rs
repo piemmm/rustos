@@ -72,6 +72,10 @@ impl Block for RamBlock {
         self.store[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

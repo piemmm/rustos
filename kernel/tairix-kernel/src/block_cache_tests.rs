@@ -83,6 +83,7 @@ struct Store {
     data: Vec<u8>,
     reads: u64,
     writes: u64,
+    flushes: u64,
     discards: Vec<(u64, u64)>,
     fail_writes: bool,
 }
@@ -102,6 +103,7 @@ impl MemDisk {
                 .collect(),
             reads: 0,
             writes: 0,
+            flushes: 0,
             discards: Vec::new(),
             fail_writes: false,
         }));
@@ -176,6 +178,11 @@ impl Block for MemDisk {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         Ok(DeviceHealth::Unavailable)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.store.borrow_mut().flushes += 1;
+        Ok(())
     }
 }
 
@@ -533,10 +540,27 @@ fn a_geometry_fault_refuses_to_wrap_the_device() {
         fn write_blocks(&mut self, _: u64, _: &[u8]) -> Result<(), DriverError> {
             Err(DriverError::Unsupported)
         }
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
     }
     assert_eq!(
         BlockCache::new(FaultyGeometry, budget(), unpressured(), sink()).err(),
         Some(DriverError::DeviceFault)
+    );
+}
+
+#[test]
+fn flush_is_forwarded_to_the_device() {
+    // The cache is write-through, so a flush is a pure durability barrier:
+    // it must reach the device, never be swallowed by the wrapper.
+    let (store, mut cache) = cached();
+    assert_eq!(store.borrow().flushes, 0);
+    cache.flush().expect("flush");
+    assert_eq!(
+        store.borrow().flushes,
+        1,
+        "the block cache forwards flush to the backing device"
     );
 }
 

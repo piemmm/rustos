@@ -80,6 +80,10 @@ impl Block for VecBlock {
         self.data[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// A real, well-formed MBR disk image (sector 0 + slack) as a seed.

@@ -109,6 +109,10 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 mod wire {
     pub const VIRTIO_BLK_T_IN: u32 = 0;
     pub const VIRTIO_BLK_T_OUT: u32 = 1;
+    /// Cache-flush request type (virtio 1.1 §5.2.6, requires
+    /// [`VIRTIO_BLK_F_FLUSH`]): commit the device's volatile write cache
+    /// to the medium. Carries a header and status only — no data segment.
+    pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
     /// Discard request type (virtio 1.1 §5.2.6, requires
     /// [`VIRTIO_BLK_F_DISCARD`]).
     pub const VIRTIO_BLK_T_DISCARD: u32 = 11;
@@ -130,6 +134,11 @@ mod wire {
     /// extended-feature negotiation is deferred to Stage 5.
     pub const SECTOR_SIZE: u32 = 512;
 
+    /// `VIRTIO_BLK_F_FLUSH` feature bit (virtio 1.1 §5.2.3): the device
+    /// has a volatile write cache and honours the flush command. When it
+    /// is *not* negotiated the device is write-through — a completed write
+    /// is already on the medium — so a flush is unnecessary.
+    pub const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
     /// `VIRTIO_BLK_F_DISCARD` feature bit (virtio 1.1 §5.2.3): the
     /// device supports the discard command.
     pub const VIRTIO_BLK_F_DISCARD: u64 = 1 << 13;
@@ -164,6 +173,10 @@ pub struct VirtioBlk<'h, T: Transport> {
     /// Whether `VIRTIO_BLK_F_DISCARD` was negotiated at `open` and the
     /// device's discard limits read from its config window.
     discard: DiscardLimits,
+    /// Whether `VIRTIO_BLK_F_FLUSH` was negotiated at `open`. When it was
+    /// not, the device is write-through and [`Self::flush`] has nothing to
+    /// commit.
+    flush_supported: bool,
     /// Persistent request staging carved once at open and reused by
     /// every request: the `virtio_blk_req` header, the data buffer
     /// (sized to [`wire::MAX_TRANSFER_LEN`], the chunk unit), and the
@@ -212,11 +225,14 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         // honour.
         let device_features = transport.device_features();
         let discard_offered = device_features & wire::VIRTIO_BLK_F_DISCARD != 0;
-        let driver_features = if discard_offered {
-            wire::VIRTIO_BLK_F_DISCARD
-        } else {
-            0
-        };
+        let flush_offered = device_features & wire::VIRTIO_BLK_F_FLUSH != 0;
+        let mut driver_features = 0;
+        if discard_offered {
+            driver_features |= wire::VIRTIO_BLK_F_DISCARD;
+        }
+        if flush_offered {
+            driver_features |= wire::VIRTIO_BLK_F_FLUSH;
+        }
         transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
         transport.set_status(status);
@@ -270,6 +286,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             block_size: wire::SECTOR_SIZE,
             block_count: capacity_sectors,
             discard,
+            flush_supported: flush_offered,
             header: Some(header),
             data: Some(data),
             status: Some(status),
@@ -429,25 +446,51 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
                 direction: Direction::DeviceWrite,
             },
         ];
+        self.submit_and_wait(&segments)?;
+        // Decode status first, and copy device-written data back to the
+        // caller only on success. The data staging is a persistent
+        // buffer reused across requests, so copying on a faulted or
+        // unsupported request could hand the caller stale bytes left by
+        // an earlier request — fail closed and copy nothing instead.
+        let status_byte = status_bb.full_region_mut()[0];
+        match status_byte {
+            wire::STATUS_OK => {
+                if let Payload::Read(dst) = payload {
+                    // The device wrote `payload_len` bytes into the
+                    // staging through its phys-mapped slice;
+                    // `full_region_mut` gives us a CPU view of them.
+                    dst.copy_from_slice(&data_bb.full_region_mut()[..payload_len]);
+                }
+                Ok(())
+            }
+            wire::STATUS_IOERR => Err(DriverError::DeviceFault),
+            _ => Err(DriverError::Unsupported),
+        }
+    }
+
+    /// Publish `segments` on the requestq, kick the device, and wait for
+    /// the single outstanding completion, acknowledging the device
+    /// interrupt before returning.
+    ///
+    /// A virtio device signals a finished request by posting a used-ring
+    /// entry and raising its single interrupt line; the host notifier
+    /// (`notify_wait`) parks the calling task until that line fires (the
+    /// mock host drains the queue and returns). A wake is only *advisory*:
+    /// the device's used-`idx` DMA write and its interrupt can be observed
+    /// in either order, and the one shared line can wake us for an
+    /// unrelated queue, so a single empty `poll_used` is never proof that
+    /// no completion is coming. Re-scan the ring after every wake and wait
+    /// again only when it is genuinely empty — the request is serialised
+    /// by the owner's lock, so exactly one completion is outstanding and
+    /// the loop ends when it lands. `MAX_COMPLETION_WAKES` bounds a
+    /// pathological wake-storm (a stuck shared line delivering wakes with
+    /// no matching completion) so the wait fails closed with `DeviceFault`
+    /// rather than looping forever.
+    fn submit_and_wait(&mut self, segments: &[ChainSegment]) -> Result<(), DriverError> {
         self.queue
-            .add_chain(&segments)
+            .add_chain(segments)
             .map_err(VirtioError::as_driver_error)?;
         self.queue.kick(&mut self.transport);
-        // Observe the completion. A virtio device signals a finished
-        // request by posting a used-ring entry and raising its single
-        // interrupt line; the host notifier (`notify_wait`) parks the
-        // calling task until that line fires (the mock host drains the
-        // queue and returns). A wake is only *advisory*: the device's
-        // used-`idx` DMA write and its interrupt can be observed in either
-        // order, and the one shared line can wake us for an unrelated
-        // queue, so a single empty `poll_used` is never proof that no
-        // completion is coming. Re-scan the ring after every wake and wait
-        // again only when it is genuinely empty — the request is serialised
-        // by the owner's lock, so exactly one completion is outstanding and
-        // the loop ends when it lands. `MAX_COMPLETION_WAKES` bounds a
-        // pathological wake-storm (a stuck shared line delivering wakes
-        // with no matching completion) so the wait fails closed with
-        // `DeviceFault` rather than looping forever.
         let mut outcome: Result<(), DriverError> = Err(DriverError::DeviceFault);
         for _ in 0..MAX_COMPLETION_WAKES {
             match self.queue.poll_used() {
@@ -466,30 +509,58 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         }
         // Acknowledge the device's interrupt now that its completion has
         // been observed (or the wait gave up), so it de-asserts its line
-        // before the next request re-arms the kernel IRQ (otherwise a stale
-        // edge re-delivers and the following request mis-pairs its
+        // before the next request re-arms the kernel IRQ (otherwise a
+        // stale edge re-delivers and the following request mis-pairs its
         // completion). Done regardless of the outcome — a faulted or
         // abandoned request must still leave the device's line clear. A
         // no-op on transports that need no device-side ack (MSI-X PCI, the
         // mock).
         self.transport.ack_interrupt();
-        outcome?;
-        // Decode status first, and copy device-written data back to the
-        // caller only on success. The data staging is a persistent
-        // buffer reused across requests, so copying on a faulted or
-        // unsupported request could hand the caller stale bytes left by
-        // an earlier request — fail closed and copy nothing instead.
-        let status_byte = status_bb.full_region_mut()[0];
-        match status_byte {
-            wire::STATUS_OK => {
-                if let Payload::Read(dst) = payload {
-                    // The device wrote `payload_len` bytes into the
-                    // staging through its phys-mapped slice;
-                    // `full_region_mut` gives us a CPU view of them.
-                    dst.copy_from_slice(&data_bb.full_region_mut()[..payload_len]);
-                }
-                Ok(())
-            }
+        outcome
+    }
+
+    /// Issue a `VIRTIO_BLK_T_FLUSH` request, committing the device's
+    /// volatile write cache to the medium. The flush request carries a
+    /// header and a status byte only — no data segment — so it reuses the
+    /// persistent header/status staging and leaves the data slab in place.
+    fn run_flush(&mut self) -> Result<(), DriverError> {
+        let (Some(header), Some(status)) = (self.header.take(), self.status.take()) else {
+            return Err(DriverError::DeviceFault);
+        };
+        let mut header_bb = BounceBuffer::new(header, BufferClass::NonSensitive);
+        let mut status_bb = BounceBuffer::new(status, BufferClass::NonSensitive);
+        let result = self.exchange_flush(&mut header_bb, &mut status_bb);
+        self.header = Some(header_bb.into_slab());
+        self.status = Some(status_bb.into_slab());
+        result
+    }
+
+    /// Stage the flush header, publish the two-descriptor chain, wait, and
+    /// decode the status. Split out so [`Self::run_flush`] always puts the
+    /// staging slabs back, mirroring [`Self::exchange`].
+    fn exchange_flush(
+        &mut self,
+        header_bb: &mut BounceBuffer,
+        status_bb: &mut BounceBuffer,
+    ) -> Result<(), DriverError> {
+        header_bb
+            .stage(&Self::build_header(wire::VIRTIO_BLK_T_FLUSH, 0))
+            .map_err(|()| DriverError::BufferTooSmall)?;
+        let segments = [
+            ChainSegment {
+                phys: header_bb.phys(),
+                len: u32::try_from(wire::HEADER_LEN).unwrap_or(0),
+                direction: Direction::DeviceRead,
+            },
+            ChainSegment {
+                phys: status_bb.phys(),
+                len: u32::try_from(wire::STATUS_LEN).unwrap_or(0),
+                direction: Direction::DeviceWrite,
+            },
+        ];
+        self.submit_and_wait(&segments)?;
+        match status_bb.full_region_mut()[0] {
+            wire::STATUS_OK => Ok(()),
             wire::STATUS_IOERR => Err(DriverError::DeviceFault),
             _ => Err(DriverError::Unsupported),
         }
@@ -532,6 +603,16 @@ impl<T: Transport> Block for VirtioBlk<'_, T> {
     }
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
         self.write_blocks_with_class(lba, buf, BufferClass::NonSensitive)
+    }
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // If the device did not negotiate `VIRTIO_BLK_F_FLUSH` it has no
+        // volatile write cache — a completed write is already on the
+        // medium — so there is nothing to commit. Otherwise issue the
+        // hardware flush and fail closed if the device cannot confirm it.
+        if !self.flush_supported {
+            return Ok(());
+        }
+        self.run_flush()
     }
     fn read_blocks_with_class(
         &mut self,

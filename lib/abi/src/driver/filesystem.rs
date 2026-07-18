@@ -479,14 +479,29 @@ pub trait FilesystemWrite {
         dst_name: &[u8],
     ) -> Result<(), DriverError>;
 
-    /// Flush any buffered metadata or data to the backing device.
+    /// Make every write the filesystem has accepted durable on stable
+    /// media, returning only once the backing device confirms it.
     ///
-    /// A driver that writes through to the block device synchronously may
-    /// implement this as a no-op returning `Ok(())`.
+    /// This is the durability contract behind the `fs_sync` syscall. A
+    /// driver must (1) push any metadata or data it still buffers to the
+    /// block device, and (2) force the device's own volatile write cache
+    /// to the medium by calling the backing device's
+    /// [`Block::flush`](super::block::Block::flush). Writing "through" to
+    /// the device synchronously is **not** sufficient: a completed block
+    /// write only means the device *accepted* the bytes, which may still
+    /// sit in its volatile cache until a flush commits them. A driver that
+    /// returns `Ok(())` without forcing the device cache reports
+    /// durability it has not delivered.
+    ///
+    /// A driver with no backing device (an in-RAM filesystem) or a
+    /// read-only mount that never wrote has nothing to commit and returns
+    /// `Ok(())` truthfully.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
+    /// * [`DriverError::DeviceFault`] if the device cannot confirm the
+    ///   data is on stable media; the caller fails the sync closed rather
+    ///   than reporting durability it cannot vouch for.
     fn flush(&mut self) -> Result<(), DriverError>;
 }
 

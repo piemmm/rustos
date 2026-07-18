@@ -175,6 +175,10 @@ impl Block for MemDisk {
         self.store[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Provision the root volume's `root.unlock` descriptor and the volume key

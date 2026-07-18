@@ -247,6 +247,10 @@ mod tests {
             self.0[start..end].copy_from_slice(buf);
             Ok(())
         }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
     }
 
     /// Format a small volume laid out like the shipped root: the

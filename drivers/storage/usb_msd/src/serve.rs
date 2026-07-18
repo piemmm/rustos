@@ -21,7 +21,7 @@ use tairix_abi::blkio::{
 use tairix_abi::driver::block::Block;
 use tairix_abi::{DriverError, Errno};
 
-use crate::scsi::{Flush, MAX_LUNS};
+use crate::scsi::MAX_LUNS;
 
 /// Reserved id range the per-LUN block-service endpoints are bound in
 /// (`b"MSD\0"`-tagged, mirroring the HCD's URB endpoint range shape).
@@ -67,7 +67,7 @@ pub fn blk_block_for(urb_endpoint: u64) -> Option<u64> {
 /// Framing a completion cannot fail (the buffer is exactly the sized
 /// destination); a defensive `unwrap_or(0)` keeps this panic-free on any
 /// path rather than relying on that invariant.
-pub fn serve_request<B: Block + Flush>(
+pub fn serve_request<B: Block>(
     device: &mut B,
     read_only: bool,
     request: &[u8],
@@ -82,7 +82,7 @@ pub fn serve_request<B: Block + Flush>(
 }
 
 /// The request body behind [`serve_request`]: decode, validate, execute.
-fn serve_decoded<B: Block + Flush>(
+fn serve_decoded<B: Block>(
     device: &mut B,
     read_only: bool,
     request: &[u8],
@@ -235,9 +235,7 @@ mod tests {
             self.data[start..end].copy_from_slice(buf);
             Ok(())
         }
-    }
 
-    impl Flush for MemBlock {
         fn flush(&mut self) -> Result<(), DriverError> {
             self.flushes += 1;
             Ok(())

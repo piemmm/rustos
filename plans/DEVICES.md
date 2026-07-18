@@ -684,7 +684,7 @@ first, then the force-unmount exit, then the verified re-insert replay.
   write (the medium's state is unknown — the set may no longer be the
   complete delta), drops discarded ranges, and past a commit watermark
   (hard/16) issues the device flush (SCSI `SYNCHRONIZE CACHE`, via the
-  new `FlushBlock` seam `BlkClient` implements) and empties the journal
+  `Block::flush` durability primitive `BlkClient` implements) and empties the journal
   on success — the quiesce-time flush, and what keeps a long copy
   committing steadily instead of ballooning to the budget. A committed
   flush also resets a lost journal: nothing is uncommitted after it.

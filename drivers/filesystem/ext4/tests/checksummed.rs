@@ -54,6 +54,9 @@ impl Block for MemBlock {
         self.data[start..end].copy_from_slice(buf);
         Ok(())
     }
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 // --- Independent reference checksums (NOT the driver's). ---

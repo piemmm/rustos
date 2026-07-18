@@ -148,6 +148,10 @@ impl Block for VecBlock {
         self.store[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Parse an absolute path, panicking if it is malformed.

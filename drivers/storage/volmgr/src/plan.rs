@@ -223,6 +223,10 @@ mod tests {
         fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
             Err(DriverError::Unsupported)
         }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
     }
 
     /// A structurally valid FAT32 head written at byte `offset` of `image`.

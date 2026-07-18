@@ -236,6 +236,10 @@ impl Block for VecBlock {
         self.store[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Build the arxfs image described in the module docs by driving the

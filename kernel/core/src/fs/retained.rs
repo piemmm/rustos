@@ -24,7 +24,7 @@
 //! * a **successful discard** drops the covered blocks — the filesystem
 //!   has deallocated them, so their content no longer needs replaying;
 //! * once the journal holds more than its **commit watermark**, the write
-//!   path issues an opportunistic device flush ([`FlushBlock::flush`])
+//!   path issues an opportunistic device flush ([`Block::flush`])
 //!   and, on success, empties the journal — this is the quiesce-time
 //!   `SYNCHRONIZE CACHE` the removal plan requires, and it is what keeps
 //!   the uncommitted set small on a long copy instead of letting it grow
@@ -77,24 +77,6 @@ const ENTRY_OVERHEAD: usize = 96;
 /// 256 KiB), so a long sequential copy flushes steadily instead of
 /// ballooning to the budget and degrading retention.
 const COMMIT_DIVISOR: usize = 16;
-
-/// A [`Block`] device that can additionally commit its volatile write
-/// cache to the medium.
-///
-/// The [`Block`] contract itself carries no flush (the in-kernel boot
-/// devices need none); the kernel blkio client serves one
-/// (`BlkOp::Flush` — SCSI `SYNCHRONIZE CACHE` on the USB mass-storage
-/// path), and [`JournaledBlock`] needs it to commit the journal at the
-/// watermark.
-pub trait FlushBlock: Block {
-    /// Commit every completed write to the medium.
-    ///
-    /// # Errors
-    ///
-    /// The device's own error surface; the caller treats a failure as
-    /// "the uncommitted set is still uncommitted", never as data loss.
-    fn flush(&mut self) -> Result<(), DriverError>;
-}
 
 /// The dual-acceptance shadow of a volume's mutation-evidence window
 /// (`plans/DEVICES.md` D4c): the on-medium region any foreign mutation of
@@ -438,13 +420,13 @@ impl Drop for RetainedWrites {
 
 /// A [`Block`] wrapper that keeps a shared [`RetainedWrites`] journal
 /// truthful for the device it forwards to. See the module docs.
-pub struct JournaledBlock<B: FlushBlock> {
+pub struct JournaledBlock<B: Block> {
     device: B,
     journal: Arc<SpinLock<RetainedWrites>>,
     pressure: &'static MemoryPressure,
 }
 
-impl<B: FlushBlock> JournaledBlock<B> {
+impl<B: Block> JournaledBlock<B> {
     /// Wrap `device`, recording its successful writes into `journal`
     /// under the `pressure` gauge's growth gate.
     pub fn new(
@@ -491,7 +473,7 @@ impl<B: FlushBlock> JournaledBlock<B> {
     }
 }
 
-impl<B: FlushBlock> Block for JournaledBlock<B> {
+impl<B: Block> Block for JournaledBlock<B> {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         self.device.geometry()
     }
@@ -528,6 +510,17 @@ impl<B: FlushBlock> Block for JournaledBlock<B> {
         let result = self.device.write_blocks_with_class(lba, buf, class);
         self.after_write(lba, buf, result);
         result
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // Commit the device's volatile cache. On success every write this
+        // journal was holding is now on the medium, so the retained set is
+        // committed (emptied) — exactly the watermark path's discipline,
+        // driven explicitly. A failure leaves the journal untouched: the
+        // uncommitted set is still uncommitted, never treated as durable.
+        self.device.flush()?;
+        self.journal.lock().commit();
+        Ok(())
     }
 
     fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
@@ -636,9 +629,7 @@ mod tests {
             self.data[start..start + len].fill(0);
             Ok(())
         }
-    }
 
-    impl FlushBlock for RamFlushBlock {
         fn flush(&mut self) -> Result<(), DriverError> {
             if self.fail_flush {
                 return Err(DriverError::DeviceFault);
@@ -717,6 +708,34 @@ mod tests {
         device.write_blocks(1, &[2u8; BLOCK_SIZE as usize]).unwrap();
         assert!(device.device.flushes >= 1, "watermark flush issued");
         assert!(!journal.lock().is_dirty(), "journal committed");
+    }
+
+    #[test]
+    fn an_explicit_flush_commits_the_device_and_empties_the_journal() {
+        // The `fs_sync` durability path: one write below the watermark
+        // stays dirty until an explicit flush forces the device cache and
+        // clears the journal.
+        let (mut device, journal) = journaled(64, small_budget());
+        device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
+        assert!(journal.lock().is_dirty(), "write retained, not yet durable");
+        assert_eq!(device.device.flushes, 0, "no flush issued below watermark");
+        Block::flush(&mut device).unwrap();
+        assert_eq!(device.device.flushes, 1, "explicit flush hit the device");
+        assert!(!journal.lock().is_dirty(), "journal committed after flush");
+    }
+
+    #[test]
+    fn an_explicit_flush_that_the_device_refuses_keeps_the_journal_dirty() {
+        // Fail-closed: a refused device flush is never reported as
+        // durability, and the uncommitted set stays uncommitted.
+        let (mut device, journal) = journaled(64, small_budget());
+        device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
+        device.device.fail_flush = true;
+        assert_eq!(Block::flush(&mut device), Err(DriverError::DeviceFault));
+        assert!(
+            journal.lock().is_dirty(),
+            "journal still dirty after refusal"
+        );
     }
 
     #[test]

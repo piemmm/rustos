@@ -569,6 +569,13 @@ impl<B: Block> Block for BlockCache<B> {
         self.cached_write(lba, buf, Block::write_blocks)
     }
 
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // A read cache: every write already went straight through to the
+        // device (`cached_write`), so nothing is buffered here. Forward the
+        // durability flush to the device so its volatile cache commits.
+        self.device.flush()
+    }
+
     fn read_blocks_with_class(
         &mut self,
         lba: u64,

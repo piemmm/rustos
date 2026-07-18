@@ -176,6 +176,14 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
         // client performs any writing the mounted filesystem needs).
         Err(DriverError::Unsupported)
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // A pure reader never issues a write, so there is nothing the
+        // device could hold uncommitted on this client's behalf. The
+        // attach-time write client (which does write) owns the durability
+        // flush; here it is a truthful no-op, not a swallowed forward.
+        Ok(())
+    }
 }
 
 /// Map a transport/completion [`Errno`] onto the block-driver error the

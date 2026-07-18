@@ -363,6 +363,10 @@ impl Block for VecBlock {
         target.copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// A deterministic stand-in for the platform RNG seam. Test scaffolding

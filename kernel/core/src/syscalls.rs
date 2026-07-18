@@ -6759,6 +6759,16 @@ where
         Ok(0)
     }
 
+    /// `fs_sync(fd)` — force every write the filesystem has accepted onto
+    /// stable media, the durability barrier a program calls before it
+    /// treats its data as safe against power loss.
+    ///
+    /// The guarantee is real, not cosmetic: the mounted volume pushes any
+    /// buffered metadata/data to its block device and then forces the
+    /// device's own volatile write cache to the medium (virtio-blk
+    /// `VIRTIO_BLK_T_FLUSH`, SCSI `SYNCHRONIZE CACHE`), returning only once
+    /// the device confirms it. It fails closed on a device fault rather
+    /// than reporting durability it cannot vouch for.
     fn fs_sync(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
         // The descriptor must be one of the caller's own open handles (a
         // forged or foreign number fails closed); the flush itself is

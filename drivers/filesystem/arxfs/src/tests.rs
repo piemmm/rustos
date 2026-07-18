@@ -162,6 +162,10 @@ impl Block for MemBlock {
         self.discarded.push((lba, blocks));
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// A *sparse* in-memory block device that reports a huge logical block count
@@ -262,6 +266,10 @@ impl Block for SparseBlock {
         for b in lba..lba + blocks {
             self.blocks.remove(&b);
         }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
 }
@@ -5835,6 +5843,7 @@ fn stats_report_tracks_allocation() {
 struct CountingBlock {
     inner: MemBlock,
     reads: u64,
+    flushes: u64,
 }
 
 impl Block for CountingBlock {
@@ -5847,6 +5856,10 @@ impl Block for CountingBlock {
     }
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
         self.inner.write_blocks(lba, buf)
+    }
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.flushes += 1;
+        self.inner.flush()
     }
 }
 
@@ -5873,6 +5886,7 @@ fn counted_dir_fixture(files: u32) -> (ARXFS<CountingBlock>, NodeId) {
     let counting = CountingBlock {
         inner: MemBlock::from_bytes(bytes, 4096, 8192),
         reads: 0,
+        flushes: 0,
     };
     let fs = ARXFS::open(counting, &TEST_KEY).expect("reopen");
     (fs, dir)
@@ -5938,5 +5952,50 @@ fn read_dir_resume_cost_is_independent_of_directory_position() {
     assert_eq!(
         first_cost, last_cost,
         "resuming at the end reads as little as resuming at the start"
+    );
+}
+
+/// The durability contract behind `fs_sync`: a filesystem flush forces the
+/// backing device's volatile write cache to stable media exactly once —
+/// the transaction data already reached the device, but only a device
+/// flush makes it survive power loss.
+#[test]
+fn fs_flush_forces_the_backing_device_cache_once() {
+    let (mut fs, dir) = counted_dir_fixture(1);
+    // The reopened counter starts clean; a mutation writes through to the
+    // device but does not itself force the cache.
+    fs.block_mut().flushes = 0;
+    fs.write_at(dir, b"f0.txt", 0, b"durable payload")
+        .expect("write");
+    assert_eq!(
+        fs.block_mut().flushes,
+        0,
+        "an ordinary write does not force the device cache"
+    );
+    FilesystemWrite::flush(&mut fs).expect("flush");
+    assert_eq!(
+        fs.block_mut().flushes,
+        1,
+        "a filesystem flush issues exactly one device cache flush"
+    );
+}
+
+/// A read-only mount never wrote, so its flush is a no-op that never
+/// touches the device — the damaged-device rescue path must not write.
+#[test]
+fn a_read_only_mount_flush_issues_no_device_flush() {
+    let (fs, _dir) = counted_dir_fixture(1);
+    let bytes = fs.into_block().inner.bytes();
+    let counting = CountingBlock {
+        inner: MemBlock::from_bytes(bytes, 4096, 8192),
+        reads: 0,
+        flushes: 0,
+    };
+    let mut ro = ARXFS::open_read_only(counting, &TEST_KEY).expect("reopen read-only");
+    FilesystemWrite::flush(&mut ro).expect("flush");
+    assert_eq!(
+        ro.block_mut().flushes,
+        0,
+        "a read-only mount forces nothing to the device"
     );
 }

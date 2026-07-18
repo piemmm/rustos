@@ -1129,4 +1129,15 @@ impl<H: SdhciHost> Block for Emmc2<H> {
             self.write_blocks_pio(block_addr, buf)
         }
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        // This driver never enables the eMMC/SD device write cache (the
+        // EXT_CSD `CACHE_CTRL` feature stays off), so the card operates
+        // write-through: a completed write has finished programming to the
+        // medium before its command returns. There is therefore no
+        // volatile cache to commit, and flush is a genuine no-op — not a
+        // swallowed forward. Enabling the device cache would make this a
+        // real `FLUSH_CACHE` command.
+        Ok(())
+    }
 }

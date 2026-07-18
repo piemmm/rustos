@@ -78,6 +78,13 @@ fn build_device_with_sectors(sectors: u64) -> (MockTransport, Rc<RefCell<Vec<u8>
                         last[0] = wire::STATUS_OK;
                     }
                 }
+                wire::VIRTIO_BLK_T_FLUSH => {
+                    // A flush carries header + status only; committing the
+                    // (already-applied) backing store is a no-op success.
+                    if let Some(last) = chain.device_write.last_mut() {
+                        last[0] = wire::STATUS_OK;
+                    }
+                }
                 _ => {
                     if let Some(last) = chain.device_write.last_mut() {
                         last[0] = 2; // VIRTIO_BLK_S_UNSUPP.
@@ -497,6 +504,68 @@ fn discard_rejects_out_of_range_and_oversized() {
     assert_eq!(blk.discard(0, 5), Err(DriverError::LengthOutOfRange));
     // A zero-length discard is a no-op success.
     assert!(blk.discard(0, 0).is_ok());
+}
+
+/// Shared flush counter a flush-capable shim increments.
+type FlushLog = Rc<RefCell<usize>>;
+
+/// Build a flush-capable virtio-blk `MockTransport`: it offers
+/// `VIRTIO_BLK_F_FLUSH`, and its shim counts every `VIRTIO_BLK_T_FLUSH`
+/// request into the returned log, answering each `STATUS_OK`.
+fn build_flush_device() -> (MockTransport, FlushLog) {
+    let mut t = MockTransport::new(1, 8, wire::VIRTIO_BLK_F_FLUSH, 64);
+    t.set_config(wire::CONFIG_CAPACITY_OFFSET, &SECTORS.to_le_bytes());
+    let log: FlushLog = Rc::new(RefCell::new(0));
+    let log_for_shim = Rc::clone(&log);
+    t.install_shim(
+        0,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            let header = *chain.device_read.first().ok_or(VirtioError::DeviceFault)?;
+            if header.len() < wire::HEADER_LEN {
+                return Err(VirtioError::DeviceFault);
+            }
+            let req_type = u32::from_le_bytes(header[0..4].try_into().unwrap_or([0; 4]));
+            if req_type == wire::VIRTIO_BLK_T_FLUSH {
+                *log_for_shim.borrow_mut() += 1;
+                if let Some(last) = chain.device_write.last_mut() {
+                    last[0] = wire::STATUS_OK;
+                }
+                return Ok(1);
+            }
+            if let Some(last) = chain.device_write.last_mut() {
+                last[0] = 2; // VIRTIO_BLK_S_UNSUPP.
+            }
+            Ok(1)
+        }),
+    );
+    (t, log)
+}
+
+#[test]
+fn flush_without_feature_is_a_noop_success() {
+    // A write-through device (no `VIRTIO_BLK_F_FLUSH`) has no volatile
+    // cache: flush succeeds without issuing any request.
+    let (t, _backing) = build_device();
+    let mut blk = open_with_autodrain(t);
+    assert_eq!(blk.transport().negotiated_driver_features(), 0);
+    blk.flush()
+        .expect("flush is a no-op success when write-through");
+}
+
+#[test]
+fn flush_capable_device_issues_a_flush_command() {
+    let (t, log) = build_flush_device();
+    let mut blk = open_with_autodrain(t);
+    assert_eq!(
+        blk.transport().negotiated_driver_features(),
+        wire::VIRTIO_BLK_F_FLUSH
+    );
+    blk.flush().expect("flush");
+    assert_eq!(
+        *log.borrow(),
+        1,
+        "one VIRTIO_BLK_T_FLUSH reached the device"
+    );
 }
 
 #[test]

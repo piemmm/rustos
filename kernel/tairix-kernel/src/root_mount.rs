@@ -1692,6 +1692,10 @@ mod tests {
             self.store[start..end].copy_from_slice(buf);
             Ok(())
         }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
     }
 
     /// Author a FAT boot partition through the real FAT32 driver and plant

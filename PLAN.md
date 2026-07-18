@@ -4719,8 +4719,8 @@ restrictive default), and `Storage:` catalog enumeration (`MountTable::
 direct_children` merged into `fs_readdir`, deduplicated, structural
 entries). D4a (done) landed the surprise-removal state machine: the
 `kernel/core::fs::retained` uncommitted-write journal (`RetainedWrites` +
-`JournaledBlock` with watermark device flushes over the new `FlushBlock`
-seam, budget/pressure-bounded, wiped on release), the
+`JournaledBlock` with watermark device flushes over the `Block::flush`
+durability primitive, budget/pressure-bounded, wiped on release), the
 `callreg::teardown_owned_by` endpoint-vanish observer seam (wake first,
 then notify), and the volume-service transitions — clean unplug retracts
 (event 4176); dirty enters unavailable-dirty with the set retained (4177);

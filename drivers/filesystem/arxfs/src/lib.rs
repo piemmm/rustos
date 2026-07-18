@@ -3538,7 +3538,17 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
-        Ok(())
+        // Every mutating operation already copy-on-writes its data and
+        // metadata to the device and publishes the transaction atomically
+        // through the superblock ring, so there is nothing buffered *here*
+        // to write out. What is not yet guaranteed durable is the device's
+        // own volatile write cache: force it to stable media so a caller's
+        // `fs_sync` is a real durability barrier, not a no-op. A read-only
+        // handle never wrote, so it has nothing to commit.
+        if self.read_only {
+            return Ok(());
+        }
+        self.block.flush()
     }
 }
 

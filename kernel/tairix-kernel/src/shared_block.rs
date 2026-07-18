@@ -161,6 +161,10 @@ impl<B: Block> Block for SharedBlockHandle<'_, B> {
         self.shared.device.lock().write_blocks(lba, buf)
     }
 
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.shared.device.lock().flush()
+    }
+
     fn read_blocks_with_class(
         &mut self,
         lba: u64,
@@ -365,6 +369,10 @@ mod tests {
         fn device_health(&self) -> Result<DeviceHealth, DriverError> {
             Ok(self.health)
         }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -390,6 +398,9 @@ mod tests {
                 Err(DriverError::Unsupported)
             }
             fn write_blocks(&mut self, _: u64, _: &[u8]) -> Result<(), DriverError> {
+                Err(DriverError::Unsupported)
+            }
+            fn flush(&mut self) -> Result<(), DriverError> {
                 Err(DriverError::Unsupported)
             }
         }

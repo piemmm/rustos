@@ -310,6 +310,10 @@ impl Block for MockBlock {
         self.data[start..end].copy_from_slice(buf);
         Ok(())
     }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 /// Mock driver host modelling the load-time `CAP_DRV_LOAD` grant.
@@ -943,6 +947,10 @@ mod format {
         fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
             let (start, end) = self.span(lba, buf.len())?;
             self.store[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
             Ok(())
         }
     }
