@@ -1075,7 +1075,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--full-time] [--group-directories-first] [--] [path...]
+ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--group-directories-first] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -1092,7 +1092,12 @@ ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD] [--time-style=STYLE] [
 | `-n`, `--numeric-uid-gid` | long format, numeric owner/group (same as `-l`) |
 | `-o`             | long format without the group column               |
 | `-p`             | append `/` to directories                          |
-| `-Q`, `--quote-name` | double-quote each rendered name                |
+| `-N`, `--literal` | names verbatim, no quoting (`--quoting-style=literal`) |
+| `-Q`, `--quote-name` | C-style quoting (`--quoting-style=c`)          |
+| `-b`, `--escape` | like `-Q` without the quotes, spaces escaped (`--quoting-style=escape`) |
+| `--quoting-style=WORD` | `literal`/`shell`/`shell-always`/`shell-escape`/`shell-escape-always`/`c`/`escape` |
+| `-q`, `--hide-control-chars` | show nongraphic characters as `?` (terminal default) |
+| `--show-control-chars` | print nongraphic characters as-is (non-terminal default) |
 | `-r`, `--reverse` | reverse the sort order                            |
 | `-R`, `--recursive` | list subdirectories recursively                 |
 | `-s`, `--size`   | allocated size per entry, in 1024-byte blocks      |
@@ -1178,12 +1183,32 @@ otherwise, decided against the wall clock), `long-iso`, `full-iso`, or
 `iso`; a custom `+FORMAT` is refused (fail closed) until a shared
 `strftime` engine lands with `date`. The stamp is decomposed through the
 one shared civil-date breakdown (`tairix_fsmeta::calendar::CivilTime`).
+
+Names are quoted through a faithful port of GNU `quotearg`, so awkward
+characters are visible and safe to paste back into a shell. `-N`
+(`--quoting-style=literal`) prints names verbatim, `-Q`
+(`--quoting-style=c`) uses C string quoting, `-b`
+(`--quoting-style=escape`) is the same without the surrounding quotes
+(spaces escaped), and `--quoting-style=WORD` selects the full GNU set —
+`literal`, `shell`, `shell-always`, `shell-escape`,
+`shell-escape-always`, `c`, or `escape`. The `shell` family single-quotes
+a name only when a shell metacharacter or a space forces it (falling back
+to C double quotes when only a single quote is awkward), and the
+`shell-escape` variants splice nongraphic characters in as `$'…'` ANSI-C
+escapes. The locale-dependent `locale` and `clocale` styles are refused
+(fail closed) — the same stance the tool takes on a custom
+`--time-style=+FORMAT` — since TAIRiX has no locale-quotation-mark
+infrastructure. The default is resolved against the attested console:
+`shell-escape` at a terminal (with control characters hidden, `-q`) and
+`literal` otherwise (control characters shown, `--show-control-chars`);
+`-q` / `--show-control-chars` toggle whether the non-escaping styles show
+nongraphic characters as `?`. `-p`/`-F` append the indicator suffix
+after any closing quote.
+
 There is still **no link-count column** — the VFS has no hard links yet,
 so a fabricated count would be a lie; it will appear when links land
 (Stage E). `-i` prefixes each entry (short and long) with its stable
-node number, right-aligned. `-Q` renders
-each name double-quoted with GNU C-style escapes; `-p`/`-F` append the
-indicator suffix after the closing quote.
+node number, right-aligned.
 
 ### Advisory output (`stdinfo`, fd 3)
 
@@ -1231,7 +1256,9 @@ old), and the `-i` node-number column,
 the per-entry stat under a slash-terminated operand, single- and
 multi-operand layout (files first, then directory headers), recursive
 depth-first traversal with headers, reverse and size sorts, the comma
-arrangement, GNU C-style quoting, the `/` and `*` indicators, the
+arrangement, every quoting style (literal, C, escape, and the shell
+family incl. `$'…'` control-char splicing) with the tty-resolved default
+and `-q` masking, the `/` and `*` indicators, the
 human-size rounding table, an empty directory, the short-help render and
 its usage-banner fallback, and the missing-operand, unreadable-directory,
 and dead-console fail-closed paths. `ls`'s help is authored on disk in

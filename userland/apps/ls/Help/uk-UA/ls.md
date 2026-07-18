@@ -4,9 +4,9 @@ ls — вивести вміст каталогів
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -62,8 +62,23 @@ ls — вивести вміст каталогів
   вище), тож збігається з `-l`.
 - `-o` — довгий формат без стовпця групи; передбачає `-l`.
 - `-p` — додавати `/` до каталогів.
-- `-Q, --quote-name` — брати кожну назву в подвійні лапки,
-  екрануючи лапки, зворотні скісні риски та керівні символи.
+- `-N, --literal` — виводити назви як є, без лапок
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — лапкування у стилі C: брати кожну назву
+  в подвійні лапки, екрануючи лапки, зворотні скісні риски
+  та керівні символи (`--quoting-style=c`).
+- `-b, --escape` — як `-Q`, але без обрамлювальних лапок і з
+  екранованими пробілами (`--quoting-style=escape`).
+- `--quoting-style=WORD` — як беруться в лапки назви: `literal`
+  (`-N`), `shell`, `shell-always`, `shell-escape`,
+  `shell-escape-always`, `c` (`-Q`) або `escape` (`-b`). Типово це
+  `shell-escape` у терміналі та `literal` в інших випадках;
+  стилі `locale` і `clocale` не підтримуються.
+- `-q, --hide-control-chars` — показувати недруковані символи як
+  `?` (типово в терміналі); впливає лише на стилі без
+  екранування.
+- `--show-control-chars` — виводити недруковані символи як є
+  (типово, коли вивід не є терміналом).
 - `-r, --reverse` — обернути порядок сортування.
 - `-R, --recursive` — виводити підкаталоги рекурсивно.
 - `-s, --size` — виводити виділений розмір кожного запису в блоках по

@@ -4,9 +4,9 @@ ls — Verzeichnisinhalte auflisten
 
 ## SYNOPSIS
 
-`ls [-aACcdFfghilmnopQrRsStUuvXx1] [-w cols] [--time=WORD]`
-`[--time-style=STYLE] [--sort=WORD] [--full-time]`
-`[--group-directories-first] [--] [path...]`
+`ls [-aAbCcdFfghilmNnopQqrRsStUuvXx1] [-w cols] [--time=WORD]`
+`[--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE]`
+`[--full-time] [--group-directories-first] [--] [path...]`
 
 ## DESCRIPTION
 
@@ -74,9 +74,23 @@ werden durch eine Leerzeile getrennt.
   hier immer numerisch (siehe oben), also identisch zu `-l`.
 - `-o` — langes Format ohne die Gruppenspalte; impliziert `-l`.
 - `-p` — `/` an Verzeichnisse anhängen.
-- `-Q, --quote-name` — jeden Namen in doppelte Anführungszeichen
-  setzen; Anführungszeichen, Backslashes und Steuerzeichen werden
-  maskiert.
+- `-N, --literal` — Namen unverändert ausgeben, ohne Anführung
+  (`--quoting-style=literal`).
+- `-Q, --quote-name` — Anführung im C-Stil: jeden Namen in doppelte
+  Anführungszeichen setzen; Anführungszeichen, Backslashes und
+  Steuerzeichen werden maskiert (`--quoting-style=c`).
+- `-b, --escape` — wie `-Q`, aber ohne die umgebenden
+  Anführungszeichen und mit maskierten Leerzeichen
+  (`--quoting-style=escape`).
+- `--quoting-style=WORD` — wie Namen angeführt werden: `literal`
+  (`-N`), `shell`, `shell-always`, `shell-escape`,
+  `shell-escape-always`, `c` (`-Q`) oder `escape` (`-b`). Standard ist
+  `shell-escape` am Terminal und sonst `literal`; die Stile `locale`
+  und `clocale` werden nicht unterstützt.
+- `-q, --hide-control-chars` — nichtdruckbare Zeichen als `?` anzeigen
+  (Standard am Terminal); betrifft nur die nicht maskierenden Stile.
+- `--show-control-chars` — nichtdruckbare Zeichen unverändert ausgeben
+  (Standard, wenn die Ausgabe kein Terminal ist).
 - `-r, --reverse` — die Sortierreihenfolge umkehren.
 - `-R, --recursive` — Unterverzeichnisse rekursiv auflisten.
 - `-s, --size` — die belegte Größe jedes Eintrags in 1024-Byte-Blöcken

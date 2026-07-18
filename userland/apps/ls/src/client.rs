@@ -14,7 +14,9 @@ use tairix_fsmeta::calendar::CivilTime;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_vt::str_width;
 
-use crate::command::{Command, Format, Hidden, Indicator, Options, Sort, TimeField, TimeStyle};
+use crate::command::{
+    Command, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField, TimeStyle,
+};
 use crate::error::LsError;
 use crate::io::{Entry, Listing, Metadata, Output};
 
@@ -114,6 +116,7 @@ fn list(
     let terminal = out.terminal_width();
     let format = resolve_format(options, terminal);
     let width = resolve_width(options, terminal);
+    let quoting = Quoting::resolve(options, terminal);
     let mut buf = String::new();
     let mut first = true;
     let mut hidden_omitted: u64 = 0;
@@ -123,7 +126,7 @@ fn list(
         open_block(&mut buf, &mut first, None);
         // No `total` line: the GNU tool totals directory listings only,
         // never the loose file-operand block.
-        render_rows(&mut buf, &files, options, format, width, now);
+        render_rows(&mut buf, &files, options, format, width, now, quoting);
         write_block(out, &mut buf)?;
     }
     // A depth-first worklist: operands are pushed reversed so they pop in
@@ -148,7 +151,7 @@ fn list(
         if options.size || options.long {
             render_total(&mut buf, &rows, options);
         }
-        render_rows(&mut buf, &rows, options, format, width, now);
+        render_rows(&mut buf, &rows, options, format, width, now, quoting);
         write_block(out, &mut buf)?;
         if options.recursive {
             // `.`/`..` never recurse — a listing must terminate even when
@@ -377,16 +380,17 @@ fn render_rows(
     format: Format,
     width: usize,
     now: Time64,
+    quoting: Quoting,
 ) {
     if options.long {
-        render_long(buf, rows, options, now);
+        render_long(buf, rows, options, now, quoting);
         return;
     }
     match format {
-        Format::OnePerLine => render_one_per_line(buf, rows, options),
-        Format::Columns => render_grid(buf, rows, options, width, Fill::TopToBottom),
-        Format::Across => render_grid(buf, rows, options, width, Fill::LeftToRight),
-        Format::Commas => render_commas(buf, rows, options, width),
+        Format::OnePerLine => render_one_per_line(buf, rows, options, quoting),
+        Format::Columns => render_grid(buf, rows, options, width, Fill::TopToBottom, quoting),
+        Format::Across => render_grid(buf, rows, options, width, Fill::LeftToRight, quoting),
+        Format::Commas => render_commas(buf, rows, options, width, quoting),
     }
 }
 
@@ -401,6 +405,7 @@ fn entry_cell(
     options: Options,
     inode_width: usize,
     blocks_width: usize,
+    quoting: Quoting,
 ) -> String {
     let mut cell = String::new();
     // Writing into a `String` is infallible, so the `fmt::Result`s are
@@ -411,18 +416,30 @@ fn entry_cell(
     if options.size {
         let _ = write!(cell, "{:>blocks_width$} ", blocks_cell(meta, options));
     }
-    cell.push_str(&decorate(name, meta, options));
+    cell.push_str(&decorate(name, meta, options, quoting));
     cell
 }
 
 /// Render one entry per line — the `-1` arrangement and the non-terminal
 /// default. Each line carries its `-s` blocks cell, right-aligned to the
 /// block's width, when `-s` is set.
-fn render_one_per_line(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
+fn render_one_per_line(
+    buf: &mut String,
+    rows: &[(String, Metadata)],
+    options: Options,
+    quoting: Quoting,
+) {
     let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
     for (name, meta) in rows {
-        buf.push_str(&entry_cell(name, *meta, options, inode_width, blocks_width));
+        buf.push_str(&entry_cell(
+            name,
+            *meta,
+            options,
+            inode_width,
+            blocks_width,
+            quoting,
+        ));
         buf.push('\n');
     }
 }
@@ -430,7 +447,13 @@ fn render_one_per_line(buf: &mut String, rows: &[(String, Metadata)], options: O
 /// The `-m` comma arrangement: names separated by `, `, wrapped so no line
 /// exceeds `width`. The comma stays at the end of a full line and the next
 /// line begins with the name, no leading space — the GNU `-m` layout.
-fn render_commas(buf: &mut String, rows: &[(String, Metadata)], options: Options, width: usize) {
+fn render_commas(
+    buf: &mut String,
+    rows: &[(String, Metadata)],
+    options: Options,
+    width: usize,
+    quoting: Quoting,
+) {
     if rows.is_empty() {
         return;
     }
@@ -438,7 +461,7 @@ fn render_commas(buf: &mut String, rows: &[(String, Metadata)], options: Options
     // inline), so the cell is built with zero prefix widths.
     let mut pos = 0usize;
     for (index, (name, meta)) in rows.iter().enumerate() {
-        let cell = entry_cell(name, *meta, options, 0, 0);
+        let cell = entry_cell(name, *meta, options, 0, 0, quoting);
         let len = str_width(&cell);
         if index > 0 {
             // Keep the entry on the current line only if it and the `, `
@@ -480,6 +503,7 @@ fn render_grid(
     options: Options,
     width: usize,
     fill: Fill,
+    quoting: Quoting,
 ) {
     let count = rows.len();
     if count == 0 {
@@ -489,7 +513,7 @@ fn render_grid(
     let blocks_width = size_column_width(rows, options);
     let cells: Vec<String> = rows
         .iter()
-        .map(|(name, meta)| entry_cell(name, *meta, options, inode_width, blocks_width))
+        .map(|(name, meta)| entry_cell(name, *meta, options, inode_width, blocks_width, quoting))
         .collect();
     let widths: Vec<usize> = cells.iter().map(|cell| str_width(cell)).collect();
 
@@ -624,7 +648,13 @@ fn size_column_width(rows: &[(String, Metadata)], options: Options) -> usize {
 /// (see the Help document). The timestamp column shows the time selected by
 /// `-c` / `-u` / `--time` (modified by default), rendered in the style
 /// chosen by `--time-style` / `--full-time`.
-fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options, now: Time64) {
+fn render_long(
+    buf: &mut String,
+    rows: &[(String, Metadata)],
+    options: Options,
+    now: Time64,
+    quoting: Quoting,
+) {
     let size_cell = |meta: &Metadata| {
         if options.human_readable {
             human_size(meta.size)
@@ -683,7 +713,7 @@ fn render_long(buf: &mut String, rows: &[(String, Metadata)], options: Options, 
             " {:>size_width$} {:<date_width$} {}",
             size_cell(meta),
             date_cell(meta),
-            decorate(name, *meta, options)
+            decorate(name, *meta, options, quoting)
         );
     }
 }
@@ -751,14 +781,11 @@ fn render_time(stamp: Time64, style: TimeStyle, now: Time64) -> String {
     }
 }
 
-/// The rendered form of one name: quoted under `-Q`, with the `-p` / `-F`
-/// indicator suffix appended after the closing quote, as in the GNU tool.
-fn decorate(name: &str, meta: Metadata, options: Options) -> String {
-    let mut rendered = if options.quote {
-        quote_name(name)
-    } else {
-        String::from(name)
-    };
+/// The rendered form of one name: quoted in the resolved [`Quoting`] style,
+/// with the `-p` / `-F` indicator suffix appended after the closing quote,
+/// as in the GNU tool.
+fn decorate(name: &str, meta: Metadata, options: Options, quoting: Quoting) -> String {
+    let mut rendered = quoting.render(name);
     match options.indicator {
         Indicator::None => {}
         Indicator::Slash => {
@@ -777,27 +804,221 @@ fn decorate(name: &str, meta: Metadata, options: Options) -> String {
     rendered
 }
 
-/// `name` in the GNU C-style double-quoted form: `\\` and `\"` for the
-/// backslash and quote, C escapes for the common control characters, and
-/// three-digit octal for the rest.
-fn quote_name(name: &str) -> String {
-    let mut quoted = String::with_capacity(name.len() + 2);
-    quoted.push('"');
-    for ch in name.chars() {
-        match ch {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            '\n' => quoted.push_str("\\n"),
-            '\t' => quoted.push_str("\\t"),
-            '\r' => quoted.push_str("\\r"),
-            _ if (ch as u32) < 0x20 || ch as u32 == 0x7f => {
-                let _ = write!(quoted, "\\{:03o}", ch as u32);
-            }
-            _ => quoted.push(ch),
+/// A resolved name-quoting decision: the concrete [`QuotingStyle`] and
+/// whether nongraphic characters are shown as `?` (the resolved `-q` /
+/// `--show-control-chars` axis). Built once per listing from the options and
+/// the attested console, then threaded through rendering so the arithmetic is
+/// done in one place.
+#[derive(Clone, Copy)]
+struct Quoting {
+    style: QuotingStyle,
+    hide_control: bool,
+}
+
+impl Quoting {
+    /// Resolve the GNU defaults against the attested console: `shell-escape`
+    /// quoting with hidden control characters at a terminal, `literal` quoting
+    /// with shown control characters otherwise. An explicit flag overrides
+    /// either axis.
+    fn resolve(options: Options, terminal: Option<usize>) -> Self {
+        let at_terminal = terminal.is_some();
+        Self {
+            style: options.quoting.unwrap_or(if at_terminal {
+                QuotingStyle::ShellEscape
+            } else {
+                QuotingStyle::Literal
+            }),
+            hide_control: options.hide_control_chars.unwrap_or(at_terminal),
         }
     }
-    quoted.push('"');
-    quoted
+
+    /// Render `name` in the resolved style.
+    fn render(self, name: &str) -> String {
+        match self.style {
+            QuotingStyle::Literal => literal_name(name, self.hide_control),
+            QuotingStyle::C => c_name(name),
+            QuotingStyle::Escape => escape_name(name),
+            QuotingStyle::Shell => shell_name(name, false, false, self.hide_control),
+            QuotingStyle::ShellAlways => shell_name(name, false, true, self.hide_control),
+            QuotingStyle::ShellEscape => shell_name(name, true, false, self.hide_control),
+            QuotingStyle::ShellEscapeAlways => shell_name(name, true, true, self.hide_control),
+        }
+    }
+}
+
+/// Whether `ch` is a nongraphic (control) character: an ASCII control or
+/// DEL. Valid multibyte UTF-8 characters are graphic and pass through, as
+/// they do for GNU `ls` in a UTF-8 locale.
+fn is_control(ch: char) -> bool {
+    let c = ch as u32;
+    c < 0x20 || c == 0x7f
+}
+
+/// The C named backslash escape letter for a control character, where one
+/// exists (`\a \b \t \n \v \f \r`); otherwise `None`, and the caller uses
+/// three-digit octal.
+fn named_escape(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{07}' => 'a',
+        '\u{08}' => 'b',
+        '\t' => 't',
+        '\n' => 'n',
+        '\u{0b}' => 'v',
+        '\u{0c}' => 'f',
+        '\r' => 'r',
+        _ => return None,
+    })
+}
+
+/// Append the C backslash escape for the control character `ch`: its named
+/// escape where one exists, else three-digit octal (`is_control` guarantees
+/// a value below `0o200`, so three digits always suffice).
+fn push_control_escape(out: &mut String, ch: char) {
+    out.push('\\');
+    match named_escape(ch) {
+        Some(esc) => out.push(esc),
+        None => {
+            let _ = write!(out, "{:03o}", ch as u32);
+        }
+    }
+}
+
+/// `literal` quoting: the name verbatim, with nongraphic characters shown as
+/// `?` when control characters are hidden (`-q`).
+fn literal_name(name: &str, hide_control: bool) -> String {
+    if !hide_control {
+        return String::from(name);
+    }
+    name.chars()
+        .map(|ch| if is_control(ch) { '?' } else { ch })
+        .collect()
+}
+
+/// `c` quoting: the name as a C string literal — always double-quoted, with
+/// `\"` and `\\` for the quote and backslash and C escapes (named or octal)
+/// for control characters.
+fn c_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for ch in name.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ if is_control(ch) => push_control_escape(&mut out, ch),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `escape` quoting: like [`c_name`] but without the surrounding quotes, so
+/// spaces are escaped (`\ `) and the double quote needs no escaping.
+fn escape_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            ' ' => out.push_str("\\ "),
+            _ if is_control(ch) => push_control_escape(&mut out, ch),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Whether `ch` at position `index` in a name of `len` characters forces
+/// shell quoting on its own — a shell metacharacter or a nongraphic
+/// character. `#` and `~` are special only leading, and `{`/`}` only as the
+/// whole name; the space and the single quote are handled by the caller.
+fn is_shell_special(ch: char, index: usize, len: usize) -> bool {
+    match ch {
+        '!' | '"' | '$' | '&' | '(' | ')' | '*' | ';' | '<' | '=' | '>' | '?' | '[' | '\\'
+        | '^' | '`' | '|' => true,
+        '#' | '~' => index == 0,
+        '{' | '}' => len == 1,
+        _ => is_control(ch),
+    }
+}
+
+/// The shell quoting styles. `escape` splices nongraphic characters as `$'…'`
+/// ANSI-C escapes; otherwise they stay literal (or become `?` under `-q`).
+/// `always` quotes even a name that needs no quoting.
+///
+/// A name whose only awkward characters are single quotes (with otherwise
+/// safe characters or spaces) takes the more concise C double-quoted form
+/// (`"it's"`); every other quoted name takes the single-quoted form, with a
+/// literal single quote written `'\''`.
+fn shell_name(name: &str, escape: bool, always: bool, hide_control: bool) -> String {
+    // The non-escaping shell styles show control characters as `?` under
+    // `-q`; the escaping styles render them with `$'…'`, so `-q` is moot.
+    let mapped: String = if !escape && hide_control {
+        name.chars()
+            .map(|ch| if is_control(ch) { '?' } else { ch })
+            .collect()
+    } else {
+        String::from(name)
+    };
+
+    let chars: Vec<char> = mapped.chars().collect();
+    let len = chars.len();
+    let mut needs_quote = always || len == 0;
+    let mut has_single_quote = false;
+    // Any character other than a space or single quote that forces quoting;
+    // such a character rules out the concise double-quote form.
+    let mut hard = false;
+    for (index, &ch) in chars.iter().enumerate() {
+        if ch == '\'' {
+            has_single_quote = true;
+            needs_quote = true;
+        } else if ch == ' ' {
+            needs_quote = true;
+        } else if is_shell_special(ch, index, len) {
+            needs_quote = true;
+            hard = true;
+        }
+    }
+
+    if !needs_quote {
+        return mapped;
+    }
+
+    if has_single_quote && !hard {
+        // Nothing inside needs escaping: `hard` being false guarantees no
+        // `"`, `$`, backtick, backslash, or control character.
+        return format!("\"{mapped}\"");
+    }
+
+    let mut out = String::with_capacity(mapped.len() + 2);
+    out.push('\'');
+    let mut open = true;
+    for &ch in &chars {
+        if ch == '\'' {
+            if open {
+                out.push('\'');
+                open = false;
+            }
+            out.push_str("\\'");
+        } else if escape && is_control(ch) {
+            if open {
+                out.push('\'');
+                open = false;
+            }
+            out.push_str("$'");
+            push_control_escape(&mut out, ch);
+            out.push('\'');
+        } else {
+            if !open {
+                out.push('\'');
+                open = true;
+            }
+            out.push(ch);
+        }
+    }
+    if open {
+        out.push('\'');
+    }
+    out
 }
 
 /// `size` in the GNU `-h` form: plain bytes below 1024, then powers of
@@ -1089,7 +1310,9 @@ mod version {
 #[cfg(test)]
 mod tests {
     use super::{run, USAGE};
-    use crate::command::{Command, Format, Hidden, Indicator, Options, Sort, TimeField, TimeStyle};
+    use crate::command::{
+        Command, Format, Hidden, Indicator, Options, QuotingStyle, Sort, TimeField, TimeStyle,
+    };
     use crate::error::LsError;
     use crate::io::{Entry, Listing, Metadata, Output};
     use alloc::string::{String, ToString};
@@ -2206,28 +2429,122 @@ mod tests {
         assert_eq!(out.text(), "a  b  c\n");
     }
 
-    #[test]
-    fn quoted_names_escape_quotes_and_controls() {
+    /// Render the single name `name` under `options` and return the one
+    /// produced line (its trailing newline stripped). The verbatim expected
+    /// strings below were pinned against GNU coreutils `ls`.
+    fn quoted(name: &str, options: Options) -> String {
         let fs = TreeFs::new()
             .dir(".")
-            .entry(".", "a\"b", FileKind::Regular, 0o644, 0)
-            .entry(".", "new\nline", FileKind::Regular, 0o644, 0);
+            .entry(".", name, FileKind::Regular, 0o644, 0);
         let out = Recorder::new();
-        assert_eq!(
-            run_ls(
-                list_with(
-                    Options {
-                        quote: true,
-                        ..Options::DEFAULT
-                    },
-                    &["."],
-                ),
-                &fs,
-                &out,
-            ),
-            Ok(())
-        );
-        assert_eq!(out.text(), "\"a\\\"b\"\n\"new\\nline\"\n");
+        run_ls(list_with(options, &["."]), &fs, &out).expect("listing succeeds");
+        let text = out.text();
+        String::from(text.strip_suffix('\n').unwrap_or(&text))
+    }
+
+    /// Options selecting one concrete quoting style with control characters
+    /// shown, so a test pins exactly the style under test.
+    fn styled(style: QuotingStyle) -> Options {
+        Options {
+            quoting: Some(style),
+            hide_control_chars: Some(false),
+            ..Options::DEFAULT
+        }
+    }
+
+    #[test]
+    fn c_style_quotes_like_a_c_string_literal() {
+        let opts = styled(QuotingStyle::C);
+        assert_eq!(quoted("a\"b", opts), "\"a\\\"b\"");
+        assert_eq!(quoted("a\\b", opts), "\"a\\\\b\"");
+        assert_eq!(quoted("a\tb", opts), "\"a\\tb\"");
+        assert_eq!(quoted("a\u{1b}b", opts), "\"a\\033b\"");
+        assert_eq!(quoted("a\u{7f}b", opts), "\"a\\177b\"");
+        // `$`, `#`, `'`, `*`, and space stay literal inside the quotes.
+        assert_eq!(quoted("a$ '*b", opts), "\"a$ '*b\"");
+    }
+
+    #[test]
+    fn escape_style_drops_the_quotes_and_escapes_spaces() {
+        let opts = styled(QuotingStyle::Escape);
+        assert_eq!(quoted("a b", opts), "a\\ b");
+        assert_eq!(quoted("a\\b", opts), "a\\\\b");
+        assert_eq!(quoted("a\tb", opts), "a\\tb");
+        // Unlike C style, the double quote is left literal.
+        assert_eq!(quoted("a\"b", opts), "a\"b");
+        // Shell metacharacters other than space and backslash are literal.
+        assert_eq!(quoted("a&;|<(b", opts), "a&;|<(b");
+    }
+
+    #[test]
+    fn literal_style_prints_the_name_verbatim() {
+        assert_eq!(quoted("a b\"$*", styled(QuotingStyle::Literal)), "a b\"$*");
+        // With control characters hidden, nongraphic bytes become `?`.
+        let hide = Options {
+            quoting: Some(QuotingStyle::Literal),
+            hide_control_chars: Some(true),
+            ..Options::DEFAULT
+        };
+        assert_eq!(quoted("a\tb", hide), "a?b");
+    }
+
+    #[test]
+    fn shell_style_quotes_only_when_necessary() {
+        let opts = styled(QuotingStyle::Shell);
+        // A plain name, and a name whose only special characters are safe,
+        // are left unquoted.
+        assert_eq!(quoted("plain", opts), "plain");
+        assert_eq!(quoted("a@%+,-.:]_b", opts), "a@%+,-.:]_b");
+        assert_eq!(quoted("mid#x", opts), "mid#x");
+        // Shell metacharacters and spaces force single quotes.
+        assert_eq!(quoted("a b", opts), "'a b'");
+        assert_eq!(quoted("a$b", opts), "'a$b'");
+        assert_eq!(quoted("a*b", opts), "'a*b'");
+        assert_eq!(quoted("#lead", opts), "'#lead'");
+        // A lone single quote (nothing else hard) takes the concise
+        // double-quoted form; a single quote alongside a hard character
+        // takes the single-quoted `'\''` form.
+        assert_eq!(quoted("it's", opts), "\"it's\"");
+        assert_eq!(quoted("a' b", opts), "\"a' b\"");
+        assert_eq!(quoted("a'&b", opts), "'a'\\''&b'");
+        // A control character stays literal inside the single quotes.
+        assert_eq!(quoted("a\tb", opts), "'a\tb'");
+    }
+
+    #[test]
+    fn shell_always_style_quotes_even_plain_names() {
+        let opts = styled(QuotingStyle::ShellAlways);
+        assert_eq!(quoted("plain", opts), "'plain'");
+        assert_eq!(quoted("it's", opts), "\"it's\"");
+    }
+
+    #[test]
+    fn shell_escape_style_splices_control_characters() {
+        let opts = styled(QuotingStyle::ShellEscape);
+        assert_eq!(quoted("plain", opts), "plain");
+        assert_eq!(quoted("a b", opts), "'a b'");
+        // Nongraphic characters are spliced in as `$'…'`, leaving the
+        // surrounding single-quoted runs.
+        assert_eq!(quoted("a\tb", opts), "'a'$'\\t''b'");
+        assert_eq!(quoted("\tlead", opts), "''$'\\t''lead'");
+        assert_eq!(quoted("trail\t", opts), "'trail'$'\\t'");
+        assert_eq!(quoted("a\u{1b}b", opts), "'a'$'\\033''b'");
+    }
+
+    #[test]
+    fn quoting_defaults_follow_the_attested_console() {
+        // At a terminal the default is shell-escape, so a name with a space
+        // is quoted.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry(".", "a b", FileKind::Regular, 0o644, 0);
+        let out = Recorder::terminal(80);
+        run_ls(list_with(Options::DEFAULT, &["."]), &fs, &out).expect("listing succeeds");
+        assert_eq!(out.text(), "'a b'\n");
+        // Piped (no attested terminal) the default is literal.
+        let piped = Recorder::new();
+        run_ls(list_with(Options::DEFAULT, &["."]), &fs, &piped).expect("listing succeeds");
+        assert_eq!(piped.text(), "a b\n");
     }
 
     #[test]
