@@ -342,6 +342,13 @@ fn handle_irq(from_el0: bool) {
     let cpu = crate::smp::current_cpu_index();
     if intid == crate::preempt::TIMER_PPI {
         crate::preempt::on_timer_interrupt(cpu);
+    } else if intid == crate::watchdog::WATCHDOG_PPI {
+        // The virtual-timer lockup-watchdog cadence sample: re-arm the next
+        // one-shot and run the installed detector callback (which stamps
+        // this CPU's liveness heartbeat and scans the other CPUs). Taken
+        // from EL0 or EL1 alike — it never preempts, so it is not gated on
+        // `from_el0`.
+        crate::watchdog::on_watchdog_interrupt(cpu);
     } else if intid < crate::gic::MIN_SPI_INTID {
         // INTIDs 0..32 are SGIs/PPIs; INTID 0..16 are the inter-processor
         // SGIs. A delivered directed IPI (`crate::kernel_arch` `send_ipi`

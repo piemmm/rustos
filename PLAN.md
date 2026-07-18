@@ -1974,26 +1974,42 @@ order (one fully-gated increment each):
                    is bounded by the remainder of one syscall (each syscall's
                    in-kernel work is itself bounded, e.g. `console_write`'s
                    4 KiB clamp). Design: `docs/src/architecture/scheduler.md`.
-                 - **CPU-stall watchdog — DONE (host-proven).** A soft-lockup
-                   detector reports on the serial/console debug output when a
-                   CPU stops making scheduler progress — a runaway in-kernel
-                   loop, a task that never yields, a lock held across a wedged
-                   access. `kernel/core::watchdog` keeps a per-CPU heartbeat
-                   stamped once per dispatch-loop iteration
-                   (`note_progress`, using the dispatch loop as the tickless
-                   analogue of Linux's watchdog thread); the ports' per-tick
-                   timer callback samples it (`check_stall`) — the tick still
-                   fires on a CPU looping in-kernel because interrupts stay
-                   deliverable (P-5). A gap past
-                   `DEFAULT_STALL_THRESHOLD_NS` (10 s) emits
-                   `CPU_STALL_DETECTED` (id 4080) once per episode, with `cpu`
-                   and `stalled_ms`, and `CPU_STALL_CLEARED` (4081) once when
-                   the CPU dispatches again. Detection and the report are
-                   lock-free/allocation-free (safe in the timer ISR, the only
-                   place a stall is observable), and fail closed before the
-                   clock/sink hooks are installed or on a never-dispatched CPU.
-                   Wired on aarch64/x86_64/riscv64 tick paths; wasm32 inherits
-                   it when its production tick path is wired. Design:
+                 - **CPU-lockup watchdog — first-class soft + hard detector
+                   (host-proven; aarch64 metal validation pending). Design:
+                   `plans/WATCHDOG.md`.** Detects, diagnoses, and best-effort
+                   recovers from two failures, loud enough to explain *why*.
+                   `kernel/core::watchdog` keeps two per-CPU heartbeats plus an
+                   activity class (Offline/Idle/Active) so only a CPU that owes
+                   progress is judged (fail closed).
+                   **Soft lockup** (a CPU that keeps taking interrupts but
+                   stops returning to the scheduler): a progress heartbeat
+                   stamped per dispatch-loop iteration (`note_progress`),
+                   sampled by the armed preemption tick (`check_stall`,
+                   contended CPUs only — no lone-task false positive) and the
+                   cross-CPU scan; a gap past
+                   `DEFAULT_SOFT_LOCKUP_THRESHOLD_NS` (10 s) emits
+                   `CPU_STALL_DETECTED` (4080) / `_CLEARED` (4081).
+                   **Hard lockup** (a CPU that stops taking even interrupts):
+                   only another CPU can see it. A port arms a non-maskable
+                   ~1 Hz cadence sample (Arch HAL `tairix_arch_api::watchdog`,
+                   `WatchdogArch`/`WatchdogSample`) that stamps a liveness
+                   heartbeat and runs a cross-CPU scan (`on_watchdog_tick`); a
+                   buddy stale past `DEFAULT_HARD_LOCKUP_THRESHOLD_NS` (10 s)
+                   emits `CPU_HARD_LOCKUP_DETECTED` (4082) / `_CLEARED` (4083).
+                   Each sample records the interrupted PC/PSTATE/kernel-vs-user
+                   as last-known context, so a detection carries `cpu`,
+                   `observer`, `stalled_ms`, `pc`, `pstate`. A detection drives
+                   a best-effort `WatchdogArch::request_recovery` (reschedule
+                   for soft, directed attention for hard), recorded with its
+                   honest outcome as `CPU_LOCKUP_RECOVERY` (4084). All paths
+                   are lock-free/allocation-free and fail closed before the
+                   hooks are installed. aarch64 delivery: the virtual generic
+                   timer (`CNTV`, PPI 27) as an IRQ (the correct and complete
+                   buddy detector for a GICv2 non-secure kernel, where FIQ is
+                   the secure-world channel a non-secure kernel cannot route;
+                   `plans/WATCHDOG.md`). x86_64/riscv64
+                   keep the soft detector and inherit hard detection when they
+                   wire their own cadence + `WatchdogArch`. Design:
                    `docs/src/architecture/scheduler.md` +
                    `docs/src/architecture/kernel.md` audit catalogue.
                - **P-6 — wait-queue §27 completeness rework (staged by the

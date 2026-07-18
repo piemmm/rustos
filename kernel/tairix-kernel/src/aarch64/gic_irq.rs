@@ -972,6 +972,39 @@ extern "C" fn production_tick_dispatch(cpu: tairix_arch_api::CpuId) {
     tairix_kernel_core::check_stall(cpu);
 }
 
+/// The cadence callback the lockup-watchdog's virtual-timer IRQ path
+/// invokes on every ~1 Hz sample (installed via
+/// [`tairix_arch_aarch64::watchdog::set_watchdog_callback`]).
+///
+/// It reads what this CPU interrupted — the return PC (`ELR_EL1`) and
+/// processor state (`SPSR_EL1`, from which the exception level says whether
+/// the CPU was in the kernel) — packages it as the architecture-neutral
+/// [`tairix_arch_api::WatchdogSample`], and hands it to the detector
+/// (`kernel/core`). The detector stamps this CPU's liveness heartbeat,
+/// records the sample as its last-known context (the "why"), and scans the
+/// other CPUs for a lockup only this cross-CPU path can see — a CPU that
+/// has stopped taking even this sample. Reading `ELR`/`SPSR` here is sound:
+/// they hold the interrupted state throughout the handler, until the
+/// `eret`. Before the monotonic clock hook is installed the sample is
+/// skipped (fail-safe).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+extern "C" fn production_watchdog_dispatch(cpu: tairix_arch_api::CpuId) {
+    let Some(now_ns) = tairix_kernel_core::wait_now_ns() else {
+        return;
+    };
+    let spsr = tairix_arch_aarch64::watchdog::read_spsr_el1();
+    let sample = tairix_arch_api::WatchdogSample {
+        pc: tairix_arch_aarch64::watchdog::read_elr_el1(),
+        // The kernel-side running-task id is not exposed to the arch layer;
+        // the PC + processor state + kernel/user verdict below are the
+        // load-bearing "why", and the detector names the CPU.
+        task: tairix_arch_api::WatchdogSample::NO_TASK,
+        aux: spsr,
+        in_kernel: tairix_arch_aarch64::watchdog::spsr_in_kernel(spsr),
+    };
+    tairix_kernel_core::on_watchdog_tick(cpu, now_ns, &sample);
+}
+
 /// Set up tickless timer-driven preemption on the boot CPU: register the
 /// per-CPU preempt storage, install the EL0-preemption callback, record
 /// the per-quantum interval derived from `PREEMPT_TICK_HZ`, and enable
@@ -1046,6 +1079,10 @@ pub fn arm_preemption(cpu_count: u32) {
         // can receive the scheduler's placement SGI.
         preempt::set_ipi_callback(production_ipi_dispatch);
 
+        // Install the lockup-watchdog cadence callback before arming its
+        // virtual-timer, so the first sample already feeds the detector.
+        tairix_arch_aarch64::watchdog::set_watchdog_callback(production_watchdog_dispatch);
+
         // Derive the tick interval from the discovered counter frequency
         // (never a board constant). A zero reading is a
         // fail-safe skip.
@@ -1065,9 +1102,17 @@ pub fn arm_preemption(cpu_count: u32) {
         // records the quantum, enables the timer PPI, and leaves the
         // timer disarmed — the scheduler arms the first one-shot on its
         // next dispatch onto a contended CPU (tickless).
+        //
+        // The lockup watchdog's ~1 Hz virtual-timer cadence is armed here
+        // too, and — unlike the tickless preemption one-shot — stays armed
+        // for the CPU's lifetime, so every core keeps a fresh liveness
+        // heartbeat and runs the cross-CPU lockup scan even when idle. The
+        // interval is one second of counter ticks (`counter_hz`), the same
+        // discovered frequency the preempt interval derives from.
         unsafe {
             preempt::enable_ipi();
             preempt::init_local_preempt(0, interval);
+            tairix_arch_aarch64::watchdog::init_local_watchdog(counter_hz);
         }
     }
     #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
@@ -1106,6 +1151,9 @@ pub fn init_secondary_preemption(cpu: tairix_arch_api::CpuId) {
         unsafe {
             preempt::enable_ipi();
             preempt::init_local_preempt(cpu, interval);
+            // Arm this secondary's lockup-watchdog cadence too (the boot
+            // CPU installed the shared callback before `CPU_ON`).
+            tairix_arch_aarch64::watchdog::init_local_watchdog(counter_hz);
         }
     }
     #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]

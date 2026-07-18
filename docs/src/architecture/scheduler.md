@@ -431,23 +431,44 @@ no-op, so a non-preemptive port inherits the explicit-wake path only; the
 host `TestArch` records each call so the wait syscalls' re-arm epilogues
 are asserted directly.
 
-The same per-tick callback also samples the **CPU stall watchdog**
-(`kernel/core::watchdog::check_stall`). Because interrupts stay deliverable
-while in-kernel code runs (below), the preemption tick still fires on a CPU
-whose task is looping without ever returning to the scheduler — a soft
-lockup. The dispatch loop stamps a per-CPU heartbeat once per iteration
-(`watchdog::note_progress`, the tickless analogue of a Linux watchdog
-thread being scheduled); when the tick observes a heartbeat older than
-`watchdog::DEFAULT_STALL_THRESHOLD_NS` (10 s) it reports the stall once —
-on the same serial/console sink the panic path uses — with the CPU id and
-how long it has gone without progress, and reports the recovery once when
-that CPU dispatches again. Detection and the report are lock-free and
-allocation-free, so they are safe in the timer ISR (the only place a stall
-is observable, since the dispatcher by definition is not running), and the
-watchdog stays silent before its clock/sink hooks are installed or on a CPU
-that has never dispatched (fail closed — it never fabricates a stall). The
-audit catalogue documents the `CPU_STALL_DETECTED` / `CPU_STALL_CLEARED`
-records (`docs/src/architecture/kernel.md`).
+The scheduler also feeds the first-class **CPU-lockup watchdog**
+(`kernel/core::watchdog`), which catches two distinct failures and makes each
+loud enough to explain *why*. It keeps two per-CPU heartbeats plus an activity
+class (Offline / Idle / Active, published by the dispatch loop so only a CPU
+that *owes* progress is judged — fail closed). See `plans/WATCHDOG.md`.
+
+- A **soft lockup** is a CPU that keeps taking interrupts but stops returning
+  to the scheduler. The dispatch loop stamps a **progress** heartbeat once per
+  iteration (`watchdog::note_progress`, the tickless analogue of a Linux
+  watchdog thread being scheduled); the armed preemption tick samples it
+  (`watchdog::check_stall`) — it only fires on a *contended* CPU, so a lone,
+  preemptible task is never falsely flagged — and a heartbeat older than
+  `watchdog::DEFAULT_SOFT_LOCKUP_THRESHOLD_NS` (10 s) reports the stall once.
+
+- A **hard lockup** is a CPU that has stopped taking even interrupts (spinning
+  with IRQs masked, wedged, an interrupt storm). Its own tick never fires, so
+  only another CPU can see it. A port arms a non-maskable ~1 Hz cadence sample
+  (the Arch HAL watchdog surface, `tairix_arch_api::watchdog`) that stamps a
+  **liveness** heartbeat and runs a **cross-CPU scan** (`on_watchdog_tick`); a
+  buddy whose liveness is stale past `DEFAULT_HARD_LOCKUP_THRESHOLD_NS` (10 s)
+  while Active is reported hard-locked. On aarch64 the cadence is the virtual
+  generic timer (`CNTV`, PPI 27) delivered as an ordinary IRQ — the correct
+  cross-CPU *buddy* detector for a GICv2 non-secure kernel, where FIQ (the
+  secure pseudo-NMI) is unavailable.
+
+Each cadence sample records what its CPU interrupted (PC, processor state,
+kernel-vs-user), so a detected lockup carries fresh "why" context: the locked
+CPU, the observer, how long it has been silent, the last-known PC and PSTATE.
+A detection then asks the port for a best-effort recovery
+(`WatchdogArch::request_recovery` — a reschedule for a soft lockup, a directed
+attention signal for a hard one), recorded with its honest outcome. Detection,
+reporting, and recovery are lock-free and allocation-free (safe on the
+non-maskable path even while a target CPU holds locks), report each episode
+once and self-close on recovery, and stay silent before the clock/sink hooks
+are installed or on a never-armed CPU (fail closed). The audit catalogue
+documents the `CPU_STALL_DETECTED` / `CPU_STALL_CLEARED`,
+`CPU_HARD_LOCKUP_DETECTED` / `CPU_HARD_LOCKUP_CLEARED`, and
+`CPU_LOCKUP_RECOVERY` records (`docs/src/architecture/kernel.md`).
 
 The dispatch loop runs with **device interrupts enabled** — TAIRiX is a
 fully preemptive kernel (`AGENTS.md` §17.1). It calls

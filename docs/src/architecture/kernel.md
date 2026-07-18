@@ -221,28 +221,55 @@ record under the `log` phase and halts.
 | 4072 | Info  | `SECONDARY_CPU_ONLINE`      | audit  |
 | 4080 | Error | `CPU_STALL_DETECTED`        | audit  |
 | 4081 | Warn  | `CPU_STALL_CLEARED`         | audit  |
+| 4082 | Error | `CPU_HARD_LOCKUP_DETECTED`  | audit  |
+| 4083 | Warn  | `CPU_HARD_LOCKUP_CLEARED`   | audit  |
+| 4084 | Warn  | `CPU_LOCKUP_RECOVERY`       | audit  |
 
-The `CPU_STALL_*` pair is the per-CPU stall watchdog
-(`tairix_kernel_core::watchdog`). `CPU_STALL_DETECTED` is emitted the
-first time the port's timer-tick path (`watchdog::check_stall`) observes a
-CPU whose last dispatch-loop heartbeat is older than the stall threshold
-(`watchdog::DEFAULT_STALL_THRESHOLD_NS`, 10 s) — a soft lockup: a CPU that
-keeps executing but stops returning to the scheduler (a runaway in-kernel
-loop, a task that never yields, a lock held across a wedged access). It is
-reported **once per episode**, never once per tick, with fields `cpu` (the
-stalled CPU) and `stalled_ms` (how long it has gone without progress).
-`CPU_STALL_CLEARED` (a `Warn`) closes the record when that CPU dispatches
-again, carrying the total episode duration, so a stall that resolves is
-self-closing rather than a dangling line. The heartbeat is stamped once
-per dispatch-loop iteration (`watchdog::note_progress`) — the tickless
-analogue of Linux's softlockup detector, using TAIRiX's dispatch loop as
-the "watchdog thread" and the preemption timer tick as the sampler.
-Detection and reporting are lock-free and allocation-free, so the check
-runs safely in the timer ISR — the one place a stall is observable,
-because the dispatcher by definition is not running. Before the report
-sink and the monotonic-clock hook are installed, or on a CPU whose
-heartbeat has never been stamped, the watchdog stays silent (fail closed):
-it never fabricates a stall and never panics.
+These five records are the first-class CPU-lockup watchdog
+(`tairix_kernel_core::watchdog`; design `plans/WATCHDOG.md`), which catches
+two distinct failures and carries enough context in each record to explain
+*why*.
+
+`CPU_STALL_DETECTED` is a **soft lockup**: a CPU that keeps taking
+interrupts but stops returning to the scheduler (a runaway in-kernel loop, a
+task that never yields, a lock held across a wedged access). It is emitted
+the first time the CPU's own armed preemption tick
+(`watchdog::check_stall`), or another CPU's cross-CPU scan, observes a
+dispatch-loop heartbeat (`watchdog::note_progress`) older than
+`watchdog::DEFAULT_SOFT_LOCKUP_THRESHOLD_NS` (10 s). `CPU_STALL_CLEARED` (a
+`Warn`) closes the record when that CPU dispatches again.
+
+`CPU_HARD_LOCKUP_DETECTED` is a **hard lockup**: a CPU that has stopped
+taking even interrupts (spinning with IRQs masked, wedged, an interrupt
+storm). Its own tick never fires, so only *another* CPU can observe it — via
+the non-maskable ~1 Hz cadence sample each CPU runs
+(`watchdog::on_watchdog_tick`), which stamps a liveness heartbeat and scans
+the other CPUs; a buddy whose liveness is stale past
+`DEFAULT_HARD_LOCKUP_THRESHOLD_NS` (10 s) while Active is reported.
+`CPU_HARD_LOCKUP_CLEARED` (a `Warn`) closes the record when that CPU takes
+its sample again.
+
+A detection carries the full diagnosis, never secrets: `cpu` (the locked
+CPU), `observer` (the CPU that caught a cross-CPU lockup), `stalled_ms` (how
+long it has been silent), and — from the last-known context each cadence
+sample records — `pc` (interrupted program counter) and `pstate`
+(interrupted processor state). Every episode is reported **once**, never
+once per tick, and self-closes on recovery.
+
+`CPU_LOCKUP_RECOVERY` (a `Warn`) records the best-effort recovery the
+watchdog asked the architecture port for after a detection
+(`WatchdogArch::request_recovery`): fields `cpu`, `kind` (`soft`/`hard`),
+and `outcome` (`rescheduled` / `attention` / `unrecoverable` /
+`unsupported`), so the attempt and its honest result are on the trail — a
+port with no recovery channel records `unsupported` rather than silently
+doing nothing.
+
+Detection, reporting, and recovery are lock-free and allocation-free, so
+they run safely from the non-maskable sample path — the one place a hard
+lockup is observable — even while a target CPU holds arbitrary locks.
+Before the report/recovery/clock hooks are installed, or on a CPU whose
+heartbeats have never been stamped, the watchdog stays silent (fail
+closed): it never fabricates a lockup and never panics.
 
 `INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /
 §20, `plans/PI.md` P11). The `key_inject` syscall handler emits it the

@@ -175,6 +175,14 @@ pub mod userentry;
 /// to the attached display via the `VideoCore` firmware mailbox, with
 /// the UART as the fallback when no display exists.
 pub mod video;
+/// aarch64 implementation of the Arch HAL lockup-watchdog surface
+/// ([`tairix_arch_api::watchdog`]): the ~1 Hz virtual-timer (`CNTV`, PPI
+/// 27) liveness-sample cadence that feeds the cross-CPU lockup detector,
+/// plus the [`watchdog::Watchdog`] recovery handle (reschedule / attention
+/// SGI). The MMIO/system-register programming is gated to the freestanding
+/// target; the pure encoding/decoding (`SPSR` level, cadence, recovery
+/// outcomes) is host-unit-tested.
+pub mod watchdog;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod entry;

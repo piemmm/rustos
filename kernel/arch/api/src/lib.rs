@@ -114,6 +114,7 @@ pub mod tlb;
 pub mod uaccess;
 pub mod userentry;
 pub mod wakeup;
+pub mod watchdog;
 pub mod xtlb;
 
 pub use sidechannel::{
@@ -163,6 +164,11 @@ pub use uaccess::{
 pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};
 
 pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
+
+pub use watchdog::{
+    conformance as watchdog_conformance, RecoveryOutcome, WatchdogArch, WatchdogKind,
+    WatchdogSample, CADENCE_NS as WATCHDOG_CADENCE_NS,
+};
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.
 ///

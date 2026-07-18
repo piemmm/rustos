@@ -976,6 +976,11 @@ fn run_dispatch_loop<A: KernelArch>(
         // `check_stall` will report. A single monotonic-counter read per
         // dispatch, off any lock.
         crate::watchdog::note_progress(cpu, arch.monotonic_ns(cpu));
+        // Publish this CPU as running work only *after* stamping a fresh
+        // progress heartbeat, so a cross-CPU watchdog scan can never catch
+        // it Active with a stale heartbeat inherited from a long idle park
+        // (which would be a false soft-lockup report).
+        crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Active);
         // Retire any reschedule obligation left by the task that just
         // suspended before the policy makes its next decision. CFQ arms
         // the incoming task's one-shot inside `step`; clearing later in
@@ -1028,6 +1033,11 @@ fn run_dispatch_loop<A: KernelArch>(
                 };
                 if !(woke || delivered || local_ready) {
                     arch.pump_console_tx();
+                    // Parked with nothing to run: a legitimately quiet CPU,
+                    // never a lockup. Publish Idle so the cross-CPU scan
+                    // does not judge it; the loop re-stamps progress and
+                    // republishes Active at its top on the next wake.
+                    crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Idle);
                     arch.wait_for_interrupt();
                 }
                 arch.set_device_irqs(true);
@@ -1036,6 +1046,10 @@ fn run_dispatch_loop<A: KernelArch>(
         }
     }
     arch.set_device_irqs(false);
+    // No dispatcher runs on this CPU any more, so it owes no progress:
+    // publish Offline so the watchdog never mistakes a retired CPU for a
+    // lockup.
+    crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Offline);
 }
 
 #[cfg(test)]
@@ -1779,6 +1793,15 @@ fn run_phases<A: KernelArch>(
     // (fail-safe); the wait-queue hook installed just above supplies the
     // monotonic clock its tick-driven check reads.
     crate::watchdog::install_report_sink(audit_sink);
+
+    // Give the watchdog its best-effort recovery channel, when the port has
+    // one: a detected lockup is met with a cross-CPU reschedule (soft) or a
+    // directed attention interrupt (hard). A port without one leaves
+    // recovery inert — the lockup is still reported loudly, and the attempt
+    // is honestly recorded as `unsupported` (fail closed).
+    if let Some(recovery) = state.arch.watchdog_recovery() {
+        crate::watchdog::install_recovery(recovery);
+    }
 
     // Wrap every boot-installed console's input half in the blocking
     // adapter (the stream backing owns blocking, never

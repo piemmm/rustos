@@ -148,6 +148,20 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// The port's non-maskable lockup-recovery handle, when it can drive a
+    /// cross-CPU recovery signal (a reschedule IPI, or a directed attention
+    /// interrupt).
+    ///
+    /// [`crate::kernel_main`] installs it into the watchdog once at boot so
+    /// a detected lockup can be met with a best-effort recovery attempt.
+    /// The default is `None` — a port with no recovery channel simply
+    /// leaves hard-lockup recovery inert; the detector still reports every
+    /// lockup loudly, and the recovery attempt is honestly recorded as
+    /// `unsupported` (fail closed, never a silent no-op).
+    fn watchdog_recovery(&self) -> Option<&'static (dyn tairix_arch_api::WatchdogArch + Sync)> {
+        None
+    }
+
     /// The Tier-1 architecture identity of this port, or `None` for a
     /// port that is not a shippable target (the host test arch).
     ///
