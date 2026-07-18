@@ -793,11 +793,14 @@ where
             let entries = vfs.list_via_secured(cred, path, fs)?;
             let mut out: Vec<ReaddirEntry> = entries
                 .into_iter()
-                .map(|(info, modified, name)| ReaddirEntry {
+                .map(|(info, name)| ReaddirEntry {
                     kind: file_kind(info.kind),
                     size: info.size,
                     allocated: info.allocated,
-                    modified,
+                    // The readdir stream carries the cheap common-case
+                    // modification stamp; a consumer wanting other times
+                    // stats the entry.
+                    modified: info.times.modified,
                     name,
                 })
                 .collect();
@@ -851,6 +854,7 @@ where
                     volume,
                     node: info.node,
                 },
+                times: info.times,
             })
         })
     }

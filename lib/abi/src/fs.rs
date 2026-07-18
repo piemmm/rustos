@@ -14,6 +14,7 @@
 //! it bounds-checks against the structure's `WIRE_LEN` and fails closed with
 //! an [`Errno`] rather than indexing out of range.
 
+use crate::driver::filesystem::NodeTimes;
 use crate::le::{put_u32, put_u64, read_u32, read_u64};
 use crate::time::Time64;
 use crate::Errno;
@@ -337,9 +338,18 @@ impl FileId {
 ///
 /// Carries only what the userland contract exposes: the node kind, its byte
 /// size, its allocated on-disk bytes, the POSIX mode bits, the owning
-/// uid/gid, and its stable system-wide [`FileId`]. The kernel fills it
+/// uid/gid, its stable system-wide [`FileId`], and its four
+/// timestamps. The kernel fills it
 /// from the VFS's authorised view of the node; a program never reads it from
 /// a `/proc`-style file (there is none).
+///
+/// The `times` field carries the same four [`Time64`] stamps a filesystem
+/// driver reports through [`NodeTimes`] — the one definition of a node's
+/// timestamps, translated straight through the VFS rather than restated. A
+/// backing that keeps no stamp of a given kind reports
+/// [`Time64::UNIX_EPOCH`] for it (ARXFS, for instance, tracks no access
+/// time, so its `times.accessed` is always the epoch), never a fabricated
+/// wall time.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FileStat {
@@ -362,15 +372,20 @@ pub struct FileStat {
     /// grew" from "a different file now sits at this name" (log rotation),
     /// and the key the kernel's file-change notification uses.
     pub id: FileId,
+    /// The node's four timestamps (creation, contents-modification (mtime),
+    /// access (atime), metadata-change (ctime)), each 64-bit-native. A stamp
+    /// the backing format does not keep is [`Time64::UNIX_EPOCH`].
+    pub times: NodeTimes,
 }
 
 impl FileStat {
     /// Encoded size of a [`FileStat`] on the wire.
     ///
     /// `kind(1)` + `pad(7)` + `size(8)` + `allocated(8)` + `mode(4)` +
-    /// `uid(4)` + `gid(4)` + `id.volume(16)` + `id.node(8)`, padded to a
-    /// multiple of 8 for natural alignment of the `u64` fields.
-    pub const WIRE_LEN: usize = 64;
+    /// `uid(4)` + `gid(4)` + `id.volume(16)` + `id.node(8)` +
+    /// `created(12)` + `modified(12)` + `accessed(12)` + `changed(12)`,
+    /// padded to a multiple of 8 for natural alignment of the `u64` fields.
+    pub const WIRE_LEN: usize = 112;
 
     /// Encode `self` into the first [`FileStat::WIRE_LEN`] bytes of `out`.
     ///
@@ -391,6 +406,10 @@ impl FileStat {
         put_u32(out, 32, self.gid);
         out[40..56].copy_from_slice(&self.id.volume);
         put_u64(out, 56, self.id.node);
+        out[64..76].copy_from_slice(&self.times.created.to_le_bytes());
+        out[76..88].copy_from_slice(&self.times.modified.to_le_bytes());
+        out[88..100].copy_from_slice(&self.times.accessed.to_le_bytes());
+        out[100..112].copy_from_slice(&self.times.changed.to_le_bytes());
         Ok(Self::WIRE_LEN)
     }
 
@@ -403,6 +422,8 @@ impl FileStat {
     ///   [`FileStat::WIRE_LEN`].
     /// * [`Errno::OutOfRange`] if the `kind` byte is not a defined
     ///   [`FileKind`].
+    /// * [`Errno::TimestampOutOfRange`] if any timestamp is not a canonical
+    ///   [`Time64`] encoding.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -419,6 +440,12 @@ impl FileStat {
             id: FileId {
                 volume,
                 node: read_u64(bytes, 56),
+            },
+            times: NodeTimes {
+                created: Time64::from_bytes(&bytes[64..76])?,
+                modified: Time64::from_bytes(&bytes[76..88])?,
+                accessed: Time64::from_bytes(&bytes[88..100])?,
+                changed: Time64::from_bytes(&bytes[100..112])?,
             },
         })
     }
@@ -605,7 +632,8 @@ impl core::iter::FusedIterator for DirEntries<'_> {}
 mod tests {
     extern crate alloc;
     use super::{
-        DirEntries, DirEntry, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_NAME_MAX,
+        DirEntries, DirEntry, FileId, FileKind, FileStat, NodeTimes, OpenFlags, UnlinkFlags,
+        FS_NAME_MAX,
     };
     use crate::time::Time64;
     use crate::Errno;
@@ -693,6 +721,14 @@ mod tests {
                 volume: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
                 node: 0xDEAD_BEEF_0BAD_F00D,
             },
+            // Each stamp distinct and spanning the pre-1970 / post-2038
+            // range, so the full signed round-trip is exercised.
+            times: NodeTimes {
+                created: Time64::from_secs(-2_000_000_000),
+                modified: Time64::new(4_000_000_000, 999_999_999).expect("canonical"),
+                accessed: Time64::UNIX_EPOCH,
+                changed: Time64::from_secs(1_700_000_000),
+            },
         };
         let mut buf = [0u8; FileStat::WIRE_LEN];
         assert_eq!(stat.encode(&mut buf), Ok(FileStat::WIRE_LEN));
@@ -709,6 +745,7 @@ mod tests {
             uid: 0,
             gid: 0,
             id: FileId::NONE,
+            times: NodeTimes::default(),
         };
         let mut tiny = [0u8; FileStat::WIRE_LEN - 1];
         assert_eq!(stat.encode(&mut tiny), Err(Errno::BufferTooSmall));

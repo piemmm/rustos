@@ -54,7 +54,7 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -237,11 +237,15 @@ struct ParsedEntry {
     cluster: u32,
     size: u32,
     is_dir: bool,
-    /// Last-write instant decoded from the short entry's DOS date/time
-    /// pair; [`Time64::UNIX_EPOCH`] when the stored fields are not a
-    /// decodable calendar date (the documented "no stamp" value — never a
+    /// The entry's timestamps decoded from the short entry's DOS date/time
+    /// fields: `created` from the creation date+time, `modified` from the
+    /// last-write date+time, `accessed` from the last-access *date* (FAT
+    /// stores no access time-of-day, so it is that date at midnight UTC).
+    /// `changed` (ctime) is [`Time64::UNIX_EPOCH`]: FAT keeps no
+    /// metadata-change stamp. A field that is not a decodable calendar date
+    /// is [`Time64::UNIX_EPOCH`] (the documented "no stamp" value — never a
     /// clamped or guessed date).
-    mtime: Time64,
+    times: NodeTimes,
     /// Device byte offset of the 8.3 short entry (the one carrying the
     /// cluster and size); the write path patches metadata here.
     short_offset: u64,
@@ -483,7 +487,15 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
         cluster,
         size: le32(raw, 28),
         is_dir: raw[11] & ATTR_DIRECTORY != 0,
-        mtime: dos_datetime_to_time64(le16(raw, 24), le16(raw, 22)),
+        times: NodeTimes {
+            // Creation date (0x10) + time (0x0E); last-write date (0x18) +
+            // time (0x16); last-access date (0x12), no time-of-day. FAT has
+            // no metadata-change (ctime) stamp, so `changed` is the epoch.
+            created: dos_datetime_to_time64(le16(raw, 16), le16(raw, 14)),
+            modified: dos_datetime_to_time64(le16(raw, 24), le16(raw, 22)),
+            accessed: dos_datetime_to_time64(le16(raw, 18), 0),
+            changed: Time64::UNIX_EPOCH,
+        },
         short_offset: 0,
         first_slot: 0,
         slot_span: 0,
@@ -2059,17 +2071,24 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         } else {
             self.chain_len(cluster)?.0 * self.layout.bytes_per_cluster
         };
+        // FAT stores timestamps only in the *parent's* directory entry, not
+        // in anything addressable by the packed node identity, so a stat by
+        // node cannot report them: `read_dir` is the one path that carries a
+        // FAT node's real stamps. Reporting the epoch here is the honest
+        // "not addressable by node" answer, never a fabricated wall time.
         if node_is_dir(node) {
             Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated,
+                times: NodeTimes::default(),
             })
         } else {
             Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: u64::from(node_size(node)),
                 allocated,
+                times: NodeTimes::default(),
             })
         }
     }
@@ -2198,19 +2217,20 @@ impl<B: Block> FilesystemRead for Fat32<B> {
                     kind: NodeKind::Directory,
                     size: 0,
                     allocated,
+                    times: entry.times,
                 }
             } else {
                 NodeInfo {
                     kind: NodeKind::RegularFile,
                     size: u64::from(entry.size),
                     allocated,
+                    times: entry.times,
                 }
             };
             let next_cursor = (u64::from(walk.cluster) << 32) | (walk.intra / DIR_ENTRY_LEN as u64);
             return Ok(Some(DirEntry {
                 node: Self::entry_node(&entry),
                 info,
-                modified: entry.mtime,
                 name_len: entry.name_len,
                 next_cursor,
             }));

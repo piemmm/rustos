@@ -644,7 +644,10 @@ fn acorn_metadata_round_trips() {
             attr(&mut fs, node, b"acorn.attr").as_deref(),
             Some(&b"RW/"[..])
         );
-        assert_eq!(fs.times(node).expect("times"), NodeTimes::default());
+        assert_eq!(
+            fs.node_info(node).expect("info").times,
+            NodeTimes::default()
+        );
 
         // Typing the file, then stamping it, round-trips exactly.
         fs.set_attr(node, b"acorn.filetype", b"ffb")
@@ -662,7 +665,7 @@ fn acorn_metadata_round_trips() {
         );
         // The stamp now decodes as the node's times and listing stamp.
         let stamp = acorn::centiseconds_to_time64(0x00_A1B2_C3D4).expect("in range");
-        assert_eq!(fs.times(node).expect("times").modified, stamp);
+        assert_eq!(fs.node_info(node).expect("info").times.modified, stamp);
 
         // Attribute letters round-trip within the format's storable set.
         fs.set_attr(node, b"acorn.attr", b"RWL/r").expect("attr");

@@ -28,10 +28,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo,
-    NodeKind,
+    NodeKind, NodeTimes,
 };
 use tairix_abi::driver::DriverError;
-use tairix_abi::time::Time64;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
 
 use super::path::MAX_COMPONENT_LEN;
@@ -62,6 +61,8 @@ pub struct DelegatedInfo {
     /// distinguishes "this file grew" from "a different file now sits at
     /// this name" and keys the file-change notification.
     pub node: u64,
+    /// The node's four timestamps, as the driver reported them.
+    pub times: NodeTimes,
 }
 
 /// Maps a [`DriverError`] from the read surface onto the VFS error type.
@@ -494,6 +495,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             allocated: info.allocated,
             meta,
             node: node.raw(),
+            times: info.times,
         })
     }
 
@@ -523,8 +525,9 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     }
 
     /// List the entries of the directory at `components`, in the driver's
-    /// stable on-disk order, each with the structural [`NodeInfo`] and the
-    /// last-modification stamp the driver reports for it.
+    /// stable on-disk order, each with the structural [`NodeInfo`] (which
+    /// carries the node's kind, sizes, and timestamps) the driver reports
+    /// for it.
     ///
     /// The kind and sizes come from the listing driver itself, so a caller
     /// never has to re-resolve each child by path — a child whose *path*
@@ -543,7 +546,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
-    ) -> Result<Vec<(NodeInfo, Time64, String)>, VfsError> {
+    ) -> Result<Vec<(NodeInfo, String)>, VfsError> {
         let (node, info, meta) = self.resolve(cred, components)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
@@ -565,7 +568,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             }
             let name =
                 core::str::from_utf8(&name_buf[..entry.name_len]).map_err(|_| VfsError::Io)?;
-            entries.push((entry.info, entry.modified, name.to_string()));
+            entries.push((entry.info, name.to_string()));
             cursor = entry.next_cursor;
         }
         Ok(entries)

@@ -589,8 +589,17 @@ Each inode stores:
 
 ```text
 owner uid, group gid, POSIX mode bits, ACL, optional capability requirement,
-created Time64, modified Time64, accessed Time64, changed Time64
+created Time64, modified Time64, changed Time64
 ```
+
+ARXFS tracks **no access time (atime)**: updating a stamp on every read
+would defeat the copy-on-write model (a pure read would write metadata),
+so the format keeps only `created`/`modified`/`changed`. The 12-byte
+atime slot in the on-disk inode record is reserved (written zero, ignored
+on read) so the surrounding field offsets stay fixed, and the node
+reports `accessed = Time64::UNIX_EPOCH` — the honest "no stamp" value.
+The three tracked stamps are surfaced through `NodeInfo::times` (read in
+the same structural read as kind/size), not a separate timestamp trait.
 
 ARXFS must enforce:
 
@@ -1274,7 +1283,7 @@ metadata block fails closed with `NoSpace` rather than spanning blocks.
 
 The driver implements the versioned `abi-v1` `FilesystemAttrs` trait
 (`lib/abi/src/driver/filesystem.rs`), a separate trait alongside
-`FilesystemRead`/`FilesystemWrite`/`FilesystemSecurity`/`FilesystemTimestamps`
+`FilesystemRead`/`FilesystemWrite`/`FilesystemSecurity`
 (new behaviour ships as a new trait, never a widening of a shipped one):
 
 - `get_attr(node, key, value_out) -> Option<len>` — reads a value into a

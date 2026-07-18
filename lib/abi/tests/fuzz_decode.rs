@@ -671,6 +671,14 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
         uid: 1000,
         gid: 1000,
         id: tairix_abi::FileId::NONE,
+        // Non-trivial stamps so the bit-flip sweep also walks the
+        // timestamp-decode branch of `FileStat::decode`.
+        times: tairix_abi::NodeTimes {
+            created: Time64::from_secs(-2_000_000_000),
+            modified: Time64::new(4_000_000_000, 999_999_999).expect("canonical"),
+            accessed: Time64::UNIX_EPOCH,
+            changed: Time64::from_secs(1_700_000_000),
+        },
     }
     .encode(&mut stat)
     .expect("a well-formed FileStat encodes");

@@ -2,11 +2,14 @@
 //!
 //! Attaches an Acorn ADFS / RISC OS `FileCore` volume sitting behind any
 //! [`tairix_abi::driver::block::Block`] device and exposes it through the
-//! versioned [`FilesystemRead`], [`FilesystemWrite`],
-//! [`FilesystemTimestamps`], [`FilesystemAttrs`], and [`FilesystemStats`]
+//! versioned [`FilesystemRead`], [`FilesystemWrite`], [`FilesystemAttrs`],
+//! and [`FilesystemStats`]
 //! surfaces (new behaviour ships as a new trait, never by widening the
 //! frozen mount/unmount
-//! [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)).
+//! [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)). It reports
+//! its single stored datestamp as the node's `created`/`modified`/
+//! `accessed`/`changed` times through
+//! [`NodeInfo::times`](tairix_abi::driver::filesystem::NodeInfo::times).
 //!
 //! # Supported formats
 //!
@@ -58,8 +61,8 @@
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemTimestamps,
-    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
+    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeId, NodeInfo,
+    NodeKind, NodeTimes, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -176,6 +179,19 @@ fn object_stamp(object: &Object) -> Time64 {
             acorn::centiseconds_to_time64(centiseconds).unwrap_or(Time64::UNIX_EPOCH)
         }
         acorn::LoadExec::Untyped { .. } => Time64::UNIX_EPOCH,
+    }
+}
+
+/// The four [`NodeTimes`] of a typed object. ADFS stores exactly one
+/// instant (set at creation, rewritten on update), so it is honestly all
+/// four; an untyped object stores none and reports the epoch throughout.
+fn object_times(object: &Object) -> NodeTimes {
+    let stamp = object_stamp(object);
+    NodeTimes {
+        created: stamp,
+        modified: stamp,
+        accessed: stamp,
+        changed: stamp,
     }
 }
 
@@ -925,21 +941,14 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         if !node_is_valid(node) {
             return Err(DriverError::NotFound);
         }
-        let size = node_size(node);
-        let allocated = self.object_allocated(node_addr(node), size)?;
-        if node_is_dir(node) {
-            Ok(NodeInfo {
-                kind: NodeKind::Directory,
-                size: 0,
-                allocated,
-            })
+        // The root has no directory entry and so no stored stamp; every
+        // other node's stamp lives in its parent's entry, resolved here.
+        let times = if node == self.root_node() {
+            NodeTimes::default()
         } else {
-            Ok(NodeInfo {
-                kind: NodeKind::RegularFile,
-                size: u64::from(size),
-                allocated,
-            })
-        }
+            object_times(&self.entry_of(node)?.3)
+        };
+        self.node_info_with_times(node, times)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
@@ -993,11 +1002,12 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         }
         name_out[..object.name_len].copy_from_slice(object.name());
         let node = object_node(&object);
-        let info = self.node_info(node)?;
+        // The listing already holds the object, so its stamps come free
+        // without a second entry resolution.
+        let info = self.node_info_with_times(node, object_times(&object))?;
         Ok(Some(DirEntry {
             node,
             info,
-            modified: object_stamp(&object),
             name_len: object.name_len,
             next_cursor: u64::from(index) + 1,
         }))
@@ -1005,6 +1015,35 @@ impl<B: Block> FilesystemRead for Adfs<B> {
 }
 
 impl<B: Block> Adfs<B> {
+    /// Build the [`NodeInfo`] of `node` from its already-known `times`.
+    ///
+    /// The structural half (kind, size, allocation) is computed once here,
+    /// so `node_info` and `read_dir` — which learn a node's timestamps by
+    /// different paths — never restate the size/allocation logic.
+    fn node_info_with_times(
+        &mut self,
+        node: NodeId,
+        times: NodeTimes,
+    ) -> Result<NodeInfo, DriverError> {
+        let size = node_size(node);
+        let allocated = self.object_allocated(node_addr(node), size)?;
+        if node_is_dir(node) {
+            Ok(NodeInfo {
+                kind: NodeKind::Directory,
+                size: 0,
+                allocated,
+                times,
+            })
+        } else {
+            Ok(NodeInfo {
+                kind: NodeKind::RegularFile,
+                size: u64::from(size),
+                allocated,
+                times,
+            })
+        }
+    }
+
     /// Resolve `name` within the directory node `dir`.
     fn resolve_child(&mut self, dir: NodeId, name: &[u8]) -> Result<(u32, Object), DriverError> {
         if !node_is_valid(dir) || !node_is_dir(dir) {
@@ -1376,28 +1415,6 @@ impl<B: Block> Adfs<B> {
         let present = [true, true, true, typed, typed];
         let count = present.iter().filter(|&&p| p).count();
         (present, count)
-    }
-}
-
-impl<B: Block> FilesystemTimestamps for Adfs<B> {
-    fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError> {
-        if !node_is_valid(node) {
-            return Err(DriverError::NotFound);
-        }
-        if node == self.root_node() {
-            // The root has no directory entry and so no stored stamp.
-            return Ok(NodeTimes::default());
-        }
-        let (_, _, _, object) = self.entry_of(node)?;
-        let stamp = object_stamp(&object);
-        // ADFS stores exactly one instant (set at creation, rewritten on
-        // update); it is honestly all four.
-        Ok(NodeTimes {
-            created: stamp,
-            modified: stamp,
-            accessed: stamp,
-            changed: stamp,
-        })
     }
 }
 

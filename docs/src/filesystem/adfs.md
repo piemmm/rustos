@@ -4,8 +4,9 @@
 interoperability driver for Acorn ADFS / RISC OS `FileCore` volumes. It
 attaches a volume behind any `tairix_abi::driver::block::Block` device
 and exposes it through the versioned `FilesystemRead`,
-`FilesystemWrite`, `FilesystemTimestamps`, `FilesystemAttrs`, and
-`FilesystemStats` traits.
+`FilesystemWrite`, `FilesystemAttrs`, and `FilesystemStats` traits. A
+node's timestamps travel in `NodeInfo::times`, filled by the read
+surface (there is no separate timestamp trait).
 
 ## Formats
 

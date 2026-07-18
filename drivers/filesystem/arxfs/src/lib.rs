@@ -5,8 +5,12 @@
 //! list and an optional capability gate **per inode**. It
 //! sits behind any [`tairix_abi::driver::block::Block`] device and exposes
 //! itself through the versioned [`FilesystemRead`] / [`FilesystemWrite`] /
-//! [`FilesystemSecurity`] / [`FilesystemTimestamps`] surfaces (new behaviour ships as a new trait, never by widening the
+//! [`FilesystemSecurity`] surfaces (new behaviour ships as a new trait, never by widening the
 //! frozen mount/unmount [`Filesystem`](tairix_abi::driver::filesystem::Filesystem)).
+//! It reports creation, modification, and metadata-change timestamps through
+//! [`NodeInfo::times`](tairix_abi::driver::filesystem::NodeInfo::times); it
+//! deliberately does **not** track access time (atime), reporting
+//! [`Time64::UNIX_EPOCH`] for it.
 //!
 //! # Crash consistency (copy-on-write + superblock ring)
 //!
@@ -51,8 +55,8 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemTimestamps, FilesystemWrite, NodeId, NodeInfo,
-    NodeKind, NodeTimes, VolumeStats,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes,
+    VolumeStats,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -353,10 +357,12 @@ const I_NLINK: usize = 20;
 const I_REQCAP: usize = 24;
 const I_ACLCOUNT: usize = 28;
 const I_SIZE: usize = 32;
-// The four timestamps, each a 12-byte Time64, occupy bytes 40..88.
+// The tracked timestamps, each a 12-byte Time64: created (40..52),
+// modified (52..64), changed (76..88). Bytes 64..76 are a reserved atime
+// slot: ARXFS does not track access time, always writes it zero, and never
+// reads it, so `NodeTimes::accessed` is always `Time64::UNIX_EPOCH`.
 const I_CREATED: usize = 40;
 const I_MODIFIED: usize = 52;
-const I_ACCESSED: usize = 64;
 const I_CHANGED: usize = 76;
 const I_ACL_BASE: usize = 88;
 const I_ACL_STRIDE: usize = 8;
@@ -394,7 +400,8 @@ impl Inode {
             times: NodeTimes {
                 created: now,
                 modified: now,
-                accessed: now,
+                // ARXFS does not track access time.
+                accessed: Time64::UNIX_EPOCH,
                 changed: now,
             },
             extent_root: 0,
@@ -444,7 +451,9 @@ impl Inode {
         let times = NodeTimes {
             created: rd_time(buf, I_CREATED)?,
             modified: rd_time(buf, I_MODIFIED)?,
-            accessed: rd_time(buf, I_ACCESSED)?,
+            // ARXFS does not track access time; the on-disk slot is reserved
+            // and ignored on read.
+            accessed: Time64::UNIX_EPOCH,
             changed: rd_time(buf, I_CHANGED)?,
         };
         Ok(Some(Self {
@@ -478,7 +487,8 @@ impl Inode {
         wr_u64(buf, I_SIZE, self.size);
         wr_time(buf, I_CREATED, self.times.created);
         wr_time(buf, I_MODIFIED, self.times.modified);
-        wr_time(buf, I_ACCESSED, self.times.accessed);
+        // Bytes 64..76 are the reserved atime slot; left zero by the buffer
+        // clear above (ARXFS does not track access time).
         wr_time(buf, I_CHANGED, self.times.changed);
         for (i, entry) in acl.iter().enumerate() {
             let base = I_ACL_BASE + i * I_ACL_STRIDE;
@@ -3039,7 +3049,6 @@ impl<B: Block> ARXFS<B> {
         let written = self.write_file(&mut child, child_ino, offset, data)?;
         let now = (self.clock)();
         child.times.modified = now;
-        child.times.accessed = now;
         child.times.changed = now;
         self.write_inode(child_ino, &child)?;
         self.commit()?;
@@ -3360,12 +3369,14 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated,
+                times: inode.times,
             })
         } else {
             Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: inode.size,
                 allocated,
+                times: inode.times,
             })
         }
     }
@@ -3451,18 +3462,19 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
                         kind: NodeKind::Directory,
                         size: 0,
                         allocated,
+                        times: child.times,
                     }
                 } else {
                     NodeInfo {
                         kind: NodeKind::RegularFile,
                         size: child.size,
                         allocated,
+                        times: child.times,
                     }
                 };
                 return Ok(Some(DirEntry {
                     node: NodeId::from_raw(u64::from(ino)),
                     info: child_info,
-                    modified: child.times.modified,
                     name_len,
                     next_cursor: position + 1,
                 }));
@@ -3560,13 +3572,6 @@ impl<B: Block> FilesystemSecurity for ARXFS<B> {
 
     fn set_security(&mut self, node: NodeId, security: Security) -> Result<(), DriverError> {
         ARXFS::set_security(self, node, security)
-    }
-}
-
-impl<B: Block> FilesystemTimestamps for ARXFS<B> {
-    fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError> {
-        let ino = self.ino_of(node)?;
-        Ok(self.read_inode(ino)?.times)
     }
 }
 

@@ -277,6 +277,7 @@ impl FilesystemService for FixtureFs {
             uid: 0,
             gid: 0,
             id: tairix_abi::FileId::NONE,
+            times: tairix_abi::NodeTimes::default(),
         })
     }
 

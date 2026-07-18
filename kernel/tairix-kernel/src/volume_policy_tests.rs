@@ -3,7 +3,7 @@
 use super::*;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
 };
 use tairix_abi::DriverError;
 use tairix_kernel_sec::GroupId;
@@ -28,11 +28,13 @@ impl FilesystemRead for TwoNodeFs {
                 kind: NodeKind::Directory,
                 size: 0,
                 allocated: 0,
+                times: NodeTimes::default(),
             }),
             FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 size: 7,
                 allocated: 512,
+                times: NodeTimes::default(),
             }),
             _ => Err(DriverError::NotFound),
         }

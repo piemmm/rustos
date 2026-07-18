@@ -199,6 +199,12 @@ pub struct NodeInfo {
     /// no dedicated blocks (an empty file, or a directory whose entries
     /// live in shared metadata structures).
     pub allocated: u64,
+    /// The node's four timestamps, read from the format in the *same*
+    /// structural read as `kind`/`size` — so a caller never pays a second
+    /// inode read (nor a second on-disk walk) to learn a node's times. A
+    /// stamp the format does not keep is [`Time64::UNIX_EPOCH`] (ARXFS, for
+    /// instance, tracks no access time), never a fabricated wall time.
+    pub times: NodeTimes,
 }
 
 /// A single entry yielded by [`FilesystemRead::read_dir`].
@@ -213,25 +219,22 @@ pub struct NodeInfo {
 /// consumer (`du`, `ls`) would otherwise re-resolve every child by path —
 /// a fresh full walk per entry on an uncached, authenticated volume.
 ///
-/// The same reasoning carries the child's last-modification stamp: the
-/// listing driver has already read the child's inode or directory record,
-/// and a format such as FAT stores the stamp *only* in the parent's
-/// directory record, so the listing is the one place every driver can
-/// report it without a second walk.
+/// The same reasoning carries the child's timestamps ([`NodeInfo::times`]):
+/// the listing driver has already read the child's inode or directory
+/// record, and a format such as FAT stores the stamps *only* in the
+/// parent's directory record, so the listing is the one place every driver
+/// can report them without a second walk.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry {
     /// The child node's identifier.
     pub node: NodeId,
-    /// The child's structural metadata (kind, size, allocated bytes).
+    /// The child's structural metadata (kind, size, allocated bytes, and
+    /// its four timestamps). The listing driver has already read the
+    /// child's inode or directory record, so the stamps come free with the
+    /// entry — a listing consumer (`ls -lt`, a file manager) reads them
+    /// from [`NodeInfo::times`] rather than re-`stat`ing each child.
     pub info: NodeInfo,
-    /// The child's last contents-modification instant (mtime), as the
-    /// mounted format stores it, widened to [`Time64`] without truncation
-    /// (a narrower on-disk encoding such as FAT's is always representable).
-    /// A backing that stores no per-node stamp reports
-    /// [`Time64::UNIX_EPOCH`] — the same instant the clockless kernel's
-    /// creation path stamps — never a fabricated wall time.
-    pub modified: Time64,
     /// Number of name bytes written into the caller's buffer.
     pub name_len: usize,
     /// Opaque cursor resuming iteration at the entry *after* this one:
@@ -665,40 +668,11 @@ pub struct NodeTimes {
     pub changed: Time64,
 }
 
-/// Per-node timestamp access to a mounted filesystem.
-///
-/// This is a **versioned `abi-v1` extension** — a *separate* trait from
-/// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`],
-/// never a widening of any of them nor of the frozen [`Filesystem`]; new
-/// behaviour ships as a new trait. A driver whose
-/// on-disk format stores the four timestamps as true [`Time64`]
-/// implements it so the VFS can surface them; a driver whose backing
-/// format keeps no timestamps (or only narrower legacy ones it cannot
-/// widen) simply does not implement it.
-///
-/// The driver only *reports* the stored record; it makes no permission
-/// decision (the VFS is the policy point).
-///
-/// # Capabilities
-///
-/// Calls are reached only through the kernel-issued
-/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
-/// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
-pub trait FilesystemTimestamps {
-    /// Report the four timestamps stored for `node`.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if `node` does not name a live node.
-    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
-    fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError>;
-}
-
 /// Per-node extended-attribute access to a mounted filesystem.
 ///
 /// This is a **versioned `abi-v1` extension** — a *separate* trait from
-/// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`] /
-/// [`FilesystemTimestamps`], never a widening of any of them nor of the frozen
+/// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`],
+/// never a widening of any of them nor of the frozen
 /// [`Filesystem`]; new behaviour ships as a new trait. A driver whose on-disk
 /// format can hold a general-purpose, namespaced `key → value` store per inode
 /// implements it so the VFS can offer extended attributes and preserve foreign
@@ -877,7 +851,7 @@ pub struct VolumeStats {
 ///
 /// This is a **versioned `abi-v1` extension** — a *separate* trait from
 /// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`] /
-/// [`FilesystemTimestamps`] / [`FilesystemAttrs`], never a widening of any
+/// [`FilesystemAttrs`], never a widening of any
 /// of them nor of the frozen [`Filesystem`]; new behaviour ships as a new
 /// trait. Every mountable driver implements it: a volume that can be
 /// mounted always has a size, and reporting it is a read of the driver's
@@ -1010,12 +984,14 @@ mod tests {
                     kind: NodeKind::Directory,
                     size: 0,
                     allocated: 0,
+                    times: NodeTimes::default(),
                 })
             } else if node == FILE {
                 Ok(NodeInfo {
                     kind: NodeKind::RegularFile,
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
+                    times: NodeTimes::default(),
                 })
             } else {
                 Err(DriverError::NotFound)
@@ -1075,8 +1051,8 @@ mod tests {
                     kind: NodeKind::RegularFile,
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
+                    times: NodeTimes::default(),
                 },
-                modified: Time64::UNIX_EPOCH,
                 name_len: FILE_NAME.len(),
                 next_cursor: 1,
             }))
@@ -1392,33 +1368,6 @@ mod tests {
             self.sec = security;
             Ok(())
         }
-    }
-
-    /// A node whose stored timestamps the VFS reads through the trait.
-    struct MockTimesFs {
-        times: NodeTimes,
-    }
-
-    impl FilesystemTimestamps for MockTimesFs {
-        fn times(&mut self, node: NodeId) -> Result<NodeTimes, DriverError> {
-            if node == NodeId::NONE {
-                return Err(DriverError::NotFound);
-            }
-            Ok(self.times)
-        }
-    }
-
-    #[test]
-    fn mock_times_fs_reports_stored_record() {
-        let times = NodeTimes {
-            created: Time64::from_secs(-2_000_000_000),
-            modified: Time64::from_secs(2_200_000_000),
-            accessed: Time64::new(1, 500).expect("canonical"),
-            changed: Time64::UNIX_EPOCH,
-        };
-        let mut fs = MockTimesFs { times };
-        assert_eq!(fs.times(NodeId::from_raw(1)), Ok(times));
-        assert_eq!(fs.times(NodeId::NONE), Err(DriverError::NotFound));
     }
 
     #[test]
