@@ -6054,6 +6054,68 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
             .ok_or(DriverError::DeviceFault)?
             .retire_one()
     }
+
+    /// Recover device `index`'s halted interrupt-IN endpoint after a transfer
+    /// completed with a halting error code that left the device present (a
+    /// STALL, babble, data-buffer or TRB error): Reset Endpoint (§4.6.8),
+    /// rebuild the transfer ring at its base and repoint the controller's
+    /// dequeue there (§4.6.10), then clear the device-side halt so its data
+    /// toggle resets (USB 2.0 §9.4.5). The endpoint accepts fresh interrupt
+    /// transfers when this returns.
+    ///
+    /// A halted endpoint is left permanently stopped by the controller until
+    /// it is reset; re-arming it without this recovery makes every re-armed
+    /// transfer re-fault — a controller interrupt storm — or, once the class
+    /// driver stops retrying, silences the device. This is the interrupt-IN
+    /// counterpart of [`Self::recover_bulk_endpoint`].
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError`] from a Reset Endpoint / Set TR Dequeue Pointer command,
+    /// the ring rebuild, or the device-side `CLEAR_FEATURE` — surfaced so a
+    /// device that vanished mid-recovery still tears down fail-closed.
+    fn recover_interrupt_endpoint(&mut self, index: usize) -> Result<(), DriverError> {
+        let (int_ring_off, dci, device_slot) = {
+            let device = self.device(index).ok_or(DriverError::NotFound)?;
+            (device.region.int_ring, device.int_dci, device.slot)
+        };
+        // Reset Endpoint clears the controller-side halt.
+        self.command(Trb::new(
+            TrbType::ResetEndpoint,
+            0,
+            0,
+            trb::control_slot(device_slot) | trb::control_endpoint(dci),
+        ))?;
+        // Rebuild the software ring at its base and clear any abandoned TRBs,
+        // then point the controller's dequeue at the fresh base with Dequeue
+        // Cycle State 1 to match.
+        let zeros = [0u8; trb::TRB_LEN];
+        for ring_slot in 0..RING_TRBS {
+            self.dma
+                .write(int_ring_off + ring_slot * trb::TRB_LEN, &zeros)?;
+        }
+        let base = self.phys_of(int_ring_off)?;
+        let (ring, link) = ProducerRing::new(RING_TRBS, base)?;
+        self.dma.write(
+            int_ring_off + ring.link_slot() * trb::TRB_LEN,
+            &link.to_bytes(),
+        )?;
+        {
+            let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
+            device.int_ring = Some(ring);
+        }
+        self.command(Trb::new(
+            TrbType::SetTrDequeuePointer,
+            base | 1,
+            0,
+            trb::control_slot(device_slot) | trb::control_endpoint(dci),
+        ))?;
+        // Clear the device-side halt on the device's own interrupt-IN endpoint,
+        // resetting its data toggle to match the rebuilt ring.
+        let ep_addr = (dci / 2) | ENDPOINT_ADDR_DIR_IN;
+        self.device_control(index, setup_clear_endpoint_halt(ep_addr), 0)?;
+        Ok(())
+    }
 }
 
 /// Bulk transfer serving: several TDs may be queued per direction (each
@@ -6492,7 +6554,14 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     ///   collection) therefore neither spins the class driver on empty
     ///   completions nor is killed by a false fault — each ZLP costs one
     ///   controller interrupt, never a busy-loop.
-    /// * `Err(_)` — a genuine per-report fault, surfaced after the retire.
+    /// * A halting error completion: the endpoint is halted. If the code
+    ///   means the device is unreachable (a probable hot-removal) the fault is
+    ///   surfaced (`Err`) so the HCD confirms the port and detaches the gone
+    ///   device. Otherwise the device is still present and merely errored (a
+    ///   STALL, babble, or transaction error): the endpoint is recovered
+    ///   ([`Self::recover_interrupt_endpoint`]), re-armed, and the URB is held
+    ///   parked (`Ok(None)`), so a transient fault neither storms the
+    ///   controller nor reaches — and kills — the class driver.
     fn deliver_report_event(
         &mut self,
         index: usize,
@@ -6503,16 +6572,52 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     ) -> Result<Option<usize>, DriverError> {
         let decoded = self.decode_transfer_report(index, event, buf);
         self.retire_interrupt_transfer(index)?;
-        if let Some(len) = decoded? {
-            return Ok(Some(len));
+        match decoded {
+            // A real report of `len` bytes landed in `buf`.
+            Ok(Some(len)) => Ok(Some(len)),
+            // A successful zero-length completion (a ZLP) carried no report:
+            // re-arm the endpoint and hold the URB parked. Replying would only
+            // make the class driver re-submit at once (a spin); the next real
+            // report completes the still-outstanding URB instead.
+            Ok(None) => {
+                self.arm_report(index)?;
+                self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
+                Ok(None)
+            }
+            // A rejected transfer. The disposition depends on *why* the
+            // decode rejected it, read from the controller's completion code.
+            Err(err) => match event.completion_code() {
+                // A *successful* completion (Success / ShortPacket) whose
+                // claimed mapping the decode rejected — a hostile or buggy
+                // controller residual or TRB pointer. The endpoint is not
+                // halted, so there is nothing to recover: fail closed and
+                // surface the fault.
+                Ok(CompletionCode::Success | CompletionCode::ShortPacket) => Err(err),
+                // A completion code that means the device failed to answer the
+                // transaction is a probable hot-removal: surface the fault so
+                // the HCD confirms the port and detaches the gone device
+                // rather than resetting an endpoint that is no longer there.
+                Ok(code) if code.indicates_device_unreachable() => Err(err),
+                // Any other halting completion code (a STALL, babble,
+                // data-buffer or TRB error, or an unmodelled code): the
+                // controller stops executing a halted endpoint until it is
+                // reset, so it must never be left as-is — re-arming a halted
+                // endpoint re-faults every transfer (a controller interrupt
+                // storm) or, once the class driver stops retrying, silences the
+                // device. The device is still present and merely errored, so
+                // reset the endpoint, re-arm it, and hold the URB parked, so the
+                // transient fault never reaches — and kills — the class driver.
+                // If the recovery itself faults (the device did vanish after
+                // all), the error propagates and the HCD tears the interface
+                // down.
+                _ => {
+                    self.recover_interrupt_endpoint(index)?;
+                    self.arm_report(index)?;
+                    self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
+                    Ok(None)
+                }
+            },
         }
-        // A zero-length completion carried no report: re-arm the endpoint and
-        // hold the URB parked. Replying would only make the class driver
-        // re-submit at once (a spin); the next real report completes the
-        // still-outstanding URB instead.
-        self.arm_report(index)?;
-        self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
-        Ok(None)
     }
 
     /// A borrowed engine view serving one device's URB transfers: the

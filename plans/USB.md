@@ -480,10 +480,35 @@ the live controller behaviour is host- and CI-proven first.
     reply-and-resubmit spin. Treating the ZLP as a `DeviceFault` (the prior
     behaviour) made the HCD reply an error, the class driver exit fail-closed
     after a few pump faults, and `devmgr` reload it — a hot reload storm that
-    pegged a core at boot behind a ZLP-streaming device. A genuine per-report
-    fault (a non-Success/ShortPacket completion code, or a residual larger
-    than the request) still surfaces after the ring is retired. Regression:
+    pegged a core at boot behind a ZLP-streaming device. Regression:
     `a_zero_length_completion_parks_and_rearms_rather_than_faulting`.
+  - **A halting interrupt-IN completion resets the endpoint in place; it
+    neither storms the controller nor kills the class driver.** An error
+    completion code (a STALL, babble, data-buffer or TRB error — anything but
+    a device-*unreachable* code) leaves the endpoint **halted**: the xHCI
+    controller runs no further transfers on it until it is reset (§4.8.3), so
+    re-arming a halted endpoint re-faults every transfer. Left unhandled this
+    was two on-metal defects: pressing a key *during* USB bring-up babbled the
+    keyboard's interrupt endpoint and the surfaced fault killed the class
+    driver after a few consecutive pump errors, and a transient transaction
+    error on the mouse re-armed the halted endpoint into a controller
+    interrupt storm that pegged a core forever. `deliver_report_event` now
+    recovers a halted endpoint the same way the bulk path recovers a STALL
+    (`UsbDevice::recover_interrupt_endpoint`: Reset Endpoint → rebuild the
+    transfer ring at its base → Set TR Dequeue Pointer → device-side
+    `CLEAR_FEATURE(ENDPOINT_HALT)`), re-arms it, and holds the URB parked
+    (`Ok(None)`), so a transient fault never reaches — and kills — the class
+    driver and the endpoint keeps serving. A device-*unreachable* completion
+    code (`UsbTransactionError` / `SplitTransactionError`,
+    `CompletionCode::indicates_device_unreachable`) is a probable hot-removal
+    and is still surfaced for the confirm-and-detach path (a gone endpoint is
+    not reset). A malformed mapping over a *successful* completion (a forged
+    residual or TRB pointer) still fails closed — the endpoint is not halted,
+    so it is not recovered. Regressions:
+    `report_source_recovers_a_halted_endpoint_without_faulting_the_class_driver`,
+    `report_source_recovers_a_babble_halt_the_same_way`,
+    `live_downstream_report_fault_recovers_the_endpoint_and_keeps_the_device`,
+    `forged_report_residual_fails_closed`.
   - **Root-port hot-plug is a per-port CSC scan, uniform for every port.**
     A connect or disconnect on any root port latches `PORTSC.CSC` (and
     posts the Port Status Change Event that raises the interrupt);
