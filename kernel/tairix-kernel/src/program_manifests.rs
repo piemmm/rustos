@@ -905,6 +905,7 @@ mod tests {
             ("rmdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("seatmgr", AppKind::Service, SEATMGR_MANIFEST),
             ("seq", AppKind::Command, PURE_TOOL_REQUEST),
+            ("sleep", AppKind::Command, PURE_TOOL_REQUEST),
             ("stress", AppKind::Command, STRESS_MANIFEST),
             ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
             ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),

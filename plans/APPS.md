@@ -960,9 +960,22 @@ behind the floor work below).
   `--max-unchanged-stats` and the obsolete trailing `f`) is staged
   behind a missing file-change wake source — reported as an
   unrecognised option, never a busy-poll or silent no-op (the `tee -i`
-  precedent). Remaining first batch:
-  `env`, `sleep`,
-  `date`, `id`; then the text tools `sort`,
+  precedent). **Done: `sleep`** — a full self-contained store bundle
+  (console-write + `CAP_FS_ACCESS`, store-only) with the complete GNU
+  surface: it pauses for the sum of its `NUMBER[SUFFIX]` operands (`s`/`m`/
+  `h`/`d`, seconds the default), each a C-locale float scanned through the
+  shared `tairix_util::cnum::scan_double` (the one `seq`/`printf` use, never
+  a second number parser), with `inf`/`infinity` a pause until killed, and
+  the GNU `missing operand` / `invalid time interval` diagnostics (a
+  negative, `nan`, unknown suffix, or trailing junk). The pause is genuinely
+  off-CPU: the production sleeper parks the task on the runtime's clock-backed
+  timed wait (`ClockDelay`) in bounded chunks — `sleep inf` re-parks forever
+  — never a busy-loop on a clock read. One documented divergence, shared with
+  every TAIRiX command app: there is no OS-wide version string, so `sleep`
+  does not implement GNU's `--version`; the reserved `-h`/`-?`/`--help`
+  short-help convention stands in. It emits nothing on fd 3 (a pause hides,
+  omits, and summarises nothing). Remaining first batch:
+  `env`, `date`, `id`; then the text tools `sort`,
   `uniq`, `tr`, `cut`, `paste`, `comm`, `nl`, `tac`, `fold`, `expand`,
   `od`, `split`, `shuf`, `truncate`, `mktemp`, `realpath`, `chgrp`,
   `sha256sum`/`cksum`, `base64`). Each is a full self-contained
@@ -1138,7 +1151,7 @@ both landed; `plans/SHELL.md` command execution):
 6. **`Help/` trees for the existing command apps** — **done for every
    store-registered command app**: `basename`, `cat`, `clear`, `cp`,
    `dirname`, `edit`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
-   `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `tail`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
+   `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `sleep`, `tail`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
    `users`, `wc`, `whoami`, `yes`, and `elsh` each author their thirteen-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served

@@ -177,6 +177,7 @@ members = [
     "userland/apps/rmdir",
     "userland/apps/seq",
     "userland/apps/setcap",
+    "userland/apps/sleep",
     "userland/apps/stress",
     "userland/apps/sysmon",
     "userland/apps/tail",
