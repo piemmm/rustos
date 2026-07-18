@@ -1,4 +1,4 @@
-# TAIRiX (not it's final name) - An OS experiment.
+# TAIRiX /'taɪ.rɪks/ - An OS experiment.
 
 A security-first, multi-user, multi-core operating system written in Rust,
 targeting bare-metal x86_64, AArch64, RISC-V 64, and the browser via
