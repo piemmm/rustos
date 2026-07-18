@@ -597,16 +597,25 @@ earlier serialisation-gate and stack-mapping-coherency theories were both
 disproven: core 3 entered Rust cleanly with a correct, PoC-coherent
 `.bss`/low-RAM stack, and the boot CPU only spin-waits during bring-up.)
 
-**Fix:** `adopt_boot_translation` now invalidates the calling core's
-local data cache to the Level of Coherence (`paging`'s set/way
+**Fix:** two complementary defences make the boot-root hand-off coherent
+across the MMU-off/cacheable boundary. (1) The boot CPU publishes the
+park root (`publish_park_root`) with a cacheable store but a secondary
+reads it MMU-off, non-cacheably from DRAM, in `adopt_boot_translation`;
+publication therefore cleans the park-root word to the point of coherency
+(`dc civac`), or the store lingers in the boot CPU's write-back cache,
+every secondary reads a stale zero, and each parks fail-closed with "no
+boot root" (the observed on-metal symptom: all secondaries report "no
+boot root" and the later release gets `no_online_ack`). (2)
+`adopt_boot_translation` invalidates the calling core's local data cache
+to the Level of Coherence (`paging`'s set/way
 `_invalidate_local_dcache_to_poc`, `dc isw`) **before**
 `program_stage1_translation` enables the MMU+caches. It is *invalidate*,
 never clean: the stale lines hold no live data this core produced (every
 prior access was MMU-off Device-nGnRnE, never cached), and cleaning would
-write their garbage back over the live tables. This is secondary-path
-only — the boot CPU's `AddressSpace::switch` is unaffected — so it never
-runs on the single-CPU QEMU boot and is safe on QEMU's `cortex-a72`
-model otherwise. The end-to-end release remains on-metal-only (no
+write their garbage back over the live tables. Both are secondary-path
+concerns — the boot CPU's `AddressSpace::switch` is otherwise unaffected —
+so neither perturbs the single-CPU QEMU boot and both are safe on QEMU's
+`cortex-a72` model. The end-to-end release remains on-metal-only (no
 `-M raspi4b` in the pinned QEMU); acceptance is all four
 `SecondaryCpuOnline` lines with core 3 scheduling across repeated boots.
 The `pi-beacon smp:` phase beacons are kept as the on-metal bring-up

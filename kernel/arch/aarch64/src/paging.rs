@@ -669,9 +669,38 @@ pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
 }
 
 /// Host stand-in for [`clean_invalidate_range_to_poc`]: the host has no
-/// data cache to maintain, so the sweep is vacuous.
+/// data cache to maintain, so the sweep is vacuous. Under `cfg(test)` it
+/// records the requested range so the host unit tests can assert that a
+/// producer of bytes read non-cacheably swept them to the point of
+/// coherency (the recorder is a per-thread log, so parallel tests never
+/// contend).
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn clean_invalidate_range_to_poc(_base: u64, _len: u64) {}
+pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
+    #[cfg(test)]
+    record_poc_sweep(base, len);
+    #[cfg(not(test))]
+    let _ = (base, len);
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static POC_SWEEPS: std::cell::RefCell<std::vec::Vec<(u64, u64)>> =
+        const { std::cell::RefCell::new(std::vec::Vec::new()) };
+}
+
+/// Record a `(base, len)` point-of-coherency sweep for the current test
+/// thread (see the host [`clean_invalidate_range_to_poc`] stand-in).
+#[cfg(test)]
+fn record_poc_sweep(base: u64, len: u64) {
+    POC_SWEEPS.with(|log| log.borrow_mut().push((base, len)));
+}
+
+/// Drain and return the point-of-coherency sweeps recorded on this test
+/// thread since the last drain.
+#[cfg(test)]
+pub(crate) fn take_recorded_poc_sweeps() -> std::vec::Vec<(u64, u64)> {
+    POC_SWEEPS.with(|log| core::mem::take(&mut *log.borrow_mut()))
+}
 
 /// Smallest data-cache line size in bytes encoded by a `CTR_EL0` value:
 /// `DminLine` (bits `[19:16]`) is the log2 of that line's length in
@@ -1326,10 +1355,28 @@ struct Stage1TranslationEnabled;
 
 #[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
 impl Stage1TranslationEnabled {
-    /// Publish the permanent kernel root once translated execution is live.
+    /// Publish the permanent kernel root once translated execution is live,
+    /// then clean the published word to the point of coherency.
+    ///
+    /// The store is cacheable — this runs with the MMU and caches on — but
+    /// its sole other reader, [`adopt_boot_translation`] on a freshly
+    /// released secondary, loads it with the MMU (and cache) **off**, i.e.
+    /// non-cacheably straight from DRAM. Without the sweep the boot CPU's
+    /// write-back store would linger in this core's cache and never reach
+    /// DRAM, so every secondary would read a stale zero and park with "no
+    /// boot root" — cache-less QEMU cannot show it, real silicon does
+    /// deterministically. `dc civac` pushes the value to DRAM (and drops the
+    /// cached copy; the boot CPU's own later reads re-fetch the same value)
+    /// so the non-cacheable reader observes it. The release words the same
+    /// secondary later polls are swept identically in
+    /// [`crate::smp::start_secondary_spintable`].
     fn publish_park_root(self, park_root: &AtomicU64, root_phys: u64) {
         let Stage1TranslationEnabled = self;
         let _ = park_root.compare_exchange(0, root_phys, Ordering::AcqRel, Ordering::Relaxed);
+        clean_invalidate_range_to_poc(
+            park_root as *const AtomicU64 as u64,
+            core::mem::size_of::<AtomicU64>() as u64,
+        );
     }
 }
 

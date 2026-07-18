@@ -56,6 +56,28 @@ fn park_root_publication_requires_live_stage1_and_is_set_once() {
 }
 
 #[test]
+fn park_root_publication_sweeps_the_word_to_point_of_coherency() {
+    // The boot CPU publishes the boot page-table root with a cacheable
+    // store, but its only other reader — a freshly-released secondary in
+    // `adopt_boot_translation` — loads it with the MMU (and cache) off,
+    // non-cacheably from DRAM. The publish must therefore clean the word
+    // to the point of coherency, or every secondary reads a stale zero
+    // and parks with "no boot root" (a real-silicon coherency hazard
+    // cache-less QEMU cannot show). Assert the exact word was swept.
+    let _ = take_recorded_poc_sweeps();
+    let park_root = AtomicU64::new(0);
+    Stage1TranslationEnabled.publish_park_root(&park_root, 0x4000_0000);
+    let addr = core::ptr::addr_of!(park_root) as u64;
+    let expected = (addr, core::mem::size_of::<AtomicU64>() as u64);
+    let sweeps = take_recorded_poc_sweeps();
+    assert!(
+        sweeps.contains(&expected),
+        "publish must clean the park-root word to the point of coherency \
+         (expected {expected:?}); recorded sweeps: {sweeps:?}"
+    );
+}
+
+#[test]
 fn identity_window_covers_highest_masked_gigapage() {
     let mut device = [0u64; GIGAPAGE_MASK_WORDS];
     let mut ram = [0u64; GIGAPAGE_MASK_WORDS];

@@ -193,7 +193,13 @@ adopts the boot identity map (`paging::adopt_boot_translation` over the
 published park root), installs its own EL1 vectors, GICv2 CPU
 interface, and tickless preemption/IPI arming, and joins the shared
 kernel dispatch loop through `tairix_kernel_core::run_secondary`,
-attesting `SecondaryCpuOnline`. `adopt_boot_translation` first
+attesting `SecondaryCpuOnline`. The boot CPU publishes the park root
+with a cacheable store but a secondary reads it with the MMU (and cache)
+off, non-cacheably from DRAM, so the publication cleans the park-root
+word to the point of coherency (`dc civac`) — otherwise the boot CPU's
+write-back store lingers in its cache, every secondary reads a stale
+zero, and each parks with "no boot root" (a real-silicon coherency
+hazard cache-less QEMU cannot show). `adopt_boot_translation` first
 invalidates the calling core's local data cache to the point of
 coherency (set/way `dc isw`, never a clean) **before** enabling the
 MMU+caches: a freshly-released secondary's caches are in the
