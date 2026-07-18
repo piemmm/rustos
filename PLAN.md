@@ -2004,9 +2004,10 @@ order (one fully-gated increment each):
                    honest outcome as `CPU_LOCKUP_RECOVERY` (4084). All paths
                    are lock-free/allocation-free and fail closed before the
                    hooks are installed. aarch64 delivery: the virtual generic
-                   timer (`CNTV`, PPI 27) as an IRQ (the correct buddy detector
-                   for a GICv2 non-secure kernel; FIQ pseudo-NMI awaits the
-                   EL3/GICv3 upgrade in `plans/WATCHDOG.md`). x86_64/riscv64
+                   timer (`CNTV`, PPI 27) as an IRQ (the correct and complete
+                   buddy detector for a GICv2 non-secure kernel, where FIQ is
+                   the secure-world channel a non-secure kernel cannot route;
+                   `plans/WATCHDOG.md`). x86_64/riscv64
                    keep the soft detector and inherit hard detection when they
                    wire their own cadence + `WatchdogArch`. Design:
                    `docs/src/architecture/scheduler.md` +

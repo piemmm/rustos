@@ -23,11 +23,12 @@
 //! interrupt a non-secure kernel cannot route to. So the sample is
 //! delivered as an ordinary **IRQ**, and hard-lockup detection is the
 //! cross-CPU *buddy* kind: a CPU that stops taking its watchdog IRQ is
-//! observed by another CPU that is still taking its own. A true
-//! pseudo-NMI (for a live remote register dump and recovery of an
-//! IRQ-masked core) needs GICv3 priority masking or an EL3 secure world;
-//! that upgrade rides the plan in `plans/WATCHDOG.md` and drops in behind
-//! this same HAL surface with no `kernel/core` change.
+//! observed by another CPU that is still taking its own. This is the
+//! correct and complete detector for GICv2 non-secure, where FIQ (the
+//! only non-maskable channel) belongs to the secure world. A board that
+//! *does* expose a non-maskable channel (a GICv3 core with `ICC_PMR`
+//! priority masking) can deliver this same sample as a true pseudo-NMI
+//! behind the unchanged HAL surface, with no `kernel/core` change.
 //!
 //! The interrupt is dispatched by [`crate::exceptions`]' IRQ path, which
 //! recognises `WATCHDOG_PPI`, calls `on_watchdog_interrupt` (re-arm +
@@ -243,8 +244,9 @@ impl WatchdogArch for Watchdog {
         // attention signal — a CPU still able to take an IRQ recovers, and
         // one that genuinely cannot is left for the loud report already
         // emitted (never a silent no-op). On a GICv2 non-secure kernel
-        // there is no non-maskable channel to force a wedged core; that
-        // arrives with the GICv3/EL3 upgrade (`plans/WATCHDOG.md`).
+        // there is no non-maskable channel to force a wedged core — that is
+        // inherent to the hardware, and the loud cross-CPU report is the
+        // complete answer for it (`plans/WATCHDOG.md`).
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
             crate::gic::send_sgi(target);
