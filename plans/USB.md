@@ -473,15 +473,62 @@ the live controller behaviour is host- and CI-proven first.
     a fault.** An idle or composite HID interface (a wireless MMO mouse's
     extra collection) can complete an armed interrupt-IN transfer with no data
     (a ZLP — a residual equal to the whole request). `decode_transfer_report`
-    returns `Ok(None)` for it and `next_report`'s `deliver_report_event`
-    re-arms the endpoint, rings the doorbell, and holds the URB outstanding
-    (`Ok(None)` → `Held`) rather than replying. So the class driver's blocking
+    returns `Ok(None)` for it and `capture_report_event` re-arms the endpoint
+    without buffering a report, so `next_report` finds the FIFO empty and holds
+    the URB outstanding (`Ok(None)` → `Held`) rather than replying. So the class driver's blocking
     `ipc_call` stays parked and a ZLP costs one controller interrupt, never a
     reply-and-resubmit spin. Treating the ZLP as a `DeviceFault` (the prior
     behaviour) made the HCD reply an error, the class driver exit fail-closed
     after a few pump faults, and `devmgr` reload it — a hot reload storm that
     pegged a core at boot behind a ZLP-streaming device. Regression:
     `a_zero_length_completion_parks_and_rearms_rather_than_faulting`.
+  - **Interrupt-IN report capture is driven off the controller interrupt,
+    fully decoupled from the class driver — it cannot be starved.** A boot
+    keyboard (or mouse, or any interrupt-IN device) reports only on a state
+    change, at its polling interval, on the device's own schedule. The class
+    driver and the HCD are ordinary schedulable user-space tasks, so under CPU
+    load (`stress --cpu N`) either can be slow to run; the report path must not
+    depend on how promptly they are scheduled. The mechanism has two halves:
+    - **Continuous depth-arming.** The engine keeps `INT_ARM_DEPTH` interrupt
+      transfers armed on every report endpoint (`UsbDevice::ensure_reports_armed`),
+      so the controller always has a landing TRB for the next interval's report
+      and the xHCI event ring queues the completions. Bounded by the ring (one
+      slot stays free); in-flight-but-unretired transfers count against the
+      depth, so retiring a completion is what re-opens a slot.
+    - **A consumer-independent pump on every controller interrupt.** The HCD
+      calls `UsbDevice::pump_reports` from its wait-set IRQ branch on *every*
+      controller completion interrupt, **before** it services any outstanding
+      class-driver URB. The pump arms every served interrupt-IN endpoint and
+      drains all posted completions off the shared event ring
+      (`UsbDevice::drain_events` → `capture_report_event`): each report is
+      **copied out of its DMA slot into a bounded per-device software FIFO**
+      (`DeviceState::reports`, `REPORT_QUEUE_CAP`) and the slot is re-armed at
+      once. Capture therefore happens the instant the controller posts a
+      completion, regardless of whether the class driver has a URB in flight or
+      is running at all. `next_report` then simply pops the FIFO when the class
+      driver next submits — its consume rate no longer gates hardware polling.
+      This is the analogue of Linux `usbhid`'s IRQ-context URB resubmission,
+      adapted to the microkernel's user-space HCD: the re-arm is on the
+      controller's interrupt, not on a starvable per-URB path.
+
+    The previous design re-armed only from inside `next_report`, so once a
+    starved class driver fell more than `INT_ARM_DEPTH` reports behind the
+    endpoint went unarmed and every later report was dropped at the hardware —
+    the on-metal "missed keypresses under load" defect. With the pump the
+    endpoint is re-armed every interrupt independent of the consumer, so a
+    transiently-starved class driver loses nothing. Because the FIFO is bounded,
+    a *permanently* stalled consumer cannot make the engine hold unbounded
+    memory: the oldest buffered report is dropped so the newest device state is
+    kept, and the loss is counted (`dropped_report_total`) and logged by the
+    HCD — never silent. The single `pending_report` slot the old parking path
+    used is replaced by this FIFO, which also fixes a latent fault: with several
+    transfers armed, more than one report completion can now arrive during a
+    synchronous EP0/command wait, which the single slot would have faulted.
+    Regressions: `the_interrupt_pump_keeps_reports_flowing_past_the_armed_depth_with_no_class_urb`,
+    `the_interrupt_pump_captures_a_mouse_the_same_way_as_a_keyboard`,
+    `a_permanently_stalled_consumer_bounds_the_buffer_and_counts_dropped_reports`,
+    `a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost`,
+    `a_burst_of_reports_before_the_class_driver_drains_any_is_kept_up_to_depth`.
   - **A halting interrupt-IN completion resets the endpoint in place; it
     neither storms the controller nor kills the class driver.** An error
     completion code (a STALL, babble, data-buffer or TRB error — anything but
@@ -492,7 +539,7 @@ the live controller behaviour is host- and CI-proven first.
     keyboard's interrupt endpoint and the surfaced fault killed the class
     driver after a few consecutive pump errors, and a transient transaction
     error on the mouse re-armed the halted endpoint into a controller
-    interrupt storm that pegged a core forever. `deliver_report_event` now
+    interrupt storm that pegged a core forever. `capture_report_event` now
     recovers a halted endpoint the same way the bulk path recovers a STALL
     (`UsbDevice::recover_interrupt_endpoint`: Reset Endpoint → rebuild the
     transfer ring at its base → Set TR Dequeue Pointer → device-side
