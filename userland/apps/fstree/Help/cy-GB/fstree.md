@@ -9,10 +9,17 @@ fstree — y rheolwr ffeiliau coeden sgrin lawn
 ## DESCRIPTION
 
 Yn pori'r system ffeiliau mewn sesiwn sgrin lawn a yrrir gan y
-bysellfwrdd: panel coeden gyfeiriaduron ar y chwith a phanel ffeiliau ar
-y dde sy'n rhestru cofnodion y cyfeiriadur a ddewiswyd gyda'u meintiau
-a'u hamserau addasu. Mae'r sesiwn yn dechrau yn `cyfeiriadur` (y golwg
+bysellfwrdd, wedi'i modelu ar XTree Gold: pennyn ystadegau disg ar y
+brig, ffenestr coeden gyfeiriaduron oddi tano uwchben ffenestr ffeiliau
+sy'n rhestru cofnodion y cyfeiriadur a ddewiswyd gyda'u meintiau a'u
+hamserau addasu. Mae'r sesiwn yn dechrau yn `cyfeiriadur` (y golwg
 gwraidd `/` yn ddiofyn).
+
+Y ffenestr coeden yw'r brif un: mae'r cyrchwr yn symud drwyddi tra bo'r
+ffenestr ffeiliau bob amser yn dangos y cyfeiriadur a ddewiswyd. Mae
+`Enter` (neu `Tab`) yn mynd i mewn i'r ffenestr ffeiliau i weithredu ar
+ffeiliau, ac mae `Esc` (neu `Tab`) yn dychwelyd i'r goeden — mae'r
+llywio bob amser yn dechrau yn y goeden.
 
 Darllenir y goeden yn ddiog: dim ond pan gaiff ei ddangos neu ei ehangu
 am y tro cyntaf y cyrchir cynnwys cyfeiriadur, felly dim ond y
@@ -23,13 +30,22 @@ chaiff dim ei ffugio.
 
 Bysellau:
 
-- `Fyny`/`Lawr` neu `k`/`j` — symud cyrchwr y panel gweithredol. Mae symud
-  cyrchwr y goeden yn rhestru'r cyfeiriadur newydd ei ddewis yn y panel
-  ffeiliau.
-- `Chwith`/`De` neu `h`/`l` — cau/ehangu rhes y goeden o dan y cyrchwr.
-- `Enter` — yn y goeden, toglo'r ehangu; yn y panel ffeiliau, disgyn i'r
-  cyfeiriadur a ddewiswyd (mae'r ddau banel yn dilyn).
-- `Tab` — newid y panel gweithredol.
+- `Fyny`/`Lawr` neu `k`/`j` — symud cyrchwr y ffenestr weithredol
+  (`PageUp`/`PageDown` un dudalen, `Home`/`End` i'r rhes gyntaf/olaf).
+  Mae symud cyrchwr y goeden yn rhestru'r cyfeiriadur newydd ei ddewis
+  yn y ffenestr ffeiliau.
+- `De`/`l`/`+` — yn y goeden, ehangu'r gangen a ddewiswyd (gan ei
+  darllen yn ddiog); yn y ffenestr ffeiliau, disgyn i'r cyfeiriadur a
+  ddewiswyd.
+- `Chwith`/`h`/`-` — yn y goeden, cau'r gangen a ddewiswyd, neu — pan
+  fo eisoes ar gau neu heb is-gyfeiriaduron — symud i fyny i'r
+  cyfeiriadur rhiant; yn y ffenestr ffeiliau, dychwelyd i'r goeden.
+- `Enter` — yn y goeden, mynd i mewn i'r ffenestr ffeiliau; yn y
+  ffenestr ffeiliau, agor y cofnod a ddewiswyd (mynd i mewn i
+  gyfeiriadur, dangos ffeil).
+- `Esc` — canslo cyfrif defnydd sy'n rhedeg; fel arall dychwelyd o'r
+  ffenestr ffeiliau i'r goeden.
+- `Tab` — newid rhwng y ffenestr coeden a'r ffenestr ffeiliau.
 - `s` — agor y ddewislen didoli: `n` enw, `e` estyniad, `s` maint,
   `m` amser addasu, `r` gwrthdroi'r cyfeiriad, `Esc` yn canslo. Caiff
   cyfeiriaduron eu grwpio bob amser cyn ffeiliau.
