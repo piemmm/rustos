@@ -9,10 +9,11 @@ fstree — el gestor de archivos en árbol a pantalla completa
 ## DESCRIPTION
 
 Recorre el sistema de archivos en una sesión a pantalla completa guiada
-por teclado: un panel de árbol de directorios a la izquierda y un panel
-de archivos a la derecha que lista las entradas del directorio
-seleccionado con sus tamaños y fechas de modificación. La sesión comienza
-en `directorio` (la vista raíz `/` por omisión).
+por teclado, al estilo de XTree Gold: una cabecera de estadísticas de
+disco arriba, una ventana de árbol de directorios sobre una ventana de
+archivos que lista las entradas del directorio resaltado con sus tamaños
+y fechas de modificación. La sesión comienza en `directorio` (la vista
+raíz `/` por omisión).
 
 El árbol se lee de forma perezosa: el contenido de un directorio solo se
 obtiene cuando se muestra o se despliega por primera vez, de modo que
@@ -23,14 +24,22 @@ conserva; nada se fabrica.
 
 Teclas:
 
-- `Arriba`/`Abajo` o `k`/`j` — mover el cursor del panel activo. Mover el
-  cursor del árbol lista el directorio recién seleccionado en el panel de
-  archivos.
-- `Izquierda`/`Derecha` o `h`/`l` — plegar/desplegar la fila del árbol
-  bajo el cursor.
-- `Intro` — en el árbol, alterna el despliegue; en el panel de archivos,
-  desciende al directorio seleccionado (ambos paneles siguen).
-- `Tab` — cambiar el panel activo.
+- `Arriba`/`Abajo` o `k`/`j` — mover el resaltado de la ventana activa
+  (`Re Pág`/`Av Pág` una pantalla, `Inicio`/`Fin` al principio o al
+  final). Mover el resaltado del árbol lista el directorio recién
+  resaltado en la ventana de archivos.
+- `Derecha`/`l`/`+` — en el árbol, desplegar la rama resaltada (leída de
+  forma perezosa); en la ventana de archivos, descender al directorio
+  resaltado.
+- `Izquierda`/`h`/`-` — en el árbol, plegar la rama resaltada o — cuando
+  ya está plegada o no tiene subdirectorios — subir el resaltado al
+  directorio padre; en la ventana de archivos, volver al árbol.
+- `Intro` — en el árbol, pasar a la ventana de archivos; en la ventana de
+  archivos, abrir la entrada resaltada (un directorio se abre, un archivo
+  se muestra).
+- `Esc` — cancelar un cálculo de uso de disco en curso; si no, volver de
+  la ventana de archivos al árbol.
+- `Tab` — cambiar entre la ventana de árbol y la ventana de archivos.
 - `s` — abrir el menú de ordenación: `n` nombre, `e` extensión,
   `s` tamaño, `m` fecha de modificación, `r` invertir el sentido, `Esc`
   cancela. Los directorios siempre se agrupan antes que los archivos.

@@ -9,10 +9,11 @@ fstree — o gestor de ficheiros em árvore de ecrã inteiro
 ## DESCRIPTION
 
 Percorre o sistema de ficheiros numa sessão de ecrã inteiro guiada pelo
-teclado: um painel com a árvore de diretórios à esquerda e um painel de
-ficheiros à direita que lista as entradas do diretório selecionado com os
-seus tamanhos e datas de modificação. A sessão começa em `diretório`
-(a vista raiz `/` por omissão).
+teclado, ao estilo do XTree Gold: um cabeçalho de estatísticas de disco
+no topo, uma janela com a árvore de diretórios por cima de uma janela de
+ficheiros que lista as entradas do diretório realçado com os seus
+tamanhos e datas de modificação. A sessão começa em `diretório` (a vista
+raiz `/` por omissão).
 
 A árvore é lida preguiçosamente: o conteúdo de um diretório só é obtido
 quando é mostrado ou expandido pela primeira vez, pelo que percorrer um
@@ -22,14 +23,22 @@ linha de mensagens e a vista anterior mantém-se; nada é fabricado.
 
 Teclas:
 
-- `Cima`/`Baixo` ou `k`/`j` — mover o cursor do painel ativo. Mover o
-  cursor da árvore lista o diretório recém-selecionado no painel de
-  ficheiros.
-- `Esquerda`/`Direita` ou `h`/`l` — recolher/expandir a linha da árvore
-  sob o cursor.
-- `Enter` — na árvore, alterna a expansão; no painel de ficheiros, desce
-  ao diretório selecionado (ambos os painéis acompanham).
-- `Tab` — trocar o painel ativo.
+- `Cima`/`Baixo` ou `k`/`j` — mover o realçado da janela ativa
+  (`PageUp`/`PageDown` uma página, `Home`/`End` ao início ou ao fim).
+  Mover o realçado da árvore lista o diretório recém-realçado na janela
+  de ficheiros.
+- `Direita`/`l`/`+` — na árvore, expandir o ramo realçado (lido
+  preguiçosamente); na janela de ficheiros, descer ao diretório
+  realçado.
+- `Esquerda`/`h`/`-` — na árvore, recolher o ramo realçado ou — quando
+  já está recolhido ou sem subdiretórios — subir o realçado ao diretório
+  pai; na janela de ficheiros, voltar à árvore.
+- `Enter` — na árvore, passar à janela de ficheiros; na janela de
+  ficheiros, abrir a entrada realçada (um diretório é aberto, um ficheiro
+  é mostrado).
+- `Esc` — cancelar um cálculo de uso do disco em curso; caso contrário,
+  voltar da janela de ficheiros à árvore.
+- `Tab` — alternar entre a janela da árvore e a janela de ficheiros.
 - `s` — abrir o menu de ordenação: `n` nome, `e` extensão, `s` tamanho,
   `m` data de modificação, `r` inverter o sentido, `Esc` cancela. Os
   diretórios agrupam-se sempre antes dos ficheiros.

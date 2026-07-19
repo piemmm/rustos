@@ -1,6 +1,6 @@
 [package]
 name = "tairix-fstree"
-description = "TAIRiX `fstree`: the full-screen tree file manager, drawn with the OS curses library (`.junie/fstree-next-plan.md`)."
+description = "TAIRiX `fstree`: the full-screen, XTree Gold-style tree file manager, drawn with the OS curses library."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

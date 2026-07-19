@@ -8,10 +8,12 @@ fstree — der Vollbild-Dateimanager mit Verzeichnisbaum
 
 ## DESCRIPTION
 
-Durchsucht das Dateisystem in einer tastaturgesteuerten Vollbildsitzung:
-links ein Verzeichnisbaum, rechts ein Dateibereich, der die Einträge des
-ausgewählten Verzeichnisses mit Größe und Änderungszeit auflistet. Die
-Sitzung beginnt in `verzeichnis` (ohne Angabe in der Wurzelansicht `/`).
+Durchsucht das Dateisystem in einer tastaturgesteuerten Vollbildsitzung
+nach dem Vorbild von XTree Gold: oben eine Kopfzeile mit
+Datenträgerangaben, darunter ein Verzeichnisbaum-Fenster über einem
+Dateifenster, das die Einträge des hervorgehobenen Verzeichnisses mit
+Größe und Änderungszeit auflistet. Die Sitzung beginnt in `verzeichnis`
+(ohne Angabe in der Wurzelansicht `/`).
 
 Der Baum wird verzögert gelesen: Der Inhalt eines Verzeichnisses wird
 erst geholt, wenn es zum ersten Mal angezeigt oder aufgeklappt wird —
@@ -23,14 +25,22 @@ nichts wird erfunden.
 
 Tasten:
 
-- `Hoch`/`Runter` oder `k`/`j` — den Cursor des aktiven Bereichs bewegen.
-  Bewegt sich der Baumcursor, wird das neu ausgewählte Verzeichnis im
-  Dateibereich aufgelistet.
-- `Links`/`Rechts` oder `h`/`l` — die Baumzeile unter dem Cursor
-  zu-/aufklappen.
-- `Eingabe` — im Baum das Aufklappen umschalten; im Dateibereich in das
-  ausgewählte Verzeichnis hinabsteigen (beide Bereiche folgen).
-- `Tab` — den aktiven Bereich wechseln.
+- `Hoch`/`Runter` oder `k`/`j` — die Hervorhebung des aktiven Fensters
+  bewegen (`Bild auf`/`Bild ab` seitenweise, `Pos1`/`Ende` an den Anfang
+  bzw. das Ende). Bewegt sich die Baum-Hervorhebung, wird das neu
+  hervorgehobene Verzeichnis im Dateifenster aufgelistet.
+- `Rechts`/`l`/`+` — im Baum den hervorgehobenen Zweig aufklappen (dabei
+  verzögert gelesen); im Dateifenster in das hervorgehobene Verzeichnis
+  hinabsteigen.
+- `Links`/`h`/`-` — im Baum den hervorgehobenen Zweig zuklappen oder —
+  wenn er schon zu ist oder keine Unterverzeichnisse hat — zur
+  übergeordneten Zeile springen; im Dateifenster zum Baum zurückkehren.
+- `Eingabe` — im Baum in das Dateifenster wechseln; im Dateifenster den
+  hervorgehobenen Eintrag öffnen (ein Verzeichnis wird betreten, eine
+  Datei angezeigt).
+- `Esc` — einen laufenden Verbrauchslauf abbrechen; sonst aus dem
+  Dateifenster zum Baum zurückkehren.
+- `Tab` — zwischen Baum- und Dateifenster wechseln.
 - `s` — das Sortiermenü öffnen: `n` Name, `e` Erweiterung, `s` Größe,
   `m` Änderungszeit, `r` Richtung umkehren, `Esc` bricht ab.
   Verzeichnisse stehen stets vor den Dateien.

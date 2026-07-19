@@ -137,6 +137,14 @@ pub struct TreeRow {
     pub path: String,
     /// Whether the row is currently expanded.
     pub expanded: bool,
+    /// The box-drawing branch prefix drawn before the name — the ancestor
+    /// connector bars plus this row's own `├─`/`└─` junction (empty for
+    /// the root), so the tree reads like `XTree Gold`'s directory window.
+    pub branch: String,
+    /// The fold marker before the name: `-` for an expanded branch, `+`
+    /// for a collapsed one that has (or may have) subdirectories, and a
+    /// space for a directory known to hold none.
+    pub fold: char,
 }
 
 /// The modal surface the message line carries while a question is open.
@@ -502,6 +510,11 @@ pub struct Model {
     pub settings_home: Option<String>,
     /// Set when the session should end.
     pub quit: bool,
+    /// Content rows of the tree window at the last draw, so a page key
+    /// moves by exactly one visible window. Zero until the first draw.
+    pub tree_page: usize,
+    /// Content rows of the file window at the last draw.
+    pub file_page: usize,
 }
 
 impl Model {
@@ -555,6 +568,8 @@ impl Model {
             settings: Settings::default(),
             settings_home: None,
             quit: false,
+            tree_page: 0,
+            file_page: 0,
         };
         let entries = fs.list_dir(root_path)?;
         model.root.children = Some(child_dirs_of(root_path, &entries));
@@ -569,26 +584,84 @@ impl Model {
     #[must_use]
     pub fn tree_rows(&self) -> Vec<TreeRow> {
         let mut rows = Vec::new();
-        self.push_rows(&self.root, 0, &mut rows);
+        self.push_rows(&self.root, 0, "", true, true, &mut rows);
         rows
     }
 
-    fn push_rows(&self, node: &DirNode, depth: usize, rows: &mut Vec<TreeRow>) {
+    /// The child directories of `node` the hidden-names toggle admits, in
+    /// listing order — the set the tree draws and connects.
+    fn visible_children<'a>(&self, node: &'a DirNode) -> Vec<&'a DirNode> {
+        match &node.children {
+            Some(children) => children
+                .iter()
+                .filter(|c| self.show_hidden || !c.name.starts_with('.'))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Flatten `node` into `rows`, threading the ancestor connector prefix
+    /// so each row carries its own box-drawing branch. `ancestors` is the
+    /// prefix of vertical bars for the levels above; `is_last` is whether
+    /// `node` is the last of its siblings; `is_root` suppresses a junction
+    /// for the tree's own root.
+    fn push_rows(
+        &self,
+        node: &DirNode,
+        depth: usize,
+        ancestors: &str,
+        is_last: bool,
+        is_root: bool,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        let children = self.visible_children(node);
+        let has_children = !children.is_empty();
+        let branch = if is_root {
+            String::new()
+        } else {
+            let junction = if is_last { "└─" } else { "├─" };
+            format!("{ancestors}{junction}")
+        };
+        let fold = if node.expanded {
+            if has_children {
+                '-'
+            } else {
+                ' '
+            }
+        } else if node.children.is_some() && !has_children {
+            // Read and known to hold no (visible) subdirectory.
+            ' '
+        } else {
+            // Expandable: unread, or read with subdirectories to show.
+            '+'
+        };
         rows.push(TreeRow {
             depth,
             name: node.name.clone(),
             path: node.path.clone(),
             expanded: node.expanded,
+            branch,
+            fold,
         });
-        if !node.expanded {
+        if !node.expanded || !has_children {
             return;
         }
-        if let Some(children) = &node.children {
-            for child in children {
-                if self.show_hidden || !child.name.starts_with('.') {
-                    self.push_rows(child, depth + 1, rows);
-                }
-            }
+        let child_ancestors = if is_root {
+            String::new()
+        } else {
+            let bar = if is_last { "  " } else { "│ " };
+            format!("{ancestors}{bar}")
+        };
+        let last = children.len() - 1;
+        for (index, child) in children.into_iter().enumerate() {
+            self.push_rows(
+                child,
+                depth + 1,
+                &child_ancestors,
+                index == last,
+                false,
+                rows,
+            );
         }
     }
 

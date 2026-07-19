@@ -8,11 +8,17 @@ fstree — the full-screen tree file manager
 
 ## DESCRIPTION
 
-Browses the filesystem in a full-screen, keyboard-driven session: a
-directory-tree pane on the left and a file pane on the right listing
-the selected directory's entries with their sizes and modification
+Browses the filesystem in a full-screen, keyboard-driven session
+modelled on XTree Gold: a disk-statistics header across the top, a
+directory-tree window above, and a file window below listing the
+highlighted directory's entries with their sizes and modification
 stamps. The session starts at `directory` (the root view `/` when
 omitted).
+
+The tree window is primary: the highlight bar moves through it and the
+file window always shows the highlighted directory. `Enter` (or `Tab`)
+steps into the file window to act on files; `Esc` (or `Tab`) steps back
+out to the tree — navigation always begins at the tree.
 
 The tree is read lazily: a directory's contents are fetched only when
 it is first shown or expanded, so browsing a huge volume costs only
@@ -22,19 +28,28 @@ previous view is kept; nothing is fabricated.
 
 Keys:
 
-- `Up`/`Down` or `k`/`j` — move the focused pane's cursor. Moving the
-  tree cursor lists the newly selected directory in the file pane.
-- `Left`/`Right` or `h`/`l` — collapse/expand the tree row under the
-  cursor.
-- `Enter` — in the tree, toggle expansion; in the file pane, descend
-  into the selected directory (both panes follow), or open the
-  selected file in a full-screen viewer: the disassembly viewer for a
-  recognised executable, the text pager when the file's opening bytes
-  read as text, the hex dump otherwise (the viewers are described
+- `Up`/`Down` or `k`/`j` — move the active window's highlight;
+  `PageUp`/`PageDown` move by a screenful, `Home`/`End` jump to the
+  first / last row. Moving the tree highlight lists the newly
+  highlighted directory in the file window.
+- `Right`/`l` — in the tree, fold the highlighted branch open (reading
+  it lazily); in the file window, descend into the highlighted
+  directory.
+- `Left`/`h` — in the tree, fold the highlighted branch shut, or — when
+  it is already shut or has no subdirectories — step the highlight up to
+  the parent directory; in the file window, step back out to the tree.
+- `+`/`-` — fold the highlighted tree branch open / shut.
+- `Enter` — in the tree, step into the file window; in the file window,
+  descend into the highlighted directory (both windows follow), or open
+  the highlighted file in a full-screen viewer: the disassembly viewer
+  for a recognised executable, the text pager when the file's opening
+  bytes read as text, the hex dump otherwise (the viewers are described
   below).
-- `o` — open the selected file in a viewer of your choosing:
+- `Esc` — cancel a live disk-usage walk (keeping its figures);
+  otherwise step out of the file window back to the tree window.
+- `o` — open the highlighted file in a viewer of your choosing:
   `t` text, `x` hex, or `d` disassembly.
-- `Tab` — switch the focused pane.
+- `Tab` — switch between the tree window and the file window.
 - `s` — open the sort menu: `n` name, `e` extension, `s` size,
   `m` modification stamp, `r` reverse the direction, `Esc` cancels.
   Directories always group before files.
@@ -146,12 +161,14 @@ kernel's error; nothing ever masquerades as a complete copy. Every
 operation is authorised by the kernel — a refusal appears verbatim on
 the message line with nothing changed.
 
-The status line shows the listed path, its visible entry count, the
-sort order, the backing volume's free/total bytes (when the System
-Information service can report them), whether hidden entries are
-shown, the active filename filter, and — while anything is tagged —
-the tagged count and byte total. A file whose backing format stores
-no modification stamp shows `-` in the stamp column.
+The top disk-statistics header shows the listed path, the backing
+volume's free/total bytes (when the System Information service can
+report them), the visible item count, and — while anything is tagged —
+the tagged count. The status band below the windows shows the active
+window (Tree or Files), the sort order, whether hidden entries are
+shown, the active filename filter, and the tagged count and byte total.
+A file whose backing format stores no modification stamp shows `-` in
+the stamp column.
 
 When the file pane omits hidden entries, the session also notes the
 omission on the Standard Information Stream (fd 3) — one advisory

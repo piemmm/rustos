@@ -1,32 +1,36 @@
 # `tairix-fstree`
 
 The TAIRiX `fstree`: the full-screen, keyboard-driven tree file manager,
-drawn with the OS curses library (`lib/curses`). It shows a persistent
-directory-tree pane beside a file pane over the storage forest. This crate
-delivers the plan's S1 model core, the S2 file operations, and the S3
-tagging surface (multi-file tags, batch operations, the flattened branch
-view, and disk-usage statistics); search and the text/hex/disassembly
-viewers are staged, stage by stage, in `.junie/fstree-next-plan.md`.
+drawn with the OS curses library (`lib/curses`). Modelled on XTree Gold,
+it shows a disk-statistics header over a persistent directory-tree
+window stacked above a file window, over the storage forest. It carries
+the model core, the file operations, the tagging surface (multi-file
+tags, batch operations, the flattened branch view, and disk-usage
+statistics), name/content search, and the text/hex/disassembly viewers.
 
 Stability tier: **experimental**.
 
 ## What it implements
 
-- **Tree pane**: a lazily populated directory tree — a directory is read
-  only when first shown or expanded, never a whole-volume scan — with
-  expansion markers, indentation, and cursor + scroll state.
-- **File pane**: the selected directory's entries with name, size, and
-  modification-stamp columns (the stamp rides the `fs_readdir` listing;
-  a backing with no stored stamp shows `-`, never a fabricated date).
+- **Tree window**: a lazily populated directory tree — a directory is
+  read only when first shown or expanded, never a whole-volume scan —
+  drawn with `├─`/`└─` box-drawing branch lines, a `+`/`-` fold marker,
+  and cursor + scroll state.
+- **File window**: the highlighted directory's entries with name, size,
+  and modification-stamp columns (the stamp rides the `fs_readdir`
+  listing; a backing with no stored stamp shows `-`, never a fabricated
+  date).
 - **Sorting**: name, extension, size, or modification stamp, ascending or
   descending, with directories always grouped first (`s` opens the menu).
 - **Hidden entries**: dotfiles are hidden by default; `H` toggles them.
   When the file pane omits hidden entries, one advisory record per
   change goes out on the Standard Information Stream (fd 3),
   best-effort and ignorable.
-- **Status/message lines**: the listed path, entry count, sort order,
-  volume free space (via the System Information API's `MOUNT_LIST` query,
-  best-effort), and errors or key hints.
+- **Header/status/command lines**: a top disk-statistics header (path,
+  volume free space via the System Information API's `MOUNT_LIST` query,
+  item and tagged counts), a status band (active window, sort order,
+  hidden/filter state), and a context command menu with errors and key
+  hints.
 - **File operations**: copy (`c`), move (`m`), rename (`r`), delete (`d`,
   confirmed — the confirmation is a persisted setting), and mkdir (`M`).
   Destinations are parsed by the shared `lib/path` grammar and Tab
@@ -43,7 +47,7 @@ Stability tier: **experimental**.
   `c`/`m`/`d` run over the whole tagged set in tag order, continuing past
   per-entry failures and listing every failure on a report overlay — a
   batch is never silently partial. Succeeded entries untag; failures stay
-  tagged for a retry. The status line carries the tagged count and bytes.
+  tagged for a retry. The status band carries the tagged count and bytes.
 - **Walks**: `u` counts files/bytes/dirs under the focused directory and
   `v` flattens its branch into one file list — both driven by one bounded,
   cancellable walker (`src/walk.rs`) that reads a few directories per
@@ -59,12 +63,29 @@ Stability tier: **experimental**.
 - **Help**: `-h`/`-?` and the `?` overlay render the bundle's own `Help/`
   document through the shared `lib/help` engine — nothing embedded.
 
+## Layout and navigation
+
+The screen follows XTree Gold: a disk-statistics header across the top
+(path, free/total space, item and tagged counts), a boxed
+directory-tree window (with `├─`/`└─` branch lines) above a boxed file
+window listing the highlighted directory's entries, and a context
+command menu along the bottom.
+
+The tree window is primary. `↑↓`/`k j` move the highlight (and the file
+window follows the highlighted directory); `→`/`l`/`+` fold a branch
+open, `←`/`h`/`-` fold it shut (or step to the parent when already
+shut); `Enter` or `Tab` step into the file window; `Esc`, `Tab`, or `←`
+step back out. In the file window `↑↓` move, `Enter` opens the entry (a
+directory descends, a file views), and `→`/`l` descends a directory.
+`PageUp`/`PageDown` move by a screenful and `Home`/`End` jump to the
+ends.
+
 ## Keys
 
-`↑↓←→`/`h j k l` navigate; `Enter` expands/collapses (tree) or descends
-(files); `Tab` switches panes; `s` sorts; `c` copies; `m` moves; `r`
-renames; `d` deletes; `M` makes a directory; `a` edits the mode bits;
-`t` tags; `T` tags by glob or range; `i` inverts tags; `C` clears tags;
+`s` sorts; `c` copies; `m` moves; `r` renames; `d` deletes; `M` makes a
+directory; `a` edits the mode bits and attributes; `o` opens a file in a
+chosen viewer; `t` tags; `T` tags by glob or range; `i` inverts tags;
+`C` clears tags; `f` filters; `/` finds by name; `F` searches contents;
 `u` counts disk usage; `v` flattens the branch (`Space` loads the next
 page, `Esc` returns); `H` toggles hidden entries; `.` repeats the last
 operation; `V` lists volumes; `S` opens settings; `?` shows help; `q`

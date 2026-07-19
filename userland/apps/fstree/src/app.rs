@@ -27,7 +27,7 @@ use crate::model::{
     Viewer, ViewerKind,
 };
 use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
-use crate::render::render;
+use crate::render::{panes_layout, render};
 use crate::search::{ContentScan, Needle};
 use crate::tag::{Batch, BatchProgress, TagEntry, TagRange};
 use crate::view_disasm::{describe, is_manifest_head, Decode, DisasmBody, DisasmPane, DisasmView};
@@ -104,7 +104,7 @@ pub fn run<T: Tty>(
     let mut noted_hidden = None;
     loop {
         note_hidden_entries(model, info, &mut noted_hidden);
-        clamp_scroll(model, body_rows(screen.size().rows));
+        clamp_scroll(model, screen.size().rows);
         refresh_viewer(
             model,
             fs,
@@ -200,7 +200,12 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
 }
 
 /// Apply one key in the plain panes view (no prompt, overlay, or
-/// covering view is open).
+/// covering view is open). Navigation follows `XTree Gold`: the tree
+/// window is primary; `↑↓` move the highlight, `→`/`+` fold a branch open
+/// and `←`/`-` fold it shut (or step to the parent when already shut),
+/// and `Enter`/`Tab` step into the file window. From the file window,
+/// `Enter` opens the highlighted entry (a directory descends, a file
+/// views) and `Esc`/`Tab`/`←` back out to the tree.
 fn handle_panes_key(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode, event: &Event) {
     match event {
         Event::Char('q') => model.quit = true,
@@ -232,36 +237,143 @@ fn handle_panes_key(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
         Event::Char('F') => open_content_prompt(model),
         Event::Char('V') => open_volumes(model, fs),
         Event::Char('S') => model.overlay = Overlay::Settings,
-        Event::Esc => cancel_usage_walk(model),
         Event::Char('.') => repeat_last_op(model, fs),
         Event::Char('H') => {
             model.show_hidden = !model.show_hidden;
             clamp_cursors(model);
         }
-        Event::Tab => {
-            model.pane = match model.pane {
-                Pane::Tree => Pane::Files,
-                Pane::Files => Pane::Tree,
-            };
-        }
-        Event::Up | Event::Char('k') => move_cursor(model, fs, -1),
-        Event::Down | Event::Char('j') => move_cursor(model, fs, 1),
-        Event::Left | Event::Char('h') => {
-            if model.pane == Pane::Tree {
-                set_expanded(model, fs, false);
-            }
-        }
-        Event::Right | Event::Char('l') => {
+        Event::Char('+') => {
             if model.pane == Pane::Tree {
                 set_expanded(model, fs, true);
             }
         }
-        Event::Enter => match model.pane {
-            Pane::Tree => toggle_expanded(model, fs),
-            Pane::Files => enter_file_row(model, fs, decode),
-        },
+        Event::Char('-') => {
+            if model.pane == Pane::Tree {
+                set_expanded(model, fs, false);
+            }
+        }
+        Event::Up | Event::Char('k') => move_cursor(model, fs, -1),
+        Event::Down | Event::Char('j') => move_cursor(model, fs, 1),
+        Event::PageUp => page_cursor(model, fs, false),
+        Event::PageDown => page_cursor(model, fs, true),
+        Event::Home => move_to_edge(model, fs, false),
+        Event::End => move_to_edge(model, fs, true),
+        Event::Left | Event::Char('h') => nav_out(model, fs),
+        Event::Right | Event::Char('l') => nav_in(model, fs, decode),
+        Event::Enter => nav_enter(model, fs, decode),
+        Event::Tab => toggle_window(model),
+        Event::Esc => nav_esc(model),
         _ => {}
     }
+}
+
+/// `Tab`: swap the active window between the tree and the files.
+fn toggle_window(model: &mut Model) {
+    model.pane = match model.pane {
+        Pane::Tree => Pane::Files,
+        Pane::Files => Pane::Tree,
+    };
+}
+
+/// `→`/`l`: in the tree window, fold the highlighted branch open (reading
+/// it lazily). In the file window, descend into the highlighted directory
+/// (a plain file is opened with `Enter`, not `→`).
+fn nav_in(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode) {
+    match model.pane {
+        Pane::Tree => set_expanded(model, fs, true),
+        Pane::Files => {
+            let is_dir = model
+                .visible_files()
+                .get(model.file_cursor)
+                .is_some_and(|entry| entry.kind.is_dir());
+            if is_dir {
+                enter_file_row(model, fs, decode);
+            }
+        }
+    }
+}
+
+/// `←`/`h`: in the tree window, fold the highlighted branch shut, or —
+/// when it is already shut (or a leaf) — step the highlight to the parent
+/// directory. In the file window, back out to the tree window.
+fn nav_out(model: &mut Model, fs: &mut dyn Fs) {
+    match model.pane {
+        Pane::Tree => {
+            let rows = model.tree_rows();
+            let Some(row) = rows.get(model.tree_cursor) else {
+                return;
+            };
+            if row.expanded {
+                set_expanded(model, fs, false);
+            } else {
+                move_tree_to_parent(model, fs);
+            }
+        }
+        Pane::Files => model.pane = Pane::Tree,
+    }
+}
+
+/// Move the tree highlight to the parent of the current row and show its
+/// listing. A no-op at the root, whose parent is not a tree row.
+fn move_tree_to_parent(model: &mut Model, fs: &mut dyn Fs) {
+    let rows = model.tree_rows();
+    let Some(row) = rows.get(model.tree_cursor) else {
+        return;
+    };
+    if row.depth == 0 {
+        return;
+    }
+    let parent = String::from(parent_of(&row.path));
+    if let Some(index) = rows.iter().position(|r| r.path == parent) {
+        model.tree_cursor = index;
+        select_dir(model, fs, &parent);
+    }
+}
+
+/// `Enter`: from the tree window, step into the file window; from the file
+/// window, open the highlighted entry (a directory descends, a file
+/// views).
+fn nav_enter(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode) {
+    match model.pane {
+        Pane::Tree => model.pane = Pane::Files,
+        Pane::Files => enter_file_row(model, fs, decode),
+    }
+}
+
+/// `Esc`: cancel a live usage walk first (keeping its figures); otherwise
+/// back out of the file window to the tree window. At the tree window with
+/// no walk running it does nothing — the top level is where navigation
+/// begins.
+fn nav_esc(model: &mut Model) {
+    if model
+        .walk
+        .as_ref()
+        .is_some_and(|walk| walk.purpose == WalkPurpose::Usage)
+    {
+        cancel_usage_walk(model);
+        return;
+    }
+    if model.pane == Pane::Files {
+        model.pane = Pane::Tree;
+    }
+}
+
+/// `PageUp`/`PageDown`: move the active window's highlight by one visible
+/// window (its content-row count at the last draw, at least one row).
+fn page_cursor(model: &mut Model, fs: &mut dyn Fs, down: bool) {
+    let page = match model.pane {
+        Pane::Tree => model.tree_page,
+        Pane::Files => model.file_page,
+    }
+    .max(1);
+    let delta = isize::try_from(page).unwrap_or(1);
+    move_cursor(model, fs, if down { delta } else { -delta });
+}
+
+/// `Home`/`End`: move the active window's highlight to the first or last
+/// row. The saturating step clamps a deliberately huge delta at the edge.
+fn move_to_edge(model: &mut Model, fs: &mut dyn Fs, end: bool) {
+    move_cursor(model, fs, if end { isize::MAX } else { isize::MIN });
 }
 
 /// The focused pane's selection: the file pane's entry, or the tree
@@ -2466,13 +2578,6 @@ fn set_expanded(model: &mut Model, fs: &mut dyn Fs, expanded: bool) {
     clamp_cursors(model);
 }
 
-/// Enter on a tree row: collapse an expanded node, expand a collapsed one.
-fn toggle_expanded(model: &mut Model, fs: &mut dyn Fs) {
-    let rows = model.tree_rows();
-    let expanded = rows.get(model.tree_cursor).is_some_and(|row| row.expanded);
-    set_expanded(model, fs, !expanded);
-}
-
 /// Enter on a file-pane row: a directory descends into it (selecting it
 /// in the tree); a regular file opens in the viewer the head sample
 /// picks.
@@ -2560,28 +2665,44 @@ fn clamp_cursors(model: &mut Model) {
     }
 }
 
-/// Keep each pane's scroll window containing its cursor.
-fn clamp_scroll(model: &mut Model, height: usize) {
+/// Keep each window's scroll offset containing its cursor and record the
+/// page height each window shows, so the page keys move by one screenful.
+/// The panes view sizes the tree and file windows independently from the
+/// stacked [`panes_layout`]; the flattened view uses the whole boxed body.
+fn clamp_scroll(model: &mut Model, screen_rows: u16) {
+    let body = screen_rows.saturating_sub(2);
+    match model.view {
+        View::Panes => {
+            let (tree_h, file_h) = match panes_layout(body) {
+                Some(layout) => (layout.tree_interior(), layout.file_interior()),
+                // Bare fallback: the whole body under the header is tree.
+                None => (usize::from(body.saturating_sub(1)), 0),
+            };
+            model.tree_page = tree_h;
+            model.file_page = file_h;
+            clamp_window(model.tree_cursor, &mut model.tree_scroll, tree_h);
+            clamp_window(model.file_cursor, &mut model.file_scroll, file_h);
+        }
+        View::Flat => {
+            // The flattened list fills the single boxed body (its two
+            // border rows removed).
+            let height = usize::from(body.saturating_sub(2));
+            clamp_window(model.flat_cursor, &mut model.flat_scroll, height);
+        }
+        // The viewer manages its own paging through `refresh_viewer`.
+        View::Viewer => {}
+    }
+}
+
+/// Keep `scroll` such that `cursor` stays within the `height`-row window.
+fn clamp_window(cursor: usize, scroll: &mut usize, height: usize) {
     if height == 0 {
         return;
     }
-    if model.tree_cursor < model.tree_scroll {
-        model.tree_scroll = model.tree_cursor;
-    }
-    if model.tree_cursor >= model.tree_scroll + height {
-        model.tree_scroll = model.tree_cursor + 1 - height;
-    }
-    if model.file_cursor < model.file_scroll {
-        model.file_scroll = model.file_cursor;
-    }
-    if model.file_cursor >= model.file_scroll + height {
-        model.file_scroll = model.file_cursor + 1 - height;
-    }
-    if model.flat_cursor < model.flat_scroll {
-        model.flat_scroll = model.flat_cursor;
-    }
-    if model.flat_cursor >= model.flat_scroll + height {
-        model.flat_scroll = model.flat_cursor + 1 - height;
+    if cursor < *scroll {
+        *scroll = cursor;
+    } else if cursor >= *scroll + height {
+        *scroll = cursor + 1 - height;
     }
 }
 

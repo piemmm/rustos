@@ -542,13 +542,104 @@ fn expanding_a_node_reads_it_exactly_once() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     m.tree_cursor = 1; // "docs"
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+                       // Right folds the branch open, reading it lazily.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Right);
     // Root + the expansion read.
     assert_eq!(fs.reads.get(), 2);
-    // Re-collapsing and re-expanding does not re-read.
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    // Folding shut and open again does not re-read (children stay cached).
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Left);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Right);
     assert_eq!(fs.reads.get(), 2);
+}
+
+// --- Navigation: the XTree Gold window model ----------------------------
+
+#[test]
+fn enter_and_esc_move_between_the_windows() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    assert_eq!(m.pane, Pane::Tree);
+    // Enter steps from the tree window into the file window.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(m.pane, Pane::Files);
+    // Esc backs out to the tree window.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
+    assert_eq!(m.pane, Pane::Tree);
+    // Esc at the tree window (nothing to back out of) is a no-op.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
+    assert_eq!(m.pane, Pane::Tree);
+    // Tab toggles both ways.
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    assert_eq!(m.pane, Pane::Files);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Tab);
+    assert_eq!(m.pane, Pane::Tree);
+}
+
+#[test]
+fn right_left_and_plus_minus_fold_the_tree() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.tree_cursor = 1; // docs
+    assert!(!m.tree_rows()[1].expanded);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('+'));
+    assert!(m.tree_rows()[1].expanded);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('-'));
+    assert!(!m.tree_rows()[1].expanded);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Right);
+    assert!(m.tree_rows()[1].expanded);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Left);
+    assert!(!m.tree_rows()[1].expanded);
+}
+
+#[test]
+fn left_on_a_collapsed_child_steps_to_the_parent() {
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("a")])
+        .dir("/a", vec![dir("b"), file("f", 1, 100)])
+        .dir("/a/b", Vec::new());
+    let mut m = Model::new(&mut fs, "/", String::new()).expect("root lists");
+    // Onto "a", fold it open, step onto its child "b".
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
+    assert_eq!(m.tree_cursor, 1);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Right); // expand a
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto b
+    assert_eq!(m.tree_rows()[m.tree_cursor].name, "b");
+    // "b" is a collapsed leaf, so Left jumps up to the parent "a".
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Left);
+    assert_eq!(m.tree_rows()[m.tree_cursor].name, "a");
+    assert_eq!(m.files_dir, "/a");
+    // Left again folds "a" shut (it is expanded).
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Left);
+    assert!(!m.tree_rows()[1].expanded);
+}
+
+#[test]
+fn home_and_end_jump_to_the_file_window_edges() {
+    let mut fs = fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    let last = m.visible_files().len() - 1;
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::End);
+    assert_eq!(m.file_cursor, last);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Home);
+    assert_eq!(m.file_cursor, 0);
+}
+
+#[test]
+fn tree_rows_carry_box_drawing_branches_and_fold_markers() {
+    let mut fs = fixture();
+    let m = model(&mut fs);
+    let rows = m.tree_rows();
+    // The root has no branch prefix and shows as expanded.
+    assert_eq!(rows[0].name, "/");
+    assert_eq!(rows[0].branch, "");
+    assert_eq!(rows[0].fold, '-');
+    // Children carry the ├─/└─ junctions; a collapsed dir shows `+`.
+    let docs = rows.iter().find(|r| r.name == "docs").expect("docs");
+    assert_eq!(docs.branch, "├─");
+    assert_eq!(docs.fold, '+');
+    let locked = rows.iter().find(|r| r.name == "locked").expect("locked");
+    assert_eq!(locked.branch, "└─");
 }
 
 #[test]
@@ -959,47 +1050,50 @@ fn a_backing_without_attributes_says_so() {
 fn the_frame_lays_out_panes_status_and_hints() {
     let mut fs = fixture();
     let m = model(&mut fs);
-    let mut window = Window::new(Pos::new(0, 0), Size::new(8, 60));
+    // A grid tall enough for the header and both boxes (body >= 7).
+    let mut window = Window::new(Pos::new(0, 0), Size::new(14, 60));
     render(&m, &mut window);
-    // Top border: the pane titles ride the box, divider at the tree width.
-    let top = row_text(&window, 0);
-    assert!(top.starts_with("┌─ Tree "), "got {top}");
-    assert!(top.contains("┬─ Files "), "got {top}");
-    // Tree pane content inside the border, the file pane past the divider.
-    assert_eq!(
-        row_text(&window, 1),
-        format!("│{:<19}│{:<38}│", "- /", file_row_text(&m, 0))
+    // Row 0: the XTree disk-statistics header — path, free space, count.
+    let header = row_text(&window, 0);
+    assert!(header.starts_with(" Path: /"), "got {header}");
+    assert!(header.contains("Avail 500 of 1000 bytes"), "got {header}");
+    assert!(header.contains("5 items"), "got {header}");
+    // The tree window sits in a titled box above the file window.
+    assert!(row_text(&window, 1).contains("Directory Tree"));
+    // Tree interior: the root, then its branch-connected children with the
+    // XTree box-drawing junctions and the collapsed `+` fold marker.
+    assert!(
+        row_text(&window, 2).starts_with("│- /"),
+        "{}",
+        row_text(&window, 2)
     );
-    assert!(row_text(&window, 2).starts_with("│  + docs"));
-    assert!(row_text(&window, 3).starts_with("│  + locked"));
-    // Status line: path, count, sort, free space.
-    let status = row_text(&window, 6);
-    assert!(status.starts_with("/  5 entries  sort name asc  free 500/1000"));
-    // Hint line (truncated to the 60-column grid; the leading hints show).
-    assert!(row_text(&window, 7).contains("t tag"));
-}
-
-/// The file-pane text of visible row `index`, as the renderer prints it.
-fn file_row_text(m: &Model, index: usize) -> String {
-    let files = m.visible_files();
-    let entry = files[index];
-    // 60 cols, tree width 20, side borders and divider: the file pane's
-    // interior is 38 wide.
-    let stamp = if entry.modified == Time64::UNIX_EPOCH {
-        String::from("-")
-    } else {
-        unreachable!("fixture row 0 is a directory with no stamp")
-    };
-    let size_text = if entry.kind.is_dir() {
-        String::from("<dir>")
-    } else {
-        format!("{}", entry.size)
-    };
-    let tail = format!("{size_text:>12} {stamp:>16}");
-    // The row starts with the one-column tag marker (a space while
-    // untagged), so the name field gives up marker + two separators.
-    let name_width = 38 - (tail.len() + 3);
-    format!(" {:<name_width$} {tail}", entry.name)
+    assert!(
+        row_text(&window, 3).starts_with("│├─+ docs"),
+        "{}",
+        row_text(&window, 3)
+    );
+    assert!(
+        row_text(&window, 4).starts_with("│└─+ locked"),
+        "{}",
+        row_text(&window, 4)
+    );
+    // The file window is a second titled box below the tree.
+    assert!(row_text(&window, 7).contains("Files"));
+    let first_file = row_text(&window, 8);
+    assert!(
+        first_file.contains("docs") && first_file.contains("<dir>"),
+        "{first_file}"
+    );
+    // Status band: the active window and the view state (path/free/count
+    // ride the header, so the band never repeats them).
+    let status = row_text(&window, 12);
+    assert!(status.starts_with("Tree  sort name asc"), "got {status}");
+    // Command menu: the tree window's XTree-style key list.
+    let menu = row_text(&window, 13);
+    assert!(
+        menu.contains("expand") && menu.contains("files"),
+        "got {menu}"
+    );
 }
 
 #[test]
@@ -1007,15 +1101,23 @@ fn the_epoch_stamp_renders_as_absent_and_real_stamps_as_dates() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     m.pane = Pane::Files;
-    let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
+    // Tall enough that the file window shows several entries.
+    let mut window = Window::new(Pos::new(0, 0), Size::new(16, 70));
     render(&m, &mut window);
-    let grid: Vec<String> = (0..8).map(|r| row_text(&window, r)).collect();
-    // The directory rows carry no stamp; the file rows carry real dates.
-    let docs_row = grid.iter().find(|r| r.contains("docs")).expect("docs row");
-    assert!(docs_row.contains("<dir>"));
+    let grid: Vec<String> = (0..14).map(|r| row_text(&window, r)).collect();
+    // The directory's file-window row carries `<dir>` and no stamp; the
+    // tree also lists `docs`, so key on the `<dir>` marker to find the
+    // file-window row.
+    let docs_row = grid
+        .iter()
+        .find(|r| r.contains("docs") && r.contains("<dir>"))
+        .expect("docs file row");
     // The stamp is the last content character before the box's right
     // border and its padding.
-    assert!(docs_row.trim_end_matches(['│', ' ']).ends_with('-'));
+    assert!(
+        docs_row.trim_end_matches(['│', ' ']).ends_with('-'),
+        "{docs_row}"
+    );
     let file_row = grid.iter().find(|r| r.contains("a.rs")).expect("file row");
     assert!(file_row.contains("1970-01-01 00:16"), "secs=1000 renders");
 }

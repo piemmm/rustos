@@ -26,9 +26,53 @@ use crate::view_hex::{dump_row, offset_digits, HexView};
 use crate::view_text::TextView;
 use crate::walk::{relative_to, WalkPurpose};
 
-/// Columns given to the tree pane for a grid `cols` wide.
-fn tree_width(cols: u16) -> u16 {
-    (cols / 3).clamp(12, 40).min(cols.saturating_sub(2))
+/// The vertical split of the two-pane view: a full-width disk-statistics
+/// header, then the boxed directory-tree window stacked above the boxed
+/// file window — the `XTree Gold` arrangement.
+pub(crate) struct PanesLayout {
+    /// Top border row of the tree box (the header is the row above it).
+    pub tree_top: u16,
+    /// Total rows of the tree box, borders included.
+    pub tree_height: u16,
+    /// Top border row of the file box.
+    pub file_top: u16,
+    /// Total rows of the file box, borders included.
+    pub file_height: u16,
+}
+
+impl PanesLayout {
+    /// Content rows inside the tree box (its height minus the two borders).
+    pub(crate) fn tree_interior(&self) -> usize {
+        usize::from(self.tree_height.saturating_sub(2))
+    }
+
+    /// Content rows inside the file box.
+    pub(crate) fn file_interior(&self) -> usize {
+        usize::from(self.file_height.saturating_sub(2))
+    }
+}
+
+/// Split a `body`-row two-pane region (the grid minus the status and
+/// message lines) into the stats header and the two stacked boxes.
+/// `None` when the body is too short to seat a header and both boxes;
+/// the renderer then falls back to a bare listing.
+pub(crate) fn panes_layout(body: u16) -> Option<PanesLayout> {
+    // One header row, then two boxes each needing at least three rows
+    // (top border, one content row, bottom border).
+    if body < 1 + 3 + 3 {
+        return None;
+    }
+    let below_header = body - 1;
+    // The tree window takes the upper half (rounded up), the file window
+    // the remainder; each keeps its own pair of border rows.
+    let tree_height = below_header.div_ceil(2);
+    let file_height = below_header - tree_height;
+    Some(PanesLayout {
+        tree_top: 1,
+        tree_height,
+        file_top: 1 + tree_height,
+        file_height,
+    })
 }
 
 // --- Styles ---------------------------------------------------------------
@@ -105,44 +149,6 @@ fn prompt_attrs() -> Attributes {
 
 // --- The frame --------------------------------------------------------------
 
-/// Draw the body's box: the top border carrying `titles` (each a
-/// `(column, text, focused)` triple), the side and bottom borders, and —
-/// when `divider` names a column — the full-height pane divider with its
-/// junctions. Content is drawn *inside* the box (rows `1..body - 1`,
-/// columns `1..cols - 1`).
-fn draw_frame(
-    window: &mut Window,
-    body: u16,
-    cols: u16,
-    divider: Option<u16>,
-    titles: &[(u16, &str, bool)],
-) {
-    let border = border_attrs();
-    window.set_attributes(border);
-    let inner = usize::from(cols.saturating_sub(2));
-    let horizontal = "─".repeat(inner);
-    let top = format!("┌{horizontal}┐");
-    let bottom = format!("└{horizontal}┘");
-    let _ = window.move_add_str(Pos::new(0, 0), &top);
-    let _ = window.move_add_str(Pos::new(body - 1, 0), &bottom);
-    for row in 1..body - 1 {
-        let _ = window.move_add_str(Pos::new(row, 0), "│");
-        let _ = window.move_add_str(Pos::new(row, cols - 1), "│");
-    }
-    if let Some(column) = divider {
-        let _ = window.move_add_str(Pos::new(0, column), "┬");
-        for row in 1..body - 1 {
-            let _ = window.move_add_str(Pos::new(row, column), "│");
-        }
-        let _ = window.move_add_str(Pos::new(body - 1, column), "┴");
-    }
-    for &(column, text, focused) in titles {
-        window.set_attributes(title_attrs(focused));
-        let _ = window.move_add_str(Pos::new(0, column), text);
-    }
-    window.set_attributes(Attributes::PLAIN);
-}
-
 /// Draw one full frame of `model` into `window`.
 pub fn render(model: &Model, window: &mut Window) {
     let size = window.size();
@@ -169,32 +175,89 @@ pub fn render(model: &Model, window: &mut Window) {
     render_message(model, window, rows, cols);
 }
 
-/// The two boxed panes and their divider.
+/// Draw one bordered window: a box `height` rows tall whose top border sits
+/// at row `top`, carrying `title` on its top border (bold when `focused`).
+/// Content is drawn *inside* (rows `top + 1 ..= top + height - 2`).
+fn draw_box(window: &mut Window, top: u16, height: u16, cols: u16, title: &str, focused: bool) {
+    if height < 2 {
+        return;
+    }
+    let border = border_attrs();
+    window.set_attributes(border);
+    let inner = usize::from(cols.saturating_sub(2));
+    let horizontal = "─".repeat(inner);
+    let bottom = top + height - 1;
+    let _ = window.move_add_str(Pos::new(top, 0), &format!("┌{horizontal}┐"));
+    let _ = window.move_add_str(Pos::new(bottom, 0), &format!("└{horizontal}┘"));
+    for row in (top + 1)..bottom {
+        let _ = window.move_add_str(Pos::new(row, 0), "│");
+        let _ = window.move_add_str(Pos::new(row, cols - 1), "│");
+    }
+    window.set_attributes(title_attrs(focused));
+    let _ = window.move_add_str(Pos::new(top, 2), title);
+    window.set_attributes(Attributes::PLAIN);
+}
+
+/// The XTree-style disk-statistics header: the shown directory's path,
+/// the volume's free/total bytes (when the mount reports them), the item
+/// count, and the tagged count — a full-width band across the top.
+fn render_header(model: &Model, window: &mut Window, cols: u16) {
+    use core::fmt::Write as _;
+    let mut text = format!(" Path: {}", model.files_dir);
+    if let Some(space) = model.space {
+        let _ = write!(
+            text,
+            "   Avail {} of {} bytes",
+            space.free_bytes, space.total_bytes
+        );
+    }
+    let _ = write!(text, "   {} items", model.visible_files().len());
+    if !model.tags.is_empty() {
+        let _ = write!(text, "   {} tagged", model.tags.count());
+    }
+    let mut padded = String::from(truncate_to_width(&text, usize::from(cols)));
+    while padded.len() < usize::from(cols) {
+        padded.push(' ');
+    }
+    window.set_attributes(status_attrs());
+    let _ = window.move_add_str(Pos::new(0, 0), &padded);
+    window.set_attributes(Attributes::PLAIN);
+}
+
+/// The `XTree Gold` main screen: a disk-statistics header over the boxed
+/// directory-tree window (branch-line tree) stacked above the boxed file
+/// window. The active window's title is bold; its highlight bar is
+/// reversed while the other window's is dimmed, so the eye always finds
+/// the focus.
 fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    render_header(model, window, cols);
+    let Some(layout) = panes_layout(body) else {
+        // Too short for the boxed layout: fall back to a bare tree listing
+        // under the header so a tiny grid still shows something usable.
+        render_bare_tree(model, window, body, cols);
+        return;
+    };
+
     let plain = Attributes::PLAIN;
     let mut reverse = Attributes::PLAIN;
     reverse.reverse = true;
     let mut dim = Attributes::PLAIN;
     dim.dim = true;
 
-    let tw = tree_width(cols);
-    draw_frame(
+    draw_box(
         window,
-        body,
+        layout.tree_top,
+        layout.tree_height,
         cols,
-        Some(tw),
-        &[
-            (2, " Tree ", model.pane == Pane::Tree),
-            (tw + 2, " Files ", model.pane == Pane::Files),
-        ],
+        " Directory Tree ",
+        model.pane == Pane::Tree,
     );
-    let inner = body - 2;
-
+    let tree_inner = layout.tree_interior();
+    let tw = usize::from(cols.saturating_sub(2));
     let tree_rows = model.tree_rows();
     let visible_tree = tree_rows.iter().enumerate().skip(model.tree_scroll);
-    for (line, (index, row)) in (0..inner).zip(visible_tree) {
-        let marker = if row.expanded { "- " } else { "+ " };
-        let text = format!("{:indent$}{marker}{}", "", row.name, indent = row.depth * 2);
+    for (line, (index, row)) in (0..tree_inner).zip(visible_tree) {
+        let text = format!("{}{} {}", row.branch, row.fold, row.name);
         let focused = index == model.tree_cursor;
         let attrs = match (focused, model.pane) {
             (true, Pane::Tree) => reverse,
@@ -204,17 +267,25 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
         };
         window.set_attributes(attrs);
         let _ = window.move_add_str(
-            Pos::new(line + 1, 1),
-            truncate_to_width(&text, usize::from(tw - 1)),
+            Pos::new(layout.tree_top + 1 + u16::try_from(line).unwrap_or(0), 1),
+            truncate_to_width(&text, tw),
         );
         window.set_attributes(plain);
     }
 
+    draw_box(
+        window,
+        layout.file_top,
+        layout.file_height,
+        cols,
+        " Files ",
+        model.pane == Pane::Files,
+    );
+    let file_inner = layout.file_interior();
+    let fw = usize::from(cols.saturating_sub(2));
     let files = model.visible_files();
-    let fx = tw + 1;
-    let fw = usize::from(cols - 1 - fx);
     let visible_files = files.iter().enumerate().skip(model.file_scroll);
-    for (line, (index, entry)) in (0..inner).zip(visible_files) {
+    for (line, (index, entry)) in (0..file_inner).zip(visible_files) {
         let tagged = model
             .tags
             .contains(&crate::model::join(&model.files_dir, &entry.name));
@@ -237,8 +308,32 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
             _ => plain,
         };
         window.set_attributes(attrs);
-        let _ = window.move_add_str(Pos::new(line + 1, fx), truncate_to_width(&text, fw));
+        let _ = window.move_add_str(
+            Pos::new(layout.file_top + 1 + u16::try_from(line).unwrap_or(0), 1),
+            truncate_to_width(&text, fw),
+        );
         window.set_attributes(plain);
+    }
+}
+
+/// The fallback listing when the grid is too short for the boxed layout:
+/// the tree rows drawn plainly under the header, cursor highlighted.
+fn render_bare_tree(model: &Model, window: &mut Window, body: u16, cols: u16) {
+    let mut reverse = Attributes::PLAIN;
+    reverse.reverse = true;
+    let width = usize::from(cols);
+    let tree_rows = model.tree_rows();
+    let visible = tree_rows.iter().enumerate().skip(model.tree_scroll);
+    for (line, (index, row)) in (1..body).zip(visible) {
+        let text = format!("{}{} {}", row.branch, row.fold, row.name);
+        let attrs = if index == model.tree_cursor {
+            reverse
+        } else {
+            dir_attrs()
+        };
+        window.set_attributes(attrs);
+        let _ = window.move_add_str(Pos::new(line, 0), truncate_to_width(&text, width));
+        window.set_attributes(Attributes::PLAIN);
     }
 }
 
@@ -276,7 +371,7 @@ fn render_flat(model: &Model, window: &mut Window, body: u16, cols: u16) {
     let mut reverse = Attributes::PLAIN;
     reverse.reverse = true;
     let title = format!(" {} ", walk.label());
-    draw_frame(window, body, cols, None, &[(2, &title, true)]);
+    draw_box(window, 0, body, cols, &title, true);
     let width = usize::from(cols - 2);
     let visible = walk.entries.iter().enumerate().skip(model.flat_scroll);
     for (line, (index, entry)) in (0..body - 2).zip(visible) {
@@ -318,7 +413,7 @@ fn render_viewer(model: &Model, window: &mut Window, body: u16, cols: u16) {
 /// eye finds function starts).
 fn render_disasm_view(view: &DisasmView, window: &mut Window, body: u16, cols: u16) {
     let title = format!(" {} ", view.path);
-    draw_frame(window, body, cols, None, &[(2, &title, true)]);
+    draw_box(window, 0, body, cols, &title, true);
     let width = usize::from(cols - 2);
     let mut reverse = Attributes::PLAIN;
     reverse.reverse = true;
@@ -351,7 +446,7 @@ fn render_disasm_view(view: &DisasmView, window: &mut Window, body: u16, cols: u
 /// The text pager's page inside its box, one sanitised row per line.
 fn render_text_view(view: &TextView, window: &mut Window, body: u16, cols: u16) {
     let title = format!(" {} ", view.path);
-    draw_frame(window, body, cols, None, &[(2, &title, true)]);
+    draw_box(window, 0, body, cols, &title, true);
     for (line, row) in (0..body - 2).zip(view.rows.iter()) {
         let _ = window.move_add_str(
             Pos::new(line + 1, 1),
@@ -364,7 +459,7 @@ fn render_text_view(view: &TextView, window: &mut Window, body: u16, cols: u16) 
 /// line; the offset column reads in cyan so the eye tracks it.
 fn render_hex_view(view: &HexView, window: &mut Window, body: u16, cols: u16) {
     let title = format!(" {} ", view.path);
-    draw_frame(window, body, cols, None, &[(2, &title, true)]);
+    draw_box(window, 0, body, cols, &title, true);
     let digits = offset_digits(view.size);
     for line in 0..body - 2 {
         let Some(text) = dump_row(view.top, &view.bytes, usize::from(line), digits) else {
@@ -384,7 +479,7 @@ fn render_hex_view(view: &HexView, window: &mut Window, body: u16, cols: u16) {
 /// The report overlay: a batch's per-file failure lines (or a walk's
 /// unreadable directories), paged inside its box; any key dismisses it.
 fn render_report(model: &Model, window: &mut Window, body: u16, cols: u16) {
-    draw_frame(window, body, cols, None, &[(2, " Report ", true)]);
+    draw_box(window, 0, body, cols, " Report ", true);
     for (line, text) in (0..body - 2).zip(model.report_lines.iter()) {
         let _ = window.move_add_str(
             Pos::new(line + 1, 1),
@@ -398,7 +493,7 @@ fn render_report(model: &Model, window: &mut Window, body: u16, cols: u16) {
 /// as `-`, never fabricated). The cursor row is reversed; Enter opens
 /// the root, Esc leaves.
 fn render_volumes(model: &Model, window: &mut Window, body: u16, cols: u16) {
-    draw_frame(window, body, cols, None, &[(2, " Volumes ", true)]);
+    draw_box(window, 0, body, cols, " Volumes ", true);
     let width = usize::from(cols - 2);
     let mut reverse = Attributes::PLAIN;
     reverse.reverse = true;
@@ -423,7 +518,7 @@ fn render_attrs(model: &Model, window: &mut Window, body: u16, cols: u16) {
     let Some(view) = model.attrs.as_ref() else {
         return;
     };
-    draw_frame(window, body, cols, None, &[(2, " Attributes ", true)]);
+    draw_box(window, 0, body, cols, " Attributes ", true);
     let width = usize::from(cols - 2);
     let mut reverse = Attributes::PLAIN;
     reverse.reverse = true;
@@ -478,7 +573,7 @@ fn display_value(value: &[u8]) -> String {
 /// The settings menu (`S`): the persisted confirmation toggles and where
 /// they persist to (or that they cannot).
 fn render_settings(model: &Model, window: &mut Window, body: u16, cols: u16) {
-    draw_frame(window, body, cols, None, &[(2, " Settings ", true)]);
+    draw_box(window, 0, body, cols, " Settings ", true);
     let width = usize::from(cols - 2);
     let on_off = |on: bool| if on { "on" } else { "off" };
     let lines = [
@@ -523,10 +618,6 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
         Some(filter) => format!("  filter {}", filter.text),
         None => String::new(),
     };
-    let space = match model.space {
-        Some(space) => format!("  free {}/{}", space.free_bytes, space.total_bytes),
-        None => String::new(),
-    };
     let tags = if model.tags.is_empty() {
         String::new()
     } else {
@@ -551,11 +642,14 @@ fn render_status(model: &Model, window: &mut Window, rows: u16, cols: u16) {
             walk.entries.len(),
         )
     } else {
-        format!(
-            "{}  {} entries  sort {key} {direction}{space}{hidden}{filter}{tags}",
-            model.files_dir,
-            model.visible_files().len(),
-        )
+        // Path, free space, and item counts ride the top disk-statistics
+        // header; the band carries the active window and view state so the
+        // two never repeat each other.
+        let active = match model.pane {
+            Pane::Tree => "Tree",
+            Pane::Files => "Files",
+        };
+        format!("{active}  sort {key} {direction}{hidden}{filter}{tags}")
     };
     let mut padded = String::from(truncate_to_width(&status, usize::from(cols)));
     while padded.len() < usize::from(cols) {
@@ -690,11 +784,19 @@ fn render_message(model: &Model, window: &mut Window, rows: u16, cols: u16) {
                 "arrows move  Enter open dir  t tag  T glob  i invert  C clear  c copy  m move  \
                  d delete  Space more  Esc back",
             )
+        } else if model.pane == Pane::Tree {
+            // The active window's own command set, XTree-style: the tree
+            // window navigates and folds; Enter/Tab/→ steps into the files.
+            String::from(
+                "↑↓ move  →/+ expand  ←/- collapse  Enter/Tab files  t tag  c copy  m move  \
+                 r rename  d delete  M mkdir  a attrib  s sort  u usage  v branch  V vols  \
+                 S settings  ? help  q quit",
+            )
         } else {
             String::from(
-                "arrows move  Enter open  o open as  Tab pane  t tag  T glob  i invert  c copy  \
-                 m move  r rename  d delete  M mkdir  a mode  f filter  / search  F contents  \
-                 u usage  v flatten  s sort  . hidden  ? help  q quit",
+                "↑↓ move  Enter open  →/l enter dir  Esc/Tab/← tree  o open as  t tag  T glob  \
+                 i invert  C clear  c copy  m move  r rename  d delete  a attrib  f filter  \
+                 / find  F contents  s sort  . repeat  ? help  q quit",
             )
         };
         (hint, hint_attrs())
@@ -854,7 +956,7 @@ fn input_prompt_line(input: &crate::model::InputPrompt) -> String {
 /// The help overlay: the bundle's own Help document, paged inside its box
 /// (never embedded text — the string arrives through the help seam).
 fn render_help(model: &Model, window: &mut Window, body: u16, cols: u16) {
-    draw_frame(window, body, cols, None, &[(2, " Help ", true)]);
+    draw_box(window, 0, body, cols, " Help ", true);
     for (line, text) in (0..body - 2).zip(model.help_text.lines()) {
         let _ = window.move_add_str(
             Pos::new(line + 1, 1),

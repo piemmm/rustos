@@ -9,10 +9,11 @@ fstree — le gestionnaire de fichiers arborescent plein écran
 ## DESCRIPTION
 
 Parcourt le système de fichiers dans une session plein écran pilotée au
-clavier : un panneau d'arborescence de répertoires à gauche et un panneau
-de fichiers à droite listant les entrées du répertoire sélectionné avec
-leurs tailles et leurs dates de modification. La session démarre dans
-`répertoire` (la vue racine `/` par défaut).
+clavier, sur le modèle de XTree Gold : un en-tête de statistiques disque
+en haut, une fenêtre d'arborescence de répertoires au-dessus d'une
+fenêtre de fichiers qui liste les entrées du répertoire mis en évidence
+avec leurs tailles et leurs dates de modification. La session démarre
+dans `répertoire` (la vue racine `/` par défaut).
 
 L'arborescence est lue paresseusement : le contenu d'un répertoire n'est
 récupéré que lorsqu'il est affiché ou déplié pour la première fois, si
@@ -23,15 +24,24 @@ précédente est conservée ; rien n'est fabriqué.
 
 Touches :
 
-- `Haut`/`Bas` ou `k`/`j` — déplacer le curseur du panneau actif. Déplacer
-  le curseur de l'arborescence liste le répertoire nouvellement
-  sélectionné dans le panneau de fichiers.
-- `Gauche`/`Droite` ou `h`/`l` — replier/déplier la ligne d'arborescence
-  sous le curseur.
-- `Entrée` — dans l'arborescence, bascule le dépliage ; dans le panneau de
-  fichiers, descend dans le répertoire sélectionné (les deux panneaux
-  suivent).
-- `Tab` — changer de panneau actif.
+- `Haut`/`Bas` ou `k`/`j` — déplacer la sélection de la fenêtre active
+  (`Page préc.`/`Page suiv.` d'un écran, `Origine`/`Fin` au début ou à la
+  fin). Déplacer la sélection de l'arborescence liste le répertoire
+  nouvellement mis en évidence dans la fenêtre de fichiers.
+- `Droite`/`l`/`+` — dans l'arborescence, déplier la branche mise en
+  évidence (lue paresseusement) ; dans la fenêtre de fichiers, descendre
+  dans le répertoire mis en évidence.
+- `Gauche`/`h`/`-` — dans l'arborescence, replier la branche mise en
+  évidence ou — quand elle est déjà repliée ou sans sous-répertoires —
+  remonter la sélection au répertoire parent ; dans la fenêtre de
+  fichiers, revenir à l'arborescence.
+- `Entrée` — dans l'arborescence, passer dans la fenêtre de fichiers ;
+  dans la fenêtre de fichiers, ouvrir l'entrée mise en évidence (un
+  répertoire est ouvert, un fichier est affiché).
+- `Échap` — annuler un calcul d'usage disque en cours ; sinon revenir de
+  la fenêtre de fichiers à l'arborescence.
+- `Tab` — basculer entre la fenêtre d'arborescence et la fenêtre de
+  fichiers.
 - `s` — ouvrir le menu de tri : `n` nom, `e` extension, `s` taille,
   `m` date de modification, `r` inverser le sens, `Échap` annule. Les
   répertoires sont toujours groupés avant les fichiers.

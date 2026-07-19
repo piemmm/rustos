@@ -1,36 +1,51 @@
 # The `fstree` file manager
 
 `fstree` (`userland/apps/fstree`, crate `tairix-fstree`) is the full-screen,
-keyboard-driven **tree file manager** for the terminal: a persistent
-directory-tree pane beside a file pane over the storage forest, drawn with
-the OS curses library (`lib/curses`). It is a command app in the system app
+keyboard-driven **tree file manager** for the terminal, modelled on XTree
+Gold: a disk-statistics header over a persistent directory-tree window
+stacked above a file window, over the storage forest, drawn with the OS
+curses library (`lib/curses`). It is a command app in the system app
 store — a sealed `.app` bundle with `AppInfo`, `Run`, and a `Help/` locale
-tree, discovered from disk like every other bundle. The staged plan for the
-whole tool lives in `.junie/fstree-next-plan.md`; this page describes what
-is built.
+tree, discovered from disk like every other bundle. This page describes
+what is built.
 
 ## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks, S4 search/filter, S5 viewers, S9 disassembly viewer)
 
-- **The tree pane.** A lazily populated directory tree: a directory is read
-  through one `fs_readdir` call when it is first shown or expanded — never
-  a whole-volume scan, so browsing costs the working set and a huge volume
-  costs only the directories actually opened. Rows carry expansion markers
-  (`+`/`-`), indentation by depth, and a cursor with scrolling.
-- **The file pane.** The selected directory's entries with name, size
+- **The tree window.** A lazily populated directory tree: a directory is
+  read through one `fs_readdir` call when it is first shown or expanded —
+  never a whole-volume scan, so browsing costs the working set and a huge
+  volume costs only the directories actually opened. Each row carries a
+  box-drawing branch prefix (the ancestor `│` bars and this row's `├─`/`└─`
+  junction, computed once in the model so the renderer just prints it), a
+  `+`/`-`/space fold marker, and a cursor with scrolling.
+- **The file window.** The highlighted directory's entries with name, size
   (`<dir>` for directories), and modification-stamp columns. The stamp is
   the `Time64` value the kernel's listing stream carries per entry; a
   backing format that stores no per-node stamp reports the epoch, which
   renders as `-` — an absent figure, never a fabricated 1970 date.
+- **XTree Gold navigation.** The tree window is primary: `↑↓`/`k j` move
+  the highlight (`PageUp`/`PageDown` by a screenful, `Home`/`End` to the
+  ends) and the file window always follows the highlighted directory.
+  `→`/`l`/`+` fold a branch open (reading it lazily), `←`/`h`/`-` fold it
+  shut or — when already shut or a leaf — step the highlight to the parent.
+  `Enter` or `Tab` step into the file window; `Esc`, `Tab`, or `←` step
+  back out. In the file window `Enter` opens the highlighted entry (a
+  directory descends with both windows following, a file opens a viewer)
+  and `→`/`l` descends a directory. The whole model is I/O-free, so the
+  navigation is exercised by host tests without a terminal.
 - **Sorting.** Name, extension, size, or modification stamp, ascending or
   descending, directories always grouped first. The `s` menu selects the
   key (`n`/`e`/`s`/`m`) or reverses (`r`); `Esc` cancels.
 - **Hidden entries.** Dot-named entries are hidden by default in both
-  panes; `.` toggles them, with cursors clamped to the shrunken lists.
-- **Status and message lines.** The listed path, visible entry count, sort
-  order, the backing volume's free/total bytes (the System Information
-  API's `MOUNT_LIST` query through the shared `tairix_procinfo` mount walk,
-  best-effort — an unreachable service simply omits the figure), and either
-  an error, the sort prompt, or the key hints.
+  windows; `H` toggles them, with cursors clamped to the shrunken lists.
+- **Header, status, and command lines.** A top disk-statistics header
+  carries the listed path, the backing volume's free/total bytes (the
+  System Information API's `MOUNT_LIST` query through the shared
+  `tairix_procinfo` mount walk, best-effort — an unreachable service simply
+  omits the figure), and the item and tagged counts. A status band below
+  the windows shows the active window, sort order, and hidden/filter state,
+  and a context command menu lists the active window's keys — or an error
+  or the sort prompt when one is open.
 - **The attributes editor.** `a` opens the focused selection's
   attributes (the file pane's entry, or the tree pane's directory): an
   overlay showing the entry's permission bits and its extended

@@ -9,10 +9,11 @@ fstree — il gestore di file ad albero a schermo intero
 ## DESCRIPTION
 
 Esplora il file system in una sessione a schermo intero guidata dalla
-tastiera: un pannello con l'albero delle directory a sinistra e un
-pannello dei file a destra che elenca le voci della directory selezionata
-con dimensioni e data di modifica. La sessione parte da `directory`
-(la vista radice `/` se omessa).
+tastiera, sul modello di XTree Gold: in alto un'intestazione con le
+statistiche del disco, una finestra con l'albero delle directory sopra
+una finestra dei file che elenca le voci della directory evidenziata con
+dimensioni e data di modifica. La sessione parte da `directory` (la vista
+radice `/` se omessa).
 
 L'albero è letto pigramente: il contenuto di una directory viene
 recuperato solo quando è mostrata o espansa per la prima volta, così
@@ -23,14 +24,23 @@ com'era; nulla viene inventato.
 
 Tasti:
 
-- `Su`/`Giù` o `k`/`j` — muovere il cursore del pannello attivo. Muovendo
-  il cursore dell'albero, la directory appena selezionata viene elencata
-  nel pannello dei file.
-- `Sinistra`/`Destra` o `h`/`l` — comprimere/espandere la riga dell'albero
-  sotto il cursore.
-- `Invio` — nell'albero alterna l'espansione; nel pannello dei file scende
-  nella directory selezionata (entrambi i pannelli seguono).
-- `Tab` — cambiare il pannello attivo.
+- `Su`/`Giù` o `k`/`j` — muovere l'evidenziazione della finestra attiva
+  (`PgSu`/`PgGiù` di una schermata, `Inizio`/`Fine` all'inizio o alla
+  fine). Muovendo l'evidenziazione dell'albero, la directory appena
+  evidenziata viene elencata nella finestra dei file.
+- `Destra`/`l`/`+` — nell'albero, espandere il ramo evidenziato (letto
+  pigramente); nella finestra dei file, scendere nella directory
+  evidenziata.
+- `Sinistra`/`h`/`-` — nell'albero, comprimere il ramo evidenziato o —
+  quando è già compresso o senza sottodirectory — risalire
+  l'evidenziazione alla directory madre; nella finestra dei file, tornare
+  all'albero.
+- `Invio` — nell'albero, passare alla finestra dei file; nella finestra
+  dei file, aprire la voce evidenziata (una directory viene aperta, un
+  file viene mostrato).
+- `Esc` — annullare un calcolo dell'uso del disco in corso; altrimenti
+  tornare dalla finestra dei file all'albero.
+- `Tab` — passare tra la finestra dell'albero e la finestra dei file.
 - `s` — aprire il menu di ordinamento: `n` nome, `e` estensione,
   `s` dimensione, `m` data di modifica, `r` inverte il verso, `Esc`
   annulla. Le directory sono sempre raggruppate prima dei file.
