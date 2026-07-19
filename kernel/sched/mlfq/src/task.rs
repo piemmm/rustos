@@ -14,7 +14,7 @@
 //! `docs/src/architecture/scheduler.md` for the full invariants.
 
 use crate::loom_compat::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use crate::{CpuId, Priority, TaskAction, TaskContext, TaskId, TaskState};
+use crate::{CpuId, Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
 
 use alloc::boxed::Box;
 use tairix_sync::SpinLock;
@@ -39,6 +39,13 @@ pub(crate) struct TaskInner {
     pub home_cpu: AtomicU32,
     /// Current priority band, stored as `Priority as u8`.
     pub priority: AtomicU8,
+    /// Scheduling class, stored as `SchedClass as u8`. A
+    /// [`SchedClass::Realtime`] task is dispatched ahead of every
+    /// time-shared band on its CPU and never preempted by one; the default
+    /// (and every newly spawned task) is [`SchedClass::TimeShared`]. The
+    /// MLFQ band/demotion bookkeeping is meaningful only for the
+    /// time-shared class.
+    pub sched_class: AtomicU8,
     /// Lifecycle state, stored as `TaskState as u8`.
     pub state: AtomicU8,
     /// Total times the body has been invoked. Useful for fairness tests.
@@ -86,6 +93,7 @@ impl TaskInner {
             id,
             home_cpu: AtomicU32::new(home_cpu),
             priority: AtomicU8::new(priority as u8),
+            sched_class: AtomicU8::new(SchedClass::TimeShared.as_u8()),
             state: AtomicU8::new(TaskState::Ready.as_u8()),
             total_runs: AtomicU64::new(0),
             run_ticks: AtomicU64::new(0),
@@ -119,6 +127,20 @@ impl TaskInner {
         // panic in production paths) without an unsafe transmute.
         let raw = self.priority.load(Ordering::Acquire) as usize;
         Priority::from_index(raw).unwrap_or(Priority::High)
+    }
+
+    /// Atomically load the scheduling class.
+    pub(crate) fn load_sched_class(&self) -> SchedClass {
+        // Only `SchedClass`-produced values are ever stored; a corrupt byte
+        // fails safe to the non-privileged time-shared band rather than
+        // silently granting real-time priority.
+        let raw = self.sched_class.load(Ordering::Acquire);
+        SchedClass::from_u8(raw).unwrap_or(SchedClass::TimeShared)
+    }
+
+    /// Atomically store the scheduling class.
+    pub(crate) fn store_sched_class(&self, class: SchedClass) {
+        self.sched_class.store(class.as_u8(), Ordering::Release);
     }
 
     /// Atomically load the state.

@@ -85,6 +85,75 @@ impl Priority {
     }
 }
 
+/// Scheduling class a task competes in.
+///
+/// Orthogonal to [`Priority`], which selects a fair-share weight and core
+/// class *within* the time-shared band: the scheduling class decides which
+/// band competes at all. The rule every policy enforces is strict:
+///
+/// * A ready [`SchedClass::Realtime`] task is dispatched before **any**
+///   [`SchedClass::TimeShared`] task on the same CPU, regardless of the
+///   time-shared task's accumulated virtual runtime, priority, or how long
+///   it has waited.
+/// * A running real-time task is **never** preempted in favour of a
+///   time-shared task. Only another real-time task (round-robin among equal
+///   peers on the CPU's periodic tick), a voluntary block/yield, or
+///   termination takes the CPU from it.
+/// * Real-time peers on one CPU are ordered **FIFO** (arrival order); the
+///   periodic preemption tick rotates the running peer to the back so equal
+///   real-time tasks share the CPU and none monopolises it (round-robin,
+///   the `SCHED_RR` shape).
+///
+/// This is the strict-priority guarantee an interrupt-serving driver needs:
+/// woken by its device IRQ, it must run *now*, ahead of any CPU-bound
+/// workload, so a report/completion is captured before the hardware ring it
+/// polls drains — the microkernel analogue of Linux's threaded-IRQ /
+/// `SCHED_FIFO` context. Entry to the class is capability-gated
+/// (`CAP_SCHED_REALTIME`) at the syscall boundary; the scheduler itself only
+/// honours the class, it does not decide who may hold it.
+///
+/// A real-time task that never blocks would monopolise its CPU against
+/// time-shared work; that is inherent to strict priority and is bounded by
+/// making the class a guarded capability granted only to trusted,
+/// IRQ-driven drivers, exactly as a `SCHED_FIFO` grant is trusted on other
+/// systems. The default class is [`SchedClass::TimeShared`].
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum SchedClass {
+    /// Strict-priority real-time band: picked before any time-shared task
+    /// and never preempted by one. FIFO among peers, round-robin on the
+    /// periodic tick.
+    Realtime = 0,
+    /// Default fair-share band, governed by the policy's own algorithm
+    /// (CFQ / EEVDF / MLFQ). The default class of every task.
+    #[default]
+    TimeShared = 1,
+}
+
+impl SchedClass {
+    /// Returns the raw discriminant as stored in an atomic.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`Self::as_u8`]; returns `None` for unknown encodings.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Realtime),
+            1 => Some(Self::TimeShared),
+            _ => None,
+        }
+    }
+
+    /// Whether this is the strict-priority [`SchedClass::Realtime`] band.
+    #[must_use]
+    pub const fn is_realtime(self) -> bool {
+        matches!(self, Self::Realtime)
+    }
+}
+
 /// Task lifecycle state.
 ///
 /// An implementation stores this (typically in an `AtomicU8`) inside each
@@ -179,6 +248,17 @@ mod tests {
         assert_eq!(Priority::High.demote(), Priority::Normal);
         assert_eq!(Priority::Normal.demote(), Priority::Low);
         assert_eq!(Priority::Low.demote(), Priority::Low);
+    }
+
+    #[test]
+    fn sched_class_round_trip_and_default() {
+        for c in [SchedClass::Realtime, SchedClass::TimeShared] {
+            assert_eq!(SchedClass::from_u8(c.as_u8()), Some(c));
+        }
+        assert_eq!(SchedClass::from_u8(2), None);
+        assert_eq!(SchedClass::default(), SchedClass::TimeShared);
+        assert!(SchedClass::Realtime.is_realtime());
+        assert!(!SchedClass::TimeShared.is_realtime());
     }
 
     #[test]

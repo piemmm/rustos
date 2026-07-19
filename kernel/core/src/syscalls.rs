@@ -73,7 +73,7 @@
 //! `cap_revoke`, and `clock_get` all consult the caller's already-
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
-use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
+use crate::sched::{CpuId, SchedClass, SchedError, Scheduler, SchedulerArch};
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::sysinfo::{
@@ -4733,6 +4733,32 @@ where
             // when nothing is pending, `NotFound` when never enabled.
             SignalIntakeOp::Take => crate::procsignal::intake_take(caller.task_id.0)
                 .map(|signal| u64::from(signal.as_u32())),
+        }
+    }
+
+    fn sched_set_realtime(&self, caller: &CallerContext<'_>, realtime: bool) -> SyscallResult {
+        // The dispatcher already checked `CAP_SCHED_REALTIME` and audited the
+        // call. Act only on the caller's own task, keyed by the kernel-trusted
+        // `caller.task_id` — there is no way to name another task, so a driver
+        // can only reclass itself (no ambient authority).
+        //
+        // `set_sched_class` records the scheduling class atomically on the
+        // task's own record and does not touch any run queue or re-enqueue
+        // the task, so — unlike `yield`/`exit`, which drive the reschedule
+        // path — it is safe to call here from inside the caller's in-flight
+        // dispatch. The class governs the task's next enqueue: the caller
+        // elevates itself once at start-up, then parks on its device IRQ, so
+        // every subsequent wake is strict-priority.
+        let class = if realtime {
+            SchedClass::Realtime
+        } else {
+            SchedClass::TimeShared
+        };
+        match self.sched.set_sched_class(caller.task_id.0, class) {
+            Ok(()) => Ok(0),
+            // The task is unknown or terminal (a concurrent teardown): fail
+            // closed rather than pretend the class changed.
+            Err(_) => Err(Errno::NotFound),
         }
     }
 
@@ -19682,6 +19708,45 @@ mod tests {
         assert!(!aspaces.read().is_pinned(SecTaskId(2)));
         assert_eq!(h.mem_unpin(&ctx), Ok(0));
         assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+    }
+
+    /// `sched_set_realtime` flips the kernel-trusted caller's own
+    /// scheduling class both ways (the dispatcher owns the capability gate,
+    /// covered by the `kernel/syscall` table tests), and fails closed for a
+    /// caller id the scheduler does not know — never pretending a class
+    /// changed.
+    #[test]
+    fn sched_set_realtime_flips_the_callers_own_class_and_fails_closed() {
+        let (_aspaces, h) = pin_fixture();
+        let sink = make_sink();
+        // A task the scheduler actually knows, driven as itself.
+        let id = h
+            .sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Park)
+            .expect("spawn");
+        let caps = make_caps_record(id, &[CapabilityId::SCHED_REALTIME], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(id),
+            caps: &caps,
+        };
+        assert_eq!(h.sched.sched_class(id), Ok(SchedClass::TimeShared));
+        // Enter the real-time class.
+        assert_eq!(h.sched_set_realtime(&ctx, true), Ok(0));
+        assert_eq!(h.sched.sched_class(id), Ok(SchedClass::Realtime));
+        // Idempotent re-entry is success.
+        assert_eq!(h.sched_set_realtime(&ctx, true), Ok(0));
+        assert_eq!(h.sched.sched_class(id), Ok(SchedClass::Realtime));
+        // Dropping back to the fair class is honoured too.
+        assert_eq!(h.sched_set_realtime(&ctx, false), Ok(0));
+        assert_eq!(h.sched.sched_class(id), Ok(SchedClass::TimeShared));
+        // A caller the scheduler never spawned fails closed rather than
+        // fabricating a class change.
+        let ghost = make_caps_record(0xDEAD, &[CapabilityId::SCHED_REALTIME], sink);
+        let gctx = CallerContext {
+            task_id: SecTaskId(0xDEAD),
+            caps: &ghost,
+        };
+        assert_eq!(h.sched_set_realtime(&gctx, true), Err(Errno::NotFound));
     }
 
     /// A `mem_pin` whose footprint already exceeds the caller's effective

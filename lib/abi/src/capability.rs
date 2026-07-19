@@ -455,6 +455,30 @@ impl CapabilityId {
     /// their signed manifests.
     pub const NET: Self = Self(36);
 
+    /// Enter the strict-priority **real-time** scheduling class
+    /// (`SchedClass::Realtime`), so the calling task is dispatched ahead of
+    /// every time-shared task on its CPU and is never preempted by one
+    /// (`plans/USB.md`; the `sched_set_realtime` syscall).
+    ///
+    /// Gates the one operation that lets a task escape fair scheduling: an
+    /// interrupt-serving user-space driver (the USB host controller, and any
+    /// driver whose device raises an IRQ it must service before its hardware
+    /// ring drains) elevates itself so a CPU-bound workload can never delay
+    /// its wake — the microkernel analogue of a threaded-IRQ / `SCHED_FIFO`
+    /// grant. It guards a whole class of authority (the ability to preempt
+    /// every ordinary task, system-wide) that no existing capability
+    /// expresses: the `CAP_DRV_*`, `CAP_IRQ_BIND`, `CAP_MMIO_MAP`, and
+    /// `CAP_MEM_DMA` grants let a driver *reach* its hardware but say nothing
+    /// about its scheduling priority, and the `CAP_RLIMIT_RAISE` /
+    /// `CAP_MEM_PIN` levers bound or exempt resources without conferring
+    /// strict priority. A real-time task that never blocks can monopolise
+    /// its CPU against time-shared work, so the class is a guarded privilege
+    /// granted only to trusted, IRQ-driven drivers through their signed
+    /// manifests, never ambient (fail closed; capability checks before state
+    /// touches). Enforced kernel-side at the `sched_set_realtime` syscall
+    /// boundary and audited per call.
+    pub const SCHED_REALTIME: Self = Self(37);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -501,6 +525,7 @@ impl CapabilityId {
         (Self::MEM_PIN, "CAP_MEM_PIN"),
         (Self::NET_ADMIN, "CAP_NET_ADMIN"),
         (Self::NET, "CAP_NET"),
+        (Self::SCHED_REALTIME, "CAP_SCHED_REALTIME"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -631,6 +656,7 @@ mod tests {
         assert_eq!(CapabilityId::MEM_PIN.as_u16(), 34);
         assert_eq!(CapabilityId::NET_ADMIN.as_u16(), 35);
         assert_eq!(CapabilityId::NET.as_u16(), 36);
+        assert_eq!(CapabilityId::SCHED_REALTIME.as_u16(), 37);
     }
 
     #[test]
@@ -664,9 +690,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=36 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=37 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=36 {
+        for raw in 1..=37 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

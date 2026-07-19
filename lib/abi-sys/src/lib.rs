@@ -79,6 +79,7 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
 const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
+const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() as u64;
 const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
@@ -908,6 +909,30 @@ pub extern "C" fn sys_signal_intake(op: u32) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel validates the op and acts only on the caller's own intake.
     unsafe { raw_syscall(NUM_SIGNAL_INTAKE, [u64::from(op), 0, 0, 0, 0, 0]) }
+}
+
+/// `sched_set_realtime`: set the calling task's scheduling class — enter
+/// (`realtime` non-zero) or leave (zero) the strict-priority real-time band
+/// (`SyscallNumber::SCHED_SET_REALTIME`, `plans/USB.md`). Returns a
+/// `TAIRIX_E_*` code.
+///
+/// A real-time task is dispatched ahead of every time-shared task on its
+/// CPU and is never preempted by one, so a CPU-bound workload cannot delay
+/// its wake — the guarantee an interrupt-serving driver needs. Gated
+/// kernel-side on `TAIRIX_CAP_SCHED_REALTIME` in both directions and acts
+/// only on the caller's own task; setting the class the task already holds
+/// is success.
+#[must_use]
+#[export_name = "tairix_sys_sched_set_realtime"]
+pub extern "C" fn sys_sched_set_realtime(realtime: u32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel checks the capability and reclasses only the caller's task.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_SCHED_SET_REALTIME,
+            [u64::from(realtime), 0, 0, 0, 0, 0],
+        ))
+    }
 }
 
 /// `file_map`: map `len` bytes of the open, readable, filesystem-backed
@@ -2392,6 +2417,7 @@ mod tests {
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
         (NUM_SIGNAL_INTAKE, "signal_intake", 1),
+        (NUM_SCHED_SET_REALTIME, "sched_set_realtime", 1),
     ];
 
     #[test]
@@ -2431,6 +2457,23 @@ mod tests {
         });
         assert_eq!(number, NUM_YIELD);
         assert_eq!(args, NO_ARGS);
+    }
+
+    #[test]
+    fn sched_set_realtime_marshals_the_class_boolean() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_sched_set_realtime(1), 0);
+        });
+        assert_eq!(number, NUM_SCHED_SET_REALTIME);
+        assert_eq!(args[0], 1);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_sched_set_realtime(0), 0);
+        });
+        assert_eq!(number, NUM_SCHED_SET_REALTIME);
+        assert_eq!(args[0], 0);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
     }
 
     #[test]

@@ -17,8 +17,9 @@ use tairix_sync::{RwLock, SpinLock};
 use crate::runqueue::{Entry, RunQueue, SCALE, SERVICE_PER_DISPATCH};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
-    CoreClass, CpuId, ExitDisposition, Priority, SchedError, SchedResult, SchedulerArch,
-    SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError, SchedResult,
+    SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId,
+    TaskState,
 };
 
 /// Per-CPU scheduler state: the virtual-time run queue plus the timer
@@ -286,14 +287,47 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// [`Self::admit`] or a prior dispatch).
     fn enqueue_home(&self, task: &TaskInner) {
         let home = task.home_cpu.load(Ordering::Acquire);
-        let entry = Entry {
-            id: task.id,
-            eligible: task.eligible(),
-            deadline: task.deadline(),
+        let full = match self.cpus.get(home as usize) {
+            Some(cpu) => {
+                if task.load_sched_class().is_realtime() {
+                    cpu.queue.push_rt(task.id).is_err()
+                } else {
+                    let entry = Entry {
+                        id: task.id,
+                        eligible: task.eligible(),
+                        deadline: task.deadline(),
+                    };
+                    cpu.queue.push(entry).is_err()
+                }
+            }
+            None => true,
         };
-        match self.cpus.get(home as usize) {
-            Some(cpu) if cpu.queue.push(entry).is_ok() => {}
-            _ => self.overflow.lock().push(task.id),
+        if full {
+            self.overflow.lock().push(task.id);
+        }
+    }
+
+    /// Admit `task` onto `cpu`'s queue in its scheduling class, adding its
+    /// weight and routing to the overflow list if the band is full. For a
+    /// task whose weight is *newly* joining this CPU — a wake from parked or
+    /// a cross-CPU yield migration. A real-time task joins the strict-
+    /// priority band (weight counted, no virtual-time placement); a
+    /// time-shared task is EEVDF-admitted to the fair set.
+    fn admit_fresh_on(&self, task: &TaskInner, cpu: CpuId) {
+        let full = match self.cpus.get(cpu as usize) {
+            Some(state) => {
+                if task.load_sched_class().is_realtime() {
+                    state.queue.add_weight(task.weight());
+                    state.queue.push_rt(task.id).is_err()
+                } else {
+                    let entry = Self::admit(task, &state.queue);
+                    state.queue.push(entry).is_err()
+                }
+            }
+            None => true,
+        };
+        if full {
+            self.overflow.lock().push(task.id);
         }
     }
 
@@ -458,11 +492,8 @@ impl<A: SchedulerArch> Scheduler<A> {
         let home = task.home_cpu.load(Ordering::Acquire);
         let target = self.placement_for(task.load_priority(), home);
         task.home_cpu.store(target, Ordering::Release);
-        let cpu = self.cpu_state(target)?;
-        let entry = Self::admit(task, &cpu.queue);
-        if cpu.queue.push(entry).is_err() {
-            self.overflow.lock().push(task.id);
-        }
+        self.cpu_state(target)?;
+        self.admit_fresh_on(task, target);
         self.arch.send_ipi(target);
         Ok(())
     }
@@ -624,14 +655,26 @@ impl<A: SchedulerArch> Scheduler<A> {
                 continue;
             }
             let home = task.home_cpu.load(Ordering::Acquire);
-            let entry = Entry {
-                id,
-                eligible: task.eligible(),
-                deadline: task.deadline(),
+            // Re-home in the task's scheduling class. Its weight is already
+            // counted on `home`, so no weight is added — only the band
+            // placement is restored.
+            let placed = match self.cpus.get(home as usize) {
+                Some(cpu) => {
+                    if task.load_sched_class().is_realtime() {
+                        cpu.queue.push_rt(id).is_ok()
+                    } else {
+                        let entry = Entry {
+                            id,
+                            eligible: task.eligible(),
+                            deadline: task.deadline(),
+                        };
+                        cpu.queue.push(entry).is_ok()
+                    }
+                }
+                None => false,
             };
-            match self.cpus.get(home as usize) {
-                Some(cpu) if cpu.queue.push(entry).is_ok() => {}
-                _ => self.overflow.lock().push(id),
+            if !placed {
+                self.overflow.lock().push(id);
             }
         }
     }
@@ -660,7 +703,15 @@ impl<A: SchedulerArch> Scheduler<A> {
                 {
                     self.cpus[v].queue.release_weight(task.weight());
                     task.home_cpu.store(cpu, Ordering::Release);
-                    let _ = Self::admit(&task, &self.cpus[cpu as usize].queue);
+                    // Account the migrated weight on the stealing CPU. The
+                    // task is dispatched immediately by the caller (not
+                    // pushed): a fair task also rebases its virtual times
+                    // onto the new clock, a real-time task carries none.
+                    if task.load_sched_class().is_realtime() {
+                        self.cpus[cpu as usize].queue.add_weight(task.weight());
+                    } else {
+                        let _ = Self::admit(&task, &self.cpus[cpu as usize].queue);
+                    }
                 }
                 return Some(entry.id);
             }
@@ -835,10 +886,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                     // no-lag-across-CPUs rule `try_steal` uses.
                     self.cpus[cpu as usize].queue.remove_weight(task.weight());
                     task.home_cpu.store(dest, Ordering::Release);
-                    let entry = Self::admit(&task, &self.cpus[dest as usize].queue);
-                    if self.cpus[dest as usize].queue.push(entry).is_err() {
-                        self.overflow.lock().push(id);
-                    }
+                    self.admit_fresh_on(&task, dest);
                 }
             }
         }
@@ -1019,6 +1067,39 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(())
     }
 
+    /// Move `id` into scheduling class `class`, governing its next enqueue
+    /// onward (see [`SchedulerPolicy::set_sched_class`]).
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`SchedError::InvalidState`] if the task is terminal.
+    pub fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()> {
+        let task = self.lookup(id)?;
+        if task.load_state() == TaskState::Exited {
+            return Err(SchedError::InvalidState);
+        }
+        // Record the class; every enqueue point (`wake_from_parked`,
+        // `enqueue_home`, the yield-migrate path, overflow drain, steal)
+        // reads it and routes the task to the matching band, so a task
+        // adopts the class the next time it is placed on a run queue — its
+        // next wake or yield. The usual caller elevates itself while
+        // Running, so it is strict-priority from its very next wake.
+        task.store_sched_class(class);
+        Ok(())
+    }
+
+    /// The current [`SchedClass`] of `id`.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    pub fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass> {
+        self.tasks
+            .read()
+            .get(&id)
+            .map(|t| t.load_sched_class())
+            .ok_or(SchedError::NoSuchTask)
+    }
+
     fn set_current(&self, cpu: CpuId, id: TaskId) {
         if let Some(slot) = self.current.get(cpu as usize) {
             slot.store(id, Ordering::Release);
@@ -1151,6 +1232,14 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn yield_current(&self, id: TaskId) -> SchedResult<()> {
         Scheduler::yield_current(self, id)
+    }
+
+    fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()> {
+        Scheduler::set_sched_class(self, id, class)
+    }
+
+    fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass> {
+        Scheduler::sched_class(self, id)
     }
 }
 

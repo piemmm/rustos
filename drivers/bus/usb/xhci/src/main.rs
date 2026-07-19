@@ -600,6 +600,7 @@ mod program {
         caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
         caps.insert(CapabilityId::HW_EMIT);
         caps.insert(CapabilityId::LOG_EMIT);
+        caps.insert(CapabilityId::SCHED_REALTIME);
         caps
     }
 
@@ -1081,6 +1082,38 @@ mod program {
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
+
+        // Enter the strict-priority real-time scheduling class up front so
+        // the controller-interrupt report pump (`pump_reports`, below)
+        // preempts CPU-bound work and cannot be starved: under a load like
+        // `stress --cpu N` the IRQ-woken wake that drains the interrupt-IN
+        // endpoints and re-arms them must run before the armed transfer ring
+        // fills, no matter how busy userland is, or reports are dropped at
+        // the hardware (the on-metal "missed keypresses under load" defect;
+        // `plans/USB.md`). The manifest grants `CAP_SCHED_REALTIME`; a build
+        // that somehow runs without it degrades gracefully to fair
+        // scheduling — the report pump still runs, only without the strict
+        // guarantee — rather than refusing to start.
+        let rt = tairix_rt::sched_set_realtime(true);
+        if rt == 0 {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Info,
+                    id: HCD_READY,
+                    message: "usb-hcd: entered real-time scheduling class (report pump cannot be starved)",
+                    fields: &[],
+                },
+            );
+        } else {
+            log_hex_event(
+                HCD_WAIT_ERROR,
+                Level::Warn,
+                "usb-hcd: real-time scheduling class refused; serving time-shared",
+                "err_hex",
+                rt.unsigned_abs(),
+            );
+        }
         let Ok(resources) = derive_controller_resources(host.resources()) else {
             return EXIT_NO_RESOURCES;
         };

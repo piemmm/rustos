@@ -245,8 +245,11 @@ pub fn build_vl805_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, Strin
 /// working set (`CAP_MEM_DMA`), binds the completion interrupt
 /// (`CAP_IRQ_BIND`), creates the shared URB data buffer (`CAP_SHM`), binds the
 /// restricted-sender URB transport endpoint (`CAP_IPC_BIND_PRIVILEGED`),
-/// publishes the per-interface node (`CAP_HW_EMIT`), and emits a one-shot
-/// bring-up diagnostic (`CAP_LOG_EMIT`) — and nothing more. Carries
+/// publishes the per-interface node (`CAP_HW_EMIT`), emits a one-shot
+/// bring-up diagnostic (`CAP_LOG_EMIT`), and enters the strict-priority
+/// real-time scheduling class (`CAP_SCHED_REALTIME`) so its
+/// controller-interrupt report pump preempts CPU-bound work and cannot be
+/// starved (`plans/USB.md`) — and nothing more. Carries
 /// `tairix_drv_bus_usb::BIND_KEYS`, so it autoloads against the `usb,xhci`
 /// node the VL805 driver emitted.
 ///
@@ -266,6 +269,7 @@ pub fn build_xhci_bundle(ctx: &Context, arch: PieArch) -> Result<Vec<u8>, String
             CapabilityId::IPC_BIND_PRIVILEGED,
             CapabilityId::HW_EMIT,
             CapabilityId::LOG_EMIT,
+            CapabilityId::SCHED_REALTIME,
         ],
         tairix_drv_bus_usb::BIND_KEYS,
     )

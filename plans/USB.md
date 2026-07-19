@@ -483,12 +483,15 @@ the live controller behaviour is host- and CI-proven first.
     pegged a core at boot behind a ZLP-streaming device. Regression:
     `a_zero_length_completion_parks_and_rearms_rather_than_faulting`.
   - **Interrupt-IN report capture is driven off the controller interrupt,
-    fully decoupled from the class driver — it cannot be starved.** A boot
+    fully decoupled from the class driver, and the HCD runs in the
+    strict-priority real-time class — it cannot be starved, ever.** A boot
     keyboard (or mouse, or any interrupt-IN device) reports only on a state
     change, at its polling interval, on the device's own schedule. The class
-    driver and the HCD are ordinary schedulable user-space tasks, so under CPU
-    load (`stress --cpu N`) either can be slow to run; the report path must not
-    depend on how promptly they are scheduled. The mechanism has two halves:
+    driver and the HCD are ordinary user-space tasks, so under CPU load
+    (`stress --cpu N`) either could be slow to run; the report path must not
+    depend on how promptly they are scheduled. The mechanism has three parts —
+    the first two decouple capture from the *class driver*, the third removes
+    the residual dependency on the *HCD* being scheduled:
     - **Continuous depth-arming.** The engine keeps `INT_ARM_DEPTH` interrupt
       transfers armed on every report endpoint (`UsbDevice::ensure_reports_armed`),
       so the controller always has a landing TRB for the next interval's report
@@ -510,12 +513,36 @@ the live controller behaviour is host- and CI-proven first.
       This is the analogue of Linux `usbhid`'s IRQ-context URB resubmission,
       adapted to the microkernel's user-space HCD: the re-arm is on the
       controller's interrupt, not on a starvable per-URB path.
+    - **The HCD runs in the strict-priority real-time scheduling class.** The
+      pump above removes the dependency on the *class driver* being scheduled,
+      but the pump itself runs in the HCD task, which is woken by the
+      controller IRQ (`irq_wait`) and must be *dispatched* to run. Under
+      `stress --cpu N` a fair-scheduled HCD would merely compete with the
+      CPU-bound tasks, so the wake-to-run latency could stretch until the
+      armed transfer ring drained and reports were lost at the hardware — the
+      starvation point simply moved from the class driver up to the HCD. The
+      HCD therefore enters the real-time class at start-up
+      (`tairix_rt::sched_set_realtime(true)`, gated by `CAP_SCHED_REALTIME`
+      in its manifest): a real-time task is dispatched ahead of *every*
+      time-shared task on its CPU and is never preempted by one, and the wake
+      already sends the placement IPI, so the IRQ-woken HCD preempts the
+      `stress` tasks and runs within interrupt-return + context-switch latency
+      — microseconds, which the `INT_ARM_DEPTH`-deep armed ring covers many
+      times over. This is the microkernel analogue of Linux's threaded-IRQ /
+      `SCHED_FIFO` context: the report path no longer depends on how busy
+      userland is at any layer. The scheduling class is a general kernel
+      facility (`SchedClass::Realtime`, honoured by every policy — CFQ, EEVDF,
+      MLFQ — and exercised by the `kernel/sched/api` conformance suite), not a
+      USB special case; any interrupt-driven driver that must service its
+      device before a hardware ring drains uses it the same way.
 
     The previous design re-armed only from inside `next_report`, so once a
     starved class driver fell more than `INT_ARM_DEPTH` reports behind the
     endpoint went unarmed and every later report was dropped at the hardware —
     the on-metal "missed keypresses under load" defect. With the pump the
-    endpoint is re-armed every interrupt independent of the consumer, so a
+    endpoint is re-armed every interrupt independent of the consumer, and with
+    the HCD in the real-time class the pump itself runs the instant the IRQ
+    fires however busy userland is, so a
     transiently-starved class driver loses nothing. Because the FIFO is bounded,
     a *permanently* stalled consumer cannot make the engine hold unbounded
     memory: the oldest buffered report is dropped so the newest device state is
