@@ -12,8 +12,8 @@ use core::cell::RefCell;
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
     BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage, EventWait, HubEvent,
-    InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, MAX_HUB_DEPTH,
-    REPORT_LEN, RING_TRBS,
+    InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH,
+    MAX_HUB_DEPTH, REPORT_LEN, REPORT_QUEUE_CAP, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -4230,6 +4230,306 @@ fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
         .expect("a report is available");
     assert_eq!(len, REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
+}
+
+#[test]
+fn a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost() {
+    // The metal "missed keystrokes under load" defect. A boot keyboard
+    // reports only on a state change; the class driver reads one report per
+    // blocking URB round trip, and between one report's reply and its next
+    // submit the endpoint has no URB driving it. Before the fix nothing was
+    // armed in that window, so a keystroke pressed and released there had no
+    // landing TRB and was dropped by the controller — the more the class
+    // driver was starved (heavy CPU load), the wider the window and the more
+    // keystrokes vanished. The engine now keeps the endpoint armed to depth,
+    // so a report arriving in the gap is captured and delivered on the next
+    // submit rather than lost.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the directly-attached keyboard enumerates");
+
+    // The first class URB arms the endpoint (to depth) and parks: no report
+    // has arrived yet.
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(
+        device.next_report(0, &mut buf),
+        Ok(None),
+        "the first submit arms the endpoint and parks"
+    );
+
+    // Report 1 ('a' down) arrives and is delivered on the next submit.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    let len = device
+        .next_report(0, &mut buf)
+        .expect("a report drains")
+        .expect("report 1 is available");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04, "the first keystroke is delivered");
+
+    // The class driver is now busy decoding/injecting report 1 and has NOT
+    // yet submitted its next URB. A second keystroke ('b' down) arrives in
+    // this gap. Because the endpoint was re-armed after delivering report 1,
+    // the controller has a landing TRB and captures it — before the fix
+    // nothing was armed here and this report was dropped.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+
+    // The class driver finally re-submits and receives the keystroke that
+    // arrived during the gap: none lost.
+    let len = device
+        .next_report(0, &mut buf)
+        .expect("a report drains")
+        .expect("the keystroke typed during the re-submit gap is captured, not lost");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(
+        buf[2], 0x05,
+        "the keystroke typed while the class driver was busy is delivered"
+    );
+}
+
+#[test]
+fn a_burst_of_reports_before_the_class_driver_drains_any_is_kept_up_to_depth() {
+    // Several keystrokes arrive faster than the (starved) class driver
+    // drains them. With the endpoint armed to INT_ARM_DEPTH before the
+    // burst, the controller captures each into its own ring slot and the
+    // xHCI event ring queues the completions; the class driver then drains
+    // them one URB at a time, in order, with none dropped. Before the fix
+    // only a single transfer was ever armed, so all but the first report of
+    // a burst were lost.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the directly-attached keyboard enumerates");
+
+    let mut buf = [0u8; REPORT_LEN];
+    // Arm the endpoint to depth (first submit, nothing queued yet).
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+
+    // A burst of distinct keystrokes, fewer than INT_ARM_DEPTH, arrives
+    // before the class driver drains any.
+    let codes = [0x04u8, 0x05, 0x06, 0x07, 0x08];
+    assert!(codes.len() <= INT_ARM_DEPTH);
+    for &code in &codes {
+        device
+            .host_mut()
+            .pending_reports
+            .push_back(alloc::vec![0x00, 0x00, code, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+    device.host_mut().process_int_ring();
+
+    // Every keystroke is drained in order, one per URB — none dropped.
+    for &code in &codes {
+        let len = device
+            .next_report(0, &mut buf)
+            .expect("a report drains")
+            .expect("a buffered report is available");
+        assert_eq!(len, REPORT_LEN);
+        assert_eq!(buf[2], code, "the burst is delivered in order");
+    }
+
+    // The queue is empty again; the next submit parks (endpoint still armed).
+    assert_eq!(
+        device.next_report(0, &mut buf),
+        Ok(None),
+        "with the burst drained the endpoint parks, still armed"
+    );
+}
+
+#[test]
+fn the_interrupt_pump_keeps_reports_flowing_past_the_armed_depth_with_no_class_urb() {
+    // The robust, consumer-independent fix. The previous depth-armed ring
+    // re-armed only from inside `next_report`, so a class driver that stopped
+    // submitting left the endpoint drained after `INT_ARM_DEPTH` reports and
+    // every later report was lost at the hardware. `pump_reports` — driven off
+    // the controller interrupt — captures completions AND re-arms the endpoint
+    // on every interrupt regardless of any class-driver URB, so device polling
+    // is decoupled from how starved the class driver is: reports keep flowing
+    // well past the armed depth even though `next_report` is never called
+    // until the very end.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the directly-attached keyboard enumerates");
+
+    // The controller interrupt pump arms the endpoint to depth — no
+    // class-driver URB has been submitted (none ever is, until the end).
+    device.pump_reports().expect("the pump arms the endpoint");
+
+    // More distinct keystrokes than a single armed depth arrive, one per
+    // controller interval, each captured by the pump on its interrupt. With
+    // only depth-arming and no pump, everything past `INT_ARM_DEPTH` would be
+    // dropped for want of a landing TRB; the pump re-arms every interrupt, so
+    // none is.
+    let count = INT_ARM_DEPTH + 4;
+    assert!(
+        count > INT_ARM_DEPTH,
+        "the burst exceeds a single armed depth"
+    );
+    assert!(
+        count <= REPORT_QUEUE_CAP,
+        "the burst fits the report buffer"
+    );
+    for i in 0..count {
+        let code = 0x04 + u8::try_from(i).expect("keycode fits");
+        device
+            .host_mut()
+            .pending_reports
+            .push_back(alloc::vec![0x00, 0x00, code, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        // The controller completes the armed transfer, then its completion
+        // interrupt fires and the HCD pumps: capture + re-arm.
+        device.host_mut().process_int_ring();
+        device
+            .pump_reports()
+            .expect("the pump captures and re-arms");
+    }
+
+    // The class driver finally runs and collects the whole backlog, in order,
+    // with nothing dropped — the endpoint never went unarmed.
+    let mut buf = [0u8; REPORT_LEN];
+    for i in 0..count {
+        let code = 0x04 + u8::try_from(i).expect("keycode fits");
+        let len = device
+            .next_report(0, &mut buf)
+            .expect("a report drains")
+            .expect("every pumped report is buffered");
+        assert_eq!(len, REPORT_LEN);
+        assert_eq!(buf[2], code, "reports are delivered in order, none lost");
+    }
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(
+        device.dropped_report_total(),
+        0,
+        "nothing was dropped: the buffer covered the whole backlog"
+    );
+}
+
+#[test]
+fn a_permanently_stalled_consumer_bounds_the_buffer_and_counts_dropped_reports() {
+    // Robustness has a floor, not a leak: a class driver that has stopped
+    // reading entirely cannot make the engine hold unbounded memory. The
+    // report buffer is bounded ([`REPORT_QUEUE_CAP`]); once full the oldest
+    // report is dropped so the newest device state is kept, and the loss is
+    // counted (never silent). The endpoint stays armed throughout, so the
+    // instant the consumer returns it drains the most recent reports.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the directly-attached keyboard enumerates");
+    device.pump_reports().expect("the pump arms the endpoint");
+
+    // Deliver more reports than the buffer holds, never draining any.
+    let overflow = 4;
+    let total = REPORT_QUEUE_CAP + overflow;
+    for i in 0..total {
+        let code = 0x04 + u8::try_from(i).expect("keycode fits");
+        device
+            .host_mut()
+            .pending_reports
+            .push_back(alloc::vec![0x00, 0x00, code, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        device.host_mut().process_int_ring();
+        device
+            .pump_reports()
+            .expect("the pump captures and re-arms");
+    }
+
+    assert_eq!(
+        device.dropped_report_total(),
+        overflow as u64,
+        "exactly the overflow beyond the buffer depth was dropped, and counted"
+    );
+
+    // What remains is the newest REPORT_QUEUE_CAP reports, in order: the
+    // oldest `overflow` keycodes were dropped.
+    let mut buf = [0u8; REPORT_LEN];
+    for i in overflow..total {
+        let code = 0x04 + u8::try_from(i).expect("keycode fits");
+        let len = device
+            .next_report(0, &mut buf)
+            .expect("a report drains")
+            .expect("a buffered report is available");
+        assert_eq!(len, REPORT_LEN);
+        assert_eq!(buf[2], code, "the newest reports are kept, in order");
+    }
+    assert_eq!(
+        device.next_report(0, &mut buf),
+        Ok(None),
+        "the buffer held exactly REPORT_QUEUE_CAP reports"
+    );
+}
+
+#[test]
+fn the_interrupt_pump_captures_a_mouse_the_same_way_as_a_keyboard() {
+    // The fix is generic across every interrupt-IN device, not keyboard-
+    // specific: the same `pump_reports` drains and re-arms the mouse's report
+    // endpoint on the controller interrupt, so a boot mouse beside the
+    // keyboard is captured under load exactly the same way — its class driver
+    // need not have a URB outstanding.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // The mouse sits on the lower-numbered port, so it is walked first and
+    // takes index 1 (index 0 is the hub's own entry).
+    mock.mouse_downstream_port = 2;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("bring-up serves both the mouse and the keyboard");
+    let mouse = device.device_identity(1).expect("the mouse is index 1");
+    assert_eq!(
+        mouse.interface_class, 0x03_01_02,
+        "a HID boot-mouse interface"
+    );
+
+    // Arm both interrupt-IN endpoints via the controller interrupt pump — no
+    // class-driver URB is outstanding for either device.
+    device.pump_reports().expect("the pump arms both endpoints");
+
+    // A burst of mouse reports arrives past the armed depth, each captured by
+    // the pump on its interrupt.
+    let count = INT_ARM_DEPTH + 2;
+    assert!(count <= REPORT_QUEUE_CAP);
+    for i in 0..count {
+        let dx = 0x01 + u8::try_from(i).expect("delta fits");
+        device
+            .host_mut()
+            .pending_reports2
+            .push_back(alloc::vec![0x00, dx, 0x00, 0x00]);
+        device.host_mut().process_int2_ring();
+        device
+            .pump_reports()
+            .expect("the pump captures and re-arms");
+    }
+
+    // The mouse class driver collects the whole backlog from its own index,
+    // in order, none lost — proving the decoupled capture is device-generic.
+    let mut buf = [0u8; REPORT_LEN];
+    for i in 0..count {
+        let dx = 0x01 + u8::try_from(i).expect("delta fits");
+        let len = device
+            .next_report(1, &mut buf)
+            .expect("a mouse report drains")
+            .expect("every pumped mouse report is buffered");
+        assert_eq!(len, 4);
+        assert_eq!(buf[1], dx, "the X deltas are delivered in order, none lost");
+    }
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.dropped_report_total(), 0);
 }
 
 #[test]

@@ -146,9 +146,36 @@ const CONNECT_WINDOW_US: u64 = 500_000;
 
 /// TRB slots in the command, EP0, and interrupt transfer rings and in
 /// the event segment. Protocol working sets for one device, not
-/// scalable capacities: each ring only ever holds the single in-flight
-/// command, control TD, or class-driver interrupt-IN URB.
+/// scalable capacities: the command and EP0 rings only ever hold a
+/// single in-flight command or control TD, while the interrupt-IN ring
+/// keeps [`INT_ARM_DEPTH`] transfers armed at once (see there).
 pub const RING_TRBS: usize = 16;
+
+/// Interrupt-IN transfers the engine keeps armed on a report endpoint at
+/// once, so the controller always has a landing TRB for the next report
+/// even in the window between one report being delivered to the class
+/// driver and that driver submitting its next URB.
+///
+/// A boot keyboard reports only on a state change, at its polling
+/// interval. The class driver reads one report per blocking URB round
+/// trip; between the reply and its next submit the endpoint has no URB
+/// driving it. If nothing is armed in that window the controller has
+/// nowhere to write the interval's report and the device's report is
+/// dropped — so a keystroke pressed and released while the class driver
+/// (or this host-controller driver) was slow to run, e.g. under heavy CPU
+/// load, was silently lost. Keeping several transfers armed means the
+/// controller captures each report into its own ring slot regardless of
+/// how promptly software re-submits; the xHCI event ring then queues the
+/// completions until the class driver drains them one URB at a time.
+///
+/// Bounded by the ring: the producer ring keeps one slot free to tell
+/// full from empty, so at most `RING_TRBS - 2` transfers can be in flight.
+/// This depth sits well under that ceiling and comfortably covers the
+/// reports a human generates within one class-driver scheduling round
+/// trip. A protocol working set, not a scalable capacity.
+pub const INT_ARM_DEPTH: usize = 8;
+
+const _: () = assert!(INT_ARM_DEPTH <= RING_TRBS - 2);
 
 /// Minimum TRBs in an xHCI event-ring segment.
 pub const EVENT_RING_SEGMENT_MIN_TRBS: usize = 16;
@@ -1462,6 +1489,46 @@ impl<T: Copy, const N: usize> Fifo<T, N> {
     }
 }
 
+/// One interrupt-IN report captured off the controller's transfer ring and
+/// buffered in the engine until a class-driver URB collects it.
+///
+/// The report bytes are copied out of the DMA report slot at capture time so
+/// the slot can be re-armed immediately: device polling is thereby decoupled
+/// from how promptly the class driver (or this host-controller driver) is
+/// scheduled to consume it.
+#[derive(Copy, Clone)]
+struct Report {
+    /// The report bytes; only the first [`Self::len`] are valid.
+    data: [u8; REPORT_LEN],
+    /// Valid byte count in [`Self::data`] (never exceeds [`REPORT_LEN`]).
+    len: u8,
+}
+
+/// Buffered interrupt-IN reports held per device between the controller
+/// capturing them and the class driver collecting them.
+///
+/// The controller keeps [`INT_ARM_DEPTH`] transfers armed, so one drain can
+/// capture that many completions; this buffer additionally covers a class
+/// driver that stays several report intervals behind (a full ring's worth of
+/// backlog) before the oldest report is dropped. A bounded protocol working
+/// set, not a scalable capacity: a genuinely dead consumer cannot make the
+/// engine hold unbounded memory, and a live one catching up sees the most
+/// recent device state. Sized at least as deep as the armed depth so a single
+/// drain never overflows.
+pub const REPORT_QUEUE_CAP: usize = 16;
+
+const _: () = assert!(REPORT_QUEUE_CAP >= INT_ARM_DEPTH);
+
+/// Upper bound on transfer completions one [`UsbDevice::drain_events`] pass
+/// consumes before yielding.
+///
+/// The loop exits as soon as the shared event ring is empty; this is only a
+/// safety cap against a controller that never stops presenting events. It
+/// covers the worst case of every served slot having its full interrupt and
+/// bulk depth armed at once, so a legitimate backlog always drains in a single
+/// pass.
+const EVENT_DRAIN_BOUND: usize = (XHCI_MAX_SLOTS + 1) * (INT_ARM_DEPTH + BULK_QUEUE_CAP);
+
 /// Encode the xHCI endpoint-context Interval (§6.2.3.6, Table 6-12) for
 /// an interrupt endpoint reporting `b_interval` at protocol `speed`.
 ///
@@ -1790,8 +1857,10 @@ struct HubState {
     /// armed.
     int_ring: Option<ProducerRing>,
     /// A status-change completion observed while another transfer was
-    /// awaiting its event, parked for the hub watcher to consume. As
-    /// [`DeviceState::pending_report`].
+    /// awaiting its event, parked for the hub watcher to consume. Only one
+    /// status-change transfer is ever armed, so a single slot suffices —
+    /// unlike a device's report [`Fifo`], which buffers several in-flight
+    /// interrupt-IN completions.
     pending: Option<Trb>,
 }
 
@@ -1837,11 +1906,25 @@ struct DeviceState {
     /// Interrupt-IN transfer ring over the region's `int_ring`, live only
     /// for a HID interface.
     int_ring: Option<ProducerRing>,
-    /// An interrupt-IN completion observed while another transfer was
-    /// awaiting its own event, parked for the report path. At most one
-    /// transfer is armed per endpoint, so a single slot suffices; a second
-    /// arriving before this is drained is a controller fault.
-    pending_report: Option<Trb>,
+    /// Interrupt-IN reports captured off the controller's ring, buffered
+    /// until a class-driver URB collects them. Filled by
+    /// [`UsbDevice::capture_report_event`] on every controller interrupt
+    /// (independent of whether a URB is outstanding), drained by
+    /// [`UsbDevice::next_report`]. Several transfers are armed at once
+    /// ([`INT_ARM_DEPTH`]), so more than one completion can be pending —
+    /// a queue, not a single slot.
+    reports: Fifo<Report, REPORT_QUEUE_CAP>,
+    /// A fatal report completion (a device-gone or fail-closed code) recorded
+    /// for the next [`UsbDevice::next_report`] to surface, so the HCD confirms
+    /// the port and detaches. Set once; taken when surfaced. A capture never
+    /// propagates such a fault synchronously, so it can neither fault an
+    /// unrelated EP0/command wait that happened to observe the report nor the
+    /// shared drain.
+    report_fault: Option<DriverError>,
+    /// Count of buffered reports dropped because the class driver fell more
+    /// than [`REPORT_QUEUE_CAP`] reports behind (a genuinely stalled
+    /// consumer). Surfaced for diagnostics; never silently ignored.
+    dropped_reports: u64,
     /// Bulk-IN transfer ring over the region's `bulk_in_ring`, built when
     /// the interface's bulk endpoint pair is configured. `None` otherwise.
     bulk_in_ring: Option<ProducerRing>,
@@ -1871,8 +1954,8 @@ struct DeviceState {
     bulk_out2_len: [u32; BULK_SLOTS],
     /// Bulk completions parked while a synchronous EP0 transfer or command
     /// was awaiting its own event. Several bulk TDs can be outstanding at
-    /// once, so this is a FIFO, unlike the single [`Self::pending_report`]
-    /// slot.
+    /// once, so this is a FIFO — as is the interrupt-IN report buffer
+    /// ([`Self::reports`]).
     pending_bulk: Fifo<Trb, BULK_QUEUE_CAP>,
     /// TDs a bulk halt recovery dropped, reported as stalled completions so
     /// every queued transfer is answered, never silently lost.
@@ -2649,27 +2732,34 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         })
     }
 
-    /// Park an asynchronous interrupt-IN completion for its endpoint's
-    /// consumer, so a synchronous EP0/command wait sharing the one event ring
-    /// neither faults on it nor drops it.
+    /// Dispatch an asynchronous completion `event` sharing the one event ring
+    /// to its endpoint's consumer, so a synchronous EP0/command wait — or the
+    /// shared report drain — neither faults on it nor drops it.
     ///
-    /// Returns `Ok(true)` when `event` belonged to a registered async
-    /// endpoint (device report or hub status-change) and was parked,
-    /// `Ok(false)` when it belonged to neither (the caller treats that as a
-    /// fault). Fails closed with [`DriverError::DeviceFault`] if a second
-    /// completion arrives for an endpoint whose previous one has not yet been
-    /// consumed — impossible while only one transfer is armed per endpoint,
-    /// so it signals a controller protocol violation rather than silently
-    /// overwriting a report.
+    /// A device report completion is **captured** into that device's report
+    /// FIFO ([`Self::capture_report_event`]: decode, retire, re-arm); a hub
+    /// status-change completion is parked for the hub watcher; a bulk
+    /// completion is parked in the device's bulk FIFO. Several interrupt
+    /// transfers are armed at once ([`INT_ARM_DEPTH`]), so more than one report
+    /// completion can arrive before it is drained — the report FIFO holds
+    /// them, unlike the hub's single status slot (only one status transfer is
+    /// ever armed).
+    ///
+    /// Returns `Ok(true)` when `event` belonged to a registered async endpoint
+    /// (report, hub status-change, bulk) or was a tolerated freed-slot
+    /// completion, `Ok(false)` when it belonged to none (the caller decides
+    /// whether that is a fault). A hub double-completion still fails closed
+    /// ([`DriverError::DeviceFault`]); a report capture fault is recorded on
+    /// the device rather than propagated here.
     fn stash_async_event(&mut self, event: Trb) -> Result<bool, DriverError> {
         if let Some(index) = self.report_async_index(event) {
-            if let Some(device) = self.devices[index].as_mut() {
-                if device.pending_report.is_some() {
-                    return Err(DriverError::DeviceFault);
-                }
-                device.pending_report = Some(event);
-                return Ok(true);
-            }
+            // Capture the report into the device's FIFO (decode, retire the
+            // ring slot, re-arm). A capture-side fault is recorded on the
+            // device for its next URB to surface, never propagated here: an
+            // asynchronous report must not fault the synchronous EP0/command
+            // wait that happened to observe it, nor the shared drain.
+            let _ = self.capture_report_event(index, event);
+            return Ok(true);
         }
         if let Some(hub_index) = self.hub_async_index(event) {
             if let Some(hub) = self.hubs[hub_index].as_mut() {
@@ -3081,6 +3171,54 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         let outcome = ring.push(normal)?;
         let link_slot = ring.link_slot();
         publish(&mut self.dma, region.int_ring, link_slot, &outcome)
+    }
+
+    /// Keep device `index`'s interrupt-IN endpoint armed with up to
+    /// [`INT_ARM_DEPTH`] outstanding transfers, arming as many fresh ones as
+    /// the current in-flight count is short and ringing the doorbell once if
+    /// any were armed.
+    ///
+    /// This is what keeps the report endpoint continuously live: with a
+    /// transfer always armed the controller has somewhere to write each
+    /// interval's report, so a report is not dropped merely because software
+    /// was slow to run. Combined with the per-interrupt drain into the report
+    /// FIFO ([`Self::pump_reports`]), device polling is decoupled from the
+    /// class driver's consume rate (the metal "missed keypresses under load"
+    /// defect). In-flight transfers the controller has already consumed but
+    /// whose completion this engine has not yet retired still count against
+    /// the depth, so this never over-fills the ring; the count is topped back
+    /// up as [`Self::capture_report_event`] retires each completion.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] / [`DriverError::DeviceFault`] if the device
+    /// or its interrupt ring is gone, or a controller fault while arming.
+    fn ensure_reports_armed(&mut self, index: usize) -> Result<(), DriverError> {
+        let (device_slot, int_dci) = {
+            let device = self.device(index).ok_or(DriverError::NotFound)?;
+            (device.slot, device.int_dci)
+        };
+        let mut armed_any = false;
+        loop {
+            let in_flight = self
+                .device(index)
+                .and_then(|device| device.int_ring.as_ref().map(ProducerRing::in_flight))
+                .ok_or(DriverError::DeviceFault)?;
+            if in_flight >= INT_ARM_DEPTH {
+                break;
+            }
+            match self.arm_report(index) {
+                Ok(()) => armed_any = true,
+                // The ring cannot hold another transfer: the depth already
+                // armed is the most this ring supports, which is enough.
+                Err(DriverError::Busy) => break,
+                Err(err) => return Err(err),
+            }
+        }
+        if armed_any {
+            self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
+        }
+        Ok(())
     }
 
     /// Address the device in `slot` (§4.3.4): program the input control
@@ -3596,7 +3734,9 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             },
             int_dci,
             int_ring,
-            pending_report: None,
+            reports: Fifo::new(),
+            report_fault: None,
+            dropped_reports: 0,
             bulk_in_ring,
             bulk_out_ring,
             bulk_in2_ring,
@@ -5537,20 +5677,15 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 }
             }
             // The served devices' report and bulk completions share this one
-            // event ring. Park the first seen for each consumer
-            // ([`UsbDevice::next_report`] / [`UsbDevice::poll_bulk`]). A
-            // report that cannot be parked (its slot already holds one) is
-            // dropped (recoverable: the class driver re-arms and the next
-            // report is delivered) rather than faulting the watch; the stash
-            // handles bulk FIFOs and freed-slot tolerance identically to the
-            // synchronous waits.
+            // event ring. Capture a report into its device's FIFO
+            // ([`UsbDevice::capture_report_event`]) and park a bulk completion
+            // for [`UsbDevice::poll_bulk`], exactly as the synchronous waits'
+            // stash does — so a report seen while polling the hub watch is
+            // buffered and its endpoint re-armed, never dropped, and never
+            // faults the watch.
             if event.trb_type() == Ok(TrbType::TransferEvent) {
                 if let Some(report_index) = self.report_async_index(event) {
-                    if let Some(device) = self.devices[report_index].as_mut() {
-                        if device.pending_report.is_none() {
-                            device.pending_report = Some(event);
-                        }
-                    }
+                    let _ = self.capture_report_event(report_index, event);
                 } else if let Some(bulk_index) = self.bulk_async_index(event) {
                     if let Some(device) = self.devices[bulk_index].as_mut() {
                         let _ = device.pending_bulk.push(event);
@@ -6038,9 +6173,11 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
     /// Called by [`Self::next_report`] for **every** completed transfer
     /// event addressed to that endpoint — including one whose report was
     /// rejected by [`Self::decode_transfer_report`] — so the transfer-ring
-    /// software dequeue always matches what the controller has consumed. The
-    /// next class-driver URB arms the next transfer; the controller is not kept
-    /// polling the device when no URB is waiting.
+    /// software dequeue always matches what the controller has consumed.
+    /// Retiring frees one ring slot, which [`Self::ensure_reports_armed`]
+    /// immediately re-arms, so the endpoint is kept armed to
+    /// [`INT_ARM_DEPTH`] and the controller always has a landing TRB for the
+    /// next report rather than going idle between class-driver URBs.
     ///
     /// # Errors
     ///
@@ -6467,22 +6604,29 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
 }
 
 impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
-    /// Deliver device `index`'s next interrupt-IN report into `buf`, arming
-    /// a transfer when none is in flight. Never blocks: `Ok(None)` when no
-    /// report has arrived yet.
+    /// Deliver device `index`'s next interrupt-IN report into `buf` from the
+    /// engine's report buffer, keeping the endpoint armed to depth and
+    /// draining any freshly-posted completions first. Never blocks: `Ok(None)`
+    /// when no report is buffered (the class driver's URB stays parked).
+    ///
+    /// The report was captured off the controller's ring — here or, under
+    /// load, already by the HCD's per-interrupt [`Self::pump_reports`] — so a
+    /// starved class driver collects buffered reports rather than losing them.
     ///
     /// # Errors
     ///
-    /// [`DriverError::DeviceFault`] when no device is live at `index`, the
-    /// device's interface carries no interrupt endpoint, or the controller
-    /// posted an event this engine cannot attribute.
+    /// [`DriverError::DeviceFault`] when no device is live at `index` or the
+    /// device's interface carries no interrupt endpoint; or a recorded fatal
+    /// report completion (a device-gone / fail-closed code) surfaced once so
+    /// the HCD confirms the port and detaches; or a fault reading the event
+    /// ring.
     pub fn next_report(
         &mut self,
         index: usize,
         buf: &mut [u8],
     ) -> Result<Option<usize>, DriverError> {
-        let (device_slot, int_dci, pending, in_flight) = {
-            let Some(device) = self.device_mut(index) else {
+        {
+            let Some(device) = self.device(index) else {
                 // Not enumerated: there is no endpoint to drain.
                 return Err(DriverError::DeviceFault);
             };
@@ -6490,133 +6634,226 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 // A bulk-only interface has no interrupt endpoint to read.
                 return Err(DriverError::DeviceFault);
             }
-            (
-                device.slot,
-                device.int_dci,
-                device.pending_report.take(),
-                device.int_ring.as_ref().map_or(0, ProducerRing::in_flight),
-            )
-        };
-        // A report completion the controller posted while a synchronous EP0
-        // transfer or command was awaiting its own event was parked in the
-        // device's entry rather than faulting the shared ring; drain it
-        // first.
-        if let Some(event) = pending {
-            return self.deliver_report_event(index, device_slot, int_dci, event, buf);
         }
-        if in_flight == 0 {
-            self.arm_report(index)?;
-            self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
-            return Ok(None);
+        // Keep the endpoint armed to depth and capture whatever the
+        // controller has posted into the report FIFO. Capture is driven off
+        // the controller interrupt too (`pump_reports`), so under load a
+        // report is usually already buffered here; draining again is cheap
+        // and keeps the class-driver path self-contained.
+        self.ensure_reports_armed(index)?;
+        self.drain_events()?;
+        // Deliver the oldest buffered report, if any.
+        if let Some(report) = self
+            .device_mut(index)
+            .and_then(|device| device.reports.pop())
+        {
+            let len = usize::from(report.len).min(buf.len());
+            buf[..len].copy_from_slice(&report.data[..len]);
+            return Ok(Some(len));
         }
-        // Bounded by the event segment: one pass can hold at most the
-        // segment's TRBs, and `next_report` never blocks.
-        for _ in 0..RING_TRBS {
-            let Some(event) = self.poll_event()? else {
-                // No event pending.
-                return Ok(None);
-            };
-            match event.trb_type() {
-                Ok(TrbType::PortStatusChange) => continue,
-                Ok(TrbType::TransferEvent) => {}
-                _ => return Err(DriverError::DeviceFault),
-            }
-            if event.slot_id() == device_slot && event.endpoint_id() == int_dci {
-                return self.deliver_report_event(index, device_slot, int_dci, event, buf);
-            }
-            // Another consumer's completion sharing the event ring (the hub
-            // status-change, another device's report or bulk TD, a stale
-            // freed-slot event) is parked for its consumer, never mistaken
-            // for this device's report or faulted. An unattributable event
-            // is a controller fault.
-            if self.stash_async_event(event)? {
-                continue;
-            }
-            return Err(DriverError::DeviceFault);
+        // No report buffered. Surface a recorded fatal report fault (a
+        // device-gone or fail-closed completion) once, so the HCD confirms
+        // the port and detaches; otherwise the URB stays parked (`Ok(None)`).
+        if let Some(err) = self
+            .device_mut(index)
+            .and_then(|device| device.report_fault.take())
+        {
+            return Err(err);
         }
         Ok(None)
     }
 
-    /// Decode one completed transfer `event` for device `index`'s interrupt
-    /// endpoint, retire it, and decide what the caller returns.
+    /// Capture every completed transfer the controller has posted on the
+    /// shared event ring, so every served interrupt-IN endpoint's reports land
+    /// in its device's FIFO and its ring is re-armed to depth — **without**
+    /// needing a class-driver URB to be outstanding.
+    ///
+    /// This is the consumer-independent report path: called on every
+    /// controller interrupt (by the HCD's [`Self::pump_reports`]) and again
+    /// from each [`Self::next_report`], it decouples device polling from how
+    /// promptly any class driver — or the HCD itself — is scheduled to run.
+    /// A boot keyboard, a mouse, a CBI completion endpoint, or any other
+    /// interrupt-IN device is therefore captured the moment its report lands
+    /// in the controller's ring, so a report is never dropped merely because
+    /// the software above was starved of CPU (the on-metal "missed keypresses
+    /// under load" defect, generalised to every interrupt-IN device).
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError`] from reading the event ring (a register-window fault).
+    /// Per-event capture faults are recorded on the owning device rather than
+    /// propagated (see [`Self::capture_report_event`]); an unattributable or
+    /// informational event is drained and ignored (the shared ring is not a
+    /// security boundary, and a stray event must never fault the report path).
+    fn drain_events(&mut self) -> Result<(), DriverError> {
+        for _ in 0..EVENT_DRAIN_BOUND {
+            let Some(event) = self.poll_event()? else {
+                return Ok(());
+            };
+            if event.trb_type() == Ok(TrbType::TransferEvent) {
+                // Report completions are captured into their device's FIFO,
+                // hub/bulk completions parked, freed-slot events tolerated.
+                // A capture-side controller/DMA hiccup is not fatal to the
+                // shared drain: the endpoint is re-armed on the next pass, and
+                // any real fatal report fault is surfaced through
+                // `next_report` from the recorded per-device flag.
+                let _ = self.stash_async_event(event);
+            }
+            // Everything else (a Port Status Change, an unmodelled or stale
+            // event) is drained by the `poll_event` above and ignored.
+        }
+        Ok(())
+    }
+
+    /// Keep every served interrupt-IN endpoint armed and drain all pending
+    /// report completions into the per-device FIFOs — the HCD's per-interrupt
+    /// report pump.
+    ///
+    /// The host-controller driver calls this on every controller completion
+    /// interrupt, **before** it services any outstanding class-driver URB, so
+    /// the controller always has landing TRBs and every report is captured the
+    /// moment it arrives — regardless of whether the class driver has a URB in
+    /// flight, and regardless of how starved that class driver is. A class
+    /// driver then merely collects the already-buffered reports when it next
+    /// submits ([`Self::next_report`]); its consume rate no longer gates
+    /// hardware polling. This is what makes the report path immune to a
+    /// CPU-starved consumer, for every interrupt-IN device the controller
+    /// serves.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError`] from reading the event ring. A per-device arming hiccup
+    /// (e.g. a device that has just vanished) is tolerated: the drain and the
+    /// hub/root hot-plug watch handle its teardown.
+    pub fn pump_reports(&mut self) -> Result<(), DriverError> {
+        for index in 0..self.devices.len() {
+            if self
+                .device(index)
+                .is_some_and(|device| device.int_dci != DCI_CONTROL && device.int_ring.is_some())
+            {
+                let _ = self.ensure_reports_armed(index);
+            }
+        }
+        self.drain_events()
+    }
+
+    /// Total interrupt-IN reports dropped across all served devices because a
+    /// class driver fell more than [`REPORT_QUEUE_CAP`] reports behind.
+    ///
+    /// A genuinely stalled consumer (one that has stopped reading for many
+    /// report intervals) cannot make the engine hold unbounded memory: the
+    /// oldest buffered report is dropped so the newest device state is kept.
+    /// This count lets the HCD surface that loss for diagnostics rather than
+    /// hiding it.
+    #[must_use]
+    pub fn dropped_report_total(&self) -> u64 {
+        self.devices
+            .iter()
+            .flatten()
+            .map(|device| device.dropped_reports)
+            .sum()
+    }
+
+    /// Decode one completed interrupt-IN transfer `event` for device `index`,
+    /// retire the ring slot, and buffer the result — the capture half of the
+    /// report path (the delivery half is [`Self::next_report`]).
     ///
     /// The transfer is retired **unconditionally** first (so an unexpected
-    /// completion code or a malformed buffer mapping is surfaced as a
-    /// per-report error while the ring state still advances, letting the next
-    /// class URB arm another transfer — a single odd transfer must never
-    /// silence the device). Then:
+    /// completion code or malformed buffer mapping still advances the ring —
+    /// a single odd transfer must never silence the device). Then:
     ///
-    /// * `Ok(Some(len))` — a real report of `len` bytes landed in `buf`.
-    /// * `Ok(None)` — a *successful* zero-length completion (a ZLP): not a
-    ///   report. The endpoint is re-armed and the doorbell rung, so the URB
-    ///   stays outstanding (parked) rather than being replied to. An idle or
-    ///   ZLP-streaming HID interface (a composite MMO mouse's extra
-    ///   collection) therefore neither spins the class driver on empty
-    ///   completions nor is killed by a false fault — each ZLP costs one
-    ///   controller interrupt, never a busy-loop.
-    /// * A halting error completion: the endpoint is halted. If the code
-    ///   means the device is unreachable (a probable hot-removal) the fault is
-    ///   surfaced (`Err`) so the HCD confirms the port and detaches the gone
-    ///   device. Otherwise the device is still present and merely errored (a
-    ///   STALL, babble, or transaction error): the endpoint is recovered
-    ///   ([`Self::recover_interrupt_endpoint`]), re-armed, and the URB is held
-    ///   parked (`Ok(None)`), so a transient fault neither storms the
-    ///   controller nor reaches — and kills — the class driver.
-    fn deliver_report_event(
-        &mut self,
-        index: usize,
-        device_slot: u8,
-        int_dci: u8,
-        event: Trb,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
-        let decoded = self.decode_transfer_report(index, event, buf);
+    /// * a real report is copied out of its DMA slot and **enqueued** into the
+    ///   device's report FIFO ([`Self::enqueue_report`]), and the endpoint is
+    ///   re-armed to depth — so its bytes survive the slot being reused;
+    /// * a *successful* zero-length completion (a ZLP) carries no report: the
+    ///   endpoint is simply re-armed (an idle or ZLP-streaming HID collection
+    ///   neither buffers empty reports nor is faulted);
+    /// * a device-unreachable or fail-closed completion **records** a fatal
+    ///   report fault on the device for [`Self::next_report`] to surface once
+    ///   (so the HCD confirms the port and detaches);
+    /// * any other halting code recovers the endpoint in place
+    ///   ([`Self::recover_interrupt_endpoint`]) and re-arms it, so a transient
+    ///   STALL/babble/transaction error neither storms the controller nor
+    ///   kills the class driver.
+    ///
+    /// A fault is never propagated to the caller: capture runs from the shared
+    /// drain and from synchronous EP0/command waits, where an asynchronous
+    /// report must not fault unrelated work. Recorded faults surface only
+    /// through [`Self::next_report`].
+    fn capture_report_event(&mut self, index: usize, event: Trb) -> Result<(), DriverError> {
+        let mut data = [0u8; REPORT_LEN];
+        let decoded = self.decode_transfer_report(index, event, &mut data);
         self.retire_interrupt_transfer(index)?;
         match decoded {
-            // A real report of `len` bytes landed in `buf`.
-            Ok(Some(len)) => Ok(Some(len)),
-            // A successful zero-length completion (a ZLP) carried no report:
-            // re-arm the endpoint and hold the URB parked. Replying would only
-            // make the class driver re-submit at once (a spin); the next real
-            // report completes the still-outstanding URB instead.
-            Ok(None) => {
-                self.arm_report(index)?;
-                self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
-                Ok(None)
+            Ok(Some(len)) => {
+                self.enqueue_report(index, &data[..len]);
+                self.ensure_reports_armed(index)?;
             }
-            // A rejected transfer. The disposition depends on *why* the
-            // decode rejected it, read from the controller's completion code.
+            Ok(None) => {
+                self.ensure_reports_armed(index)?;
+            }
             Err(err) => match event.completion_code() {
-                // A *successful* completion (Success / ShortPacket) whose
-                // claimed mapping the decode rejected — a hostile or buggy
-                // controller residual or TRB pointer. The endpoint is not
-                // halted, so there is nothing to recover: fail closed and
-                // surface the fault.
-                Ok(CompletionCode::Success | CompletionCode::ShortPacket) => Err(err),
-                // A completion code that means the device failed to answer the
-                // transaction is a probable hot-removal: surface the fault so
-                // the HCD confirms the port and detaches the gone device
-                // rather than resetting an endpoint that is no longer there.
-                Ok(code) if code.indicates_device_unreachable() => Err(err),
-                // Any other halting completion code (a STALL, babble,
-                // data-buffer or TRB error, or an unmodelled code): the
-                // controller stops executing a halted endpoint until it is
-                // reset, so it must never be left as-is — re-arming a halted
-                // endpoint re-faults every transfer (a controller interrupt
-                // storm) or, once the class driver stops retrying, silences the
-                // device. The device is still present and merely errored, so
-                // reset the endpoint, re-arm it, and hold the URB parked, so the
-                // transient fault never reaches — and kills — the class driver.
-                // If the recovery itself faults (the device did vanish after
-                // all), the error propagates and the HCD tears the interface
-                // down.
+                // A successful completion whose claimed mapping the decode
+                // rejected (a hostile/buggy residual or TRB pointer). The
+                // endpoint is not halted, so nothing to recover: record the
+                // fault for the class driver's next URB to fail closed on.
+                Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {
+                    self.record_report_fault(index, err);
+                }
+                // The device failed to answer — a probable hot-removal.
+                // Record it so the URB path confirms the port and detaches;
+                // the hub/root watch also detaches independently, so a
+                // starved consumer still loses the device cleanly.
+                Ok(code) if code.indicates_device_unreachable() => {
+                    self.record_report_fault(index, err);
+                }
+                // A recoverable halt (STALL, babble, data-buffer/TRB error, or
+                // an unmodelled code): the device is present and merely
+                // errored. Reset the endpoint in place and re-arm it, so a
+                // transient fault neither storms the controller nor reaches the
+                // class driver. A recovery that itself faults leaves the
+                // endpoint unarmed; the next pump re-attempts to arm it.
                 _ => {
                     self.recover_interrupt_endpoint(index)?;
-                    self.arm_report(index)?;
-                    self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
-                    Ok(None)
+                    self.ensure_reports_armed(index)?;
                 }
             },
+        }
+        Ok(())
+    }
+
+    /// Buffer one decoded report for device `index`, dropping the **oldest**
+    /// buffered report (and counting the loss) when the FIFO is full.
+    ///
+    /// The FIFO is bounded ([`REPORT_QUEUE_CAP`]): a class driver that has
+    /// stopped reading for many report intervals cannot make the engine hold
+    /// unbounded memory. Dropping the oldest keeps the FIFO in order and
+    /// leaves the newest device state for a consumer that catches up.
+    fn enqueue_report(&mut self, index: usize, bytes: &[u8]) {
+        let Some(device) = self.device_mut(index) else {
+            return;
+        };
+        let n = bytes.len().min(REPORT_LEN);
+        let mut report = Report {
+            data: [0u8; REPORT_LEN],
+            #[allow(clippy::cast_possible_truncation)] // `n <= REPORT_LEN` (a small constant).
+            len: n as u8,
+        };
+        report.data[..n].copy_from_slice(&bytes[..n]);
+        if device.reports.push(report).is_err() {
+            // The consumer is not draining: drop the oldest to keep the
+            // newest, and count the loss so it is never silent.
+            let _ = device.reports.pop();
+            device.dropped_reports = device.dropped_reports.saturating_add(1);
+            let _ = device.reports.push(report);
+        }
+    }
+
+    /// Record a fatal report completion on device `index` for the next
+    /// [`Self::next_report`] to surface, keeping the first observed fault.
+    fn record_report_fault(&mut self, index: usize, err: DriverError) {
+        if let Some(device) = self.device_mut(index) {
+            device.report_fault.get_or_insert(err);
         }
     }
 

@@ -26,12 +26,17 @@
 //!   `call_recv`s the URB and drives it. An interrupt-IN report not yet
 //!   arrived is left **outstanding** (the class driver's `ipc_call` parks in
 //!   the kernel); a control transfer or a ready report is replied at once.
-//! * **The controller's completion interrupt**: it drains the event ring and
-//!   **replies to the now-complete outstanding URB**, bounce-copying the
-//!   report from its own DMA ring into the shared buffer the class driver
-//!   reads. It also watches the root-hub port and retracts the interface node
-//!   on a disconnect (`hw_remove_node`), so `devmgr` unloads the class driver
-//!   while the controller stays up.
+//! * **The controller's completion interrupt**: it first **pumps every served
+//!   interrupt-IN endpoint** (`UsbDevice::pump_reports`) — capturing each
+//!   posted report into the engine's per-device buffer and re-arming the
+//!   endpoint, *independent* of whether a class driver has a URB outstanding —
+//!   then **replies to any now-satisfiable outstanding URB** from that buffer,
+//!   bounce-copying the report into the shared buffer the class driver reads.
+//!   Capturing on the interrupt rather than only when a class driver submits
+//!   decouples device polling from a CPU-starved class driver, so reports are
+//!   never dropped under load (`plans/USB.md`). It also watches the root-hub
+//!   port and retracts the interface node on a disconnect (`hw_remove_node`),
+//!   so `devmgr` unloads the class driver while the controller stays up.
 //!
 //! # Data path (`plans/USB.md` U3a2, Option B)
 //!
@@ -785,6 +790,41 @@ mod program {
         }
     }
 
+    /// Run the engine's consumer-independent report pump on a controller
+    /// interrupt: capture every served interrupt-IN device's reports into the
+    /// per-device buffers and keep every such endpoint armed, independent of
+    /// any class-driver URB ([`tairix_usb::device::UsbDevice::pump_reports`]).
+    ///
+    /// A drain fault and any newly dropped reports (a class driver that has
+    /// stalled past the buffer depth) are logged so a stuck consumer is never
+    /// silent; neither is fatal to the loop — the pump is best-effort and the
+    /// hot-plug watch owns device teardown.
+    fn pump_reports(
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
+        reported_drops: &mut u64,
+    ) {
+        if let Err(err) = device.pump_reports() {
+            log_hex_event(
+                HCD_WAIT_ERROR,
+                Level::Warn,
+                "usb-hcd: report pump failed",
+                "err_hex",
+                err as u64,
+            );
+        }
+        let dropped = device.dropped_report_total();
+        if dropped > *reported_drops {
+            log_hex_event(
+                HCD_WAIT_ERROR,
+                Level::Warn,
+                "usb-hcd: interrupt reports dropped; class driver stalled",
+                "dropped",
+                dropped,
+            );
+            *reported_drops = dropped;
+        }
+    }
+
     /// A diagnostic field carrying a controller value that may not have been
     /// readable: an unreadable register is logged `Null`, never a fabricated
     /// zero.
@@ -1135,6 +1175,10 @@ mod program {
             return EXIT_NO_TRANSPORT;
         };
         let mut transports: Vec<Option<Transport>> = Vec::new();
+        // Running total of interrupt reports the engine has dropped because a
+        // class driver stalled past the buffer depth; logged (once per new
+        // loss) so a genuinely stuck consumer is never silent.
+        let mut reported_drops = 0u64;
 
         let irq_add = tairix_rt::waitset_ctl(
             set,
@@ -1351,6 +1395,20 @@ mod program {
                     ) {
                         continue;
                     }
+                    // Capture every served interrupt-IN device's reports off
+                    // this controller interrupt into the engine's per-device
+                    // buffers, and keep every such endpoint armed — regardless
+                    // of whether a class driver has a URB outstanding. This is
+                    // the decoupling that makes report capture immune to a
+                    // CPU-starved class driver: reports are captured the moment
+                    // they arrive rather than only when the (possibly starved)
+                    // class driver next submits, so none is lost under load.
+                    // It covers every interrupt-IN device the controller serves
+                    // (keyboard, mouse, and any other), not just the one whose
+                    // URB happens to be in flight. `service_busy_urbs` below
+                    // then merely hands the already-buffered reports to any
+                    // outstanding URB.
+                    pump_reports(&mut device, &mut reported_drops);
                     // Drive every transport with a URB outstanding: the
                     // drained event(s) may complete any of them, and a
                     // completion the hot-plug handling above parked must not
