@@ -1,0 +1,18 @@
+[package]
+name = "tairix-controls"
+description = "TAIRiX shared Reactive Alloy GUI control behaviour: the one orientation-independent scroll geometry engine shared by the window manager's root viewport and application content (§2.2, §6, §17.4 — plans/GUI-CONTROLS-DESIGN.md §11.28)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies on purpose: the scroll geometry engine is pure integer
+# arithmetic over a one-dimensional track, orientation-independent by
+# construction. The owning viewport maps the computed 1-D thumb span onto a
+# `tairix_geometry::Rect` at the edge, so this crate stays at the bottom of
+# the §17.4 layering, depended on and never depending.

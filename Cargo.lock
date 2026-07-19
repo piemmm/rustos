@@ -729,6 +729,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-controls"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-cp"
 version = "0.0.0"
 dependencies = [

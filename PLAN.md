@@ -3228,6 +3228,35 @@ transfer, landed in increments:
   observer and folded into every reseed) — so no single source is trusted
   alone. The encrypted-swap key (Stage 8) consumes the same seam.
 
+### GUI controls — Reactive Alloy (`plans/GUI-CONTROLS-DESIGN.md`, binding)
+
+The shared GUI control design language. Built foundation-first as
+`lib/controls`, so the window manager, taskbar, and apps share one typed,
+theme-resolved, single-drawing-path control implementation rather than
+per-app recipes (§2.2).
+
+- **Scroll geometry engine — DONE.** `lib/controls::scroll` is the one
+  orientation-independent scrollbar behaviour the spec requires be shared by
+  the WM root viewport and nested application content (§11.28): `ScrollRange`
+  (validated, always-normalised content/viewport/offset, private fields so the
+  offset can never exceed `max_offset`), `ScrollModel` (the single offset
+  source of truth: line/page/`scroll_by`/`scroll_to`/`to_start`/`to_end`/
+  `resize`), and `ScrollGeometry` (proportional thumb length bounded by the
+  theme minimum and the track, offset↔thumb-position mapping, `hit`
+  classification, and drag with a preserved pointer-to-thumb anchor). Pure
+  `u128` integer arithmetic, every division guarded, fail-closed to a
+  non-draggable zero-offset bar; 27 host unit tests cover the §20 scrollbar
+  checklist. No consumers yet — the WM/app wiring is the next stage (below),
+  which is when the scroll-tick pointer record deferred above (`from_device_event`)
+  is carried.
+- **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
+  the typed control-state vocabulary (§5), the theme-token additions (§6), the
+  drawn controls over `lib/raster` (button/icon-button/toggle/field, then
+  window furniture and the scrollbar renderer), and the WM root-viewport +
+  application consumers of the scroll engine. Each control lands complete
+  (§27) with dark/light + reduced-motion + high-contrast coverage and its
+  §20 tests before the next begins.
+
 ---
 
 ## Stage 8 — Installer and Image Builders

@@ -43,6 +43,7 @@ members = [
     "lib/collections",
     "lib/complete",
     "lib/compress",
+    "lib/controls",
     "lib/crt0",
     "lib/crypto",
     "lib/curses",

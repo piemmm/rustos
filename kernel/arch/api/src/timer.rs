@@ -170,7 +170,7 @@ pub trait Timer: Send + Sync {
 pub mod conformance {
     use super::{TickFn, Timer};
     use crate::CpuId;
-    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     /// Records the ticks the conformance callback observes, so the suite
     /// can assert the dispatched callback actually ran with the CPU it
@@ -178,6 +178,36 @@ pub mod conformance {
     static TICKS: AtomicU64 = AtomicU64::new(0);
     /// The last [`CpuId`] the conformance callback saw.
     static LAST_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// Serialises the fires-on-dispatch check so its reset-then-observe of
+    /// the process-global counters above is atomic with respect to any
+    /// other thread running the suite concurrently. The callback is a bare
+    /// `extern "C" fn` and cannot carry per-run state, so the counters must
+    /// be global; this guard is what makes the suite safe to run from the
+    /// several `#[test]` functions the host test harness runs in parallel.
+    static PROBE_LOCK: AtomicBool = AtomicBool::new(false);
+
+    /// Held for the duration of the counter-observing section; releases the
+    /// lock on drop, including on an unwinding panic from a failed
+    /// assertion, so a rejected timer never leaves the lock stuck.
+    struct ProbeGuard;
+
+    impl ProbeGuard {
+        fn acquire() -> Self {
+            while PROBE_LOCK
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            Self
+        }
+    }
+
+    impl Drop for ProbeGuard {
+        fn drop(&mut self) {
+            PROBE_LOCK.store(false, Ordering::Release);
+        }
+    }
 
     /// The conformance scheduler-tick callback: counts each tick and
     /// records the CPU it fired on.
@@ -188,10 +218,12 @@ pub mod conformance {
 
     /// Run the entire [`Timer`] conformance suite against `timer`.
     ///
-    /// Because the probe callback and its counters are process-global,
-    /// the suite is not safe to run from two threads at once; the port
-    /// host tests run it single-threaded under `cargo test`, the same as
-    /// the other HAL verticals.
+    /// The probe callback and its counters are process-global (the
+    /// callback is a stateless `extern "C" fn`), but the fires-on-dispatch
+    /// check holds a process-global lock across its reset-then-observe window, so
+    /// running the suite from several threads at once is safe: concurrent
+    /// runs serialise on that section rather than clobbering each other's
+    /// counters.
     ///
     /// # Panics
     ///
@@ -241,6 +273,9 @@ pub mod conformance {
     /// Installing a callback round-trips, and dispatching a tick invokes
     /// it with the CPU it was handed.
     fn installed_callback_fires_on_dispatch<T: Timer + ?Sized>(timer: &T) {
+        // Serialise the whole reset-then-observe window: the counters are
+        // process-global, so a concurrent run must not reset them mid-loop.
+        let _guard = ProbeGuard::acquire();
         TICKS.store(0, Ordering::Relaxed);
         LAST_CPU.store(u32::MAX, Ordering::Relaxed);
 

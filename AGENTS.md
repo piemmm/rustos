@@ -584,6 +584,17 @@ tairix/
 │   │                    #   nothing, never a guess.
 │   ├── compress/        # First-party LZ codec; ARXFS compresses every record
 │   │                    #   with it, no external dependency (§2.12, §16.4).
+│   ├── controls/        # Shared Reactive Alloy GUI control behaviour
+│   │                    #   (plans/GUI-CONTROLS-DESIGN.md): the one
+│   │                    #   orientation-independent scroll geometry engine
+│   │                    #   (ScrollRange/ScrollModel/ScrollGeometry — validated
+│   │                    #   range, proportional thumb math, drag-anchor mapping,
+│   │                    #   line/page/home-end steps) the window-manager root
+│   │                    #   viewport and nested application content share,
+│   │                    #   never separate vertical/horizontal/WM/app recipes.
+│   │                    #   Pure integer arithmetic, fail closed, no panic
+│   │                    #   (§2.2, §17.4). The broader control-state vocabulary,
+│   │                    #   theme tokens, and drawn controls are staged.
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
