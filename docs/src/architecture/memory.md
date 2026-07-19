@@ -65,6 +65,94 @@ permanently while `free_frames` still reports plenty. It stays marked
 reserved, exactly like firmware-reserved RAM, and is excluded from
 `usable_frames`.
 
+## 1a. Early-boot RAM self-test (`ramtest`)
+
+Before the frame allocator hands out a single frame, the kernel proves the
+installed RAM actually stores what is written to it. `kernel/mem`'s
+architecture-neutral [`ramtest`] engine walks every **usable** region of the
+[`BootMemoryMap`] through the port's direct [`PhysMap`] (§3b) and, on the
+first mismatch, returns a `RamFault` naming the physical address. The
+kernel-core half (`tairix_kernel_core::memtest`) drives it during the
+`Phase::Mem` boot step and shows the result on the boot console.
+
+It runs *before* `FrameAllocator::new` on purpose: usable regions are, by
+definition, RAM nothing is using yet (the kernel image, its stack, the boot
+page tables and the device tree all sit in reserved regions), so the test may
+write to them freely. It is a **boot sanity check, not an exhaustive march
+test** — it must finish in a couple of seconds on many gigabytes — so it does
+not touch every byte and does not scrub whole regions. The few cells it does
+write are restored to zero, and the allocator's consumers zero their own
+frames before use anyway (the page-table frame source hands back
+zero-initialised frames, anonymous and DMA memory is zeroed on map, the user
+stack is zeroed on spawn), so a clean frame is each consumer's own guarantee.
+
+For that invariant to hold, everything the kernel keeps reading *after* the
+hand-off must be reserved out of the usable window — the flattened device
+tree above all. Firmware on both the aarch64 (`virt`/Pi) and riscv64 (`virt`)
+boards lands the DTB blob in the RAM window the map would otherwise call
+usable, so each boot path reserves its whole frames through the one shared
+`reserve_blob_frames` routine (`tairix-kernel::mem_map`). Without it the
+self-test would zero the live tree and the later root-storage bind and device
+discovery would find it unreadable — the concrete failure this reservation
+prevents.
+
+Two complementary passes (after Michael Barr, *"Software-Based Memory
+Testing"*, 2000) are applied to each progress-sized window:
+
+- a whole-window **address-line** test that stamps offset 0 and every
+  power-of-two offset with its own marker and reads them all back, catching
+  an address bit that is stuck or shorted (a write that lands in the wrong
+  cell) in `O(log n)` accesses — the textbook quick address-line walk,
+  covering the address decode across the full span, and
+- a sampling **device** test that proves **one word per 16 KiB** holds both a
+  `1` and a `0` (writing `0xAA…` then its complement `0x55…` and reading each
+  back), catching a stuck data bit, row, column, or bank.
+
+The device test deliberately does **not** touch every cell — that is the
+`O(all bytes)` write-back-and-verify cost this boot check exists to avoid.
+The faults that occur in practice — a stuck cell, row, column, or bank — span
+far more than 16 KiB and are hit by the sample many times over; the coverage
+traded away is a lone single-cell fault that falls between two samples, which
+is `memtest86`'s job, not the boot path's. Only the address pass's handful of
+offsets and the device pass's periodic sample are ever written, read, or
+flushed, so the whole test costs `O(usable_bytes / sample_interval)`
+cache-line accesses rather than `O(usable_bytes)` — the difference between a
+couple of seconds and many minutes on a large machine (≈ 1.3 s to verify
+8 GiB under QEMU/TCG, far quicker on real silicon).
+
+**Defeating the cache.** Reads and writes go through the *cacheable* direct
+map, so a naive write-then-read could be served from the CPU cache and never
+reach the DRAM cell under test. Before reading a sampled cell back the engine
+flushes just that cell's cache line via [`PhysMap::clean_invalidate`], which
+writes the dirty line back to DRAM and drops the cached copy, so the read
+observes what the DRAM actually holds — a per-word flush, never a
+whole-window one that would pay to write back RAM the test never reads. On an
+I/O-coherent host or the `SimPhysMap` test double the flush is a documented
+no-op and the model is identical, which is what makes the engine fully
+host-testable (healthy RAM, an injected stuck-low/stuck-high bit, and a
+shorted address line are all exercised on the host).
+
+**On the console.** The `TAIRiX <version> <RAM>MiB` identity line is drawn
+here — the figure starts at zero and climbs to the installed total in
+**yellow** while the test is still running (RAM being verified but not yet
+proven), then, once every region has passed, settles on the installed figure
+redrawn in **light green**. The engine reports progress every couple of MiB,
+but the driver coalesces those into at most a few hundred in-place redraws
+spread across installed RAM, so the counter animates just as smoothly on
+256 MiB as on 64 GiB without thousands of framebuffer blits dominating the
+test's run time. It is drawn on *every* boot console — the framebuffer screen and the
+serial line alike — so a headless boot shows the same line a graphical one
+does; when a port makes the framebuffer its sole console and keeps the UART
+for the debug log alone (the aarch64 `VIDEO_ONLY_CONSOLES` case), the line
+lands on that one console, i.e. the screen. Userland `init` adds only the
+processor line beneath it and never repeats the version or RAM figure. A
+detected fault redraws the number in
+**red** as the MiB offset of the failing location, prints a diagnostic
+naming the physical address and the mismatch, and **halts the boot**: TAIRiX
+never runs on memory it could not trust (fail closed, fail loud). A port with
+no direct physical map (the host / `wasm32` environment) cannot reach
+physical RAM and skips the test rather than faking a pass.
+
 ## 2. Slab allocator with guard pages
 
 `AGENTS.md` §4 mandates guard pages around kernel slabs. The slab's

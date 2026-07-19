@@ -643,12 +643,22 @@ pub fn boot(
     // An absent or malformed discovery fails closed to a status string
     // rather than a panic; the map is retained (not
     // just measured) so it can be moved into the `BootInfo` hand-off.
-    let layout_result: Result<crate::mem_map::MemoryLayout, &'static str> =
+    let mut layout_result: Result<crate::mem_map::MemoryLayout, &'static str> =
         if ram_windows.is_empty() {
             Err("no_memory_window")
         } else {
             build_memory_map(&ram_windows, kernel_end_addr()).map_err(|err| err.as_str())
         };
+    // Reserve the firmware device-tree blob out of the usable window so
+    // neither the frame allocator nor the early-boot RAM self-test (which
+    // zeroes every usable byte) clobbers the tree the later root-storage
+    // bind and device discovery still re-parse. The QEMU `virt`/Pi firmware
+    // lands the blob high in RAM, above the kernel image the map already
+    // reserves, so without this it sits in usable memory (fail closed: an
+    // absent tree reserves nothing).
+    if let Ok(layout) = &mut layout_result {
+        crate::mem_map::reserve_blob_frames(&mut layout.map, dtb, early.dtb_len);
+    }
     let (mem_status, usable_bytes, reserved_bytes) = match &layout_result {
         Ok(layout) => {
             let (usable, reserved) = region_byte_totals(&layout.map);

@@ -133,6 +133,40 @@ fn align_up(value: u64, align: u64) -> Option<u64> {
     value.checked_add(mask).map(|sum| sum & !mask)
 }
 
+/// Reserve out of `map` every whole physical frame the firmware blob at
+/// `[base, base + len)` occupies (rounded outward to a page boundary).
+///
+/// A firmware structure the kernel keeps reading *after* the allocator
+/// hand-off — the flattened device tree above all — is placed by firmware
+/// wherever it likes, and on both the aarch64 `virt`/Pi and riscv64 `virt`
+/// boards that landing spot is inside the RAM window the map otherwise marks
+/// usable. Left usable, the blob is fair game for the frame allocator *and*
+/// is overwritten by the early-boot RAM self-test that zeroes every usable
+/// byte (`tairix_kernel_mem::ramtest`) — destroying the tree every later
+/// consumer (device discovery, root-storage bind, the QEMU scenarios) still
+/// reads. Reserving its frames keeps the blob live for the life of the
+/// kernel, exactly as the kernel image is reserved.
+///
+/// The blob is the one shared definition both DTB-bearing ports call, so the
+/// reservation cannot drift between them. A zero-length blob, or a `base +
+/// len` / rounding that overflows `u64`, is a no-op (fail closed: a malformed
+/// span reserves nothing rather than wrapping into an unrelated region).
+#[cfg(any(
+    all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "riscv64")),
+    test
+))]
+pub(crate) fn reserve_blob_frames(map: &mut BootMemoryMap, base: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    let page = tairix_kernel_mem::PAGE_SIZE as u64;
+    let frame_start = base & !(page - 1);
+    let Some(frame_end) = base.checked_add(len).and_then(|end| align_up(end, page)) else {
+        return;
+    };
+    map.reserve_range(PhysAddr::new(frame_start), PhysAddr::new(frame_end));
+}
+
 /// The reserved, 2 MiB-aligned kthread-stack guard arena `(base, len)`
 /// the boot path fine-maps and the allocator must not touch.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -707,6 +741,60 @@ mod tests {
             build_memory_map(&[], VIRT_RAM_BASE + TWO_MIB).unwrap_err(),
             MemoryMapError::UsableRegionEmpty,
         );
+    }
+
+    #[test]
+    fn reserve_blob_frames_carves_the_dtb_out_of_usable_ram() {
+        // A DTB landed high in the usable window (the QEMU `virt` / Pi
+        // shape): its whole frames must leave the usable span and become a
+        // reserved gap, so neither the allocator nor the RAM self-test can
+        // touch the live tree. Unaligned base and length exercise the
+        // outward rounding.
+        let ram_size = 0x4000_0000u64; // 1 GiB
+        let kernel_end = VIRT_RAM_BASE + TWO_MIB;
+        let mut layout =
+            build_memory_map(&[(VIRT_RAM_BASE, ram_size)], kernel_end).expect("well-formed");
+        let (usable_before, _) = region_byte_totals(&layout.map);
+
+        let dtb_base = VIRT_RAM_BASE + 0x2000_0123; // mid-page
+        let dtb_len = 0x1_500u64; // spills across a page once rounded outward
+        super::reserve_blob_frames(&mut layout.map, dtb_base, dtb_len);
+
+        let page = PAGE_SIZE as u64;
+        let frame_start = dtb_base & !(page - 1);
+        let frame_end = (dtb_base + dtb_len + page - 1) & !(page - 1);
+        let reserved = frame_end - frame_start;
+
+        let (usable_after, _) = region_byte_totals(&layout.map);
+        assert_eq!(
+            usable_before - usable_after,
+            reserved,
+            "exactly the DTB's whole frames leave the usable total"
+        );
+        // No usable region overlaps the reserved DTB frames.
+        for r in layout.map.regions() {
+            if r.kind != RegionKind::Usable {
+                continue;
+            }
+            let (rs, re) = (r.start.as_u64(), r.start.as_u64() + r.length);
+            assert!(
+                re <= frame_start || rs >= frame_end,
+                "a usable region still overlaps the DTB frames"
+            );
+        }
+    }
+
+    #[test]
+    fn reserve_blob_frames_is_a_noop_for_zero_len_or_overflow() {
+        let mut layout = build_memory_map(&[(VIRT_RAM_BASE, 0x4000_0000)], VIRT_RAM_BASE + TWO_MIB)
+            .expect("well-formed");
+        let before = layout.map.regions().len();
+        // A zero-length blob reserves nothing.
+        super::reserve_blob_frames(&mut layout.map, VIRT_RAM_BASE + 0x1000_0000, 0);
+        // A `base + len` that overflows `u64` reserves nothing (fail closed),
+        // never wrapping into an unrelated region.
+        super::reserve_blob_frames(&mut layout.map, u64::MAX - 8, 64);
+        assert_eq!(layout.map.regions().len(), before);
     }
 
     #[test]

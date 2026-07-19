@@ -61,6 +61,7 @@ pub mod pagetables;
 pub mod phys;
 pub mod pressure;
 pub mod ptr;
+pub mod ramtest;
 pub mod ramzip;
 pub mod reclaim;
 pub mod reclaim_audit;
@@ -88,6 +89,7 @@ pub use pressure::{
     escalation, ramzip_handoff, shrink_target, EscalationStep, FreeMemorySource, MemoryPressure,
     PressureBand, PressureThresholds, RamzipHandoff,
 };
+pub use ramtest::{run as ram_selftest, RamFault, Word as RamTestWord, PROGRESS_STEP_BYTES};
 pub use ramzip::{
     eligibility, escalate_refusal, CompressRefusal, FaultError, Ineligible, PageCandidate,
     PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipLedger, VmContext, WarmOutcome,

@@ -104,9 +104,10 @@ mod program {
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the startup banner to
-    /// its inherited standard output (fd 1), then supervises one session per
-    /// discovered text console for the lifetime of PID 1
+    /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the machine-summary
+    /// banner line to its inherited standard output (fd 1) beneath the
+    /// kernel's identity + RAM-self-test line, then supervises one session
+    /// per discovered text console for the lifetime of PID 1
     /// ([`supervise`] — `plans/PI.md` P11).
     ///
     /// The banner write is *gated*: `write_all` loops over benign short writes
@@ -125,15 +126,16 @@ mod program {
             return EXIT_CONFIG_INVALID;
         };
         // The banner's machine facts come from the kernel-attested
-        // `boot_facts_get` answer. A refusal degrades the banner to the
-        // version line (never a fabricated machine shape) and states its
-        // reason on the diagnostic stream — fail loud, degrade gracefully;
-        // PID 1 boots on either way.
+        // `boot_facts_get` answer. A refusal omits the machine-summary line
+        // (never a fabricated machine shape) and states its reason on the
+        // diagnostic stream — fail loud, degrade gracefully; PID 1 boots on
+        // either way. The identity and RAM figure were already drawn by the
+        // kernel's early-boot RAM self-test, so `init` never repeats them.
         let facts = match tairix_rt::boot_facts() {
             Ok(facts) => Some(facts),
             Err(err) => {
                 let _ = Stderr.write_fmt(format_args!(
-                    "init: boot facts unavailable (err {err}); banner shows the version only\n"
+                    "init: boot facts unavailable (err {err}); the machine-summary line is omitted\n"
                 ));
                 None
             }

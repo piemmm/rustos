@@ -91,38 +91,16 @@ service /System/Services/seatmgr.app/Run seatmgr
 session /System/Services/login.app/Run login
 ";
 
-/// The version prefix of the banner `init` writes once it reaches user mode.
-///
-/// The version is the workspace crate version stamped in at compile time
-/// (`env!("CARGO_PKG_VERSION")`). No wall-clock build date or timestamp is
-/// embedded: the images must stay bit-reproducible, and a build clock would
-/// defeat that — the source-fixed version is the honest, reproducible build
-/// identity. The machine facts appended by [`render_banner`] come from the
-/// kernel-attested `boot_facts_get` answer, never a compiled-in guess.
-const BANNER_PREFIX: &str = concat!("TAIRiX ", env!("CARGO_PKG_VERSION"));
-
 /// Byte capacity of the [`render_banner`] output buffer.
 ///
-/// The banner is bounded by construction: the fixed prefix and layout text,
-/// a `u64` memory figure (at most 20 digits), a CPU name of at most
-/// [`tairix_abi::CPU_NAME_LEN`] (48) bytes — or the fallback's
+/// The banner is bounded by construction: the fixed layout text, a CPU name
+/// of at most [`tairix_abi::CPU_NAME_LEN`] (48) bytes — or the fallback's
 /// `Unknown `/` processor` text around the longest arch name — and a `u32`
 /// core count (at most 10 digits) fit comfortably; 160 bytes leaves honest
 /// headroom without a heap. A `Write` overflow is impossible for
 /// well-formed inputs and fails closed (truncation refused) rather than
 /// corrupting the text.
 pub const BANNER_MAX: usize = 160;
-
-/// One binary mebibyte, the banner's default memory unit.
-const MIB: u64 = 1024 * 1024;
-
-/// One binary gibibyte; the banner switches to GiB only above
-/// [`GIB_THRESHOLD`].
-const GIB: u64 = 1024 * MIB;
-
-/// Installed-memory sizes strictly above this render in GiB; everything at
-/// or below it renders in MiB (`8192MiB`, not `8GiB`).
-const GIB_THRESHOLD: u64 = 100 * GIB;
 
 /// A bounded, allocation-free `core::fmt::Write` sink over a caller-owned
 /// byte buffer. Refuses (fails closed) any write past the buffer's end
@@ -145,66 +123,54 @@ impl core::fmt::Write for BufWriter<'_> {
     }
 }
 
-/// Render the startup banner into `buf`, returning the text.
+/// Render the startup machine-summary line into `buf`, returning the text.
 ///
-/// With the kernel's boot facts available the banner is the machine
-/// summary:
+/// The kernel's early-boot RAM self-test already drew the identity line —
+/// `TAIRiX <version> <RAM>MiB` — as it verified the installed memory (see
+/// `tairix_kernel_core::memtest`), so `init` does **not** repeat the version
+/// or the RAM figure. It adds only the processor line beneath it:
 ///
 /// ```text
-/// TAIRiX 0.0.0 8192MiB
+/// TAIRiX 0.0.0 8192MiB      (drawn by the kernel)
 ///
-/// ARM Cortex-A72, 4 cores
+/// ARM Cortex-A72, 4 cores   (this line)
 /// ```
 ///
-/// The installed memory renders in whole MiB (rounded to nearest) unless it
-/// exceeds 100 GiB, where whole GiB keep the figure readable; a single core
-/// reads `1 core`. A kernel that discovered no CPU model reports the honest
-/// fallback `Unknown <arch> processor, <n> cores`. Without facts (a kernel
-/// that installed none) the banner degrades to the version line alone —
-/// the honest output, never a fabricated machine shape. A formatting
-/// overflow (impossible for well-formed inputs) equally degrades to the
-/// version line, fail closed.
+/// A single core reads `1 core`; a kernel that discovered no CPU model
+/// reports the honest fallback `Unknown <arch> processor, <n> cores`. Without
+/// boot facts there is no machine shape to add, so the banner is empty — the
+/// honest output, never a fabricated line. A formatting overflow (impossible
+/// for well-formed inputs) equally degrades to empty, fail closed.
 pub fn render_banner(facts: Option<tairix_abi::BootFacts>, buf: &mut [u8; BANNER_MAX]) -> &str {
-    use core::fmt::Write as _;
-
     let mut w = BufWriter { buf, len: 0 };
     let ok = match facts {
         Some(facts) => write_facts_banner(&mut w, &facts).is_ok(),
-        None => writeln!(w, "{BANNER_PREFIX}").is_ok(),
+        // No facts: the kernel already drew the identity line; there is
+        // nothing to add.
+        None => true,
     };
     if !ok {
-        // Fail closed to the version line alone; it always fits.
+        // Fail closed to no line rather than a partial one.
         w.len = 0;
-        if writeln!(w, "{BANNER_PREFIX}").is_err() {
-            w.len = 0;
-        }
     }
     let len = w.len;
-    // The writer only ever copies whole `&str`s, so the prefix is UTF-8.
+    // The writer only ever copies whole `&str`s, so the text is UTF-8.
     core::str::from_utf8(&buf[..len]).unwrap_or("")
 }
 
-/// Write the full machine-summary banner (see [`render_banner`]).
+/// Write the machine-summary line beneath the kernel's identity line (see
+/// [`render_banner`]). The leading blank line separates it from the kernel's
+/// RAM line above.
 fn write_facts_banner(w: &mut BufWriter<'_>, facts: &tairix_abi::BootFacts) -> core::fmt::Result {
     use core::fmt::Write as _;
 
-    write!(w, "{BANNER_PREFIX} ")?;
-    if facts.memory_bytes > GIB_THRESHOLD {
-        // Round to the nearest whole GiB; the saturating add cannot
-        // overflow below u64::MAX - GIB/2, far past any real machine.
-        let gib = facts.memory_bytes.saturating_add(GIB / 2) / GIB;
-        write!(w, "{gib}GiB")?;
-    } else {
-        let mib = facts.memory_bytes.saturating_add(MIB / 2) / MIB;
-        write!(w, "{mib}MiB")?;
-    }
     let cores = facts.cpu_count;
     let noun = if cores == 1 { "core" } else { "cores" };
     match facts.cpu_name.as_str() {
-        Some(name) => write!(w, "\n\n{name}, {cores} {noun}\n"),
+        Some(name) => write!(w, "\n{name}, {cores} {noun}\n"),
         None => write!(
             w,
-            "\n\nUnknown {} processor, {cores} {noun}\n",
+            "\nUnknown {} processor, {cores} {noun}\n",
             facts.arch.name()
         ),
     }
@@ -661,7 +627,9 @@ session /Apps/Shell.app/Run login   # the login service
     }
 
     #[test]
-    fn banner_renders_memory_cpu_name_and_cores() {
+    fn banner_renders_only_the_cpu_name_and_cores() {
+        // The kernel drew the identity + RAM line; `init` adds only the
+        // processor line, on its own line beneath it.
         let facts = BootFacts {
             arch: Arch::X86_64,
             cpu_name: cpu_name("Intel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz"),
@@ -670,11 +638,23 @@ session /Apps/Shell.app/Run login   # the login service
         };
         assert_eq!(
             banner(Some(facts)),
-            format!(
-                "TAIRiX {} 8192MiB\n\nIntel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz, 36 cores\n",
-                env!("CARGO_PKG_VERSION"),
-            ),
+            "\nIntel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz, 36 cores\n",
         );
+    }
+
+    #[test]
+    fn banner_does_not_repeat_the_ram_figure_the_kernel_showed() {
+        let facts = BootFacts {
+            arch: Arch::Aarch64,
+            cpu_name: cpu_name("ARM Cortex-A72"),
+            cpu_count: 4,
+            memory_bytes: 8192 * 1024 * 1024,
+        };
+        let text = banner(Some(facts));
+        assert!(!text.contains("MiB"), "{text}");
+        assert!(!text.contains("GiB"), "{text}");
+        assert!(!text.contains("TAIRiX"), "{text}");
+        assert_eq!(text, "\nARM Cortex-A72, 4 cores\n");
     }
 
     #[test]
@@ -685,49 +665,10 @@ session /Apps/Shell.app/Run login   # the login service
             cpu_count: 2,
             memory_bytes: 512 * 1024 * 1024,
         };
-        let text = banner(Some(facts));
-        assert!(
-            text.ends_with("Unknown riscv64 processor, 2 cores\n"),
-            "{text}"
+        assert_eq!(
+            banner(Some(facts)),
+            "\nUnknown riscv64 processor, 2 cores\n"
         );
-    }
-
-    #[test]
-    fn banner_uses_mib_up_to_the_100_gib_threshold() {
-        // Exactly 100 GiB still renders in MiB ("over 100G" is strict).
-        let facts = BootFacts {
-            arch: Arch::Aarch64,
-            cpu_name: cpu_name("ARM Cortex-A72"),
-            cpu_count: 4,
-            memory_bytes: 100 * 1024 * 1024 * 1024,
-        };
-        assert!(banner(Some(facts)).contains(" 102400MiB\n"));
-    }
-
-    #[test]
-    fn banner_switches_to_gib_above_the_threshold() {
-        let facts = BootFacts {
-            arch: Arch::Riscv64,
-            cpu_name: cpu_name("SiFive U74-MC"),
-            cpu_count: 128,
-            memory_bytes: 256 * 1024 * 1024 * 1024,
-        };
-        let text = banner(Some(facts));
-        assert!(text.contains(" 256GiB\n"), "{text}");
-        assert!(text.ends_with("SiFive U74-MC, 128 cores\n"), "{text}");
-    }
-
-    #[test]
-    fn banner_rounds_memory_to_the_nearest_unit() {
-        // 8 GiB minus 100 KiB rounds back up to 8192 MiB — the figure a
-        // user recognises as installed, not a truncated 8191.
-        let facts = BootFacts {
-            arch: Arch::Aarch64,
-            cpu_name: cpu_name("ARM Cortex-A72"),
-            cpu_count: 4,
-            memory_bytes: 8192 * 1024 * 1024 - 100 * 1024,
-        };
-        assert!(banner(Some(facts)).contains(" 8192MiB\n"));
     }
 
     #[test]
@@ -738,16 +679,14 @@ session /Apps/Shell.app/Run login   # the login service
             cpu_count: 1,
             memory_bytes: 128 * 1024 * 1024,
         };
-        let text = banner(Some(facts));
-        assert!(text.ends_with("ARM Cortex-A53, 1 core\n"), "{text}");
+        assert_eq!(banner(Some(facts)), "\nARM Cortex-A53, 1 core\n");
     }
 
     #[test]
-    fn banner_without_facts_degrades_to_the_version_line() {
-        assert_eq!(
-            banner(None),
-            format!("TAIRiX {}\n", env!("CARGO_PKG_VERSION")),
-        );
+    fn banner_without_facts_is_empty() {
+        // The kernel already drew the identity line; with no machine facts
+        // there is nothing for `init` to add — never a fabricated line.
+        assert_eq!(banner(None), "");
     }
 
     #[test]
@@ -762,7 +701,7 @@ session /Apps/Shell.app/Run login   # the login service
             memory_bytes: u64::MAX,
         };
         let text = banner(Some(facts));
-        assert!(text.starts_with("TAIRiX "));
+        assert!(text.starts_with('\n'));
         assert!(text.ends_with(" cores\n"), "{text}");
         // The unknown-name fallback's worst case fits too.
         let facts = BootFacts {

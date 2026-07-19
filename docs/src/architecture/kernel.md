@@ -42,7 +42,7 @@ break the boot-timeline they key off (`AGENTS.md` §5.4, §2.4).
 |---|---------|---------------------------------------------------------------------------------------|
 | 0 | —       | `BootStarted` event emitted; `BootInfo::validate` runs.                               |
 | 1 | `log`   | `tairix_log::set_max_level(boot.log_level)`.                                          |
-| 2 | `mem`   | `tairix_kernel_mem::FrameAllocator::new(&boot.memory_map)`.                           |
+| 2 | `mem`   | The early-boot RAM self-test (`tairix_kernel_core::memtest`, drawing the `TAIRiX <version> <RAM>MiB` line on the boot console) proves every usable region before it is trusted, halting on a fault; then `tairix_kernel_mem::FrameAllocator::new(&boot.memory_map)`. See [the memory page](./memory.md#1a-early-boot-ram-self-test-ramtest). |
 | 3 | `sec`   | `boot.identity.verify(boot.audit_sink)` → `IdentityTable`.                            |
 | 4 | `sched` | `crate::sched::Scheduler::new(boot.scheduler_config, Arc::clone(&boot.arch))` — the build-time-selected policy (§17.1). |
 | 5 | `irq`   | `arch.irq_routing()` returns the architecture-installed `IrqRouting`; the kernel core builds `tairix_kernel_irq::IrqTable::new(routing.max_line)` and stores `routing.controller` in `KernelState`. Immediately after the leak, `arch.install_irq_dispatch(&state.irq)` publishes the `'static` table reference into the arch port's external-IRQ dispatcher slot (Stage 4.D Item 2-tail.2). |

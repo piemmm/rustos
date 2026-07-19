@@ -648,11 +648,21 @@ pub fn build_boot_memory_map(dtb: u64) -> Result<BootMemoryMap, BootError> {
     // tree that lives for the life of the guest. `Fdt::from_ptr`
     // validates the magic and bounds the blob before any further read.
     let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.map_err(|_| BootError::Fdt)?;
-    memory_map_from_fdt(&fdt)
+    memory_map_from_fdt(&fdt, dtb)
 }
 
-/// Build the two-region [`BootMemoryMap`] from an already-parsed `fdt`.
-fn memory_map_from_fdt(fdt: &Fdt<'_>) -> Result<BootMemoryMap, BootError> {
+/// Build the [`BootMemoryMap`] from an already-parsed `fdt` whose blob lives
+/// at physical `dtb_base`.
+///
+/// The kernel image + boot heap `[ram_base, __kernel_end]` is reserved, the
+/// remainder is usable — and the device-tree blob itself is reserved out of
+/// that usable span. OpenSBI places the DTB high in RAM (well above the
+/// kernel image), so without this the blob sits in usable memory the frame
+/// allocator would eventually hand out and the early-boot RAM self-test
+/// (`tairix_kernel_mem::ramtest`) would zero, destroying the tree every later
+/// consumer (device discovery, the QEMU scenarios) still reads. The blob is
+/// live for the life of the kernel, so it is reserved like the kernel image.
+fn memory_map_from_fdt(fdt: &Fdt<'_>, dtb_base: u64) -> Result<BootMemoryMap, BootError> {
     let (ram_base, ram_size) = fdt.first_memory_region().ok_or(BootError::NoMemoryMap)?;
     let ram_end = ram_base
         .checked_add(ram_size)
@@ -673,6 +683,10 @@ fn memory_map_from_fdt(fdt: &Fdt<'_>) -> Result<BootMemoryMap, BootError> {
         start: PhysAddr::new(usable_start),
         length: ram_end - usable_start,
     });
+    // Reserve the whole frames the DTB blob occupies out of the usable
+    // window, so the tree survives both the allocator and the RAM self-test
+    // — the one shared reservation both DTB-bearing ports call.
+    crate::mem_map::reserve_blob_frames(&mut memory_map, dtb_base, fdt.total_size() as u64);
     Ok(memory_map)
 }
 
@@ -875,7 +889,7 @@ pub fn try_boot(
     //    the figure the ungated `boot_facts_get` syscall reports — taken
     //    before the guard-arena carve below drops its range from the map.
     let installed_memory_bytes = fdt.first_memory_region().map_or(0, |(_base, size)| size);
-    let mut memory_map = memory_map_from_fdt(&fdt)?;
+    let mut memory_map = memory_map_from_fdt(&fdt, dtb)?;
 
     // Carve a 2 MiB-aligned kthread-stack guard arena out of the map and
     // install it so the spawn seams (`init_spawn_riscv64`,

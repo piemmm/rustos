@@ -180,7 +180,22 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `mmu::AddressSpace + tlb::TlbShootdown` alias, including transactional
       contiguous maps with one range TLB synchronization), guard-page kernel
       `Slab`, `alloc_sensitive`/`free_sensitive` zero-on-free, and
-      `Result<_, AllocError>` everywhere (no panic on OOM).
+      `Result<_, AllocError>` everywhere (no panic on OOM). Includes the
+      early-boot RAM self-test (`kernel/mem/src/ramtest.rs` engine +
+      `kernel/core/src/memtest.rs` display): the `Phase::Mem` step tests every
+      usable region through the arch direct `PhysMap` before the allocator
+      hands out a frame. A quick *boot sanity check*, not an exhaustive march
+      test (≈ 1.3 s on 8 GiB under QEMU): a whole-window `O(log n)`
+      address-line marker walk plus a device stuck-bit test that samples one
+      word per 16 KiB (both bit polarities), each read flushed per-word to
+      reach DRAM. It does not scrub whole regions — consumers zero their own
+      frames. It draws the `TAIRiX <version> <RAM>MiB` identity line as a
+      counter (yellow while running, light green when proven) climbing to the
+      installed total, coalesced to a bounded number of in-place redraws so
+      the animation is smooth on any RAM size, and halts with a red
+      failing-MiB location on any fault (fail closed). `init`'s banner no
+      longer repeats the version/RAM line — it adds only the processor
+      summary beneath it.
 - [x] 2.3 — `kernel/sched`: SMP scheduler — per-CPU Chase–Lev work-stealing
       queues, MLFQ priority + fairness with periodic boost, IPI preemption
       hook behind `SchedulerArch`, `spawn`/`park`/`unpark`/`exit`. Host-only

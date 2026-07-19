@@ -1665,6 +1665,15 @@ fn run_phases<A: KernelArch>(
 
     // Phase 2 — Mem.
     phase_started(log_sink, Phase::Mem);
+    // Prove the installed RAM before trusting it with a single frame: a
+    // quick but effective self-test of every usable region (walking-pattern
+    // stuck-bit and power-of-two address-line checks) drawn on the boot
+    // console as a verified-MiB counter that climbs to the installed total.
+    // It runs here, ahead of the allocator, precisely so it may write freely
+    // to the free RAM it tests; it leaves every tested region zeroed, and a
+    // detected fault halts the boot rather than run on memory the kernel
+    // could not trust (fail closed).
+    crate::memtest::run(arch.as_ref(), &memory_map, installed_memory_bytes, consoles);
     let frame_allocator: &'static FrameAllocator = Box::leak(Box::new(
         FrameAllocator::new(&memory_map).map_err(InitError::Mem)?,
     ));

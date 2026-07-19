@@ -46,6 +46,7 @@ for filesystems, the feature section below.
 | Feature | x86_64 | aarch64 | riscv64 | wasm32 |
 | --- | :-: | :-: | :-: | :-: |
 | Boot + early console | ✓ | ✓ | ✓ | ✓ |
+| Early-boot RAM self-test | ✓ | ✓ | ✓ | — |
 | Hardware discovery | ✓ ACPI | ✓ FDT | ✓ FDT | ✓ host |
 | MMU / paging | ✓ | ✓ | ✓ | — |
 | Context switch | ✓ | ✓ | ✓ | — |
