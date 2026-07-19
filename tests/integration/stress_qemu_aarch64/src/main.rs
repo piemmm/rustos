@@ -20,20 +20,28 @@
 //!    `reclaimable` panel, and `q` must return to the shell. This proves
 //!    timer-driven preemption, input delivery, IPC, and the system-information
 //!    service all progress while CPU workers issue no syscalls.
-//! 3. After `sysmon` returns, the script waits for the detached controller's
-//!    audited exit at the end of its full 120-second run, then types `exit`.
+//! 3. After `sysmon` returns, the script advances past the launcher's early
+//!    stress-worker syscalls and, on the next `comm=stress` line (the detached
+//!    controller waking to tear its 120-second run down), types `exit`. PASS
+//!    ordering does not depend on that marker — see below.
 //!
-//! ## Why the PASS keys on two `stress` exits *then* the shell's exit
+//! ## Why the PASS keys on two `stress` exits *and* the shell's exit
 //!
 //! `--background` creates two `comm=stress` audited exits: the foreground
 //! launcher after it has spawned the detached controller, then the detached
 //! controller after the full load and teardown. Workers are ended by
-//! `Terminate` and never invoke `exit`. The sink therefore arms only after
-//! both stress exits and reports PASS on the subsequent audited shell exit.
-//! The script cannot type that exit until `sysmon` has rendered, refreshed,
-//! quit, and the second stress exit appears after the restored prompt. A
+//! `Terminate` and never invoke `exit`. PASS requires all three witnesses —
+//! both `comm=stress` exits and the scripted `comm=elsh` exit — and fires
+//! once the *last* of them is observed, in **any** order. Order-independence
+//! is deliberate: the detached controller's exit and the shell's scripted
+//! `exit` are concurrent (the shell can exit while the reparented controller
+//! is still tearing down its 120-second run), so keying PASS on a fixed
+//! arrival order would race — exactly the flake this shape removes. The three
+//! events still each prove their property: the two stress exits that the full
+//! load spawned, pinned, dispatched, timed out, reaped and summarised; the
+//! shell exit that the console stayed interactive enough to accept it. A
 //! refused spawn, unresponsive console, failed teardown, or hung controller
-//! leaves a scripted marker unreached and the run fails loud by timeout.
+//! leaves a witness unreached and the run fails loud by timeout.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -60,7 +68,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -100,10 +108,11 @@ mod kernel {
     /// record is unambiguous.
     const CONTROLLER_COMM: &str = "stress";
 
-    /// The session shell's attested process name: the PASS finisher fires
-    /// on its audited `exit` — typed by the runner only after both
-    /// post-load `sysinfo` renders appeared — never on the intervening
-    /// `sysinfo` exits.
+    /// The session shell's attested process name. Its audited `exit` is one
+    /// of the three PASS witnesses; the runner types it once (`comm=sysmon`
+    /// exits in between never match), and it may arrive before or after the
+    /// detached controller's exit, so the finisher fires on whichever witness
+    /// completes the set.
     const SHELL_COMM: &str = "elsh";
 
     /// The foreground detach launcher and the detached load controller each
@@ -113,6 +122,9 @@ mod kernel {
 
     /// Number of audited `stress` exits observed by the sink.
     static STRESS_EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    /// Whether the scripted session shell's audited `exit` has been observed.
+    static SHELL_EXITED: AtomicBool = AtomicBool::new(false);
 
     /// The string value of `event`'s field `key`, if present.
     fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
@@ -129,9 +141,23 @@ mod kernel {
     }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports
-    /// PASS once both `stress` processes have exited and the shell's subsequent
-    /// scripted `exit` dispatches (see the module docs for the ordering proof).
+    /// PASS once both `stress` processes and the scripted session shell have
+    /// each dispatched their audited `exit`, in any order (see the module docs
+    /// for why the order is not fixed).
     struct StressSink;
+
+    impl StressSink {
+        /// Fire the QEMU success exit once every required witness has been
+        /// observed: both `stress` exits and the shell exit. Called after each
+        /// witness so PASS fires on whichever arrives last.
+        fn finish_if_complete() {
+            if SHELL_EXITED.load(Ordering::Acquire)
+                && STRESS_EXIT_COUNT.load(Ordering::Acquire) >= REQUIRED_STRESS_EXITS
+            {
+                qemu_exit::exit_success();
+            }
+        }
+    }
 
     impl Sink for StressSink {
         fn write_event(&self, event: &Event<'_>) {
@@ -144,11 +170,11 @@ mod kernel {
             match field_str(event, "comm") {
                 Some(CONTROLLER_COMM) => {
                     STRESS_EXIT_COUNT.fetch_add(1, Ordering::AcqRel);
+                    Self::finish_if_complete();
                 }
-                Some(SHELL_COMM)
-                    if STRESS_EXIT_COUNT.load(Ordering::Acquire) >= REQUIRED_STRESS_EXITS =>
-                {
-                    qemu_exit::exit_success();
+                Some(SHELL_COMM) => {
+                    SHELL_EXITED.store(true, Ordering::Release);
+                    Self::finish_if_complete();
                 }
                 _ => {}
             }

@@ -3756,16 +3756,17 @@ const TESTS: &[QemuTest] = &[
     // `stress --cpu 10 --timeout 120s --background`, requires the returned
     // prompt to accept `sysmon`, observes its `Pressure:` frame, refreshes to
     // the `reclaimable` panel, and quits back to the shell while ten CPU-bound
-    // workers saturate four CPUs. It then waits for the detached controller's
-    // audited `comm=stress` exit after the full 120-second run before typing
-    // `exit`. The first stress exit belongs to the foreground detach launcher
-    // and occurs before the returned prompt; advancing the serial-script cursor
-    // past the post-sysmon prompt makes the later `comm=stress` marker
-    // unambiguously the detached controller. The guest sink independently
-    // requires both stress exits before the shell's exit can report PASS. A
-    // 300-second guest budget covers boot, bounded PBKDF2, the required
-    // 120-second load, and teardown on QEMU TCG; four CPUs reproduce the RPi4
-    // saturation shape.
+    // workers saturate four CPUs. After the post-`sysmon` prompt it advances
+    // its serial cursor past the launcher's early stress-worker syscalls and,
+    // on the next `comm=stress` line (the detached controller waking to tear
+    // its 120-second run down), types `exit`. PASS is decided by the guest
+    // sink, which records three witnesses — both `comm=stress` exits (the
+    // foreground launcher and the detached controller) and the `comm=elsh`
+    // shell exit — and fires on whichever completes the set. The order is not
+    // fixed on purpose: the controller's exit and the shell's scripted `exit`
+    // are concurrent, so any ordering assumption would race. A 300-second
+    // guest budget covers boot, bounded PBKDF2, the required 120-second load,
+    // and teardown on QEMU TCG; four CPUs reproduce the RPi4 saturation shape.
     QemuTest {
         package: "tairix-test-stress-qemu-aarch64",
         binary: "tairix-test-stress-qemu-aarch64",
@@ -3796,10 +3797,15 @@ const TESTS: &[QemuTest] = &[
             // Raw input and a fresh sysinfo round trip remain live under load.
             ("reclaimable", Duration::ZERO, "q"),
             // Advance past the prompt restored by `sysmon`; the launcher's
-            // earlier stress exit is now outside the remaining search window.
+            // earlier stress-worker syscalls are now outside the search window.
             ("root@tairix ~% ", Duration::ZERO, ""),
-            // The detached controller exited only after its 120-second timeout
-            // tore down and reaped all ten workers.
+            // The next `comm=stress` line past that prompt is the detached
+            // controller waking to tear down its 120-second run, so the shell
+            // `exit` is typed while the controller is finishing. PASS ordering
+            // is not keyed on this marker: the guest sink fires once both
+            // `comm=stress` exits and this `comm=elsh` exit are observed, in
+            // any order, so the concurrent shell-exit / controller-exit race
+            // that this marker cannot disambiguate cannot flake the run.
             ("comm=stress", Duration::ZERO, "exit\n"),
         ],
     },
