@@ -1197,7 +1197,7 @@ fn audit_root_storage_binding(
                 height_px: video.height_px,
                 stride_bytes: video.stride_bytes,
                 format: video.format,
-                memory: tairix_abi::hwtree::FramebufferMemory::WriteBack,
+                memory: video.memory,
             },
             &mut sink,
         );

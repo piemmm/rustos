@@ -35,6 +35,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::driver::display::DisplayFormat;
+use tairix_abi::hwtree::FramebufferMemory;
 /// The framebuffer console's character cell, re-exported so the boot caller
 /// can size and blank the grid buffers it leaks into [`attach_console`]
 /// without naming `tairix_fbcon` directly.
@@ -191,6 +192,15 @@ pub struct DiscoveredVideo {
     pub stride_bytes: u32,
     /// Pixel encoding the surface was programmed with.
     pub format: DisplayFormat,
+    /// CPU mapping policy the surface backing requires when a user-space
+    /// display driver maps it. A framebuffer boot-console scan-out is
+    /// always CPU-written and read back by a display engine that does not
+    /// snoop the CPU caches (the Pi's `VideoCore` HVS, QEMU's `ramfb`
+    /// scan-out), so it needs write-combining (Normal non-cacheable)
+    /// memory to stay coherent without per-frame cache maintenance —
+    /// never write-back cacheable, which strands the CPU's writes in the
+    /// data cache and shows the display a stale, fragmented surface.
+    pub memory: FramebufferMemory,
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -557,6 +567,12 @@ mod metal {
             height_px: geometry.height_px,
             stride_bytes: geometry.stride_px * 4,
             format,
+            // Both bring-up paths (the Pi `VideoCore` mailbox surface and
+            // the QEMU `ramfb` surface) are linear scan-out RAM the CPU
+            // writes and a non-snooping display engine reads, so both
+            // require write-combining to stay coherent without per-frame
+            // cache maintenance.
+            memory: super::FramebufferMemory::WriteCombine,
         })
     }
 

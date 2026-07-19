@@ -126,7 +126,7 @@ mod tests {
             height_px: 768,
             stride_bytes: 1024 * 4,
             format: DisplayFormat::Bgra8888,
-            memory: FramebufferMemory::WriteBack,
+            memory: FramebufferMemory::WriteCombine,
         }
     }
 
@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(mode.format, DisplayFormat::Bgra8888);
         assert_eq!(
             resource.framebuffer_memory(),
-            Ok(FramebufferMemory::WriteBack)
+            Ok(FramebufferMemory::WriteCombine)
         );
     }
 
