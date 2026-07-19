@@ -17,6 +17,7 @@
 //! service so the weighted divisions stay in integer arithmetic
 //! (no floats in kernel paths, deterministic).
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_sync::SpinLock;
@@ -54,6 +55,15 @@ pub(crate) struct Entry {
 
 /// Mutable interior of a [`RunQueue`], guarded by one `SpinLock`.
 struct Inner {
+    /// Strict-priority real-time band, in FIFO arrival order. Any entry
+    /// here is dispatched (and stolen) before *any* eligible time-shared
+    /// entry in [`Self::ready`], regardless of virtual deadline — the
+    /// [`tairix_kernel_sched_api::SchedClass::Realtime`] guarantee. A task
+    /// re-enqueued after a yield goes to the back, so equal real-time peers
+    /// share the CPU round-robin. Real-time tasks carry no virtual time;
+    /// only [`Self::total_weight`] counts them (for load-balanced
+    /// placement). Bounded by [`Self::capacity`] like the fair set.
+    rt_ready: VecDeque<TaskId>,
     ready: Vec<Entry>,
     /// The CPU's current virtual time `V` (fixed point). Advances by
     /// `service * SCALE / total_weight` as the CPU dispatches work.
@@ -84,6 +94,7 @@ impl RunQueue {
         }
         Some(Self {
             inner: SpinLock::new(Inner {
+                rt_ready: VecDeque::new(),
                 ready: Vec::new(),
                 virtual_time: 0,
                 total_weight: 0,
@@ -108,6 +119,15 @@ impl RunQueue {
         g.virtual_time
     }
 
+    /// Account a real-time task joining this CPU's competition: add its
+    /// `weight` so load-balanced placement still counts it, without the
+    /// virtual-time placement the fair band's [`Self::admit_weight`]
+    /// performs (a real-time task carries no virtual time).
+    pub(crate) fn add_weight(&self, weight: u64) {
+        let mut g = self.inner.lock();
+        g.total_weight = g.total_weight.saturating_add(weight);
+    }
+
     /// Account a task leaving this CPU's competition: subtract `weight`.
     pub(crate) fn remove_weight(&self, weight: u64) {
         let mut g = self.inner.lock();
@@ -130,7 +150,8 @@ impl RunQueue {
     /// (`crate::Scheduler::dispatch`) reads this to arm the one-shot timer
     /// only when a CPU is contended.
     pub(crate) fn ready_len(&self) -> usize {
-        self.inner.lock().ready.len()
+        let g = self.inner.lock();
+        g.rt_ready.len() + g.ready.len()
     }
 
     /// Push a ready entry. Returns `Err(id)` if the queue is at its
@@ -141,6 +162,19 @@ impl RunQueue {
             return Err(entry.id);
         }
         g.ready.push(entry);
+        Ok(())
+    }
+
+    /// Push a real-time task onto the back of the strict-priority band
+    /// (FIFO / round-robin). Returns `Err(id)` if the band is at its
+    /// compile-time bound (the caller then routes it to overflow), exactly
+    /// like [`Self::push`].
+    pub(crate) fn push_rt(&self, id: TaskId) -> Result<(), TaskId> {
+        let mut g = self.inner.lock();
+        if g.rt_ready.len() >= g.capacity {
+            return Err(id);
+        }
+        g.rt_ready.push_back(id);
         Ok(())
     }
 
@@ -155,6 +189,16 @@ impl RunQueue {
     /// to pass).
     pub(crate) fn pick(&self) -> Option<Entry> {
         let mut g = self.inner.lock();
+        // Strict priority: any ready real-time task is dispatched before the
+        // earliest-deadline fair task, and does not advance the fair virtual
+        // clock (a real-time task carries no virtual time).
+        if let Some(id) = g.rt_ready.pop_front() {
+            return Some(Entry {
+                id,
+                eligible: 0,
+                deadline: 0,
+            });
+        }
         if g.ready.is_empty() {
             return None;
         }
@@ -205,6 +249,15 @@ impl RunQueue {
     /// the caller as the task changes owning CPU.
     pub(crate) fn steal(&self) -> Option<Entry> {
         let mut g = self.inner.lock();
+        // Steal a waiting real-time task first: moving it to an idle CPU
+        // shortens its dispatch latency, and it stays strict-priority there.
+        if let Some(id) = g.rt_ready.pop_front() {
+            return Some(Entry {
+                id,
+                eligible: 0,
+                deadline: 0,
+            });
+        }
         if g.ready.is_empty() {
             return None;
         }

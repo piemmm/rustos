@@ -24,7 +24,7 @@ use crate::arch::{CpuId, SchedulerArch};
 use crate::config::SchedulerConfig;
 use crate::error::SchedResult;
 use crate::outcome::{ExitDisposition, StepOutcome};
-use crate::task::{Priority, TaskAction, TaskContext, TaskId, TaskState};
+use crate::task::{Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
 
 /// The architecture-neutral contract every TAIRiX scheduler implements.
 ///
@@ -267,4 +267,42 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// * [`crate::SchedError::NoSuchTask`] if the id is unknown.
     /// * [`crate::SchedError::InvalidState`] if the task is not running.
     fn yield_current(&self, id: TaskId) -> SchedResult<()>;
+
+    /// Move `id` into the [`SchedClass`] `class`.
+    ///
+    /// The class is recorded at once and governs the task's **next
+    /// enqueue** onward: from the moment the task is next placed on a run
+    /// queue (its next wake from parked, or its next yield/quantum
+    /// re-enqueue) the policy must honour the strict-priority contract
+    /// documented on [`SchedClass`] — once a task is
+    /// [`SchedClass::Realtime`], every pick on any CPU dispatches it ahead
+    /// of any [`SchedClass::TimeShared`] task, and it is never preempted in
+    /// favour of one.
+    ///
+    /// A task that is `Running` (the usual caller — a task elevating
+    /// itself) or `Parked` therefore takes the new class the very next time
+    /// it becomes runnable, before it next competes, which is what an
+    /// interrupt-driven driver needs: it elevates itself, then blocks on its
+    /// IRQ, and every subsequent wake is strict-priority. A task that
+    /// happens to be sitting **Ready** in a run queue when its class changes
+    /// adopts the new band at its next dispatch rather than being surgically
+    /// moved between bands; a policy whose ready structure supports cheap
+    /// removal *may* re-place it immediately, but no policy is required to,
+    /// so the observable contract is identical across policies. Idempotent:
+    /// setting the class a task already holds is a successful no-op.
+    ///
+    /// Entry to [`SchedClass::Realtime`] is a privileged operation gated at
+    /// the syscall boundary (`CAP_SCHED_REALTIME`); the policy trusts the
+    /// caller and does not itself perform the capability check.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::InvalidState`] if the task is terminal.
+    fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()>;
+
+    /// The current [`SchedClass`] of `id`.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass>;
 }

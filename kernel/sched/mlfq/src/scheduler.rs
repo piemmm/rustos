@@ -16,8 +16,9 @@ use crate::loom_compat::{fence, AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
-    CoreClass, CpuId, ExitDisposition, Priority, SchedError, SchedResult, SchedulerArch,
-    SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError, SchedResult,
+    SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId,
+    TaskState,
 };
 
 /// Per-CPU scheduler state.
@@ -26,6 +27,12 @@ use crate::{
 /// access happens only through atomic fields and the per-band deques —
 /// there is no shared `Mutex<CpuState>`.
 struct CpuState {
+    /// Strict-priority real-time band. A task here is dispatched (and
+    /// stolen) before *any* time-shared band, and re-enqueued to the back
+    /// on yield (FIFO / round-robin among real-time peers) — the
+    /// [`SchedClass::Realtime`] guarantee. A real-time task never enters
+    /// `bands`; the MLFQ demotion/boost machinery does not apply to it.
+    rt: RunDeque,
     bands: [RunDeque; Priority::COUNT],
     /// Tick at which this CPU last completed a [`Scheduler::step`] that
     /// returned [`StepOutcome::Ran`]. Used by tests to assert progress.
@@ -44,6 +51,7 @@ impl CpuState {
     fn new(queue_capacity: usize) -> Option<Self> {
         let band = || RunDeque::try_new(queue_capacity);
         Some(Self {
+            rt: band()?,
             bands: [band()?, band()?, band()?],
             last_run_tick: AtomicU64::new(0),
             busy_ticks: AtomicU64::new(0),
@@ -53,6 +61,37 @@ impl CpuState {
 
     fn push_priority(&self, prio: Priority, id: TaskId) -> Result<(), TaskId> {
         self.bands[prio.as_index()].push(id)
+    }
+
+    /// Push a real-time task onto the back of the strict-priority band
+    /// (FIFO / round-robin). Returns `Err(id)` when the band is full, like
+    /// [`Self::push_priority`].
+    fn push_realtime(&self, id: TaskId) -> Result<(), TaskId> {
+        self.rt.push(id)
+    }
+
+    /// Enqueue `task` in its scheduling class: a real-time task onto the
+    /// strict-priority band, a time-shared task onto its `prio` band.
+    fn push_class(&self, class: SchedClass, prio: Priority, id: TaskId) -> Result<(), TaskId> {
+        if class.is_realtime() {
+            self.push_realtime(id)
+        } else {
+            self.push_priority(prio, id)
+        }
+    }
+
+    /// Consume the front real-time task, if any, ahead of every
+    /// time-shared band. Bounded lost-CAS retry, exactly as
+    /// [`Self::pop_highest`].
+    fn pop_realtime(&self) -> Option<TaskId> {
+        for _ in 0..8 {
+            match self.rt.steal() {
+                Steal::Stolen(id) => return Some(id),
+                Steal::Empty => return None,
+                Steal::Retry => {}
+            }
+        }
+        None
     }
 
     fn pop_highest(&self) -> Option<(Priority, TaskId)> {
@@ -79,6 +118,13 @@ impl CpuState {
     }
 
     fn steal_any(&self) -> Steal {
+        // The real-time band is stolen first: moving a waiting real-time
+        // task to an idle CPU shortens its dispatch latency, and it stays
+        // strict-priority there.
+        match self.rt.steal() {
+            Steal::Empty => {}
+            other => return other,
+        }
         for band in &self.bands {
             match band.steal() {
                 Steal::Empty => {}
@@ -91,9 +137,9 @@ impl CpuState {
     /// Whether any band holds a ready task. The running task sits in the
     /// current-task slot, not in a band, so a `true` here means there is a
     /// **competitor** the running task must be preempted for — the
-    /// tickless one-shot arming decision.
+    /// tickless one-shot arming decision. Includes the real-time band.
     fn has_ready_competitor(&self) -> bool {
-        self.bands.iter().any(RunDeque::has_ready)
+        self.rt.has_ready() || self.bands.iter().any(RunDeque::has_ready)
     }
 }
 
@@ -491,11 +537,12 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.cas_state(TaskState::Parked, TaskState::Ready)
             .map_err(|_| SchedError::InvalidState)?;
         let prio = task.load_priority();
+        let class = task.load_sched_class();
         let home = task.home_cpu.load(Ordering::Acquire);
         let target = self.preferred_home(prio, home);
         task.home_cpu.store(target, Ordering::Release);
         let cpu = self.cpu_state(target)?;
-        if cpu.push_priority(prio, task.id).is_err() {
+        if cpu.push_class(class, prio, task.id).is_err() {
             self.overflow.lock().push(task.id);
         }
         self.arch.send_ipi(target);
@@ -686,12 +733,18 @@ impl<A: SchedulerArch> Scheduler<A> {
         // 1. Drain overflow onto our local queue, best-effort.
         self.drain_overflow_to(me);
 
-        // 2. Local high → normal → low.
+        // 2. Strict priority: any local real-time task runs before every
+        //    time-shared band, regardless of MLFQ level.
+        if let Some(id) = me.pop_realtime() {
+            return Ok(self.dispatch(cpu, id));
+        }
+
+        // 3. Local time-shared bands: high → normal → low.
         if let Some((_band, id)) = me.pop_highest() {
             return Ok(self.dispatch(cpu, id));
         }
 
-        // 3. Work-stealing pass over the other CPUs.
+        // 4. Work-stealing pass over the other CPUs.
         if let Some(id) = self.try_steal(cpu) {
             return Ok(self.dispatch(cpu, id));
         }
@@ -702,12 +755,14 @@ impl<A: SchedulerArch> Scheduler<A> {
     fn drain_overflow_to(&self, me: &CpuState) {
         let mut g = self.overflow.lock();
         while let Some(id) = g.pop() {
-            let prio = self
+            let (class, prio) = self
                 .tasks
                 .read()
                 .get(&id)
-                .map_or(Priority::Normal, |t| t.load_priority());
-            if me.push_priority(prio, id).is_err() {
+                .map_or((SchedClass::TimeShared, Priority::Normal), |t| {
+                    (t.load_sched_class(), t.load_priority())
+                });
+            if me.push_class(class, prio, id).is_err() {
                 // Local queue full too — put it back and stop draining.
                 g.push(id);
                 break;
@@ -870,16 +925,32 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.clear_current(cpu);
         self.settle_run_accounting(cpu, &task, tick);
 
-        // Re-resolve external park/exit that may have raced with the body.
+        self.retire_park_or_requeue(&task, id, prio, cpu, action);
+        StepOutcome::Ran(id)
+    }
+
+    /// Resolve the effective disposition of a task whose body has just
+    /// returned `action` and apply it: retire it, park it, or re-enqueue it.
+    ///
+    /// The body's `action` is reconciled against external races. A
+    /// termination requested while the task executed
+    /// ([`ExitDisposition::Deferred`]) makes this dispatch own the final
+    /// transition to quiescence — the task is retired rather than
+    /// re-enqueued — *unless* it returned `Park`, which means it blocked
+    /// inside a syscall handler and still holds kernel state only its own
+    /// unwind can release; that kill is landed at the syscall boundary once
+    /// the handler unwinds, so the park is honoured and the task is resumed
+    /// to reach it. A concurrent external `park`/`exit` observed on the task
+    /// likewise wins over a stale `Yield`.
+    fn retire_park_or_requeue(
+        &self,
+        task: &Arc<TaskInner>,
+        id: TaskId,
+        prio: Priority,
+        cpu: CpuId,
+        action: TaskAction,
+    ) {
         let observed_state = task.load_state();
-        // A termination requested while this task was executing
-        // ([`ExitDisposition::Deferred`]): this dispatch owns the final
-        // transition to quiescence. Retire the task rather than re-enqueue
-        // a body that has been told to die — *unless* it returned `Park`,
-        // which means it blocked inside a syscall handler and still holds
-        // kernel state only its own unwind can release; that kill is landed
-        // at the syscall boundary once the handler unwinds, so honour the
-        // park here and let the task be resumed to reach it.
         let doomed = task.doomed.load(Ordering::Acquire);
         let effective = if doomed && action != TaskAction::Park {
             TaskAction::Exit
@@ -912,40 +983,51 @@ impl<A: SchedulerArch> Scheduler<A> {
                 task.store_state(TaskState::Parked);
                 fence(Ordering::SeqCst);
                 if task.take_wake_pending() {
-                    let _ = self.wake_from_parked(&task);
+                    let _ = self.wake_from_parked(task);
                 }
             }
-            TaskAction::Yield => {
-                let yields = task.yields_at_band.fetch_add(1, Ordering::AcqRel) + 1;
-                let new_prio = if yields >= self.config.yields_before_demotion {
-                    let demoted = prio.demote();
-                    if demoted != prio {
-                        task.yields_at_band.store(0, Ordering::Release);
-                    }
-                    demoted
-                } else {
-                    prio
-                };
-                task.priority.store(new_prio as u8, Ordering::Release);
-                task.store_state(TaskState::Ready);
-                // Re-place on a CPU of the class the (possibly demoted or
-                // boosted) priority now calls for. A task boosted to High
-                // migrates *up* to a performance core; one demoted to Low
-                // migrates back *down* to an efficiency core. On a
-                // homogeneous machine this resolves to the CPU it just ran
-                // on, so behaviour is unchanged.
-                let dest = self.preferred_home(new_prio, cpu);
-                task.home_cpu.store(dest, Ordering::Release);
-                let target = self
-                    .cpus
-                    .get(dest as usize)
-                    .unwrap_or(&self.cpus[cpu as usize]);
-                if target.push_priority(new_prio, id).is_err() {
-                    self.overflow.lock().push(id);
-                }
-            }
+            TaskAction::Yield => self.reenqueue_after_yield(task, id, prio, cpu),
         }
-        StepOutcome::Ran(id)
+    }
+
+    /// Re-enqueue `task` after a voluntary `Yield`, in its scheduling class.
+    ///
+    /// A **real-time** task keeps its priority (which selects its core class)
+    /// and re-enters the strict-priority band FIFO — round-robin among
+    /// real-time peers; the MLFQ band/demotion machinery is time-shared only,
+    /// so no demotion applies. A **time-shared** task runs the MLFQ demotion
+    /// rule (a full quantum of consecutive yields demotes it one band) and is
+    /// re-placed on a CPU of the class its (possibly demoted or boosted)
+    /// priority now calls for — a task boosted to `High` migrates *up* to a
+    /// performance core, one demoted to `Low` migrates back *down*; on a
+    /// homogeneous machine this resolves to the CPU it just ran on.
+    fn reenqueue_after_yield(&self, task: &TaskInner, id: TaskId, prio: Priority, cpu: CpuId) {
+        task.store_state(TaskState::Ready);
+        let (class, dest_prio) = if task.load_sched_class().is_realtime() {
+            (SchedClass::Realtime, prio)
+        } else {
+            let yields = task.yields_at_band.fetch_add(1, Ordering::AcqRel) + 1;
+            let new_prio = if yields >= self.config.yields_before_demotion {
+                let demoted = prio.demote();
+                if demoted != prio {
+                    task.yields_at_band.store(0, Ordering::Release);
+                }
+                demoted
+            } else {
+                prio
+            };
+            task.priority.store(new_prio as u8, Ordering::Release);
+            (SchedClass::TimeShared, new_prio)
+        };
+        let dest = self.preferred_home(dest_prio, cpu);
+        task.home_cpu.store(dest, Ordering::Release);
+        let target = self
+            .cpus
+            .get(dest as usize)
+            .unwrap_or(&self.cpus[cpu as usize]);
+        if target.push_class(class, dest_prio, id).is_err() {
+            self.overflow.lock().push(id);
+        }
     }
 
     /// Returns the total number of times the given task's body has been
@@ -1161,13 +1243,55 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.cas_state(TaskState::Running, TaskState::Ready)
             .map_err(|_| SchedError::InvalidState)?;
         let prio = task.load_priority();
+        let class = task.load_sched_class();
         let home = task.home_cpu.load(Ordering::Acquire);
         let cpu = self.cpu_state(home)?;
-        if cpu.push_priority(prio, id).is_err() {
+        if cpu.push_class(class, prio, id).is_err() {
             self.overflow.lock().push(id);
         }
         self.clear_current_matching(id);
         Ok(())
+    }
+
+    /// Move `id` into scheduling class `class`, governing its next enqueue
+    /// onward (see [`SchedulerPolicy::set_sched_class`]).
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`SchedError::InvalidState`] if the task is terminal.
+    pub fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()> {
+        let task = self
+            .tasks
+            .read()
+            .get(&id)
+            .cloned()
+            .ok_or(SchedError::NoSuchTask)?;
+        if task.load_state() == TaskState::Exited {
+            return Err(SchedError::InvalidState);
+        }
+        // Record the class; every enqueue point (`wake_from_parked`, the
+        // dispatch yield path, overflow drain, `yield_current`) reads it and
+        // routes the task to the matching band, so a task adopts the class
+        // the next time it is placed on a run queue — its next wake or
+        // yield. The usual caller elevates itself while Running, so it is
+        // strict-priority from its very next wake. A task already sitting in
+        // a time-shared band keeps that slot until its next enqueue (the
+        // Chase–Lev deque supports no arbitrary removal); this matches the
+        // policy-neutral contract.
+        task.store_sched_class(class);
+        Ok(())
+    }
+
+    /// The current [`SchedClass`] of `id`.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    pub fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass> {
+        self.tasks
+            .read()
+            .get(&id)
+            .map(|t| t.load_sched_class())
+            .ok_or(SchedError::NoSuchTask)
     }
 
     /// Publish `id` as the current task on `cpu`. Out-of-range `cpu`
@@ -1310,6 +1434,14 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
 
     fn yield_current(&self, id: TaskId) -> SchedResult<()> {
         Scheduler::yield_current(self, id)
+    }
+
+    fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()> {
+        Scheduler::set_sched_class(self, id, class)
+    }
+
+    fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass> {
+        Scheduler::sched_class(self, id)
     }
 }
 

@@ -1771,6 +1771,36 @@ impl SyscallNumber {
     /// cleared on exit.
     pub const SIGNAL_INTAKE: Self = Self(94);
 
+    /// Set the calling task's **scheduling class** — enter or leave the
+    /// strict-priority real-time band (`plans/USB.md`; `SchedClass`).
+    ///
+    /// Argument: `realtime` (`u32` boolean — non-zero requests the
+    /// strict-priority real-time scheduling class, zero requests the fair
+    /// time-shared class; the `SchedClass` type lives in `kernel/sched/api`).
+    /// Returns an error code
+    /// (`Ok(0)` on success). Self-only: a task can set only *its own* class,
+    /// so there is no target-task argument and no way to reclass another
+    /// principal (no ambient authority).
+    ///
+    /// Gated by [`crate::CapabilityId::SCHED_REALTIME`]: a real-time task is
+    /// dispatched ahead of every time-shared task on its CPU and is never
+    /// preempted by one, so a CPU-bound workload cannot delay it — the
+    /// guarantee an interrupt-serving driver needs (the microkernel
+    /// threaded-IRQ / `SCHED_FIFO` analogue). The whole syscall carries the
+    /// gate, in both directions: a task's scheduling class is per-task state
+    /// and the capability is static (a signed manifest request intersected
+    /// with the user's grants), so only a capability holder is ever
+    /// real-time and only a holder ever needs to leave the class — gating
+    /// both directions denies nothing a legitimate caller could do while
+    /// keeping the privileged direction (entering) firmly closed to everyone
+    /// else (fail closed; no ambient authority). The change governs the
+    /// task's next enqueue onward; the usual caller elevates itself once at
+    /// start-up, then blocks on its device IRQ, so every subsequent wake is
+    /// strict-priority. Every call is audited: entering or leaving strict
+    /// priority is a security-relevant scheduling decision, and the volume
+    /// is low (once per driver start), so the record cannot drown the log.
+    pub const SCHED_SET_REALTIME: Self = Self(95);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -2024,6 +2054,7 @@ mod tests {
         assert_eq!(SyscallNumber::USERS_ADMIN.as_u16(), 69);
         assert_eq!(SyscallNumber::PORT_BIND.as_u16(), 88);
         assert_eq!(SyscallNumber::BOOT_FACTS_GET.as_u16(), 89);
+        assert_eq!(SyscallNumber::SCHED_SET_REALTIME.as_u16(), 95);
     }
 
     #[test]

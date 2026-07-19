@@ -2331,6 +2331,33 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SCHED_SET_REALTIME,
+        name: "sched_set_realtime",
+        arg_count: 1,
+        args: [
+            // `realtime` boolean: non-zero enters the strict-priority
+            // real-time class, zero returns to the fair time-shared class.
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Entering the real-time class lets a task preempt every ordinary
+        // task on its CPU system-wide, so the whole syscall is gated on the
+        // dedicated capability. A task's scheduling class is per-task state
+        // and the capability is static, so only a holder is ever real-time
+        // and only a holder ever needs to leave the class: gating both
+        // directions denies a legitimate caller nothing while keeping the
+        // privileged direction firmly closed. Audited per call: entering or
+        // leaving strict priority is a security-relevant scheduling
+        // decision, and the volume is low (once per driver start).
+        required_capability: Some(CapabilityId::SCHED_REALTIME),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

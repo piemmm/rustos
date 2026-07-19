@@ -13,7 +13,9 @@
 
 // Re-export the policy-neutral vocabulary so the rest of `kernel/core`
 // names one canonical definition.
-pub(crate) use tairix_kernel_sched_api::{CpuId, SchedError, SchedulerArch, SchedulerConfig};
+pub(crate) use tairix_kernel_sched_api::{
+    CpuId, SchedClass, SchedError, SchedulerArch, SchedulerConfig,
+};
 
 /// The concrete scheduler policy selected for this image.
 ///

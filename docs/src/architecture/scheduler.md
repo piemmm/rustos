@@ -299,6 +299,67 @@ suite's `heterogeneous_topology_preserves_liveness` test runs a mixed
 cores, asserting no task is stranded, lost, or duplicated. Each policy's
 own unit tests assert *where* tasks land.
 
+## Real-time scheduling class
+
+`Priority` (`High`/`Normal`/`Low`) is a *nice level* within the fair band —
+it tunes weight and core-class placement but never lets a task escape fair
+competition. Orthogonal to it is the **scheduling class**, `SchedClass`
+(`kernel/sched/api`), with two values:
+
+* `SchedClass::TimeShared` — the default (and every newly spawned task): the
+  fair band governed by the selected policy (CFQ/EEVDF/MLFQ) exactly as
+  described above.
+* `SchedClass::Realtime` — a strict-priority band that sits **above** the
+  entire fair band on every CPU.
+
+The contract every policy enforces is strict:
+
+* a ready real-time task is dispatched before **any** time-shared task on its
+  CPU, regardless of the time-shared task's accumulated virtual runtime,
+  priority, or wait time;
+* a running real-time task is **never** preempted in favour of a time-shared
+  task — only another real-time task, a voluntary block/yield, or termination
+  takes the CPU from it;
+* real-time peers on one CPU are ordered FIFO and re-enqueued at the back on
+  yield, so equal peers share the CPU round-robin (the `SCHED_RR` shape) and
+  none starves another.
+
+This is the microkernel analogue of a threaded-IRQ / `SCHED_FIFO` grant: an
+interrupt-serving user-space driver woken by its device IRQ must run *now*,
+ahead of any CPU-bound workload, so it can service the device before the
+hardware ring it polls drains. The xHCI USB host controller is the first user
+(`plans/USB.md`): under `stress --cpu N` its IRQ-woken report pump would
+otherwise merely compete with the CPU hogs and could be scheduled too late to
+re-arm the interrupt-IN endpoints, dropping input reports; in the real-time
+class the IRQ wake preempts the hogs and the pump runs within
+interrupt-return + context-switch latency.
+
+A task enters or leaves the class with the `sched_set_realtime` syscall
+(`SyscallNumber::SCHED_SET_REALTIME`, wrapped by `tairix_rt::sched_set_realtime`),
+which is **self-only** — a task can reclass only itself, keyed by the
+kernel-trusted caller id — and gated in both directions by the dedicated
+capability `CAP_SCHED_REALTIME`. Because scheduling class is per-task state
+and the capability is static (a signed manifest request intersected with the
+user's grants), only a holder is ever real-time and only a holder ever needs
+to leave the class, so gating both directions denies a legitimate caller
+nothing while keeping the privileged direction firmly closed. A real-time task
+that never blocks would monopolise its CPU against time-shared work; that is
+inherent to strict priority and is bounded by making the class a guarded
+capability granted only to trusted, IRQ-driven drivers. `set_sched_class`
+records the class; the task adopts it at its next enqueue (its next wake or
+yield), which for the usual caller — a driver that elevates itself once at
+start-up and then blocks on its device IRQ — means every subsequent wake is
+strict-priority.
+
+The class is a property of the *kernel*, not of any one policy: it is honoured
+identically by CFQ, EEVDF, and MLFQ (each keeps a separate strict-priority
+band its `step` consults before the fair band), and the shared
+`kernel/sched/api` conformance suite pins the guarantee for every policy
+(`realtime_is_dispatched_ahead_of_a_full_time_shared_queue`,
+`realtime_is_not_preempted_by_time_shared_then_releases_on_park`,
+`realtime_peers_share_the_cpu_round_robin`,
+`sched_class_reports_and_fails_closed_on_unknown`).
+
 ## IPI-based preemption hook
 
 The scheduler never sleeps or busy-waits on its own. It signals

@@ -252,7 +252,10 @@ pub fn service_caps() -> CapabilitySet {
 /// `vl805`) that publish enumerated devices and reload controller firmware;
 /// [`CapabilityId::SHM`] / [`CapabilityId::IPC_ENDPOINT`] for the
 /// USB host-controller driver and its HID class driver to stand up and submit
-/// on the per-interface URB transport; and [`CapabilityId::FS_MOUNT`] for the
+/// on the per-interface URB transport; [`CapabilityId::SCHED_REALTIME`] for the
+/// USB host-controller driver to enter the real-time scheduling class so its
+/// IRQ-woken report pump cannot be starved by CPU-bound work; and
+/// [`CapabilityId::FS_MOUNT`] for the
 /// `volmgr` storage-policy driver to request the audited kernel attach of
 /// each recognised volume. A driver whose
 /// manifest does not request them receives nothing extra (the per-driver
@@ -314,6 +317,13 @@ pub fn autoload_caps() -> CapabilitySet {
     // binds, so no ambient authority).
     caps.insert(CapabilityId::SHM);
     caps.insert(CapabilityId::IPC_ENDPOINT);
+    // The USB host-controller driver (`drivers/bus/usb/xhci`) elevates itself
+    // to the real-time scheduling class so its IRQ-woken report pump preempts
+    // CPU-bound work and interrupt-IN capture cannot be starved (`plans/USB.md`).
+    // That elevation is gated on `CAP_SCHED_REALTIME`, so the delegatable set
+    // carries it; the per-driver manifest intersection still binds, so a driver
+    // that does not request it receives nothing extra (no ambient authority).
+    caps.insert(CapabilityId::SCHED_REALTIME);
     // The `volmgr` storage-policy driver probes its bound block-service node
     // read-only and asks the kernel to attach each recognised volume through
     // `volume_attach`, which the kernel gates on `CAP_FS_MOUNT` (and
@@ -859,6 +869,12 @@ mod tests {
             // itself (no ambient authority).
             CapabilityId::SHM,
             CapabilityId::IPC_ENDPOINT,
+            // The USB host-controller driver elevates itself to the real-time
+            // scheduling class (`CAP_SCHED_REALTIME`) so its IRQ-woken report
+            // pump cannot be starved by CPU-bound work — delegatable to a
+            // signed manifest that requests it, never held by the kthread
+            // itself (no ambient authority).
+            CapabilityId::SCHED_REALTIME,
             // An autoloaded user-space driver emits its structured
             // diagnostics through `log_emit` (`CAP_LOG_EMIT`) — delegatable
             // to a signed manifest that requests it, never held by the

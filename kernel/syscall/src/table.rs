@@ -620,6 +620,26 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Set the calling task's scheduling class — enter (`realtime` true) or
+    /// leave (false) the strict-priority real-time band (`plans/USB.md`).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SCHED_REALTIME`] — the whole syscall is gated in both
+    /// directions, since a task's scheduling class is per-task state and the
+    /// capability is static, so only a holder is ever real-time and only a
+    /// holder ever leaves the class. This handler acts solely on the
+    /// caller's own task, keyed by the kernel-trusted caller id (never a
+    /// caller-supplied target). Setting the class the task already holds is
+    /// success.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no scheduler class
+    /// control wired never pretends a task's priority changed. The real
+    /// handler is installed in `kernel/core`.
+    fn sched_set_realtime(&self, _caller: &CallerContext<'_>, _realtime: bool) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Copy the system user database (`/System/Security/Users`) the kernel
     /// loaded at boot out to the user buffer at `buf` (
     /// `plans/PI.md` P11).
@@ -2396,6 +2416,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let op = SignalIntakeOp::from_u32(decode_u32(args.0[0]))?;
                 self.handlers.signal_intake(caller, op)
             }
+            SyscallNumber::SCHED_SET_REALTIME => {
+                // args[0] is a `u32` boolean: non-zero enters the
+                // strict-priority real-time class, zero returns to fair.
+                let realtime = decode_u32(args.0[0]) != 0;
+                self.handlers.sched_set_realtime(caller, realtime)
+            }
             SyscallNumber::WAIT => {
                 // `validate_arg` guarantees args[0] is a sign-extended
                 // `i32`; recover it by truncating the low 32 bits (the
@@ -3419,6 +3445,13 @@ mod tests {
             // real intake bookkeeping here.
             Ok(u64::from(op.as_u32()))
         }
+        fn sched_set_realtime(&self, _c: &CallerContext<'_>, realtime: bool) -> SyscallResult {
+            self.record("sched_set_realtime");
+            // Echo the decoded boolean back so the reachability test can
+            // assert the dispatcher decoded it without wiring the real
+            // scheduler class control here.
+            Ok(u64::from(realtime))
+        }
         fn users_db_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
             self.record("users_db_read");
             // Echo the capacity back so the reachability test can assert
@@ -4157,6 +4190,7 @@ mod tests {
                 CapabilityId::SEAT_ADMIN,
                 CapabilityId::FS_MOUNT,
                 CapabilityId::MEM_PIN,
+                CapabilityId::SCHED_REALTIME,
             ],
             &sink,
         );

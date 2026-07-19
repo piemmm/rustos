@@ -138,6 +138,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  92 | `mem_pin`      | —                                       | `errno`       | `CAP_MEM_PIN` | yes   |
 |  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
 |  94 | `signal_intake` | `u32 op`                               | `u64` (value) | —             | yes   |
+|  95 | `sched_set_realtime` | `u32 realtime`                    | `errno`       | `CAP_SCHED_REALTIME` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -312,6 +313,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
 | `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
+| `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -806,6 +808,29 @@ a swap tier": pages still fault in lazily, zero-on-free and encryption
 guarantees are unchanged, and the process stays killable. First-party
 Rust wrappers are `tairix_rt::mem_pin` / `tairix_rt::mem_unpin`; C stubs
 `tairix_sys_mem_pin` / `tairix_sys_mem_unpin`.
+
+`sched_set_realtime` (no. 95) sets the calling task's **scheduling class**:
+`realtime` non-zero enters the strict-priority real-time band
+(`SchedClass::Realtime`), zero returns to the fair time-shared class. A
+real-time task is dispatched ahead of every time-shared task on its CPU and
+is never preempted by one, so a CPU-bound workload cannot delay its wake —
+the microkernel threaded-IRQ / `SCHED_FIFO` analogue an interrupt-serving
+driver needs to service its device before a hardware ring drains (the xHCI
+USB host controller is the first holder; see
+[the scheduler](scheduler.md#real-time-scheduling-class) and `plans/USB.md`).
+It is **self-only** — a task can reclass only itself, keyed by the
+kernel-trusted caller id, never a caller-supplied target (no ambient
+authority) — and gated by `CAP_SCHED_REALTIME` in both directions: because
+scheduling class is per-task state and the capability is static, only a
+holder is ever real-time and only a holder ever leaves the class, so gating
+both denies a legitimate caller nothing while keeping entry firmly closed.
+The handler records the class on the caller's own scheduler task (a plain
+atomic store, no run-queue mutation, so it is safe from inside the caller's
+in-flight dispatch) and the task adopts it at its next enqueue; the usual
+caller elevates itself once at start-up, then blocks on its device IRQ, so
+every subsequent wake is strict-priority. Every call is audited. First-party
+Rust wrapper `tairix_rt::sched_set_realtime`; C stub
+`tairix_sys_sched_set_realtime`.
 
 `wait` (no. 16) is likewise **ungated**: a process may only wait on its
 *own* children, so reaping one grants no authority over any other

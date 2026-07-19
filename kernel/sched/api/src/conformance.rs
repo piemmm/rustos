@@ -30,7 +30,7 @@ use crate::config::SchedulerConfig;
 use crate::error::SchedError;
 use crate::outcome::{ExitDisposition, StepOutcome};
 use crate::policy::SchedulerPolicy;
-use crate::task::{Priority, TaskAction, TaskState};
+use crate::task::{Priority, SchedClass, TaskAction, TaskState};
 
 /// Run the entire conformance suite against scheduler policy `S`.
 ///
@@ -50,6 +50,10 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     load_observations_track_dispatch::<S>();
     no_starvation_under_priority_boost::<S>();
     fairness_no_band_is_starved::<S>();
+    realtime_is_dispatched_ahead_of_a_full_time_shared_queue::<S>();
+    realtime_is_not_preempted_by_time_shared_then_releases_on_park::<S>();
+    realtime_peers_share_the_cpu_round_robin::<S>();
+    sched_class_reports_and_fails_closed_on_unknown::<S>();
     smp_stress_four_cores::<S>();
     heterogeneous_topology_preserves_liveness::<S>();
 }
@@ -526,6 +530,200 @@ fn fairness_no_band_is_starved<S: SchedulerPolicy<TestArch>>() {
         low_runs.load(Ordering::Relaxed) > 0,
         "low-band task is not starved (priority boost gives it turns)"
     );
+}
+
+/// A [`SchedClass::Realtime`] task is dispatched ahead of a CPU whose fair
+/// run queue is already full of ready time-shared tasks, regardless of its
+/// virtual runtime — the strict-priority guarantee. This is the property an
+/// IRQ-woken driver relies on: it must run *now*, before any CPU-bound
+/// workload, so it can service its device before the hardware ring it polls
+/// drains. Modelled on the single-CPU worst case (a queue packed with fair
+/// competitors) through the public surface only.
+fn realtime_is_dispatched_ahead_of_a_full_time_shared_queue<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+
+    // Pack CPU 0 with perpetually-runnable fair tasks and let them cycle so
+    // they accrue virtual runtime and settle into the ready set — the loaded
+    // machine an interrupt arrives on.
+    for _ in 0..5 {
+        sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("spawn fair hog");
+    }
+    for _ in 0..10 {
+        let _ = sched.step(0).expect("step");
+        arch.advance_ticks(1);
+    }
+
+    // A real-time task arrives exactly as an IRQ-woken driver does: admitted
+    // parked, classed realtime, then unparked (the wake). Its vruntime is at
+    // the front, but strict priority — not vruntime — must decide the pick.
+    let rt = sched
+        .spawn_parked(0, Priority::Normal, |_| TaskAction::Park)
+        .expect("spawn_parked rt");
+    sched
+        .set_sched_class(rt, SchedClass::Realtime)
+        .expect("class it realtime");
+    assert_eq!(
+        sched.sched_class(rt),
+        Ok(SchedClass::Realtime),
+        "the class change is observable"
+    );
+    sched.unpark(rt).expect("wake the realtime task");
+
+    // The very next step dispatches the realtime task, ahead of every ready
+    // fair task on the CPU — never one fair pick first.
+    assert_eq!(
+        sched.step(0),
+        Ok(StepOutcome::Ran(rt)),
+        "the realtime task preempts a full fair queue on the next pick"
+    );
+}
+
+/// While a [`SchedClass::Realtime`] task stays runnable it is dispatched on
+/// every pick ahead of ready time-shared tasks (never preempted by fair
+/// work); once it voluntarily blocks (`Park`), the CPU is released to the
+/// time-shared band. This pins both halves of the strict-priority contract
+/// — fair work cannot steal the CPU from a runnable realtime task, and a
+/// realtime task that blocks does not wedge the fair band.
+fn realtime_is_not_preempted_by_time_shared_then_releases_on_park<S: SchedulerPolicy<TestArch>>() {
+    // A realtime task that runs this many quanta then blocks.
+    const RT_QUANTA: u64 = 5;
+
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+
+    let fair_runs = Arc::new(AtomicU64::new(0));
+    for _ in 0..3 {
+        let fr = fair_runs.clone();
+        sched
+            .spawn(0, Priority::Normal, move |_| {
+                fr.fetch_add(1, Ordering::Relaxed);
+                TaskAction::Yield
+            })
+            .expect("spawn fair");
+    }
+
+    // Admitted parked, classed realtime, then woken — the interrupt-driven-
+    // driver shape, and the path the class contract guarantees for every
+    // policy.
+    let rt_runs = Arc::new(AtomicU64::new(0));
+    let rr = rt_runs.clone();
+    let rt = sched
+        .spawn_parked(0, Priority::Normal, move |_| {
+            if rr.fetch_add(1, Ordering::Relaxed) + 1 >= RT_QUANTA {
+                TaskAction::Park
+            } else {
+                TaskAction::Yield
+            }
+        })
+        .expect("spawn_parked rt");
+    sched
+        .set_sched_class(rt, SchedClass::Realtime)
+        .expect("class it realtime");
+    sched.unpark(rt).expect("wake the realtime task");
+
+    // Every step until the realtime task blocks dispatches the realtime task
+    // and only it: no fair task runs while a realtime task is runnable.
+    for _ in 0..RT_QUANTA {
+        assert_eq!(
+            sched.step(0),
+            Ok(StepOutcome::Ran(rt)),
+            "the realtime task holds the CPU against fair work"
+        );
+        assert_eq!(
+            fair_runs.load(Ordering::Relaxed),
+            0,
+            "no time-shared task runs while the realtime task is runnable"
+        );
+    }
+    assert_eq!(sched.state_of(rt), TaskState::Parked, "it blocked");
+    assert_eq!(rt_runs.load(Ordering::Relaxed), RT_QUANTA);
+
+    // With the realtime task blocked, the fair band is released and runs.
+    let _ = sched.step(0).expect("step");
+    assert!(
+        fair_runs.load(Ordering::Relaxed) > 0,
+        "a blocked realtime task does not wedge the time-shared band"
+    );
+}
+
+/// Two runnable [`SchedClass::Realtime`] peers on one CPU share it
+/// round-robin (FIFO re-enqueue on yield), so neither realtime task starves
+/// the other. Strict priority is *between* classes; within the realtime
+/// class the peers alternate.
+fn realtime_peers_share_the_cpu_round_robin<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+
+    let a_runs = Arc::new(AtomicU64::new(0));
+    let b_runs = Arc::new(AtomicU64::new(0));
+    let ar = a_runs.clone();
+    let br = b_runs.clone();
+    let a = sched
+        .spawn_parked(0, Priority::Normal, move |_| {
+            ar.fetch_add(1, Ordering::Relaxed);
+            TaskAction::Yield
+        })
+        .expect("spawn_parked rt a");
+    let b = sched
+        .spawn_parked(0, Priority::Normal, move |_| {
+            br.fetch_add(1, Ordering::Relaxed);
+            TaskAction::Yield
+        })
+        .expect("spawn_parked rt b");
+    sched
+        .set_sched_class(a, SchedClass::Realtime)
+        .expect("a realtime");
+    sched
+        .set_sched_class(b, SchedClass::Realtime)
+        .expect("b realtime");
+    sched.unpark(a).expect("wake a");
+    sched.unpark(b).expect("wake b");
+
+    for _ in 0..20 {
+        let _ = sched.step(0).expect("step");
+        arch.advance_ticks(1);
+    }
+    let a_final = a_runs.load(Ordering::Relaxed);
+    let b_final = b_runs.load(Ordering::Relaxed);
+    assert!(a_final > 0 && b_final > 0, "both realtime peers ran");
+    let (hi, lo) = (a_final.max(b_final), a_final.min(b_final));
+    assert!(
+        hi - lo <= 1,
+        "realtime peers alternate evenly (round-robin): {a_final} vs {b_final}"
+    );
+}
+
+/// `sched_class` reports the current class and fails closed on an unknown
+/// id; `set_sched_class` likewise refuses an unknown id rather than
+/// fabricating a task.
+fn sched_class_reports_and_fails_closed_on_unknown<S: SchedulerPolicy<TestArch>>() {
+    let (_arch, sched) = make::<S>(1, 64);
+    assert_eq!(
+        sched.sched_class(999),
+        Err(SchedError::NoSuchTask),
+        "class of an unknown id is refused"
+    );
+    assert_eq!(
+        sched.set_sched_class(999, SchedClass::Realtime),
+        Err(SchedError::NoSuchTask),
+        "classing an unknown id is refused"
+    );
+    let id = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+        .expect("spawn");
+    assert_eq!(
+        sched.sched_class(id),
+        Ok(SchedClass::TimeShared),
+        "a task is born time-shared"
+    );
+    // Idempotent: re-setting the class a task already holds is a no-op.
+    sched
+        .set_sched_class(id, SchedClass::TimeShared)
+        .expect("idempotent no-op");
+    assert_eq!(sched.sched_class(id), Ok(SchedClass::TimeShared));
 }
 
 /// Deadlock-free, lossless, bounded-latency dispatch of a large task

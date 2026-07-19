@@ -56,5 +56,6 @@
 #define TAIRIX_CAP_MEM_PIN ((uint16_t)34u)
 #define TAIRIX_CAP_NET_ADMIN ((uint16_t)35u)
 #define TAIRIX_CAP_NET ((uint16_t)36u)
+#define TAIRIX_CAP_SCHED_REALTIME ((uint16_t)37u)
 
 #endif /* TAIRIX_CAPABILITY_H */

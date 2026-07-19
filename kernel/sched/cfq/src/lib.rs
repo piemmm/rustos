@@ -73,8 +73,9 @@ mod task;
 // (`tairix_kernel_sched_cfq::{Scheduler, Priority, …}`) resolve to the
 // single canonical definitions in `kernel/sched/api` (no duplication).
 pub use tairix_kernel_sched_api::{
-    CoreClass, CpuId, ExitDisposition, Priority, SchedError, SchedResult, SchedulerArch,
-    SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,
+    CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError, SchedResult,
+    SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId,
+    TaskState,
 };
 
 #[cfg(any(test, feature = "test-arch"))]

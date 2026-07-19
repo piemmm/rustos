@@ -225,6 +225,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn sched_set_realtime(&self, _c: &CallerContext<'_>, _realtime: bool) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn rlimit_get(&self, _c: &CallerContext<'_>, _kind: u32, _out: u64) -> SyscallResult {
         self.bump();
         Ok(0)

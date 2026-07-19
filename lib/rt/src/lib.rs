@@ -112,6 +112,8 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_MEM_PIN: u64 = SyscallNumber::MEM_PIN.as_u16() as u64;
 /// `signal_intake` syscall number (as above).
 const NUM_SIGNAL_INTAKE: u64 = SyscallNumber::SIGNAL_INTAKE.as_u16() as u64;
+/// `sched_set_realtime` syscall number (as above).
+const NUM_SCHED_SET_REALTIME: u64 = SyscallNumber::SCHED_SET_REALTIME.as_u16() as u64;
 
 /// `mem_unpin` syscall number (as above).
 const NUM_MEM_UNPIN: u64 = SyscallNumber::MEM_UNPIN.as_u16() as u64;
@@ -1438,6 +1440,32 @@ pub fn signal_intake(op: SignalIntakeOp) -> i64 {
     // validates the op and acts only on the caller's own intake. No user
     // pointer is passed.
     let ret = unsafe { raw_syscall(NUM_SIGNAL_INTAKE, [u64::from(op.as_u32()), 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Set the calling task's scheduling class — enter (`realtime` true) or
+/// leave (false) the strict-priority real-time band
+/// (`SyscallNumber::SCHED_SET_REALTIME`, `plans/USB.md`).
+///
+/// A real-time task is dispatched ahead of every time-shared task on its
+/// CPU and is never preempted by one, so a CPU-bound workload cannot delay
+/// its wake — the guarantee an interrupt-serving driver needs (the
+/// microkernel threaded-IRQ / `SCHED_FIFO` analogue). The whole call is
+/// gated by `CAP_SCHED_REALTIME` in both directions; the usual caller
+/// elevates itself once at start-up, then blocks on its device IRQ, so
+/// every subsequent wake is strict-priority.
+///
+/// Returns `0` on success (setting the class the task already holds is
+/// success) or `-errno` (recover the [`tairix_abi::Errno`] discriminant as
+/// `-ret`): `PermissionDenied` without the capability. The wrapper hides no
+/// error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn sched_set_realtime(realtime: bool) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel checks the
+    // capability and acts only on the caller's own task on the far side of
+    // the trap. No user pointer is passed.
+    let ret = unsafe { raw_syscall(NUM_SCHED_SET_REALTIME, [u64::from(realtime), 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -4714,6 +4742,35 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(mem_pin(), want);
+        });
+    }
+
+    #[test]
+    fn sched_set_realtime_marshals_the_class_boolean() {
+        // Entering the real-time class marshals `1`; leaving marshals `0`.
+        let (number, args) = capture(0, || {
+            assert_eq!(sched_set_realtime(true), 0);
+        });
+        assert_eq!(number, NUM_SCHED_SET_REALTIME);
+        assert_eq!(args[0], 1);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(sched_set_realtime(false), 0);
+        });
+        assert_eq!(number, NUM_SCHED_SET_REALTIME);
+        assert_eq!(args[0], 0);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn sched_set_realtime_surfaces_negative_errno_encoding() {
+        // A refused entry (no capability) surfaces unchanged so the driver
+        // can report the refusal rather than silently run time-shared.
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(sched_set_realtime(true), want);
         });
     }
 
