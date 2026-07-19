@@ -7,10 +7,14 @@
 //! `--help` answer with the bundle's own short help. `lspci` takes no
 //! positional operands; one is a usage error, never silently ignored.
 //!
-//! TAIRiX's hardware model has no PCI bus/device/function address — a
-//! discovered function is a hardware-tree node with a stable node id — so
-//! the `-s` selector names that node id (the same deliberate divergence
-//! `lsusb`'s bus/device numbers make; the Help document states it).
+//! TAIRiX's hardware model has no PCI bus/device/function address, so the
+//! listing numbers each device with a small, stable sequence number
+//! assigned in bus order (shown as `#<n>`) rather than the opaque
+//! hardware-tree node id — which the bootstrap-floor probes and the
+//! boot-display shim mint from a high reserved id space, producing huge
+//! meaningless values. The `-s` selector names that displayed number (the
+//! same deliberate divergence `lsusb`'s bus/device numbers make; the Help
+//! document states it).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -60,7 +64,8 @@ pub struct Options {
     pub tree: bool,
     /// `-d`: keep only functions matching the vendor/device filter.
     pub device: Option<DeviceFilter>,
-    /// `-s`: keep only the function with this hardware-tree node id.
+    /// `-s`: keep only the function with this displayed listing number
+    /// (the small, bus-order `#<n>` the listing shows, not a node id).
     pub slot: Option<u32>,
 }
 
@@ -73,7 +78,7 @@ pub enum ParseError {
     MissingValue(&'static str),
     /// A `-d` value that is not `[<vendor>]:[<device>]` in hex.
     BadDeviceFilter(String),
-    /// A `-s` value that is not a decimal hardware-tree node id.
+    /// A `-s` value that is not a decimal listing number.
     BadSlot(String),
     /// A positional operand; `lspci` takes none.
     UnexpectedOperand(String),
@@ -88,10 +93,7 @@ impl fmt::Display for ParseError {
                 write!(f, "-d expects [<vendor>]:[<device>] in hex, got '{value}'")
             }
             Self::BadSlot(value) => {
-                write!(
-                    f,
-                    "-s expects a decimal hardware-tree node id, got '{value}'"
-                )
+                write!(f, "-s expects a decimal listing number, got '{value}'")
             }
             Self::UnexpectedOperand(arg) => write!(f, "unexpected operand '{arg}'"),
         }

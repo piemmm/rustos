@@ -8,8 +8,8 @@ lspci — list discovered PCI/PCIe devices
 
 ## DESCRIPTION
 
-Lists, one line per discovered PCI/PCIe function, the function's
-hardware-tree node id, its class, and its vendor and device names. The
+Lists, one line per discovered PCI/PCIe function, a small listing
+number, the function's class, and its vendor and device names. The
 inventory is the hardware tree — the system's single device inventory —
 read through the System Information API, which requires the
 `CAP_SYSINFO_HW` capability; a refusal is reported on standard error
@@ -23,12 +23,14 @@ on the standard information stream (fd 3). If the bundled table is
 missing or fails validation, the listing degrades to numeric ids with
 the reason on standard error — the inventory itself is still listed.
 
-TAIRiX records no PCI `bus:device.function` address: a function's
-stable address is its hardware-tree node id, shown as `#<node>`, and
-`-s` selects that node id (a deliberate, documented divergence from
-Linux's `lspci`). The `-k` kernel-driver view is not offered yet: the
-system does not publish driver-binding records, and `lspci` reports
-only what the system actually records.
+TAIRiX records no PCI `bus:device.function` address. Instead each
+listed device is given a small, stable number assigned in bus order,
+shown as `#<n>`, and `-s` selects that number (a deliberate, documented
+divergence from Linux's `lspci`). The number is *not* the internal
+hardware-tree node id, which comes from a reserved space and can be a
+large, meaningless value. The `-k` kernel-driver view is not offered
+yet: the system does not publish driver-binding records, and `lspci`
+reports only what the system actually records.
 
 ## OPTIONS
 
@@ -37,18 +39,20 @@ only what the system actually records.
 - `-v` — after each function, list the resources its tree node
   declares (MMIO windows, IRQ lines, I/O ports, DMA constraints) —
   the capability-grant requests the tree records, not live state.
-- `-t` — render the functions as a tree under their bus parents.
+- `-t` — render the functions as a tree under their bus parents; each
+  intermediate bus line names its class and match-key identity, and
+  under `-v` (`-tv`) shows its declared resources too.
 - `-d [<vendor>]:[<device>]` — list only functions matching the given
   vendor/device ids (hex); an omitted half matches any.
-- `-s <node>` — list only the function with the given hardware-tree
-  node id (decimal).
+- `-s <node>` — list only the function with the given listing number
+  (the decimal `#<n>` shown in the listing).
 - `-?, --help` — show this command's own short help.
 
 ## EXAMPLES
 
 - `lspci` — every discovered PCI function, with names.
 - `lspci -nn` — the same, with the numeric ids alongside.
-- `lspci -v -s 7` — node 7's line plus its declared resources.
+- `lspci -v -s 7` — device `#7`'s line plus its declared resources.
 - `lspci -d 1af4:` — every function from vendor `1af4` (virtio).
 - `lspci -t` — the functions under their bus topology.
 

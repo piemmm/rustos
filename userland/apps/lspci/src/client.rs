@@ -23,10 +23,22 @@ pub const USAGE: &str = "usage: lspci [-n | -nn] [-v] [-t] [-d [<vendor>]:[<devi
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "lspci";
 
-/// One discovered PCI function: its tree identity and the numeric
-/// identity its match key carries.
+/// The fetched hardware tree in the shape the renderers need: the node
+/// records, their stable bus-order traversal, and the per-node display
+/// index those two derive. Grouped so the render paths take one view
+/// rather than three parallel slices.
+struct TreeView<'a> {
+    nodes: &'a [HwNode],
+    order: &'a [usize],
+    index_of: &'a [u32],
+}
+
+/// One discovered PCI function: its stable listing index (a small,
+/// bus-order sequence number, *not* the opaque hardware-tree node id),
+/// its tree node, and the numeric identity its match key carries.
 struct Function<'a> {
     node: &'a HwNode,
+    index: u32,
     vendor: u16,
     device: u16,
     class24: u32,
@@ -65,12 +77,18 @@ pub fn run(
 
     let nodes = hwtree::fetch_tree(transport).map_err(LspciError::from)?;
     let order = hwtree::bus_order(&nodes);
+    // A small, stable, 1-based listing number per node, assigned in bus
+    // order. This is the identifier the listing shows and `-s` selects
+    // on — never the opaque hardware-tree node id, which a bootstrap-floor
+    // probe or the boot-display shim mints from a high reserved space
+    // (values like `#2147614721`) that means nothing to a user.
+    let index_of = display_index(&nodes, &order);
 
     // The PCI functions, in stable bus order (parent-chain order from the
     // tree), then filtered by `-s` / `-d`.
     let mut functions: Vec<Function<'_>> = Vec::new();
-    for &index in &order {
-        let node = &nodes[index];
+    for &position in &order {
+        let node = &nodes[position];
         let Some(key) = node
             .match_keys()
             .iter()
@@ -80,6 +98,7 @@ pub fn run(
         };
         let function = Function {
             node,
+            index: index_of[position],
             vendor: key.vendor(),
             device: key.product(),
             class24: key.class(),
@@ -90,12 +109,17 @@ pub fn run(
         functions.push(function);
     }
 
+    let view = TreeView {
+        nodes: &nodes,
+        order: &order,
+        index_of: &index_of,
+    };
     let mut unnamed = 0u64;
     if options.tree {
-        render_tree(&options, &nodes, &functions, database, out, &mut unnamed)?;
+        render_tree(&options, &view, &functions, database, out, &mut unnamed)?;
     } else {
         for function in &functions {
-            let mut line = format!("#{} ", function.node.id());
+            let mut line = format!("#{} ", function.index);
             push_identity(&mut line, &options, function, database, &mut unnamed);
             line.push('\n');
             out.write_all(line.as_bytes()).map_err(LspciError::Output)?;
@@ -110,10 +134,55 @@ pub fn run(
     Ok(())
 }
 
+/// A small, stable, 1-based listing number for every node, assigned in
+/// bus order (`order` is the bus-order index list from
+/// [`hwtree::bus_order`]). Indexed by a node's position in `nodes`, so a
+/// node's number is looked up in O(1). This replaces surfacing the opaque
+/// hardware-tree node id — which the bootstrap-floor probes and the
+/// boot-display shim mint from a high reserved id space (huge values like
+/// `2147614721`) — with the compact topological position a user expects,
+/// exactly as `lsusb` shows small bus/device numbers rather than node ids.
+fn display_index(nodes: &[HwNode], order: &[usize]) -> Vec<u32> {
+    let mut index_of = alloc::vec![0u32; nodes.len()];
+    for (rank, &position) in order.iter().enumerate() {
+        // The node count is bounded by the discovered hardware and the
+        // rank never exceeds it, so the 1-based number fits a `u32` on
+        // every target; the saturating fallback is unreachable in
+        // practice and simply avoids an unwrap on an infallible path.
+        index_of[position] = u32::try_from(rank + 1).unwrap_or(u32::MAX);
+    }
+    index_of
+}
+
+/// A terse identity for a context (bus/bridge) node in a `-t` view,
+/// drawn from its first informative match key: the `compatible` string
+/// discovery recorded, or the `vendor:device` / virtio id a numeric key
+/// carries. `None` when the node has no informative key, so the caller
+/// shows only the class label rather than an empty bracket.
+fn context_identity(node: &HwNode) -> Option<String> {
+    for key in node.match_keys() {
+        match key.kind() {
+            Some(HwMatchKind::Compatible) => {
+                if let Ok(text) = core::str::from_utf8(key.compatible_bytes()) {
+                    if !text.is_empty() {
+                        return Some(String::from(text));
+                    }
+                }
+            }
+            Some(HwMatchKind::Pci | HwMatchKind::Usb) => {
+                return Some(format!("{:04x}:{:04x}", key.vendor(), key.product()));
+            }
+            Some(HwMatchKind::Virtio) => return Some(format!("virtio {}", key.class())),
+            None => {}
+        }
+    }
+    None
+}
+
 /// `true` if `function` passes the `-s` / `-d` filters.
 fn selected(options: &Options, function: &Function<'_>) -> bool {
     if let Some(slot) = options.slot {
-        if function.node.id() != slot {
+        if function.index != slot {
             return false;
         }
     }
@@ -181,43 +250,57 @@ fn push_identity(
 }
 
 /// Render the `-t` topology view: every PCI function under its ancestor
-/// chain, ancestors that lead to a PCI function shown as `#<id> <class>`
-/// context lines, indentation one step per tree level.
+/// chain, ancestors that lead to a PCI function shown as
+/// `#<index> <class> [<identity>]` context lines, indentation one step per
+/// tree level.
+///
+/// A context (bus/bridge) line names the node's terse match-key identity
+/// when it has one (its `compatible` string, or a numeric `vendor:device`),
+/// so an intermediate bus is genuinely informative rather than a bare
+/// `#<index> bus`. Under `-v` (`-tv`) a context node's declared resources
+/// are shown too, exactly as a function's are.
 fn render_tree(
     options: &Options,
-    nodes: &[HwNode],
+    view: &TreeView<'_>,
     functions: &[Function<'_>],
     database: Option<&DevIds<'_>>,
     out: &dyn Output,
     unnamed: &mut u64,
 ) -> Result<(), LspciError> {
+    let nodes = view.nodes;
     // Which nodes are (or contain) a selected PCI function.
     let selected_ids: Vec<u32> = functions.iter().map(|f| f.node.id()).collect();
     let keep = hwtree::keep_with_ancestors(nodes, &selected_ids);
 
     // Depth-first over the kept nodes, in the same stable bus order.
-    for &index in &hwtree::bus_order(nodes) {
-        if !keep[index] {
+    for &position in view.order {
+        if !keep[position] {
             continue;
         }
-        let node = &nodes[index];
+        let node = &nodes[position];
         let depth = hwtree::depth_of(nodes, node);
         let mut line = String::new();
         for _ in 0..depth {
             line.push_str("  ");
         }
         if let Some(function) = functions.iter().find(|f| f.node.id() == node.id()) {
-            let _ = write!(line, "#{} ", node.id());
+            let _ = write!(line, "#{} ", function.index);
             push_identity(&mut line, options, function, database, unnamed);
         } else {
-            let _ = write!(line, "#{} {}", node.id(), hwtree::class_label(node.class()));
+            let _ = write!(
+                line,
+                "#{} {}",
+                view.index_of[position],
+                hwtree::class_label(node.class())
+            );
+            if let Some(identity) = context_identity(node) {
+                let _ = write!(line, " [{identity}]");
+            }
         }
         line.push('\n');
         out.write_all(line.as_bytes()).map_err(LspciError::Output)?;
         if options.verbose {
-            if let Some(function) = functions.iter().find(|f| f.node.id() == node.id()) {
-                render_resources(function.node.resources(), depth + 1, out)?;
-            }
+            render_resources(node.resources(), depth + 1, out)?;
         }
     }
     Ok(())
@@ -583,13 +666,71 @@ C 02  Network controller
     fn tree_view_shows_the_parent_chain() {
         let (out, result) = run_case(&["-t"], Ok(fixture_tree()), true);
         result.expect("listing succeeds");
+        // Context (bus) nodes name their match-key identity so an
+        // intermediate bus is informative, not a bare `#n bus`.
         assert_eq!(
             out.lines(),
             [
-                "#1 bus",
-                "  #2 bus",
+                "#1 bus [fixture,root]",
+                "  #2 bus [fixture,pcie]",
                 "    #3 Ethernet controller: Red Hat, Inc. Virtio network device",
                 "    #4 Class 0106: Vendor 8086 Device 2922",
+            ]
+        );
+    }
+
+    /// A tree whose nodes carry the *huge* synthetic ids the bootstrap-floor
+    /// probes and the boot-display shim mint (a reserved space based at
+    /// `0x8000_0000`): a root bus at `0x8002_0000` and a PCI function at
+    /// `0x8002_0001` — the exact shape that used to print as `#2147614721`.
+    fn synthetic_id_tree() -> Vec<u8> {
+        let synthetic_root = 0x8002_0000;
+        let synthetic_fn = 0x8002_0001;
+        let mut root = HwNode::new(synthetic_root, HW_NODE_ROOT, HwDeviceClass::Bus);
+        root.push_match_key(HwMatchKey::compatible(b"synthetic,bus").expect("fits"))
+            .expect("key fits");
+        let mut nic = HwNode::new(synthetic_fn, synthetic_root, HwDeviceClass::Network);
+        nic.push_match_key(HwMatchKey::pci(0x1af4, 0x1000, 0x02_00_00))
+            .expect("key fits");
+
+        let nodes = [root, nic];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HwTreeHeader::new(1, nodes.len() as u64).to_le_bytes());
+        for node in nodes {
+            bytes.extend_from_slice(&node.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn huge_synthetic_node_ids_render_as_small_sequential_numbers() {
+        // The regression: a function on a node with a huge reserved
+        // synthetic id must list as a small `#n`, never the raw id.
+        let (out, result) = run_case(&[], Ok(synthetic_id_tree()), true);
+        result.expect("listing succeeds");
+        // The root bus is #1, the PCI function is #2 — no huge number.
+        assert_eq!(
+            out.lines(),
+            ["#2 Ethernet controller: Red Hat, Inc. Virtio network device"]
+        );
+
+        // `-s` selects on that displayed number, not the node id.
+        let (out, result) = run_case(&["-s", "2"], Ok(synthetic_id_tree()), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines(),
+            ["#2 Ethernet controller: Red Hat, Inc. Virtio network device"]
+        );
+
+        // The tree view numbers the context bus small too and names its
+        // identity.
+        let (out, result) = run_case(&["-t"], Ok(synthetic_id_tree()), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines(),
+            [
+                "#1 bus [synthetic,bus]",
+                "  #2 Ethernet controller: Red Hat, Inc. Virtio network device",
             ]
         );
     }

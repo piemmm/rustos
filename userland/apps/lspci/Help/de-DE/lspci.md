@@ -8,8 +8,8 @@ lspci — erkannte PCI/PCIe-Geräte auflisten
 
 ## DESCRIPTION
 
-Listet, eine Zeile je erkannter PCI/PCIe-Funktion, die
-Hardwarebaum-Knotennummer der Funktion, ihre Klasse sowie Hersteller-
+Listet, eine Zeile je erkannter PCI/PCIe-Funktion, eine kleine
+Listennummer, die Klasse der Funktion sowie Hersteller-
 und Gerätenamen. Das Inventar ist der Hardwarebaum — das einzige
 Geräteinventar des Systems — gelesen über die
 Systeminformations-API, die die Capability `CAP_SYSINFO_HW` verlangt;
@@ -26,10 +26,13 @@ nicht, fällt die Auflistung auf numerische Kennungen zurück, mit der
 Begründung auf der Standardfehlerausgabe — das Inventar selbst wird
 weiterhin aufgelistet.
 
-TAIRiX führt keine PCI-Adresse `bus:device.function`: Die stabile
-Adresse einer Funktion ist ihre Hardwarebaum-Knotennummer, angezeigt
-als `#<node>`, und `-s` wählt diese Nummer aus (eine bewusste,
-dokumentierte Abweichung vom Linux-`lspci`). Die `-k`-Ansicht
+TAIRiX führt keine PCI-Adresse `bus:device.function`. Stattdessen
+erhält jedes aufgelistete Gerät eine kleine, stabile Nummer, die in
+Bus-Reihenfolge vergeben und als `#<n>` angezeigt wird; `-s` wählt
+diese Nummer aus (eine bewusste, dokumentierte Abweichung vom
+Linux-`lspci`). Diese Nummer ist *nicht* die interne
+Hardwarebaum-Knotennummer, die aus einem reservierten Bereich stammt
+und ein großer, bedeutungsloser Wert sein kann. Die `-k`-Ansicht
 (Kerneltreiber) wird noch nicht angeboten: Das System veröffentlicht
 keine Treiberbindungs-Datensätze, und `lspci` meldet nur, was das
 System tatsächlich verzeichnet.
@@ -43,19 +46,21 @@ System tatsächlich verzeichnet.
   deklariert (MMIO-Fenster, IRQ-Leitungen, E/A-Ports,
   DMA-Beschränkungen) — die verzeichneten Capability-Anforderungen,
   kein Live-Zustand.
-- `-t` — die Funktionen als Baum unter ihren Bus-Eltern darstellen.
+- `-t` — die Funktionen als Baum unter ihren Bus-Eltern darstellen;
+  jede Zwischenbus-Zeile nennt ihre Klasse und Match-Key-Identität und
+  zeigt mit `-v` (`-tv`) auch ihre deklarierten Ressourcen.
 - `-d [<vendor>]:[<device>]` — nur Funktionen mit den angegebenen
   Kennungen (hexadezimal) auflisten; eine ausgelassene Hälfte passt
   auf alles.
-- `-s <node>` — nur die Funktion mit der angegebenen
-  Hardwarebaum-Knotennummer (dezimal) auflisten.
+- `-s <node>` — nur die Funktion mit der angegebenen Listennummer
+  (die dezimale `#<n>` aus der Auflistung) auflisten.
 - `-?, --help` — die Kurzhilfe dieses Kommandos anzeigen.
 
 ## EXAMPLES
 
 - `lspci` — jede erkannte PCI-Funktion, mit Namen.
 - `lspci -nn` — dasselbe, mit den numerischen Kennungen daneben.
-- `lspci -v -s 7` — die Zeile von Knoten 7 samt deklarierter
+- `lspci -v -s 7` — die Zeile von Gerät `#7` samt deklarierter
   Ressourcen.
 - `lspci -d 1af4:` — jede Funktion des Herstellers `1af4` (virtio).
 - `lspci -t` — die Funktionen unter ihrer Bus-Topologie.

@@ -8,8 +8,8 @@ lspci — listar os dispositivos PCI/PCIe descobertos
 
 ## DESCRIPTION
 
-Lista, uma linha por função PCI/PCIe descoberta, o identificador do nó
-da árvore de hardware da função, a sua classe e os nomes do fabricante
+Lista, uma linha por função PCI/PCIe descoberta, um pequeno número de
+lista, a sua classe e os nomes do fabricante
 e do dispositivo. O inventário é a árvore de hardware — o inventário
 único de dispositivos do sistema — lida através da API de informação
 do sistema, que exige a capacidade `CAP_SYSINFO_HW`; uma recusa é
@@ -24,10 +24,13 @@ número de tais dispositivos é anotado no fluxo de informação padrão
 degrada para identificadores numéricos com a razão no erro padrão — o
 inventário em si continua a ser listado.
 
-O TAIRiX não regista um endereço PCI `bus:device.function`: o endereço
-estável de uma função é o identificador do seu nó da árvore de
-hardware, mostrado como `#<node>`, e `-s` seleciona esse identificador
-(uma divergência deliberada e documentada face ao `lspci` do Linux). A
+O TAIRiX não regista um endereço PCI `bus:device.function`. Em vez
+disso, cada dispositivo listado recebe um pequeno número estável
+atribuído por ordem de barramento, mostrado como `#<n>`, e `-s`
+seleciona esse número (uma divergência deliberada e documentada face ao
+`lspci` do Linux). Esse número *não* é o identificador de nó interno da
+árvore de hardware, que provém de um espaço reservado e pode ser um
+valor grande e sem significado. A
 vista `-k` (controlador do núcleo) ainda não é oferecida: o sistema
 não publica registos de vinculação de controladores, e o `lspci`
 apenas comunica o que o sistema realmente regista.
@@ -41,19 +44,22 @@ apenas comunica o que o sistema realmente regista.
 - `-v` — após cada função, listar os recursos que o seu nó declara
   (janelas MMIO, linhas IRQ, portas de E/S, restrições DMA) — os
   pedidos de concessão registados, não estado em tempo real.
-- `-t` — representar as funções como árvore sob os barramentos pais.
+- `-t` — representar as funções como árvore sob os barramentos pais;
+  cada linha de barramento intermédio nomeia a sua classe e a sua
+  identidade de chave de correspondência e, com `-v` (`-tv`), mostra
+  também os recursos que declara.
 - `-d [<vendor>]:[<device>]` — listar apenas as funções que
   correspondam aos identificadores dados (hexadecimal); uma metade
   omitida corresponde a qualquer valor.
-- `-s <node>` — listar apenas a função com o identificador de nó dado
-  (decimal).
+- `-s <node>` — listar apenas a função com o número de lista dado
+  (o `#<n>` decimal mostrado na listagem).
 - `-?, --help` — mostrar a ajuda curta deste comando.
 
 ## EXAMPLES
 
 - `lspci` — cada função PCI descoberta, com nomes.
 - `lspci -nn` — o mesmo, com os identificadores numéricos ao lado.
-- `lspci -v -s 7` — a linha do nó 7 mais os recursos declarados.
+- `lspci -v -s 7` — a linha do dispositivo `#7` mais os recursos declarados.
 - `lspci -d 1af4:` — cada função do fabricante `1af4` (virtio).
 - `lspci -t` — as funções na sua topologia de barramentos.
 

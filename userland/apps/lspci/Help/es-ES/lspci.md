@@ -8,8 +8,8 @@ lspci — listar los dispositivos PCI/PCIe descubiertos
 
 ## DESCRIPTION
 
-Muestra, una línea por función PCI/PCIe descubierta, el identificador
-de nodo del árbol de hardware de la función, su clase y los nombres de
+Muestra, una línea por función PCI/PCIe descubierta, un pequeño número
+de lista, la clase de la función y los nombres de
 su fabricante y dispositivo. El inventario es el árbol de hardware —
 el inventario único de dispositivos del sistema — leído a través de la
 API de información del sistema, que exige la capacidad
@@ -26,11 +26,13 @@ validación, el listado degrada a identificadores numéricos con la
 razón en la salida de error estándar — el inventario en sí sigue
 listándose.
 
-TAIRiX no registra una dirección PCI `bus:device.function`: la
-dirección estable de una función es su identificador de nodo del árbol
-de hardware, mostrado como `#<node>`, y `-s` selecciona ese
-identificador (una divergencia deliberada y documentada respecto al
-`lspci` de Linux). La vista `-k` (controlador del núcleo) aún no se
+TAIRiX no registra una dirección PCI `bus:device.function`. En su lugar,
+cada dispositivo listado recibe un pequeño número estable asignado en
+orden de bus, mostrado como `#<n>`, y `-s` selecciona ese número (una
+divergencia deliberada y documentada respecto al `lspci` de Linux). Ese
+número *no* es el identificador de nodo interno del árbol de hardware,
+que proviene de un espacio reservado y puede ser un valor grande y sin
+significado. La vista `-k` (controlador del núcleo) aún no se
 ofrece: el sistema no publica registros de vinculación de
 controladores, y `lspci` solo informa de lo que el sistema realmente
 registra.
@@ -45,19 +47,21 @@ registra.
   (ventanas MMIO, líneas IRQ, puertos de E/S, restricciones DMA) —
   las solicitudes de concesión registradas, no estado en vivo.
 - `-t` — representar las funciones como un árbol bajo sus buses
-  padres.
+  padres; cada línea de bus intermedio nombra su clase y su identidad
+  de clave de coincidencia, y con `-v` (`-tv`) muestra también sus
+  recursos declarados.
 - `-d [<vendor>]:[<device>]` — listar solo las funciones que
   coincidan con los identificadores dados (hexadecimal); una mitad
   omitida coincide con cualquiera.
-- `-s <node>` — listar solo la función con el identificador de nodo
-  dado (decimal).
+- `-s <node>` — listar solo la función con el número de lista dado
+  (el `#<n>` decimal mostrado en el listado).
 - `-?, --help` — mostrar la ayuda corta de este comando.
 
 ## EXAMPLES
 
 - `lspci` — cada función PCI descubierta, con nombres.
 - `lspci -nn` — lo mismo, con los identificadores numéricos al lado.
-- `lspci -v -s 7` — la línea del nodo 7 más sus recursos declarados.
+- `lspci -v -s 7` — la línea del dispositivo `#7` más sus recursos declarados.
 - `lspci -d 1af4:` — cada función del fabricante `1af4` (virtio).
 - `lspci -t` — las funciones bajo su topología de bus.
 

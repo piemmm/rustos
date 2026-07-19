@@ -3,8 +3,8 @@
 A `plans/DEVICES.md` DEVICE1 command app (`AGENTS.md` §3
 `userland/apps/`), registered as the system app store bundle `lspci.app`
 so the shell resolves the bare word `lspci` to it. `lspci` lists, one
-line per discovered PCI/PCIe function, the function's hardware-tree node
-id, its class, and its vendor and device names. The option surface
+line per discovered PCI/PCIe function, a small bus-order listing number,
+the function's class, and its vendor and device names. The option surface
 follows `pciutils` over what the TAIRiX model actually carries
 (`AGENTS.md` §16.7): `-n`/`-nn` numeric modes, `-v` declared resources,
 `-t` bus topology, `-d [<vendor>]:[<device>]` and `-s <node>` filters.
@@ -33,8 +33,10 @@ error — the inventory itself is never withheld over a naming aid.
 
 Documented divergences from Linux `pciutils` (`AGENTS.md` §16.7,
 divergence-by-concept): TAIRiX records no PCI `bus:device.function`
-triple, so a function's address is its stable hardware-tree node id
-(`#<node>`) and `-s` selects that id; subsystem ids are not recorded by
+triple, so each listed device is given a small, stable number assigned
+in bus order (shown `#<n>`) and `-s` selects that number — never the
+internal hardware-tree node id, which comes from a reserved id space
+and can be a large, meaningless value; subsystem ids are not recorded by
 the hardware tree today, so no subsystem lines are shown; `-k` (bound
 kernel driver) is not offered until the system publishes driver-binding
 records — the tool reports only what the system actually records

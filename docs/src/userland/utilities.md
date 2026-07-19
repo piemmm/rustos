@@ -140,8 +140,9 @@ fail-closed paths.
 
 `tairix-lspci` is the `pciutils` `lspci` over what the TAIRiX model
 actually carries (`plans/DEVICES.md` DEVICE1 V2, `AGENTS.md` §16.7): one
-line per discovered PCI/PCIe function — its hardware-tree node id, class
-name, and vendor + device names. The inventory is the hardware tree read
+line per discovered PCI/PCIe function — a small bus-order listing
+number, its class name, and vendor + device names. The inventory is the
+hardware tree read
 through the `CAP_SYSINFO_HW`-gated `sysinfo-v1` `HARDWARE_TREE` query
 (the shared paged `tairix_procinfo::hwtree::fetch_tree` walk — never a
 `/proc` and never a kernel bypass), fail-closed whole `HwNode` records
@@ -156,10 +157,14 @@ on the volume, covered by the signed `AppInfo` content hash — never
 table degrades the whole listing to numeric ids with the reason on
 standard error. `-n`/`-nn` select the numeric modes, `-v` lists the
 node's declared resources (the capability-grant requests the tree
-records), `-t` renders the bus topology, and `-d
-[<vendor>]:[<device>]`/`-s <node>` filter. Documented divergences:
-TAIRiX records no `bus:device.function` triple (the address is the
-stable node id, `#<node>`), no subsystem ids, and no `-k` until the
+records), `-t` renders the bus topology — naming each intermediate bus
+by its class and match-key identity, and under `-tv` its declared
+resources too — and `-d [<vendor>]:[<device>]`/`-s <node>` filter.
+Documented divergences: TAIRiX records no `bus:device.function`
+triple, so each listed device is given a small, stable bus-order number
+(shown `#<n>`) that `-s` selects — never the internal hardware-tree
+node id, which comes from a reserved id space and can be a large,
+meaningless value; no subsystem ids, and no `-k` until the
 system publishes driver-binding records. Manifest: `CAP_CONSOLE_WRITE` +
 `CAP_FS_ACCESS` + `CAP_SYSINFO_HW`. `cargo test -p tairix-lspci` drives
 the parser, the naming/fallback/filter/tree/verbose renders, the

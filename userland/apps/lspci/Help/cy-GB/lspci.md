@@ -8,8 +8,8 @@ lspci — rhestru'r dyfeisiau PCI/PCIe a ddarganfuwyd
 
 ## DESCRIPTION
 
-Yn rhestru, un llinell i bob swyddogaeth PCI/PCIe a ddarganfuwyd,
-dynodwr nod coeden galedwedd y swyddogaeth, ei dosbarth, ac enwau'r
+Yn rhestru, un llinell i bob swyddogaeth PCI/PCIe a ddarganfuwyd, rhif
+rhestr bach, dosbarth y swyddogaeth, ac enwau'r
 gwneuthurwr a'r ddyfais. Y rhestr yw'r goeden galedwedd — unig
 restr ddyfeisiau'r system — a ddarllenir drwy API gwybodaeth y system,
 sy'n gofyn am y gallu `CAP_SYSINFO_HW`; adroddir gwrthodiad ar y gwall
@@ -24,10 +24,12 @@ sydd wedi'i gynnwys ar goll neu'n methu'r dilysu, mae'r rhestr yn
 dirywio i ddynodwyr rhifol gyda'r rheswm ar y gwall safonol — rhestrir
 y rhestr ei hun o hyd.
 
-Nid yw TAIRiX yn cofnodi cyfeiriad PCI `bus:device.function`: cyfeiriad
-sefydlog swyddogaeth yw dynodwr ei nod yn y goeden galedwedd, a
-ddangosir fel `#<node>`, ac mae `-s` yn dewis y dynodwr hwnnw
+Nid yw TAIRiX yn cofnodi cyfeiriad PCI `bus:device.function`. Yn lle
+hynny rhoddir i bob dyfais a restrir rif bach, sefydlog a neilltuir yn
+nhrefn y bws, a ddangosir fel `#<n>`, ac mae `-s` yn dewis y rhif hwnnw
 (gwyriad bwriadol, wedi'i ddogfennu, oddi wrth `lspci` Linux). Nid
+dynodwr nod mewnol y goeden galedwedd yw'r rhif hwn; daw'r dynodwr nod
+o le neilltuedig a gall fod yn werth mawr, diystyr. Nid
 yw'r olwg `-k` (gyrrwr cnewyllyn) ar gael eto: nid yw'r system yn
 cyhoeddi cofnodion rhwymo gyrwyr, ac mae `lspci` ond yn adrodd yr hyn
 y mae'r system yn ei gofnodi mewn gwirionedd.
@@ -40,19 +42,22 @@ y mae'r system yn ei gofnodi mewn gwirionedd.
 - `-v` — ar ôl pob swyddogaeth, rhestru'r adnoddau y mae ei nod yn eu
   datgan (ffenestri MMIO, llinellau IRQ, pyrth M/A, cyfyngiadau DMA)
   — y ceisiadau grant a gofnodwyd, nid cyflwr byw.
-- `-t` — dangos y swyddogaethau fel coeden o dan eu bysiau rhiant.
+- `-t` — dangos y swyddogaethau fel coeden o dan eu bysiau rhiant;
+  mae pob llinell bws ganol yn enwi ei dosbarth a hunaniaeth ei allwedd
+  gyfatebol, a chyda `-v` (`-tv`) yn dangos yr adnoddau y mae'n eu
+  datgan hefyd.
 - `-d [<vendor>]:[<device>]` — rhestru dim ond y swyddogaethau sy'n
   cyfateb i'r dynodwyr a roddwyd (hecsadegol); mae hanner a
   hepgorwyd yn cyfateb i unrhyw beth.
-- `-s <node>` — rhestru dim ond y swyddogaeth â'r dynodwr nod a
-  roddwyd (degol).
+- `-s <node>` — rhestru dim ond y swyddogaeth â'r rhif rhestr a
+  roddwyd (y `#<n>` degol a ddangosir yn y rhestr).
 - `-?, --help` — dangos cymorth byr y gorchymyn hwn.
 
 ## EXAMPLES
 
 - `lspci` — pob swyddogaeth PCI a ddarganfuwyd, gydag enwau.
 - `lspci -nn` — yr un peth, gyda'r dynodwyr rhifol wrth eu hymyl.
-- `lspci -v -s 7` — llinell nod 7 ynghyd â'i adnoddau datganedig.
+- `lspci -v -s 7` — llinell dyfais `#7` ynghyd â'i adnoddau datganedig.
 - `lspci -d 1af4:` — pob swyddogaeth gan y gwneuthurwr `1af4`
   (virtio).
 - `lspci -t` — y swyddogaethau o dan eu topoleg bysiau.
