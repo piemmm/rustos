@@ -79,26 +79,41 @@ to the outer frame.
 
 ## 2. Stages
 
+**Status:** Stage A is **done**; Stages B–E are **planned** (not started). Per
+the User's direction, one full stage lands per change.
+
 Each stage lands complete — its rendering for **both** dark and light themes,
 reduced-motion and high-contrast behaviour, its pointer/keyboard/focus paths,
 and its `#[cfg(test)]` tests — before the next begins.
 
-### Stage A — WM depends on `lib/controls`; frame layout + reserved client rect
+### Stage A — WM depends on `lib/controls`; frame layout + reserved client rect — DONE
 
-- Add `tairix-controls` to `userland/gui/wm/Cargo.toml` (the WM already depends
-  on `tairix-theme`/`tairix-raster`/`tairix-geometry`; this adds the furniture
-  family it will compose).
-- Give each `Window` an owned `WindowFrame` (from `lib/controls::window`),
-  seeded with the window's `WindowFurnitureState` and its title. Extend
-  `window.rs` (`Window`/`Window::new`) to hold it.
-- Compute, per window, the outer frame rect and the **reserved** inner client
-  rect from `WindowFrame::layout(...)` at the active `Scale`/`Theme`, exactly as
-  `viewport.rs` reserves the scrollbar gutter and shrinks the client. The app's
-  content `Surface` is presented **inside** the client rect and never overlaps
-  furniture.
-- Tests: layout reserves the title-bar/border extents at reference and scaled
-  DPI; the client rect never intersects the frame rim, title bar, controls, or
-  grabber corner (mirror the `viewport.rs` gutter/corner tests).
+The window-manager geometry foundation for decorated windows is complete and
+tree-green. What it now guarantees:
+
+- `userland/gui/wm/Cargo.toml` depends on `tairix-controls`; the crate root
+  re-exports the furniture family it will compose.
+- `WindowFrame` exposes the single outer↔client derivation both directions:
+  `FrameInsets`, `WindowFrame::insets()`, and `WindowFrame::outer_for_client()`
+  (the inverse of `layout`). `layout` and `insets` share one `edges()` metric
+  helper, so the frame band has exactly one definition (no §2.2 duplication).
+- `Window` holds an opt-in `Option<WindowFrame>` (mirroring the existing
+  `Option<RootViewport>` precedent). `bounds()` returns the outer rectangle for
+  a decorated window; `client_rect()`/`frame()` expose the inset client and the
+  frame; content sampling maps outer-local→content coordinates so the reserved
+  band shows the background and the client never overlaps furniture. The
+  undecorated path is byte-identical.
+- `Compositor` owns the active `Theme` (`theme()`/`set_theme()`), offers
+  `set_window_frame`/`clear_window_frame`/`window_frame`/`window_client_rect`,
+  and re-resolves every window's band on scale or theme change.
+- Tests cover insets/`outer_for_client` round-trips at reference and scaled DPI
+  under both themes, plus WM outer-band reservation, client-vs-background on
+  composite, clear-reverts, rescale-grows-band, theme-switch, and
+  undecorated-unchanged.
+
+No furniture is rendered or hit-tested yet, no ABI was touched, and no window
+opts into a frame in the running desktop — so there is no behavioural or visual
+change yet. That is Stage B onward.
 
 ### Stage B — Compose and render the furniture
 
