@@ -17,6 +17,36 @@ rules, it points to them.
 4. Update documentation in the same commit as the code it describes —
    rustdoc on every public item and the relevant page in `docs/src/`.
 
+## Flaky tests are defects — fix them, never re-run them
+
+A test that fails intermittently is a **bug**, and it is fixed like any other
+bug ([§7][test], [§2.5][agents], [§2.18][agents]). This is binding and has no
+exceptions:
+
+- **"Machine load" is never an excuse.** Do **not** dismiss a failure as
+  "flaky because the machine was busy", "CPU contention", "an oversubscribed
+  host", "a slow CI runner", or "it passes when I run it on its own".
+  Re-running a failed test in isolation until it goes green is **not** an
+  investigation and **not** a fix — it is the exact get-out the charter forbids.
+- **Load exposes real bugs; it does not cause false failures.** Every time a
+  failure in this project has been blamed on machine load, it has turned out to
+  be a genuine defect — a race, an unsynchronised wait, an unbounded queue, a
+  budget sized to an idle host, a missing completion signal — that the load
+  merely revealed. Treat a failure that appears under load as a confirmed
+  defect and find its root cause.
+- **A green re-run is not evidence the defect is gone.** It proves only that
+  the failure is intermittent, which is precisely the bug. Diagnose the *why*,
+  fix the code or the test so it cannot recur under any load, and add a
+  regression test ([§7][test]).
+- **A load-dependent timeout is fixed structurally**, not retried: size the
+  budget to the actual work, bound concurrency so guests do not oversubscribe
+  the host, or add a completion signal ([§7][test]). See the CI soak notes in
+  `tools/ci/README.md`.
+
+Do not report work as done while any test has failed even once during the
+change. If the real fix is genuinely too large for the current change, stop and
+ask — never wave the failure through as transient, load, or environment.
+
 ## What `cargo xtask ci` runs
 
 | Step          | What it does                                                |

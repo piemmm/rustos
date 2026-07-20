@@ -32,6 +32,15 @@
 # guest's wall-clock deadline — true under the full parallel fan-out. Lowering
 # one's own niceness never requires privilege, so this works on any runner.
 #
+# This `nice` split is a STRUCTURAL measure that keeps the host from
+# oversubscribing the timed guests — it is NOT a licence to tolerate a timeout.
+# A QEMU vertical's deadline is sized to the actual work with headroom; if a
+# guest still misses it, that is a genuine defect (a too-tight budget, a missing
+# completion signal, an unsynchronised wait) fixed under `AGENTS.md` §7. It is
+# NEVER dismissed as a "machine load" flake and NEVER "resolved" by re-running
+# the vertical on its own until it passes — every such timeout has turned out to
+# be a real bug the load merely exposed.
+#
 # Usage:
 #   tools/ci/soak.sh [fuzz|proptest|fssoak|test|both|all] [--sequential] \
 #                    [--secs N] [--dry-run]

@@ -1167,6 +1167,30 @@ an update to this section.
   an open defect to investigate and fix (or escalate, §15.7) — not a
   "transient" to wave through, and not something a completion report may
   describe as resolved.
+  - **"Machine load" is never an excuse — and never has been.** The single
+    most abused get-out is "the test only failed because the machine was
+    busy, so I re-ran it alone and it passed". This is **forbidden**, in every
+    phrasing: "it was flaky because of machine load", "CPU contention", "the
+    host was oversubscribed", "it passes when run on its own", "it was just
+    the CI runner being slow". Re-running a failed test in isolation to make it
+    "pass" is **not** an investigation, **not** a fix, and **not** an
+    acceptable resolution — it is the exact hack this rule exists to stop.
+    Every single time a failure in this project has been dismissed as "machine
+    load", it has turned out to be a **genuine defect** that machine load
+    merely *exposed* — a real race, an unsynchronised wait, an unbounded queue,
+    a budget sized to an idle host, a missing completion signal. Load is a
+    **test amplifier that surfaces real bugs**, not a cause of false failures.
+    Treat a failure that appears under load as a confirmed defect and find the
+    real cause; the load only did you the favour of revealing it.
+  - **What you MUST do when a test fails, ever, for any reason.** Diagnose the
+    *why* until the mechanism is understood, then fix the code or the test so
+    the failure cannot recur under any load, and land a regression test that
+    demonstrates the fix (§7 "Every bug found gets a regression test"). You may
+    **not** close, submit, or report the work while any test has failed even
+    once in the current work — "it went green on retry" is not "fixed". If the
+    real fix is genuinely too large for the current change, stop and ask
+    (§15.7) and stage it; never wave the failure through as load, transient, or
+    environment.
 - **Coverage targets** (enforced by `cargo xtask coverage`):
   - `kernel/sec`, `kernel/mem`, `kernel/ipc`, `lib/caps`, `lib/crypto`: **≥ 95%**
   - All other kernel crates: ≥ 85%
@@ -2916,6 +2940,15 @@ Trace, do not assume. For every entry point the change adds or touches
   surfaces or you notice (§2.18); a bug is never fixed without its regression
   test, and an escalated-but-not-yet-fixed defect (§15.7) carries that
   test requirement with it (§7).
+- **No test failed even once and was left "fixed" by a re-run (§7).** If any
+  test failed at any point during the change — including a failure you
+  attributed to "machine load", CPU contention, an oversubscribed host, a slow
+  runner, or "it passes when run on its own" — it was diagnosed to root cause
+  and fixed structurally so it cannot recur under any load, with a regression
+  test, **not** waved through by re-running it in isolation. "Machine load" is
+  never an accepted diagnosis (§7); a green re-run is not a fix. A completion
+  report that describes any failure as transient, a load flake, or resolved by
+  retry is a failed gate.
 - **Whole-project gate run (§7, §15.6).** `cargo fmt --all`, the full
   `cargo xtask ci` (run **exactly once** — never twice consecutively), and
   `cargo xtask fuzz --secs 5` (plus whatever `.github/workflows/ci.yml` runs

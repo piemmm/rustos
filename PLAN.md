@@ -5658,6 +5658,22 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-07-20 — "Machine load" is never an excuse for a flaky test.**
+  Strengthened §7's "No flaky tests" clause and added a §23.4 gate bullet
+  (maintainer request) after failures were repeatedly dismissed as "flaky
+  because of machine load, so I re-ran it alone and it passed" — a get-out that
+  every time masked a *real* defect the load merely exposed (a race, an
+  unsynchronised wait, an unbounded queue, a budget sized to an idle host, a
+  missing completion signal). The rule now names and forbids that get-out in
+  every phrasing (machine load, CPU contention, oversubscribed host, slow
+  runner, "passes when run on its own"), states that re-running a failed test
+  in isolation is neither an investigation nor a fix, and forbids closing work
+  while any test has failed even once. Mirrored in `docs/src/contributing.md`
+  (new "Flaky tests are defects" section), `tools/ci/README.md` (the soak /
+  QEMU-timeout framing: a load-dependent timeout is a defect fixed
+  structurally, not niced or re-run away), and `plans/CODEVERIFY.md`. Charter +
+  docs only; no code changed.
+
 - **2026-07-15 — CFQ: the one sanctioned non-tickless scheduler, now the
   default.** Amended §17.1 (maintainer request) to grant a single, explicit
   exception to the tickless (NO_HZ) mandate: the new `kernel/sched/cfq`

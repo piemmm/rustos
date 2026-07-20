@@ -89,19 +89,36 @@ registries **sequentially**, 24 h per target — so the full nightly would take
 here) and launches one `--soak --target <name>` process per target, all sharing
 a single 24 h wall clock. The §7 repeated-test soak adds one more job,
 `cargo xtask test --qemu --soak`, that repeats the whole test matrix for the
-same budget (a flake too rare for the per-PR single-pass run, where `ci`
-runs each test once, still gets a full night). Each job writes its own log under
+same budget. Its purpose is **detection, not tolerance**: it exists to *catch*
+a defect too rare for the per-PR single-pass run (where `ci` runs each test
+once), so the bug can be fixed — never to make an intermittent failure
+acceptable. Each job writes its own log under
 `<logdir>/soak-<UTC-stamp>/<job>.log`, and the script exits non-zero if any job
-fails — §7/§19.6/§19.7 fail closed.
+fails — §7/§19.6/§19.7 fail closed. Any failure it surfaces is a real defect to
+diagnose and fix (§7), not a flake to re-run away.
 
-The fuzz/proptest/fssoak jobs run at a lowered scheduling priority (`nice`),
-the repeated-test matrix at normal priority. Every job fans out to all cores,
-so running them together oversubscribes the host many-fold; the QEMU verticals
-in the test matrix are the only jobs with a hard, no-retry wall-clock deadline,
-so without this they starve for CPU and time out (a flake) while the
-deadline-free soaks merely run slower. The `nice` split lets the kernel hand
-the timed guests their cores whenever runnable, keeping their deadlines
-reachable under the full parallel fan-out.
+**A QEMU vertical must never time out.** Every QEMU vertical's wall-clock
+deadline is sized to the actual work with headroom, so the guest completes well
+inside it — not sized to a quiet, idle host. If a guest ever misses its
+deadline, that is a **genuine defect** — a budget too tight for the work, a
+missing completion signal, an unsynchronised wait, or the host being allowed to
+oversubscribe the timed guests — and it is fixed structurally under the charter
+(`AGENTS.md` §7: no flaky tests; "machine load" is never an accepted
+diagnosis). It is **never** dismissed as a load flake, and **never** "resolved"
+by re-running the vertical on its own until it happens to pass. Historically,
+every timeout blamed on "machine load" in this project has turned out to be
+exactly such a real bug that the load merely exposed.
+
+The soak's job scheduling is one such **structural** measure — it bounds how
+badly the parallel fan-out can contend with the timed guests, it is not a
+licence to tolerate a timeout. Every job fans out to all cores, so running them
+together oversubscribes the host many-fold; the QEMU verticals in the test
+matrix are the ones with a hard wall-clock deadline. The fuzz/proptest/fssoak
+jobs therefore run at a lowered scheduling priority (`nice`) and the
+repeated-test matrix at normal priority, so the kernel hands the timed guests
+their cores whenever runnable. If a vertical still cannot make its deadline
+under this arrangement, the deadline or the test is wrong and is fixed (§7) —
+the scheduling split is not the last word, correctness is.
 
 ```sh
 tools/ci/soak.sh                 # both fuzz + proptest, parallel (default)

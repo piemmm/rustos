@@ -109,7 +109,11 @@ it is not enumerated here.
 - A public item without rustdoc; a `docs/src/` page out of sync with code;
   a stale symbol reference.
 - A weakened/`#[ignore]`d/deleted test, a flaky test, or a fixed bug with no
-  regression test.
+  regression test. A flaky test is a defect regardless of how it is perceived:
+  a failure excused as "machine load", CPU contention, an oversubscribed host,
+  a slow runner, or "it passes when run on its own", or "resolved" by re-running
+  it in isolation, is the exact get-out the charter forbids (§7) — it is
+  diagnosed to root cause and fixed structurally, with a regression test.
 
 ## 2. Method for one issue (binding per context)
 
