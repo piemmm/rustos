@@ -123,6 +123,18 @@
 //! stable-layout container with a header, grouped actions, a content region, and
 //! an anchor notch back to its invoker. Each emits a typed action ([`RowAction`],
 //! [`CardAction`], [`PanelAction`]); the owner enforces authority.
+//!
+//! The [`window`] module is the window-manager furniture family —
+//! [`WindowFrame`], [`TitleBar`], the compact [`WindowControl`] command
+//! buttons (close, minimize, put-to-back, size-toggle), the [`ResizeGrabber`],
+//! and the neutral [`ScrollCorner`]. The window manager owns frame rendering,
+//! hit testing, pointer capture, move/resize, stacking, minimization, and
+//! size-state transitions; the frame's hit map keeps the client viewport and
+//! the furniture strictly separate so an application can neither receive
+//! furniture input nor impersonate a frame control, and the resize corner
+//! never overlaps a scrollbar thumb. Each item emits a typed action
+//! ([`WindowControlAction`], [`TitleBarEvent`], [`ResizeEvent`]); the window
+//! manager enforces authority and performs the cooperative window operation.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -143,6 +155,7 @@ pub mod tabs;
 pub mod text;
 pub mod toolbar;
 pub mod value;
+pub mod window;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 pub use collection::{
@@ -166,6 +179,11 @@ pub use tabs::{Tab, Tabs, TabsAction};
 pub use text::{SearchField, TextAction, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};
+pub use window::{
+    ControlPlacement, FrameLayout, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
+    ScrollCorner, TitleBar, TitleBarEvent, TitleBarLayout, TitleHit, WindowControl,
+    WindowControlAction, WindowFrame,
+};
 
 #[cfg(test)]
 mod button_tests;
@@ -191,3 +209,5 @@ mod text_tests;
 mod toolbar_tests;
 #[cfg(test)]
 mod value_tests;
+#[cfg(test)]
+mod window_tests;
