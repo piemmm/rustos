@@ -1623,6 +1623,7 @@ You are not exempt from any rule above. In addition:
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
     | CPU-lockup watchdog (soft/hard lockup detection, diagnostics, recovery, the Arch-HAL watchdog slice) | `plans/WATCHDOG.md` |
+    | Syscall interruptibility / IRQ-on-entry (interruptible syscall bodies, non-preemptible kernel, reschedule-at-return) | `plans/FIX-SYSCALL.md` |
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md`; `plans/ARCHSUPPORT.md` (x86_64 product parity: image, storage floor, unlock/login, autoload, verticals) |
     | Raspberry Pi bring-up | `plans/PI.md` |
@@ -2911,6 +2912,14 @@ Trace, do not assume. For every entry point the change adds or touches
 - **SMP-correct.** Shared state uses `lib/sync` primitives with a stated
   ordering discipline; there is no data race, no torn read, no "works on one
   core" assumption (§4). Lock acquisition order cannot deadlock.
+- **ISR-shared locks are interrupt-safe.** Syscall bodies and in-kernel tasks
+  run with device interrupts enabled (§17.1), so any lock a change adds that
+  is shared between an ISR and a syscall-reachable path is an
+  `IrqSafeSpinLock` (masks the current CPU for the hold) **or** the ISR side
+  is lock-free and only flags a deferred wake (`request_wake`) drained later
+  in dispatcher context. A plain `SpinLock` shared with an ISR is a
+  single-CPU self-deadlock waiting to happen and is a defect (`lib/sync`'s
+  `irq` rustdoc; the console UART RX `UART_RX_GATE` is the worked example).
 - **Error paths are real.** Allocation failure and every `Result` are handled
   as values, never `unwrap`/`expect`/`panic!` in a production path (§2.9);
   OOM is a `Result`, not a panic (§4). Cleanup on the error path leaks

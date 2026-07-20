@@ -8546,9 +8546,11 @@ where
 }
 
 /// Decide how a completed syscall leaves the kernel: an explicit
-/// rescheduling syscall suspends with its own action, a latched
-/// preemption tick suspends with a `Yield`, and everything else returns
-/// straight to user space.
+/// rescheduling syscall suspends with its own action; otherwise the
+/// deferred interrupt-context wakes an ISR flagged while the (now
+/// interruptible) syscall body ran are drained, and a latched preemption
+/// tick or a drain that unparked a task suspends with a `Yield`.
+/// Everything else returns straight to user space.
 ///
 /// The latch check is the kernel's involuntary preemption point: a
 /// one-shot timer tick taken while the syscall ran in kernel mode could
@@ -8569,7 +8571,26 @@ fn completion_outcome(raw_number: u16, result: SyscallResult, cpu: CpuId) -> Dis
             cpu,
         };
     }
-    if crate::preempt::take_preempt_pending(cpu) {
+    // The syscall body ran with device interrupts enabled (the arch trap
+    // glue unmasks them around the dispatch and re-masks on exit). An ISR
+    // taken mid-syscall only *flags* its wake — it must not take the
+    // wait-queue / scheduler locks the interrupted syscall may hold, so it
+    // calls the lock-free `WaitQueue::request_wake` / `timed_wake_sweep`
+    // and defers the real `wake_all` / deadline sweep. This return-to-user
+    // boundary is the first safe dispatcher-context point to perform that
+    // deferred drain (taking those locks here is sound), reusing the P-5
+    // machinery rather than a second discipline. A drain that unparked a
+    // task made new work runnable, so the caller yields to let the
+    // scheduler pick it up — exactly as it does for a latched preemption
+    // tick; an unnecessary yield costs one bounded scheduler round-trip and
+    // is never wrong, whereas skipping it could strand a just-woken task on
+    // a lone-task CPU until the next tick.
+    let woke = crate::waitq::drain_pending_wakes();
+    // Then honour a preemption tick latched while the syscall ran (see the
+    // fn-level doc): a tick taken in kernel mode could not switch, so it is
+    // consumed and paid here at the return-to-user boundary. A drain that
+    // unparked a task likewise yields so the scheduler picks up the new work.
+    if crate::preempt::take_preempt_pending(cpu) || woke {
         return DispatchOutcome::Reschedule {
             result,
             action: RescheduleAction::Yield,

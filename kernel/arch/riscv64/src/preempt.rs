@@ -226,10 +226,14 @@ static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// invoked **only** for a tick taken from U-mode — a tick taken in S-mode
 /// never preempts (the kernel is non-preemptible watch-out:
 /// a half-completed kernel critical section must never be switched away
-/// from). In production the kernel runs with `sstatus.SIE == 0`, so the
-/// privilege rule (U < S) is the *only* path on which a tick is taken at
-/// all, but the explicit SPP gate is defence-in-depth so a future S-mode
-/// `SIE` enable can never accidentally preempt the kernel.
+/// from). Syscall bodies run with `sstatus.SIE` enabled (the trap handler
+/// unmasks S-mode interrupts around the `ecall` dispatch so a long,
+/// non-blocking syscall cannot monopolise the hart), so a supervisor
+/// interrupt genuinely *can* be taken in S-mode; the explicit saved-`SPP`
+/// gate is therefore load-bearing, not merely defence-in-depth — it is
+/// what keeps such a tick from switching the non-preemptible kernel away
+/// mid-critical-section. Its reschedule is latched instead and honoured at
+/// the interrupted syscall's return-to-user.
 static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
 /// Install the per-hart timer callback.

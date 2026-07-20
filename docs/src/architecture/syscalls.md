@@ -1546,6 +1546,60 @@ to `Dispatcher::dispatch`. The full description of the x86_64 stub
 sequence — lives in
 [the x86_64 platform page](../platform/x86_64.md#stage-3a-c6--syscallsysret-entry).
 
+## Interrupts during a syscall
+
+**Syscalls run with device interrupts enabled.** Every bare-metal port's
+trap glue unmasks device IRQs (and the one-shot preemption timer) for the
+*body* of every syscall — around the dispatch call only — and re-masks
+them before restoring the user frame:
+
+| Arch | Enable / re-mask |
+| --- | --- |
+| aarch64 | `DAIFClr`/`DAIFSet` of the `I` bit around `dispatch_svc` |
+| riscv64 | `sstatus.SIE` set/cleared around `dispatch_ecall` |
+| x86_64  | `sti` before / `cli` after the `call` in `syscall_entry_stub` |
+| wasm32  | no-op — no hardware interrupts; preemption is the host yield facility |
+
+The interrupts are enabled *once, uniformly, in the arch trap glue* after
+the trampoline has saved the full user register frame and established a
+well-defined kernel context (kernel stack, `swapgs`/per-CPU, the
+side-channel entry barrier). There is **no** per-syscall
+"runs uninterruptible" flag: the axis that must be uninterruptible is the
+*critical section*, not the syscall, and a genuine critical section masks
+locally for a documented reason (a held `lib/sync` lock, the console
+UART receive ring's `UART_RX_GATE`).
+
+This closes the "cooperative dispatch in preemptive clothing" defect: with
+interrupts masked for the whole syscall, a long non-blocking body (e.g. a
+bootstrap-floor `fs_*` MMIO wait) monopolised the CPU, stalling the
+preemption tick and every interrupt-driven driver until the syscall
+happened to yield.
+
+**The kernel stays non-preemptible.** An IRQ taken *while a syscall runs*
+(i.e. taken in EL1/S-mode/ring-0) is a nested trap that services its
+source and returns to the **same** syscall; it never context-switches. The
+ports enforce this by gating the preempt point on the interrupted
+privilege (`from_el0` / saved `SPP` / a ring-3 saved `CS`): a tick taken
+in kernel mode only *latches* a reschedule (`kernel/core::preempt`), it
+does not switch a half-completed critical section away. "Interrupts on" ≠
+"preemptible kernel"; only the former changed.
+
+**Reschedule and deferred wakes are honoured at return-to-user.** An ISR
+taken mid-syscall is lock-free — it only *flags* a deferred wake
+(`WaitQueue::request_wake` / `timed_wake_sweep`), never taking the
+wait-queue or scheduler locks the interrupted syscall may hold. The single
+arch-neutral return decision (`completion_outcome` in `kernel/core`) then,
+at the first safe boundary before the trap returns to user mode:
+
+1. drains those deferred wakes (`waitq::drain_pending_wakes`), and
+2. suspends the caller with a `Yield` when a preemption tick was latched
+   or a drain unparked a task — otherwise returns straight to user space.
+
+This reuses the in-kernel dispatch loop's machinery rather than inventing
+a second discipline, so a task that sits in syscalls is still preempted
+and a task woken by an interrupt during another task's syscall runs
+promptly, with no busy-poll.
+
 ## Out of scope (Stage 2.7)
 
 * New syscalls beyond what Stages 2.1–2.6 require. Adding a syscall

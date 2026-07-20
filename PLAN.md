@@ -2072,6 +2072,34 @@ order (one fully-gated increment each):
                    `docs/src/architecture/kernel.md` (4090). The separate
                    Pi-only question of *why* the VL805/xHCI re-asserts is now
                    chased from this audit trail rather than a wedged core.
+               - **P-5b — syscalls run with interrupts enabled (the
+                 syscall-entry half of the §17.1 no-cooperative-dispatch fix).
+                 Design: `plans/FIX-SYSCALL.md`.** P-5 made the *dispatch loop*
+                 and in-kernel kthreads preemptible, but the user→kernel syscall
+                 path still ran the whole syscall with device IRQs and the
+                 preemption timer masked, so a long non-blocking body (a
+                 bootstrap-floor `fs_*` MMIO wait) monopolised the CPU exactly as
+                 the pre-P-5 loop did. Now every bare-metal port's trap glue
+                 unmasks device IRQs for the syscall *body* only and re-masks on
+                 exit (aarch64 `DAIF.I` around `dispatch_svc`, riscv64
+                 `sstatus.SIE` around `dispatch_ecall`, x86_64 `sti`/`cli` around
+                 the `syscall_entry_stub` dispatch call; wasm32 is a no-op — no
+                 hardware interrupts). The kernel stays non-preemptible (§4): an
+                 IRQ taken in EL1/S-mode/ring-0 is a nested trap that services its
+                 source and returns to the same syscall, gated by the existing
+                 `from_el0`/`SPP`/ring-3-`CS` preempt gates; its reschedule is
+                 latched. The one arch-neutral `completion_outcome`
+                 (`kernel/core`) drains the deferred, lock-free ISR wakes
+                 (`waitq::drain_pending_wakes`) and honours a latched tick /
+                 unparked task with a `Yield` at return-to-user — reusing P-5's
+                 machinery, no per-syscall flag, no second wake discipline. Safe
+                 by lock discipline: every ISR is lock-free (`request_wake`) and
+                 the only ISR↔task-shared ring (aarch64 console RX) is
+                 `UART_RX_GATE`-interlocked; riscv64/x86_64 console reads are the
+                 fail-closed `NULL_CONSOLE_READ` (no RX ISR). The standing rule
+                 "any ISR-shared lock is `IrqSafeSpinLock` or the ISR side is
+                 lock-free + deferred drain" is in `lib/sync`'s `irq` rustdoc and
+                 the §23 checklist. Docs: `docs/src/architecture/syscalls.md`.
                - **P-6 — wait-queue §27 completeness rework (staged by the
                  2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
                  up to the §27 bar: the primitive P-2 landed is the thinnest slice
@@ -6148,3 +6176,11 @@ can see *why* a rule exists without diffing the charter's history.
   subtree by the existing inode/mount-flag/`CAP_FS_ACCESS` controls; the named
   caps arrive with their owning service. §16.2 softened to match. Documentation
   only.
+
+- **2026-07-20 — ISR-shared locks must be interrupt-safe (review rule).**
+  Added a §23.2 self-review bullet and a `lib/sync` `irq` rustdoc note: because
+  syscall bodies and in-kernel tasks now run with device interrupts enabled
+  (the P-5b syscall-entry work, `plans/FIX-SYSCALL.md`), any lock shared
+  between an ISR and a syscall-reachable path MUST be an `IrqSafeSpinLock` or
+  the ISR side must be lock-free with a deferred drain — a plain `SpinLock`
+  shared with an ISR is a single-CPU self-deadlock. Documentation only.

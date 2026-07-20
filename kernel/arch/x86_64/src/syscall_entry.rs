@@ -55,8 +55,15 @@
 //! [`fmask_value`] clears `IF`, `TF`, `DF`, `AC`, `NT`, `RF`,
 //! `VM`, and `IOPL`. The motivations are:
 //!
-//! * `IF` — entry must be non-preemptible until the kernel decides
-//!   otherwise (matches the `cli` semantics every other ISR uses).
+//! * `IF` — entry must be interrupt-free until the kernel has swapped to
+//!   its GS base and pivoted onto the kernel stack. The entry stub then
+//!   issues a single `sti` in that well-defined kernel context so the
+//!   *syscall body* runs with device interrupts deliverable (a long,
+//!   non-blocking syscall must not monopolise the CPU with interrupts
+//!   masked), and `cli`s again before restoring the user frame. The kernel
+//!   stays non-preemptible: an interrupt taken at CPL=0 during the body
+//!   only latches a reschedule (honoured at return-to-user), it never
+//!   switches away mid-syscall.
 //! * `TF` — drop a stray single-step before kernel code runs.
 //! * `DF` — System V AMD64 ABI requires `DF=0` at function entry.
 //! * `AC` — defence against SMAP bypass / explicit alignment quirks.
@@ -786,7 +793,24 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         // 5. Call Rust trampoline: rdi=number (was rax), rsi=&args[0].
         "movq %rsp, %rsi",
         "movq %rax, %rdi",
+        // 6. Run the syscall body with device interrupts deliverable. The
+        //    CPU cleared IF via IA32_FMASK on entry; we are now in a
+        //    well-defined kernel context (swapgs done, pivoted onto this
+        //    task's kernel stack, user RIP/RFLAGS/rsp frame-resident), so an
+        //    interrupt taken here is taken at CPL=0 and pushes its frame onto
+        //    this same kernel stack, services its source, and `iret`s back
+        //    here — it never switches stacks (no IST for these vectors) and
+        //    never reschedules the non-preemptible kernel (the ISRs gate
+        //    preemption on the saved ring-3 CS; a tick taken in ring 0 only
+        //    latches its reschedule, honoured at return-to-user in
+        //    `completion_outcome`). This stops a long, non-blocking syscall
+        //    body from monopolising the CPU with interrupts masked. Re-mask
+        //    (`cli`) before restoring the user frame so `sysretq` returns to
+        //    ring 3 with the entry residue gone; the user RFLAGS (with its
+        //    own IF) is restored from `%r11` by `sysretq`.
+        "sti",
         "call {dispatch}",
+        "cli",
         // 7. Restore the caller's argument registers from the arg array
         //    (never a bare stack drop: the user-side trap stub promises
         //    the compiler only rax/rcx/r11 change across `syscall`, and
