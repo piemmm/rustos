@@ -3370,12 +3370,31 @@ per-app recipes (§2.2).
   (both themes, high contrast, scale, rails/seam/beads, focus,
   pointer/keyboard, fail-closed, the column-alignment invariant, card
   three-edge state + footer, panel layout/actions/notch).
+- **Drawn controls: scrollbar renderer — DONE.** `lib/controls::scrollbar`
+  draws the one orientation-parameterized `ScrollBar` (spec §11.28–§11.30) over
+  the Stage-A `scroll::ScrollGeometry`: a decrement button, a track
+  (before-thumb/thumb/after-thumb), and an increment button, laid out
+  identically on both axes so the vertical and horizontal bars are one
+  behaviour, not two recipes. It paints the quiet Scroll Channel, a rounded
+  thumb that brightens to the reactive rim when awake (hover/focus/drag/held),
+  orientation-appropriate end-button chevrons (`paint::ChevronDir` gained
+  `Up`/`Left`) that brighten under the pointer or when held, a focus-ring
+  outline distinct from a hover, a high-contrast thumb rim, and the §13
+  disposition (denied shows the denied thumb and ignores input, disabled
+  mutes it). It holds the owning viewport's `ScrollModel` (never a private
+  offset), updates it immediately, and emits `ScrollAction::ScrollTo`;
+  `on_pointer` captures a preserved drag anchor (re-clamped each move so a
+  mid-drag range change stays valid), presses end buttons for line steps and
+  the track for page steps, `repeat()` is the one-shot-timer auto-repeat seam
+  the owner drives (no polling loop), `on_key` steps the orientation's arrows
+  plus Page/Home/End on a focused bar, and `wheel` steps one line per tick
+  along the bar's axis; `part_at`/`geometry` expose the shared layout. Content
+  changes are never animated (reduced-motion correct). 21 host tests.
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (the scrollbar renderer, window furniture,
-  shell/decision surfaces) over the same shared paths, then the Switchboard
-  reference composition. Each lands complete (§27) with dark/light +
-  reduced-motion + high-contrast coverage and its §20 tests before the next
-  begins.
+  the remaining drawn families (window furniture, shell/decision surfaces)
+  over the same shared paths, then the Switchboard reference composition. Each
+  lands complete (§27) with dark/light + reduced-motion + high-contrast
+  coverage and its §20 tests before the next begins.
 
 ---
 

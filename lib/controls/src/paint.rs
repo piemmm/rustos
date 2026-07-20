@@ -328,21 +328,27 @@ pub(crate) fn paint_plate(surface: &mut Surface, rect: (u32, u32, u32, u32), sty
     }
 }
 
-/// A directional disclosure/anchor chevron.
+/// A directional disclosure/anchor/step chevron.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ChevronDir {
+    /// Points up (a vertical scrollbar's decrement button).
+    Up,
     /// Points down (a disclosure that expands below, e.g. a split button or a
-    /// combo box).
+    /// combo box; a vertical scrollbar's increment button).
     Down,
-    /// Points right (a submenu anchor).
+    /// Points toward the logical start (a horizontal scrollbar's decrement
+    /// button).
+    Left,
+    /// Points right (a submenu anchor; a horizontal scrollbar's increment
+    /// button).
     Right,
 }
 
 /// Draw a filled chevron of the given direction centred in `rect`.
 ///
 /// One definition shared by the split button's disclosure, the combo box's
-/// disclosure, and a menu's submenu anchor, so no family carries its own
-/// triangle recipe.
+/// disclosure, a menu's submenu anchor, and a scrollbar's end-button steps, so
+/// no family carries its own triangle recipe.
 pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, color: Color) {
     let Some((x, y, w, h)) = surface_rect(rect) else {
         return;
@@ -356,7 +362,9 @@ pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, 
     // Triangles authored on a 100×100 grid mapped across the region, so they
     // scale with the region at any density.
     let points: [(i32, i32); 3] = match dir {
+        ChevronDir::Up => [(32, 58), (68, 58), (50, 36)],
         ChevronDir::Down => [(32, 42), (68, 42), (50, 64)],
+        ChevronDir::Left => [(58, 32), (58, 68), (36, 50)],
         ChevronDir::Right => [(40, 32), (40, 68), (64, 50)],
     };
     glyph.fill_polygon(&points, 100, color);
