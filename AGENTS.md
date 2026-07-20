@@ -601,8 +601,11 @@ tairix/
 │   │                    #   text entries TextField/SearchField, the menu command
 │   │                    #   surface Menu/MenuItem, the Toolbar (composing icon/
 │   │                    #   split tools in groups with an active-tool seam), the
-│   │                    #   Tabs strip, and the ComboBox (composing the Menu for
-│   │                    #   its popup) so far, over one
+│   │                    #   Tabs strip, the ComboBox (composing the Menu for
+│   │                    #   its popup), and the collection controls ListRow/
+│   │                    #   TableRow/TableCell/Card/Panel (one shared row chrome
+│   │                    #   with a fixed rail gutter so columns stay aligned as
+│   │                    #   row state changes) so far, over one
 │   │                    #   shared draw+interaction core —
 │   │                    #   resolving colour/metric/radius
 │   │                    #   from lib/theme+lib/geometry, rounding plates through

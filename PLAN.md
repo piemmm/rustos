@@ -3350,12 +3350,32 @@ per-app recipes (§2.2).
   outside/Escape dismiss, §13 denied lock bead, `popup_size`, typed
   `ComboAction`). All theme/`Scale`-resolved, dark/light + high-contrast +
   fail-closed; 63 host tests across the four families.
+- **Drawn controls: collection family — DONE.** `lib/controls::collection`
+  draws `ListRow`, `TableRow`, `TableCell`, `Card`, and `Panel` over the shared
+  paint core and one shared row-chrome helper (`paint_row`). A row reads state
+  by shape as well as colour: hover tint, a leading accent selection rail +
+  raised tint, a leading semantic Pressure Rail, a bottom proportional activity
+  Heat Seam, a trailing recovery/complete/denied Signal Bead, and a focus ring,
+  with the §13 disposition driving the foreground (denied keeps its value + lock
+  bead). The leading rail gutter is *always reserved* so content never shifts
+  when a row's state changes — tables stay aligned (spec §11.13); `paint_row`
+  returns the state-independent content rect. `TableCell` draws column-aligned
+  text (leading/centre/`numeric` trailing) and its own bead only for
+  cell-specific state (§11.14). `Card` carries dominant state (leading rail),
+  progress (bottom seam), and a count pill / alert bead (top-trailing) with
+  composed `Button` footer actions; `Panel` splits a header (title + state bead
+  + right-aligned grouped `Button` actions) from an owner-drawn `content_rect`
+  with an anchor notch (`anchor_edge`) back to its invoker. Typed `RowAction`/
+  `CardAction`/`PanelAction`; authority stays with the owner. 32 host tests
+  (both themes, high contrast, scale, rails/seam/beads, focus,
+  pointer/keyboard, fail-closed, the column-alignment invariant, card
+  three-edge state + footer, panel layout/actions/notch).
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (collections incl. ListRow/TableRow/TableCell/
-  Card/Panel, the scrollbar renderer, window furniture, shell/decision surfaces)
-  over the same shared paths, then the Switchboard reference composition. Each
-  lands complete (§27) with dark/light + reduced-motion + high-contrast coverage
-  and its §20 tests before the next begins.
+  the remaining drawn families (the scrollbar renderer, window furniture,
+  shell/decision surfaces) over the same shared paths, then the Switchboard
+  reference composition. Each lands complete (§27) with dark/light +
+  reduced-motion + high-contrast coverage and its §20 tests before the next
+  begins.
 
 ---
 

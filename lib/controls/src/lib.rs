@@ -99,6 +99,18 @@
 //! the text-field focus model and the [`Menu`] model rather than re-deriving
 //! either: the popup *is* a [`Menu`] built from the choices, and selecting one
 //! emits a typed [`ComboAction`].
+//!
+//! The [`collection`] module is the collection controls — [`ListRow`],
+//! [`TableRow`], [`TableCell`], [`Card`], and [`Panel`]. These are the surfaces
+//! that group other state and actions: a row is a hoverable, selectable,
+//! focusable, activatable control drawn from one shared row chrome (background
+//! tint, leading selection/pressure rails, a bottom activity Heat Seam, a
+//! trailing Signal Bead, and a focus ring); a table keeps its columns aligned
+//! while a row's state changes; a card carries its dominant state, progress, and
+//! a count/alert on three edges with footer action [`Button`]s; and a panel is a
+//! stable-layout container with a header, grouped actions, a content region, and
+//! an anchor notch back to its invoker. Each emits a typed action ([`RowAction`],
+//! [`CardAction`], [`PanelAction`]); the owner enforces authority.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -107,6 +119,7 @@
 extern crate alloc;
 
 pub mod button;
+pub mod collection;
 pub mod combo;
 pub mod menu;
 mod paint;
@@ -119,6 +132,10 @@ pub mod toolbar;
 pub mod value;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
+pub use collection::{
+    Card, CardAction, CellAlign, ListRow, Panel, PanelAction, PanelEdge, RowAction, TableCell,
+    TableRow,
+};
 pub use combo::{ComboAction, ComboBox};
 pub use menu::{Menu, MenuAction, MenuItem};
 pub use scroll::{
@@ -138,6 +155,8 @@ pub use value::{Progress, Slider, SliderAction};
 
 #[cfg(test)]
 mod button_tests;
+#[cfg(test)]
+mod collection_tests;
 #[cfg(test)]
 mod combo_tests;
 #[cfg(test)]
