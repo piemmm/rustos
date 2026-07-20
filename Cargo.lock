@@ -4008,6 +4008,7 @@ name = "tairix-viewer"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-controls",
  "tairix-font",
  "tairix-raster",
  "tairix-rt",
@@ -4095,6 +4096,7 @@ name = "tairix-wm"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-controls",
  "tairix-cursor",
  "tairix-geometry",
  "tairix-input",

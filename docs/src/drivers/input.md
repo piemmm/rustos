@@ -196,7 +196,7 @@ one definition shared with the USB keyboard driver, §2.2 / §2.16), maps it
 through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device up
 with `VirtioInput::open_armed`, and pumps `poll`, offering each decoded event to
 the shared pointer mapping first (`PointerInput::from_device_event` — axis
-deltas and `BTN_*` edges → `pointer_inject`) and every other event to
+deltas, `BTN_*` edges, and scroll ticks → `pointer_inject`) and every other event to
 `VirtioKeyboardConsole::feed` → `key_inject`; one driver instance is spawned
 per discovered virtio-input node (keyboard and mouse alike — the bind table
 cannot tell them apart), and each instance's device decides which producer
@@ -270,8 +270,9 @@ against the previous report, X/Y/wheel deltas), and every decoded event is
 translated by the one shared device→seat mapping
 `PointerInput::from_device_event` — the same mapping the virtio pointer path
 uses, so the two can never diverge — and injected through `pointer_inject`.
-Scroll ticks are decoded but deliberately not injected: the pointer record
-vocabulary carries no scroll consumer yet, and fabricating a record is
-forbidden (`AGENTS.md` §2.9). Disconnect/reload and the fail-closed error
+Motion, button edges, and scroll ticks all inject now that the desktop
+scrollbar consumes scroll; only an event outside the pointer vocabulary
+maps to nothing and is never fabricated (`AGENTS.md` §2.9).
+Disconnect/reload and the fail-closed error
 budget behave exactly as the keyboard driver's; the live report path is the
 Pi 4 metal acceptance item.

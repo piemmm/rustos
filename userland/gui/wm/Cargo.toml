@@ -36,6 +36,12 @@ tairix-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
 # taskbar — which may not depend on the window manager — routes the same
 # device events without duplicating the vocabulary (§2.2).
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The shared Reactive Alloy scroll geometry engine (§2.2, §17.4 —
+# plans/GUI-CONTROLS-DESIGN.md §11.28): the one orientation-independent
+# range/thumb/offset behaviour the root-viewport scrollbars drive. The window
+# manager is the first consumer; nested application content (e.g. the viewer
+# app) is the second, so the behaviour lives in `lib/controls`, never here.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 
 [lints]
 workspace = true

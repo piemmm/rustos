@@ -36,9 +36,10 @@ host controller that speaks the URB transport (`AGENTS.md` §2.20 / §17.4).
    diffed, X/Y deltas, wheel) and injects each pointer record into the kernel
    input-focus arbiter via `pointer_inject`, using the one shared device→seat
    mapping `PointerInput::from_device_event` — the same mapping the virtio
-   pointer driver uses, so the two can never diverge. Wheel/scroll ticks are
-   decoded but deliberately not injected: the pointer record vocabulary
-   carries no scroll consumer yet, and fabricating one is forbidden.
+   pointer driver uses, so the two can never diverge. Motion, button edges,
+   and wheel/scroll ticks all inject (the desktop scrollbar consumes scroll);
+   only an event outside the pointer vocabulary maps to nothing and is not
+   injected, never fabricated.
 
 A failure to acquire the host or the transport grants exits with a reserved
 fail-closed code (`80` no host, `81` no transport), leaving the desktop

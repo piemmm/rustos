@@ -32,6 +32,7 @@ use crate::cursor::CursorLayer;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect, Scale};
 use crate::surface::Surface;
+use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{Window, WindowId};
 
 /// Scan-out channel order for a supported [`DisplayFormat`].
@@ -318,6 +319,55 @@ impl Compositor {
     #[must_use]
     pub fn window_cursor(&self, id: WindowId) -> Option<CursorKind> {
         self.window(id).map(Window::cursor_hint)
+    }
+
+    /// Give the window named by `id` a root viewport, so the window manager
+    /// composes its scrollbars as furniture around the client. Returns
+    /// `false` for an unknown id. The window's bounds are marked dirty (the
+    /// reserved gutter re-clips the client).
+    pub fn set_root_viewport(&mut self, id: WindowId, viewport: RootViewport) -> bool {
+        self.mutate(id, |w| w.set_viewport(Some(viewport)))
+    }
+
+    /// Remove the root viewport from the window named by `id`, so the window
+    /// manager stops composing scrollbar furniture and the client reclaims
+    /// the reserved gutter. Returns `false` for an unknown id. The window's
+    /// bounds are marked dirty (the reclaimed gutter recomposites).
+    pub fn clear_root_viewport(&mut self, id: WindowId) -> bool {
+        self.mutate(id, |w| w.set_viewport(None))
+    }
+
+    /// The root viewport of the window named by `id`, or `None` when the id
+    /// is unknown or the window has no root viewport.
+    #[must_use]
+    pub fn root_viewport(&self, id: WindowId) -> Option<&RootViewport> {
+        self.window(id).and_then(Window::viewport)
+    }
+
+    /// Classify the screen `point` against the furniture of the window named
+    /// by `id`, or `None` when the id is unknown or the window has no root
+    /// viewport. This is the furniture hit map: a point on a scrollbar or the
+    /// corner never reads as client.
+    #[must_use]
+    pub fn furniture_hit(&self, id: WindowId, point: Point) -> Option<FurnitureHit> {
+        let window = self.window(id)?;
+        let viewport = window.viewport()?;
+        Some(viewport.hit_test(window.bounds(), point))
+    }
+
+    /// Mutate the root viewport of the window named by `id` through `change`,
+    /// marking the window's bounds dirty so the bars recompose. Returns
+    /// `None` for an unknown id or a window with no root viewport.
+    pub fn scroll_root<T>(
+        &mut self,
+        id: WindowId,
+        change: impl FnOnce(&mut RootViewport) -> T,
+    ) -> Option<T> {
+        let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+        let bounds = window.bounds();
+        let out = change(window.viewport_mut()?);
+        self.damage.add(bounds);
+        Some(out)
     }
 
     /// Show `image` as the pointer cursor with its hotspot at `pointer`,

@@ -779,7 +779,16 @@ mod program {
                         );
                     }
                 }
-                InputResponse::Moved { .. }
+                // Root-viewport scrollbar interactions: the window manager has
+                // already updated its scroll model. The session does not yet
+                // attach a root viewport to any app window (that, and the
+                // window-channel message that forwards a new offset so the
+                // client re-renders, are a later stage), so these do not arise
+                // in the shipping desktop today; they are handled here for
+                // completeness rather than left to a wildcard.
+                InputResponse::Scrolled { .. }
+                | InputResponse::FurniturePressed { .. }
+                | InputResponse::Moved { .. }
                 | InputResponse::MoveEnded { .. }
                 | InputResponse::Ignored => {}
             },

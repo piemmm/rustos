@@ -6,6 +6,7 @@ use crate::color::{div255, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
+use crate::viewport::RootViewport;
 
 /// An opaque, compositor-minted window identifier.
 ///
@@ -28,6 +29,7 @@ pub struct Window {
     corners: Corners,
     visible: bool,
     cursor: CursorKind,
+    viewport: Option<RootViewport>,
 }
 
 impl Window {
@@ -47,6 +49,7 @@ impl Window {
             corners: Corners::Square,
             visible: true,
             cursor: CursorKind::Arrow,
+            viewport: None,
         }
     }
 
@@ -87,6 +90,16 @@ impl Window {
     #[must_use]
     pub const fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    /// This window's window-manager-owned root-viewport scrollbars, if any.
+    ///
+    /// A window with a root viewport has the window manager compose its
+    /// scrollbars as furniture around the client; a window without one is a
+    /// plain client surface.
+    #[must_use]
+    pub const fn viewport(&self) -> Option<&RootViewport> {
+        self.viewport.as_ref()
     }
 
     /// Borrow the window's content surface.
@@ -139,6 +152,9 @@ impl Window {
         if !self.visible {
             return None;
         }
+        if self.clipped_by_furniture(lx, ly) {
+            return None;
+        }
         let pixel = self.surface.get(lx, ly)?;
         let coverage = self
             .corners
@@ -169,6 +185,26 @@ impl Window {
 
     pub(crate) fn replace_surface(&mut self, surface: Surface) {
         self.surface = surface;
+    }
+
+    pub(crate) fn set_viewport(&mut self, viewport: Option<RootViewport>) {
+        self.viewport = viewport;
+    }
+
+    pub(crate) fn viewport_mut(&mut self) -> Option<&mut RootViewport> {
+        self.viewport.as_mut()
+    }
+
+    /// `true` when surface-local `(lx, ly)` falls in a reserved scrollbar
+    /// gutter, so the client pixel there is clipped away (the furniture, not
+    /// the client, owns that strip).
+    fn clipped_by_furniture(&self, lx: u32, ly: u32) -> bool {
+        let Some(viewport) = self.viewport else {
+            return false;
+        };
+        let local = Rect::new(0, 0, self.surface.width(), self.surface.height());
+        let client = viewport.layout(local).client;
+        lx >= client.width || ly >= client.height
     }
 }
 

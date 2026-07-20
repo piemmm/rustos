@@ -27,4 +27,17 @@ pub struct Metrics {
     pub popup_corner_radius: u32,
     /// Thickness of window and control borders/separators.
     pub border_thickness: u32,
+    /// Breadth (the short dimension) of a scrollbar's Scroll Channel — a
+    /// vertical bar's width, a horizontal bar's height — in logical pixels.
+    /// The window manager reserves a gutter of this breadth for a root
+    /// viewport's bars, and it also sizes the square scroll corner at their
+    /// junction. The scrollbar's long dimension is the track it runs along,
+    /// so only the breadth is a metric.
+    pub scrollbar_breadth: u32,
+    /// The shortest a scrollbar thumb may be drawn, in logical pixels, so the
+    /// thumb stays a grabbable target even when the viewport shows a tiny
+    /// fraction of a very large content. The shared scroll geometry engine
+    /// floors the proportional thumb length at this value (bounded by the
+    /// track).
+    pub min_thumb_length: u32,
 }

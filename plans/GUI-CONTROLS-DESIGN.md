@@ -35,6 +35,41 @@ A Reactive Alloy control communicates three things at a glance:
 
 Switchboard is the flagship example because it exposes live task, job, recovery, and system state, but this specification is deliberately broader. The same language applies to buttons, toggles, sliders, fields, menus, tables, toolbars, taskbar items, notifications, dialogs, window frames, title bars, window furniture, scrollbars, and application controls.
 
+### Every control and window-furniture item is first-class
+
+Every control and every piece of window furniture named in this specification —
+buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
+Radio), value controls (Slider, Progress), text entry (TextField, SearchField),
+choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
+Toolbar, Tabs), collection controls (ListRow, TableRow, TableCell, Card, Panel),
+decision surfaces (Dialog, Tooltip, HelpTip), shell surfaces (Notification,
+TaskbarItem, TraySignal), and the window-manager furniture (WindowFrame,
+TitleBar, the WindowControl set — Close, Minimize, PutToBack, SizeToggle — the
+ResizeGrabber, the ScrollBar in both orientations, and the ScrollCorner) — is a
+**first-class control**. Each MUST be **fully implemented**: not stubbed, not a
+"minimal for now" core, not a partial subset of the states §11 gives it, and
+not something an application is expected to hand-roll.
+
+"Fully implemented" for a control means all of the following are present, correct,
+and tested before the control is considered done (§20, `AGENTS.md` §27):
+
+- Every state §11 specifies for that control, composed from the typed §5 state
+  model (never an ad-hoc per-control flag bag).
+- Dark and light theme coverage, high-contrast shape fallbacks (§15), and
+  reduced-motion behaviour (§9), all resolved from `Theme` and `Scale` (§6, §14).
+- Its complete pointer, keyboard, and focus behaviour (§11, §15).
+- Authority-denied, pending, failed-closed, and destructive rendering wherever the
+  control can express them, distinct from a plain disabled state (§13).
+- Its §20 tests, including the furniture and scrollbar checklists.
+
+None of these controls is optional, deferrable, or reducible to a placeholder.
+A control that is missing a specified state, a theme variant, an accessibility
+fallback, or a keyboard path is incomplete and is a defect, regardless of
+whether it compiles or its current call site exercises the missing part
+(`AGENTS.md` §27, §23). The staged build order in `.junie/gui-controls-work.md`
+sequences *when* each family lands; it never licenses shipping any of them in a
+thinned-down form.
+
 ---
 
 ## 2. Design Position
@@ -455,6 +490,14 @@ WindowFrame
 ---
 
 ## 11. Component Specifications
+
+Every component in this section is a **first-class control that must be fully
+implemented** (§1): each ships with all the states listed for it, its dark/light
+theme coverage, its high-contrast and reduced-motion behaviour, its complete
+pointer/keyboard/focus handling, and its §20 tests. No component here is a
+placeholder, an optional extra, or a "minimal for now" core (`AGENTS.md` §27,
+§2.19). A component that omits a specified state or behaviour is incomplete and
+is a defect (§20, `AGENTS.md` §23).
 
 ### 11.1 Button
 

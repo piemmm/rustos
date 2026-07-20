@@ -59,6 +59,7 @@ pub mod geometry;
 pub mod input;
 pub mod select;
 pub mod surface;
+pub mod viewport;
 pub mod window;
 
 #[cfg(test)]
@@ -73,4 +74,7 @@ pub use geometry::{Point, Rect, Scale};
 pub use input::{InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton};
 pub use select::{desired_cursor, CursorController};
 pub use surface::Surface;
+pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};
 pub use window::{Window, WindowId};
+
+pub use tairix_controls::{ScrollModel, ScrollOrientation, ScrollRange, TrackHit};

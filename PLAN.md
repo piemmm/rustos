@@ -3017,9 +3017,11 @@ Shipped (headless-testable, model + renderer over injected seams):
   extent, so `DeviceInputSource` accumulates displacements — saturating,
   clamped to the screen `Rect` it is constructed with (empty screen
   refused), starting at the centre — and drivers need no display-geometry
-  authority (the libinput/Wayland split). Scroll ticks are not carried
-  until a desktop scroll consumer exists. `PointerInput::from_device_event`
-  (`lib/abi`) is the one device→seat mapping (axis deltas + the shared
+  authority (the libinput/Wayland split). A scroll wheel is carried as a
+  `Scrolled { dx, dy }` tick record, consumed by the desktop scrollbar
+  (`PointerScrolled` in `lib/input`, routed to the root viewport under the
+  pointer). `PointerInput::from_device_event`
+  (`lib/abi`) is the one device→seat mapping (axis deltas + scroll ticks + the shared
   `evdev` `BTN_*` codes, hoisted with `AXIS_X`/`AXIS_Y` into
   `tairix_abi::driver::input` from the lib/hid + lib/virtio_input copies).
 - **The seat's pointer channel is fed by the real virtio-input driver.**
@@ -3246,14 +3248,23 @@ per-app recipes (§2.2).
   classification, and drag with a preserved pointer-to-thumb anchor). Pure
   `u128` integer arithmetic, every division guarded, fail-closed to a
   non-draggable zero-offset bar; 27 host unit tests cover the §20 scrollbar
-  checklist. No consumers yet — the WM/app wiring is the next stage (below),
-  which is when the scroll-tick pointer record deferred above (`from_device_event`)
-  is carried.
+  checklist.
+- **Scroll engine consumers — DONE.** The engine has its two mandated,
+  independent consumers, and the deferred scroll-tick record is now carried
+  end to end. The window manager composes **root-viewport scrollbars** as
+  furniture (`userland/gui/wm::viewport::RootViewport`): a per-axis
+  `ScrollModel`, a reserved-gutter/overlay layout, a furniture hit map that
+  keeps the client from receiving bar input (and clips the client out of the
+  gutter), and `InputRouter` wheel/track-page/thumb-drag driving over the
+  Stage-A math. The **viewer app** is the second, nested consumer
+  (`tairix_viewer::ScrollView`), scrolling a long file by keyboard through
+  the same `ScrollModel`. The pointer record carries a `Scrolled` tick
+  (`lib/abi`), delivered as `lib/input::PointerScrolled` and a new theme
+  `scrollbar_breadth`/`min_thumb_length` metric sizes the furniture.
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the typed control-state vocabulary (§5), the theme-token additions (§6), the
-  drawn controls over `lib/raster` (button/icon-button/toggle/field, then
-  window furniture and the scrollbar renderer), and the WM root-viewport +
-  application consumers of the scroll engine. Each control lands complete
+  the typed control-state vocabulary (§5), the theme-token additions (§6), and
+  the drawn controls over `lib/raster` (button/icon-button/toggle/field, then
+  window furniture and the scrollbar renderer). Each control lands complete
   (§27) with dark/light + reduced-motion + high-contrast coverage and its
   §20 tests before the next begins.
 

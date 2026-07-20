@@ -376,11 +376,15 @@ impl DesktopShell {
     /// that owns no task changes no highlight and is left cheap.
     fn mirror_focus(&mut self, response: &InputResponse, compositor: &mut Compositor) {
         let focus = match *response {
-            InputResponse::Activated { window, .. } => Some(window),
+            // A furniture press (a scrollbar) activated its window exactly as a
+            // client press does, so the highlighted task follows it too.
+            InputResponse::Activated { window, .. }
+            | InputResponse::FurniturePressed { window } => Some(window),
             InputResponse::DesktopPressed => None,
             InputResponse::Moved { .. }
             | InputResponse::MoveEnded { .. }
             | InputResponse::Key { .. }
+            | InputResponse::Scrolled { .. }
             | InputResponse::Ignored => return,
         };
         if self.tasks.sync_focus(self.session.taskbar_mut(), focus) {

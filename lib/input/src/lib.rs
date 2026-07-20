@@ -139,6 +139,17 @@ pub enum InputEvent {
         /// The button that came up.
         button: PointerButton,
     },
+    /// The scroll wheel turned by a relative number of ticks at the current
+    /// pointer position. Positive `dx` scrolls toward the logical end,
+    /// positive `dy` scrolls downward (the `evdev` orientation). Scroll is a
+    /// delta, not an absolute position: the router routes it to the viewport
+    /// under the pointer rather than moving the pointer.
+    PointerScrolled {
+        /// Signed horizontal scroll ticks.
+        dx: i32,
+        /// Signed vertical scroll ticks.
+        dy: i32,
+    },
     /// A key was pressed; it is delivered to the focused surface.
     KeyPressed {
         /// The key that went down.
@@ -219,6 +230,21 @@ mod tests {
             }
             other => panic!("expected a key press, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pointer_scrolled_carries_signed_ticks() {
+        let event = InputEvent::PointerScrolled { dx: -1, dy: 3 };
+        match event {
+            InputEvent::PointerScrolled { dx, dy } => {
+                assert_eq!((dx, dy), (-1, 3));
+            }
+            other => panic!("expected a scroll, got {other:?}"),
+        }
+        assert_ne!(
+            InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            InputEvent::PointerScrolled { dx: 0, dy: -1 }
+        );
     }
 
     #[test]

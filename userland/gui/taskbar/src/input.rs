@@ -114,6 +114,7 @@ impl TaskbarInput {
             } => self.press_primary(taskbar, scale),
             InputEvent::PointerPressed { .. }
             | InputEvent::PointerReleased { .. }
+            | InputEvent::PointerScrolled { .. }
             | InputEvent::KeyPressed { .. }
             | InputEvent::KeyReleased { .. } => TaskbarResponse::Ignored,
         }

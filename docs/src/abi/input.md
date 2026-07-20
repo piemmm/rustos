@@ -16,6 +16,9 @@ states unrepresentable (`AGENTS.md` §2.11):
 - `Pressed(button)` / `Released(button)` — a [`PointerButtonCode`]
   (primary / secondary / middle) went down or came up at the current
   pointer position.
+- `Scrolled { dx, dy }` — the scroll wheel turned by a relative number of
+  ticks (`evdev` orientation: positive x toward the logical end, positive y
+  downward), acting at the current pointer position.
 
 The record is deliberately **screen-independent**: only the seat owner
 (the desktop session, which owns the compositor) knows the screen's pixel
@@ -25,10 +28,11 @@ on-screen position — an input driver needs no display-geometry authority.
 A record is exactly [`PointerInput::WIRE_LEN`] (20) bytes, little-endian:
 a `"PIN1"` magic, the two-byte ABI version, a `kind` code, a `button`
 code, a reserved half-word, and two 4-byte signed displacements. The
-displacement fields carry the reported motion for a move and are zero for
-a press or release (a pointing device reports motion separately from
-clicks, and the seat owner applies a button at the position its
-accumulated motion established — the same model as `lib/input`).
+displacement fields carry the reported motion for a move, the signed wheel
+ticks for a scroll, and are zero for a press or release (a pointing device
+reports motion separately from clicks, and the seat owner applies a button at
+the position its accumulated motion established — the same model as
+`lib/input`).
 
 ## Fail-closed decoding
 
@@ -49,11 +53,10 @@ input *driver* reports across the [`Input`] driver trait: single-axis
 pointer *deltas*, scroll ticks, and platform keycodes, one event per axis
 or edge. `PointerInput` is the *seat-channel* record a driver process
 injects (`pointer_inject`): button keycodes are resolved to the closed
-button set, and scroll ticks are not carried (the desktop has no scroll
-consumer yet; the vocabulary is extended with the consumer, never ahead
-of it). [`PointerInput::from_device_event`] is the one shared spelling of
-that mapping, so the virtio and USB HID driver processes can never
-diverge.
+button set, and a scroll wheel becomes a `Scrolled` tick record now that
+the desktop scrollbar consumes it. [`PointerInput::from_device_event`] is
+the one shared spelling of that mapping, so the virtio and USB HID driver
+processes can never diverge.
 
 ## The keyboard record
 

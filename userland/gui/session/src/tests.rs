@@ -378,10 +378,8 @@ fn custom_dark(id: ThemeId, taskbar_corner_radius: u32) -> Theme {
         Appearance::Dark,
         *base.palette(),
         Metrics {
-            window_corner_radius: 8,
             taskbar_corner_radius,
-            popup_corner_radius: 6,
-            border_thickness: 1,
+            ..*base.metrics()
         },
         base.fonts().clone(),
         base.cursors().clone(),

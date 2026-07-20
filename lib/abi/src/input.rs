@@ -38,10 +38,10 @@
 //! trait: single-axis pointer *deltas*, scroll ticks, and platform keycodes,
 //! one event per axis or edge. [`PointerInput`] is the *seat-channel* record
 //! an input-driver process injects (`pointer_inject`): button keycodes are
-//! resolved to the closed button set and scroll ticks are not carried (the
-//! desktop has no scroll consumer yet; the vocabulary is extended with the
-//! consumer, never ahead of it). [`PointerInput::from_device_event`] is the
-//! one spelling of that mapping, shared by every pointer-input driver.
+//! resolved to the closed button set, and a scroll wheel becomes a
+//! [`Scrolled`](PointerInput::Scrolled) tick record now that the desktop
+//! scrollbar consumes it. [`PointerInput::from_device_event`] is the one
+//! spelling of that mapping, shared by every pointer-input driver.
 //!
 //! # Wire layout
 //!
@@ -51,19 +51,20 @@
 //! |-------:|-----:|------------|------------------------------------------|
 //! |      0 |    4 | `magic`    | [`POINTER_INPUT_MAGIC`]                   |
 //! |      4 |    2 | `version`  | ABI version ([`crate::ABI_VERSION_CURRENT`]) |
-//! |      6 |    2 | `kind`     | [`KIND_MOVED_BY`] / [`KIND_PRESSED`] / [`KIND_RELEASED`] |
-//! |      8 |    2 | `button`   | [`BUTTON_NONE`] for motion, else a button code |
+//! |      6 |    2 | `kind`     | [`KIND_MOVED_BY`] / [`KIND_PRESSED`] / [`KIND_RELEASED`] / [`KIND_SCROLLED`] |
+//! |      8 |    2 | `button`   | [`BUTTON_NONE`] for motion/scroll, else a button code |
 //! |     10 |    2 | `reserved` | must be zero                             |
-//! |     12 |    4 | `dx`       | signed x displacement (motion only)      |
-//! |     16 |    4 | `dy`       | signed y displacement (motion only)      |
+//! |     12 |    4 | `dx`       | signed x displacement / scroll ticks     |
+//! |     16 |    4 | `dy`       | signed y displacement / scroll ticks     |
 //!
 //! The displacement fields carry the reported motion for a
-//! [`MovedBy`](PointerInput::MovedBy) record and must be zero for a press or
-//! release (a real pointing device reports motion separately from clicks, and
-//! the seat owner applies a button at the position its accumulated motion
+//! [`MovedBy`](PointerInput::MovedBy) record, the signed wheel ticks for a
+//! [`Scrolled`](PointerInput::Scrolled) record, and must be zero for a press
+//! or release (a real pointing device reports motion separately from clicks,
+//! and the seat owner applies a button at the position its accumulated motion
 //! established — the same model as `lib/input`). The `button` field is
-//! [`BUTTON_NONE`] for motion and a valid button code for a press or
-//! release. Any other combination is wire corruption and is refused.
+//! [`BUTTON_NONE`] for motion and scroll and a valid button code for a press
+//! or release. Any other combination is wire corruption and is refused.
 
 use crate::driver::input::{
     InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE, POINTER_BUTTON_COUNT,
@@ -81,9 +82,12 @@ pub const KIND_MOVED_BY: u16 = 0;
 pub const KIND_PRESSED: u16 = 1;
 /// `kind` code for a pointer-button release.
 pub const KIND_RELEASED: u16 = 2;
+/// `kind` code for a scroll-wheel tick.
+pub const KIND_SCROLLED: u16 = 3;
 
-/// `button` code carried by a [`MovedBy`](PointerInput::MovedBy) record: no
-/// button is involved in a motion event.
+/// `button` code carried by a [`MovedBy`](PointerInput::MovedBy) or
+/// [`Scrolled`](PointerInput::Scrolled) record: no button is involved in a
+/// motion or scroll event.
 pub const BUTTON_NONE: u16 = 0;
 
 /// The pointer button a press or release record names.
@@ -151,6 +155,17 @@ pub enum PointerInput {
     Pressed(PointerButtonCode),
     /// A pointer button came up at the current pointer position.
     Released(PointerButtonCode),
+    /// The scroll wheel turned by a relative number of ticks, in the
+    /// device's detent units (positive x toward the logical end, positive y
+    /// downward — the `evdev` orientation). A scroll acts at the current
+    /// pointer position, exactly as a button does; the seat owner routes it
+    /// to the viewport under that position.
+    Scrolled {
+        /// Signed horizontal scroll ticks.
+        dx: i32,
+        /// Signed vertical scroll ticks.
+        dy: i32,
+    },
 }
 
 impl PointerInput {
@@ -167,6 +182,7 @@ impl PointerInput {
             Self::MovedBy { dx, dy } => (KIND_MOVED_BY, BUTTON_NONE, dx, dy),
             Self::Pressed(button) => (KIND_PRESSED, button.code(), 0, 0),
             Self::Released(button) => (KIND_RELEASED, button.code(), 0, 0),
+            Self::Scrolled { dx, dy } => (KIND_SCROLLED, BUTTON_NONE, dx, dy),
         };
         put_u16(&mut out, 6, kind);
         put_u16(&mut out, 8, button);
@@ -193,8 +209,8 @@ impl PointerInput {
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::OutOfRange`] if `kind` is not a defined kind, or if the
     ///   `button` field is inconsistent with the kind (a button code on a
-    ///   motion record, or [`BUTTON_NONE`]/an unknown code on a press or
-    ///   release).
+    ///   motion or scroll record, or [`BUTTON_NONE`]/an unknown code on a
+    ///   press or release).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -218,6 +234,12 @@ impl PointerInput {
                     return Err(Errno::OutOfRange);
                 }
                 Ok(Self::MovedBy { dx, dy })
+            }
+            KIND_SCROLLED => {
+                if button != BUTTON_NONE {
+                    return Err(Errno::OutOfRange);
+                }
+                Ok(Self::Scrolled { dx, dy })
             }
             KIND_PRESSED | KIND_RELEASED => {
                 if dx != 0 || dy != 0 {
@@ -247,11 +269,12 @@ impl PointerInput {
     ///   [`POINTER_BUTTON_CODE_BASE`] button codes becomes a
     ///   [`Pressed`](Self::Pressed) / [`Released`](Self::Released) of the
     ///   resolved button;
-    /// * everything else — keyboard keys (a keyboard producer's job),
-    ///   [`Scroll`](InputEventKind::Scroll) ticks (no desktop scroll
-    ///   consumer yet), an unknown axis, or a non-edge button value (a
-    ///   repeat) — produces no record rather than a guessed one (fail
-    ///   closed, never fabricate input).
+    /// * a [`Scroll`](InputEventKind::Scroll) axis tick becomes a
+    ///   single-axis [`Scrolled`](Self::Scrolled);
+    /// * everything else — keyboard keys (a keyboard producer's job), an
+    ///   unknown axis, or a non-edge button value (a repeat) — produces no
+    ///   record rather than a guessed one (fail closed, never fabricate
+    ///   input).
     #[must_use]
     pub fn from_device_event(event: &InputEvent) -> Option<Self> {
         match event.kind {
@@ -281,7 +304,17 @@ impl PointerInput {
                     _ => None,
                 }
             }
-            InputEventKind::Scroll => None,
+            InputEventKind::Scroll => match event.code {
+                AXIS_X => Some(Self::Scrolled {
+                    dx: event.value,
+                    dy: 0,
+                }),
+                AXIS_Y => Some(Self::Scrolled {
+                    dx: 0,
+                    dy: event.value,
+                }),
+                _ => None,
+            },
         }
     }
 }
@@ -629,8 +662,8 @@ mod tests {
     use super::{
         KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
         KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-        KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
-        POINTER_INPUT_MAGIC,
+        KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, MOD_ALT, MOD_CTRL, MOD_META,
+        MOD_SHIFT, POINTER_INPUT_MAGIC,
     };
     use crate::driver::input::{
         InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE,
@@ -735,6 +768,22 @@ mod tests {
         assert_eq!(PointerInput::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 
+    #[test]
+    fn scroll_round_trips_with_signed_ticks() {
+        let event = PointerInput::Scrolled { dx: -3, dy: 5 };
+        let decoded = PointerInput::from_bytes(&event.to_le_bytes()).expect("valid record");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn rejects_button_on_scroll() {
+        // A well-formed scroll record, then plant a button code: a scroll
+        // carries no button, exactly like a motion record.
+        let mut bytes = PointerInput::Scrolled { dx: 0, dy: 1 }.to_le_bytes();
+        bytes[8] = 1;
+        assert_eq!(PointerInput::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
     /// One device event per axis maps onto a single-axis displacement.
     #[test]
     fn device_axis_deltas_map_to_single_axis_moves() {
@@ -787,8 +836,33 @@ mod tests {
         }
     }
 
-    /// Keyboard keys, scroll ticks, unknown axes, out-of-set buttons, and
-    /// repeat values produce no record (fail closed, never fabricate).
+    /// One device scroll event per axis maps onto a single-axis tick record.
+    #[test]
+    fn device_scroll_ticks_map_to_single_axis_scrolls() {
+        let x = InputEvent {
+            kind: InputEventKind::Scroll,
+            reserved0: 0,
+            code: AXIS_X,
+            value: 2,
+        };
+        let y = InputEvent {
+            kind: InputEventKind::Scroll,
+            reserved0: 0,
+            code: AXIS_Y,
+            value: -1,
+        };
+        assert_eq!(
+            PointerInput::from_device_event(&x),
+            Some(PointerInput::Scrolled { dx: 2, dy: 0 })
+        );
+        assert_eq!(
+            PointerInput::from_device_event(&y),
+            Some(PointerInput::Scrolled { dx: 0, dy: -1 })
+        );
+    }
+
+    /// Keyboard keys, unknown axes, out-of-set buttons, and repeat values
+    /// produce no record (fail closed, never fabricate).
     #[test]
     fn device_events_outside_the_pointer_vocabulary_produce_nothing() {
         let cases = [
@@ -813,18 +887,18 @@ mod tests {
                 code: POINTER_BUTTON_CODE_BASE,
                 value: 2,
             },
-            // An axis this vocabulary does not model.
+            // A pointer axis this vocabulary does not model.
             InputEvent {
                 kind: InputEventKind::Pointer,
                 reserved0: 0,
                 code: 2,
                 value: 1,
             },
-            // Scroll has no desktop consumer yet, so no record is minted.
+            // A scroll axis this vocabulary does not model.
             InputEvent {
                 kind: InputEventKind::Scroll,
                 reserved0: 0,
-                code: AXIS_Y,
+                code: 2,
                 value: -1,
             },
         ];
@@ -845,6 +919,7 @@ mod tests {
         assert_eq!(KIND_MOVED_BY, 0);
         assert_eq!(KIND_PRESSED, 1);
         assert_eq!(KIND_RELEASED, 2);
+        assert_eq!(KIND_SCROLLED, 3);
         assert_eq!(BUTTON_NONE, 0);
         assert_eq!(PointerButtonCode::Primary.code(), 1);
         assert_eq!(PointerButtonCode::Secondary.code(), 2);

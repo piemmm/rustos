@@ -26,7 +26,10 @@
 //! (focus on the desktop, or the focused window since gone) is ignored
 //! rather than misdelivered.
 
+use tairix_controls::{ScrollOrientation, TrackHit};
+
 use crate::geometry::Point;
+use crate::viewport::FurnitureHit;
 use crate::window::{Window, WindowId};
 use crate::Compositor;
 
@@ -80,6 +83,22 @@ pub enum InputResponse {
         /// `true` for a press, `false` for a release.
         pressed: bool,
     },
+    /// A root-viewport scrollbar's offset changed (a wheel tick, a track
+    /// page step, or a thumb drag). The embedder re-reads the window's
+    /// [`RootViewport`](crate::RootViewport) models and forwards the new
+    /// offset to the client, which re-renders its content.
+    Scrolled {
+        /// The window whose root viewport scrolled.
+        window: WindowId,
+    },
+    /// A primary press landed on a window's scrollbar furniture (a track or
+    /// the corner) and was consumed by the window manager. It is **not**
+    /// delivered to the client: the furniture owns that region, so an
+    /// application look-alike inside the client can never intercept it.
+    FurniturePressed {
+        /// The window whose furniture received the press.
+        window: WindowId,
+    },
 }
 
 /// An in-flight interactive move: the grabbed window and the offset
@@ -90,6 +109,16 @@ pub enum InputResponse {
 struct MoveGrab {
     window: WindowId,
     offset: Point,
+}
+
+/// An in-flight scrollbar thumb drag: the window, which bar is being
+/// dragged, and the pointer-to-thumb-start anchor captured when the drag
+/// began, held constant so the content does not jump on grab.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ScrollGrab {
+    window: WindowId,
+    orientation: ScrollOrientation,
+    anchor: i32,
 }
 
 /// Routes pointer input into [`Compositor`] actions.
@@ -104,6 +133,7 @@ pub struct InputRouter {
     pointer: Point,
     focused: Option<WindowId>,
     grab: Option<MoveGrab>,
+    scroll_grab: Option<ScrollGrab>,
 }
 
 impl InputRouter {
@@ -131,6 +161,12 @@ impl InputRouter {
     #[must_use]
     pub const fn is_moving(&self) -> bool {
         self.grab.is_some()
+    }
+
+    /// `true` while a scrollbar thumb is captured for dragging.
+    #[must_use]
+    pub const fn is_scrolling(&self) -> bool {
+        self.scroll_grab.is_some()
     }
 
     /// Give keyboard focus to `window`, validated against `compositor`.
@@ -167,8 +203,13 @@ impl InputRouter {
         match event {
             InputEvent::PointerMoved { to } => {
                 self.pointer = to;
-                self.drag_to(to, compositor)
+                if self.scroll_grab.is_some() {
+                    self.scroll_drag_to(to, compositor)
+                } else {
+                    self.drag_to(to, compositor)
+                }
             }
+            InputEvent::PointerScrolled { dx, dy } => self.wheel(dx, dy, compositor),
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => self.press_primary(compositor),
@@ -248,6 +289,13 @@ impl InputRouter {
         };
         compositor.raise(window);
         self.focused = Some(window);
+        // A press on the root-viewport furniture is the window manager's, not
+        // the client's: the furniture hit map keeps it away from the surface.
+        if let Some(hit) = compositor.furniture_hit(window, self.pointer) {
+            if !matches!(hit, FurnitureHit::Client) {
+                return self.press_furniture(window, hit, compositor);
+            }
+        }
         let origin = compositor
             .window(window)
             .map_or(Point::ORIGIN, Window::origin);
@@ -260,8 +308,124 @@ impl InputRouter {
         }
     }
 
-    /// Handle a primary-button release: end any active move-grab.
+    /// Handle a primary press that landed on window furniture: a thumb starts
+    /// a drag, a track region pages toward it, and the corner is inert. The
+    /// press is always consumed by the window manager.
+    fn press_furniture(
+        &mut self,
+        window: WindowId,
+        hit: FurnitureHit,
+        compositor: &mut Compositor,
+    ) -> InputResponse {
+        match hit {
+            FurnitureHit::Vertical(TrackHit::Thumb) => {
+                self.begin_scroll_grab(window, ScrollOrientation::Vertical, compositor);
+            }
+            FurnitureHit::Horizontal(TrackHit::Thumb) => {
+                self.begin_scroll_grab(window, ScrollOrientation::Horizontal, compositor);
+            }
+            FurnitureHit::Vertical(region) => {
+                let forward = matches!(region, TrackHit::AfterThumb);
+                compositor.scroll_root(window, |vp| vp.page(ScrollOrientation::Vertical, forward));
+            }
+            FurnitureHit::Horizontal(region) => {
+                let forward = matches!(region, TrackHit::AfterThumb);
+                compositor
+                    .scroll_root(window, |vp| vp.page(ScrollOrientation::Horizontal, forward));
+            }
+            FurnitureHit::Corner | FurnitureHit::Client => {}
+        }
+        InputResponse::FurniturePressed { window }
+    }
+
+    /// Capture the scrollbar thumb of `orientation` for dragging, recording
+    /// the pointer-to-thumb-start anchor so the content does not jump. Does
+    /// nothing (no grab) when that bar is absent or its track is degenerate.
+    fn begin_scroll_grab(
+        &mut self,
+        window: WindowId,
+        orientation: ScrollOrientation,
+        compositor: &Compositor,
+    ) {
+        let Some(bounds) = compositor.window(window).map(Window::bounds) else {
+            return;
+        };
+        let Some(viewport) = compositor.root_viewport(window) else {
+            return;
+        };
+        let Some((track, geometry)) = viewport.track_and_geometry(bounds, orientation) else {
+            return;
+        };
+        let along = match orientation {
+            ScrollOrientation::Vertical => self.pointer.y - track.top(),
+            ScrollOrientation::Horizontal => self.pointer.x - track.left(),
+        };
+        let thumb_start = i32::try_from(geometry.thumb().start).unwrap_or(0);
+        self.scroll_grab = Some(ScrollGrab {
+            window,
+            orientation,
+            anchor: along - thumb_start,
+        });
+    }
+
+    /// Route a scroll-wheel gesture to the root viewport under the pointer.
+    ///
+    /// The ticks drive the shared scroll model (one line step per tick);
+    /// the pointer does not move. Returns [`InputResponse::Scrolled`] when an
+    /// offset changed, else [`InputResponse::Ignored`] (no window, no root
+    /// viewport, or already at the bound).
+    fn wheel(&mut self, dx: i32, dy: i32, compositor: &mut Compositor) -> InputResponse {
+        let Some(window) = compositor.window_at(self.pointer) else {
+            return InputResponse::Ignored;
+        };
+        match compositor.scroll_root(window, |vp| vp.wheel(dx, dy)) {
+            Some(true) => InputResponse::Scrolled { window },
+            _ => InputResponse::Ignored,
+        }
+    }
+
+    /// Apply pointer motion to an active scrollbar thumb drag.
+    ///
+    /// The thumb start is derived from the current range each move, so a
+    /// content change mid-drag re-clamps the offset rather than producing an
+    /// invalid one; the captured anchor keeps the grab point under the
+    /// pointer.
+    fn scroll_drag_to(&mut self, to: Point, compositor: &mut Compositor) -> InputResponse {
+        let Some(grab) = self.scroll_grab else {
+            return InputResponse::Ignored;
+        };
+        let Some(bounds) = compositor.window(grab.window).map(Window::bounds) else {
+            self.scroll_grab = None;
+            return InputResponse::Ignored;
+        };
+        let Some(viewport) = compositor.root_viewport(grab.window) else {
+            self.scroll_grab = None;
+            return InputResponse::Ignored;
+        };
+        let Some((track, geometry)) = viewport.track_and_geometry(bounds, grab.orientation) else {
+            self.scroll_grab = None;
+            return InputResponse::Ignored;
+        };
+        let along = match grab.orientation {
+            ScrollOrientation::Vertical => to.y - track.top(),
+            ScrollOrientation::Horizontal => to.x - track.left(),
+        };
+        let offset = geometry.offset_for_drag(along, grab.anchor);
+        match compositor.scroll_root(grab.window, |vp| vp.set_offset(grab.orientation, offset)) {
+            Some(true) => InputResponse::Scrolled {
+                window: grab.window,
+            },
+            _ => InputResponse::Ignored,
+        }
+    }
+
+    /// Handle a primary-button release: end any active move-grab or scrollbar
+    /// thumb drag. A released thumb has already committed its offset, so
+    /// ending the capture reports nothing further.
     fn release_primary(&mut self) -> InputResponse {
+        if self.scroll_grab.take().is_some() {
+            return InputResponse::Ignored;
+        }
         match self.grab.take() {
             Some(grab) => InputResponse::MoveEnded {
                 window: grab.window,

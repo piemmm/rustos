@@ -24,6 +24,11 @@
 //!   one-line status ("waiting", "cancelled") or the content lines,
 //!   drawn with the shared `lib/font` face onto a `lib/raster`
 //!   [`Surface`] through the active `lib/theme` palette.
+//! * [`ScrollView`] — the vertical scroll offset through a long file, held
+//!   in the shared `lib/controls` scroll model (the same behaviour the
+//!   window manager's root-viewport bars use). Arrow, page, and home/end
+//!   keys step it; [`visible`](ScrollView::visible) is the line window the
+//!   renderer draws.
 //!
 //! # Layering & safety
 //!
@@ -198,6 +203,127 @@ fn to_i32(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+/// Most display lines the viewer keeps for a picked file. A validation
+/// bound like [`CONTENT_MAX`]: every retained line costs at least one input
+/// byte (a character or a line feed), so this caps the line vector for a
+/// hostile all-newline file without ever panicking.
+pub const MAX_LINES: usize = CONTENT_MAX;
+
+/// A scrollable view over a picked file's display lines.
+///
+/// The viewer is the *second, independent* consumer of the shared scroll
+/// geometry engine ([`tairix_controls`]) — the window manager's
+/// root-viewport bars are the first — so a nested application scroll uses the
+/// same range validation and offset behaviour as a window-level bar rather
+/// than a private recipe. The scroll unit here is a **display row**: the
+/// content extent is the number of lines, the viewport extent is the rows the
+/// window shows, and the [`ScrollModel`](tairix_controls::ScrollModel) owns
+/// the first-visible-row offset. Arrow keys step one line, Page Up/Down step a
+/// page, and Home/End jump to the bounds, exactly as the design language's
+/// scrollbar keyboard model prescribes.
+pub struct ScrollView {
+    lines: Vec<String>,
+    model: tairix_controls::ScrollModel,
+}
+
+impl ScrollView {
+    /// Build a view over `lines` showing `visible_rows` rows at once.
+    ///
+    /// A page step is one row shy of a full page so a line stays on screen
+    /// across a page turn; a degenerate zero-row window fails closed to a
+    /// non-scrollable view (the shared range pins the offset to zero).
+    #[must_use]
+    pub fn new(lines: Vec<String>, visible_rows: usize) -> Self {
+        let content = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+        let viewport = u64::try_from(visible_rows).unwrap_or(u64::MAX);
+        let page = u64::try_from(visible_rows.saturating_sub(1).max(1)).unwrap_or(u64::MAX);
+        let model = tairix_controls::ScrollModel::new(
+            tairix_controls::ScrollRange::new(content, viewport, 0),
+            1,
+            page,
+        );
+        Self { lines, model }
+    }
+
+    /// The first visible row (the scroll offset), clamped into the lines.
+    #[must_use]
+    pub fn offset(&self) -> usize {
+        usize::try_from(self.model.offset())
+            .unwrap_or(usize::MAX)
+            .min(self.lines.len())
+    }
+
+    /// The number of display lines the file produced.
+    #[must_use]
+    pub fn total_lines(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// The rows shown at once (the viewport extent).
+    #[must_use]
+    pub fn window_rows(&self) -> usize {
+        usize::try_from(self.model.range().viewport_extent()).unwrap_or(usize::MAX)
+    }
+
+    /// The lines currently in view: at most [`window_rows`](Self::window_rows)
+    /// lines starting at the offset.
+    #[must_use]
+    pub fn visible(&self) -> &[String] {
+        let start = self.offset();
+        let end = start
+            .saturating_add(self.window_rows())
+            .min(self.lines.len());
+        self.lines.get(start..end).unwrap_or(&[])
+    }
+
+    /// The underlying scroll model, for a future scrollbar renderer to size a
+    /// thumb from the same offset the view shows.
+    #[must_use]
+    pub fn model(&self) -> tairix_controls::ScrollModel {
+        self.model
+    }
+
+    /// Scroll one line toward the start, returning whether the view moved.
+    pub fn line_up(&mut self) -> bool {
+        self.apply(tairix_controls::ScrollModel::line_backward)
+    }
+
+    /// Scroll one line toward the end, returning whether the view moved.
+    pub fn line_down(&mut self) -> bool {
+        self.apply(tairix_controls::ScrollModel::line_forward)
+    }
+
+    /// Scroll one page toward the start, returning whether the view moved.
+    pub fn page_up(&mut self) -> bool {
+        self.apply(tairix_controls::ScrollModel::page_backward)
+    }
+
+    /// Scroll one page toward the end, returning whether the view moved.
+    pub fn page_down(&mut self) -> bool {
+        self.apply(tairix_controls::ScrollModel::page_forward)
+    }
+
+    /// Jump to the first line, returning whether the view moved.
+    pub fn to_top(&mut self) -> bool {
+        self.apply(tairix_controls::ScrollModel::to_start)
+    }
+
+    /// Jump so the last lines are in view, returning whether the view moved.
+    pub fn to_bottom(&mut self) -> bool {
+        self.apply(tairix_controls::ScrollModel::to_end)
+    }
+
+    /// Apply `change` to the model, returning whether the offset changed.
+    fn apply(
+        &mut self,
+        change: impl FnOnce(tairix_controls::ScrollModel) -> tairix_controls::ScrollModel,
+    ) -> bool {
+        let before = self.model.offset();
+        self.model = change(self.model);
+        self.model.offset() != before
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +367,63 @@ mod tests {
     fn view_geometry_is_non_degenerate() {
         assert!(visible_rows() > 4, "the window shows several lines");
         assert!(visible_cols() > 16, "the window shows several columns");
+    }
+
+    /// Build a view over `total` numbered lines showing `rows` at once.
+    fn view(total: usize, rows: usize) -> ScrollView {
+        let lines: Vec<String> = (0..total).map(|n| alloc::format!("line {n}")).collect();
+        ScrollView::new(lines, rows)
+    }
+
+    #[test]
+    fn scroll_view_shows_a_window_of_lines_from_the_offset() {
+        let mut v = view(100, 10);
+        assert_eq!(v.offset(), 0);
+        assert_eq!(v.visible().len(), 10);
+        assert_eq!(v.visible()[0], "line 0");
+
+        assert!(v.line_down());
+        assert_eq!(v.offset(), 1);
+        assert_eq!(v.visible()[0], "line 1");
+
+        // A page steps one row shy of a full window so a line stays visible.
+        assert!(v.page_down());
+        assert_eq!(v.offset(), 1 + 9);
+    }
+
+    #[test]
+    fn scroll_view_clamps_at_both_ends() {
+        let mut v = view(100, 10);
+        assert!(!v.line_up(), "already at the top");
+        assert!(v.to_bottom());
+        // The last row of content is the last row on screen: offset = 100 - 10.
+        assert_eq!(v.offset(), 90);
+        assert_eq!(v.visible().last().map(String::as_str), Some("line 99"));
+        assert!(!v.line_down(), "already at the bottom");
+        assert!(v.to_top());
+        assert_eq!(v.offset(), 0);
+    }
+
+    #[test]
+    fn scroll_view_with_fewer_lines_than_rows_is_not_scrollable() {
+        let mut v = view(3, 10);
+        assert_eq!(v.total_lines(), 3);
+        assert!(!v.line_down(), "content fits, so nothing scrolls");
+        assert!(!v.page_down());
+        assert!(!v.to_bottom());
+        assert_eq!(v.offset(), 0);
+        assert_eq!(v.visible().len(), 3);
+    }
+
+    #[test]
+    fn scroll_view_and_window_bars_share_the_same_offset_math() {
+        // The viewer's model and a window-manager-style geometry over the same
+        // range agree on the offset a thumb position implies — the point of one
+        // shared engine.
+        let v = view(1000, 20);
+        let range = v.model().range();
+        assert_eq!(range.content_extent(), 1000);
+        assert_eq!(range.viewport_extent(), 20);
+        assert_eq!(range.max_offset(), 980);
     }
 }

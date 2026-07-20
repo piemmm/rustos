@@ -50,8 +50,8 @@ mod program {
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_theme::ThemeRegistry;
     use tairix_viewer::{
-        content_lines, render_lines, render_status, visible_cols, visible_rows, CONTENT_MAX,
-        WIN_HEIGHT, WIN_WIDTH,
+        content_lines, render_lines, render_status, visible_cols, visible_rows, ScrollView,
+        CONTENT_MAX, MAX_LINES, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
@@ -310,6 +310,9 @@ mod program {
             set,
             server,
         });
+        // The currently viewed file, scrolled through the shared engine. None
+        // until a pick delivers content; a re-pick or refusal replaces it.
+        let mut view: Option<ScrollView> = None;
         loop {
             let event = match events.wait() {
                 Ok(event) => event,
@@ -321,46 +324,83 @@ mod program {
             let outcome = match event {
                 WindowEvent::FilePicked { handle, .. } => match read_picked(handle) {
                     Some(content) => {
-                        let lines = content_lines(&content, visible_rows(), visible_cols());
-                        render_lines(&lines, theme)
+                        // Keep every line (bounded) so the file can be
+                        // scrolled, not just its first screenful.
+                        let lines = content_lines(&content, MAX_LINES, visible_cols());
+                        let scroll = ScrollView::new(lines, visible_rows());
+                        let result = render_lines(scroll.visible(), theme)
                             .ok_or(Errno::NoSpace)
                             .and_then(|surface| {
                                 present_surface(&surface, &mut client, window, frames, &mode)
-                            })
+                            });
+                        view = Some(scroll);
+                        result
                     }
                     // A refused redemption or read delegated nothing the
                     // viewer can show; state it honestly.
-                    None => show("Delegated read refused", &mut client, frames),
+                    None => {
+                        view = None;
+                        show("Delegated read refused", &mut client, frames)
+                    }
                 },
                 WindowEvent::PickCancelled { .. } => {
                     show("No file chosen - Enter retries", &mut client, frames)
                 }
                 WindowEvent::Key {
-                    key:
-                        KeyInput::Pressed {
-                            key: KeyValue::Named(NamedKeyCode::Enter),
-                            ..
-                        },
+                    key: KeyInput::Pressed { key, .. },
                     ..
-                } => {
-                    // Ask for another pick; a refusal (one already
+                } => match key {
+                    // Enter asks for another pick; a refusal (one already
                     // showing) leaves the current content on screen.
-                    let _ = client.pick_file(window);
-                    Ok(())
-                }
+                    KeyValue::Named(NamedKeyCode::Enter) => {
+                        let _ = client.pick_file(window);
+                        Ok(())
+                    }
+                    // Navigation keys drive the shared scroll model and
+                    // repaint only when the view actually moved.
+                    KeyValue::Named(nav) => scroll_view(nav, view.as_mut())
+                        .filter(|moved| *moved)
+                        .map_or(Ok(()), |_| {
+                            let Some(scroll) = view.as_ref() else {
+                                return Ok(());
+                            };
+                            render_lines(scroll.visible(), theme)
+                                .ok_or(Errno::NoSpace)
+                                .and_then(|surface| {
+                                    present_surface(&surface, &mut client, window, frames, &mode)
+                                })
+                        }),
+                    KeyValue::Char(_) => Ok(()),
+                },
                 WindowEvent::CloseRequested { .. } => {
                     // The desktop asked; close the window and end cleanly.
                     let _ = client.close(window);
                     return 0;
                 }
-                // Focus changes, other keys, and pointer events repaint
-                // nothing; the viewer is picker-driven.
+                // Focus changes, key releases, and pointer events repaint
+                // nothing; the viewer is picker- and keyboard-driven.
                 _ => Ok(()),
             };
             if outcome.is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }
+    }
+
+    /// Apply a navigation key to the scroll `view`, returning whether the view
+    /// moved (or `None` when the key is not a scroll key or there is no view).
+    fn scroll_view(key: NamedKeyCode, view: Option<&mut ScrollView>) -> Option<bool> {
+        let view = view?;
+        let moved = match key {
+            NamedKeyCode::Up => view.line_up(),
+            NamedKeyCode::Down => view.line_down(),
+            NamedKeyCode::PageUp => view.page_up(),
+            NamedKeyCode::PageDown => view.page_down(),
+            NamedKeyCode::Home => view.to_top(),
+            NamedKeyCode::End => view.to_bottom(),
+            _ => return None,
+        };
+        Some(moved)
     }
 
     tairix_rt::entry!(main);

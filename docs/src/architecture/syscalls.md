@@ -223,9 +223,9 @@ the seat owner (the desktop session, which owns the compositor) knows the
 screen extent, so it accumulates and clamps displacements into the
 on-screen pointer position; a driver needs no display-geometry authority.
 A pointer-input driver holding `CAP_INPUT_INJECT` injects each decoded
-motion or button edge for the seat its device belongs to (scroll ticks
-are not carried yet — the vocabulary is extended with the first desktop
-scroll consumer, never ahead of it); the kernel copies the record in
+motion, button edge, or scroll tick for the seat its device belongs to
+(the desktop scrollbar consumes the scroll record); the kernel copies the
+record in
 through the validated boundary, decodes it fail-closed, and the seat
 registry routes it by who holds the seat — a held seat's record is queued
 on its bounded per-seat pointer channel, an unowned seat's record is

@@ -166,6 +166,10 @@ impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
                 PointerInput::Released(button) => InputEvent::PointerReleased {
                     button: pointer_button(button),
                 },
+                // A scroll is a delta at the current pointer position, not a
+                // move: the pointer stays put and the router routes the ticks
+                // to the viewport under it.
+                PointerInput::Scrolled { dx, dy } => InputEvent::PointerScrolled { dx, dy },
             })),
         }
     }
@@ -320,6 +324,17 @@ mod tests {
             source.poll(),
             Ok(Some(InputEvent::PointerPressed { .. }))
         ));
+        assert_eq!(source.pointer(), before);
+    }
+
+    #[test]
+    fn scroll_maps_to_ticks_and_does_not_move_the_pointer() {
+        let mut source = source(&[PointerInput::Scrolled { dx: -1, dy: 4 }]);
+        let before = source.pointer();
+        assert_eq!(
+            source.poll(),
+            Ok(Some(InputEvent::PointerScrolled { dx: -1, dy: 4 }))
+        );
         assert_eq!(source.pointer(), before);
     }
 

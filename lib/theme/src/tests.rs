@@ -218,6 +218,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             taskbar_corner_radius: 4,
             popup_corner_radius: 4,
             border_thickness: 1,
+            scrollbar_breadth: 12,
+            min_thumb_length: 20,
         },
         Fonts {
             ui: FontSpec::new("Test Sans", 12, FontWeight::Regular),

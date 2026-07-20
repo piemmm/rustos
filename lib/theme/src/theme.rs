@@ -175,6 +175,8 @@ fn common_metrics() -> Metrics {
         taskbar_corner_radius: 12,
         popup_corner_radius: 6,
         border_thickness: 1,
+        scrollbar_breadth: 14,
+        min_thumb_length: 24,
     }
 }
 

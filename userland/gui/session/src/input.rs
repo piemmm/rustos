@@ -172,14 +172,16 @@ impl SessionInputRouter {
                     wm_response(self.wm.handle(event, compositor))
                 }
             }
+            // The window manager takes the rest and the taskbar none of them:
+            // a primary release ends a move-grab, a scroll wheel routes to the
+            // root viewport under the pointer, and keys go to the focused
+            // window.
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => wm_response(self.wm.handle(event, compositor)),
-            // Keys go to the window manager, which delivers them to the
-            // focused window; the taskbar takes no keyboard input.
-            InputEvent::KeyPressed { .. } | InputEvent::KeyReleased { .. } => {
-                wm_response(self.wm.handle(event, compositor))
             }
+            | InputEvent::PointerScrolled { .. }
+            | InputEvent::KeyPressed { .. }
+            | InputEvent::KeyReleased { .. } => wm_response(self.wm.handle(event, compositor)),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 SessionInputResponse::Ignored
             }

@@ -22,10 +22,11 @@
 #define TAIRIX_POINTER_INPUT_WIRE_LEN 20u
 #define TAIRIX_KEY_INPUT_WIRE_LEN 20u
 
-/* Record `kind` codes: pointer moves/clicks then key down/up (uint16_t). */
+/* Record `kind` codes: pointer moves/clicks/scroll then key down/up (uint16_t). */
 #define TAIRIX_INPUT_KIND_MOVED_BY ((uint16_t)0u)
 #define TAIRIX_INPUT_KIND_PRESSED ((uint16_t)1u)
 #define TAIRIX_INPUT_KIND_RELEASED ((uint16_t)2u)
+#define TAIRIX_INPUT_KIND_SCROLLED ((uint16_t)3u)
 #define TAIRIX_INPUT_KIND_KEY_PRESSED ((uint16_t)1u)
 #define TAIRIX_INPUT_KIND_KEY_RELEASED ((uint16_t)2u)
 

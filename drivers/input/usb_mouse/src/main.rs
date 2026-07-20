@@ -309,10 +309,9 @@ mod program {
                     consecutive_pump_errors = 0;
                     for event in &events[..drained] {
                         // The shared pointer mapping claims the pointer
-                        // vocabulary (axis deltas, button edges); a boot
-                        // mouse decodes to nothing else, so an unmapped
-                        // event (a scroll tick with no desktop consumer
-                        // yet) is deliberately not injected.
+                        // vocabulary — axis deltas, button edges, and scroll
+                        // ticks; anything outside it (a stray axis) maps to
+                        // nothing and is deliberately not injected.
                         let Some(record) = PointerInput::from_device_event(event) else {
                             continue;
                         };

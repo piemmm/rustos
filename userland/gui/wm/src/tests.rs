@@ -1268,3 +1268,171 @@ fn accelerated_present_falls_back_when_a_layer_is_too_large() {
         "software frame sent"
     );
 }
+
+// ---- root-viewport scrollbars ----------------------------------------
+
+use crate::{RootViewport, ScrollModel, ScrollOrientation, ScrollPolicy, ScrollRange};
+
+fn scrolled(dx: i32, dy: i32) -> InputEvent {
+    InputEvent::PointerScrolled { dx, dy }
+}
+
+/// A window with a vertical root viewport: 1000 units of content in a
+/// 100-unit viewport, 10-unit lines, 100-unit pages, 14px breadth, 24px
+/// minimum thumb.
+fn with_vertical_viewport(c: &mut Compositor) -> WindowId {
+    let id = c.add_window(Point::ORIGIN, opaque(100, 100, RED));
+    let viewport = RootViewport::new(ScrollPolicy::ReservedGutter, 14, 24)
+        .with_vertical(ScrollModel::new(ScrollRange::new(1000, 100, 0), 10, 100));
+    assert!(c.set_root_viewport(id, viewport));
+    id
+}
+
+fn vertical_offset(c: &Compositor, id: WindowId) -> u64 {
+    c.root_viewport(id)
+        .and_then(RootViewport::vertical)
+        .expect("vertical bar")
+        .offset()
+}
+
+#[test]
+fn wheel_scrolls_the_viewport_under_the_pointer() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = with_vertical_viewport(&mut c);
+    let mut router = InputRouter::new();
+
+    // Pointer over the client: a wheel tick moves one line step per tick.
+    router.handle(moved(10, 10), &mut c);
+    assert_eq!(
+        router.handle(scrolled(0, 3), &mut c),
+        InputResponse::Scrolled { window: id }
+    );
+    assert_eq!(vertical_offset(&c, id), 30);
+
+    // Pointer off the window: the wheel has no viewport to scroll.
+    router.handle(moved(150, 150), &mut c);
+    assert_eq!(
+        router.handle(scrolled(0, 5), &mut c),
+        InputResponse::Ignored
+    );
+    assert_eq!(vertical_offset(&c, id), 30);
+}
+
+#[test]
+fn furniture_press_is_not_delivered_to_the_client() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = with_vertical_viewport(&mut c);
+    let mut router = InputRouter::new();
+
+    // A press in the reserved vertical gutter (x in [86, 100)) is furniture,
+    // never an Activated delivered to the client.
+    router.handle(moved(93, 5), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    // But the press still focused the window (it is the window's furniture).
+    assert_eq!(router.focused(), Some(id));
+
+    // A press in the client area is a normal activation.
+    router.handle(moved(10, 10), &mut c);
+    assert!(matches!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::Activated { window, .. } if window == id
+    ));
+}
+
+#[test]
+fn thumb_drag_captures_tracks_and_releases() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = with_vertical_viewport(&mut c);
+    let mut router = InputRouter::new();
+
+    // Grab the thumb near its top (offset 0 → thumb starts at 0).
+    router.handle(moved(93, 5), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert!(router.is_scrolling());
+    // Grabbing does not move the content.
+    assert_eq!(vertical_offset(&c, id), 0);
+
+    // Dragging down scrolls forward, tracking the pointer.
+    assert_eq!(
+        router.handle(moved(93, 45), &mut c),
+        InputResponse::Scrolled { window: id }
+    );
+    let dragged = vertical_offset(&c, id);
+    assert!(dragged > 0, "drag moved the offset forward");
+
+    // Release ends the capture; a later move no longer scrolls.
+    router.handle(release_primary(), &mut c);
+    assert!(!router.is_scrolling());
+    assert_eq!(router.handle(moved(93, 80), &mut c), InputResponse::Ignored);
+    assert_eq!(vertical_offset(&c, id), dragged, "no scroll after release");
+}
+
+#[test]
+fn content_shrinking_mid_drag_reclamps_the_offset() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = with_vertical_viewport(&mut c);
+    let mut router = InputRouter::new();
+
+    router.handle(moved(93, 5), &mut c);
+    router.handle(press_primary(), &mut c);
+    router.handle(moved(93, 45), &mut c);
+    assert!(vertical_offset(&c, id) > 100);
+
+    // Content shrinks under the live drag: the viewport re-expresses its
+    // range, and the next drag move produces a valid, clamped offset.
+    c.scroll_root(id, |vp| vp.resize(ScrollOrientation::Vertical, 200, 100));
+    router.handle(moved(93, 90), &mut c);
+    assert!(
+        vertical_offset(&c, id) <= 100,
+        "offset stays within the new 200-100 range"
+    );
+}
+
+#[test]
+fn track_press_below_the_thumb_pages_forward() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = with_vertical_viewport(&mut c);
+    let mut router = InputRouter::new();
+
+    // The thumb sits at the top (offset 0); a press well below it is the
+    // after-thumb region and pages one page (100) forward.
+    router.handle(moved(93, 80), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert!(!router.is_scrolling(), "a track press does not capture");
+    assert_eq!(vertical_offset(&c, id), 100);
+}
+
+#[test]
+fn client_pixels_are_clipped_out_of_the_reserved_gutter() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let _ = with_vertical_viewport(&mut c);
+    c.composite();
+    // The client fills 0..86 with red; the reserved 14px gutter shows the
+    // desktop background instead (the client cannot paint into the furniture).
+    assert_eq!(frame_pixel(&c, 10, 10), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 90, 10), [0, 0, 255, 255]);
+}
+
+#[test]
+fn clearing_a_root_viewport_removes_the_furniture() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = with_vertical_viewport(&mut c);
+    assert!(c.root_viewport(id).is_some());
+
+    // Clearing drops the viewport, so no furniture is composed and the client
+    // reclaims the gutter.
+    assert!(c.clear_root_viewport(id));
+    assert!(c.root_viewport(id).is_none());
+
+    // A clear against an unknown id is refused.
+    assert!(!c.clear_root_viewport(WindowId(9_999)));
+}

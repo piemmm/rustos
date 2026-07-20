@@ -47,8 +47,8 @@
 //!   keystroke.
 //! * The poll/feed/inject loop: each decoded `InputEvent` is offered to the
 //!   shared pointer mapping first (`PointerInput::from_device_event` — axis
-//!   deltas and the `BTN_*` button edges) and injected through
-//!   `pointer_inject`; every other event is resolved into a `KeyInput`
+//!   deltas, the `BTN_*` button edges, and scroll ticks) and injected
+//!   through `pointer_inject`; every other event is resolved into a `KeyInput`
 //!   record by `VirtioKeyboardConsole` and injected through `key_inject`.
 //!   Both syscalls route by who holds the seat; the driver never chooses
 //!   the encoding or the destination, and it never learns the screen —
@@ -200,9 +200,10 @@ mod program {
                 Ok(drained) => {
                     for event in &events[..drained] {
                         // The pointer mapping claims the pointer vocabulary
-                        // (axis deltas, `BTN_*` edges); everything else is
-                        // the keyboard producer's. The two are disjoint by
-                        // construction, so no event is ever double-injected.
+                        // (axis deltas, `BTN_*` edges, scroll ticks);
+                        // everything else is the keyboard producer's. The two
+                        // are disjoint by construction, so no event is ever
+                        // double-injected.
                         if let Some(record) = PointerInput::from_device_event(event) {
                             let _ =
                                 tairix_rt::pointer_inject(tairix_abi::seat::SEAT_PRIMARY, &record);

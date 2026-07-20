@@ -968,8 +968,8 @@ the live controller behaviour is host- and CI-proven first.
   (`CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/`CAP_LOG_EMIT`), pumping
   blocking interrupt-IN URBs through `tairix_hid::BootMouse` and injecting
   each decoded event through the one shared `PointerInput::from_device_event`
-  mapping → `pointer_inject` (scroll ticks decode but are not injected — no
-  pointer-record scroll consumer exists yet). `NotFound` exits for reload;
+  mapping → `pointer_inject` (motion, button edges, and scroll ticks all
+  inject; the desktop scrollbar consumes scroll). `NotFound` exits for reload;
   repeated faults exit fail-closed. The bundle ships in the Pi image
   (`Drivers/input/usb_mouse/Run`, signed).
   Two engine defects found while landing it (the metal boot log's ~4 s
