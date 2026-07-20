@@ -70,6 +70,40 @@ whether it compiles or its current call site exercises the missing part
 sequences *when* each family lands; it never licenses shipping any of them in a
 thinned-down form.
 
+### Nothing is deferred, no-opped, or left "for now"
+
+Every behaviour this specification describes is implemented properly in the
+change that introduces it — never deferred to a "later stage", stubbed with a
+`TODO`, or handled by a no-op match arm that silently drops input
+(`AGENTS.md` §2.1, §2.17, §2.18, §2.19, §2.23, §27). This binds input paths as
+much as rendering: a scrollable surface handles **every** input the spec gives
+it — keyboard line/page/bound navigation, thumb drag, *and* the mouse wheel
+(§11.28) — in the same change, not "wheel later". A control or input path
+delivered as "keyboard today, wheel to follow" is exactly the deferral this
+rule forbids. If the proper implementation depends on prerequisite work (an ABI
+event that does not exist, a routing seam that is missing), that prerequisite is
+completed as part of the same change; if it genuinely cannot be, the conflict is
+raised with the User (`AGENTS.md` §15.7), never papered over with a temporary
+gap. A wheel event that genuinely has nothing to scroll (a live terminal screen
+that keeps no scrollback) is a *correct, complete* answer, not a deferral — but
+"there is nowhere to route this yet" is not.
+
+### Do not remove a control's genuinely useful public API
+
+These crates are developer-facing: `lib/controls`, `userland/gui/wm`,
+`lib/window`, and the app crates expose public control and window-furniture APIs
+that third-party developers and a proper, complete UI legitimately depend on. A
+public item that is part of a *complete, correct* control surface — a viewport's
+`clear_root_viewport`, a scroll model's step and query methods, a furniture
+hit-test — is kept even when the in-tree call sites are few or absent, because
+removing it takes a genuinely useful primitive away from a consumer and makes
+the control *less* than fully implemented (`AGENTS.md` §27, §15.5). This does
+**not** license speculative surface (`AGENTS.md` §2.3, §2.4): the bar is "part
+of a proper, complete control that a developer would reasonably use", never
+"might be handy one day". When it is unclear whether an item is load-bearing API
+or genuine dead code, keep the complete primitive and ask (`AGENTS.md` §15.7)
+rather than delete it.
+
 ---
 
 ## 2. Design Position
@@ -1158,6 +1192,8 @@ same geometry + quieter Frame Rim + complete controls
 - Animate window move, resize, or thumb drag behind the pointer.
 - Hide the only resize affordance in a one-pixel invisible border.
 - Change the title-bar or client geometry merely because activation, hover, or attention state changed.
+- Defer, stub, or no-op any specified input path (most commonly the mouse wheel): a scrollable surface handles keyboard, thumb drag, and the wheel in the same change, never "keyboard now, wheel later".
+- Delete a genuinely useful public control or window-furniture API (for example a viewport's `clear_root_viewport`) merely because its in-tree call sites are few; it stays for the developers and complete UIs that depend on it.
 
 ---
 

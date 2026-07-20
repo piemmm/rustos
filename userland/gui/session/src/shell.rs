@@ -385,6 +385,7 @@ impl DesktopShell {
             | InputResponse::MoveEnded { .. }
             | InputResponse::Key { .. }
             | InputResponse::Scrolled { .. }
+            | InputResponse::AppScroll { .. }
             | InputResponse::Ignored => return,
         };
         if self.tasks.sync_focus(self.session.taskbar_mut(), focus) {

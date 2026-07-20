@@ -420,14 +420,17 @@ mod program {
                             }
                         }
                         WindowEvent::CloseRequested { .. } => return EventOutcome::End,
-                        // Focus changes and pointer events repaint
-                        // nothing today; the screen is shell-driven. The
-                        // terminal never requests a pick, so a pick
-                        // conclusion is a session bug and is ignored (an
-                        // unredeemed delegation is reclaimed by the
-                        // kernel at exit).
+                        // Focus changes and pointer events repaint nothing;
+                        // the screen is shell-driven. A wheel likewise has
+                        // nothing to move: the terminal renders the shell's
+                        // live screen and keeps no scrollback, so there is no
+                        // scrollable content a tick could reach. The terminal
+                        // never requests a pick, so a pick conclusion is a
+                        // session bug and is ignored (an unredeemed
+                        // delegation is reclaimed by the kernel at exit).
                         WindowEvent::Focus { .. }
                         | WindowEvent::Pointer { .. }
+                        | WindowEvent::Scrolled { .. }
                         | WindowEvent::FilePicked { .. }
                         | WindowEvent::PickCancelled { .. } => {}
                     }

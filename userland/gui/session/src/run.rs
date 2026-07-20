@@ -779,6 +779,27 @@ mod program {
                         );
                     }
                 }
+                // A wheel gesture over a window that owns its own content
+                // scrolling (no window-manager root viewport): the ticks
+                // belong to the application, so forward them to that window's
+                // owner over the window channel. The picker window scrolls its
+                // own list in-process, so a wheel over it is consumed by the
+                // shell, not forwarded as an app event.
+                InputResponse::AppScroll { window, dx, dy } => {
+                    if picker.wm_id() != Some(window) {
+                        if let Some(window_id) = windows.ipc_id(window) {
+                            deliver(
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                picker,
+                                &WindowEvent::Scrolled { window_id, dx, dy },
+                            );
+                        }
+                    }
+                }
                 // Root-viewport scrollbar interactions: the window manager has
                 // already updated its scroll model. The session does not yet
                 // attach a root viewport to any app window (that, and the

@@ -1319,6 +1319,33 @@ fn wheel_scrolls_the_viewport_under_the_pointer() {
 }
 
 #[test]
+fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    // A plain window that owns its own content scrolling: no root viewport.
+    let id = c.add_window(Point::ORIGIN, opaque(100, 100, RED));
+    let mut router = InputRouter::new();
+
+    // A wheel over it consumes no furniture; the ticks belong to the app,
+    // reported verbatim (both axes, signed) for the session to forward.
+    router.handle(moved(10, 10), &mut c);
+    assert_eq!(
+        router.handle(scrolled(-2, 3), &mut c),
+        InputResponse::AppScroll {
+            window: id,
+            dx: -2,
+            dy: 3,
+        }
+    );
+
+    // Off the window there is nothing to forward.
+    router.handle(moved(150, 150), &mut c);
+    assert_eq!(
+        router.handle(scrolled(0, 5), &mut c),
+        InputResponse::Ignored
+    );
+}
+
+#[test]
 fn furniture_press_is_not_delivered_to_the_client() {
     let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
     let id = with_vertical_viewport(&mut c);

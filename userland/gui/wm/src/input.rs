@@ -99,6 +99,21 @@ pub enum InputResponse {
         /// The window whose furniture received the press.
         window: WindowId,
     },
+    /// A wheel gesture landed on a window that owns its own content
+    /// scrolling (it exposes no window-manager root viewport), so the
+    /// window manager consumed nothing and the ticks belong to the
+    /// application. The embedder forwards them to that window's owner over
+    /// the window channel; the application applies them to its nested
+    /// scroll model. Ticks are in device detent units (positive `dx`
+    /// toward the logical end, positive `dy` downward).
+    AppScroll {
+        /// The window the pointer was over.
+        window: WindowId,
+        /// Signed horizontal scroll ticks.
+        dx: i32,
+        /// Signed vertical scroll ticks.
+        dy: i32,
+    },
 }
 
 /// An in-flight interactive move: the grabbed window and the offset
@@ -368,19 +383,25 @@ impl InputRouter {
         });
     }
 
-    /// Route a scroll-wheel gesture to the root viewport under the pointer.
+    /// Route a scroll-wheel gesture to the window under the pointer.
     ///
     /// The ticks drive the shared scroll model (one line step per tick);
-    /// the pointer does not move. Returns [`InputResponse::Scrolled`] when an
-    /// offset changed, else [`InputResponse::Ignored`] (no window, no root
-    /// viewport, or already at the bound).
+    /// the pointer does not move. When the window exposes a window-manager
+    /// root viewport, the ticks scroll it: [`InputResponse::Scrolled`] if
+    /// an offset changed, else [`InputResponse::Ignored`] (already at the
+    /// bound). When the window owns its own content scrolling (no root
+    /// viewport), the ticks are the application's:
+    /// [`InputResponse::AppScroll`] names the recipient so the embedder can
+    /// forward them over the window channel. With no window under the
+    /// pointer the gesture is [`InputResponse::Ignored`].
     fn wheel(&mut self, dx: i32, dy: i32, compositor: &mut Compositor) -> InputResponse {
         let Some(window) = compositor.window_at(self.pointer) else {
             return InputResponse::Ignored;
         };
         match compositor.scroll_root(window, |vp| vp.wheel(dx, dy)) {
             Some(true) => InputResponse::Scrolled { window },
-            _ => InputResponse::Ignored,
+            Some(false) => InputResponse::Ignored,
+            None => InputResponse::AppScroll { window, dx, dy },
         }
     }
 

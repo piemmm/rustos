@@ -35,7 +35,7 @@
 use crate::driver::display::{DamageRect, DisplayFormat};
 use crate::input::KeyInput;
 use crate::input::PointerButtonCode;
-use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
 use crate::{Errno, ProcId};
 
 /// Reserved well-known call-endpoint id of the desktop session's window
@@ -464,6 +464,8 @@ const EV_CLOSE_REQUESTED: u16 = 4;
 const EV_FILE_PICKED: u16 = 5;
 /// Wire event discriminant of [`WindowEvent::PickCancelled`].
 const EV_PICK_CANCELLED: u16 = 6;
+/// Wire event discriminant of [`WindowEvent::Scrolled`].
+const EV_SCROLLED: u16 = 7;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -550,6 +552,22 @@ pub enum WindowEvent {
         /// The window whose pick was dismissed.
         window_id: u64,
     },
+    /// The scroll wheel turned over the window while the window owns its
+    /// own content scrolling (it exposes no window-manager root viewport,
+    /// so the session forwards the ticks to the app instead of consuming
+    /// them into furniture). The app applies them to its nested scroll
+    /// model exactly as it would a keyboard line step. Ticks are in the
+    /// device's detent units: positive `dx` toward the logical end,
+    /// positive `dy` downward (the `evdev` orientation), one line step per
+    /// tick by convention.
+    Scrolled {
+        /// The window the pointer was over when the wheel turned.
+        window_id: u64,
+        /// Signed horizontal scroll ticks.
+        dx: i32,
+        /// Signed vertical scroll ticks.
+        dy: i32,
+    },
 }
 
 impl WindowEvent {
@@ -567,7 +585,8 @@ impl WindowEvent {
             | Self::Pointer { window_id, .. }
             | Self::CloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
-            | Self::PickCancelled { window_id } => window_id,
+            | Self::PickCancelled { window_id }
+            | Self::Scrolled { window_id, .. } => window_id,
         }
     }
 
@@ -608,6 +627,11 @@ impl WindowEvent {
             }
             Self::PickCancelled { .. } => {
                 put_u16(&mut out, 6, EV_PICK_CANCELLED);
+            }
+            Self::Scrolled { dx, dy, .. } => {
+                put_u16(&mut out, 6, EV_SCROLLED);
+                put_i32(&mut out, 16, dx);
+                put_i32(&mut out, 20, dy);
             }
         }
         out
@@ -692,6 +716,12 @@ impl WindowEvent {
             EV_PICK_CANCELLED => {
                 event_reserved_zero(bytes, 16)?;
                 Ok(Self::PickCancelled { window_id })
+            }
+            EV_SCROLLED => {
+                event_reserved_zero(bytes, 24)?;
+                let dx = read_i32(bytes, 16);
+                let dy = read_i32(bytes, 20);
+                Ok(Self::Scrolled { window_id, dx, dy })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -1012,11 +1042,36 @@ mod tests {
                 handle: 7,
             },
             WindowEvent::PickCancelled { window_id: 4 },
+            WindowEvent::Scrolled {
+                window_id: 4,
+                dx: 0,
+                dy: 3,
+            },
+            WindowEvent::Scrolled {
+                window_id: 4,
+                dx: -2,
+                dy: -5,
+            },
         ] {
             let bytes = event.to_le_bytes();
             assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
             assert_eq!(event.window_id(), 4);
         }
+    }
+
+    #[test]
+    fn scroll_events_carry_signed_ticks_and_fail_closed_on_a_dirty_tail() {
+        let event = WindowEvent::Scrolled {
+            window_id: 9,
+            dx: -7,
+            dy: 11,
+        };
+        let bytes = event.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+        // The 8 bytes past the two i32 ticks are reserved and must be zero.
+        let mut dirty = bytes;
+        dirty[24] = 1;
+        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
     }
 
     #[test]

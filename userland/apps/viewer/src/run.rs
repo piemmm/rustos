@@ -293,6 +293,16 @@ mod program {
                 .ok_or(Errno::NoSpace)
                 .and_then(|surface| present_surface(&surface, client, window, frames, &mode))
         };
+        // Repaint the current window of lines. The single definition every
+        // caller (a fresh pick, keyboard navigation, and wheel scrolling)
+        // shares so the content-repaint path is never duplicated.
+        let repaint = |scroll: &ScrollView,
+                       client: &mut WindowClient<RtWindowTransport>,
+                       frames: &mut [u8]| {
+            render_lines(scroll.visible(), theme)
+                .ok_or(Errno::NoSpace)
+                .and_then(|surface| present_surface(&surface, client, window, frames, &mode))
+        };
         if show("Choose a file...", &mut client, frames).is_err() {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
@@ -327,14 +337,11 @@ mod program {
                         // Keep every line (bounded) so the file can be
                         // scrolled, not just its first screenful.
                         let lines = content_lines(&content, MAX_LINES, visible_cols());
-                        let scroll = ScrollView::new(lines, visible_rows());
-                        let result = render_lines(scroll.visible(), theme)
-                            .ok_or(Errno::NoSpace)
-                            .and_then(|surface| {
-                                present_surface(&surface, &mut client, window, frames, &mode)
-                            });
-                        view = Some(scroll);
-                        result
+                        view = Some(ScrollView::new(lines, visible_rows()));
+                        match view.as_ref() {
+                            Some(scroll) => repaint(scroll, &mut client, frames),
+                            None => Ok(()),
+                        }
                     }
                     // A refused redemption or read delegated nothing the
                     // viewer can show; state it honestly.
@@ -360,18 +367,25 @@ mod program {
                     // repaint only when the view actually moved.
                     KeyValue::Named(nav) => scroll_view(nav, view.as_mut())
                         .filter(|moved| *moved)
-                        .map_or(Ok(()), |_| {
-                            let Some(scroll) = view.as_ref() else {
-                                return Ok(());
-                            };
-                            render_lines(scroll.visible(), theme)
-                                .ok_or(Errno::NoSpace)
-                                .and_then(|surface| {
-                                    present_surface(&surface, &mut client, window, frames, &mode)
-                                })
+                        .map_or(Ok(()), |_| match view.as_ref() {
+                            Some(scroll) => repaint(scroll, &mut client, frames),
+                            None => Ok(()),
                         }),
                     KeyValue::Char(_) => Ok(()),
                 },
+                // A wheel gesture the desktop forwarded because this window
+                // owns its own content scrolling: drive the shared model by
+                // its vertical ticks and repaint only when the view moved.
+                WindowEvent::Scrolled { dy, .. } => {
+                    if view.as_mut().is_some_and(|scroll| scroll.scroll_ticks(dy)) {
+                        match view.as_ref() {
+                            Some(scroll) => repaint(scroll, &mut client, frames),
+                            None => Ok(()),
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
                 WindowEvent::CloseRequested { .. } => {
                     // The desktop asked; close the window and end cleanly.
                     let _ = client.close(window);

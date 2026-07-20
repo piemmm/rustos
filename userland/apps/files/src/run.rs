@@ -227,6 +227,28 @@ mod program {
                 _ => (false, false),
             },
             WindowEvent::CloseRequested { .. } => (false, true),
+            // A wheel gesture the desktop forwarded (this window owns its own
+            // content scrolling): move the selection one entry per tick,
+            // exactly as Up/Down do, stopping at the ends so a large or
+            // hostile tick count cannot spin. Repaint only when it moved.
+            WindowEvent::Scrolled { dy, .. } => {
+                let before = browser.selected_index();
+                let mut remaining = *dy;
+                while remaining != 0 {
+                    let prev = browser.selected_index();
+                    if remaining > 0 {
+                        browser.select_next();
+                        remaining -= 1;
+                    } else {
+                        browser.select_previous();
+                        remaining += 1;
+                    }
+                    if browser.selected_index() == prev {
+                        break;
+                    }
+                }
+                (browser.selected_index() != before, false)
+            }
             // Focus changes, key releases, and pointer events repaint
             // nothing today; the selection model is keyboard-driven. The
             // browser never requests a pick, so a pick conclusion is a

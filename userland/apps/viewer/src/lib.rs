@@ -313,6 +313,17 @@ impl ScrollView {
         self.apply(tairix_controls::ScrollModel::to_end)
     }
 
+    /// Scroll by `ticks` wheel detents, one line step per tick — the same
+    /// convention the window manager's root viewport uses. A positive tick
+    /// scrolls toward the end (downward), a negative one toward the start.
+    /// Returns whether the view moved.
+    pub fn scroll_ticks(&mut self, ticks: i32) -> bool {
+        self.apply(|model| {
+            let step = i64::try_from(model.line_step()).unwrap_or(i64::MAX);
+            model.scroll_by(i64::from(ticks).saturating_mul(step))
+        })
+    }
+
     /// Apply `change` to the model, returning whether the offset changed.
     fn apply(
         &mut self,
@@ -402,6 +413,26 @@ mod tests {
         assert!(!v.line_down(), "already at the bottom");
         assert!(v.to_top());
         assert_eq!(v.offset(), 0);
+    }
+
+    #[test]
+    fn scroll_view_scrolls_by_wheel_ticks_one_line_per_tick_and_clamps() {
+        let mut v = view(100, 10);
+        // Positive ticks scroll toward the end, one line per tick.
+        assert!(v.scroll_ticks(3));
+        assert_eq!(v.offset(), 3);
+        // Negative ticks scroll back toward the start.
+        assert!(v.scroll_ticks(-1));
+        assert_eq!(v.offset(), 2);
+        // A zero tick moves nothing (fail closed, no guessed distance).
+        assert!(!v.scroll_ticks(0));
+        assert_eq!(v.offset(), 2);
+        // A large or hostile tick count saturates at the last row rather
+        // than overshooting, and reports no further movement once pinned.
+        assert!(v.scroll_ticks(i32::MAX));
+        assert_eq!(v.offset(), 90);
+        assert!(!v.scroll_ticks(i32::MAX));
+        assert_eq!(v.offset(), 90);
     }
 
     #[test]
