@@ -32,6 +32,7 @@
 //! it. A build that never installs one (host tests of unrelated paths)
 //! leaves the explicit-wake / timed-wake helpers as fail-safe no-ops.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -89,13 +90,59 @@ pub trait WaitQueueArch: Sync {
     }
 }
 
-/// One registered waiter: the task to wake and the absolute monotonic-ns
-/// deadline at which the timed sweep releases it ([`NO_DEADLINE`] = never by
-/// timeout).
+/// One registered waiter's bookkeeping: its FIFO arrival sequence and the
+/// absolute monotonic-ns deadline at which the timed sweep releases it
+/// ([`NO_DEADLINE`] = never by timeout).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct Waiter {
-    task: TaskId,
+    /// Monotonic arrival order. The oldest waiter (smallest `seq`) is the
+    /// FIFO head that [`WaitQueue::wake_one`] releases, so repeated
+    /// contention can never move an older task behind newer arrivals.
+    seq: u64,
     deadline_ns: u64,
+}
+
+/// The registered-waiter set behind a [`WaitQueue`]'s lock.
+///
+/// A thin `Vec` scan was the P-2 slice; the complete primitive (§27) keeps
+/// three cross-indices so every load-bearing per-park operation is
+/// O(log n), never a linear scan under §26 load:
+///
+/// - [`by_task`](Self::by_task): the canonical set, keyed by [`TaskId`], for
+///   O(log n) `register` / `deregister` / `wake_task` membership.
+/// - [`order`](Self::order): arrival `seq` → task, so the FIFO head
+///   ([`WaitQueue::wake_one`], [`WaitQueue::oldest_task`]) is the first key
+///   — O(log n), a *stated* first-come-first-served fairness discipline with
+///   no starvation (an older waiter is never overtaken).
+/// - [`deadlines`](Self::deadlines): `(deadline_ns, seq)` → task, holding
+///   only finite-deadline waiters, so [`WaitQueue::earliest_deadline`] is
+///   the first key (O(log n)) and [`WaitQueue::sweep`] visits only the
+///   already-expired prefix (O(log n + woken)) instead of scanning every
+///   waiter on every timer expiry.
+///
+/// The three stay consistent: a waiter is in `by_task` and `order` always,
+/// and in `deadlines` iff its deadline is finite.
+struct WaitSet {
+    /// Next FIFO arrival sequence to hand out. Monotonic; a fresh `register`
+    /// takes and increments it, a re-`register` of a present task keeps its
+    /// existing `seq` so its FIFO position is preserved.
+    next_seq: u64,
+    by_task: BTreeMap<TaskId, Waiter>,
+    order: BTreeMap<u64, TaskId>,
+    deadlines: BTreeMap<(u64, u64), TaskId>,
+}
+
+impl WaitSet {
+    /// An empty set. `const` so the enclosing [`WaitQueue`] stays
+    /// `const`-constructible for a `static`.
+    const fn new() -> Self {
+        Self {
+            next_seq: 0,
+            by_task: BTreeMap::new(),
+            order: BTreeMap::new(),
+            deadlines: BTreeMap::new(),
+        }
+    }
 }
 
 /// A reusable blocking wait-queue.
@@ -106,7 +153,7 @@ struct Waiter {
 /// `unpark` it. This mirrors `kernel/irq`'s passive `IrqTable`:
 /// one definition of the wait set, no threading concerns of its own.
 pub struct WaitQueue {
-    waiters: SpinLock<Vec<Waiter>>,
+    waiters: SpinLock<WaitSet>,
     /// Lock-free "an explicit wake was requested for this queue" flag.
     ///
     /// A wake delivered from **interrupt context** (a device-IRQ
@@ -132,7 +179,7 @@ impl WaitQueue {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            waiters: SpinLock::new(Vec::new()),
+            waiters: SpinLock::new(WaitSet::new()),
             wake_pending: AtomicBool::new(false),
         }
     }
@@ -168,34 +215,58 @@ impl WaitQueue {
 
     /// Register `task` as waiting, with an absolute monotonic-ns
     /// `deadline_ns` ([`NO_DEADLINE`] for no timeout). Re-registering the
-    /// same task updates its deadline rather than duplicating it, so a
-    /// handler that loops (re-arming after each spurious wake) never grows
-    /// the queue.
+    /// same task updates its deadline rather than duplicating it *and
+    /// preserves its FIFO position* (a handler that loops, re-arming after
+    /// each spurious wake, keeps its place in line and never grows the
+    /// queue). O(log n) — no linear scan on this per-park path.
     pub fn register(&self, task: TaskId, deadline_ns: u64) {
-        let mut waiters = self.waiters.lock();
-        if let Some(existing) = waiters.iter_mut().find(|w| w.task == task) {
-            existing.deadline_ns = deadline_ns;
+        let mut set = self.waiters.lock();
+        if let Some(existing) = set.by_task.get(&task).copied() {
+            // Present: keep the FIFO `seq`, only re-index the deadline.
+            if existing.deadline_ns != NO_DEADLINE {
+                set.deadlines.remove(&(existing.deadline_ns, existing.seq));
+            }
+            let seq = existing.seq;
+            set.by_task.insert(task, Waiter { seq, deadline_ns });
+            if deadline_ns != NO_DEADLINE {
+                set.deadlines.insert((deadline_ns, seq), task);
+            }
         } else {
-            waiters.push(Waiter { task, deadline_ns });
+            let seq = set.next_seq;
+            set.next_seq += 1;
+            set.by_task.insert(task, Waiter { seq, deadline_ns });
+            set.order.insert(seq, task);
+            if deadline_ns != NO_DEADLINE {
+                set.deadlines.insert((deadline_ns, seq), task);
+            }
         }
     }
 
     /// Remove `task` from the wait set (it finished waiting). Idempotent:
-    /// removing an absent task is a no-op.
+    /// removing an absent task is a no-op. O(log n).
     pub fn deregister(&self, task: TaskId) {
-        self.waiters.lock().retain(|w| w.task != task);
+        let mut set = self.waiters.lock();
+        if let Some(w) = set.by_task.remove(&task) {
+            set.order.remove(&w.seq);
+            if w.deadline_ns != NO_DEADLINE {
+                set.deadlines.remove(&(w.deadline_ns, w.seq));
+            }
+        }
     }
 
     /// Wake **every** waiter (an explicit event changed the condition they
     /// are blocked on). Each is `unpark`ed through `arch`; the woken
     /// handler re-checks its condition and deregisters itself.
     ///
-    /// The task ids are collected under the lock and the lock released
-    /// *before* any `unpark`, so the scheduler's own locks are never taken
-    /// while holding the wait-queue lock (no lock held
-    /// across a hand-off).
+    /// A genuine broadcast is O(n) in the number of waiters, by definition;
+    /// this is the only linear path and is reserved for conditions that
+    /// really do release everyone (cancellation, a shared latch resolving).
+    /// The ids are collected in FIFO order under the lock and the lock
+    /// released *before* any `unpark`, so the scheduler's own locks are
+    /// never taken while holding the wait-queue lock (no lock held across a
+    /// hand-off).
     pub fn wake_all(&self, arch: &dyn WaitQueueArch) {
-        let ids: Vec<TaskId> = self.waiters.lock().iter().map(|w| w.task).collect();
+        let ids: Vec<TaskId> = self.waiters.lock().order.values().copied().collect();
         for id in ids {
             arch.unpark(id);
         }
@@ -203,13 +274,14 @@ impl WaitQueue {
 
     /// Wake the oldest registered waiter, returning whether one existed.
     ///
-    /// Registration order is FIFO and re-registration updates a waiter in
+    /// Registration order is FIFO and re-registration keeps a waiter in
     /// place, so repeated contention cannot move an older task behind newer
-    /// arrivals. The waiter remains registered until it resumes and
-    /// deregisters itself; this preserves the register-before-retest lost-wake
-    /// discipline while avoiding a thundering herd.
+    /// arrivals — a *stated* no-starvation guarantee. The waiter remains
+    /// registered until it resumes and deregisters itself; this preserves
+    /// the register-before-retest lost-wake discipline while avoiding a
+    /// thundering herd. O(log n).
     pub fn wake_one(&self, arch: &dyn WaitQueueArch) -> bool {
-        let task = self.waiters.lock().first().map(|waiter| waiter.task);
+        let task = self.waiters.lock().order.values().next().copied();
         if let Some(task) = task {
             arch.unpark(task);
             true
@@ -223,17 +295,17 @@ impl WaitQueue {
     /// Used by [`SleepLock`](crate::SleepLock) to publish direct ownership
     /// handoff before waking the designated FIFO waiter. The waiter remains
     /// registered until it resumes, so the normal register-before-retest
-    /// lost-wake discipline is preserved.
+    /// lost-wake discipline is preserved. O(log n).
     #[must_use]
     pub(crate) fn oldest_task(&self) -> Option<TaskId> {
-        self.waiters.lock().first().map(|waiter| waiter.task)
+        self.waiters.lock().order.values().next().copied()
     }
 
     /// Wake exactly `task` if it is currently registered, returning whether
     /// it was (the wake-one discipline — an addressed event such as a
     /// posted request or a ticket's reply wakes its one target, never the
     /// whole queue; a wake-all there is a thundering herd that keeps
-    /// unrelated tasks runnable and distorts the load census).
+    /// unrelated tasks runnable and distorts the load census). O(log n).
     ///
     /// An unregistered target is a benign no-op returning `false`: by the
     /// register-before-poll discipline every waiter registers *before* its
@@ -242,7 +314,7 @@ impl WaitQueue {
     /// poll. The `unpark` runs after the lock is released, exactly as
     /// [`Self::wake_all`].
     pub fn wake_task(&self, arch: &dyn WaitQueueArch, task: TaskId) -> bool {
-        let registered = self.waiters.lock().iter().any(|w| w.task == task);
+        let registered = self.waiters.lock().by_task.contains_key(&task);
         if registered {
             arch.unpark(task);
         }
@@ -252,15 +324,20 @@ impl WaitQueue {
     /// Wake every waiter whose finite deadline is at or before `now_ns`
     /// (the timed wake). A [`NO_DEADLINE`] waiter is never released here.
     ///
-    /// As with [`Self::wake_all`], the expired ids are collected under the
-    /// lock and `unpark`ed after it is dropped.
+    /// The deadline index is ordered, so only the already-expired prefix is
+    /// visited — O(log n + woken), not a scan of every waiter on every
+    /// timer expiry. As with [`Self::wake_all`], the expired ids are
+    /// collected under the lock and `unpark`ed after it is dropped; the
+    /// woken waiter deregisters itself, so entries are left in place here
+    /// and a redundant re-sweep before it runs is a harmless idempotent
+    /// re-`unpark`.
     pub fn sweep(&self, arch: &dyn WaitQueueArch, now_ns: u64) {
         let ids: Vec<TaskId> = self
             .waiters
             .lock()
-            .iter()
-            .filter(|w| w.deadline_ns != NO_DEADLINE && w.deadline_ns <= now_ns)
-            .map(|w| w.task)
+            .deadlines
+            .range(..=(now_ns, u64::MAX))
+            .map(|(_, &task)| task)
             .collect();
         for id in ids {
             arch.unpark(id);
@@ -269,22 +346,22 @@ impl WaitQueue {
 
     /// The soonest finite deadline among current waiters, or `None` if the
     /// queue is empty or every waiter is [`NO_DEADLINE`]. This is the value
-    /// the timed-wake one-shot is armed to (the nearest
-    /// armed wakeup).
+    /// the timed-wake one-shot is armed to (the nearest armed wakeup).
+    /// O(log n) — the front of the ordered deadline index.
     #[must_use]
     pub fn earliest_deadline(&self) -> Option<u64> {
         self.waiters
             .lock()
-            .iter()
-            .map(|w| w.deadline_ns)
-            .filter(|&d| d != NO_DEADLINE)
-            .min()
+            .deadlines
+            .keys()
+            .next()
+            .map(|&(deadline, _seq)| deadline)
     }
 
     /// `true` if no task is currently waiting. Diagnostic / test observer.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.waiters.lock().is_empty()
+        self.waiters.lock().by_task.is_empty()
     }
 }
 
@@ -947,6 +1024,92 @@ mod tests {
             !q.take_wake_pending(),
             "the flag is cleared by the consuming drain"
         );
+    }
+
+    #[test]
+    fn re_registration_preserves_fifo_position() {
+        // A waiter that re-registers (re-arming after a spurious wake) keeps
+        // its place in line: the older task is still the FIFO head, never
+        // overtaken by a task that arrived later — the stated no-starvation
+        // guarantee.
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(7, NO_DEADLINE);
+        q.register(3, NO_DEADLINE);
+        // 7 re-arms with a new (finite) deadline; its FIFO seq is retained.
+        q.register(7, 500);
+        assert_eq!(q.oldest_task(), Some(7), "re-register keeps FIFO head");
+        assert!(q.wake_one(&arch));
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![7]);
+    }
+
+    #[test]
+    fn re_registration_re_indexes_the_deadline() {
+        // Updating a present waiter's deadline moves it in the ordered
+        // deadline index rather than leaving a stale entry behind.
+        let q = WaitQueue::new();
+        q.register(1, 900);
+        assert_eq!(q.earliest_deadline(), Some(900));
+        // Tighten it, then relax it: the index always reflects the current
+        // value, with no duplicate stale (900, _) entry lingering.
+        q.register(1, 300);
+        assert_eq!(q.earliest_deadline(), Some(300));
+        q.register(1, NO_DEADLINE);
+        assert_eq!(
+            q.earliest_deadline(),
+            None,
+            "relaxing to no-deadline clears the arming"
+        );
+        assert!(!q.is_empty(), "the waiter itself is still registered");
+    }
+
+    #[test]
+    fn sweep_visits_only_the_expired_prefix_in_deadline_order() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(1, 300);
+        q.register(2, 100);
+        q.register(3, 200);
+        q.register(4, NO_DEADLINE);
+        q.sweep(&arch, 250);
+        // Exactly the finite deadlines at or before 250, in ascending
+        // deadline order (100 then 200); 300 and the untimed waiter stay.
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![2, 3]);
+    }
+
+    #[test]
+    fn deregister_removes_from_every_index() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(1, 100);
+        q.register(2, 200);
+        q.deregister(1);
+        // Gone from the deadline index (earliest is now 2's), from the FIFO
+        // order (oldest is now 2), and from membership.
+        assert_eq!(q.earliest_deadline(), Some(200));
+        assert_eq!(q.oldest_task(), Some(2));
+        assert!(!q.wake_task(&arch, 1), "no longer a member");
+        assert!(q.wake_task(&arch, 2));
+    }
+
+    #[test]
+    fn wake_one_round_robins_without_starving_under_repeated_contention() {
+        // Model the FIFO service loop a wake-one consumer drives: wake the
+        // head, it resumes and deregisters, the next-oldest becomes head.
+        // Every waiter is served exactly once, in arrival order — no task is
+        // starved however many rounds run.
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        for id in [10, 20, 30, 40] {
+            q.register(id, NO_DEADLINE);
+        }
+        for _ in 0..4 {
+            let head = q.oldest_task().expect("a waiter remains");
+            assert!(q.wake_one(&arch));
+            q.deregister(head);
+        }
+        assert!(!q.wake_one(&arch), "queue drained");
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![10, 20, 30, 40]);
     }
 
     #[test]

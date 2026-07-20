@@ -1467,9 +1467,10 @@ mod tests {
     /// task with neither an armed timer nor a pending reschedule.
     #[test]
     fn dispatch_step_preserves_a_tick_fired_after_policy_arm() {
-        // A CPU index no other test latches, so parallel test threads
-        // never observe each other through the process-wide slots.
-        const CPU: CpuId = 45;
+        // A CPU index no other host test latches (the per-CPU preempt latch
+        // is one process-wide array shared across the whole test binary),
+        // so parallel test threads never observe each other through it.
+        const CPU: CpuId = 47;
         let rec = recorder();
         let mut control = control_with(RecordingCs(rec), BoxStack::new());
 
@@ -1684,7 +1685,7 @@ mod tests {
         let cs = RecordingCs(rec);
         let mut control = control_with(cs, BoxStack::new());
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
-        let cpu: CpuId = 60;
+        let cpu: CpuId = 54;
 
         // Model `dispatch_step`'s publish, then drive the trap-path entry
         // point directly. The handle's thunk reconstructs the task's
@@ -1777,7 +1778,7 @@ mod tests {
         let cs = RecordingCs(rec);
         let mut control = control_with(cs, BoxStack::new());
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
-        let cpu: CpuId = 59;
+        let cpu: CpuId = 53;
 
         publish_resume::<RecordingCs, BoxStack>(
             cpu,
