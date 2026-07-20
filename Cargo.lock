@@ -731,6 +731,14 @@ dependencies = [
 [[package]]
 name = "tairix-controls"
 version = "0.0.0"
+dependencies = [
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-icon",
+ "tairix-input",
+ "tairix-raster",
+ "tairix-theme",
+]
 
 [[package]]
 name = "tairix-cp"

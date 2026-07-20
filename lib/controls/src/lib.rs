@@ -32,16 +32,47 @@
 //! Every input is validated and every result is clamped: an empty,
 //! overflowing, or non-scrollable range yields a zero-offset, non-draggable
 //! scrollbar rather than out-of-bounds geometry.
+//!
+//! The [`state`] module is the typed control-state vocabulary: [`ControlKind`]
+//! and [`ControlRole`], the composed [`ControlState`] (focus/pointer/selection/
+//! validation/authority/activity/pressure/recovery), the derived
+//! [`ControlDisposition`] taxonomy that keeps an authority denial distinct from
+//! a plain disabled control, and the window-furniture states. Controls are
+//! *composed* from these small typed fields, never one giant enum.
+//!
+//! The [`button`] module is the first drawn control family — [`Button`],
+//! [`IconButton`], and [`SplitButton`]. They resolve every visible property
+//! from the active `tairix_theme::Theme` and `tairix_geometry::Scale`, round
+//! their plates through the shared `tairix_raster` rounded-rect fill (never a
+//! second rounding path), draw their labels/icons through `tairix_font`/
+//! `tairix_icon`, and consume the shared `tairix_input` pointer/keyboard
+//! vocabulary. A control renders state and emits a typed action; it performs
+//! no privileged work — the owning service enforces authority.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod scroll;
+extern crate alloc;
 
+pub mod button;
+pub mod scroll;
+pub mod state;
+
+pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
+pub use state::{
+    ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,
+    FocusState, PointerState, PressureKind, PressureState, ProgressValue, RecoveryState,
+    SelectionState, SizeAction, ValidationState, WindowActivationState, WindowControlKind,
+    WindowFurnitureState, WindowSizeState,
+};
 
+#[cfg(test)]
+mod button_tests;
+#[cfg(test)]
+mod state_tests;
 #[cfg(test)]
 mod tests;

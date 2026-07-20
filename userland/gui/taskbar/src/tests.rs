@@ -490,6 +490,9 @@ fn apply_theme_switches_corner_radius() {
         metrics,
         Theme::dark().fonts().clone(),
         Theme::dark().cursors().clone(),
+        Theme::dark().motion(),
+        Theme::dark().density(),
+        Theme::dark().contrast(),
     );
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
     assert_eq!(bar.corner_radius(), 12);

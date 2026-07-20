@@ -9,6 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::color::{Color, Pixel};
+use crate::round::round_rect_coverage;
 
 /// A row-major, premultiplied-alpha pixel buffer.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +90,41 @@ impl Surface {
             for col in x..x_end {
                 if let Some(i) = self.index(col, row) {
                     self.pixels[i] = pixel;
+                }
+            }
+        }
+    }
+
+    /// Fill the rounded rectangle `[x, x+w) × [y, y+h)` with corner `radius`,
+    /// compositing `color` over the existing pixels at each pixel's
+    /// anti-aliased rounded-rectangle coverage.
+    ///
+    /// This is the single rounded-rectangle fill the desktop shares: a
+    /// Reactive Alloy control plate rounds through here over the same
+    /// [`round_rect_coverage`] the
+    /// compositor rounds a window with, so there is never a second rounding
+    /// definition. A `radius` of `0` is a square fill (like
+    /// [`fill_rect`](Self::fill_rect) but through the compositing path); an
+    /// over-large radius is clamped to half the shorter side. The rectangle is
+    /// clipped to the surface bounds and a zero-size rectangle draws nothing.
+    pub fn fill_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        let source = color.premultiply();
+        let x_end = x.saturating_add(w).min(self.width);
+        let y_end = y.saturating_add(h).min(self.height);
+        for row in y..y_end {
+            let local_y = row - y;
+            for col in x..x_end {
+                let local_x = col - x;
+                let coverage = round_rect_coverage(local_x, local_y, w, h, radius);
+                if coverage == 0 {
+                    continue;
+                }
+                let src = source.scale_alpha(coverage);
+                if let Some(dst) = self.get(col, row) {
+                    self.set(col, row, src.over(dst));
                 }
             }
         }

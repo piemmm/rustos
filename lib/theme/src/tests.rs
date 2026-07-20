@@ -2,9 +2,10 @@
 
 use alloc::string::String;
 
+use crate::motion::MotionInteraction;
 use crate::{
-    Appearance, CursorKind, CursorSet, FontSpec, FontWeight, Fonts, Metrics, Palette, Rgba, Theme,
-    ThemeError, ThemeId, ThemeRegistry,
+    Appearance, Contrast, CursorKind, CursorSet, Density, FontSpec, FontWeight, Fonts, Metrics,
+    MotionTheme, Palette, Rgba, SignalRole, Theme, ThemeError, ThemeId, ThemeRegistry,
 };
 
 #[test]
@@ -41,6 +42,81 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.accent, l.accent);
     assert_ne!(d.on_accent, l.on_accent);
     assert_ne!(d.border, l.border);
+    // The Reactive Alloy control roles and semantic signals also differ per
+    // appearance, so a theme switch retunes them consistently.
+    assert_ne!(d.surface_pressed, l.surface_pressed);
+    assert_ne!(d.rim, l.rim);
+    assert_ne!(d.rim_active, l.rim_active);
+    assert_ne!(d.danger, l.danger);
+    assert_ne!(d.scroll_track, l.scroll_track);
+    assert_ne!(d.scroll_thumb, l.scroll_thumb);
+    assert_ne!(d.frame_active, l.frame_active);
+    assert_ne!(d.frame_inactive, l.frame_inactive);
+    for role in [
+        SignalRole::Cpu,
+        SignalRole::Memory,
+        SignalRole::Disk,
+        SignalRole::Network,
+        SignalRole::Power,
+        SignalRole::Thermal,
+        SignalRole::Recovery,
+        SignalRole::Success,
+        SignalRole::Warning,
+        SignalRole::Denied,
+    ] {
+        assert_ne!(
+            d.signal(role),
+            l.signal(role),
+            "signal role {role:?} differs"
+        );
+    }
+}
+
+#[test]
+fn signal_resolves_each_semantic_role_to_its_field() {
+    let p = *Theme::dark().palette();
+    assert_eq!(p.signal(SignalRole::Cpu), p.cpu_pressure);
+    assert_eq!(p.signal(SignalRole::Memory), p.memory_pressure);
+    assert_eq!(p.signal(SignalRole::Disk), p.disk_pressure);
+    assert_eq!(p.signal(SignalRole::Network), p.network_activity);
+    assert_eq!(p.signal(SignalRole::Power), p.power_pressure);
+    assert_eq!(p.signal(SignalRole::Thermal), p.thermal_pressure);
+    assert_eq!(p.signal(SignalRole::Recovery), p.recovery);
+    assert_eq!(p.signal(SignalRole::Success), p.success);
+    assert_eq!(p.signal(SignalRole::Warning), p.warning);
+    assert_eq!(p.signal(SignalRole::Denied), p.denied);
+}
+
+#[test]
+fn builtins_share_motion_and_default_density_contrast() {
+    assert_eq!(Theme::dark().motion(), Theme::light().motion());
+    assert_eq!(Theme::dark().density(), Density::Normal);
+    assert_eq!(Theme::dark().contrast(), Contrast::Normal);
+    // Tuned durations sit within the spec §9 bands.
+    let m = Theme::dark().motion();
+    assert_eq!(m.duration(MotionInteraction::HoverEnter), 100);
+    assert!(!m.reduced_motion());
+}
+
+#[test]
+fn reduced_motion_collapses_every_duration_to_zero() {
+    let reduced = Theme::dark().motion().with_reduced_motion(true);
+    assert!(reduced.reduced_motion());
+    for interaction in [
+        MotionInteraction::HoverEnter,
+        MotionInteraction::HoverExit,
+        MotionInteraction::PressCompress,
+        MotionInteraction::ReleaseSettle,
+        MotionInteraction::PanelOpen,
+        MotionInteraction::MenuOpen,
+        MotionInteraction::JobProgressPulse,
+        MotionInteraction::RecoveryLatchReveal,
+        MotionInteraction::WindowActivate,
+        MotionInteraction::WindowSizeTransition,
+        MotionInteraction::ScrollbarWake,
+    ] {
+        assert_eq!(reduced.duration(interaction), 0);
+    }
 }
 
 #[test]
@@ -212,6 +288,24 @@ fn sample_theme(id: ThemeId) -> Theme {
             accent: Rgba::rgb(80, 140, 255),
             on_accent: Rgba::rgb(0, 0, 0),
             border: Rgba::rgb(60, 60, 60),
+            surface_pressed: Rgba::rgb(5, 5, 5),
+            rim: Rgba::rgb(70, 70, 70),
+            rim_active: Rgba::rgb(120, 170, 255),
+            danger: Rgba::rgb(255, 90, 90),
+            cpu_pressure: Rgba::rgb(240, 160, 48),
+            memory_pressure: Rgba::rgb(176, 108, 240),
+            disk_pressure: Rgba::rgb(48, 192, 176),
+            network_activity: Rgba::rgb(64, 176, 255),
+            power_pressure: Rgba::rgb(139, 212, 80),
+            thermal_pressure: Rgba::rgb(255, 122, 60),
+            recovery: Rgba::rgb(255, 106, 176),
+            success: Rgba::rgb(76, 208, 122),
+            warning: Rgba::rgb(245, 197, 66),
+            denied: Rgba::rgb(200, 90, 90),
+            scroll_track: Rgba::rgb(35, 40, 48),
+            scroll_thumb: Rgba::rgb(74, 81, 92),
+            frame_active: Rgba::rgb(80, 140, 255),
+            frame_inactive: Rgba::rgb(60, 60, 60),
         },
         Metrics {
             window_corner_radius: 4,
@@ -220,6 +314,18 @@ fn sample_theme(id: ThemeId) -> Theme {
             border_thickness: 1,
             scrollbar_breadth: 12,
             min_thumb_length: 20,
+            control_height: 24,
+            control_inset: 8,
+            control_gap: 6,
+            control_corner_radius: 4,
+            seam_thickness: 2,
+            rail_thickness: 2,
+            bead_size: 6,
+            title_bar_height: 24,
+            frame_inset: 1,
+            window_control_extent: 18,
+            resize_grabber_extent: 14,
+            hit_slop: 3,
         },
         Fonts {
             ui: FontSpec::new("Test Sans", 12, FontWeight::Regular),
@@ -232,5 +338,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             move_: String::from("c.move"),
             busy: String::from("c.busy"),
         },
+        MotionTheme::new(90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70),
+        Density::Normal,
+        Contrast::Normal,
     )
 }

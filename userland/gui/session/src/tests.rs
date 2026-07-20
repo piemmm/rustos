@@ -383,6 +383,9 @@ fn custom_dark(id: ThemeId, taskbar_corner_radius: u32) -> Theme {
         },
         base.fonts().clone(),
         base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        base.contrast(),
     )
 }
 

@@ -11,6 +11,7 @@ use alloc::string::String;
 
 use crate::cursor::CursorSet;
 use crate::metrics::Metrics;
+use crate::motion::{Contrast, Density, MotionTheme};
 use crate::palette::Palette;
 use crate::typography::{FontSpec, FontWeight, Fonts};
 use crate::Rgba;
@@ -52,11 +53,15 @@ pub struct Theme {
     metrics: Metrics,
     fonts: Fonts,
     cursors: CursorSet,
+    motion: MotionTheme,
+    density: Density,
+    contrast: Contrast,
 }
 
 impl Theme {
     /// Assemble a theme from its parts.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: ThemeId,
         name: impl Into<String>,
@@ -65,6 +70,9 @@ impl Theme {
         metrics: Metrics,
         fonts: Fonts,
         cursors: CursorSet,
+        motion: MotionTheme,
+        density: Density,
+        contrast: Contrast,
     ) -> Self {
         Self {
             id,
@@ -74,6 +82,9 @@ impl Theme {
             metrics,
             fonts,
             cursors,
+            motion,
+            density,
+            contrast,
         }
     }
 
@@ -119,6 +130,24 @@ impl Theme {
         &self.cursors
     }
 
+    /// The theme's motion timings and reduced-motion policy.
+    #[must_use]
+    pub fn motion(&self) -> MotionTheme {
+        self.motion
+    }
+
+    /// The theme's information density.
+    #[must_use]
+    pub fn density(&self) -> Density {
+        self.density
+    }
+
+    /// The theme's contrast policy.
+    #[must_use]
+    pub fn contrast(&self) -> Contrast {
+        self.contrast
+    }
+
     /// The built-in **dark** theme — TAIRiX's default.
     #[must_use]
     pub fn dark() -> Self {
@@ -135,10 +164,31 @@ impl Theme {
                 accent: Rgba::rgb(0x4c, 0x8d, 0xff),
                 on_accent: Rgba::rgb(0x0b, 0x0d, 0x10),
                 border: Rgba::rgb(0x3a, 0x40, 0x49),
+                surface_pressed: Rgba::rgb(0x16, 0x19, 0x1e),
+                rim: Rgba::rgb(0x44, 0x4b, 0x55),
+                rim_active: Rgba::rgb(0x6f, 0xa4, 0xff),
+                danger: Rgba::rgb(0xff, 0x5c, 0x5c),
+                cpu_pressure: Rgba::rgb(0xf0, 0xa0, 0x30),
+                memory_pressure: Rgba::rgb(0xb0, 0x6c, 0xf0),
+                disk_pressure: Rgba::rgb(0x30, 0xc0, 0xb0),
+                network_activity: Rgba::rgb(0x40, 0xb0, 0xff),
+                power_pressure: Rgba::rgb(0x8b, 0xd4, 0x50),
+                thermal_pressure: Rgba::rgb(0xff, 0x7a, 0x3c),
+                recovery: Rgba::rgb(0xff, 0x6a, 0xb0),
+                success: Rgba::rgb(0x4c, 0xd0, 0x7a),
+                warning: Rgba::rgb(0xf5, 0xc5, 0x42),
+                denied: Rgba::rgb(0xc8, 0x5a, 0x5a),
+                scroll_track: Rgba::rgb(0x23, 0x28, 0x30),
+                scroll_thumb: Rgba::rgb(0x4a, 0x51, 0x5c),
+                frame_active: Rgba::rgb(0x4c, 0x8d, 0xff),
+                frame_inactive: Rgba::rgb(0x3a, 0x40, 0x49),
             },
             common_metrics(),
             common_fonts(),
             common_cursors(),
+            common_motion(),
+            Density::Normal,
+            Contrast::Normal,
         )
     }
 
@@ -158,10 +208,31 @@ impl Theme {
                 accent: Rgba::rgb(0x1f, 0x6f, 0xeb),
                 on_accent: Rgba::rgb(0xff, 0xff, 0xff),
                 border: Rgba::rgb(0xc4, 0xc9, 0xd1),
+                surface_pressed: Rgba::rgb(0xdf, 0xe2, 0xe8),
+                rim: Rgba::rgb(0xb9, 0xbf, 0xc9),
+                rim_active: Rgba::rgb(0x1f, 0x6f, 0xeb),
+                danger: Rgba::rgb(0xd8, 0x35, 0x35),
+                cpu_pressure: Rgba::rgb(0xc0, 0x7a, 0x00),
+                memory_pressure: Rgba::rgb(0x8b, 0x3f, 0xd0),
+                disk_pressure: Rgba::rgb(0x0f, 0x8f, 0x80),
+                network_activity: Rgba::rgb(0x14, 0x78, 0xd0),
+                power_pressure: Rgba::rgb(0x4f, 0x9e, 0x20),
+                thermal_pressure: Rgba::rgb(0xd8, 0x5a, 0x1c),
+                recovery: Rgba::rgb(0xc8, 0x3a, 0x86),
+                success: Rgba::rgb(0x1f, 0x9e, 0x52),
+                warning: Rgba::rgb(0xb8, 0x86, 0x0b),
+                denied: Rgba::rgb(0xb0, 0x30, 0x30),
+                scroll_track: Rgba::rgb(0xe2, 0xe5, 0xea),
+                scroll_thumb: Rgba::rgb(0xb0, 0xb6, 0xc0),
+                frame_active: Rgba::rgb(0x1f, 0x6f, 0xeb),
+                frame_inactive: Rgba::rgb(0xc4, 0xc9, 0xd1),
             },
             common_metrics(),
             common_fonts(),
             common_cursors(),
+            common_motion(),
+            Density::Normal,
+            Contrast::Normal,
         )
     }
 }
@@ -177,7 +248,38 @@ fn common_metrics() -> Metrics {
         border_thickness: 1,
         scrollbar_breadth: 14,
         min_thumb_length: 24,
+        control_height: 28,
+        control_inset: 10,
+        control_gap: 8,
+        control_corner_radius: 6,
+        seam_thickness: 2,
+        rail_thickness: 3,
+        bead_size: 8,
+        title_bar_height: 28,
+        frame_inset: 1,
+        window_control_extent: 20,
+        resize_grabber_extent: 16,
+        hit_slop: 4,
     }
+}
+
+/// The motion timings shared by both built-in themes, tuned to the middle of
+/// the spec §9 targets. Reduced motion is derived from this by a consumer
+/// (or a variant theme) via [`MotionTheme::with_reduced_motion`].
+fn common_motion() -> MotionTheme {
+    MotionTheme::new(
+        100, // hover enter
+        95,  // hover exit
+        75,  // press compress
+        110, // release settle
+        210, // panel open
+        150, // menu open
+        150, // job progress pulse
+        220, // recovery latch reveal
+        115, // window activate
+        200, // window size transition
+        95,  // scrollbar wake
+    )
 }
 
 /// The fonts shared by both built-in themes.

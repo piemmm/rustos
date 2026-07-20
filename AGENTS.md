@@ -591,10 +591,18 @@ tairix/
 │   │                    #   range, proportional thumb math, drag-anchor mapping,
 │   │                    #   line/page/home-end steps) the window-manager root
 │   │                    #   viewport and nested application content share,
-│   │                    #   never separate vertical/horizontal/WM/app recipes.
-│   │                    #   Pure integer arithmetic, fail closed, no panic
-│   │                    #   (§2.2, §17.4). The broader control-state vocabulary,
-│   │                    #   theme tokens, and drawn controls are staged.
+│   │                    #   never separate vertical/horizontal/WM/app recipes;
+│   │                    #   the typed control-state vocabulary (ControlKind/
+│   │                    #   Role, composed ControlState + the §13
+│   │                    #   ControlDisposition, window-furniture states); and
+│   │                    #   the drawn control families — Button/IconButton/
+│   │                    #   SplitButton so far — resolving colour/metric/radius
+│   │                    #   from lib/theme+lib/geometry, rounding plates through
+│   │                    #   the one shared lib/raster fill, drawing via lib/font
+│   │                    #   /lib/icon, consuming lib/input. A control renders
+│   │                    #   state and emits a typed action; the service enforces
+│   │                    #   authority. Fail closed, no panic (§2.2, §17.4). The
+│   │                    #   remaining control families are staged.
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
@@ -760,7 +768,11 @@ tairix/
 │   │                    #   through the System Information API, never a kernel
 │   │                    #   resource_open backing (§2.2, §16.6).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
-│   │                    #   Surface (fill_rect, fill_polygon, blit) (§2.2, §17.4).
+│   │                    #   Surface (fill_rect, fill_round_rect, fill_polygon,
+│   │                    #   blit) + round_rect_coverage, the one anti-aliased
+│   │                    #   rounded-rectangle definition the WM compositor's
+│   │                    #   window corners and the Reactive Alloy control plates
+│   │                    #   both round through (§2.2, §17.4).
 │   ├── resref/          # Shared resource-reference parser: the one definition
 │   │                    #   of how a TAIRiX resource reference
 │   │                    #   (namespace:selector[@guard][::facet][?params], e.g.
@@ -809,7 +821,9 @@ tairix/
 │   │                    #   C3): closed versioned TermType set in lib/vt terms,
 │   │                    #   fail-closed from_term (§2.2, §2.9, §16.1).
 │   ├── theme/           # Shared desktop theme definition: dark/light
-│   │                    #   palettes, corner radii, fonts, cursors (§10).
+│   │                    #   palettes (incl. §6 semantic signal roles), control/
+│   │                    #   furniture metrics, motion timings + reduced-motion,
+│   │                    #   density/contrast variants, fonts, cursors (§10).
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol: the
 │   │                    #   XhciHost register seam, the Xhci controller engine,
 │   │                    #   the TRB/ring vocabulary, and the multi-device

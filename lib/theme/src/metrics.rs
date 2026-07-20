@@ -40,4 +40,47 @@ pub struct Metrics {
     /// floors the proportional thumb length at this value (bounded by the
     /// track).
     pub min_thumb_length: u32,
+
+    // --- Reactive Alloy control metrics ---------------------------------
+    //
+    // The logical extents a control's anatomy is laid out from. Every
+    // Reactive Alloy control resolves its size from these rather than
+    // carrying a private constant, so a density change is data.
+    /// The standard interactive height of a control (button, field, menu
+    /// row), in logical pixels. Also the minimum interactive target height.
+    pub control_height: u32,
+    /// The padding between a control's edge and its content group, in logical
+    /// pixels.
+    pub control_inset: u32,
+    /// The gap between adjacent controls in a group or toolbar, in logical
+    /// pixels.
+    pub control_gap: u32,
+    /// The corner radius of an ordinary control plate (the Alloy Plate), in
+    /// logical pixels. `0` is square.
+    pub control_corner_radius: u32,
+    /// The thickness of a Heat Seam (an activity/progress line on an edge),
+    /// in logical pixels.
+    pub seam_thickness: u32,
+    /// The thickness of a Pressure Rail (a side resource-pressure indicator),
+    /// in logical pixels.
+    pub rail_thickness: u32,
+    /// The diameter of a Signal Bead (a compact count/alert lamp), in logical
+    /// pixels.
+    pub bead_size: u32,
+
+    // --- Window-furniture metrics ---------------------------------------
+    /// The height of a window title bar, in logical pixels.
+    pub title_bar_height: u32,
+    /// The inset of the client viewport from the outer frame edge, in logical
+    /// pixels.
+    pub frame_inset: u32,
+    /// The square extent of one window-control furniture button (close,
+    /// minimize, …), in logical pixels.
+    pub window_control_extent: u32,
+    /// The square extent of the resize grabber's visible affordance, in
+    /// logical pixels.
+    pub resize_grabber_extent: u32,
+    /// The invisible slop added around a furniture hit target so it stays
+    /// grabbable, in logical pixels. Never extends over another control.
+    pub hit_slop: u32,
 }

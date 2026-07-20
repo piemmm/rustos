@@ -3261,12 +3261,39 @@ per-app recipes (§2.2).
   the same `ScrollModel`. The pointer record carries a `Scrolled` tick
   (`lib/abi`), delivered as `lib/input::PointerScrolled` and a new theme
   `scrollbar_breadth`/`min_thumb_length` metric sizes the furniture.
+- **Typed control-state vocabulary — DONE.** `lib/controls::state` is the §5
+  model as composed typed Rust: `ControlKind`/`ControlRole`, a `ControlState`
+  built from `FocusState`/`PointerState`/`SelectionState`/`ValidationState`/
+  `AuthorityState`/`ActivityState`/`PressureState`/`RecoveryState`, the derived
+  §13 `ControlDisposition`, `ProgressValue`, and the window-furniture states
+  (`WindowControlKind`/`WindowActivationState`/`WindowSizeState`/
+  `WindowFurnitureState`). Composition over one giant enum; illegal states
+  unrepresentable.
+- **Theme-token additions — DONE.** `lib/theme` carries the §6 Reactive Alloy
+  tokens as data: semantic signal roles + `Palette::signal`, the control /
+  furniture metrics (seam/rail/bead/thumb/min-thumb/extents), `MotionTheme`
+  with reduced-motion, and `Density`/`Contrast`; both built-ins populate them.
+- **Shared rounded-rectangle fill — DONE.** `lib/raster::round_rect_coverage`
+  is the single anti-aliased rounded-rect coverage definition (supersampled,
+  no `sqrt`, fail-closed radius clamp); `Surface::fill_round_rect` fills
+  through it, and the WM compositor's per-window corner rounding
+  (`userland/gui/wm::corner`) consumes the same function, so window corners
+  and control plates can never diverge (§2.2).
+- **Drawn controls: button family — DONE.** `lib/controls::button` draws
+  `Button`/`IconButton`/`SplitButton` from one visual+interaction core over
+  `lib/raster`/`lib/icon`/`lib/font`: Alloy Plate + Signal Rim through the
+  shared rounded-rect, Heat Seam / Pressure Rail / shape-coded Signal Bead
+  (check/diamond/lock) and focus ring, full pointer/keyboard activation, and
+  the §13 disabled-vs-denied-vs-pending-vs-failed rendering, all theme- and
+  `Scale`-resolved. Dark/light + high-contrast + accessibility (shape marks)
+  tested.
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the typed control-state vocabulary (§5), the theme-token additions (§6), and
-  the drawn controls over `lib/raster` (button/icon-button/toggle/field, then
-  window furniture and the scrollbar renderer). Each control lands complete
-  (§27) with dark/light + reduced-motion + high-contrast coverage and its
-  §20 tests before the next begins.
+  the remaining drawn families (toggle/checkbox/radio, slider/progress,
+  text/search/combo, menu/toolbar/tabs, collections, the scrollbar renderer,
+  window furniture, shell/decision surfaces) over the same shared paths, then
+  the Switchboard reference composition. Each lands complete (§27) with
+  dark/light + reduced-motion + high-contrast coverage and its §20 tests
+  before the next begins.
 
 ---
 

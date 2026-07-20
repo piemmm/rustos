@@ -35,4 +35,102 @@ pub struct Palette {
     pub on_accent: Rgba,
     /// Window and control borders / separators.
     pub border: Rgba,
+
+    // --- Reactive Alloy control roles -----------------------------------
+    /// The inner plate of a control while it is pressed (darker than
+    /// [`surface`](Self::surface)).
+    pub surface_pressed: Rgba,
+    /// The quiet perimeter (Signal Rim) of a resting control.
+    pub rim: Rgba,
+    /// The reactive perimeter of a hovered, focused, or active control.
+    pub rim_active: Rgba,
+    /// The danger role for destructive actions and refusals.
+    pub danger: Rgba,
+
+    // --- Semantic signal roles (spec §6) --------------------------------
+    /// Compute saturation / CPU pressure.
+    pub cpu_pressure: Rgba,
+    /// Memory pressure.
+    pub memory_pressure: Rgba,
+    /// Storage throughput / disk pressure.
+    pub disk_pressure: Rgba,
+    /// Network transfer / remote I/O activity.
+    pub network_activity: Rgba,
+    /// Power / battery pressure.
+    pub power_pressure: Rgba,
+    /// Thermal pressure.
+    pub thermal_pressure: Rgba,
+    /// Hung, not-responding, repair, restart, or force-action state.
+    pub recovery: Rgba,
+    /// Completed, verified, recovered.
+    pub success: Rgba,
+    /// Elevated impact, caution, delayed risk.
+    pub warning: Rgba,
+    /// Missing authority or blocked action.
+    pub denied: Rgba,
+
+    // --- Scroll and window-frame roles ----------------------------------
+    /// The quiet Scroll Channel (track) behind a scrollbar thumb.
+    pub scroll_track: Rgba,
+    /// The scrollbar thumb.
+    pub scroll_thumb: Rgba,
+    /// The Frame Rim of the active window.
+    pub frame_active: Rgba,
+    /// The Frame Rim of an inactive window (quieter, still legible).
+    pub frame_inactive: Rgba,
+}
+
+impl Palette {
+    /// The semantic signal colour for a resource pressure.
+    ///
+    /// One place maps a pressure to its role so no consumer restates the
+    /// mapping. The kind is taken as a small local enum
+    /// ([`SignalRole`]) rather than a `lib/controls` type, keeping this crate
+    /// at the bottom of the layering.
+    #[must_use]
+    pub const fn signal(&self, role: SignalRole) -> Rgba {
+        match role {
+            SignalRole::Cpu => self.cpu_pressure,
+            SignalRole::Memory => self.memory_pressure,
+            SignalRole::Disk => self.disk_pressure,
+            SignalRole::Network => self.network_activity,
+            SignalRole::Power => self.power_pressure,
+            SignalRole::Thermal => self.thermal_pressure,
+            SignalRole::Recovery => self.recovery,
+            SignalRole::Success => self.success,
+            SignalRole::Warning => self.warning,
+            SignalRole::Denied => self.denied,
+        }
+    }
+}
+
+/// A semantic signal a control can display, used to resolve one palette
+/// colour and (in the renderer) one shape fallback.
+///
+/// This is the theme-side vocabulary of the spec §6 semantic roles. The
+/// resource-pressure subset lines up one-to-one with `lib/controls`'
+/// `PressureKind`; a renderer maps its typed state to a `SignalRole` and asks
+/// the palette for the colour, so the mapping lives in exactly one place.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum SignalRole {
+    /// Compute saturation.
+    Cpu,
+    /// Memory pressure.
+    Memory,
+    /// Storage throughput.
+    Disk,
+    /// Network transfer.
+    Network,
+    /// Power / battery pressure.
+    Power,
+    /// Thermal pressure.
+    Thermal,
+    /// Recovery / repair / restart.
+    Recovery,
+    /// Completed / verified.
+    Success,
+    /// Caution.
+    Warning,
+    /// Missing authority.
+    Denied,
 }
