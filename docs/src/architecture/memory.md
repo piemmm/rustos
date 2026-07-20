@@ -104,21 +104,21 @@ Testing"*, 2000) are applied to each progress-sized window:
   an address bit that is stuck or shorted (a write that lands in the wrong
   cell) in `O(log n)` accesses — the textbook quick address-line walk,
   covering the address decode across the full span, and
-- a sampling **device** test that proves **one word per 16 KiB** holds both a
+- a sampling **device** test that proves **one word per 4 KiB** holds both a
   `1` and a `0` (writing `0xAA…` then its complement `0x55…` and reading each
   back), catching a stuck data bit, row, column, or bank.
 
 The device test deliberately does **not** touch every cell — that is the
 `O(all bytes)` write-back-and-verify cost this boot check exists to avoid.
 The faults that occur in practice — a stuck cell, row, column, or bank — span
-far more than 16 KiB and are hit by the sample many times over; the coverage
+far more than 4 KiB and are hit by the sample many times over; the coverage
 traded away is a lone single-cell fault that falls between two samples, which
 is `memtest86`'s job, not the boot path's. Only the address pass's handful of
-offsets and the device pass's periodic sample are ever written, read, or
-flushed, so the whole test costs `O(usable_bytes / sample_interval)`
-cache-line accesses rather than `O(usable_bytes)` — the difference between a
-couple of seconds and many minutes on a large machine (≈ 1.3 s to verify
-8 GiB under QEMU/TCG, far quicker on real silicon).
+offsets and the device pass's periodic sample (one word per page) are ever
+written, read, or flushed, so the whole test costs
+`O(usable_bytes / sample_interval)` cache-line accesses rather than
+`O(usable_bytes)` — the difference between a few seconds and many minutes on a
+large machine, quicker still on real silicon than under QEMU/TCG.
 
 **Defeating the cache.** Reads and writes go through the *cacheable* direct
 map, so a naive write-then-read could be served from the CPU cache and never

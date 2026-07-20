@@ -185,9 +185,9 @@ Do **not** begin a stage before all its listed dependencies are complete.
       `kernel/core/src/memtest.rs` display): the `Phase::Mem` step tests every
       usable region through the arch direct `PhysMap` before the allocator
       hands out a frame. A quick *boot sanity check*, not an exhaustive march
-      test (≈ 1.3 s on 8 GiB under QEMU): a whole-window `O(log n)`
+      test (a few seconds on 8 GiB under QEMU): a whole-window `O(log n)`
       address-line marker walk plus a device stuck-bit test that samples one
-      word per 16 KiB (both bit polarities), each read flushed per-word to
+      word per 4 KiB (both bit polarities), each read flushed per-word to
       reach DRAM. It does not scrub whole regions — consumers zero their own
       frames. It draws the `TAIRiX <version> <RAM>MiB` identity line as a
       counter (yellow while running, light green when proven) climbing to the
