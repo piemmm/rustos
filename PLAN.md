@@ -3465,12 +3465,35 @@ per-app recipes (§2.2).
   inactive muting, high contrast, scale, both themes, title layout/sanitise/drag/
   routing/focus, frame hit-map isolation + resize edges + activation-invariant
   client + rim/attention, grabber drag/escape/non-overlap, scroll corner).
-- **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (shell surfaces Notification/TaskbarItem/
-  TraySignal, then decision surfaces Dialog/Tooltip/HelpTip) over the same
-  shared paths, then the Switchboard reference composition. Each lands complete
-  (§27) with dark/light + reduced-motion + high-contrast coverage and its §20
-  tests before the next begins.
+- **Drawn controls: shell surfaces — DONE.** `lib/controls::shell` draws
+  `Notification`, `TaskbarItem`, and `TraySignal` over the shared paint core.
+  `Notification` composes a `Card` plus a source attribution: informational
+  (quiet rim), background job (Heat Seam), warning (warning rail via the shared
+  `dominant_color`), recovery (bead), and denied (Authority Mark beside the
+  source) all read from its composed state; its actions are footer `Button`s
+  (typed `NotificationAction`). `TaskbarItem` combines an icon+label identity
+  with a `TaskVisibility` (Running/Active/Minimized) window state — active shows
+  a lower accent seam, minimized recesses the plate + a non-colour tick — plus
+  the activity Heat Seam and an attention/recovery/denied Signal Bead, failing
+  closed on a denied click (typed `TaskbarItemAction`). `TraySignal` is a calm
+  glyph capsule that stacks severity-ordered mini beads (denied > recovery >
+  warning > complete), shows a leading pressure rail and lower Heat Seam, and
+  expands on hover/focus to an instrument readout (state name, value, one safe
+  action) the owner positions (typed `TraySignalAction`). 26 host tests.
+- **Drawn controls: decision surfaces — DONE.** `lib/controls::decision` draws
+  `Dialog`, `Tooltip`, and `HelpTip` over the shared paint core. `Dialog` is a
+  modal choice surface with a title, message, optional inline reason, and a
+  right-aligned action-`Button` row: Action Warmth is honest (an action is warm
+  only when its role is Recommended/Primary; a destructive action carries the
+  danger/confirmation posture), and a blocked action shows the §13 Authority
+  Mark rather than a plain disabled look (typed `DialogAction`, fail-closed on a
+  denied click). `Tooltip` is a short anchored affordance hint. `HelpTip`
+  explains why an action is unavailable or recommended (reason tone by role)
+  with one optional safe next-step `Button` (typed `HelpTipAction`). 17 host
+  tests.
+- **Staged next** (`.junie/gui-controls-work.md` tracks status and detail): the
+  Switchboard reference composition (spec §17), assembled purely from the shared
+  controls above as the proof that no surface needs custom chrome.
 
 ---
 

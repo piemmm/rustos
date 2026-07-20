@@ -135,6 +135,22 @@
 //! never overlaps a scrollbar thumb. Each item emits a typed action
 //! ([`WindowControlAction`], [`TitleBarEvent`], [`ResizeEvent`]); the window
 //! manager enforces authority and performs the cooperative window operation.
+//!
+//! The [`shell`] module is the shell-surface family — [`Notification`],
+//! [`TaskbarItem`], and [`TraySignal`]. A notification is a [`Card`] carrying
+//! semantic beads plus a source attribution; a taskbar item combines
+//! application identity with a [`TaskVisibility`] window state, activity,
+//! attention, and recovery/authority beads; and a tray signal is a compact
+//! status capsule that stacks severity-ordered beads and expands to an
+//! instrument readout on hover or focus. Each emits a typed action; the owner
+//! enforces authority.
+//!
+//! The [`decision`] module is the decision-surface family — [`Dialog`],
+//! [`Tooltip`], and [`HelpTip`]. A dialog is a modal choice surface whose
+//! recommended action is warm only when its role says so and whose denied
+//! actions show the Authority Mark rather than a plain disabled look; a tooltip
+//! is a short anchored affordance hint; and a help tip explains why an action
+//! is unavailable or recommended, with one optional safe next-step action.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -145,11 +161,13 @@ extern crate alloc;
 pub mod button;
 pub mod collection;
 pub mod combo;
+pub mod decision;
 pub mod menu;
 mod paint;
 pub mod scroll;
 pub mod scrollbar;
 pub mod selector;
+pub mod shell;
 pub mod state;
 pub mod tabs;
 pub mod text;
@@ -163,12 +181,17 @@ pub use collection::{
     TableRow,
 };
 pub use combo::{ComboAction, ComboBox};
+pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use menu::{Menu, MenuAction, MenuItem};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
+pub use shell::{
+    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction, TraySignal,
+    TraySignalAction,
+};
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,
     FocusState, PointerState, PressureKind, PressureState, ProgressValue, RecoveryState,
@@ -192,11 +215,15 @@ mod collection_tests;
 #[cfg(test)]
 mod combo_tests;
 #[cfg(test)]
+mod decision_tests;
+#[cfg(test)]
 mod menu_tests;
 #[cfg(test)]
 mod scrollbar_tests;
 #[cfg(test)]
 mod selector_tests;
+#[cfg(test)]
+mod shell_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

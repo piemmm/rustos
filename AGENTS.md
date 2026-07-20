@@ -617,8 +617,16 @@ tairix/
 │   │                    #   command glyphs that read without colour, drag/resize
 │   │                    #   capture, active/inactive/attention frame, the client
 │   │                    #   never receiving furniture input, and the resize corner
-│   │                    #   never overlapping a scrollbar thumb)
-│   │                    #   so far, over one
+│   │                    #   never overlapping a scrollbar thumb), the shell
+│   │                    #   surfaces (Notification composing a Card with a
+│   │                    #   source attribution, TaskbarItem with a
+│   │                    #   TaskVisibility state + activity/attention/recovery
+│   │                    #   beads, TraySignal stacking severity-ordered beads
+│   │                    #   with a hover/focus instrument readout), and the
+│   │                    #   decision surfaces (Dialog with honest Action
+│   │                    #   Warmth + §13 denial rendering, the short anchored
+│   │                    #   Tooltip, and HelpTip with one safe next step) —
+│   │                    #   over one
 │   │                    #   shared draw+interaction core —
 │   │                    #   resolving colour/metric/radius
 │   │                    #   from lib/theme+lib/geometry, rounding plates through
@@ -633,8 +641,9 @@ tairix/
 │   │                    #   active on a query (TextAction). A
 │   │                    #   control renders state and emits a typed action; the
 │   │                    #   service enforces authority. Fail closed, no panic
-│   │                    #   (§2.2, §17.4). The remaining control families are
-│   │                    #   staged.
+│   │                    #   (§2.2, §17.4). The full drawn control set is
+│   │                    #   complete; the Switchboard reference composition
+│   │                    #   (spec §17) is staged.
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
