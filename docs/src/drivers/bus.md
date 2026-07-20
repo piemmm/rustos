@@ -465,7 +465,13 @@ class triples and `bConfigurationValue` / `bInterfaceNumber` drive the
 steps below — never assumed), and `SET_CONFIGURATION`.
 
 The interrupt-IN endpoint is configured (Configure Endpoint) and
-`SET_PROTOCOL(boot)` is issued **only for a HID interface**. It is not
+`SET_PROTOCOL(boot)` followed by `SET_IDLE(indefinite)` is issued **only
+for a HID interface**. `SET_IDLE` with an indefinite duration makes the
+device report only when its report data changes and NAK otherwise; without
+it a boot mouse streams a duplicate report every polling interval after the
+first movement — a controller interrupt storm on an idle device — and a
+boot keyboard auto-repeats a held key (both requests are optional, so a
+device that STALLs either is tolerated). The endpoint is not
 primed during enumeration: `next_report` arms one transfer only when the
 class driver has submitted a URB and is waiting for that report. A hub
 reports interface class `0x09`, not HID: it keeps only its control endpoint,
@@ -491,7 +497,8 @@ port, §8.9) and — for a full/low-speed device behind the high-speed hub
 — the **transaction-translator** Hub Slot ID and Port Number (§6.2.2),
 so the controller splits its transactions through the hub's TT. The
 post-Address sequence (descriptors → Configure Endpoint →
-`SET_CONFIGURATION` → `SET_PROTOCOL(boot)` → ready for request-driven report
+`SET_CONFIGURATION` → `SET_PROTOCOL(boot)` → `SET_IDLE(indefinite)` →
+ready for request-driven report
 arming) is the shared `finish_enumeration`, identical to a root-port device —
 only the topology in the slot context differs. A failed attach restores
 the hub as the active control context and releases the claimed slot, so
@@ -988,7 +995,8 @@ receiver carrying a boot-keyboard *and* a boot-mouse interface — gets one
 device-table entry and one emitted node **per served interface**, the
 siblings sharing the device's slot and EP0. The discovered
 `bConfigurationValue` and each `bInterfaceNumber` drive
-`SET_CONFIGURATION` and the per-interface HID `SET_PROTOCOL(boot)` —
+`SET_CONFIGURATION` and the per-interface HID `SET_PROTOCOL(boot)` +
+`SET_IDLE(indefinite)` —
 neither is assumed to be `1` / `0` any more — and the 24-bit interface class
 `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`
 (an HID boot keyboard is `0x03_01_01`, a boot mouse `0x03_01_02`) is

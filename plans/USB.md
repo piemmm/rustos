@@ -1019,7 +1019,9 @@ the live controller behaviour is host- and CI-proven first.
     EP0 cursor via `active_device`), each sibling at its own free index and
     ring region while **sharing the device's slot and EP0**. Every
     Configure Endpoint carries Context Entries covering the highest served
-    DCI, `SET_CONFIGURATION` runs once, and `SET_PROTOCOL(boot)` runs per
+    DCI, `SET_CONFIGURATION` runs once, and `SET_PROTOCOL(boot)` followed
+    by `SET_IDLE(indefinite)` (so an idle HID endpoint reports only on
+    change rather than storming the controller) runs per
     HID interface. A sibling's control transfers route through the slot's
     EP0 owner (`ep0_owner_index`); the (slot, DCI) event demux and the
     per-index report/bulk paths are unchanged.

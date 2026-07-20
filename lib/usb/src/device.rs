@@ -3,8 +3,10 @@
 //!
 //! [`UsbDevice`] drives one controller through the full bring-up of a
 //! attached devices: port reset, Enable Slot, Address
-//! Device, `GET_DESCRIPTOR(device)`, `SET_PROTOCOL(boot)`, Configure
-//! Endpoint, and on-demand interrupt-IN transfer arming, per device. Each
+//! Device, `GET_DESCRIPTOR(device)`, Configure Endpoint,
+//! `SET_PROTOCOL(boot)` + `SET_IDLE(indefinite)` for a HID interface (so an
+//! idle report endpoint stays quiescent rather than storming the
+//! controller), and on-demand interrupt-IN transfer arming, per device. Each
 //! served device's [`DeviceEngine`] view implements the `ReportSource` seam
 //! from `tairix_abi::driver::input`, so the host-controller driver serves
 //! reports straight off the transfer ring over the URB transport to a class
@@ -691,6 +693,24 @@ const fn setup_get_device_descriptor(len: u16) -> [u8; 8] {
 /// request to `interface` (USB HID 1.11 §7.2.6).
 const fn setup_set_protocol_boot(interface: u8) -> [u8; 8] {
     [0x21, 0x0B, 0x00, 0x00, interface, 0x00, 0x00, 0x00]
+}
+
+/// The 8-byte SETUP payload of the HID `SET_IDLE` class request to
+/// `interface` with an *indefinite* idle duration for **all** reports
+/// (USB HID 1.11 §7.2.4): `bmRequestType` host-to-device/class/interface
+/// (`0x21`), `bRequest` `SET_IDLE` (`0x0A`), `wValue` = duration `0` in the
+/// high byte and report id `0` (all reports) in the low byte, `wIndex` the
+/// interface, no data stage.
+///
+/// Duration `0` means the endpoint reports **only when the report data
+/// changes** and NAKs otherwise. Without it a boot device is free to stream
+/// a fresh report every polling interval whether or not anything changed —
+/// so a mouse floods the controller with duplicate reports (and interrupts)
+/// forever after the first movement, and a keyboard auto-repeats a held key.
+/// Setting the idle duration to indefinite is what makes an idle HID device
+/// quiescent on the bus.
+const fn setup_set_idle_indefinite(interface: u8) -> [u8; 8] {
+    [0x21, 0x0A, 0x00, 0x00, interface, 0x00, 0x00, 0x00]
 }
 
 /// The 8-byte SETUP payload of `GET_DESCRIPTOR(configuration, 0)` for
@@ -1691,8 +1711,10 @@ pub enum EnumStage {
     SetConfiguration = 7,
     /// HID `SET_PROTOCOL(boot)` class request (HID 1.11 §7.2.6).
     SetProtocol = 8,
+    /// HID `SET_IDLE(indefinite)` class request (HID 1.11 §7.2.4).
+    SetIdle = 9,
     /// Enumeration completed: the device is configured and ready for a class URB.
-    Configured = 9,
+    Configured = 10,
 }
 
 impl EnumStage {
@@ -3501,6 +3523,14 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 // does not implement it STALLs, which is tolerated.
                 self.stage = EnumStage::SetProtocol;
                 self.control_optional(setup_set_protocol_boot(iface.interface_number))?;
+                // `SET_IDLE(indefinite)` so the device reports only when its
+                // report data changes and NAKs otherwise. Without it a boot
+                // mouse streams duplicate reports every polling interval after
+                // the first movement — a controller interrupt storm on an idle
+                // device — and a boot keyboard auto-repeats. A device that does
+                // not implement the request STALLs, which is tolerated.
+                self.stage = EnumStage::SetIdle;
+                self.control_optional(setup_set_idle_indefinite(iface.interface_number))?;
             }
         }
 

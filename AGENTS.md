@@ -1639,6 +1639,7 @@ You are not exempt from any rule above. In addition:
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The `vim` app | `plans/VIM.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
+    | Open core-kernel defect tracking | `plans/OPEN-DEFECTS.md` |
 
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a

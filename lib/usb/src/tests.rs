@@ -651,6 +651,12 @@ struct MockXhci {
     configured: bool,
     configuration: Option<u8>,
     protocol: Option<u8>,
+    /// The `wValue` of the last HID `SET_IDLE` (`0x21, 0x0A`) received on a
+    /// configured HID interface (`None` until the request arrives). The high
+    /// byte is the idle duration (`0` = indefinite / report-on-change), so a
+    /// test can pin that enumeration quiesces the device against the
+    /// interrupt-storm defect.
+    idle_value: Option<u16>,
     pending_setup: Option<[u8; 8]>,
     /// Pending IN data stage: TRB address, buffer, length, ISP.
     pending_data: Option<(u64, u64, u32, bool)>,
@@ -1082,6 +1088,7 @@ impl MockXhci {
             configured: false,
             configuration: None,
             protocol: None,
+            idle_value: None,
             pending_setup: None,
             pending_data: None,
             pending_reports: VecDeque::new(),
@@ -2131,6 +2138,30 @@ impl MockXhci {
         self.deliver_in_data(data, &hub_desc, w_length, status_addr)
     }
 
+    /// Post the fault/STALL a HID class request (`SET_PROTOCOL` / `SET_IDLE`)
+    /// answers under the scripted knobs, returning `true` when it did so (the
+    /// caller must then stop). A scripted `fault_class_requests` answers a
+    /// non-STALL transaction error; a hub (not a HID device) or a scripted
+    /// `stall_class_requests` answers a protocol STALL, which halts EP0
+    /// exactly as real hardware does. `false` means the request is accepted
+    /// and the caller records its effect.
+    fn reject_hid_class_request(&mut self, status_addr: u64) -> bool {
+        if self.fault_class_requests {
+            self.post_transfer_event(status_addr, CompletionCode::UsbTransactionError, 1, 0);
+            return true;
+        }
+        // A hub is not a HID device, so it STALLs this HID class request — and
+        // a STALL halts EP0, exactly the metal failure that breaks a following
+        // hub-descriptor read. The downstream device *is* a HID keyboard, so
+        // once it is addressed the request succeeds.
+        if self.stall_class_requests || (self.hub_ports > 0 && !self.downstream_active) {
+            self.ep0_halted = true;
+            self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+            return true;
+        }
+        false
+    }
+
     /// Execute the assembled control TD, posting its transfer events.
     fn execute_control(&mut self, status_addr: u64) {
         let Some(setup) = self.pending_setup.take() else {
@@ -2241,26 +2272,19 @@ impl MockXhci {
             }
             // SET_PROTOCOL (HID class)
             (0x21, 0x0B) => {
-                if self.fault_class_requests {
-                    self.post_transfer_event(
-                        status_addr,
-                        CompletionCode::UsbTransactionError,
-                        1,
-                        0,
-                    );
-                    return;
-                }
-                // A hub is not a HID device, so it STALLs this HID class
-                // request — and a STALL halts EP0, exactly the metal
-                // failure that breaks a following hub-descriptor read. The
-                // downstream device *is* a HID keyboard, so once it is
-                // addressed the request succeeds.
-                if self.stall_class_requests || (self.hub_ports > 0 && !self.downstream_active) {
-                    self.ep0_halted = true;
-                    self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+                if self.reject_hid_class_request(status_addr) {
                     return;
                 }
                 self.protocol = Some(setup[2]);
+            }
+            // SET_IDLE (HID class): quiesce an idle endpoint so it reports
+            // only when its report data changes. Honours the same STALL/fault
+            // knobs as SET_PROTOCOL, and records the requested idle value.
+            (0x21, 0x0A) => {
+                if self.reject_hid_class_request(status_addr) {
+                    return;
+                }
+                self.idle_value = Some(u16::from_le_bytes([setup[2], setup[3]]));
             }
             _ => {
                 self.ep0_halted = true;
@@ -3881,8 +3905,8 @@ fn root_attach_tolerates_a_stalled_set_protocol() {
 #[test]
 fn root_attach_records_the_configured_stage_on_success() {
     // A clean enumeration walks the breadcrumb to `Configured`, and the
-    // last completion observed is the SET_PROTOCOL status stage's
-    // Success — the fault-localising diagnostic reads a healthy run.
+    // last completion observed is the closing HID class request's status
+    // stage Success — the fault-localising diagnostic reads a healthy run.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     assert_eq!(device.enum_stage(), EnumStage::Scan);
@@ -3891,6 +3915,52 @@ fn root_attach_records_the_configured_stage_on_success() {
     assert_eq!(
         device.last_completion_code(),
         CompletionCode::Success.as_u8()
+    );
+}
+
+#[test]
+fn root_attach_sets_the_hid_endpoint_idle_indefinite() {
+    // A boot HID device is told `SET_IDLE(indefinite)` (idle duration 0,
+    // all reports) during enumeration so its interrupt-IN endpoint reports
+    // only when the report data changes and NAKs otherwise. Without it a
+    // mouse streams a duplicate report every polling interval after the
+    // first movement — a controller interrupt storm on an idle device —
+    // and a keyboard auto-repeats. The high byte of the recorded `wValue`
+    // is the idle duration, which must be 0 (indefinite).
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
+    let idle = device
+        .host_mut()
+        .idle_value
+        .expect("SET_IDLE was issued to the HID interface");
+    assert_eq!(
+        idle >> 8,
+        0,
+        "the idle duration is indefinite (report only on change)"
+    );
+    assert_eq!(idle & 0xFF, 0, "SET_IDLE targets all reports (report id 0)");
+}
+
+#[test]
+fn root_attach_tolerates_a_stalled_set_idle() {
+    // `SET_IDLE` is optional (HID 1.11 §7.2.4): a device that does not
+    // implement it STALLs, which the default control endpoint recovers
+    // from. Enumeration must absorb the STALL and still finish, exactly as
+    // it does for a stalled `SET_PROTOCOL`, rather than aborting an
+    // otherwise-usable device.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.stall_class_requests = true;
+    let mut device = started_device(mock, &mem);
+    let index = attach_root_device(&mut device, 1).expect("a stalled SET_IDLE is tolerated");
+    let identity = device.device_identity(index).expect("identity captured");
+    assert_eq!(identity.vendor_id, 0x046D);
+    assert_eq!(device.enum_stage(), EnumStage::Configured);
+    assert_eq!(
+        device.host_mut().idle_value,
+        None,
+        "the stalled request recorded no idle value"
     );
 }
 

@@ -2128,6 +2128,27 @@ order (one fully-gated increment each):
                  ordering + expired-prefix sweep, deregister across every index,
                  the wake-one round-robin no-starvation loop, and the unchanged
                  lock-free `request_wake`/drain race.
+               - **P-7 — §27 foundational-primitive audit sweep — DONE.** The
+                 general §27 sweep (`plans/OPEN-DEFECTS.md` D4) of every
+                 foundational primitive other code builds on: the `lib/sync`
+                 locks (`SpinLock`/`IrqSafeSpinLock`, the fair FIFO `McsLock`,
+                 the writer-preference `RwLock`, `SeqLock`), `OnceCell`/`Once`,
+                 `Epoch`, `lib/collections::BitSet256`, `lib/caps` (`CapabilitySet`
+                 delegation + `CapToken`), `kernel/ipc` (`PortRegistry` +
+                 `call`/`port`/`notify` over the P-6 wake/drain), and the
+                 allocators (`lib/kalloc` coalescing free list, `lib/rt` heap
+                 free-span, `kernel/mem::Slab`). All are §27-complete abstractions
+                 with the right structure/complexity for §26 load; `waitq` (P-6)
+                 was the sole thin slice. **One latent structural watch-item,
+                 staged not fixed (§2.18 / D4.3):** `kernel/mem::Slab::alloc`
+                 finds a free slot with an `O(slot_count)` scan of `in_use` rather
+                 than an `O(1)` free-index. This is **not a live defect** — its
+                 sole production caller (`kthread.rs` kthread-stack slab) uses
+                 `slot_count == 1`, so the scan is O(1) today. **Trigger for the
+                 rework:** if any large-`slot_count` consumer of `Slab` is
+                 introduced, `Slab` must first gain an O(1) free-slot index (a
+                 free-slot stack/head) so allocation does not become O(n) under
+                 §26 load — that consumer's change carries the free-index rework.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass

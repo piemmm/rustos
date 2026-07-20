@@ -29,9 +29,11 @@ The open items, in priority order:
   O(log n) `WaitSet` with a stated FIFO no-starvation discipline).
 - **D3 — Hard-lockup watchdog parity** on x86_64 and riscv64 (aarch64
   is the only port with hard-lockup detection wired).
-- **D4 — Latent §27 audit sweep** of the other foundational primitives
-  (`lib/sync`, IPC/capability structures, allocators) to find any other
-  thin-slice cores before they bite.
+- **D4 — Latent §27 audit sweep — DONE.** The other foundational
+  primitives (`lib/sync`, IPC/capability structures, allocators,
+  `lib/collections`) were audited against §27. All are complete; `waitq`
+  (D2) was the sole thin slice. One latent watch-item (the slab
+  free-slot scan) is recorded and staged (not a live defect).
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -160,33 +162,58 @@ work and are conformance-tested on all three bare-metal targets;
 
 ---
 
-## D4 — Latent §27 audit sweep of foundational primitives
+## D4 — Latent §27 audit sweep of foundational primitives — DONE
 
-**State:** the 2026-07-06 §27 amendment was a **general** rule (kernel
-building blocks had been shipped as thin slices); `waitq` (D2) is the
-one concrete instance staged so far. Other foundational primitives may
-carry the same defect and are not yet audited.
+**State:** completed. Every foundational primitive `kernel/*`, `lib/*`,
+and userland code builds on was read and judged against the §27 bar
+(complete abstraction, right structure/complexity for §26 load,
+fairness/ordering/wake-one where the abstraction implies it, no O(n) scan
+on a load-bearing path). `waitq` (D2) was and remains the **only** thin
+slice; every other primitive is §27-complete. One latent structural
+watch-item (the slab free-slot scan) is recorded below — it is not a live
+defect (its sole production caller uses one slot) and is staged, not
+fixed in passing (D4.3).
 
-- **D4.1 — enumerate the foundational primitives** other code builds on:
-  `lib/sync` (locks, `Once`, epoch, the `IrqSafeSpinLock` family), the
-  IPC/capability structures (`kernel/ipc`, `lib/caps`), the allocators
-  (`kernel/mem` slab, `lib/kalloc`, `lib/rt` heap), and the core
-  collections in `lib/collections`.
-- **D4.2 — audit each against §27** in the spirit of `plans/CODEVERIFY.md`:
-  is the *complete* abstraction implemented, or the first caller's slice?
-  Right data structure / complexity for §26 load? Fairness / ordering /
-  wake-one where the abstraction implies it? No O(n) scan on a
-  load-bearing path?
-- **D4.3 — record findings.** Each primitive that falls short is staged
-  as its own §27 rework item (a `PLAN.md` P-item and, if large, its own
-  `plans/*.md`) with the specific gap named — do not silently fix in
-  passing and do not defer with a `// TODO` (§2.18). A primitive that
-  passes is recorded as audited so the sweep is not re-run blindly.
+**D4.1 — primitives enumerated and audited.** The full set below.
 
-**Done when:** every enumerated primitive is audited and either confirmed
-§27-complete or has a staged rework item; the audit result is recorded
-(a short table in this file), and any in-scope small fixes land with
-tests (§7).
+**D4.2/D4.3 — audit result (each primitive read, not assumed):**
+
+| Primitive | Structure / complexity | Verdict |
+|---|---|---|
+| `lib/sync::SpinLock` / `IrqSafeSpinLock` | test-and-set acquire spin (charter's brief-hold carve-out); `new`/`try_lock`/`lock`/`is_locked`/`get_mut`/`into_inner`/guards | §27-complete |
+| `lib/sync::McsLock` | canonical MCS queue lock — strict FIFO fairness, per-waiter local spin, O(1)/op | §27-complete (the fair lock the plain spinlock defers fairness to) |
+| `lib/sync::RwLock` | writer-preference; stated fairness invariant (`pending_writers>0` blocks new readers) with a property test | §27-complete |
+| `lib/sync::SeqLock` | read-mostly seqlock — `read`/`write`/`sequence`, retry-on-odd | §27-complete |
+| `lib/sync::OnceCell` / `Once` | full once-init: `get`/`set`/`get_or_try_init`/`take`/`call_once`(+infallible), poison handling | §27-complete |
+| `lib/sync::Epoch` | epoch-based reclamation — `register`/`pin`/`defer_free`/`defer`/`advance`; complete lifecycle | §27-complete |
+| `lib/collections::BitSet256` | 4×u64; full set algebra + subset + popcount + ascending fused iter, all O(1) | §27-complete |
+| `lib/caps::CapabilitySet` | 256-bit; full algebra + subset-enforcing `delegate` + `revoke` + wire round-trip; delegation-never-widens property-tested (§19.7) | §27-complete |
+| `lib/caps::CapToken` | unforgeable token vocabulary (`token.rs`) | §27-complete |
+| `kernel/ipc::PortRegistry` | `BTreeMap` endpoint + name indexes — O(log n) `lookup`/`resolve`/`register`/`unregister`; bulk `teardown_owned_by` O(n) only on process exit (not a hot path) | §27-complete |
+| `kernel/ipc` `call`/`port`/`notify` | reply/mailbox/notification queues over the shared `waitq` wake/drain discipline (D2) | §27-complete |
+| `lib/kalloc::FreeListAllocator` | coalescing address-sorted first-fit free list; growable/shrinkable via `HeapSource`; deterministic OOM (null, never panic) | §27-complete (first-fit is O(free-blocks); coalescing bounds the count — the standard general-purpose design, not a thin slice) |
+| `lib/rt` heap | first-fit over a coalesced, address-sorted free-**span** list; growable `SpanStore` (§24.1/§25); realloc grow/shrink in place | §27-complete (same standard first-fit design; §25-bound) |
+| `kernel/mem::Slab` | guard-page + tag-rotation + zero-on-free + double-free/dirty-slot hardened fixed-size slab | §27-complete for its use — **watch-item** below |
+
+**Slab free-slot scan — recorded, staged, not fixed in passing (D4.3).**
+`Slab::alloc` finds a free slot with an `O(slot_count)` linear scan of the
+`in_use` bitmap rather than an `O(1)` free-index. This is **not a live
+§27 defect**: the sole production constructor (`kernel/core/src/kthread.rs`
+kthread-stack slab) uses `slot_count == 1`, so the scan is O(1) in
+practice, and the slab's purpose is guard/tag hardening of small, few-slot
+object classes, not a high-fan-out hot-path allocator. It is recorded as a
+latent structural watch-item: **should a large-`slot_count` consumer ever
+be introduced, `Slab` must first gain an O(1) free-slot index (a free-slot
+stack/head) so the allocation hot path does not become O(n) under §26
+load.** Staged as a `PLAN.md` note rather than reworked here, per D4.3 (do
+not fix in passing; the abstraction is complete and correct for every
+present caller).
+
+**Done:** every enumerated foundational primitive audited against §27 and
+confirmed complete (table above); the one latent structural concern (slab
+free-slot scan) recorded and staged with its specific trigger; no other
+thin-slice core found; no in-scope code fix was required (all present
+callers are served correctly), so the sweep lands as the recorded audit.
 
 ---
 
@@ -201,7 +228,9 @@ whole-project-green gate:
   `WaitSet`, stated FIFO no-starvation) with tests; P-6 marked done.
 - D3: hard-lockup watchdog + diagnostics conformance-tested on all three
   bare-metal targets.
-- D4: every foundational primitive audited; shortfalls staged.
+- D4: **DONE** — every foundational primitive audited against §27
+  (findings table recorded); all complete, the one latent structural
+  concern (slab free-slot scan) staged; no in-scope code fix required.
 - For each landing: `cargo fmt --all` (+ `--check`), `cargo xtask ci`
   (once), `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both
   --secs 20` green and quoted; §23 self-review verdict stated.

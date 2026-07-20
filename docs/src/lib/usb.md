@@ -37,7 +37,9 @@ build on the *same* engine without depending on each other — exactly the split
   it differs from the speed's assumed worst case (a full-speed receiver's
   8-byte EP0) → the full `GET_DESCRIPTOR` reads (the configuration at its
   exact advertised `wTotalLength`) → `SET_CONFIGURATION` →
-  `SET_PROTOCOL(boot)` per HID interface → Configure Endpoint, into a
+  `SET_PROTOCOL(boot)` + `SET_IDLE(indefinite)` per HID interface (the
+  latter so an idle report endpoint reports only on change instead of
+  storming the controller with duplicate reports) → Configure Endpoint, into a
   growable table of concurrently served **interfaces**, each with its own
   demand-allocated DMA region (EP0 / interrupt / bulk rings and buffers)
   claimed on attach and released on detach — the only concurrency bounds
