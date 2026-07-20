@@ -597,8 +597,12 @@ tairix/
 │   │                    #   ControlDisposition, window-furniture states); and
 │   │                    #   the drawn control families — Button/IconButton/
 │   │                    #   SplitButton, the boolean selectors Toggle/Checkbox/
-│   │                    #   Radio, the value controls Slider/Progress, and the
-│   │                    #   text entries TextField/SearchField so far, over one
+│   │                    #   Radio, the value controls Slider/Progress, the
+│   │                    #   text entries TextField/SearchField, the menu command
+│   │                    #   surface Menu/MenuItem, the Toolbar (composing icon/
+│   │                    #   split tools in groups with an active-tool seam), the
+│   │                    #   Tabs strip, and the ComboBox (composing the Menu for
+│   │                    #   its popup) so far, over one
 │   │                    #   shared draw+interaction core —
 │   │                    #   resolving colour/metric/radius
 │   │                    #   from lib/theme+lib/geometry, rounding plates through

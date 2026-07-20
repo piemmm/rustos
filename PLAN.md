@@ -3332,13 +3332,30 @@ per-app recipes (§2.2).
   tests (editing incl. multibyte, caret/selection, limit, Ctrl+A, Enter/Escape,
   read-only/denied/disabled, validation rim + message, pointer caret/drag,
   dark/light + high-contrast + scale, search chrome).
+- **Drawn controls: command-surface family + ComboBox — DONE.** The shared
+  chevron and focus-ring/cell-outline primitives are hoisted into
+  `lib/controls::paint` (`ChevronDir`/`paint_chevron`, `draw_outline`), then:
+  `lib/controls::menu` draws `MenuItem` rows and the elevated `Menu` plate
+  (icon column, shortcut/reason, submenu chevron, danger rail, §13 bead, current
+  highlight vs keyboard focus ring; Up/Down/Home/End/Right/Enter/Space/Escape,
+  pointer hover/click, `row_at`, `preferred_width/height`, typed `MenuAction`);
+  `lib/controls::toolbar` composes `IconButton`/`SplitButton` tools in `u16`
+  groups (raised strip, group dividers, active-tool accent seam, per-tool heat
+  from button state; pointer routing + Left/Right/Home/End focus + activation,
+  typed `ToolbarAction`); `lib/controls::tabs` draws an equal-width `Tabs` strip
+  (selected lower seam, loading heat seam, modified/error shape beads, focus
+  ring; Left/Right/Home/End + Enter/Space, typed `TabsAction`); and
+  `lib/controls::combo` draws `ComboBox` composing the `Menu` for its popup
+  (collapsed field + down-chevron, open/select/close by pointer and keyboard,
+  outside/Escape dismiss, §13 denied lock bead, `popup_size`, typed
+  `ComboAction`). All theme/`Scale`-resolved, dark/light + high-contrast +
+  fail-closed; 63 host tests across the four families.
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (menu/toolbar/tabs, collections incl. ListRow,
-  then ComboBox composing the menu/list surface, the scrollbar renderer, window
-  furniture, shell/decision surfaces) over the same shared paths, then the
-  Switchboard reference composition. Each lands complete (§27) with dark/light +
-  reduced-motion + high-contrast coverage and its §20 tests before the next
-  begins.
+  the remaining drawn families (collections incl. ListRow/TableRow/TableCell/
+  Card/Panel, the scrollbar renderer, window furniture, shell/decision surfaces)
+  over the same shared paths, then the Switchboard reference composition. Each
+  lands complete (§27) with dark/light + reduced-motion + high-contrast coverage
+  and its §20 tests before the next begins.
 
 ---
 
