@@ -68,6 +68,14 @@
 //! a read-only instrument trace of known, working, indeterminate, complete, or
 //! failed work, driven only by the state its owner sets — it runs no idle loop
 //! and renders an indeterminate trace statically under reduced motion.
+//!
+//! The [`text`] module is the text-entry family — [`TextField`] and
+//! [`SearchField`]. Both are single-line entries on a quiet Alloy Plate with a
+//! caret, selection, and horizontally-scrolled clipped text; a [`SearchField`]
+//! adds a leading magnifier that reads as active when a query is present. A
+//! read-only field stays legible and selectable but refuses edits, distinct
+//! from a disabled field (muted) and a denied field (Authority Mark); both emit
+//! a typed [`TextAction`] the owner validates and commits.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -80,6 +88,7 @@ mod paint;
 pub mod scroll;
 pub mod selector;
 pub mod state;
+pub mod text;
 pub mod value;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
@@ -93,6 +102,7 @@ pub use state::{
     SelectionState, SizeAction, ValidationState, WindowActivationState, WindowControlKind,
     WindowFurnitureState, WindowSizeState,
 };
+pub use text::{SearchField, TextAction, TextField};
 pub use value::{Progress, Slider, SliderAction};
 
 #[cfg(test)]
@@ -103,5 +113,7 @@ mod selector_tests;
 mod state_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_tests;
 #[cfg(test)]
 mod value_tests;

@@ -3315,12 +3315,30 @@ per-app recipes (§2.2).
   under reduced motion, complete success fill + check bead, failed recovery rim
   + reason. Value is a validated permille, all arithmetic `u64`-guarded and
   clamped. Dark/light + high-contrast + reduced-motion + scale + §13 tested.
+- **Drawn controls: text-entry family — DONE.** `lib/controls::text` draws
+  `TextField` and `SearchField` over the shared paint core and one pure
+  `TextEditor` (caret/anchor byte indices always on a `char` boundary,
+  insert/backspace/forward-delete, left/right/home/end with Shift-selection,
+  Ctrl+A, optional character limit). Text is clipped and horizontally scrolled
+  through a temporary sub-surface (caret pinned visible, no bleed over the rim),
+  with an accent selection highlight and a focused/actionable caret; a pointer
+  press places the caret and a drag extends the selection. The §13 disposition
+  keeps read-only (recessed plate, full-contrast selectable text, no edits)
+  distinct from disabled (muted) and denied (kept value + lock bead); validation
+  drives the rim segment (Invalid/Warning) and an inline message row when the
+  bounds allow. `SearchField` adds a leading magnifier that reads accent on a
+  query and clears it on Escape. Both emit a typed `TextAction`
+  (`Edited`/`Submitted`/`Cancelled`); the owner validates and commits. 30 host
+  tests (editing incl. multibyte, caret/selection, limit, Ctrl+A, Enter/Escape,
+  read-only/denied/disabled, validation rim + message, pointer caret/drag,
+  dark/light + high-contrast + scale, search chrome).
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (text/search/combo, menu/toolbar/tabs,
-  collections, the scrollbar renderer, window furniture, shell/decision
-  surfaces) over the same shared paths, then the Switchboard reference
-  composition. Each lands complete (§27) with dark/light + reduced-motion +
-  high-contrast coverage and its §20 tests before the next begins.
+  the remaining drawn families (menu/toolbar/tabs, collections incl. ListRow,
+  then ComboBox composing the menu/list surface, the scrollbar renderer, window
+  furniture, shell/decision surfaces) over the same shared paths, then the
+  Switchboard reference composition. Each lands complete (§27) with dark/light +
+  reduced-motion + high-contrast coverage and its §20 tests before the next
+  begins.
 
 ---
 
