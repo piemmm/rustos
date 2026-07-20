@@ -1,10 +1,11 @@
 //! Windows: a placed surface with compositing attributes.
 
-use tairix_theme::CursorKind;
+use tairix_controls::{FrameInsets, WindowFrame};
+use tairix_theme::{CursorKind, Theme};
 
 use crate::color::{div255, Pixel};
 use crate::corner::Corners;
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Point, Rect, Scale};
 use crate::surface::Surface;
 use crate::viewport::RootViewport;
 
@@ -30,6 +31,8 @@ pub struct Window {
     visible: bool,
     cursor: CursorKind,
     viewport: Option<RootViewport>,
+    frame: Option<WindowFrame>,
+    band: Option<FrameInsets>,
 }
 
 impl Window {
@@ -50,6 +53,8 @@ impl Window {
             visible: true,
             cursor: CursorKind::Arrow,
             viewport: None,
+            frame: None,
+            band: None,
         }
     }
 
@@ -115,15 +120,59 @@ impl Window {
         &mut self.surface
     }
 
-    /// The window's screen rectangle (origin plus surface size).
+    /// The window's screen rectangle.
+    ///
+    /// For a plain window this is the origin plus the content surface size. For
+    /// a *decorated* window it is the **outer** rectangle: the content surface
+    /// grown by the frame band ([`FrameInsets`]) the window manager reserves
+    /// for the title bar, borders, and resize edges, so the decoration lives
+    /// around the client rather than over it.
     #[must_use]
     pub fn bounds(&self) -> Rect {
-        Rect::new(
-            self.origin.x,
-            self.origin.y,
-            self.surface.width(),
-            self.surface.height(),
-        )
+        let (w, h) = self.outer_size();
+        Rect::new(self.origin.x, self.origin.y, w, h)
+    }
+
+    /// The window's outer size in physical pixels: the content surface grown by
+    /// the reserved frame band when decorated, else the bare surface size.
+    fn outer_size(&self) -> (u32, u32) {
+        match self.band {
+            Some(insets) => (
+                self.surface
+                    .width()
+                    .saturating_add(insets.left)
+                    .saturating_add(insets.right),
+                self.surface
+                    .height()
+                    .saturating_add(insets.top)
+                    .saturating_add(insets.bottom),
+            ),
+            None => (self.surface.width(), self.surface.height()),
+        }
+    }
+
+    /// The screen rectangle the application content occupies: the inset client
+    /// viewport for a decorated window, or the whole bounds for a plain one.
+    ///
+    /// The content surface is presented here and never overlaps the furniture
+    /// band, so a decorated window's client never receives frame input.
+    #[must_use]
+    pub fn client_rect(&self) -> Rect {
+        match self.band {
+            Some(insets) => Rect::new(
+                self.origin.x.saturating_add_unsigned(insets.left),
+                self.origin.y.saturating_add_unsigned(insets.top),
+                self.surface.width(),
+                self.surface.height(),
+            ),
+            None => self.bounds(),
+        }
+    }
+
+    /// This window's window-manager-owned decoration frame, if it is decorated.
+    #[must_use]
+    pub fn frame(&self) -> Option<&WindowFrame> {
+        self.frame.as_ref()
     }
 
     /// The composited contribution of this window at screen `(x, y)`:
@@ -139,10 +188,10 @@ impl Window {
         self.sample_local(lx, ly)
     }
 
-    /// The composited contribution of this window at *surface-local*
-    /// `(lx, ly)`: the source pixel scaled by the combined opacity and
-    /// rounded-corner coverage, or `None` outside the surface or when the
-    /// window is hidden.
+    /// The composited contribution of this window at *window-local*
+    /// `(lx, ly)` (origin the outer top-left): the source pixel scaled by the
+    /// combined opacity and rounded-corner coverage, or `None` outside the
+    /// content, in the reserved frame band, or when the window is hidden.
     ///
     /// This is the same per-pixel result as [`Self::sample`] addressed in
     /// the window's own coordinate space; the hardware-layer present path
@@ -152,15 +201,40 @@ impl Window {
         if !self.visible {
             return None;
         }
-        if self.clipped_by_furniture(lx, ly) {
+        // Map outer-window-local coordinates to content-surface coordinates. A
+        // point in the reserved frame band yields no client pixel — the window
+        // manager paints the furniture there separately — and the content sits
+        // inset at the client origin.
+        let (sx, sy) = self.to_content(lx, ly)?;
+        if self.clipped_by_furniture(sx, sy) {
             return None;
         }
-        let pixel = self.surface.get(lx, ly)?;
-        let coverage = self
-            .corners
-            .coverage(lx, ly, self.surface.width(), self.surface.height());
+        let pixel = self.surface.get(sx, sy)?;
+        // A decorated window's rounded corners belong to the frame rim, not the
+        // rectangular client; an undecorated window rounds its own content.
+        let coverage = if self.band.is_some() {
+            255
+        } else {
+            self.corners
+                .coverage(sx, sy, self.surface.width(), self.surface.height())
+        };
         let factor = combine(self.opacity, coverage);
         Some(pixel.scale_alpha(factor))
+    }
+
+    /// Translate outer-window-local `(lx, ly)` into content-surface
+    /// coordinates, or `None` when the point falls in the reserved frame band
+    /// (outside the client). A plain window maps one-to-one.
+    fn to_content(&self, lx: u32, ly: u32) -> Option<(u32, u32)> {
+        let Some(insets) = self.band else {
+            return Some((lx, ly));
+        };
+        let sx = lx.checked_sub(insets.left)?;
+        let sy = ly.checked_sub(insets.top)?;
+        if sx >= self.surface.width() || sy >= self.surface.height() {
+            return None;
+        }
+        Some((sx, sy))
     }
 
     pub(crate) fn set_origin(&mut self, origin: Point) {
@@ -193,6 +267,20 @@ impl Window {
 
     pub(crate) fn viewport_mut(&mut self) -> Option<&mut RootViewport> {
         self.viewport.as_mut()
+    }
+
+    /// Attach or replace this window's decoration frame, resolving its band for
+    /// the given output `scale`/`theme` so [`Self::bounds`] reflects the outer
+    /// rectangle immediately. Passing `None` removes the decoration.
+    pub(crate) fn set_frame(&mut self, frame: Option<WindowFrame>, scale: Scale, theme: &Theme) {
+        self.frame = frame;
+        self.refresh_band(scale, theme);
+    }
+
+    /// Re-resolve the decoration band for a new output `scale`/`theme`, so a
+    /// runtime DPI or theme change re-sizes the reserved furniture band.
+    pub(crate) fn refresh_band(&mut self, scale: Scale, theme: &Theme) {
+        self.band = self.frame.as_ref().map(|f| f.insets(scale, theme));
     }
 
     /// `true` when surface-local `(lx, ly)` falls in a reserved scrollbar

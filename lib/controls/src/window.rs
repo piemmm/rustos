@@ -950,6 +950,27 @@ pub struct FrameLayout {
     pub client: Rect,
 }
 
+/// The per-edge thickness of a window frame's furniture band around its client
+/// viewport, in physical pixels at a given scale and theme.
+///
+/// This is the single definition [`WindowFrame::layout`] and
+/// [`WindowFrame::outer_for_client`] both derive from: an outer rectangle grown
+/// from a client rectangle by these insets satisfies
+/// `layout(outer).client == client`, so a window manager can size a decorated
+/// window's outer bounds from its client-sized content surface without
+/// re-deriving the frame metrics.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct FrameInsets {
+    /// Top band: the frame border plus the title bar.
+    pub top: u32,
+    /// Left band: the frame inset.
+    pub left: u32,
+    /// Right band: the frame inset.
+    pub right: u32,
+    /// Bottom band: the frame inset.
+    pub bottom: u32,
+}
+
 /// The window-manager-owned boundary around one client viewport (spec §11.17).
 ///
 /// It draws the Frame Rim (stronger and doubled when active, quieter when
@@ -998,16 +1019,66 @@ impl WindowFrame {
         &mut self.title_bar
     }
 
+    /// The three scaled frame metrics — `(border, title_bar_height,
+    /// frame_inset)` in physical pixels — every frame rectangle is built from.
+    /// The border is at least one physical pixel and the side inset is never
+    /// thinner than the border, so a rim always draws.
+    fn edges(scale: Scale, theme: &Theme) -> (u32, u32, u32) {
+        let metrics = theme.metrics();
+        let border = scale.scale_length(metrics.border_thickness).max(1);
+        let inset_amt = scale.scale_length(metrics.frame_inset).max(border);
+        let title_h = scale.scale_length(metrics.title_bar_height);
+        (border, title_h, inset_amt)
+    }
+
+    /// The per-edge furniture-band thickness around the client, at the active
+    /// scale and theme.
+    ///
+    /// The top band carries the frame border and the title bar; the other three
+    /// carry the frame inset. This is the one definition [`Self::layout`] and
+    /// [`Self::outer_for_client`] share (they never restate the metric math).
+    #[must_use]
+    pub fn insets(&self, scale: Scale, theme: &Theme) -> FrameInsets {
+        let (border, title_h, inset_amt) = Self::edges(scale, theme);
+        FrameInsets {
+            top: border.saturating_add(title_h),
+            left: inset_amt,
+            right: inset_amt,
+            bottom: inset_amt,
+        }
+    }
+
+    /// The outer window rectangle whose client viewport is exactly `client`:
+    /// `client` grown by the furniture band ([`Self::insets`]) on every edge.
+    ///
+    /// This is the window manager's inverse of [`Self::layout`] — it sizes a
+    /// decorated window's outer bounds from its client-sized content surface —
+    /// and it round-trips: `self.layout(self.outer_for_client(client, ..),
+    /// ..).client == client`.
+    #[must_use]
+    pub fn outer_for_client(&self, client: Rect, scale: Scale, theme: &Theme) -> Rect {
+        let insets = self.insets(scale, theme);
+        Rect::new(
+            client.left() - to_i32(insets.left),
+            client.top() - to_i32(insets.top),
+            client
+                .width
+                .saturating_add(insets.left)
+                .saturating_add(insets.right),
+            client
+                .height
+                .saturating_add(insets.top)
+                .saturating_add(insets.bottom),
+        )
+    }
+
     /// Lay the frame out within `bounds` for the active theme.
     ///
     /// The rim thickness and client inset are independent of activation, so a
     /// window never shifts its client when it gains or loses focus.
     #[must_use]
     pub fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> FrameLayout {
-        let metrics = theme.metrics();
-        let b = scale.scale_length(metrics.border_thickness).max(1);
-        let inset_amt = scale.scale_length(metrics.frame_inset).max(b);
-        let title_h = scale.scale_length(metrics.title_bar_height);
+        let (b, title_h, inset_amt) = Self::edges(scale, theme);
 
         let title_bar = Rect::new(
             bounds.left() + to_i32(b),
@@ -1015,17 +1086,15 @@ impl WindowFrame {
             bounds.width.saturating_sub(b.saturating_mul(2)),
             title_h,
         );
-        let client_top = bounds.top() + to_i32(b) + to_i32(title_h);
-        let client_h = bounds
-            .height
-            .saturating_sub(b)
-            .saturating_sub(title_h)
-            .saturating_sub(inset_amt);
         let client = Rect::new(
             bounds.left() + to_i32(inset_amt),
-            client_top,
+            bounds.top() + to_i32(b) + to_i32(title_h),
             bounds.width.saturating_sub(inset_amt.saturating_mul(2)),
-            client_h,
+            bounds
+                .height
+                .saturating_sub(b)
+                .saturating_sub(title_h)
+                .saturating_sub(inset_amt),
         );
 
         FrameLayout {

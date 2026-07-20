@@ -14,7 +14,9 @@ use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
 use crate::{Compositor, WindowId};
 
-use tairix_theme::{ThemeId, ThemeRegistry};
+use tairix_theme::{Theme, ThemeId, ThemeRegistry};
+
+use crate::{WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
 
 fn mode(w: u32, h: u32) -> DisplayMode {
     DisplayMode {
@@ -1462,4 +1464,127 @@ fn clearing_a_root_viewport_removes_the_furniture() {
 
     // A clear against an unknown id is refused.
     assert!(!c.clear_root_viewport(WindowId(9_999)));
+}
+
+// ---- server-side window decorations (Stage A geometry) ---------------
+
+/// A movable, resizable, active furniture state for a decorated test window.
+fn decorated() -> WindowFurnitureState {
+    WindowFurnitureState {
+        activation: WindowActivationState::Active,
+        size: WindowSizeState::Restored,
+        movable: true,
+        resizable: true,
+    }
+}
+
+#[test]
+fn decorating_a_window_reserves_a_band_around_the_client() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+
+    // Undecorated: outer bounds are the bare content surface and the client is
+    // the whole window.
+    assert_eq!(c.window(id).unwrap().bounds(), Rect::new(10, 10, 40, 30));
+    assert_eq!(c.window_client_rect(id), Some(Rect::new(10, 10, 40, 30)));
+
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+
+    // The outer bounds grow to hold the band; the content keeps its own size.
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).expect("decorated client");
+    assert_eq!(client.width, 40);
+    assert_eq!(client.height, 30);
+    assert!(bounds.width > 40 && bounds.height > 30);
+
+    // The client sits strictly inside the outer bounds on every edge, and the
+    // top band (title bar) is thicker than the others.
+    let left = client.left() - bounds.left();
+    let right = bounds.right() - client.right();
+    let top = client.top() - bounds.top();
+    let bottom = bounds.bottom() - client.bottom();
+    assert!(left > 0 && right > 0 && top > 0 && bottom > 0);
+    assert!(top > bottom, "the title band is the thickest edge");
+    assert!(bounds.contains(client.origin));
+}
+
+#[test]
+fn decorated_client_shows_content_and_the_band_shows_the_background() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    let client = c.window_client_rect(id).expect("client");
+    c.composite();
+
+    // A pixel inside the client shows the application content...
+    let cx = u32::try_from(client.left() + 2).unwrap();
+    let cy = u32::try_from(client.top() + 2).unwrap();
+    assert_eq!(frame_pixel(&c, cx, cy), [255, 0, 0, 255]);
+
+    // ...while the reserved band (here the title area, above the client) shows
+    // the desktop background: Stage A reserves the furniture, it is not the
+    // client's to paint. (Stage B draws the furniture chrome there.)
+    let by = u32::try_from(client.top() - 1).unwrap();
+    assert_eq!(frame_pixel(&c, cx, by), [0, 0, 255, 255]);
+    // The left border band, too.
+    let bx = u32::try_from(client.left() - 1).unwrap();
+    assert_eq!(frame_pixel(&c, bx, cy), [0, 0, 255, 255]);
+}
+
+#[test]
+fn clearing_the_frame_restores_the_bare_bounds() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    assert!(c.window(id).unwrap().bounds().width > 40);
+
+    assert!(c.clear_window_frame(id));
+    assert_eq!(c.window(id).unwrap().bounds(), Rect::new(10, 10, 40, 30));
+    assert_eq!(c.window_client_rect(id), Some(Rect::new(10, 10, 40, 30)));
+    assert!(c.window_frame(id).is_none());
+
+    // Operations against an unknown id are refused.
+    assert!(!c.set_window_frame(WindowId(9_999), WindowFrame::new(decorated())));
+    assert!(!c.clear_window_frame(WindowId(9_999)));
+    assert!(c.window_client_rect(WindowId(9_999)).is_none());
+}
+
+#[test]
+fn rescaling_grows_the_reserved_band() {
+    let mut c = Compositor::new(mode(400, 400), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    let before = c.window(id).unwrap().bounds();
+
+    assert!(c.set_scale(Scale::from_percent(200).expect("scale")));
+    let after = c.window(id).unwrap().bounds();
+
+    // The band scales with density, so the outer bounds grow while the client
+    // content keeps its pixel size.
+    assert!(after.width > before.width);
+    assert!(after.height > before.height);
+    assert_eq!(c.window_client_rect(id).unwrap().width, 40);
+}
+
+#[test]
+fn switching_theme_is_reported_and_keeps_decorated_windows() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+
+    // Switching to a different theme reports the change and leaves the window
+    // decorated; re-applying the same theme is a no-op.
+    assert!(c.set_theme(Theme::light()));
+    assert!(c.window_frame(id).is_some());
+    assert!(!c.set_theme(Theme::light()));
+}
+
+#[test]
+fn an_undecorated_window_keeps_its_surface_bounds() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(5, 7), opaque(40, 30, RED));
+    // No frame: bounds and client are the bare surface, unchanged by this work.
+    assert_eq!(c.window(id).unwrap().bounds(), Rect::new(5, 7, 40, 30));
+    assert_eq!(c.window_client_rect(id), Some(Rect::new(5, 7, 40, 30)));
+    assert!(c.window_frame(id).is_none());
 }

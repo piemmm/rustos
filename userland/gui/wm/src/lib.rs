@@ -77,4 +77,7 @@ pub use surface::Surface;
 pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};
 pub use window::{Window, WindowId};
 
-pub use tairix_controls::{ScrollModel, ScrollOrientation, ScrollRange, TrackHit};
+pub use tairix_controls::{
+    ScrollModel, ScrollOrientation, ScrollRange, TrackHit, WindowActivationState, WindowFrame,
+    WindowFurnitureState, WindowSizeState,
+};

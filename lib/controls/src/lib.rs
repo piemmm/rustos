@@ -208,8 +208,8 @@ pub use text::{SearchField, TextAction, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{
-    ControlPlacement, FrameLayout, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
-    ScrollCorner, TitleBar, TitleBarEvent, TitleBarLayout, TitleHit, WindowControl,
+    ControlPlacement, FrameInsets, FrameLayout, FurniturePart, ResizeEdge, ResizeEvent,
+    ResizeGrabber, ScrollCorner, TitleBar, TitleBarEvent, TitleBarLayout, TitleHit, WindowControl,
     WindowControlAction, WindowFrame,
 };
 

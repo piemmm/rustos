@@ -23,8 +23,9 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::DriverError;
 
+use tairix_controls::WindowFrame;
 use tairix_cursor::CursorImage;
-use tairix_theme::CursorKind;
+use tairix_theme::{CursorKind, Theme};
 
 use crate::color::{Color, Pixel};
 use crate::corner::Corners;
@@ -54,6 +55,7 @@ enum ChannelOrder {
 pub struct Compositor {
     mode: DisplayMode,
     scale: Scale,
+    theme: Theme,
     background: Color,
     order: ChannelOrder,
     windows: Vec<Window>,
@@ -88,6 +90,7 @@ impl Compositor {
         let mut compositor = Self {
             mode,
             scale: Scale::ONE,
+            theme: Theme::dark(),
             background,
             order,
             windows: Vec::new(),
@@ -138,8 +141,47 @@ impl Compositor {
             return false;
         }
         self.scale = scale;
+        self.refresh_frame_bands();
         self.damage.add(self.screen_rect());
         true
+    }
+
+    /// The active desktop theme this output decorates windows with.
+    ///
+    /// The window manager draws decoration frames (title bar, borders, resize
+    /// edges) from this theme's palette and metrics; it is the single theme the
+    /// output owns, read here rather than copied.
+    #[must_use]
+    pub const fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Switch the active desktop theme, returning whether it changed.
+    ///
+    /// A runtime light/dark switch is one call here: every decorated window
+    /// re-resolves its reserved furniture band (a theme may change the border,
+    /// inset, or title-bar metrics), and the whole screen is marked dirty so
+    /// the next composite repaints every window and its decorations under the
+    /// new palette. Setting the theme already in effect changes nothing and
+    /// returns `false`.
+    pub fn set_theme(&mut self, theme: Theme) -> bool {
+        if theme == self.theme {
+            return false;
+        }
+        self.theme = theme;
+        self.refresh_frame_bands();
+        self.damage.add(self.screen_rect());
+        true
+    }
+
+    /// Re-resolve every decorated window's furniture band for the current
+    /// output scale and theme (after a DPI or theme change), so each window's
+    /// outer bounds reflect the new band thickness.
+    fn refresh_frame_bands(&mut self) {
+        let scale = self.scale;
+        for window in &mut self.windows {
+            window.refresh_band(scale, &self.theme);
+        }
     }
 
     /// The desktop background colour behind every window (always opaque).
@@ -342,6 +384,60 @@ impl Compositor {
     #[must_use]
     pub fn root_viewport(&self, id: WindowId) -> Option<&RootViewport> {
         self.window(id).and_then(Window::viewport)
+    }
+
+    /// Decorate the window named by `id` with the window-manager-owned frame
+    /// `frame` (title bar, borders, resize edges). Returns `false` for an
+    /// unknown id.
+    ///
+    /// The frame band is reserved *around* the client at the active
+    /// scale/theme, so the window's outer [`bounds`](Window::bounds) grow to
+    /// hold the decoration and its content surface is presented inset at the
+    /// [`client_rect`](Window::client_rect); the client never overlaps the
+    /// furniture. The union of the old and new outer bounds is marked dirty.
+    pub fn set_window_frame(&mut self, id: WindowId, frame: WindowFrame) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        let before = window.bounds();
+        window.set_frame(Some(frame), scale, &self.theme);
+        let after = window.bounds();
+        self.damage.add(before);
+        self.damage.add(after);
+        true
+    }
+
+    /// Remove the decoration frame from the window named by `id`, so the window
+    /// manager stops reserving and drawing furniture and the window's outer
+    /// bounds collapse back to the bare content surface. Returns `false` for an
+    /// unknown id. The union of the old and new bounds is marked dirty.
+    pub fn clear_window_frame(&mut self, id: WindowId) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        let before = window.bounds();
+        window.set_frame(None, scale, &self.theme);
+        let after = window.bounds();
+        self.damage.add(before);
+        self.damage.add(after);
+        true
+    }
+
+    /// The decoration frame of the window named by `id`, or `None` when the id
+    /// is unknown or the window is undecorated.
+    #[must_use]
+    pub fn window_frame(&self, id: WindowId) -> Option<&WindowFrame> {
+        self.window(id).and_then(Window::frame)
+    }
+
+    /// The screen rectangle the application content of the window named by `id`
+    /// occupies — the inset client viewport for a decorated window, or the full
+    /// bounds for a plain one — or `None` for an unknown id.
+    #[must_use]
+    pub fn window_client_rect(&self, id: WindowId) -> Option<Rect> {
+        self.window(id).map(Window::client_rect)
     }
 
     /// Classify the screen `point` against the furniture of the window named

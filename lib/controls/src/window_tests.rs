@@ -21,8 +21,9 @@ use crate::state::{
     WindowFurnitureState, WindowSizeState,
 };
 use crate::window::{
-    ControlPlacement, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollCorner,
-    TitleBar, TitleBarEvent, TitleHit, WindowControl, WindowControlAction, WindowFrame,
+    ControlPlacement, FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
+    ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl, WindowControlAction,
+    WindowFrame,
 };
 
 fn font() -> BitmapFont {
@@ -657,4 +658,62 @@ fn scroll_corner_renders_neutral() {
     let mut surface = Surface::new(14, 14).expect("surface");
     corner.render(&mut surface, Rect::new(0, 0, 14, 14), Scale::ONE, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().surface)));
+}
+
+// --- Frame insets / outer_for_client --------------------------------------
+
+#[test]
+fn insets_match_the_client_band_layout_reserves() {
+    // The four insets are exactly the gap `layout` leaves between the outer
+    // bounds and the client on each edge — one definition, not two recipes.
+    let theme = Theme::dark();
+    let frame = WindowFrame::new(furniture());
+    let outer = Rect::new(30, 40, 300, 220);
+    let layout = frame.layout(outer, Scale::ONE, &theme);
+    let insets = frame.insets(Scale::ONE, &theme);
+    let expected = FrameInsets {
+        top: u32::try_from(layout.client.top() - outer.top()).unwrap(),
+        left: u32::try_from(layout.client.left() - outer.left()).unwrap(),
+        right: u32::try_from(outer.right() - layout.client.right()).unwrap(),
+        bottom: u32::try_from(outer.bottom() - layout.client.bottom()).unwrap(),
+    };
+    assert_eq!(insets, expected);
+    // The top band carries the title bar and is therefore the thickest.
+    assert!(insets.top > insets.bottom);
+}
+
+#[test]
+fn outer_for_client_round_trips_through_layout() {
+    // Sizing the outer window from a client-sized content surface and then
+    // laying that outer rect out must reproduce the client exactly, at
+    // reference and scaled DPI (the geometry the window manager relies on).
+    let theme = Theme::dark();
+    let frame = WindowFrame::new(furniture());
+    let client = Rect::new(120, 90, 400, 300);
+    for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
+        let outer = frame.outer_for_client(client, scale, &theme);
+        let insets = frame.insets(scale, &theme);
+        // The outer rect is the client grown by the band on every edge.
+        assert_eq!(
+            outer.left(),
+            client.left() - i32::try_from(insets.left).unwrap()
+        );
+        assert_eq!(
+            outer.top(),
+            client.top() - i32::try_from(insets.top).unwrap()
+        );
+        // Laying it out reproduces the client.
+        assert_eq!(frame.layout(outer, scale, &theme).client, client);
+    }
+}
+
+#[test]
+fn outer_for_client_uses_the_light_theme_metrics_too() {
+    // The derivation reads the active theme's metrics, so a light-theme frame
+    // round-trips under the light theme's own band thicknesses.
+    let theme = Theme::light();
+    let frame = WindowFrame::new(furniture());
+    let client = Rect::new(10, 10, 200, 150);
+    let outer = frame.outer_for_client(client, Scale::ONE, &theme);
+    assert_eq!(frame.layout(outer, Scale::ONE, &theme).client, client);
 }
