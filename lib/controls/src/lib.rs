@@ -76,6 +76,29 @@
 //! read-only field stays legible and selectable but refuses edits, distinct
 //! from a disabled field (muted) and a denied field (Authority Mark); both emit
 //! a typed [`TextAction`] the owner validates and commits.
+//!
+//! The [`menu`] module is the menu command surface — [`Menu`] and
+//! [`MenuItem`]. A menu is an elevated command plate carrying a column of row
+//! controls (label, optional icon, shortcut, submenu chevron, and a disabled
+//! row's reason); it owns keyboard navigation, pointer hover/click, the §13
+//! authority rendering (a denied row keeps its slot and shows an Authority
+//! Mark), and a destructive row's danger rail, emitting a typed [`MenuAction`].
+//!
+//! The [`toolbar`] module is the toolbar / toolstrip — [`Toolbar`]. It is a
+//! horizontal container of [`IconButton`] / [`SplitButton`] tools grouped with
+//! quiet gutters, marks the active tool with a persistent lower accent seam,
+//! and routes pointer and keyboard input to the tools it owns, emitting a typed
+//! [`ToolbarAction`].
+//!
+//! The [`tabs`] module is the tab strip — [`Tabs`] and [`Tab`]. Tabs select one
+//! of several views: the selected tab carries a strong lower seam, a loading
+//! tab a Heat Seam, and a modified or error tab a shape-coded Signal Bead, all
+//! legible without colour; it emits a typed [`TabsAction`].
+//!
+//! The [`combo`] module is the choice-entry control — [`ComboBox`]. It composes
+//! the text-field focus model and the [`Menu`] model rather than re-deriving
+//! either: the popup *is* a [`Menu`] built from the choices, and selecting one
+//! emits a typed [`ComboAction`].
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -84,14 +107,20 @@
 extern crate alloc;
 
 pub mod button;
+pub mod combo;
+pub mod menu;
 mod paint;
 pub mod scroll;
 pub mod selector;
 pub mod state;
+pub mod tabs;
 pub mod text;
+pub mod toolbar;
 pub mod value;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
+pub use combo::{ComboAction, ComboBox};
+pub use menu::{Menu, MenuAction, MenuItem};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
@@ -102,18 +131,28 @@ pub use state::{
     SelectionState, SizeAction, ValidationState, WindowActivationState, WindowControlKind,
     WindowFurnitureState, WindowSizeState,
 };
+pub use tabs::{Tab, Tabs, TabsAction};
 pub use text::{SearchField, TextAction, TextField};
+pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};
 
 #[cfg(test)]
 mod button_tests;
 #[cfg(test)]
+mod combo_tests;
+#[cfg(test)]
+mod menu_tests;
+#[cfg(test)]
 mod selector_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]
+mod tabs_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod text_tests;
+#[cfg(test)]
+mod toolbar_tests;
 #[cfg(test)]
 mod value_tests;

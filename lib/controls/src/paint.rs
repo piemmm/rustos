@@ -328,6 +328,65 @@ pub(crate) fn paint_plate(surface: &mut Surface, rect: (u32, u32, u32, u32), sty
     }
 }
 
+/// A directional disclosure/anchor chevron.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ChevronDir {
+    /// Points down (a disclosure that expands below, e.g. a split button or a
+    /// combo box).
+    Down,
+    /// Points right (a submenu anchor).
+    Right,
+}
+
+/// Draw a filled chevron of the given direction centred in `rect`.
+///
+/// One definition shared by the split button's disclosure, the combo box's
+/// disclosure, and a menu's submenu anchor, so no family carries its own
+/// triangle recipe.
+pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, color: Color) {
+    let Some((x, y, w, h)) = surface_rect(rect) else {
+        return;
+    };
+    if w == 0 || h == 0 {
+        return;
+    }
+    let Some(mut glyph) = Surface::new(w, h) else {
+        return;
+    };
+    // Triangles authored on a 100×100 grid mapped across the region, so they
+    // scale with the region at any density.
+    let points: [(i32, i32); 3] = match dir {
+        ChevronDir::Down => [(32, 42), (68, 42), (50, 64)],
+        ChevronDir::Right => [(40, 32), (40, 68), (64, 50)],
+    };
+    glyph.fill_polygon(&points, 100, color);
+    surface.blit(to_i32(x), to_i32(y), &glyph);
+}
+
+/// Draw a hollow rectangular outline of `thickness` inside `(x, y, w, h)`.
+///
+/// The one focus-ring / cell-outline primitive shared by the row/tab families
+/// (a keyboard-focused row or tab draws this ring to read distinctly from a
+/// pointer hover, spec §15).
+pub(crate) fn draw_outline(
+    surface: &mut Surface,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    thickness: u32,
+    color: Color,
+) {
+    if w == 0 || h == 0 || thickness == 0 {
+        return;
+    }
+    let edge = thickness.min(w).min(h);
+    surface.fill_rect(x, y, w, edge, color);
+    surface.fill_rect(x, y + h - edge, w, edge, color);
+    surface.fill_rect(x, y, edge, h, color);
+    surface.fill_rect(x + w - edge, y, edge, h, color);
+}
+
 /// Draw one Signal Bead of `size` at `(bx, by)` in the given shape, so the
 /// alert role reads by shape as well as colour.
 pub(crate) fn paint_bead(

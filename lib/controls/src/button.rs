@@ -19,8 +19,9 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    key_activation, paint_bead, paint_plate, plate_border, pointer_activation, resolve_bead,
-    resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape, PlateStyle,
+    key_activation, paint_bead, paint_chevron, paint_plate, plate_border, pointer_activation,
+    resolve_bead, resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape, ChevronDir,
+    PlateStyle,
 };
 use crate::state::{ActivityState, ControlDisposition, ControlRole, ControlState, PointerState};
 
@@ -496,23 +497,6 @@ fn split_regions(bounds: Rect, scale: Scale, theme: &Theme) -> (Rect, Rect) {
     (primary, disclosure)
 }
 
-/// Draw a downward disclosure chevron centred in `rect`.
-fn paint_chevron(surface: &mut Surface, rect: Rect, color: Color) {
-    let Some((x, y, w, h)) = surface_rect(rect) else {
-        return;
-    };
-    if w == 0 || h == 0 {
-        return;
-    }
-    if let Some(mut glyph) = Surface::new(w, h) {
-        // A downward triangle authored on a 100×100 grid mapped across the
-        // region, so it scales with the region at any density.
-        let points = [(32, 42), (68, 42), (50, 64)];
-        glyph.fill_polygon(&points, 100, color);
-        surface.blit(to_i32(x), to_i32(y), &glyph);
-    }
-}
-
 /// A primary action region plus a disclosure region sharing one plate
 /// (spec §11.3).
 ///
@@ -605,7 +589,7 @@ impl SplitButton {
         if let Some(rect) = surface_rect(primary_rect) {
             paint_content(surface, rect, scale, theme, &res, &self.content, font);
         }
-        paint_chevron(surface, disclosure_rect, res.label);
+        paint_chevron(surface, disclosure_rect, ChevronDir::Down, res.label);
     }
 
     /// Feed a pointer event, given the button's current `bounds`, returning the

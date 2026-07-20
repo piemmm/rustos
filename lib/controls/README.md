@@ -77,10 +77,42 @@ property from the active theme and scale, draw the shared overlay signals
 and emit a typed `SelectorAction` — a denied selector keeps its value and
 shows the lock bead rather than looking disabled.
 
+The **value-control family** (`value`) is `Slider` and `Progress`: measured
+controls whose value is a validated permille. A `Slider` drags/steps and commits
+through its owner (`SliderAction`) with an optional cap marker and resource-tinted
+track; a `Progress` is a read-only instrument trace (known %, working/
+indeterminate segment that freezes under reduced motion, complete/failed). The
+**text-entry family** (`text`) is `TextField` and `SearchField` over a pure
+caret/selection `TextEditor` with clipped horizontal scroll, emitting a typed
+`TextAction`; read-only, disabled, and denied render distinctly.
+
+The **command surfaces** are the menu, toolbar, tab strip, and combo box:
+
+- `menu` — `MenuItem` rows and the elevated `Menu` plate (icon column, shortcut
+  or disabled-row reason, submenu chevron, destructive danger rail, §13 Signal
+  Bead; current-row highlight distinct from a keyboard focus ring). The `Menu`
+  owns Up/Down/Home/End/Right/Enter/Space/Escape and pointer hover/click, sizes
+  itself (`preferred_width`/`preferred_height`), and emits a typed `MenuAction`.
+- `toolbar` — `Toolbar` composes `IconButton`/`SplitButton` tools in `u16`
+  groups (raised strip, group dividers, active-tool accent seam), routing
+  pointer/keyboard input to the tools it owns and emitting a typed
+  `ToolbarAction`.
+- `tabs` — `Tab`/`Tabs`, an equal-width strip whose selected tab carries a
+  strong lower seam, loading a Heat Seam, and modified/error a shape-coded bead;
+  it emits a typed `TabsAction`.
+- `combo` — `ComboBox` composes the text-field focus model and the `Menu` model
+  (its popup *is* a `Menu`), opening/selecting/closing by pointer and keyboard
+  and emitting a typed `ComboAction`.
+
+The shared chevron and focus-ring/cell-outline primitives live once in the
+private `paint` module (`ChevronDir`/`paint_chevron`, `draw_outline`), so no
+family carries its own triangle or outline recipe.
+
 ## Where it sits
 
 `#![no_std]`. The `scroll` and `state` modules are pure logic with no
-dependencies; the drawn controls (`button`, `selector`) depend only on other `lib/*`
+dependencies; the drawn controls (`button`, `selector`, `value`, `text`, `menu`,
+`toolbar`, `tabs`, `combo`) depend only on other `lib/*`
 crates — `tairix-geometry`, `tairix-theme`, `tairix-raster`, `tairix-font`,
 `tairix-icon`, and `tairix-input` — never on `kernel/*`, `drivers/*`, or
 `userland/*`, so the crate stays a shared building block the desktop consumers
@@ -90,7 +122,7 @@ at the edge.
 
 ## Staged work
 
-The remaining Reactive Alloy control families (slider/progress, fields, menus,
-tabs, collections, dialogs, notifications, and the window-manager furniture)
-and the window-manager / taskbar consumers of the drawn controls are staged in
-`.junie/gui-controls-work.md`.
+The remaining Reactive Alloy control families (collections — ListRow/TableRow/
+TableCell/Card/Panel, the scrollbar renderer, dialogs, notifications, and the
+window-manager furniture) and the window-manager / taskbar consumers of the
+drawn controls are staged in `.junie/gui-controls-work.md`.
