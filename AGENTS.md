@@ -641,9 +641,11 @@ tairix/
 │   │                    #   active on a query (TextAction). A
 │   │                    #   control renders state and emits a typed action; the
 │   │                    #   service enforces authority. Fail closed, no panic
-│   │                    #   (§2.2, §17.4). The full drawn control set is
-│   │                    #   complete; the Switchboard reference composition
-│   │                    #   (spec §17) is staged.
+│   │                    #   (§2.2, §17.4). The full drawn control set and the
+│   │                    #   Switchboard reference composition (spec §17,
+│   │                    #   module switchboard: WindowFrame/TitleBar/Tabs/
+│   │                    #   ListRow/Card/Panel/Button/ScrollBar from typed view
+│   │                    #   models, typed SwitchboardAction) are complete.
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.

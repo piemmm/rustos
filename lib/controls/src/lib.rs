@@ -169,6 +169,7 @@ pub mod scrollbar;
 pub mod selector;
 pub mod shell;
 pub mod state;
+pub mod switchboard;
 pub mod tabs;
 pub mod text;
 pub mod toolbar;
@@ -197,6 +198,10 @@ pub use state::{
     FocusState, PointerState, PressureKind, PressureState, ProgressValue, RecoveryState,
     SelectionState, SizeAction, ValidationState, WindowActivationState, WindowControlKind,
     WindowFurnitureState, WindowSizeState,
+};
+pub use switchboard::{
+    JobControl, JobSummary, RecoveryControl, RecoveryItem, ResourceSummary, Section,
+    ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction, TaskSummary,
 };
 pub use tabs::{Tab, Tabs, TabsAction};
 pub use text::{SearchField, TextAction, TextField};

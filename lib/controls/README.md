@@ -120,9 +120,32 @@ depend on and never the reverse. The owning viewport maps the computed
 one-dimensional `ThumbSpan` onto a `tairix_geometry::Rect` for its orientation
 at the edge.
 
+The remaining drawn families are also complete: the value controls
+(`value` — `Slider`/`Progress`), the text entries (`text` — `TextField`/
+`SearchField`), the collection controls (`collection` — `ListRow`/`TableRow`/
+`TableCell`/`Card`/`Panel`), the scrollbar renderer (`scrollbar` — the one
+orientation-parameterized `ScrollBar` over the `scroll` engine), the
+window-manager furniture (`window` — `WindowFrame`/`TitleBar`/`WindowControl`/
+`ResizeGrabber`/`ScrollCorner`), the shell surfaces (`shell` —
+`Notification`/`TaskbarItem`/`TraySignal`), and the decision surfaces
+(`decision` — `Dialog`/`Tooltip`/`HelpTip`).
+
+## Switchboard reference composition
+
+The `switchboard` module assembles **Switchboard** (design spec §17) purely
+from the shared controls above — the window furniture, a `Tabs` strip,
+`ListRow`/`Card`/`Panel`/`Button` content, and one vertical `ScrollBar` over the
+`scroll` engine — with no application-painted chrome and no second copy of any
+control's behaviour. `Switchboard::new` turns a typed `SwitchboardModel`
+(`TaskSummary`/`JobSummary`/`RecoveryItem`/`ResourceSummary`/`ServiceSummary`/
+`SystemAction`) into controls; every interaction returns a typed
+`SwitchboardAction` for the hosting service to authorise, and the frame hit map
+(`furniture_at`) keeps the client viewport strictly separate from the
+furniture. A denied action fails closed and renders distinctly from a disabled
+one. It is the proof that no TAIRiX surface needs custom chrome.
+
 ## Staged work
 
-The remaining Reactive Alloy control families (collections — ListRow/TableRow/
-TableCell/Card/Panel, the scrollbar renderer, dialogs, notifications, and the
-window-manager furniture) and the window-manager / taskbar consumers of the
-drawn controls are staged in `.junie/gui-controls-work.md`.
+The Reactive Alloy control set is complete (see
+`.junie/gui-controls-work.md`). The remaining work is the window-manager /
+taskbar / app consumers adopting these shared controls.

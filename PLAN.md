@@ -3491,9 +3491,19 @@ per-app recipes (§2.2).
   explains why an action is unavailable or recommended (reason tone by role)
   with one optional safe next-step `Button` (typed `HelpTipAction`). 17 host
   tests.
-- **Staged next** (`.junie/gui-controls-work.md` tracks status and detail): the
-  Switchboard reference composition (spec §17), assembled purely from the shared
-  controls above as the proof that no surface needs custom chrome.
+- **Switchboard reference composition — DONE.** `lib/controls::switchboard`
+  assembles Switchboard (spec §17) purely from the shared controls above — the
+  `WindowFrame`/`TitleBar`/`ResizeGrabber`/`ScrollCorner` furniture, a `Tabs`
+  strip, `ListRow`/`Card`/`Panel`/`Button` content, and one vertical `ScrollBar`
+  over the Stage A/B scroll engine — proving no surface needs custom chrome. It
+  turns a typed `SwitchboardModel` (Task/Job/Recovery/Resource/Service/System
+  view models) into controls and emits a typed `SwitchboardAction`; the client
+  can never receive furniture input (`furniture_at` over the frame hit map), a
+  denied action fails closed and renders `DeniedByAuthority`, a force action
+  carries the destructive-confirmation posture, and the mouse wheel, thumb,
+  end buttons, track paging, and keyboard all scroll the active section (offsets
+  are per-section, re-clamped on section switch/resize). 18 host tests. The
+  Reactive Alloy control set is now complete (Stages A–F).
 
 ---
 
