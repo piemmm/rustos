@@ -24346,16 +24346,24 @@ mod tests {
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
 
-        // A client (task 9) posts and is then killed before the server
-        // receives.
-        let client_caps = make_caps_record(9, &[], sink);
-        let _ = ep.post(&client_caps, 9, b"stale", sink).expect("posted");
+        // A client posts and is then killed before the server receives.
+        // The poster task id must be unique to this test, not a small
+        // shared constant: `reclaim_task_resources` scrubs the poster's
+        // calls across the *process-global* endpoint registry, so a
+        // sibling test reusing the same id and reclaiming it in parallel
+        // would cancel this call between the post and the assert. The
+        // endpoint id is already made unique for the same reason.
+        let client = 0x6009_1234;
+        let client_caps = make_caps_record(client, &[], sink);
+        let _ = ep
+            .post(&client_caps, client, b"stale", sink)
+            .expect("posted");
         assert!(ep.has_pending());
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        h.reclaim_task_resources(SecTaskId(9));
+        h.reclaim_task_resources(SecTaskId(client));
 
         // The dead poster's call is gone before any server sees it.
         assert!(!ep.has_pending());
