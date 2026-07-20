@@ -33,6 +33,18 @@
 //! overflowing, or non-scrollable range yields a zero-offset, non-draggable
 //! scrollbar rather than out-of-bounds geometry.
 //!
+//! The [`scrollbar`] module is the drawn scrollbar family — [`ScrollBar`]. It
+//! is the one orientation-parameterized scrollbar control (a decrement button,
+//! a track, a draggable thumb, and an increment button) drawn over the shared
+//! [`scroll`] geometry engine, serving both the window-manager root viewport
+//! and nested application content. It holds the owning viewport's
+//! [`ScrollModel`] rather than a private offset, brightens the thumb and the
+//! relevant end control when awake, preserves the pointer-to-thumb anchor on a
+//! drag, and maps end-button line steps, track paging, wheel ticks, and
+//! arrow/page/home/end keys back to a clamped offset, emitting a typed
+//! [`ScrollAction`]; a denied or disabled bar keeps its position and ignores
+//! input (spec §13).
+//!
 //! The [`state`] module is the typed control-state vocabulary: [`ControlKind`]
 //! and [`ControlRole`], the composed [`ControlState`] (focus/pointer/selection/
 //! validation/authority/activity/pressure/recovery), the derived
@@ -124,6 +136,7 @@ pub mod combo;
 pub mod menu;
 mod paint;
 pub mod scroll;
+pub mod scrollbar;
 pub mod selector;
 pub mod state;
 pub mod tabs;
@@ -141,6 +154,7 @@ pub use menu::{Menu, MenuAction, MenuItem};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
+pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,
@@ -161,6 +175,8 @@ mod collection_tests;
 mod combo_tests;
 #[cfg(test)]
 mod menu_tests;
+#[cfg(test)]
+mod scrollbar_tests;
 #[cfg(test)]
 mod selector_tests;
 #[cfg(test)]

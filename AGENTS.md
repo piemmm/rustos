@@ -602,10 +602,15 @@ tairix/
 │   │                    #   surface Menu/MenuItem, the Toolbar (composing icon/
 │   │                    #   split tools in groups with an active-tool seam), the
 │   │                    #   Tabs strip, the ComboBox (composing the Menu for
-│   │                    #   its popup), and the collection controls ListRow/
+│   │                    #   its popup), the collection controls ListRow/
 │   │                    #   TableRow/TableCell/Card/Panel (one shared row chrome
 │   │                    #   with a fixed rail gutter so columns stay aligned as
-│   │                    #   row state changes) so far, over one
+│   │                    #   row state changes), and the one orientation-
+│   │                    #   parameterized ScrollBar (decrement/track/thumb/
+│   │                    #   increment over the shared scroll geometry, awake-
+│   │                    #   brightened thumb + end controls, preserved drag
+│   │                    #   anchor, one-shot-timer repeat seam, ScrollAction)
+│   │                    #   so far, over one
 │   │                    #   shared draw+interaction core —
 │   │                    #   resolving colour/metric/radius
 │   │                    #   from lib/theme+lib/geometry, rounding plates through
