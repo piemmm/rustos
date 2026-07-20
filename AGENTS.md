@@ -596,13 +596,17 @@ tairix/
 │   │                    #   Role, composed ControlState + the §13
 │   │                    #   ControlDisposition, window-furniture states); and
 │   │                    #   the drawn control families — Button/IconButton/
-│   │                    #   SplitButton so far — resolving colour/metric/radius
+│   │                    #   SplitButton and the boolean selectors Toggle/
+│   │                    #   Checkbox/Radio so far, over one shared draw+
+│   │                    #   interaction core — resolving colour/metric/radius
 │   │                    #   from lib/theme+lib/geometry, rounding plates through
 │   │                    #   the one shared lib/raster fill, drawing via lib/font
-│   │                    #   /lib/icon, consuming lib/input. A control renders
-│   │                    #   state and emits a typed action; the service enforces
-│   │                    #   authority. Fail closed, no panic (§2.2, §17.4). The
-│   │                    #   remaining control families are staged.
+│   │                    #   /lib/icon, consuming lib/input. Selectors read by
+│   │                    #   shape as well as colour (thumb/square/bar/bead). A
+│   │                    #   control renders state and emits a typed action; the
+│   │                    #   service enforces authority. Fail closed, no panic
+│   │                    #   (§2.2, §17.4). The remaining control families are
+│   │                    #   staged.
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.

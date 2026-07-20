@@ -64,10 +64,23 @@ Every §11 state is composed from the typed model, dark/light and high-contrast 
 theme data, and a control emits only a typed action — the owning service enforces
 authority.
 
+The **boolean-selector family** (`selector`) is the second drawn family:
+`Toggle`, `Checkbox`, and `Radio`. Each is a labelled boolean control that
+reads by *shape* as well as colour (a toggle's thumb slides to the active side
+with an accent contact, a checkbox draws a filled square when checked and a
+horizontal bar when mixed, a radio draws a centre bead when selected), so its
+state is legible without hue. They share the button family's plate, colour,
+bead, and interaction helpers (the private `paint` module — the one place the
+§13 rim/bead recipe and the plate rounding live), resolve every visible
+property from the active theme and scale, draw the shared overlay signals
+(Pressure Rail, pending Heat Seam, Authority Mark bead) on top of the glyph,
+and emit a typed `SelectorAction` — a denied selector keeps its value and
+shows the lock bead rather than looking disabled.
+
 ## Where it sits
 
 `#![no_std]`. The `scroll` and `state` modules are pure logic with no
-dependencies; the drawn controls (`button`) depend only on other `lib/*`
+dependencies; the drawn controls (`button`, `selector`) depend only on other `lib/*`
 crates — `tairix-geometry`, `tairix-theme`, `tairix-raster`, `tairix-font`,
 `tairix-icon`, and `tairix-input` — never on `kernel/*`, `drivers/*`, or
 `userland/*`, so the crate stays a shared building block the desktop consumers
@@ -77,7 +90,7 @@ at the edge.
 
 ## Staged work
 
-The remaining Reactive Alloy control families (toggle/checkbox/radio,
-slider/progress, fields, menus, tabs, collections, dialogs, notifications, and
-the window-manager furniture) and the window-manager / taskbar consumers of the
-drawn controls are staged in `.junie/gui-controls-work.md`.
+The remaining Reactive Alloy control families (slider/progress, fields, menus,
+tabs, collections, dialogs, notifications, and the window-manager furniture)
+and the window-manager / taskbar consumers of the drawn controls are staged in
+`.junie/gui-controls-work.md`.

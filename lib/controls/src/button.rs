@@ -14,14 +14,15 @@ use alloc::string::String;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
-use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Contrast, SignalRole, Theme};
+use tairix_theme::Theme;
 
-use crate::state::{
-    ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, PressureKind,
-    RecoveryState,
+use crate::paint::{
+    key_activation, paint_bead, paint_plate, plate_border, pointer_activation, resolve_bead,
+    resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape, PlateStyle,
 };
+use crate::state::{ActivityState, ControlDisposition, ControlRole, ControlState, PointerState};
 
 /// What a button displays: a label, an icon, or an icon with a label.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,18 +57,6 @@ pub enum SplitAction {
     Disclosure,
 }
 
-/// Map a resource pressure to its theme signal role (one place).
-const fn pressure_role(kind: PressureKind) -> SignalRole {
-    match kind {
-        PressureKind::Cpu => SignalRole::Cpu,
-        PressureKind::Memory => SignalRole::Memory,
-        PressureKind::Disk => SignalRole::Disk,
-        PressureKind::Network => SignalRole::Network,
-        PressureKind::Power => SignalRole::Power,
-        PressureKind::Thermal => SignalRole::Thermal,
-    }
-}
-
 /// How much of the lower edge a Heat Seam covers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SeamExtent {
@@ -75,18 +64,6 @@ enum SeamExtent {
     Full,
     /// A known fraction in permille (measured progress).
     Fraction(u16),
-}
-
-/// The non-colour shape a Signal Bead draws, so an alert is legible without
-/// relying on hue (accessibility §15).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum BeadShape {
-    /// A completion check mark.
-    Check,
-    /// A recovery diamond.
-    Diamond,
-    /// An authority lock (a small keyhole square).
-    Lock,
 }
 
 /// The colours and edge signals a button paints, resolved from theme and state.
@@ -106,40 +83,14 @@ struct Resolved {
 }
 
 /// Resolve the button's colours and edge signals for one theme and state.
+///
+/// The plate/rim/label/rail/bead come from the shared control resolvers so
+/// every family reads identically; only the button-specific Heat Seam (the
+/// activity/progress trace) is resolved here.
 fn resolve(theme: &Theme, role: ControlRole, state: ControlState) -> Resolved {
     let palette = theme.palette();
     let disposition = state.disposition();
-
-    let plate = match disposition {
-        ControlDisposition::DisabledByState => palette.surface,
-        _ if state.pointer == PointerState::Pressed => palette.surface_pressed,
-        _ => palette.surface_raised,
-    };
-
-    let rim = match disposition {
-        ControlDisposition::DisabledByState => palette.border,
-        ControlDisposition::DeniedByAuthority => palette.denied,
-        ControlDisposition::FailedClosed => palette.recovery,
-        ControlDisposition::PendingCheck => palette.rim_active,
-        ControlDisposition::Interactive | ControlDisposition::NeedsConfirmation => match role {
-            ControlRole::Destructive => palette.danger,
-            ControlRole::Recovery => palette.recovery,
-            ControlRole::Primary | ControlRole::Recommended => palette.accent,
-            _ if state.pointer == PointerState::Hover
-                || state.pointer == PointerState::Pressed
-                || state.focus.focused =>
-            {
-                palette.rim_active
-            }
-            _ => palette.rim,
-        },
-    };
-
-    let label = if disposition == ControlDisposition::DisabledByState {
-        palette.on_surface_muted
-    } else {
-        palette.on_surface
-    };
+    let frame = resolve_frame(theme, role, state);
 
     let seam = match state.activity {
         ActivityState::Working | ActivityState::Indeterminate => {
@@ -155,49 +106,15 @@ fn resolve(theme: &Theme, role: ControlRole, state: ControlState) -> Resolved {
         }
     };
 
-    let rail = match state.pressure {
-        crate::state::PressureState::Under(kind) => Some(palette.signal(pressure_role(kind))),
-        crate::state::PressureState::None => None,
-    };
-
-    // Priority: authority mark, then recovery, then completion.
-    let bead = match disposition {
-        ControlDisposition::DeniedByAuthority => Some((palette.denied, BeadShape::Lock)),
-        ControlDisposition::FailedClosed => Some((palette.recovery, BeadShape::Diamond)),
-        _ => match state.recovery {
-            RecoveryState::None => match state.activity {
-                ActivityState::Complete => Some((palette.success, BeadShape::Check)),
-                _ => None,
-            },
-            _ => Some((palette.recovery, BeadShape::Diamond)),
-        },
-    };
-
     Resolved {
-        plate: Color::from(plate),
-        rim: Color::from(rim),
-        label: Color::from(label),
+        plate: frame.plate,
+        rim: frame.rim,
+        label: frame.label,
         seam: seam.map(|(c, e)| (Color::from(c), e)),
-        rail: rail.map(Color::from),
-        bead: bead.map(|(c, s)| (Color::from(c), s)),
-        focused: state.focus.focused,
+        rail: resolve_rail(theme, state),
+        bead: resolve_bead(theme, state),
+        focused: frame.focused,
     }
-}
-
-/// Whether the theme asks for the heavier-contrast treatment (thicker rim,
-/// stronger marks) — high-contrast or monochrome-safe.
-fn heavy_contrast(theme: &Theme) -> bool {
-    !matches!(theme.contrast(), Contrast::Normal)
-}
-
-/// Clamp a rectangle's origin into non-negative surface coordinates, returning
-/// the `(x, y, w, h)` in surface pixels, or `None` if it lies fully off the
-/// top-left. A control is laid out within a client surface, so its origin is
-/// expected to be non-negative; anything off-surface simply does not paint.
-fn surface_rect(bounds: Rect) -> Option<(u32, u32, u32, u32)> {
-    let x = u32::try_from(bounds.left()).ok()?;
-    let y = u32::try_from(bounds.top()).ok()?;
-    Some((x, y, bounds.width, bounds.height))
 }
 
 /// Paint one button plate frame — Alloy Plate, Signal Rim, focus ring, and the
@@ -219,61 +136,21 @@ fn paint_frame(surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme,
     let radius = scale.scale_length(metrics.control_corner_radius);
     let border = plate_border(theme, scale);
 
-    // Signal Rim = the whole plate in the rim colour; the Alloy Plate is the
-    // same rounded shape inset by the border, so the rim reads as a border of
-    // one shared rounded-rect definition rather than a second outline path.
-    surface.fill_round_rect(x, y, w, h, radius, res.rim);
-    let inner = inset(x, y, w, h, border);
-    if let Some((ix, iy, iw, ih)) = inner {
-        let inner_radius = radius.saturating_sub(border);
-        surface.fill_round_rect(ix, iy, iw, ih, inner_radius, res.plate);
-
-        // Focus ring: a second inset outline, distinct from hover without
-        // relying on colour (a double rim, accessibility §15).
-        if res.focused {
-            let gap = border;
-            if let Some((fx, fy, fw, fh)) = inset(ix, iy, iw, ih, gap) {
-                let ring = Color::from(theme.palette().rim_active);
-                surface.fill_round_rect(fx, fy, fw, fh, inner_radius.saturating_sub(gap), ring);
-                if let Some((px, py, pw, ph)) = inset(fx, fy, fw, fh, border) {
-                    surface.fill_round_rect(
-                        px,
-                        py,
-                        pw,
-                        ph,
-                        inner_radius.saturating_sub(gap + border),
-                        res.plate,
-                    );
-                }
-            }
-        }
-    }
+    let ring = Color::from(theme.palette().rim_active);
+    paint_plate(
+        surface,
+        (x, y, w, h),
+        &PlateStyle {
+            radius,
+            border,
+            plate: res.plate,
+            rim: res.rim,
+            focused: res.focused,
+            ring,
+        },
+    );
 
     paint_signals(surface, (x, y, w, h), scale, theme, res);
-}
-
-/// Inset a surface rectangle by `by` on every side, or `None` if it collapses.
-fn inset(x: u32, y: u32, w: u32, h: u32, by: u32) -> Option<(u32, u32, u32, u32)> {
-    let iw = w.checked_sub(by.saturating_mul(2))?;
-    let ih = h.checked_sub(by.saturating_mul(2))?;
-    if iw == 0 || ih == 0 {
-        return None;
-    }
-    Some((x + by, y + by, iw, ih))
-}
-
-/// The scaled plate border/rim thickness, doubled under heavy contrast so a
-/// high-contrast theme strengthens the rim before adding any glow (§15).
-fn plate_border(theme: &Theme, scale: Scale) -> u32 {
-    scale
-        .scale_length(theme.metrics().border_thickness)
-        .max(1)
-        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
-}
-
-/// A `u32` extent as an `i32` coordinate, saturating rather than wrapping.
-fn to_i32(v: u32) -> i32 {
-    i32::try_from(v).unwrap_or(i32::MAX)
 }
 
 /// Paint the Pressure Rail, Heat Seam, and Signal Bead inside the plate.
@@ -330,23 +207,6 @@ fn paint_signals(
         let bx = x + w - border - size;
         let by = y + border;
         paint_bead(surface, bx, by, size, color, shape);
-    }
-}
-
-/// Draw one Signal Bead of `size` at `(bx, by)` in the given shape, so the
-/// alert role reads by shape as well as colour.
-fn paint_bead(surface: &mut Surface, bx: u32, by: u32, size: u32, color: Color, shape: BeadShape) {
-    match shape {
-        BeadShape::Check => surface.fill_round_rect(bx, by, size, size, size / 2, color),
-        BeadShape::Lock => surface.fill_round_rect(bx, by, size, size, size / 4, color),
-        BeadShape::Diamond => {
-            if let Some(mut glyph) = Surface::new(size, size) {
-                let s = to_i32(size);
-                let points = [(s / 2, 0), (s, s / 2), (s / 2, s), (0, s / 2)];
-                glyph.fill_polygon(&points, size, color);
-                surface.blit(to_i32(bx), to_i32(by), &glyph);
-            }
-        }
     }
 }
 
@@ -407,62 +267,6 @@ fn paint_content(
             font.draw_text(surface, text_x, text_y, fitted, res.label);
         }
     }
-}
-
-/// Update `state`/`armed` from one pointer event and return whether the
-/// control was activated (a primary press-and-release over it).
-///
-/// The press captures a latch on primary-button down over an actionable
-/// control; releasing over it activates, releasing away cancels — the
-/// standard button press model. `inside` is whether the pointer is over the
-/// control's bounds (the caller's hit-test).
-fn pointer_activation(
-    state: &mut ControlState,
-    armed: &mut bool,
-    event: &InputEvent,
-    inside: bool,
-) -> bool {
-    match event {
-        InputEvent::PointerMoved { .. } => {
-            if !*armed {
-                state.pointer = if inside {
-                    PointerState::Hover
-                } else {
-                    PointerState::None
-                };
-            }
-            false
-        }
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        } => {
-            if inside && state.is_actionable() {
-                *armed = true;
-                state.pointer = PointerState::Pressed;
-            }
-            false
-        }
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        } => {
-            let activated = *armed && inside && state.is_actionable();
-            *armed = false;
-            state.pointer = if inside {
-                PointerState::Hover
-            } else {
-                PointerState::None
-            };
-            activated
-        }
-        _ => false,
-    }
-}
-
-/// Whether a key activates a focused, actionable control (Space or Enter).
-fn key_activation(state: ControlState, key: Key) -> bool {
-    state.focus.focused
-        && state.is_actionable()
-        && matches!(key, Key::Char(' ') | Key::Named(NamedKey::Enter))
 }
 
 /// A labelled or icon-labelled action plate (spec §11.1).

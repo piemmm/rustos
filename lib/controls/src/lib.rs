@@ -48,6 +48,17 @@
 //! `tairix_icon`, and consume the shared `tairix_input` pointer/keyboard
 //! vocabulary. A control renders state and emits a typed action; it performs
 //! no privileged work — the owning service enforces authority.
+//!
+//! The [`selector`] module is the boolean-selector family — [`Toggle`],
+//! [`Checkbox`], and [`Radio`]. Each is a labelled boolean control that reads
+//! by *shape* as well as colour (a toggle's thumb slides to the active side, a
+//! checkbox draws a filled square when on and a horizontal bar when mixed, a
+//! radio draws a centre bead when selected), so its state is legible without
+//! relying on hue. They share the button family's shared plate helpers and
+//! interaction model, resolve every visible property from the active
+//! theme, and — like every control — emit a typed [`SelectorAction`] rather
+//! than performing the change themselves; a denied selector keeps its value
+//! and shows an Authority Mark.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -56,13 +67,16 @@
 extern crate alloc;
 
 pub mod button;
+mod paint;
 pub mod scroll;
+pub mod selector;
 pub mod state;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
+pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,
     FocusState, PointerState, PressureKind, PressureState, ProgressValue, RecoveryState,
@@ -72,6 +86,8 @@ pub use state::{
 
 #[cfg(test)]
 mod button_tests;
+#[cfg(test)]
+mod selector_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

@@ -3287,13 +3287,24 @@ per-app recipes (§2.2).
   the §13 disabled-vs-denied-vs-pending-vs-failed rendering, all theme- and
   `Scale`-resolved. Dark/light + high-contrast + accessibility (shape marks)
   tested.
+- **Drawn controls: boolean-selector family — DONE.** `lib/controls::selector`
+  draws `Toggle`/`Checkbox`/`Radio` over the shared draw+interaction core
+  (`lib/controls::paint`, hoisted from the button family so the §13 rim/bead
+  recipe and plate rounding live once, §2.2). Each reads by shape as well as
+  colour (toggle thumb + accent contact, checkbox filled-square / mixed-bar,
+  radio centre bead), draws the shared overlay signals (Pressure Rail, pending
+  Heat Seam, shape-coded Signal Bead) after the glyph, carries the §13
+  disposition on rim + mark + Authority Mark (a denied selector keeps its value
+  and shows the lock bead), and emits a typed `SelectorAction::Set { on }`.
+  Dark/light + high-contrast + accessibility (shape marks) + pointer/keyboard +
+  next-value semantics tested.
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (toggle/checkbox/radio, slider/progress,
-  text/search/combo, menu/toolbar/tabs, collections, the scrollbar renderer,
-  window furniture, shell/decision surfaces) over the same shared paths, then
-  the Switchboard reference composition. Each lands complete (§27) with
-  dark/light + reduced-motion + high-contrast coverage and its §20 tests
-  before the next begins.
+  the remaining drawn families (slider/progress, text/search/combo,
+  menu/toolbar/tabs, collections, the scrollbar renderer, window furniture,
+  shell/decision surfaces) over the same shared paths, then the Switchboard
+  reference composition. Each lands complete (§27) with dark/light +
+  reduced-motion + high-contrast coverage and its §20 tests before the next
+  begins.
 
 ---
 
