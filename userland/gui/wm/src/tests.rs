@@ -14,7 +14,7 @@ use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
 use crate::{Compositor, WindowId};
 
-use tairix_theme::{Theme, ThemeId, ThemeRegistry};
+use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
 
 use crate::{WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
 
@@ -1509,26 +1509,35 @@ fn decorating_a_window_reserves_a_band_around_the_client() {
 }
 
 #[test]
-fn decorated_client_shows_content_and_the_band_shows_the_background() {
+fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
     let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
     let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).expect("client");
+    let frame_active = c.theme().palette().frame_active.to_array();
+    let surface = c.theme().palette().surface.to_array();
     c.composite();
 
-    // A pixel inside the client shows the application content...
+    // A pixel inside the client shows the application content.
     let cx = u32::try_from(client.left() + 2).unwrap();
     let cy = u32::try_from(client.top() + 2).unwrap();
     assert_eq!(frame_pixel(&c, cx, cy), [255, 0, 0, 255]);
 
-    // ...while the reserved band (here the title area, above the client) shows
-    // the desktop background: Stage A reserves the furniture, it is not the
-    // client's to paint. (Stage B draws the furniture chrome there.)
+    // Stage B paints the furniture in the reserved band, not the desktop
+    // background: the outer top-edge rim shows the active frame colour...
+    let rim_x = u32::try_from(bounds.left() + i32::try_from(bounds.width / 2).unwrap()).unwrap();
+    let rim_y = u32::try_from(bounds.top()).unwrap();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), frame_active);
+    assert_ne!(
+        frame_active,
+        [0, 0, 255, 255],
+        "chrome is not the background"
+    );
+
+    // ...and the title-bar interior above the client shows the window surface.
     let by = u32::try_from(client.top() - 1).unwrap();
-    assert_eq!(frame_pixel(&c, cx, by), [0, 0, 255, 255]);
-    // The left border band, too.
-    let bx = u32::try_from(client.left() - 1).unwrap();
-    assert_eq!(frame_pixel(&c, bx, cy), [0, 0, 255, 255]);
+    assert_eq!(frame_pixel(&c, cx, by), surface);
 }
 
 #[test]
@@ -1587,4 +1596,243 @@ fn an_undecorated_window_keeps_its_surface_bounds() {
     assert_eq!(c.window(id).unwrap().bounds(), Rect::new(5, 7, 40, 30));
     assert_eq!(c.window_client_rect(id), Some(Rect::new(5, 7, 40, 30)));
     assert!(c.window_frame(id).is_none());
+}
+
+// ---- server-side window decorations (Stage B rendering) --------------
+
+/// The centre point of a rectangle, in screen coordinates.
+fn centre(r: Rect) -> Point {
+    Point::new(
+        r.left() + i32::try_from(r.width / 2).unwrap(),
+        r.top() + i32::try_from(r.height / 2).unwrap(),
+    )
+}
+
+/// A copy of `base` with a different [`Contrast`] policy (same palette,
+/// metrics, and motion), so a test can render the furniture under high
+/// contrast without a second built-in theme.
+fn with_contrast(base: &Theme, contrast: Contrast) -> Theme {
+    Theme::new(
+        base.id(),
+        base.name(),
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        base.fonts().clone(),
+        base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        contrast,
+    )
+}
+
+/// A copy of `base` with reduced motion enabled; everything else is identical,
+/// so a reduced-motion render must be pixel-identical to the full-motion one
+/// (the furniture is animation-free).
+fn with_reduced_motion(base: &Theme) -> Theme {
+    Theme::new(
+        base.id(),
+        base.name(),
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        base.fonts().clone(),
+        base.cursors().clone(),
+        base.motion().with_reduced_motion(true),
+        base.density(),
+        base.contrast(),
+    )
+}
+
+/// A compositor with one decorated window whose content is wide enough to hold
+/// a full title bar (identity text plus the four command controls) and a
+/// resize grabber, so the furniture renders as it would on a real desktop.
+fn decorated_compositor() -> (Compositor, WindowId) {
+    let mut c = Compositor::new(mode(320, 240), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 20), opaque(240, 150, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    (c, id)
+}
+
+#[test]
+fn active_and_inactive_frames_use_distinct_rim_colours() {
+    let (mut c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let rim = Point::new(centre(bounds).x, bounds.top());
+    let rim_x = u32::try_from(rim.x).unwrap();
+    let rim_y = u32::try_from(rim.y).unwrap();
+    let active = c.theme().palette().frame_active.to_array();
+    let inactive = c.theme().palette().frame_inactive.to_array();
+    assert_ne!(
+        active, inactive,
+        "the two rim states must be distinguishable"
+    );
+
+    // A window starts active and paints the active rim.
+    c.composite();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), active);
+
+    // Deactivating repaints the rim to the inactive colour, and reactivating
+    // restores it — the rim state follows the focused window.
+    assert!(c.set_active_frame(id, false));
+    c.composite();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), inactive);
+    assert!(c.set_active_frame(id, true));
+    c.composite();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), active);
+
+    // An undecorated or unknown window has no frame to activate.
+    let plain = c.add_window(Point::new(150, 150), opaque(10, 10, RED));
+    assert!(!c.set_active_frame(plain, false));
+    assert!(!c.set_active_frame(WindowId(9_999), false));
+}
+
+#[test]
+fn a_focus_flip_repaints_only_the_furniture() {
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    assert!(!c.has_damage(), "composite clears damage");
+
+    let client = c.window_client_rect(id).unwrap();
+    let bounds = c.window(id).unwrap().bounds();
+
+    // Flipping focus repaints the furniture and marks it dirty...
+    assert!(c.set_active_frame(id, false));
+    assert!(c.has_damage());
+
+    // ...but the client interior is never in the damage — a focus change does
+    // not touch the application content, so it is not recomposited.
+    assert!(!c.damage_covers(centre(client)));
+    // The title rim, by contrast, is dirty.
+    assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
+
+    // The furniture bands never overlap the client (the separate furniture
+    // paint/hit map the design language requires).
+    for band in c.window(id).unwrap().furniture_bands() {
+        assert!(band.intersection(&client).is_empty());
+    }
+}
+
+#[test]
+fn setting_a_title_repaints_only_the_title_band() {
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    assert!(!c.has_damage());
+
+    assert!(c.set_window_title(id, "Documents"));
+    assert!(c.has_damage());
+
+    let client = c.window_client_rect(id).unwrap();
+    let bounds = c.window(id).unwrap().bounds();
+    // The client and the bottom edge are untouched; only the top title band is
+    // dirty.
+    assert!(!c.damage_covers(centre(client)));
+    assert!(!c.damage_covers(Point::new(centre(bounds).x, bounds.bottom() - 1)));
+    assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
+
+    // Refused for an undecorated or unknown window.
+    let plain = c.add_window(Point::new(150, 150), opaque(10, 10, RED));
+    assert!(!c.set_window_title(plain, "x"));
+    assert!(!c.set_window_title(WindowId(9_999), "x"));
+}
+
+#[test]
+fn the_window_title_is_rendered_in_the_title_bar() {
+    // Two identical decorated windows differing only in their title must
+    // composite to different frames — the title is drawn, not merely stored.
+    let (mut blank, _) = decorated_compositor();
+    blank.composite();
+
+    let (mut titled, id) = decorated_compositor();
+    assert!(titled.set_window_title(id, "TAIRiX Files"));
+    titled.composite();
+
+    assert_ne!(
+        blank.frame(),
+        titled.frame(),
+        "the title text changes the rendered title bar"
+    );
+}
+
+#[test]
+fn the_light_theme_draws_the_furniture_chrome() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_theme(Theme::light()));
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    let frame_active = c.theme().palette().frame_active.to_array();
+    let surface = c.theme().palette().surface.to_array();
+    let desktop = c.theme().palette().desktop.to_array();
+    c.composite();
+
+    // The light theme paints its own rim and title-bar surface, distinct from
+    // the desktop background.
+    let rim = Point::new(centre(bounds).x, bounds.top());
+    assert_eq!(
+        frame_pixel(
+            &c,
+            u32::try_from(rim.x).unwrap(),
+            u32::try_from(rim.y).unwrap()
+        ),
+        frame_active
+    );
+    assert_ne!(frame_active, desktop);
+    let by = u32::try_from(client.top() - 1).unwrap();
+    let cx = u32::try_from(client.left() + 2).unwrap();
+    assert_eq!(frame_pixel(&c, cx, by), surface);
+    // The client still shows its content.
+    let cc = centre(client);
+    assert_eq!(
+        frame_pixel(
+            &c,
+            u32::try_from(cc.x).unwrap(),
+            u32::try_from(cc.y).unwrap()
+        ),
+        [255, 0, 0, 255]
+    );
+}
+
+#[test]
+fn reduced_motion_renders_furniture_identically() {
+    // The furniture is animation-free, so a reduced-motion theme must produce
+    // the exact same pixels as the full-motion theme (reduced-motion correct
+    // by construction).
+    let (mut full, _) = decorated_compositor();
+    full.composite();
+
+    let (mut reduced, _) = decorated_compositor();
+    assert!(reduced.set_theme(with_reduced_motion(&Theme::dark())));
+    reduced.composite();
+
+    assert_eq!(full.frame(), reduced.frame());
+}
+
+#[test]
+fn high_contrast_thickens_the_furniture_glyphs() {
+    // High contrast keeps the same palette but thickens the command-glyph and
+    // grip strokes, so the rendered furniture differs from normal contrast.
+    let (mut normal, _) = decorated_compositor();
+    normal.composite();
+
+    let (mut heavy, id) = decorated_compositor();
+    assert!(heavy.set_theme(with_contrast(&Theme::dark(), Contrast::High)));
+    heavy.composite();
+
+    assert_ne!(
+        normal.frame(),
+        heavy.frame(),
+        "high contrast changes the glyph rendering"
+    );
+
+    // The chrome is still correct: the active rim is drawn.
+    let bounds = heavy.window(id).unwrap().bounds();
+    let rim = Point::new(centre(bounds).x, bounds.top());
+    assert_eq!(
+        frame_pixel(
+            &heavy,
+            u32::try_from(rim.x).unwrap(),
+            u32::try_from(rim.y).unwrap()
+        ),
+        heavy.theme().palette().frame_active.to_array()
+    );
 }

@@ -440,6 +440,48 @@ impl Compositor {
         self.window(id).map(Window::client_rect)
     }
 
+    /// Mark the decorated window named by `id` active or inactive, repainting
+    /// its frame rim, title, and controls under the new activation. Returns
+    /// `false` for an unknown or undecorated window.
+    ///
+    /// The window manager keeps this in step with the focused window the
+    /// [`InputRouter`](crate::InputRouter) tracks. Only the furniture bands are
+    /// marked dirty — the client area does not change on a focus flip — so a
+    /// focus change never triggers a full-window recomposite.
+    pub fn set_active_frame(&mut self, id: WindowId, active: bool) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        if !window.set_frame_active(active, scale, &self.theme) {
+            return false;
+        }
+        for band in window.furniture_bands() {
+            self.damage.add(band);
+        }
+        true
+    }
+
+    /// Set the decorated window named by `id`'s title, repainting the title
+    /// bar. Returns `false` for an unknown or undecorated window.
+    ///
+    /// The title is the untrusted string the window channel already carries
+    /// (`WindowTitle`); the title bar sanitises and truncates it. Only the top
+    /// (title) furniture band is marked dirty — a title edit never touches the
+    /// client or the other frame edges.
+    pub fn set_window_title(&mut self, id: WindowId, title: &str) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        if !window.set_frame_title(title, scale, &self.theme) {
+            return false;
+        }
+        let band = window.title_band();
+        self.damage.add(band);
+        true
+    }
+
     /// Classify the screen `point` against the furniture of the window named
     /// by `id`, or `None` when the id is unknown or the window has no root
     /// viewport. This is the furniture hit map: a point on a scrollbar or the
@@ -517,6 +559,15 @@ impl Compositor {
     #[must_use]
     pub fn has_damage(&self) -> bool {
         !self.damage.is_empty()
+    }
+
+    /// Whether `point` lies within a currently-dirty rectangle. Test-only: it
+    /// lets the decoration tests assert that a furniture-only change (a focus
+    /// flip, a title edit) confines its damage to the furniture and never
+    /// marks the client area dirty.
+    #[cfg(test)]
+    pub(crate) fn damage_covers(&self, point: Point) -> bool {
+        self.damage.covers(point)
     }
 
     /// Recompose every damaged pixel into the back buffer and the

@@ -121,6 +121,49 @@ frame (a window was added, moved, restyled, hidden, raised, or removed).
 `Compositor::composite` recomputes only those pixels and then clears the
 damage, so an idle desktop costs nothing to recomposite.
 
+## Server-side window decorations
+
+Window decorations — a title bar with the four command controls (close,
+minimize, put-to-back, size-toggle), an active/inactive frame rim, and a
+corner resize grabber — are drawn by the **window manager**, never by an
+app (`AGENTS.md` §10, `plans/GUI-CONTROLS-DESIGN.md` §1, §11.17–§11.23;
+`plans/COMPOSITOR-WORK.md`). An app supplies only its content surface and
+typed window metadata; it can neither paint over nor receive input from
+the chrome. The furniture family itself lives once in
+`lib/controls::window` (`WindowFrame`, `TitleBar`, `WindowControl`,
+`ResizeGrabber`) and is composed here, so there is no second visual recipe
+(`AGENTS.md` §2.2).
+
+- **Reserved band (geometry).** `Compositor::set_window_frame` attaches a
+  `WindowFrame` and reserves a furniture band *around* the client from the
+  frame's `FrameInsets` at the active `Scale` and `Theme`: the window's
+  outer `bounds` grow to hold the decoration and the content surface is
+  presented inset at `window_client_rect`, so the client never overlaps the
+  furniture. `clear_window_frame` collapses the band back to the bare
+  surface. A DPI (`set_scale`) or theme (`set_theme`) change re-resolves the
+  band for every decorated window.
+- **Rendering.** Each decorated window keeps a pre-rendered, outer-sized
+  decoration `Surface` painted through `WindowFrame::render` /
+  `TitleBar::render` (rim, body, the sanitised title text via `lib/font`,
+  and the four command controls) plus a corner `ResizeGrabber`, using the
+  one `lib/raster` fill and the shared rounded-corner path — so the rim's
+  rounded corners stay transparent and the desktop shows through. The
+  compositor samples that decoration in the reserved band and the client
+  content inside it (`Window::sample_local`), for both the software and the
+  hardware-accelerated present paths. The furniture is animation-free, so it
+  is reduced-motion correct by construction, and high contrast thickens the
+  command-glyph and grip strokes.
+- **Activation and title.** `Compositor::set_active_frame` repaints a
+  window's rim, title, and controls for the focused/unfocused state the
+  `InputRouter` tracks; `Compositor::set_window_title` repaints the title
+  bar with the (untrusted, sanitised) `WindowTitle` the channel already
+  carries. Both confine their damage to the furniture bands — a focus flip
+  or title edit never recomposites the client (`AGENTS.md` §2.16).
+
+Furniture hit testing, pointer/keyboard routing, and the typed
+close/minimize/put-to-back/size-toggle lifecycle are the next stages of
+`plans/COMPOSITOR-WORK.md`.
+
 ## Failing closed
 
 Every fallible entry point returns a `Result`/`Option` rather than

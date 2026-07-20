@@ -4106,6 +4106,7 @@ dependencies = [
  "tairix-abi",
  "tairix-controls",
  "tairix-cursor",
+ "tairix-font",
  "tairix-geometry",
  "tairix-input",
  "tairix-raster",

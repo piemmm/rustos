@@ -79,8 +79,8 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stage A is **done**; Stages B–E are **planned** (not started). Per
-the User's direction, one full stage lands per change.
+**Status:** Stages A–B are **done**; Stages C–E are **planned** (not started).
+Per the User's direction, one full stage lands per change.
 
 Each stage lands complete — its rendering for **both** dark and light themes,
 reduced-motion and high-contrast behaviour, its pointer/keyboard/focus paths,
@@ -115,22 +115,37 @@ No furniture is rendered or hit-tested yet, no ABI was touched, and no window
 opts into a frame in the running desktop — so there is no behavioural or visual
 change yet. That is Stage B onward.
 
-### Stage B — Compose and render the furniture
+### Stage B — Compose and render the furniture — DONE
 
-- In the compositor draw path (`compositor.rs`), after (or around) the content
-  blit, render `WindowFrame` (rim), its `TitleBar` (title text via `lib/font`
-  through the shared path, plus the four `WindowControl` buttons), and the
-  `ResizeGrabber` — all through `WindowFrame::render`/`TitleBar::render`, using
-  the one `lib/raster` fill and the existing `corner.rs` rounded-corner path
-  (no second recipe, §2.2).
-- Render the title the WM already receives on the channel (`WindowTitle`) —
-  render it, do not merely label the taskbar with it.
-- Active/inactive rim treatment is driven by the focused-window state the
-  `InputRouter` already tracks; keep it in sync via `set_active_frame`.
-- Damage: a focus change, title change, or control state change marks only the
-  furniture bands dirty (reuse `damage.rs`), never a full-window repaint.
-- Tests: dark and light theme render; active vs inactive rim; reduced-motion
-  and high-contrast variants; damage is confined to furniture on a focus flip.
+The furniture chrome is rendered around every decorated window. What it now
+guarantees:
+
+- Each decorated `Window` keeps a pre-rendered, outer-sized decoration
+  `Surface` (`window.rs::render_decoration`), painted through
+  `WindowFrame::render`/`TitleBar::render` (rim, body, the sanitised title via
+  `lib/font`, the four `WindowControl` buttons) plus a corner `ResizeGrabber`,
+  using the one `lib/raster` fill and the shared rounded-corner path (no second
+  recipe). The rim's rounded corners stay transparent so the desktop shows
+  through.
+- `Window::sample_local` samples that decoration in the reserved band and the
+  inset client content inside it, so both the software composite and the
+  hardware-accelerated `encode_layers` path draw the furniture identically; the
+  client never overlaps the band.
+- The title the WM receives on the channel (`WindowTitle`) is rendered in the
+  title bar via `Compositor::set_window_title`, not merely used as the taskbar
+  label.
+- Active/inactive rim treatment follows the focused window through
+  `Compositor::set_active_frame`; attention requests are preserved rather than
+  clobbered by a focus change.
+- A focus change or title edit repaints only the furniture bands
+  (`Window::furniture_bands`/`title_band`), never the client — damage stays
+  confined to the furniture.
+- Tests cover dark and light theme render, active vs inactive rim, the title
+  being drawn, reduced-motion pixel-identical render, high-contrast glyph
+  thickening, and furniture-confined damage on a focus flip and a title edit.
+
+No furniture is hit-tested or wired to a lifecycle action yet, and no ABI was
+touched — that is Stage C onward.
 
 ### Stage C — Furniture hit map + pointer/keyboard routing
 
