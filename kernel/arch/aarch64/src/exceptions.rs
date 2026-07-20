@@ -439,7 +439,33 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
             // this call is sound.
             let saved = unsafe { &*frame.cast::<[u64; crate::syscall_entry::SAVED_GPRS]>() };
             let mut syscall_frame = crate::syscall_entry::syscall_frame_from_saved(saved);
-            if !crate::syscall_entry::dispatch_svc(&mut syscall_frame) {
+            // Run the syscall body with device IRQs deliverable. The PE
+            // masked `DAIF.I` on exception entry; the trampoline has now
+            // saved the full frame (GPRs + ELR/SPSR/SP_EL0 + FP) and we run
+            // on `SP_EL1`, so a device IRQ or the preemption tick taken here
+            // is a nested EL1 exception that saves its own frame, services
+            // its source, and `eret`s back to this handler — the outer svc's
+            // return state is frame-resident and restored before the final
+            // `eret`. This is what stops a long, non-blocking syscall body
+            // from monopolising the CPU with interrupts masked. The kernel
+            // stays non-preemptible: an IRQ taken in EL1 latches its
+            // reschedule (honoured at return-to-user in `completion_outcome`)
+            // rather than switching away mid-critical-section, enforced by
+            // the `from_el0` gate in `handle_irq`. Re-mask before returning
+            // so the trampoline restores the user frame with IRQ-taking off.
+            // SAFETY: the vector table, GIC, and IRQ callbacks are installed
+            // before any EL0 code can `svc`, so a taken IRQ dispatches
+            // correctly; `enable_irq`/`mask_irq` only toggle `DAIF.I`.
+            unsafe {
+                enable_irq();
+            }
+            let dispatched = crate::syscall_entry::dispatch_svc(&mut syscall_frame);
+            // SAFETY: as above — restoring the IRQ mask before the epilogue
+            // restores the interrupted user frame.
+            unsafe {
+                mask_irq();
+            }
+            if !dispatched {
                 crate::kernel_arch::halt_current_cpu();
             }
             // SAFETY: index 0 is the saved `x0` slot; writing the result

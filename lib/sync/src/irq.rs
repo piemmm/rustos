@@ -15,6 +15,31 @@
 //! [`IrqSafeSpinLock`](crate::IrqSafeSpinLock) with the architecture's
 //! type.
 //!
+//! # Standing rule: any ISR-shared lock must be IRQ-safe
+//!
+//! TAIRiX runs syscall bodies — and every in-kernel task — with device
+//! interrupts **enabled**, so an interrupt service routine can fire on the
+//! same CPU while a syscall-reachable code path holds a lock. If that lock
+//! were a plain [`SpinLock`](crate::SpinLock) and the ISR took it too, the
+//! ISR would spin forever on a CPU whose interrupted task already holds it
+//! — a single-CPU self-deadlock. Therefore, for **any** lock that is
+//! shared between a driver's (or subsystem's) ISR and its
+//! syscall-reachable body, one of the following MUST hold:
+//!
+//! * the shared lock is an [`IrqSafeSpinLock`](crate::IrqSafeSpinLock),
+//!   which masks interrupts on the current CPU for the duration of the
+//!   hold (the console UART receive ring's `UART_RX_GATE` is the worked
+//!   example), **or**
+//! * the ISR side is entirely lock-free and only *flags* deferred work
+//!   (e.g. `WaitQueue::request_wake` sets one atomic), with the real
+//!   lock-taking wake/drain performed later in dispatcher context (the
+//!   `kernel/core` deferred-drain model).
+//!
+//! A plain-`SpinLock` structure shared with an ISR and *not* gated this
+//! way is a defect — it is exactly the deadlock the interruptible-syscall
+//! design would otherwise introduce. New drivers are held to this rule in
+//! review.
+//!
 //! [`IrqSafeSpinLock`]: crate::IrqSafeSpinLock
 
 use core::marker::PhantomData;

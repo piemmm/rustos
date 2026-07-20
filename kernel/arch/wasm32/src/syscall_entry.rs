@@ -16,6 +16,22 @@
 //!   installed by the downstream boot module; the arch port never
 //!   re-implements it.
 //!
+//! # Interrupts during the syscall body
+//!
+//! The bare-metal ports unmask device IRQs around the syscall dispatch so
+//! a long, non-blocking syscall cannot monopolise the CPU with interrupts
+//! masked, then re-mask on exit. wasm32 has no hardware interrupt-mask
+//! state to toggle: a "syscall" is an ordinary module call and there is no
+//! privilege boundary or asynchronous device IRQ to enable, so the
+//! "enable IRQs for the body / re-mask on exit" step is inherently a no-op
+//! here. Preemption is driven by the host's yield/scheduling facility
+//! (`crate::preempt`), not a timer IRQ. The architecture-neutral
+//! return-to-user bookkeeping — the deferred wake drain and the
+//! honour-`need_resched`-at-return decision in
+//! `tairix_kernel_core`'s `completion_outcome` — runs identically for
+//! wasm32, so the deferred-drain model holds without any per-arch entry
+//! glue on this target.
+//!
 //! # Host testability
 //!
 //! The argument packing, the callback storage, and [`dispatch_syscall`]

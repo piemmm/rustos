@@ -375,10 +375,37 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
 
     if (scause & SCAUSE_INTERRUPT_BIT) == 0 {
         if crate::syscall_entry::is_ecall_from_user(scause) {
+            // Run the syscall body with S-mode interrupts deliverable. The
+            // hart cleared `sstatus.SIE` on trap entry; the asm vector has
+            // now saved the caller-saved registers and the frame-resident
+            // return state (`sepc`/`sstatus`), and the vector recognises a
+            // nested S-mode trap (the `sscratch == 0` invariant), so a
+            // supervisor timer/external interrupt taken here saves its own
+            // frame, services its source, and `sret`s back to this handler.
+            // This is what stops a long, non-blocking syscall body (e.g. a
+            // bootstrap-floor `fs_*` MMIO wait) from monopolising the hart
+            // with interrupts masked. The kernel stays non-preemptible: an
+            // interrupt taken in S-mode latches its reschedule (honoured at
+            // return-to-user in `completion_outcome`) rather than switching
+            // away mid-critical-section, enforced by the saved-`SPP` gate
+            // below. Re-mask before returning so the epilogue `sret`s to the
+            // interrupted user frame with `SIE` off.
+            // SAFETY: the trap vector is installed and the syscall/IPC
+            // dispatch and IRQ paths are wired before any U-mode code can
+            // `ecall`, so a taken interrupt dispatches correctly;
+            // `set_supervisor_interrupts` only toggles `sstatus.SIE`.
+            unsafe {
+                set_supervisor_interrupts(true);
+            }
             // SAFETY: `frame` is the live saved-register frame the asm
             // vector passed; the syscall path reads `a0`–`a7` and writes
             // the result into `a0`.
             let dispatched = crate::syscall_entry::dispatch_ecall(unsafe { &mut *frame });
+            // SAFETY: as above — restoring the S-mode interrupt mask before
+            // the epilogue restores the interrupted user frame.
+            unsafe {
+                set_supervisor_interrupts(false);
+            }
             if !dispatched {
                 // A syscall reached the handler before the binary
                 // installed its dispatcher — fail closed.

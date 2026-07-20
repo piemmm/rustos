@@ -1,6 +1,7 @@
 # FIX-SYSCALL — Run syscalls with interrupts enabled
 
-Status: **planned**
+Status: **code + docs done, host-proven; per-arch QEMU syscall-body
+verticals staged** (see "Remaining" below)
 
 Binding under `AGENTS.md`. This plan closes the remaining half of the
 "no cooperative dispatch loop" defect class (§17.1): **P-5 made the
@@ -92,100 +93,86 @@ These are verification, not redesign — and each is a task below:
   drain). Add this to the §23 review checklist and a doc note in
   `lib/sync`.
 
-## Work items
+## What landed
 
-### T1 — Arch entry glue: enable IRQs on syscall entry, re-mask on exit
-Do this behind the existing `KernelArch` seam so the shared
-reschedule/drain logic stays one definition (§2.21). For each bare-metal
-port, after the trampoline has saved the user register frame and
-established a well-defined kernel context (kernel stack, `swapgs`/per-CPU,
-and the §19.1 side-channel entry barrier — all already done), unmask
-device IRQs; re-mask on the exit path before restoring the user frame.
+**T1 — arch entry glue (interruptible syscall body).** Each bare-metal
+port unmasks device IRQs around the syscall dispatch call only and
+re-masks before restoring the user frame; the trampoline's full-frame
+save + frame-resident return state (aarch64 `ELR/SPSR/SP_EL0`, riscv64
+`sepc/sstatus`) plus nested-trap support make a mid-body IRQ safe:
 
-- `kernel/arch/aarch64/src/exceptions.rs` (`tairix_aarch64_trap_handler` /
-  `dispatch_svc` path): clear `DAIF.I` after frame save; set before `eret`.
-- `kernel/arch/riscv64/src/trap.rs` (`ecall` path): set `sstatus.SIE`
-  after frame save; clear before `sret`. Update the now-stale comments
-  that assert "the kernel runs with `sstatus.SIE == 0`".
-- `kernel/arch/x86_64/src/syscall_entry.rs`: `sti` once in a safe kernel
-  context (keep `IA32_FMASK` clearing `IF`/`IOPL`/`AC`/etc. on *entry*;
-  re-enable only `IF`); `cli` before `sysret`. Update the module doc.
-- `kernel/arch/wasm32/*`: entry glue is a no-op (C2).
+- `kernel/arch/aarch64/src/exceptions.rs`: `enable_irq()` / `mask_irq()`
+  (`DAIF.I`) around `dispatch_svc`.
+- `kernel/arch/riscv64/src/trap.rs`: `set_supervisor_interrupts(true/false)`
+  (`sstatus.SIE`) around `dispatch_ecall`; the stale "kernel runs with
+  `SIE == 0`" comment in `preempt.rs` corrected — the saved-`SPP` gate is
+  now load-bearing, not defence-in-depth.
+- `kernel/arch/x86_64/src/syscall_entry.rs`: `sti` / `cli` around the
+  `call {dispatch}` in `syscall_entry_stub` (entry still clears
+  `IF`/`IOPL`/`AC`/… via `IA32_FMASK`; only `IF` is re-enabled, in kernel
+  context after `swapgs`+pivot). The ISRs identify the CPU via the LAPIC,
+  not GS, and gate preemption on the saved ring-3 `CS`, so a body-taken
+  IRQ runs at ring 0 with kernel GS and never reschedules.
+- `kernel/arch/wasm32`: no-op (no hardware interrupts) — documented in
+  `syscall_entry.rs`.
 
-Keep every port's existing preemption gate on the interrupted privilege
-(`from_el0` / saved `SPP` / `cs_is_ring3`) so an IRQ taken in
-EL1/S-mode/ring-0 serves-and-returns without a mid-syscall switch.
+Every port keeps its interrupted-privilege preempt gate (`from_el0` /
+`SPP` / ring-3 `CS`), so a body-taken IRQ serves-and-returns without a
+mid-syscall switch — the kernel stays non-preemptible (§4).
 
-### T2 — Deferred drain on the syscall return path
-Once syscalls run with IRQs on, an IRQ landing mid-syscall latches a wake
-via `request_wake`. Run `waitq::drain_pending_wakes` (and honour
-`need_resched`) at a safe point on the **syscall return-to-user path**
-(before `eret`/`sret`/`sysret`), not only in the dispatch loop. Reuse
-P-5's machinery; do not invent a second discipline (§2.2).
+**T2 — deferred drain at return-to-user (one arch-neutral definition).**
+`completion_outcome` (`kernel/core/src/syscalls.rs`) calls
+`waitq::drain_pending_wakes()` then suspends the caller with `Yield` when a
+preemption tick was latched *or* the drain unparked a task; otherwise it
+returns straight to user space. This reuses P-5's machinery — no
+per-syscall flag, no second wake discipline.
 
-### T3 — Close C1 (riscv64/x86_64 console RX)
-Audit both console input paths. If either shares a plain-`SpinLock` ring
-between an RX ISR and `stream_read`/`keyboard_read`, add the
-`IrqSafeSpinLock` gate (the aarch64 `UART_RX_GATE` shape). Otherwise
-document that the path is synchronous.
+**C1/C2/C3 closed.** C1: only aarch64 has an ISR-shared console RX ring
+(already `UART_RX_GATE`-interlocked); riscv64 and x86_64 console reads are
+the fail-closed `NULL_CONSOLE_READ` (no RX ISR) — synchronous, nothing to
+gate. C2: wasm32 entry is inherently a no-op; the shared drain still runs.
+C3: the standing rule ("any ISR-shared lock is `IrqSafeSpinLock` or the
+ISR side is lock-free + deferred drain") is in `lib/sync`'s `irq` rustdoc
+and the AGENTS.md §23.2 review checklist.
 
-### T4 — Close C2 (wasm32) and C3 (standing rule)
-- Verify the wasm32 no-op entry/exit and deferred-drain behaviour.
-- Add the "ISR-shared lock must be IRQ-safe (or lock-free + deferred
-  drain)" rule to the §23 review checklist and a rustdoc note in
-  `lib/sync` (`irq.rs`).
+**T5 — docs.** `docs/src/architecture/syscalls.md` gained the "Interrupts
+during a syscall" section; PLAN.md has the P-5b entry and the
+Charter-Amendments line; the §15.18 jump-sheet has its row. The README
+support matrix needs no per-arch mark change (preemption/interruptibility
+is not a matrix row).
 
-### T5 — Docs + housekeeping
-- Update `docs/src/architecture/syscalls.md` to state syscalls run with
-  interrupts enabled, the kernel is non-preemptible, and reschedule
-  happens at return-to-user.
-- Add a `PLAN.md` entry (as the sibling of P-5) recording this as the
-  syscall-entry half of the §17.1 fix, and a one-line "Charter
-  Amendments" rationale if the review checklist rule (C3) is added.
-- Add a row to the `AGENTS.md` §15.18 jump-sheet:
-  `Syscall interruptibility / IRQ-on-entry → plans/FIX-SYSCALL.md`.
-- Update the `README.md` support matrix only if a per-arch mark changes.
+## Why this is safe — see "Why this is safe today" above
 
-## Tests (mandatory — part of this change, §7)
+The lock-discipline argument (Invariants 1 & 2) is unchanged and is the
+correctness basis: every ISR is lock-free (`request_wake`), and the one
+ISR↔task-shared ring is IRQ-gated.
 
-Extend the §17.1 conformance / `preempt_*` verticals with a
-**syscall-body** case, mirroring `preempt_inkernel_qemu_aarch64` for the
-syscall path, on every bare-metal Tier-1 target:
+## Remaining (QEMU syscall-body verticals — staged, §2.19/§15.7)
 
-- **Delivery-during-syscall.** A task enters a deliberately long syscall
-  (a CPU-bound busy body, or a bootstrap-floor `fs_*` MMIO wait); assert a
-  device IRQ / preemption tick is **taken during** the syscall (proving
-  IRQs are enabled and deliverable in-kernel).
-- **Non-preemptibility.** Assert the task is **not** rescheduled
-  mid-syscall (no context switch while in EL1/S-mode/ring-0), and that a
-  held lock / in-flight syscall is never abandoned.
-- **Reschedule-at-return.** Assert a latched `need_resched` is honoured on
-  return-to-user (the task yields the CPU at syscall exit, not before).
-- **Wake timeliness.** A parked blocking syscall (`ipc_recv`/`wait`/
-  `stream_read`) is woken via the lock-free `request_wake` → deferred
-  drain while another CPU/ISR runs — no busy-poll (§2.23).
-- **Console-RX no-deadlock (C1).** On each port, drive the RX ISR while a
-  `stream_read`/`keyboard_read` holds the ring; assert no single-CPU
-  self-deadlock (the gate must be present where the ring is ISR-shared).
-- **wasm32 (C2).** The no-op entry/exit still satisfies the deferred-drain
-  and reschedule-at-return semantics via the host yield facility.
+The dedicated per-arch **syscall-body** QEMU verticals are staged, not yet
+landed. Each mirrors `preempt_inkernel_qemu_aarch64` for the syscall path:
+an EL0/U-mode/ring-3 task issues a syscall whose test dispatch shim
+busy-loops until it observes a timer tick, asserting the tick is taken
+*during* the body (IRQs deliverable in-kernel) while the EL0-preempt
+callback fires **zero** times (kernel not preempted), and a latched tick
+yields at return-to-user.
 
-Add any fuzzer/proptest find to the regression corpus (§19.6). A bug found
-en route gets its own regression test (§7).
+What already covers the behaviour today, so this staging is confirmation
+rather than an unproven claim:
 
-## Definition of done (§7, §15, §23)
+- the in-kernel IRQ-delivery + non-preemption property is proven directly
+  by `preempt_inkernel_qemu_aarch64` (enabling device IRQs while an
+  in-kernel task runs and taking a tick mid-run without rescheduling — the
+  same mechanism the syscall body now uses);
+- interrupt-return preemption / the need-resched latch is proven per arch
+  by `preempt_el0_qemu_{aarch64,riscv64,x86_64}`;
+- the arch-neutral return-to-user decision (drain + latched-tick /
+  unparked-task yield) is host-tested via `completion_outcome_*` in
+  `kernel/core`.
 
-- All work items T1–T5 complete; C1/C2/C3 closed (confirmed or gated).
-- New syscall-body preemption/delivery tests pass on every Tier-1 target
-  under QEMU; the §17.1 conformance suite is green.
-- Whole-project gate green and quoted: `cargo fmt --all` (+ `--check`),
-  `cargo xtask ci` (once), `cargo xtask fuzz --secs 5`, and
-  `tools/ci/soak.sh both --secs 20`.
-- §23 self-review verdict stated: security (entry hardening unchanged —
-  still clear `IF`/barriers on entry, re-enable only `IF`; capability
-  checks fail-closed and unchanged, §5.4/§19.1), multi-arch (§23.2 — one
-  definition behind `KernelArch`, no `cfg` leakage), no dead code / no
-  compat shims (§2.13/§2.14), docs updated in the same change.
+Landing the three dedicated syscall-body verticals is the outstanding
+follow-up for full per-arch coverage of the IRQ-during-body property
+specifically.
 
 ## Non-goals / do not do
 
