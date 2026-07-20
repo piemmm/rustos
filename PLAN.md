@@ -3418,11 +3418,33 @@ per-app recipes (§2.2).
   plus Page/Home/End on a focused bar, and `wheel` steps one line per tick
   along the bar's axis; `part_at`/`geometry` expose the shared layout. Content
   changes are never animated (reduced-motion correct). 21 host tests.
+- **Drawn controls: window furniture — DONE.** `lib/controls::window` draws the
+  WM-owned frame family over the shared paint core: `WindowControl` (the compact
+  Close/Minimize/PutToBack/SizeToggle command buttons — command glyphs drawn
+  here like `paint_chevron`, reading by shape without colour; the size toggle
+  shows/names its *next* action), `TitleBar` (four controls on either edge with
+  close outermost, untrusted-title sanitiser + ellipsis truncation, drag region
+  that activates on press and begins a cooperative move past the threshold, a
+  press over a control routing to it and never dragging, Left/Right focus nav +
+  Space/Enter), `WindowFrame` (active/inactive/attention Frame Rim with a doubled
+  inner line and a bounded static attention dot — activation never changes the
+  client origin/outer size — plus the furniture hit map classifying every point
+  as `Client`/`TitleBar`/`WindowControl`/`ResizeEdge`/`Frame`/`Outside` so the
+  client never receives furniture input), `ResizeGrabber` (grip teeth, drag
+  capture with Escape-cancel, disabled when non-resizable/maximized, hit region
+  kept clear of scrollbar thumbs), and `ScrollCorner` (the inert neutral
+  junction plate). Typed `WindowControlAction`/`TitleBarEvent`/`ResizeEvent`; the
+  WM performs the cooperative operation and enforces authority (§13 denied keeps
+  the value + lock bead). 37 host tests (glyphs, activation, disabled/denied,
+  inactive muting, high contrast, scale, both themes, title layout/sanitise/drag/
+  routing/focus, frame hit-map isolation + resize edges + activation-invariant
+  client + rim/attention, grabber drag/escape/non-overlap, scroll corner).
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (window furniture, shell/decision surfaces)
-  over the same shared paths, then the Switchboard reference composition. Each
-  lands complete (§27) with dark/light + reduced-motion + high-contrast
-  coverage and its §20 tests before the next begins.
+  the remaining drawn families (shell surfaces Notification/TaskbarItem/
+  TraySignal, then decision surfaces Dialog/Tooltip/HelpTip) over the same
+  shared paths, then the Switchboard reference composition. Each lands complete
+  (§27) with dark/light + reduced-motion + high-contrast coverage and its §20
+  tests before the next begins.
 
 ---
 

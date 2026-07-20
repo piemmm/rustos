@@ -609,7 +609,15 @@ tairix/
 │   │                    #   parameterized ScrollBar (decrement/track/thumb/
 │   │                    #   increment over the shared scroll geometry, awake-
 │   │                    #   brightened thumb + end controls, preserved drag
-│   │                    #   anchor, one-shot-timer repeat seam, ScrollAction)
+│   │                    #   anchor, one-shot-timer repeat seam, ScrollAction),
+│   │                    #   and the window-manager furniture family (WindowFrame
+│   │                    #   with its client/furniture hit map, TitleBar with the
+│   │                    #   compact WindowControl command buttons Close/Minimize/
+│   │                    #   PutToBack/SizeToggle, ResizeGrabber, ScrollCorner —
+│   │                    #   command glyphs that read without colour, drag/resize
+│   │                    #   capture, active/inactive/attention frame, the client
+│   │                    #   never receiving furniture input, and the resize corner
+│   │                    #   never overlapping a scrollbar thumb)
 │   │                    #   so far, over one
 │   │                    #   shared draw+interaction core —
 │   │                    #   resolving colour/metric/radius
