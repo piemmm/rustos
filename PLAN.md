@@ -2100,29 +2100,34 @@ order (one fully-gated increment each):
                  "any ISR-shared lock is `IrqSafeSpinLock` or the ISR side is
                  lock-free + deferred drain" is in `lib/sync`'s `irq` rustdoc and
                  the §23 checklist. Docs: `docs/src/architecture/syscalls.md`.
-               - **P-6 — wait-queue §27 completeness rework (staged by the
-                 2026-07-06 charter amendment).** Bring `kernel/core/src/waitq.rs`
-                 up to the §27 bar: the primitive P-2 landed is the thinnest slice
-                 its first callers exercised — an O(n) `Vec` wait set with
-                 `wake_all` as the only wake path (no wake-one, no FIFO/priority
-                 ordering, no fairness/anti-starvation guarantee; O(n)
-                 `register`/`deregister`/`sweep`/`earliest_deadline`, and
-                 `nearest_timed_deadline` re-scans every queue on every arm).
-                 Deliverables: a real wait-set structure with a *stated* FIFO
-                 fairness/ordering discipline and O(1) (or O(log n))
-                 register/deregister — never a linear `Vec` scan on this
-                 load-bearing path (§26 load, §24.1); a deadline-ordered
-                 structure (heap / timer wheel) so the timed sweep and one-shot
-                 arming stop re-scanning every waiter; a `wake_one` path so a
-                 single-resource event (a `CallEndpoint` reply, one console
-                 byte) need not thundering-herd every waiter, with wake_all
-                 retained for genuine broadcast conditions; the lock-free ISR
-                 `request_wake`/deferred-drain shape P-5 landed is preserved.
-                 No surface beyond the abstraction itself (§27.4). Lands with
-                 regression tests (FIFO wake order, wake-one vs wake-all,
-                 deadline ordering, no lost wake) per §7/§23.4, and every
-                 park-site consumer re-audited for which wake primitive it
-                 should use.
+               - **P-6 — wait-queue §27 completeness rework — DONE
+                 (host-proven).** `kernel/core/src/waitq.rs` now meets the §27
+                 bar. The P-2 slice's O(n) `Vec` wait set is replaced by a
+                 three-index `WaitSet` (all `BTreeMap`, `const`-constructible so
+                 the `static` queues keep `const fn new()`): `by_task`
+                 (membership, O(log n) `register`/`deregister`/`wake_task`),
+                 `order` (arrival `seq` → task, so `wake_one`/`oldest_task` take
+                 the FIFO head in O(log n) — a *stated* first-come-first-served
+                 no-starvation discipline; a re-`register` keeps its `seq`, so a
+                 looping waiter is never overtaken), and `deadlines`
+                 (`(deadline, seq)` → task, only finite deadlines, so
+                 `earliest_deadline` is O(log n) and `sweep` visits only the
+                 expired prefix in deadline order, O(log n + woken), not a scan
+                 of every waiter per timer expiry). `wake_all` stays O(n) for
+                 genuine broadcast conditions only; `wake_one`/`wake_task` (the
+                 targeted `CallEndpoint`-reply / IPC-server / signal-intake
+                 wakes) are the single-target path. The lock-free ISR
+                 `request_wake` + deferred `drain_pending_wakes` shape P-5 landed
+                 is unchanged (§2.2 — one wake/drain discipline). No surface
+                 beyond the abstraction itself (§27.4). Every park site was
+                 re-audited: single-target events use `wake_task`
+                 (`CALL_WAITQ`/`SERVE_WAITQ`/`SIGNAL_INTAKE_WAITQ`), genuine
+                 broadcasts use `wake_all` (`CONSOLE`/`PROCWAIT`/`PIPE`/
+                 `HW_TREE`/`USERS_DB`/`APP_STORE`/`SEAT_INPUT`). Host tests cover
+                 FIFO order + re-register position preservation, deadline
+                 ordering + expired-prefix sweep, deregister across every index,
+                 the wake-one round-robin no-starvation loop, and the unchanged
+                 lock-free `request_wake`/drain race.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass
@@ -5834,8 +5839,9 @@ can see *why* a rule exists without diffing the charter's history.
   work is landed complete-as-far-as-it-goes and escalated (§15.7), never
   shipped thin. The `waitq.rs` rework itself is too large for this charter
   change, so it is staged and surfaced as PLAN **P-6** (§2.18/§2.19/§15.7)
-  rather than left silent. Charter + plan only; no code changed in this
-  amendment.
+  rather than left silent. The rework has since landed complete as PLAN
+  P-6 (an O(log n) three-index wait set with a stated FIFO no-starvation
+  discipline; see P-6).
 
 - **2026-07-05 — Fail loud, degrade gracefully.** Added §2.24 (maintainer
   decision) after `top` was found exiting silently (code 1, no message) when

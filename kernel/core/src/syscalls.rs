@@ -8579,17 +8579,32 @@ fn completion_outcome(raw_number: u16, result: SyscallResult, cpu: CpuId) -> Dis
     // and defers the real `wake_all` / deadline sweep. This return-to-user
     // boundary is the first safe dispatcher-context point to perform that
     // deferred drain (taking those locks here is sound), reusing the P-5
-    // machinery rather than a second discipline. A drain that unparked a
-    // task made new work runnable, so the caller yields to let the
-    // scheduler pick it up — exactly as it does for a latched preemption
-    // tick; an unnecessary yield costs one bounded scheduler round-trip and
-    // is never wrong, whereas skipping it could strand a just-woken task on
-    // a lone-task CPU until the next tick.
+    // machinery rather than a second discipline.
     let woke = crate::waitq::drain_pending_wakes();
-    // Then honour a preemption tick latched while the syscall ran (see the
-    // fn-level doc): a tick taken in kernel mode could not switch, so it is
-    // consumed and paid here at the return-to-user boundary. A drain that
-    // unparked a task likewise yields so the scheduler picks up the new work.
+    ordinary_completion(result, cpu, woke)
+}
+
+/// The return-to-user decision for an ordinary (non-rescheduling) syscall,
+/// given whether the deferred-wake drain unparked a task (`woke`).
+///
+/// Split out from [`completion_outcome`] so it can be unit-tested
+/// hermetically: the real `drain_pending_wakes` touches process-global
+/// wait-queue statics that a *parallel* host test may have flagged, which
+/// would otherwise divert this decision non-deterministically. Production
+/// always reaches it through `completion_outcome` with the live drain
+/// result.
+///
+/// A latched preemption tick or a drain that unparked a task suspends the
+/// caller with a `Yield`; everything else returns straight to user space.
+/// A tick taken while the syscall ran in kernel mode could not
+/// context-switch (the kernel is non-preemptible), so it was latched and is
+/// consumed and paid here — the first safe boundary — instead of `eret`ing
+/// back into user mode with an expired quantum. A drain that unparked a
+/// task likewise yields so the scheduler picks up the new work; an
+/// unnecessary yield costs one bounded scheduler round-trip and is never
+/// wrong, whereas skipping it could strand a just-woken task on a lone-task
+/// CPU until the next tick.
+fn ordinary_completion(result: SyscallResult, cpu: CpuId, woke: bool) -> DispatchOutcome {
     if crate::preempt::take_preempt_pending(cpu) || woke {
         return DispatchOutcome::Reschedule {
             result,
@@ -8736,19 +8751,23 @@ mod tests {
     /// the core the task is running on now. Reusing the stale entry core
     /// instead would consult — and reschedule against — the wrong core's
     /// latch and resume handle, switching that core through another task's
-    /// saved context (a wild fault). The CPU indices are unique to this
-    /// test so parallel test threads never share the process-wide latch.
+    /// saved context (a wild fault). The CPU indices are distinct from
+    /// every other latch-touching host test's (the per-CPU preempt latch is
+    /// a single process-wide array shared across the whole test binary), so
+    /// a parallel test thread can never arm the slot this one reads.
     #[test]
     fn completion_outcome_reads_only_the_given_cpus_preempt_latch() {
-        const HERE: CpuId = 45;
-        const OTHER: CpuId = 46;
-        let ordinary = SyscallNumber::CLOCK_GET.as_u16();
+        const HERE: CpuId = 48;
+        const OTHER: CpuId = 49;
 
         // A latch armed on `OTHER` must not divert a completion on `HERE`:
-        // the decision reads `HERE`'s own (unset) latch and returns.
+        // the decision reads `HERE`'s own (unset) latch and returns. The
+        // drain result is passed explicitly (`woke = false`) so this pins
+        // the per-CPU latch isolation without depending on the process-wide
+        // wait-queue statics a parallel test may have flagged.
         crate::preempt::note_preempt_tick(OTHER);
         assert_eq!(
-            completion_outcome(ordinary, Ok(1), HERE),
+            ordinary_completion(Ok(1), HERE, false),
             DispatchOutcome::Returned(Ok(1))
         );
         // `OTHER`'s latch is left intact — this completion never touched it.
@@ -9017,14 +9036,32 @@ mod tests {
         }
     }
 
-    /// A completed ordinary syscall with no pending preemption returns
-    /// straight to user space.
+    /// A completed ordinary syscall with no pending preemption and no
+    /// deferred wake returns straight to user space. Exercised through the
+    /// pure [`ordinary_completion`] helper so the process-wide wait-queue
+    /// statics a parallel test may have flagged cannot divert it.
     #[test]
     fn completion_outcome_without_a_latched_tick_returns() {
         const CPU: CpuId = 50;
         assert_eq!(
-            completion_outcome(SyscallNumber::CLOCK_GET.as_u16(), Ok(1), CPU),
+            ordinary_completion(Ok(1), CPU, false),
             DispatchOutcome::Returned(Ok(1))
+        );
+    }
+
+    /// A deferred-wake drain that unparked a task yields, so the scheduler
+    /// picks up the newly-runnable task, even with no preemption tick
+    /// latched (`woke = true`, latch clear).
+    #[test]
+    fn completion_outcome_yields_on_a_deferred_wake() {
+        const CPU: CpuId = 55;
+        assert_eq!(
+            ordinary_completion(Ok(7), CPU, true),
+            DispatchOutcome::Reschedule {
+                result: Ok(7),
+                action: RescheduleAction::Yield,
+                cpu: CPU,
+            }
         );
     }
 
@@ -9034,13 +9071,15 @@ mod tests {
     /// of being silently lost (before the latch existed, the caller
     /// resumed user mode with no timer armed and could starve every
     /// competitor). The latch is consumed by the conversion, so the next
-    /// completion returns normally.
+    /// completion returns normally. Driven through [`ordinary_completion`]
+    /// with `woke = false` so only the latch — not ambient drain state —
+    /// decides.
     #[test]
     fn completion_outcome_with_a_latched_tick_yields_once() {
         const CPU: CpuId = 51;
         crate::preempt::note_preempt_tick(CPU);
         assert_eq!(
-            completion_outcome(SyscallNumber::STREAM_WRITE.as_u16(), Ok(4), CPU),
+            ordinary_completion(Ok(4), CPU, false),
             DispatchOutcome::Reschedule {
                 result: Ok(4),
                 action: RescheduleAction::Yield,
@@ -9048,7 +9087,7 @@ mod tests {
             }
         );
         assert_eq!(
-            completion_outcome(SyscallNumber::STREAM_WRITE.as_u16(), Ok(4), CPU),
+            ordinary_completion(Ok(4), CPU, false),
             DispatchOutcome::Returned(Ok(4))
         );
     }

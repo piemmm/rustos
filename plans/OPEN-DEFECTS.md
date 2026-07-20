@@ -23,9 +23,10 @@ The open items, in priority order:
 - **D1 — FIX-SYSCALL residual verticals** (x86_64/riscv64 syscall-body
   tests + metal re-confirmation). The design and code are done; the
   per-arch conformance verticals are not.
-- **D2 — P-6: wait-queue §27 completeness rework.** A foundational
-  primitive (`kernel/core/src/waitq.rs`) shipped as a thin slice; §27
-  requires the complete primitive.
+- **D2 — P-6: wait-queue §27 completeness rework — DONE.** The
+  foundational primitive (`kernel/core/src/waitq.rs`) shipped as a thin
+  slice; §27 required the complete primitive. Landed (three-index
+  O(log n) `WaitSet` with a stated FIFO no-starvation discipline).
 - **D3 — Hard-lockup watchdog parity** on x86_64 and riscv64 (aarch64
   is the only port with hard-lockup detection wired).
 - **D4 — Latent §27 audit sweep** of the other foundational primitives
@@ -81,42 +82,49 @@ and `plans/FIX-SYSCALL.md` is updated to done-state (§13) with its
 
 ---
 
-## D2 — P-6: wait-queue §27 completeness rework
+## D2 — P-6: wait-queue §27 completeness rework — DONE (host-proven)
 
-**State:** staged as `PLAN.md` **P-6** (2026-07-06 §27 amendment).
-`kernel/core/src/waitq.rs` is the thinnest slice P-2 needed: an O(n)
-`Vec` wait set, `wake_all` as the only wake path (no `wake_one`), no
-FIFO/priority ordering, no fairness/anti-starvation guarantee, and O(n)
-`register`/`deregister`/`sweep`/`earliest_deadline` with
-`nearest_timed_deadline` re-scanning every queue on every timer arm.
+**State:** landed. `kernel/core/src/waitq.rs`'s O(n) `Vec` wait set is
+replaced by a three-index `WaitSet` (all `BTreeMap`, `const`-constructible
+so the `static` queues keep `const fn new()`), meeting the §27 bar.
 
 **Deliverables (§27 — the complete primitive, not new surface §27.4):**
 
-- **D2.1 — real wait-set structure** with a *stated* FIFO
-  fairness/ordering discipline and O(1) (or O(log n)) register /
-  deregister — never a linear `Vec` scan on this load-bearing per-park
-  path (§26 load, §24.1). Use an intrusive list for O(1) removal.
-- **D2.2 — deadline-ordered structure** (min-heap or timer wheel) so the
-  timed sweep and one-shot arming stop re-scanning every waiter;
-  `nearest_timed_deadline` becomes O(1)/O(log n).
-- **D2.3 — `wake_one` path** so a single-resource event (a
-  `CallEndpoint` reply, one console byte) no longer thundering-herds
-  every waiter; keep `wake_all` for genuine broadcast conditions
-  (§27.3 — wake-one where a wake-all is a thundering herd).
-- **D2.4 — preserve P-5's discipline.** The lock-free ISR `request_wake`
-  + deferred `drain_pending_wakes` shape is retained unchanged (§2.2);
-  do not invent a second wake/drain path.
-- **D2.5 — re-audit every park site** (`ipc_recv`, `ipc_call`,
-  `call_recv`/`call_reply`, `irq_wait`, `wait`/`waitset_wait`,
-  `keyboard_read`, `stream_read`, `users_db_wait`, `hw_tree_wait`) for
-  which wake primitive it should use (one vs all).
+- **D2.1 — real wait-set structure — DONE.** `by_task: BTreeMap<TaskId,
+  Waiter>` gives O(log n) `register`/`deregister`/`wake_task` membership,
+  and `order: BTreeMap<seq, TaskId>` (a monotonic arrival sequence) gives
+  a *stated* FIFO first-come-first-served no-starvation discipline: the
+  oldest `seq` is the head `wake_one`/`oldest_task` release, and a
+  re-`register` keeps its `seq` so a looping waiter is never overtaken. No
+  linear scan on the per-park path. (An `alloc`-only `BTreeMap` was chosen
+  over an intrusive list because the latter needs per-task node storage in
+  the scheduler — a far larger change for the same O(log n) removal and no
+  `unsafe`.)
+- **D2.2 — deadline-ordered structure — DONE.** `deadlines: BTreeMap<
+  (deadline_ns, seq), TaskId>` holds only finite-deadline waiters, so
+  `earliest_deadline` is O(log n) (the front key) and `sweep` visits only
+  the already-expired prefix in deadline order — O(log n + woken), not a
+  scan of every waiter per timer expiry. `nearest_timed_deadline` is a
+  fixed-arity min over the five timed queues' O(log n) fronts.
+- **D2.3 — `wake_one` path — DONE.** `wake_one` (FIFO head) and
+  `wake_task` (addressed) are the single-target paths; `wake_all` is kept
+  for genuine broadcast conditions only (cancellation, a shared latch
+  resolving).
+- **D2.4 — preserve P-5's discipline — DONE.** The lock-free ISR
+  `request_wake` + deferred `drain_pending_wakes` shape is unchanged
+  (§2.2); no second wake/drain path.
+- **D2.5 — park sites re-audited — DONE.** Single-target events use
+  `wake_task` (`CALL_WAITQ`/`SERVE_WAITQ`/`SIGNAL_INTAKE_WAITQ`); genuine
+  broadcasts use `wake_all` (`CONSOLE`/`PROCWAIT`/`PIPE`/`HW_TREE`/
+  `USERS_DB`/`APP_STORE`/`SEAT_INPUT`). The rework preserves each choice.
 
-**Tests (§7/§23.4):** FIFO wake order; wake-one vs wake-all; deadline
-ordering; no lost wake under concurrent `request_wake` + drain; the
-no-starvation property under N×M load (mirror the §17.1 style). Any
-fuzz/proptest find enters the regression corpus (§19.6).
+**Tests (§7/§23.4):** host tests cover FIFO wake order + re-register
+position preservation, deadline ordering + expired-prefix sweep,
+deregister across every index, the wake-one round-robin no-starvation
+loop, and the unchanged lock-free `request_wake`/drain race. All 15
+`waitq` tests green.
 
-**Done when:** `waitq.rs` meets the §27 bar with the above operations,
+**Done:** `waitq.rs` meets the §27 bar with the above operations,
 complexities, and stated fairness discipline; all park sites re-audited;
 tests green; `PLAN.md` P-6 updated to done-state.
 
@@ -189,7 +197,8 @@ whole-project-green gate:
 
 - D1: syscall-body verticals green on all bare-metal targets + wasm32
   confirmed + metal re-confirmed; FIX-SYSCALL marked done.
-- D2: `waitq.rs` at the §27 bar with tests; P-6 marked done.
+- D2: **DONE** — `waitq.rs` at the §27 bar (three-index O(log n)
+  `WaitSet`, stated FIFO no-starvation) with tests; P-6 marked done.
 - D3: hard-lockup watchdog + diagnostics conformance-tested on all three
   bare-metal targets.
 - D4: every foundational primitive audited; shortfalls staged.
