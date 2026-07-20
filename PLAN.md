@@ -3297,14 +3297,30 @@ per-app recipes (§2.2).
   disposition on rim + mark + Authority Mark (a denied selector keeps its value
   and shows the lock bead), and emits a typed `SelectorAction::Set { on }`.
   Dark/light + high-contrast + accessibility (shape marks) + pointer/keyboard +
-  next-value semantics tested.
+  next-value semantics tested. The selector mark-colour recipe is hoisted into
+  the shared `lib/controls::paint::resolve_mark` so the selector tick and the
+  slider value track resolve their accent from one definition (§2.2).
+- **Drawn controls: value-control family — DONE.** `lib/controls::value` draws
+  `Slider` and `Progress` over the shared paint core. `Slider` is a measured
+  control (groove, accent value track filling to a draggable thumb plate with
+  rim + focus ring): drag updates the displayed value immediately and commits
+  through the owner via `SliderAction::SetValue`, arrows/Page/Home/End step it
+  by settable line/page steps (zero step moves nothing, fail-closed bounds), a
+  resource slider tints the track with its semantic signal colour, `with_cap`
+  bounds the value with a warning cap marker, and the §13 disposition drives
+  the rim/track and lock bead (a denied slider keeps its value, ignores input).
+  `Progress` is a read-only instrument trace driven only by its `ActivityState`
+  (and, for indeterminate work, an owner-advanced `phase` — no idle loop):
+  known % fill + caption, working/indeterminate moving segment that freezes
+  under reduced motion, complete success fill + check bead, failed recovery rim
+  + reason. Value is a validated permille, all arithmetic `u64`-guarded and
+  clamped. Dark/light + high-contrast + reduced-motion + scale + §13 tested.
 - **Staged next** (`.junie/gui-controls-work.md` tracks status and detail):
-  the remaining drawn families (slider/progress, text/search/combo,
-  menu/toolbar/tabs, collections, the scrollbar renderer, window furniture,
-  shell/decision surfaces) over the same shared paths, then the Switchboard
-  reference composition. Each lands complete (§27) with dark/light +
-  reduced-motion + high-contrast coverage and its §20 tests before the next
-  begins.
+  the remaining drawn families (text/search/combo, menu/toolbar/tabs,
+  collections, the scrollbar renderer, window furniture, shell/decision
+  surfaces) over the same shared paths, then the Switchboard reference
+  composition. Each lands complete (§27) with dark/light + reduced-motion +
+  high-contrast coverage and its §20 tests before the next begins.
 
 ---
 

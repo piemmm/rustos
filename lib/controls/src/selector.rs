@@ -21,7 +21,7 @@ use tairix_theme::Theme;
 
 use crate::paint::{
     key_activation, paint_bead, paint_plate, plate_border, pointer_activation, resolve_bead,
-    resolve_frame, resolve_rail, surface_rect, to_i32, PlateStyle,
+    resolve_frame, resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
 
@@ -183,25 +183,6 @@ fn mark_rect(inner: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
     Some((ix + margin, iy + margin, mw, mh))
 }
 
-/// The colour a selector's mark (checkbox fill, radio bead, toggle contact)
-/// draws in: the role's accent while interactive, the denied role while
-/// denied, or the muted foreground while disabled — so the mark carries the
-/// §13 disposition like the rim does, never a hard-coded hue.
-fn mark_color(theme: &Theme, role: ControlRole, state: ControlState) -> Color {
-    let palette = theme.palette();
-    let rgba = match state.disposition() {
-        ControlDisposition::DisabledByState => palette.on_surface_muted,
-        ControlDisposition::DeniedByAuthority => palette.denied,
-        ControlDisposition::FailedClosed => palette.recovery,
-        _ => match role {
-            ControlRole::Destructive => palette.danger,
-            ControlRole::Recovery => palette.recovery,
-            _ => palette.accent,
-        },
-    };
-    Color::from(rgba)
-}
-
 /// The label, role, composed state, and pointer/press latch shared by every
 /// boolean selector.
 ///
@@ -357,7 +338,7 @@ impl Toggle {
                         contact_w,
                         ih,
                         ih / 2,
-                        mark_color(theme, self.core.role, self.core.state),
+                        resolve_mark(theme, self.core.role, self.core.state),
                     );
                 }
             }
@@ -507,7 +488,7 @@ impl Checkbox {
         );
 
         if let Some((ix, iy, iw, ih)) = inner.and_then(mark_rect) {
-            let color = mark_color(theme, self.core.role, self.core.state);
+            let color = resolve_mark(theme, self.core.role, self.core.state);
             match self.selection {
                 SelectionState::Selected | SelectionState::Current => {
                     surface.fill_rect(ix, iy, iw, ih, color);
@@ -650,7 +631,7 @@ impl Radio {
                     d,
                     d,
                     d / 2,
-                    mark_color(theme, self.core.role, self.core.state),
+                    resolve_mark(theme, self.core.role, self.core.state),
                 );
             }
         }

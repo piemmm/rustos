@@ -59,6 +59,15 @@
 //! theme, and — like every control — emit a typed [`SelectorAction`] rather
 //! than performing the change themselves; a denied selector keeps its value
 //! and shows an Authority Mark.
+//!
+//! The [`value`] module is the value-control family — [`Slider`] and
+//! [`Progress`]. Both are measured controls whose value is a validated permille
+//! fraction. A [`Slider`] is interactive (a rail, a value track that fills to a
+//! draggable thumb, drag and keyboard stepping, an optional bounded-cap marker)
+//! and emits a typed [`SliderAction`] that the owner commits; a [`Progress`] is
+//! a read-only instrument trace of known, working, indeterminate, complete, or
+//! failed work, driven only by the state its owner sets — it runs no idle loop
+//! and renders an indeterminate trace statically under reduced motion.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -71,6 +80,7 @@ mod paint;
 pub mod scroll;
 pub mod selector;
 pub mod state;
+pub mod value;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 pub use scroll::{
@@ -83,6 +93,7 @@ pub use state::{
     SelectionState, SizeAction, ValidationState, WindowActivationState, WindowControlKind,
     WindowFurnitureState, WindowSizeState,
 };
+pub use value::{Progress, Slider, SliderAction};
 
 #[cfg(test)]
 mod button_tests;
@@ -92,3 +103,5 @@ mod selector_tests;
 mod state_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod value_tests;

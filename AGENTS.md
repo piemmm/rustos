@@ -596,13 +596,16 @@ tairix/
 │   │                    #   Role, composed ControlState + the §13
 │   │                    #   ControlDisposition, window-furniture states); and
 │   │                    #   the drawn control families — Button/IconButton/
-│   │                    #   SplitButton and the boolean selectors Toggle/
-│   │                    #   Checkbox/Radio so far, over one shared draw+
-│   │                    #   interaction core — resolving colour/metric/radius
+│   │                    #   SplitButton, the boolean selectors Toggle/Checkbox/
+│   │                    #   Radio, and the value controls Slider/Progress so
+│   │                    #   far, over one shared draw+interaction core —
+│   │                    #   resolving colour/metric/radius
 │   │                    #   from lib/theme+lib/geometry, rounding plates through
 │   │                    #   the one shared lib/raster fill, drawing via lib/font
 │   │                    #   /lib/icon, consuming lib/input. Selectors read by
-│   │                    #   shape as well as colour (thumb/square/bar/bead). A
+│   │                    #   shape as well as colour (thumb/square/bar/bead); the
+│   │                    #   slider commits through its owner (SliderAction) and
+│   │                    #   progress is a read-only instrument trace. A
 │   │                    #   control renders state and emits a typed action; the
 │   │                    #   service enforces authority. Fail closed, no panic
 │   │                    #   (§2.2, §17.4). The remaining control families are

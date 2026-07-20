@@ -217,6 +217,31 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
     }
 }
 
+/// The accent colour a control fills its *value mark* with — a selector's
+/// check/bead/toggle contact, or a slider's value track and thumb accent.
+///
+/// It carries the spec §13 disposition exactly like the rim does: a disabled
+/// control mutes it, a denial takes the denied role, a failed-closed attempt
+/// the recovery role, and an interactive control takes its role's accent
+/// (destructive danger, recovery, otherwise the theme accent). Sharing this
+/// with the selector family keeps the mark recipe defined once (`AGENTS.md`
+/// §2.2), so a selector's tick and a slider's track can never diverge.
+#[must_use]
+pub(crate) fn resolve_mark(theme: &Theme, role: ControlRole, state: ControlState) -> Color {
+    let palette = theme.palette();
+    let rgba = match state.disposition() {
+        ControlDisposition::DisabledByState => palette.on_surface_muted,
+        ControlDisposition::DeniedByAuthority => palette.denied,
+        ControlDisposition::FailedClosed => palette.recovery,
+        _ => match role {
+            ControlRole::Destructive => palette.danger,
+            ControlRole::Recovery => palette.recovery,
+            _ => palette.accent,
+        },
+    };
+    Color::from(rgba)
+}
+
 /// The Pressure Rail colour a control shows, if it is under a resource
 /// pressure — one mapping shared by every family.
 #[must_use]
