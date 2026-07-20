@@ -45,7 +45,7 @@
 //!   catch an address bit that is stuck or shorted (writes that land in the
 //!   wrong cell) in `O(log² n)` accesses, covering the address decode across
 //!   the full span, and
-//! * a sampling **device** test that proves one word per 16 KiB holds both a
+//! * a sampling **device** test that proves one word per 4 KiB holds both a
 //!   `1` and a `0` (writing an alternating pattern then its complement and
 //!   reading each back), catching a stuck data bit, row, column, or bank —
 //!   the faults that occur in practice, which span many contiguous cells.
@@ -200,14 +200,13 @@ fn address_pass<W: WordWindow>(w: &W, base: PhysAddr) -> Result<(), RamFault> {
 
 /// Bytes between the device pass's sampled words.
 ///
-/// One aligned word is tested per this span. It is a multiple of the page
-/// size, so the sample lands in one page out of every
-/// `DEVICE_SAMPLE_INTERVAL_BYTES / PAGE_SIZE`. Chosen so the whole test
-/// finishes in about a second on 8 GiB (measured under QEMU/TCG, where a
-/// cache-line flush is far dearer than on real silicon) while still hitting
-/// every stuck DRAM cell, row, column, or bank many times over — those
-/// faults span far more than this interval.
-const DEVICE_SAMPLE_INTERVAL_BYTES: usize = 16 * 1024;
+/// One aligned word is tested per this span. It is exactly the page size, so
+/// the sample lands one word in every page. Chosen so the whole test still
+/// finishes in a few seconds on many gigabytes (measured under QEMU/TCG,
+/// where a cache-line flush is far dearer than on real silicon) while
+/// hitting every stuck DRAM cell, row, column, or bank many times over —
+/// those faults span far more than this interval.
+const DEVICE_SAMPLE_INTERVAL_BYTES: usize = 4 * 1024;
 
 /// Word stride of the device pass's sample: one word tested per this many.
 ///
