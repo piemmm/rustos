@@ -613,6 +613,14 @@ pub fn bring_up_bsp(
     let madt = acpi::Madt::parse(madt_bytes).map_err(|_| BootError::BadMadt)?;
     verify_bsp_present(&madt, bsp_lapic_id)?;
 
+    // Publish the ACPI-discovered platform inventory (root, enabled CPUs,
+    // and the I/O APICs) to the authoritative `HW_TREE`, so the
+    // `hw_tree_read` / `hw_tree_wait` syscalls expose the real x86_64
+    // hardware to user space — the sibling of the riscv64/aarch64
+    // device-tree seed. Pure MADT byte-slice normalisation (no MMIO
+    // register access), so it is safe at this point in bring-up.
+    seed_hardware_tree(madt_bytes);
+
     // 6. Build the `cpu_to_lapic` map with **only** the BSP populated.
     //    Production `tairix-kernel` runs single-CPU (it never calls the
     //    `SecondaryBringup` HAL method — that handshake is proven by the
@@ -849,6 +857,36 @@ fn try_boot(
     // The caller forwards to `kernel_main`, which returns `!` and
     // never re-enters this function.
     Ok(boot_info)
+}
+
+/// Discover the platform hardware tree from the firmware ACPI MADT and
+/// publish it to the authoritative [`crate::hwtree_store::HW_TREE`] the
+/// `hw_tree_read` / `hw_tree_wait` syscalls read, so user space observes the
+/// same inventory the kernel discovered (Design D) — the x86_64 sibling of
+/// the riscv64/aarch64 device-tree seed.
+///
+/// This is pure ACPI-table normalisation through the port's
+/// [`tairix_arch_x86_64::platform::AcpiDiscovery`] (the root, every enabled
+/// Local APIC as a CPU node, and the I/O APICs as interrupt-controller
+/// nodes), collected into the shared
+/// [`crate::boot_hwtree::CollectingHwNodeSink`] so no arch carries its own
+/// copy of the collect-into-`Vec` logic. `madt_bytes` is the byte slice the
+/// firmware hand-off already located and validated ([`acpi::locate_madt`] +
+/// [`acpi::Madt::parse`]); discovery re-parses it and reads no MMIO, so it is
+/// safe here.
+///
+/// Fail closed: a malformed table leaves the sink empty and seeds an empty
+/// tree rather than failing the boot, so the syscalls report the devices
+/// that *were* discovered. The buffered tree is leaked to `'static` (a
+/// one-shot boot publish, never a mutable global) so the inventory readers
+/// can borrow it for the kernel's lifetime.
+fn seed_hardware_tree(madt_bytes: &[u8]) {
+    use tairix_arch_api::PlatformDiscovery;
+    use tairix_arch_x86_64::platform::AcpiDiscovery;
+    let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
+    // A discovery error leaves the sink empty; seed whatever was collected.
+    let _ = AcpiDiscovery::new(madt_bytes).discover(&mut sink);
+    crate::hwtree_store::HW_TREE.seed(sink.leak());
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.

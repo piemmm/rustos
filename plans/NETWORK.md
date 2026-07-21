@@ -761,7 +761,22 @@ improvement, not test scaffolding):
   `INBOUND_ECHO_SERVED`) plus the peer's own v6 echo verdict, at the 240 s
   budget its aarch64 sibling uses. What remains: x86_64 repeats the whole
   sequence over its virtio-**PCI** bus (its `irq_routing` / IO-APIC path already
-  exists).
+  exists). **First x86_64 foundation landed:** `boot_x86_64::bring_up_bsp` now
+  **seeds the hardware tree**. It runs the already-built-but-unconsumed port
+  discovery seam `tairix_arch_x86_64::platform::AcpiDiscovery` (root, every
+  enabled Local APIC as a `Cpu` node, and each I/O APIC as an
+  `InterruptController` node with its MMIO window) over the already-located,
+  validated MADT bytes into the shared `boot_hwtree::CollectingHwNodeSink`
+  (§2.2 — no per-arch collect copy) and publishes it to the authoritative
+  `HW_TREE`, so `hw_tree_read` / `hw_tree_wait` expose the real x86_64 platform
+  inventory to user space instead of an empty tree — the exact sibling of the
+  riscv64/aarch64 pure device-tree seed. It is pure ACPI byte-slice
+  normalisation (no MMIO register access), so it is safe before any
+  bootstrap-floor bus bring-up, and fails closed (a malformed table seeds
+  whatever was collected rather than failing the boot). The bootstrap-floor
+  **virtio-PCI** `DeviceID` probe (the ECAM/`lib/pci` analogue of the riscv64
+  virtio-MMIO probe) that emits the autoloadable Block/Input/Network child
+  nodes is the next x86_64 tranche, on top of this seed.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and
