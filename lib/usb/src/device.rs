@@ -2131,6 +2131,27 @@ struct DeviceState {
     /// than [`REPORT_QUEUE_CAP`] reports behind (a genuinely stalled
     /// consumer). Surfaced for diagnostics; never silently ignored.
     dropped_reports: u64,
+    /// The interrupt-IN endpoint completed a transfer with a halting error
+    /// code and is stopped by the controller until it is reset. Set by
+    /// [`UsbDevice::capture_report_event`] the moment the halt is observed
+    /// (which runs re-entrantly from inside a synchronous EP0/command wait,
+    /// so it MUST NOT recover the endpoint there); the actual recovery
+    /// ([`UsbDevice::recover_interrupt_endpoint`]) is performed later at a
+    /// top-level, non-re-entrant point ([`UsbDevice::recover_report_endpoint_if_pending`],
+    /// called from [`UsbDevice::next_report`] and [`UsbDevice::pump_reports`]).
+    /// Cleared once the endpoint is recovered.
+    int_recovery_pending: bool,
+    /// A [`UsbDevice::recover_interrupt_endpoint`] for this device's
+    /// interrupt-IN endpoint is in progress. Recovery issues Reset Endpoint /
+    /// Set TR Dequeue commands and a device-side `CLEAR_FEATURE`, each of
+    /// which waits on the shared event ring — during which a fresh interrupt
+    /// completion for the *same* endpoint can arrive and reach
+    /// [`UsbDevice::capture_report_event`]. This guard makes that re-entrant
+    /// capture leave the ring (which recovery is rebuilding) untouched and
+    /// merely re-flag [`Self::int_recovery_pending`], so recovery can never
+    /// recurse into itself and scramble the ring — the on-metal defect where
+    /// hammering a device during USB bring-up killed its class driver.
+    int_recovering: bool,
     /// Bulk-IN transfer ring over the region's `bulk_in_ring`, built when
     /// the interface's bulk endpoint pair is configured. `None` otherwise.
     bulk_in_ring: Option<ProducerRing>,
@@ -4106,6 +4127,8 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             reports: Fifo::new(),
             report_fault: None,
             dropped_reports: 0,
+            int_recovery_pending: false,
+            int_recovering: false,
             bulk_in_ring,
             bulk_out_ring,
             bulk_in2_ring,
@@ -7041,6 +7064,11 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // and keeps the class-driver path self-contained.
         self.ensure_reports_armed(index)?;
         self.drain_events()?;
+        // Recover the interrupt endpoint if a halting completion flagged it.
+        // This is the top-level, non-re-entrant recovery point: `drain_events`
+        // above only *flags* a halt (it may run re-entrantly), so the actual
+        // reset/rebuild/CLEAR_FEATURE happens here where it cannot recurse.
+        self.recover_report_endpoint_if_pending(index)?;
         // Deliver the oldest buffered report, if any.
         if let Some(report) = self
             .device_mut(index)
@@ -7133,7 +7161,18 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 let _ = self.ensure_reports_armed(index);
             }
         }
-        self.drain_events()
+        self.drain_events()?;
+        // Recover any interrupt endpoint a halting completion flagged during
+        // the drain above. `drain_events` only *flags* a halt (it may run
+        // re-entrantly from a synchronous wait); the reset/rebuild/CLEAR_FEATURE
+        // happens here, at this top-level, non-re-entrant point. A per-device
+        // recovery hiccup (a device that vanished mid-recovery) is tolerated —
+        // its teardown is driven by the hub/root watch and the recorded report
+        // fault — so it never aborts the whole pump.
+        for index in 0..self.devices.len() {
+            let _ = self.recover_report_endpoint_if_pending(index);
+        }
+        Ok(())
     }
 
     /// Total interrupt-IN reports dropped across all served devices because a
@@ -7167,19 +7206,48 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// * a *successful* zero-length completion (a ZLP) carries no report: the
     ///   endpoint is simply re-armed (an idle or ZLP-streaming HID collection
     ///   neither buffers empty reports nor is faulted);
-    /// * a device-unreachable or fail-closed completion **records** a fatal
-    ///   report fault on the device for [`Self::next_report`] to surface once
-    ///   (so the HCD confirms the port and detaches);
-    /// * any other halting code recovers the endpoint in place
-    ///   ([`Self::recover_interrupt_endpoint`]) and re-arms it, so a transient
-    ///   STALL/babble/transaction error neither storms the controller nor
-    ///   kills the class driver.
+    /// * a *successful* completion whose claimed buffer mapping is malformed
+    ///   (a forged residual or TRB pointer) leaves the endpoint un-halted, so
+    ///   there is nothing to recover: it **records** a fatal report fault on
+    ///   the device for [`Self::next_report`] to surface once;
+    /// * any halting code — a STALL, babble, data-buffer or TRB error, and a
+    ///   USB or split *transaction* error alike — leaves the endpoint halted
+    ///   (the controller runs no further transfers on it until it is reset).
+    ///   It is only **flagged** here ([`DeviceState::int_recovery_pending`]);
+    ///   the endpoint is recovered later, at a top-level, non-re-entrant point
+    ///   ([`Self::recover_report_endpoint_if_pending`]). Recovery cannot run
+    ///   here because this capture also runs re-entrantly from inside a
+    ///   synchronous command/EP0 wait, and recovery itself waits — so
+    ///   recovering here would recurse into recovery and scramble the ring it
+    ///   is rebuilding (the on-metal defect where input hammered during
+    ///   bring-up killed the class driver). A halting code is not, on its own,
+    ///   a hot-removal: a transaction error is exactly what a present-but-
+    ///   disturbed device produces, and the deferred recovery is the
+    ///   authoritative liveness test.
     ///
     /// A fault is never propagated to the caller: capture runs from the shared
     /// drain and from synchronous EP0/command waits, where an asynchronous
     /// report must not fault unrelated work. Recorded faults surface only
-    /// through [`Self::next_report`].
+    /// through [`Self::next_report`]; a halted endpoint is recovered by
+    /// [`Self::recover_report_endpoint_if_pending`].
     fn capture_report_event(&mut self, index: usize, event: Trb) -> Result<(), DriverError> {
+        // A recovery for this endpoint is in progress (this capture is running
+        // re-entrantly from inside one of recovery's own synchronous
+        // command/CLEAR_FEATURE waits). Recovery is rebuilding the ring, so
+        // touching it here would corrupt it and re-entering recovery would
+        // recurse without bound — the on-metal defect where input hammered
+        // during bring-up killed the class driver. Leave the ring untouched
+        // and keep the endpoint flagged so recovery runs again after this one
+        // completes (the endpoint re-halted on this fresh completion).
+        if self
+            .device(index)
+            .is_some_and(|device| device.int_recovering)
+        {
+            if let Some(device) = self.device_mut(index) {
+                device.int_recovery_pending = true;
+            }
+            return Ok(());
+        }
         let mut data = [0u8; CAPTURE_LEN];
         let decoded = self.decode_transfer_report(index, event, &mut data);
         self.retire_interrupt_transfer(index)?;
@@ -7192,33 +7260,116 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 self.ensure_reports_armed(index)?;
             }
             Err(err) => match event.completion_code() {
-                // A successful completion whose claimed mapping the decode
+                // A *successful* completion whose claimed mapping the decode
                 // rejected (a hostile/buggy residual or TRB pointer). The
-                // endpoint is not halted, so nothing to recover: record the
-                // fault for the class driver's next URB to fail closed on.
+                // endpoint is not halted, so there is nothing to recover:
+                // record the fault for the class driver's next URB to fail
+                // closed on.
                 Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {
                     self.record_report_fault(index, err);
                 }
-                // The device failed to answer — a probable hot-removal.
-                // Record it so the URB path confirms the port and detaches;
-                // the hub/root watch also detaches independently, so a
-                // starved consumer still loses the device cleanly.
-                Ok(code) if code.indicates_device_unreachable() => {
-                    self.record_report_fault(index, err);
-                }
-                // A recoverable halt (STALL, babble, data-buffer/TRB error, or
-                // an unmodelled code): the device is present and merely
-                // errored. Reset the endpoint in place and re-arm it, so a
-                // transient fault neither storms the controller nor reaches the
-                // class driver. A recovery that itself faults leaves the
-                // endpoint unarmed; the next pump re-attempts to arm it.
+                // Any halting completion — a STALL, babble, data-buffer or TRB
+                // error, and a USB or split *transaction* error alike — leaves
+                // the endpoint halted (the controller runs no further transfers
+                // on it until it is reset). A halting code is NOT, on its own,
+                // conclusive of a hot-removal: a transaction error (CRC,
+                // timeout, bad PID) is exactly what a device that is present
+                // but momentarily disturbed produces — for instance one
+                // hammered with input while its interrupt endpoint is still
+                // being brought up.
+                //
+                // Recovery MUST NOT run here. This capture happens from the
+                // shared drain and, crucially, re-entrantly from inside a
+                // synchronous EP0/command wait: recovery issues Reset Endpoint
+                // / Set TR Dequeue commands and a device-side CLEAR_FEATURE,
+                // each of which itself waits on the shared event ring, during
+                // which another interrupt completion for this same endpoint can
+                // arrive and land back here — recursing into recovery and
+                // scrambling the ring it is rebuilding. So only *flag* the
+                // endpoint; the real, non-re-entrant recovery is performed at
+                // top level by `recover_report_endpoint_if_pending` (from
+                // `next_report` and `pump_reports`). The rejected completion
+                // code stays captured in `last_report_fault_code` (set by
+                // `decode_transfer_report`) for the detach path.
                 _ => {
-                    self.recover_interrupt_endpoint(index)?;
-                    self.ensure_reports_armed(index)?;
+                    if let Some(device) = self.device_mut(index) {
+                        device.int_recovery_pending = true;
+                    }
                 }
             },
         }
         Ok(())
+    }
+
+    /// Recover device `index`'s interrupt-IN endpoint if a halting completion
+    /// flagged it ([`DeviceState::int_recovery_pending`]) — the top-level,
+    /// **non-re-entrant** half of the halt-recovery split.
+    ///
+    /// Called only from [`Self::next_report`] and [`Self::pump_reports`],
+    /// which run from the HCD's URB service and its per-interrupt report pump
+    /// — never from inside a synchronous command/EP0 wait. A guard
+    /// ([`DeviceState::int_recovering`]) makes any interrupt completion that
+    /// arrives during recovery's own waits re-flag the endpoint instead of
+    /// recursing, so recovery can never re-enter itself.
+    ///
+    /// Recovery is the authoritative liveness test, attempted once per pending
+    /// halt:
+    ///
+    /// * it succeeds — the device is present and answered its own
+    ///   `CLEAR_FEATURE` handshake — so the endpoint is re-armed, the pending
+    ///   flag and the captured fault code are cleared, and the class driver's
+    ///   URB stays parked (a transient fault never reaches it);
+    /// * it faults — a genuinely vanished device cannot complete the
+    ///   handshake — so the fatal report fault is recorded for
+    ///   [`Self::next_report`] to surface once (the HCD then confirms the port
+    ///   and detaches), with `last_report_fault_code` still holding the
+    ///   device-unreachable code so a gone device behind a still-connected hub
+    ///   port is freed directly.
+    ///
+    /// # Errors
+    ///
+    /// Never propagates a recovery fault (a vanished device is a recorded
+    /// report fault, not an error here); only a bookkeeping fault re-arming a
+    /// recovered endpoint is surfaced.
+    fn recover_report_endpoint_if_pending(&mut self, index: usize) -> Result<(), DriverError> {
+        if !self
+            .device(index)
+            .is_some_and(|device| device.int_recovery_pending)
+        {
+            return Ok(());
+        }
+        // Clear the pending flag before recovering: a fresh halt observed
+        // *during* recovery (via the `int_recovering` guard) sets it again, so
+        // a re-halt is not lost, while a clean recovery leaves it clear.
+        if let Some(device) = self.device_mut(index) {
+            device.int_recovery_pending = false;
+            device.int_recovering = true;
+        }
+        let outcome = self.recover_interrupt_endpoint(index);
+        if let Some(device) = self.device_mut(index) {
+            device.int_recovering = false;
+        }
+        match outcome {
+            Ok(()) => {
+                // Present: no fault to surface. Clear the captured fault code
+                // (a transient transaction error must not linger and be read
+                // as a removal by a later detach check) and re-arm to depth.
+                if let Some(device) = self.device_mut(index) {
+                    device.last_report_fault_code = 0;
+                }
+                self.ensure_reports_armed(index)
+            }
+            // Gone: the device could not complete its own recovery handshake.
+            // Record the fault so the URB path confirms and detaches; the
+            // hub/root watch also detaches independently, so a starved consumer
+            // still loses the device cleanly. `DeviceFault` is the stable
+            // client-visible errno; `last_report_fault_code` (the rejected
+            // completion code) is what drives the detach.
+            Err(_recover_err) => {
+                self.record_report_fault(index, DriverError::DeviceFault);
+                Ok(())
+            }
+        }
     }
 
     /// Buffer a captured interrupt-IN report for device `index`, first

@@ -749,6 +749,24 @@ struct MockXhci {
     /// delivered (a single rejected report must never silence the
     /// keyboard).
     fault_one_report_completion: Option<CompletionCode>,
+    /// When set, the device is physically **gone**: a device-side
+    /// `CLEAR_FEATURE(ENDPOINT_HALT)` on the interrupt endpoint — the last
+    /// step of the interrupt-IN halt recovery — faults with a device-
+    /// unreachable transaction error instead of succeeding, exactly as a
+    /// vanished device cannot answer its own recovery handshake. This is how
+    /// a genuine hot-removal is told apart from a transient halt: a present
+    /// device recovers, a gone one cannot, so its endpoint recovery is the
+    /// authoritative liveness test the driver relies on.
+    device_gone: bool,
+    /// When set, the *first* device-side `CLEAR_FEATURE(ENDPOINT_HALT)` on the
+    /// interrupt endpoint (the last step of a halt recovery) posts a fresh
+    /// interrupt-IN fault completion onto the event ring **before** its own
+    /// success — modelling a keystroke landing exactly while the endpoint is
+    /// being recovered. The engine observes it re-entrantly from inside
+    /// recovery's own `CLEAR_FEATURE` wait; a correct driver defers it (it
+    /// does not recurse into recovery and scramble the ring). One-shot: taken
+    /// when it fires, so the following recovery is clean.
+    inject_int_fault_on_clear: Option<CompletionCode>,
     /// When set, a `DisableSlot` command posts **no** completion event,
     /// modelling the metal hot-removal where the gone device's hub never
     /// lets the controller acknowledge the Disable Slot in time. The
@@ -1186,6 +1204,8 @@ impl MockXhci {
             fault_class_requests: false,
             forge_report_residual: false,
             fault_one_report_completion: None,
+            device_gone: false,
+            inject_int_fault_on_clear: None,
             suppress_disable_completion: false,
             latent_device_port: None,
             hcsparams2: 0,
@@ -2371,35 +2391,10 @@ impl MockXhci {
             // permanently flagged, so the watch keeps re-firing.
             (0x23, 0x01) => self.execute_clear_port_feature(setup[2], setup[4]),
             // Standard CLEAR_FEATURE(ENDPOINT_HALT) on an endpoint (USB 2.0
-            // §9.4.1): the device-side half of a bulk halt recovery.
+            // §9.4.1): the device-side half of a bulk/interrupt halt recovery.
             (0x02, 0x01) if setup[2] == 0x00 => {
-                // The request must reach the *device's* own control
-                // endpoint. One wrongly issued to the hub's EP0 (the resting
-                // active control context) is a mistargeted recovery: the hub
-                // has no such endpoint, so it STALLs — loudly, exactly as
-                // real hardware would.
-                if self.hub_slot_id != 0 && self.ep0_slot == self.hub_slot_id {
-                    self.ep0_halted = true;
-                    self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+                if self.execute_clear_endpoint_halt(setup, status_addr) {
                     return;
-                }
-                let number = setup[4] & 0x0F;
-                let dci = if setup[4] & 0x80 != 0 {
-                    number * 2 + 1
-                } else {
-                    number * 2
-                };
-                // The device-side clear completes the recovery only after
-                // the controller-side Reset Endpoint + Set TR Dequeue
-                // Pointer ran, mirroring the order the silicon requires.
-                if dci == self.bulk_in.dci && self.bulk_in.halt == 3 {
-                    self.bulk_in.halt = 0;
-                }
-                if dci == self.bulk_out.dci && self.bulk_out.halt == 3 {
-                    self.bulk_out.halt = 0;
-                }
-                if dci == self.int_dci && self.int_halt == 3 {
-                    self.int_halt = 0;
                 }
             }
             // SET_CONFIGURATION
@@ -2437,6 +2432,59 @@ impl MockXhci {
             }
         }
         self.post_transfer_event(status_addr, CompletionCode::Success, 1, 0);
+    }
+
+    /// Model a device-side `CLEAR_FEATURE(ENDPOINT_HALT)` (USB 2.0 §9.4.1),
+    /// the last step of a bulk/interrupt halt recovery. Returns `true` when it
+    /// posted its own (fault) transfer event and the caller must not post the
+    /// standard Success completion.
+    fn execute_clear_endpoint_halt(&mut self, setup: [u8; 8], status_addr: u64) -> bool {
+        // The request must reach the *device's* own control endpoint. One
+        // wrongly issued to the hub's EP0 (the resting active control context)
+        // is a mistargeted recovery: the hub has no such endpoint, so it
+        // STALLs — loudly, exactly as real hardware would.
+        if self.hub_slot_id != 0 && self.ep0_slot == self.hub_slot_id {
+            self.ep0_halted = true;
+            self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+            return true;
+        }
+        let number = setup[4] & 0x0F;
+        let dci = if setup[4] & 0x80 != 0 {
+            number * 2 + 1
+        } else {
+            number * 2
+        };
+        // A physically gone device cannot answer its own recovery handshake:
+        // the CLEAR_FEATURE to its interrupt endpoint faults with a device-
+        // unreachable transaction error (the hub's transaction translator can
+        // no longer reach it), leaving the endpoint halted. This is the metal
+        // signal that distinguishes a real hot-removal from a transient halt,
+        // which recovers.
+        if self.device_gone && dci == self.int_dci {
+            self.post_transfer_event(status_addr, CompletionCode::UsbTransactionError, 1, 0);
+            return true;
+        }
+        // The device-side clear completes the recovery only after the
+        // controller-side Reset Endpoint + Set TR Dequeue Pointer ran,
+        // mirroring the order the silicon requires.
+        if dci == self.bulk_in.dci && self.bulk_in.halt == 3 {
+            self.bulk_in.halt = 0;
+        }
+        if dci == self.bulk_out.dci && self.bulk_out.halt == 3 {
+            self.bulk_out.halt = 0;
+        }
+        if dci == self.int_dci && self.int_halt == 3 {
+            // Model a keystroke landing exactly as the endpoint is recovered:
+            // post a fresh interrupt-IN fault completion the engine observes
+            // re-entrantly from inside this very `CLEAR_FEATURE` wait, *before*
+            // the clear's own success below. A correct driver defers it rather
+            // than recursing into recovery (which is rebuilding the ring).
+            if let Some(code) = self.inject_int_fault_on_clear.take() {
+                self.post_transfer_event(self.int_base, code, self.int_dci, 0);
+            }
+            self.int_halt = 0;
+        }
+        false
     }
 
     fn process_int_ring(&mut self) {
@@ -2495,11 +2543,12 @@ impl MockXhci {
             self.post_transfer_event(addr, code, self.int_dci, residual);
             // A halting completion (anything but Success/ShortPacket) stops the
             // endpoint on real hardware: it halts and delivers nothing more
-            // until the driver resets it. An "unreachable" code is a removal,
-            // handled by teardown rather than reset, so it does not halt.
-            if !matches!(code, CompletionCode::Success | CompletionCode::ShortPacket)
-                && !code.indicates_device_unreachable()
-            {
+            // until the driver resets it. This holds for a transaction/split
+            // error too — the endpoint halts on the error whether the device
+            // is merely disturbed (recovery clears the halt) or gone (recovery
+            // faults on the device-side CLEAR_FEATURE); the halted state, not
+            // the completion code, is what the silicon presents.
+            if !matches!(code, CompletionCode::Success | CompletionCode::ShortPacket) {
                 self.int_halt = 1;
                 return;
             }
@@ -5661,17 +5710,140 @@ fn report_source_recovers_a_babble_halt_the_same_way() {
 }
 
 #[test]
+fn a_transient_transaction_error_during_bringup_recovers_and_keeps_the_keyboard() {
+    // The reported on-metal defect: pressing keys (or moving the mouse) *while*
+    // USB is still being brought up makes the device's interrupt-IN endpoint
+    // fault with a USB Transaction Error (CRC / timeout / bad PID) — the device
+    // is present, merely disturbed mid-configuration. A transaction error is
+    // NOT conclusive of a hot-removal: a present device answers its own
+    // recovery handshake. The halted endpoint must therefore be recovered in
+    // place (reset, re-arm, hold the URB parked) exactly like a STALL or
+    // babble, so the transient fault never reaches — and kills — the class
+    // driver, and the keyboard keeps typing. Before the fix a transaction error
+    // was treated as a device-gone code and surfaced fatally, so the class
+    // driver died after a few consecutive pump errors — the "type during boot
+    // and the keyboard stops working" symptom.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
+
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    // The device stays present (`device_gone` unset): its recovery handshake
+    // succeeds, distinguishing this transient fault from a real unplug.
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::UsbTransactionError);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+
+    // Recovered and held parked — the class driver never sees the fault, and no
+    // device-gone verdict lingers to trip a later detach.
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert!(
+        device.device_live(0),
+        "a transient transaction error never tears the present device down"
+    );
+    assert_eq!(
+        device.last_report_fault_code(0),
+        0,
+        "a recovered transient fault leaves no lingering device-gone code"
+    );
+    assert_eq!(
+        device.detach_if_device_gone(0),
+        Ok(false),
+        "the live device is not detached over a transient transaction error"
+    );
+    assert!(device.device_live(0));
+
+    // The recovered endpoint keeps delivering reports: the keyboard still types.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0, 0, 0x05, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(buf, [0, 0, 0x05, 0, 0, 0, 0, 0]);
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+}
+
+#[test]
+fn a_keystroke_landing_during_recovery_is_deferred_and_never_recurses() {
+    // The core on-metal defect: input arriving *while* a halted interrupt
+    // endpoint is being recovered. Recovery issues Reset Endpoint / Set TR
+    // Dequeue commands and a device-side CLEAR_FEATURE, each of which waits on
+    // the shared event ring — and a fresh interrupt-IN fault completion
+    // arriving during that wait reaches the report-capture path re-entrantly.
+    // Recovering the endpoint again from there would recurse into recovery and
+    // scramble the ring recovery is rebuilding, so recovery eventually faulted,
+    // surfaced a fatal report fault, and killed the class driver (typing during
+    // boot stopped the keyboard, then the controller stormed dropped reports).
+    // The re-entrant fault MUST instead be deferred: it re-flags the endpoint
+    // for a later, top-level recovery and never recurses.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
+
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+
+    // The device is present (no `device_gone`), so its recovery handshake
+    // succeeds. Arm a fault on the first report *and*, one-shot, a second fault
+    // injected during that recovery's CLEAR_FEATURE — the concurrent keystroke.
+    device.host_mut().fault_one_report_completion = Some(CompletionCode::UsbTransactionError);
+    device.host_mut().inject_int_fault_on_clear = Some(CompletionCode::UsbTransactionError);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+
+    // Recovery ran once, deferred the re-entrant fault, and did not recurse:
+    // the device is still live, the class driver saw no fault, and no
+    // device-gone verdict lingers.
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert!(
+        device.device_live(0),
+        "the present device survives a keystroke landing during recovery"
+    );
+    assert_eq!(
+        device.last_report_fault_code(0),
+        0,
+        "a recovered endpoint leaves no lingering device-gone code"
+    );
+    assert_eq!(
+        device.detach_if_device_gone(0),
+        Ok(false),
+        "the live device is not detached over a fault during recovery"
+    );
+    assert!(device.device_live(0));
+
+    // The endpoint keeps serving: a subsequent report is delivered, so the
+    // keyboard still types after the storm.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0, 0, 0x07, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(buf, [0, 0, 0x07, 0, 0, 0, 0, 0]);
+    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+}
+
+#[test]
 fn rejected_report_records_its_completion_code_surviving_a_later_control_transfer() {
     // When a downstream keyboard is unplugged, on metal the disconnect first
-    // surfaces as the device's interrupt-IN transfer faulting. The HCD then
-    // issues a hub GET_PORT_STATUS control transfer to confirm — which resets
-    // the shared per-transfer event diagnostics. The controller's verdict on
-    // the keyboard's *own* endpoint (a transient transaction error vs. a
-    // device-gone code) is the datum that decides the correct teardown, so it
-    // must be captured at the report fault and survive that confirmation
-    // control transfer. This asserts the dedicated `last_report_fault_code`
-    // records the rejected code and is not clobbered by a subsequent control
-    // transfer (it fails before that field existed, when the code was lost).
+    // surfaces as the device's interrupt-IN transfer faulting. The halted
+    // endpoint's recovery then fails (the gone device cannot answer its own
+    // CLEAR_FEATURE), which is what confirms the removal. The HCD next issues a
+    // hub GET_PORT_STATUS control transfer — which resets the shared
+    // per-transfer event diagnostics. The controller's verdict on the
+    // keyboard's *own* endpoint (the device-gone completion code) is the datum
+    // that lets the teardown free the slot directly, so it must be captured at
+    // the report fault and survive that confirmation control transfer. This
+    // asserts the dedicated `last_report_fault_code` records the rejected code
+    // and is not clobbered by a subsequent control transfer.
     use crate::transport::UrbEngine;
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
@@ -5682,9 +5854,12 @@ fn rejected_report_records_its_completion_code_surviving_a_later_control_transfe
         "no report has faulted yet"
     );
 
-    // The next interrupt-IN report posts a completion code the decode rejects
-    // (the unplug-style fault).
+    // The device is gone: the next interrupt-IN report posts a device-
+    // unreachable completion the decode rejects, and the halted endpoint's
+    // recovery cannot complete (the gone device does not answer CLEAR_FEATURE),
+    // so the fault is surfaced.
     let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::UsbTransactionError);
     assert_eq!(device.next_report(0, &mut buf), Ok(None));
     device
@@ -6848,8 +7023,11 @@ fn faulted_downstream_report_can_confirm_and_detach_a_gone_device() {
     let mut buf = [0u8; REPORT_LEN];
     // A downstream low/full-speed device's hot-removal surfaces as a Split
     // Transaction Error on its own endpoint (the hub's transaction translator
-    // can no longer reach it) — a device-unreachable code, not a recoverable
-    // halt, so the fault is surfaced for the confirm-and-detach path.
+    // can no longer reach it). The endpoint halts; its recovery cannot complete
+    // because the gone device does not answer the device-side CLEAR_FEATURE, so
+    // the fault is surfaced for the confirm-and-detach path — and the captured
+    // device-unreachable code lets the detach free the slot directly.
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
     assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
@@ -6883,8 +7061,11 @@ fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
     let mut buf = [0u8; REPORT_LEN];
-    // A device-unreachable Split Transaction Error is the downstream unplug
-    // signal (a recoverable halt would be reset in place, not detached).
+    // The downstream device is unplugged: its interrupt-IN endpoint faults
+    // with a Split Transaction Error, halts, and cannot recover (the gone
+    // device does not answer CLEAR_FEATURE), so the fault is surfaced and the
+    // captured device-unreachable code drives the direct detach.
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
     assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device.host_mut().hub_downstream_status = 0;
@@ -6903,6 +7084,9 @@ fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
     assert_eq!(device.detach_if_device_gone(1), Ok(true));
 
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    // A fresh device is plugged back in — it is present, so it answers its
+    // recovery handshake again.
+    device.host_mut().device_gone = false;
     device.host_mut().hub_downstream_status = 1 << 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
@@ -6932,9 +7116,12 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
     let freed_slot = device.raw_device_slot(1);
     assert!(freed_slot != 0, "the keyboard enumerated on a real slot");
 
-    // The unplug faults the device's interrupt-IN transfer; the fault path
-    // confirms the downstream port is gone and frees the device slot.
+    // The unplug faults the device's interrupt-IN transfer; its endpoint
+    // recovery cannot complete (the gone device does not answer
+    // CLEAR_FEATURE), so the fault path confirms the downstream port is gone
+    // and frees the device slot.
     let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
     assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device.host_mut().hub_downstream_status = 0;
@@ -6971,7 +7158,9 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
         "the hub watch survived the stale event and is armed for a reconnect"
     );
 
-    // A genuine reconnect still enumerates a brand-new device on a fresh slot.
+    // A genuine reconnect still enumerates a brand-new device on a fresh slot
+    // (present, so it answers its recovery handshake).
+    device.host_mut().device_gone = false;
     device.host_mut().hub_downstream_status = 1 << 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
@@ -7001,6 +7190,9 @@ fn fault_driven_detach_leaves_unposted_hub_latch_for_rearm() {
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
     let mut buf = [0u8; REPORT_LEN];
+    // Unplug: the endpoint faults and cannot recover (the gone device does not
+    // answer CLEAR_FEATURE), so the slot is freed on the captured code.
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
     assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device.host_mut().hub_downstream_status = 0;
@@ -7026,6 +7218,7 @@ fn fault_driven_detach_leaves_unposted_hub_latch_for_rearm() {
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
     assert_eq!(device.host_mut().hub_downstream_change, 0);
 
+    device.host_mut().device_gone = false;
     device.host_mut().hub_downstream_status = 1 << 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
@@ -7096,10 +7289,13 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
     // connected and a hub `GET_PORT_STATUS` confirmation is unreliable (it
     // times out). The disconnect surfaces *only* as the keyboard's own
     // interrupt-IN transfer faulting with a Split Transaction Error (the hub's
-    // transaction translator can no longer reach the gone device). That code is
-    // conclusive on its own, so the device slot must be freed directly —
-    // without depending on the hub confirmation, which here would (wrongly)
-    // report the port still connected and leave the device wedged forever.
+    // transaction translator can no longer reach the gone device). That halt is
+    // not conclusive on its own — a present device recovers it — but here the
+    // gone device cannot answer its recovery CLEAR_FEATURE, so recovery fails
+    // and *that* confirms the removal. The captured device-unreachable code
+    // then frees the slot directly, without depending on the hub confirmation,
+    // which here would (wrongly) report the port still connected and leave the
+    // device wedged forever.
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
     mock.hub_downstream_status = 1 << 0;
@@ -7111,6 +7307,7 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
         .expect("the keyboard behind the hub is reached");
 
     let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
     assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
@@ -7143,8 +7340,8 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
         "the acted-on fault code is cleared so a re-plug is not re-detached"
     );
 
-    // Re-plug: the hub posts a connect change and the device re-enumerates on a
-    // fresh slot.
+    // Re-plug: a fresh, present device re-enumerates on a fresh slot.
+    device.host_mut().device_gone = false;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
     match device.next_hub_change(&delay) {
@@ -7186,6 +7383,7 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
         .expect("the keyboard behind the hub is reached");
 
     let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
     assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
@@ -7216,6 +7414,7 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
     // Re-plug now re-enumerates (it would not if `device_slot` were still set).
     // The controller acknowledges the re-enumeration's commands again.
     device.host_mut().suppress_disable_completion = false;
+    device.host_mut().device_gone = false;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);
     match device.next_hub_change(&delay) {
@@ -7256,9 +7455,11 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
         .expect("the keyboard behind the hub is reached");
 
     // Unplug: the keyboard's interrupt-IN endpoint faults with a Split
-    // Transaction Error and the slot is freed directly (the hub confirmation is
-    // unreliable, so the device-unreachable code is conclusive on its own).
+    // Transaction Error, halts, and cannot recover (the gone device does not
+    // answer CLEAR_FEATURE); the slot is then freed directly on the captured
+    // device-unreachable code, without a hub confirmation.
     let mut buf = [0u8; REPORT_LEN];
+    device.host_mut().device_gone = true;
     device.host_mut().fault_one_report_completion = Some(CompletionCode::SplitTransactionError);
     assert_eq!(device.next_report(1, &mut buf), Ok(None));
     device
@@ -7303,6 +7504,7 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
     // connect is only delivered if the status-change endpoint was re-armed
     // despite the earlier error — i.e. an interrupt can still reach the engine.
     device.host_mut().fault_hub_port_status = false;
+    device.host_mut().device_gone = false;
     device.host_mut().hub_downstream_status = 1 << 0;
     device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device.host_mut().post_hub_status_change(&[1 << 4]);

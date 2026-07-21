@@ -184,12 +184,43 @@ fn keyboard_duplicate_usage_presses_once() {
 }
 
 #[test]
-fn keyboard_rejects_short_report() {
+fn keyboard_rejects_report_below_minimum() {
+    // A report with fewer than the modifier + reserved bytes carries no
+    // interpretable field and is refused; two bytes is the floor.
     let mut src = MockSource::new();
-    src.push(&[0u8; 7]);
+    src.push(&[0u8; 1]);
     let mut kbd = BootKeyboard::new(src);
     let mut out = [key(0, 0); 4];
     assert_eq!(kbd.poll(&mut out), Err(DriverError::LengthOutOfRange));
+}
+
+#[test]
+fn keyboard_decodes_short_native_report() {
+    // Regression: a Raspberry Pi 4B composite keyboard that ignores
+    // SET_PROTOCOL(boot) delivers a 6-byte interrupt-IN report (four
+    // key-array slots) rather than the standard 8. It must decode, not
+    // be refused as LengthOutOfRange — refusing it killed the class
+    // driver on the first keypress during boot.
+    let mut src = MockSource::new();
+    src.push(&[0x00, 0x00, 0x04, 0x00, 0x00, 0x00]); // 6 bytes: 'A' down
+    src.push(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // 'A' up
+    let mut kbd = BootKeyboard::new(src);
+    let mut out = [key(0, 0); 4];
+    assert_eq!(kbd.poll(&mut out), Ok(2));
+    assert_eq!(out[0], key(0x04, 1));
+    assert_eq!(out[1], key(0x04, 0));
+}
+
+#[test]
+fn keyboard_decodes_two_byte_modifier_only_report() {
+    // The minimum-length report: modifiers + reserved, no key slots.
+    // Only the modifier edge is decoded; the held key set is untouched.
+    let mut src = MockSource::new();
+    src.push(&[0b0000_0001, 0x00]); // LeftControl down
+    let mut kbd = BootKeyboard::new(src);
+    let mut out = [key(0, 0); 4];
+    assert_eq!(kbd.poll(&mut out), Ok(1));
+    assert_eq!(out[0], key(MODIFIER_USAGE_BASE, 1));
 }
 
 #[test]
