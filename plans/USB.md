@@ -583,6 +583,20 @@ the live controller behaviour is host- and CI-proven first.
     `report_source_recovers_a_babble_halt_the_same_way`,
     `live_downstream_report_fault_recovers_the_endpoint_and_keeps_the_device`,
     `forged_report_residual_fails_closed`.
+  - **Interrupt moderation is left at the 1 ms xHCI reset default, never
+    disabled.** `enable_interrupter` programs `IR_IMOD` to
+    `regs::IMODI_DEFAULT` (4000 × 250 ns = 1 ms). Disabling moderation
+    (`IMOD = 0`) raises one interrupt the instant every transfer completes;
+    that is fine for a report-on-change endpoint but an interrupt-IN endpoint
+    that streams a report every service interval — a mouse polling every
+    microframe posts thousands per second — then floods the CPU with one
+    interrupt per report, pegging the host-controller and class drivers even
+    while the pointer is idle (the on-metal `xhci`/`usb_mouse` CPU-storm
+    defect). The 1 ms default coalesces such a stream to ≤~1000 interrupts/s
+    (each drain retiring every report the interval accumulated) and adds no
+    perceptible latency to genuine, sparse input, exactly as production xHCI
+    drivers run. Regression: `start_enables_the_interrupter` asserts
+    `IR_IMOD == IMODI_DEFAULT`.
   - **Root-port hot-plug is a per-port CSC scan, uniform for every port.**
     A connect or disconnect on any root port latches `PORTSC.CSC` (and
     posts the Port Status Change Event that raises the interrupt);
@@ -1019,12 +1033,11 @@ the live controller behaviour is host- and CI-proven first.
     EP0 cursor via `active_device`), each sibling at its own free index and
     ring region while **sharing the device's slot and EP0**. Every
     Configure Endpoint carries Context Entries covering the highest served
-    DCI, `SET_CONFIGURATION` runs once, and `SET_PROTOCOL(boot)` followed
-    by `SET_IDLE(indefinite)` (so an idle HID endpoint reports only on
-    change rather than storming the controller) runs per
-    HID interface. A sibling's control transfers route through the slot's
-    EP0 owner (`ep0_owner_index`); the (slot, DCI) event demux and the
-    per-index report/bulk paths are unchanged.
+    DCI, `SET_CONFIGURATION` runs once, and the per-HID-interface protocol
+    setup (see the report-protocol item below) runs per HID interface. A
+    sibling's control transfers route through the slot's EP0 owner
+    (`ep0_owner_index`); the (slot, DCI) event demux and the per-index
+    report/bulk paths are unchanged.
   - `detach_device` frees **every** entry sharing the vanished device's
     slot, so one physical unplug retracts all of its interfaces; the HCD
     reconciles all published nodes against the live table
@@ -1040,6 +1053,79 @@ the live controller behaviour is host- and CI-proven first.
     `bring_up_serves_both_interfaces_of_a_composite_receiver`,
     `unplugging_a_composite_receiver_frees_both_interfaces_and_a_replug_reserves_them`,
     `a_composite_receiver_beside_the_keyboard_costs_it_nothing`.
+
+- **Report protocol is scoped to the mouse; a keyboard runs boot protocol.**
+  A pointer honours `SET_IDLE` — reporting only on change instead of streaming
+  a duplicate report every polling interval — **only in report protocol** (an
+  on-metal mouse streamed at its ~1 ms poll rate in boot protocol and pegged
+  `xhci`/`usb_mouse` while idle; neither device-side `SET_IDLE` in boot
+  protocol nor controller-side `IMOD` moderation made it quiet). So a **mouse**
+  interface reads `GET_DESCRIPTOR(Report)` and, when the descriptor parses
+  (`tairix_hid::parse_report_descriptor` → `HidReportMap`), runs in report
+  protocol (`SET_PROTOCOL(report)` + `SET_IDLE`, `configure_hid_protocol`); an
+  unreadable/STALLing/unparsable descriptor falls back to boot protocol. Each
+  captured report-protocol report is normalised back into the fixed boot layout
+  the class drivers consume (`enqueue_captured_report` →
+  `HidReportMap::normalize`), so `drivers/input/usb_mouse` and the URB ABI are
+  unchanged; a report whose Report ID is not the interface's is dropped like an
+  idle no-op, keeping the URB parked.
+  - A **keyboard** (`InterfaceInfo::is_keyboard`, HID `bInterfaceProtocol` = 1)
+    is driven in the standardised **boot protocol** (`SET_PROTOCOL(boot)` +
+    `SET_IDLE`) and its Report Descriptor is not read: it reports only on a
+    key-state change and so never causes the idle interrupt storm a mouse does,
+    and the fixed 8-byte boot report the boot decoder consumes directly avoids
+    a report-descriptor parse a composite keyboard's multiple Report IDs (or an
+    NKRO layout) can misread. This was the metal defect: a composite keyboard,
+    put in report protocol, streamed its native keyboard report under a Report
+    ID the parser had *not* pinned to (it pinned the first keyboard
+    collection's ID = 1, but the device reported under ID 6), so
+    `report_body_offset` (raw[0] ≠ 1) dropped every keypress. Boot protocol
+    makes the device emit the report the boot decoder is built for.
+  - The interrupt-IN transfer lands in a `CAPTURE_LEN`-byte (64) buffer (a
+    report-protocol mouse report can exceed the 8-byte boot `REPORT_LEN`), but
+    is **armed** to the endpoint's own `wMaxPacketSize`
+    (`DeviceState::int_capture_len` = `min(int_max_packet, CAPTURE_LEN)`),
+    **never** the full 64-byte buffer: a full/low-speed HID endpoint behind the
+    high-speed hub's transaction translator faults with a Split Transaction
+    Error (completion code 36) when a transfer exceeds the per-interval budget
+    the TT scheduled, retracting the interface. `normalize` is fail-soft — a
+    report captured a byte short still delivers the fields that arrived.
+  - The HID Report Descriptor parser + boot-layout normaliser is the shared
+    `tairix_hid::report` (one HID decode definition, §2.2). Interrupt
+    moderation stays at the 1 ms xHCI reset default as defence-in-depth.
+  - Regressions:
+    `a_report_protocol_mouse_is_configured_and_normalizes_reports`,
+    `a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses`,
+    `a_report_transfer_is_armed_to_the_endpoint_max_packet_not_the_capture_buffer`,
+    `a_device_without_a_report_descriptor_falls_back_to_boot_protocol`,
+    `decode_all_captures_the_hid_report_descriptor_length`, and the
+    `tairix_hid::report` parser/normalizer unit tests
+    (`report_id_keyboard_offsets_follow_the_id_byte`,
+    `full_report_id_keyboard_report_normalizes`,
+    `truncated_report_id_keyboard_keeps_present_fields`).
+
+- **Enumeration decision is logged for metal (the live report path is
+  invisible under QEMU).** The engine latches, per served HID interface, its
+  enumeration decision, and the HCD logs it once (`publish_interface`) so a
+  metal boot shows *how* each device's reports are read — a keyboard as
+  boot-protocol, a mouse as report-protocol — without guessing:
+  `UsbDevice::hid_enum_diag(index)` → `HidEnumDiag` (report vs boot protocol,
+  declared report-descriptor length, the parsed `tairix_hid::ReportMapSummary`
+  field layout when in report protocol, `int_max_packet`, and the armed
+  `capture_len`), logged as `usb-hcd: HID interface report protocol` /
+  `… boot-protocol fallback` (event id 4150). It carries no report payload (no
+  keystroke ever reaches the log). Coverage:
+  `a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses`,
+  `a_report_protocol_mouse_is_configured_and_normalizes_reports`.
+
+- **A mouse's poll rate is capped at ~100 Hz.** A mouse interface's
+  endpoint-context Interval is raised to at least `pointer_min_interval`
+  (derived from `POINTER_MAX_REPORT_HZ` = 100) in `configure_interrupt_endpoint`
+  when `InterfaceInfo::is_mouse` (HID `bInterfaceProtocol` = 2). A 1000 Hz
+  gaming mouse otherwise woke the HCD and its class driver a thousand times a
+  second while moving; the cap only lowers an aggressive rate, never raises a
+  slower one, and a keyboard is untouched. Regression:
+  `a_fast_mouses_poll_rate_is_capped`.
 
 - **U8 — EP0 max-packet discovery + exact-length descriptor reads `[x]`
   (DONE; live path metal-only).** Enumeration assumed the speed's
@@ -1133,9 +1219,15 @@ acceptance step (QEMU models no Pi USB, §0.4).
 
 ## 4. Out of scope (explicitly)
 
-- Non-boot-protocol HID and isochronous transfers — each is a later class
-  driver or HCD extension on top of this seam, not part of bringing the split
-  up. (Hub *hot-plug* is in: U5 services each hub's status-change endpoint
+- Arbitrary (non-boot-vocabulary) HID collections — gamepads, consumer
+  controls, custom report layouts beyond the mouse/keyboard boot fields — and
+  isochronous transfers, each a later class driver or HCD extension on top of
+  this seam. (Report protocol itself is now *used* for a **mouse** — the
+  enumeration parses its Report Descriptor and runs it in report protocol so
+  `SET_IDLE` quiesces the otherwise-streaming pointer, normalising its reports
+  back into the boot vocabulary; a keyboard stays in boot protocol, and any
+  device the parser cannot handle falls back to boot protocol.) (Hub
+  *hot-plug* is in: U5 services each hub's status-change endpoint
   event-driven, and U9 descends and watches **multi-tier** hubs — a hub
   plugged into a hub — with cascade teardown. Bulk transfers themselves have
   since landed on this seam — `plans/DEVICES.md` D1 — and the mass-storage

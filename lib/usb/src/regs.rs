@@ -171,8 +171,26 @@ pub const IMAN_IE: u32 = 1 << 1;
 
 /// `IMOD` — interrupter moderation register, interrupter base + `0x04`
 /// (§5.5.2.2). The low 16 bits (IMODI) are the minimum inter-interrupt
-/// interval in 250 ns increments; `0` disables moderation (lowest latency).
+/// interval in 250 ns increments; `0` disables moderation entirely.
 pub const IR_IMOD: usize = 0x04;
+
+/// Interrupter Moderation Interval (IMODI) programmed on every interrupter
+/// this driver arms: `4000` × 250 ns = 1 ms, the xHCI reset default
+/// (§5.5.2.2).
+///
+/// Moderation caps how often the controller may raise an interrupt to at
+/// most once per this interval; it does **not** delay a lone event past it.
+/// Leaving it at `0` (moderation off) means every completed transfer raises
+/// its own interrupt the instant it posts. That is harmless for an endpoint
+/// that reports on change, but an interrupt-IN endpoint that streams a report
+/// every service interval — a mouse polling every microframe can post
+/// thousands per second — then floods the CPU with one interrupt per report:
+/// an interrupt storm that pegs the host-controller and class drivers even
+/// while the device is idle. Programming the 1 ms default coalesces such a
+/// stream to at most ~1000 interrupts/s (each drain retiring every report the
+/// interval accumulated) while adding no perceptible latency to genuine,
+/// sparse input, exactly as production xHCI drivers run.
+pub const IMODI_DEFAULT: u32 = 4000;
 
 /// `ERSTSZ` — event ring segment table size, interrupter base + `0x08`
 /// (§5.5.2.3.1).

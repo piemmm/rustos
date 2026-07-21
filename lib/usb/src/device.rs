@@ -184,9 +184,31 @@ pub const EVENT_RING_SEGMENT_MIN_TRBS: usize = 16;
 
 const _: () = assert!(RING_TRBS >= EVENT_RING_SEGMENT_MIN_TRBS);
 
-/// Byte length of one HID boot-protocol report buffer (USB HID 1.11
-/// App. B: keyboard 8, mouse 3..=8).
+/// Byte length of one HID **boot-protocol** report — the fixed layout the
+/// class drivers and the report FIFO consume (USB HID 1.11 App. B: keyboard
+/// 8, mouse 3..=8). A report-protocol report captured off the wire
+/// ([`CAPTURE_LEN`]) is rewritten into this layout before it is buffered, so
+/// the class-driver-facing report is always this size.
 pub const REPORT_LEN: usize = 8;
+
+/// Byte length of one interrupt-IN **capture** buffer slot — the raw report
+/// read off the controller before normalisation, ahead of any rewrite into
+/// the [`REPORT_LEN`] boot layout.
+///
+/// A boot-protocol report fits [`REPORT_LEN`], but a **report-protocol**
+/// report can be longer than eight bytes: a device that declares a Report ID
+/// prefixes every report with an ID byte (a boot keyboard's report is then
+/// nine bytes, its final key slot at byte 8), and richer pointers/keyboards
+/// pack extra fields. Capturing only eight bytes clipped that final field and
+/// the whole report was then dropped — the metal "keyboard registers no
+/// keypresses" defect on a Report-ID keyboard behind the hub. The interrupt-IN
+/// TRB is armed to this length and the controller short-packets a smaller
+/// report, so one slot captures any HID interrupt report in full. A
+/// validation bound on device-supplied data (the HID interrupt max-packet
+/// ceiling), not a scalable capacity.
+pub const CAPTURE_LEN: usize = 64;
+
+const _: () = assert!(CAPTURE_LEN >= REPORT_LEN);
 
 /// Byte length of the hub status-change endpoint report buffer (USB 2.0
 /// §11.12.4): the port-change bitmap is one bit per port plus the hub bit,
@@ -397,9 +419,10 @@ struct DeviceRegion {
     ep0_ring: usize,
     /// Interrupt-IN transfer ring, live only for a HID interface.
     int_ring: usize,
-    /// [`RING_TRBS`] report buffers of [`REPORT_LEN`] bytes for
+    /// [`RING_TRBS`] report buffers of [`CAPTURE_LEN`] bytes for
     /// [`Self::int_ring`]: slot `n`'s TRB points at buffer `n`, so a
-    /// completion maps back to its bytes by slot index.
+    /// completion maps back to its bytes by slot index. Sized to capture a
+    /// whole report-protocol report (not just the [`REPORT_LEN`] boot layout).
     report_bufs: usize,
     /// Bulk-IN transfer ring ([`BULK_RING_TRBS`] slots), live only for a
     /// device whose matched interface carries a bulk-IN endpoint (e.g. a
@@ -433,7 +456,7 @@ impl DeviceRegion {
             output_ctx: packer.take(OUTPUT_CONTEXTS * ctx_size),
             ep0_ring: packer.take(RING_TRBS * trb::TRB_LEN),
             int_ring: packer.take(RING_TRBS * trb::TRB_LEN),
-            report_bufs: packer.take(RING_TRBS * REPORT_LEN),
+            report_bufs: packer.take(RING_TRBS * CAPTURE_LEN),
             bulk_in_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
             bulk_out_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
             bulk_in2_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
@@ -695,6 +718,38 @@ const fn setup_set_protocol_boot(interface: u8) -> [u8; 8] {
     [0x21, 0x0B, 0x00, 0x00, interface, 0x00, 0x00, 0x00]
 }
 
+/// The 8-byte SETUP payload of the HID `SET_PROTOCOL(report)` class request
+/// to `interface` (USB HID 1.11 §7.2.6): `wValue` = `1` (report protocol).
+///
+/// Report protocol is the mode the host uses once it has parsed the device's
+/// Report Descriptor. It is the protocol default after reset, but a device
+/// left in boot protocol by prior firmware is put back explicitly. Crucially
+/// some devices honour `SET_IDLE` — reporting only on change instead of
+/// streaming a duplicate every polling interval — only in report protocol, so
+/// running report protocol is what lets an idle device fall quiet on the bus.
+const fn setup_set_protocol_report(interface: u8) -> [u8; 8] {
+    [0x21, 0x0B, 0x01, 0x00, interface, 0x00, 0x00, 0x00]
+}
+
+/// The 8-byte SETUP payload of the standard `GET_DESCRIPTOR(Report)` request
+/// to `interface` for `len` bytes (USB HID 1.11 §7.1.1): `bmRequestType`
+/// device-to-host/standard/interface (`0x81`), `bRequest` `GET_DESCRIPTOR`
+/// (`0x06`), `wValue` = report descriptor type ([`DESC_TYPE_REPORT`]) in the
+/// high byte and index `0` in the low byte, `wIndex` the interface.
+const fn setup_get_report_descriptor(interface: u8, len: u16) -> [u8; 8] {
+    let l = len.to_le_bytes();
+    [
+        0x81,
+        0x06,
+        0x00,
+        DESC_TYPE_REPORT,
+        interface,
+        0x00,
+        l[0],
+        l[1],
+    ]
+}
+
 /// The 8-byte SETUP payload of the HID `SET_IDLE` class request to
 /// `interface` with an *indefinite* idle duration for **all** reports
 /// (USB HID 1.11 §7.2.4): `bmRequestType` host-to-device/class/interface
@@ -736,6 +791,20 @@ const DESC_TYPE_CONFIGURATION: u8 = 0x02;
 /// `bDescriptorType` of an interface descriptor.
 const DESC_TYPE_INTERFACE: u8 = 0x04;
 
+/// `bDescriptorType` of a HID class descriptor (USB HID 1.11 §7.1): it
+/// follows an interface descriptor and carries the length of the interface's
+/// Report Descriptor in its `wDescriptorLength` field.
+const DESC_TYPE_HID: u8 = 0x21;
+
+/// Byte offset of `wDescriptorLength` within a HID class descriptor (USB HID
+/// 1.11 §6.2.1): after `bLength`, `bDescriptorType`, `bcdHID` (2),
+/// `bCountryCode`, `bNumDescriptors`, and the first `bDescriptorType`.
+const HID_DESC_REPORT_LEN_OFFSET: usize = 7;
+
+/// `bDescriptorType` of a HID Report descriptor (USB HID 1.11 §7.1.1),
+/// requested with the standard `GET_DESCRIPTOR(Report)`.
+const DESC_TYPE_REPORT: u8 = 0x22;
+
 /// `bDescriptorType` of an endpoint descriptor (USB 2.0 §9.4 Table 9-5).
 const DESC_TYPE_ENDPOINT: u8 = 0x05;
 
@@ -765,6 +834,14 @@ const ENDPOINT_MAX_PACKET_MASK: u16 = 0x07FF;
 /// would break a following EP0 transfer (`UsbDevice::attach_root_port`).
 /// Held as the top byte of the 24-bit class triple ([`InterfaceInfo`]).
 const INTERFACE_CLASS_HID: u32 = 0x03;
+
+/// `bInterfaceProtocol` of a HID **keyboard** (USB HID 1.11 §4.2), the low
+/// byte of the 24-bit class triple.
+const INTERFACE_PROTOCOL_KEYBOARD: u32 = 0x01;
+
+/// `bInterfaceProtocol` of a HID **mouse** (USB HID 1.11 §4.3), the low byte
+/// of the 24-bit class triple. A keyboard is `0x01`.
+const INTERFACE_PROTOCOL_MOUSE: u32 = 0x02;
 
 /// `bDeviceClass` of a USB hub (USB 2.0 §11.23.1). The Pi 4B's onboard
 /// `2109:3431` VIA Labs hub reports this, so the keyboard plugged into a
@@ -888,7 +965,7 @@ const SPEED_LOW: u8 = 2;
 
 /// xHCI protocol speed ID for a high-speed device (§7.2.1): the speed of
 /// the Pi 4B's onboard hub.
-const SPEED_HIGH: u8 = 3;
+pub(crate) const SPEED_HIGH: u8 = 3;
 
 /// xHCI protocol speed ID for a `SuperSpeed` device (§7.2.1).
 const SPEED_SUPER: u8 = 4;
@@ -1121,6 +1198,13 @@ pub struct InterfaceInfo {
     /// it (speed-dependent units, decoded by `interrupt_interval`).
     /// `0` for a non-HID interface.
     pub int_b_interval: u8,
+    /// `wDescriptorLength` from the interface's HID class descriptor — the
+    /// byte length of its Report Descriptor to fetch with
+    /// `GET_DESCRIPTOR(Report)`. `0` when the interface declares no HID
+    /// descriptor (a non-HID interface, or a HID interface whose descriptor
+    /// was malformed), in which case the interface falls back to boot
+    /// protocol.
+    pub report_descriptor_len: u16,
     /// Device Context Index of the interface's first bulk-IN endpoint
     /// (§4.5.1: `2 * endpoint_number + 1`), read from its endpoint
     /// descriptor. `0` when the interface carries none — a DCI of zero
@@ -1197,6 +1281,9 @@ impl InterfaceInfo {
         // inside a skipped alternate setting.
         let mut interface: Option<(u8, u32)> = None;
         let mut int_endpoint: Option<(u8, u16, u8)> = None;
+        // `wDescriptorLength` of the current interface's HID descriptor, if it
+        // declares one — the length of the Report Descriptor to fetch.
+        let mut hid_report_len: Option<u16> = None;
         let mut bulk_in: [Option<(u8, u16)>; 2] = [None; 2];
         let mut bulk_out: [Option<(u8, u16)>; 2] = [None; 2];
         while offset + 2 <= buf.len() {
@@ -1214,6 +1301,7 @@ impl InterfaceInfo {
                         configuration_value,
                         &mut interface,
                         &mut int_endpoint,
+                        &mut hid_report_len,
                         &mut bulk_in,
                         &mut bulk_out,
                         &mut out,
@@ -1229,6 +1317,18 @@ impl InterfaceInfo {
                                 | (u32::from(buf[offset + 6]) << 8)
                                 | u32::from(buf[offset + 7]),
                         ));
+                    }
+                }
+                DESC_TYPE_HID if interface.is_some() && hid_report_len.is_none() => {
+                    // The HID descriptor's `wDescriptorLength` (its first
+                    // Report Descriptor's length); a descriptor too short to
+                    // carry the field is ignored, leaving the interface on the
+                    // boot-protocol fallback.
+                    if length > HID_DESC_REPORT_LEN_OFFSET + 1 {
+                        hid_report_len = Some(u16::from_le_bytes([
+                            buf[offset + HID_DESC_REPORT_LEN_OFFSET],
+                            buf[offset + HID_DESC_REPORT_LEN_OFFSET + 1],
+                        ]));
                     }
                 }
                 DESC_TYPE_ENDPOINT if interface.is_some() => {
@@ -1270,6 +1370,7 @@ impl InterfaceInfo {
             configuration_value,
             &mut interface,
             &mut int_endpoint,
+            &mut hid_report_len,
             &mut bulk_in,
             &mut bulk_out,
             &mut out,
@@ -1286,18 +1387,22 @@ impl InterfaceInfo {
     /// HID interface with no interrupt-IN endpoint is dropped (malformed —
     /// nothing to poll for reports), and an interface beyond the
     /// [`MAX_INTERFACES`] bound is ignored rather than trusted.
-    #[allow(clippy::similar_names)] // The `*2` names are the second pipes'
-                                    // own names beside their primaries — deliberate siblings.
+    #[allow(clippy::similar_names)]
+    // The `*2` names are the second pipes'
+    // own names beside their primaries — deliberate siblings.
+    #[allow(clippy::too_many_arguments)] // One decoder's collection state, threaded by reference.
     fn flush_interface(
         configuration_value: u8,
         interface: &mut Option<(u8, u32)>,
         int_endpoint: &mut Option<(u8, u16, u8)>,
+        hid_report_len: &mut Option<u16>,
         bulk_in: &mut [Option<(u8, u16)>; 2],
         bulk_out: &mut [Option<(u8, u16)>; 2],
         out: &mut [Option<Self>; MAX_INTERFACES],
         count: &mut usize,
     ) {
         let int = int_endpoint.take();
+        let report_descriptor_len = hid_report_len.take().unwrap_or(0);
         let [b_in, b_in2] = core::mem::take(bulk_in);
         let [b_out, b_out2] = core::mem::take(bulk_out);
         let Some((interface_number, class24)) = interface.take() else {
@@ -1323,6 +1428,7 @@ impl InterfaceInfo {
             int_dci,
             int_max_packet,
             int_b_interval,
+            report_descriptor_len,
             bulk_in_dci,
             bulk_in_max_packet,
             bulk_out_dci,
@@ -1354,6 +1460,28 @@ impl InterfaceInfo {
     #[must_use]
     pub const fn is_hid(&self) -> bool {
         self.class24 >> 16 == INTERFACE_CLASS_HID
+    }
+
+    /// Whether this is a HID **mouse** interface (`bInterfaceProtocol` = 2,
+    /// USB HID 1.11 §4.3). The pointer report rate is capped for such an
+    /// interface (its endpoint-context Interval is clamped to the pointer
+    /// minimum) so an aggressive gaming mouse cannot flood the HCD and its
+    /// class driver with polls.
+    #[must_use]
+    pub const fn is_mouse(&self) -> bool {
+        self.is_hid() && (self.class24 & 0xFF) == INTERFACE_PROTOCOL_MOUSE
+    }
+
+    /// Whether this is a HID **keyboard** interface (`bInterfaceProtocol` = 1,
+    /// USB HID 1.11 §4.2). A keyboard is driven in the standardised boot
+    /// protocol rather than report protocol: it reports only on a key-state
+    /// change (so it never causes the idle interrupt storm a report-streaming
+    /// mouse does), and the fixed 8-byte boot report the boot decoder consumes
+    /// avoids a report-descriptor parse that a composite keyboard's multiple
+    /// Report IDs (or an NKRO layout) can misread and silently drop.
+    #[must_use]
+    pub const fn is_keyboard(&self) -> bool {
+        self.is_hid() && (self.class24 & 0xFF) == INTERFACE_PROTOCOL_KEYBOARD
     }
 
     /// Whether the matched interface carries the bulk-IN **and** bulk-OUT
@@ -1557,7 +1685,7 @@ const EVENT_DRAIN_BOUND: usize = (XHCI_MAX_SLOTS + 1) * (INT_ARM_DEPTH + BULK_QU
 /// `bInterval` is in frames (1 ms): converted to 125µs microframes (×8)
 /// and reduced to its log2 exponent, clamped to the 3..=10 the periodic
 /// scheduler accepts. Derived per-endpoint, not hard-coded.
-fn interrupt_interval(speed: u8, b_interval: u8) -> u32 {
+pub(crate) fn interrupt_interval(speed: u8, b_interval: u8) -> u32 {
     let b_interval = b_interval.max(1);
     match speed {
         SPEED_FULL | SPEED_LOW => {
@@ -1567,6 +1695,34 @@ fn interrupt_interval(speed: u8, b_interval: u8) -> u32 {
         }
         _ => u32::from(b_interval - 1).min(15),
     }
+}
+
+/// The highest report rate a pointer (mouse) endpoint is polled at.
+///
+/// A cursor needs no more than ~100 updates/second to feel immediate;
+/// polling faster only multiplies controller interrupts and the per-report
+/// HCD→class-driver IPC round-trip for no user benefit — a 1000 Hz mouse
+/// otherwise woke both processes a thousand times a second while moving. The
+/// cap only *lowers* an aggressive endpoint's rate; a mouse that already
+/// polls slower keeps its own interval.
+const POINTER_MAX_REPORT_HZ: u32 = 100;
+
+/// The xHCI endpoint-context Interval exponent (period = `2^Interval · 125µs`,
+/// §6.2.3.6) for the fastest poll that still respects
+/// [`POINTER_MAX_REPORT_HZ`]: the smallest exponent whose period is at least
+/// `1 / POINTER_MAX_REPORT_HZ`. Derived from the rate, not hard-coded — at
+/// 100 Hz this is `7` (128 microframes = 16 ms, ≈62.5 Hz, the nearest
+/// power-of-two period at or under the cap). An interrupt endpoint's Interval
+/// for a mouse is raised to at least this, never lowered below the device's
+/// own.
+pub(crate) const fn pointer_min_interval() -> u32 {
+    // Longest acceptable period per report, in 125µs microframes.
+    let min_microframes = 1_000_000 / POINTER_MAX_REPORT_HZ / 125;
+    let mut exponent = 0;
+    while (1u32 << exponent) < min_microframes {
+        exponent += 1;
+    }
+    exponent
 }
 
 /// Input control context dwords: dword 1 carries the Add Context
@@ -1709,12 +1865,15 @@ pub enum EnumStage {
     ConfigureEndpoint = 6,
     /// `SET_CONFIGURATION` control transfer (§9.4.7).
     SetConfiguration = 7,
-    /// HID `SET_PROTOCOL(boot)` class request (HID 1.11 §7.2.6).
-    SetProtocol = 8,
+    /// `GET_DESCRIPTOR(Report)` control transfer (HID 1.11 §7.1.1), read per
+    /// HID interface to run it in report protocol.
+    GetReportDescriptor = 8,
+    /// HID `SET_PROTOCOL` class request (HID 1.11 §7.2.6).
+    SetProtocol = 9,
     /// HID `SET_IDLE(indefinite)` class request (HID 1.11 §7.2.4).
-    SetIdle = 9,
+    SetIdle = 10,
     /// Enumeration completed: the device is configured and ready for a class URB.
-    Configured = 10,
+    Configured = 11,
 }
 
 impl EnumStage {
@@ -1925,9 +2084,34 @@ struct DeviceState {
     /// from its endpoint descriptor during enumeration (§4.5.1).
     /// [`DCI_CONTROL`] when the interface carries none (a bulk interface).
     int_dci: u8,
+    /// `wMaxPacketSize` (bits 0:10) of the interrupt-IN endpoint, read from
+    /// its endpoint descriptor during enumeration. A single service interval
+    /// delivers at most this many bytes (the endpoint's Max ESIT payload for
+    /// a boot/report HID device), so it is the length each interrupt-IN
+    /// transfer is armed to ([`Self::int_capture_len`]). `0` when the
+    /// interface carries no interrupt-IN endpoint.
+    ///
+    /// Arming a transfer longer than this makes a full/low-speed endpoint's
+    /// periodic split (through a high-speed hub's transaction translator)
+    /// exceed the per-interval budget the TT scheduled, which the controller
+    /// reports as a Split Transaction Error — the metal "keyboard registers
+    /// no keypresses" defect for an 8-byte-max-packet keyboard behind the
+    /// Pi 4 hub. A directly-attached high-speed device tolerated the
+    /// over-length transfer (it short-packets with no split), which is why
+    /// only the hub-attached keyboard failed.
+    int_max_packet: u16,
     /// Interrupt-IN transfer ring over the region's `int_ring`, live only
     /// for a HID interface.
     int_ring: Option<ProducerRing>,
+    /// The parsed HID Report Descriptor for this interface, present when the
+    /// device runs in **report protocol** (`SET_IDLE` then quiesces an idle
+    /// device instead of it streaming a duplicate report every interval). Each
+    /// captured report-protocol report is rewritten into the fixed boot layout
+    /// through this map before it is buffered ([`UsbDevice::capture_report_event`]),
+    /// so the class drivers keep seeing boot-format reports. `None` when the
+    /// interface fell back to boot protocol (the descriptor was unreadable or
+    /// unparsable), in which case reports are buffered as delivered.
+    report_map: Option<tairix_hid::HidReportMap>,
     /// Interrupt-IN reports captured off the controller's ring, buffered
     /// until a class-driver URB collects them. Filled by
     /// [`UsbDevice::capture_report_event`] on every controller interrupt
@@ -1990,9 +2174,52 @@ struct DeviceState {
     /// only place the controller's verdict on the device's own endpoint can
     /// still be read. `0` until a report has been rejected.
     last_report_fault_code: u8,
+    /// Bytes of HID Report Descriptor this interface declared, captured at
+    /// enumeration for the metal report diagnostic ([`UsbDevice::hid_enum_diag`]).
+    /// `0` when the interface declared none (a bulk interface, or a HID device
+    /// with no report descriptor → boot-protocol fallback).
+    report_descriptor_len: u16,
+}
+
+/// One-shot view of an interface's HID enumeration decision, for the
+/// host-controller driver to log on metal (`plans/USB.md`; QEMU models no Pi
+/// USB, so this is the only window on how a device's reports are read). All
+/// fields are derived from what enumeration recorded — never assumed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HidEnumDiag {
+    /// Bytes of HID Report Descriptor the interface declared (`0` = none).
+    pub report_descriptor_len: u16,
+    /// `true` when the interface runs in **report protocol** (a report map was
+    /// parsed); `false` on the boot-protocol fallback.
+    pub report_protocol: bool,
+    /// The parsed report-map summary, `None` on the boot fallback.
+    pub map: Option<tairix_hid::ReportMapSummary>,
+    /// The interrupt-IN endpoint's `wMaxPacketSize`.
+    pub int_max_packet: u16,
+    /// The byte length each interrupt-IN transfer is armed to (derived from
+    /// `int_max_packet`), so a metal capture shows the on-wire transfer size.
+    pub capture_len: u16,
 }
 
 impl DeviceState {
+    /// Byte length one interrupt-IN transfer is armed to for this device: the
+    /// endpoint's `wMaxPacketSize` ([`Self::int_max_packet`]), never more than
+    /// the [`CAPTURE_LEN`] capture buffer. A single service interval delivers
+    /// at most one packet for a boot/report HID endpoint, so this captures a
+    /// whole report while never asking a full/low-speed endpoint's transaction
+    /// translator for more than the per-interval budget it scheduled (which
+    /// would fault as a Split Transaction Error). Falls back to [`CAPTURE_LEN`]
+    /// only if the packet size is unknown, which never happens for a live
+    /// interrupt endpoint.
+    fn int_capture_len(&self) -> usize {
+        let packet = usize::from(self.int_max_packet).min(CAPTURE_LEN);
+        if packet == 0 {
+            CAPTURE_LEN
+        } else {
+            packet
+        }
+    }
+
     /// The configured DCI of `pipe` (`0` = the pipe does not exist).
     fn bulk_dci(&self, pipe: BulkPipe) -> u8 {
         match (pipe.direction, pipe.secondary) {
@@ -3180,10 +3407,15 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         let region = self.device(index).ok_or(DriverError::NotFound)?.region;
         let bufs_phys = self.phys_of(region.report_bufs)?;
         let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
+        // Arm the transfer to the endpoint's own packet size, never the full
+        // capture buffer: a full/low-speed endpoint's periodic split through a
+        // high-speed hub faults (Split Transaction Error) when asked for more
+        // than the per-interval budget the transaction translator scheduled.
+        let capture_len = device.int_capture_len();
         let ring = device.int_ring.as_mut().ok_or(DriverError::DeviceFault)?;
         let slot = ring.enqueue_slot();
-        let buffer = bufs_phys + (slot * REPORT_LEN) as u64;
-        let report_len = u32::try_from(REPORT_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
+        let buffer = bufs_phys + (slot * CAPTURE_LEN) as u64;
+        let report_len = u32::try_from(capture_len).map_err(|_| DriverError::LengthOutOfRange)?;
         let normal = Trb::new(
             TrbType::Normal,
             buffer,
@@ -3517,25 +3749,27 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         self.stage = EnumStage::SetConfiguration;
         self.control(setup_set_configuration(first.configuration_value), 0)?;
 
-        for (_, iface) in plan.iter().flatten() {
-            if iface.is_hid() {
-                // `SET_PROTOCOL(boot)` per HID interface; a device that
-                // does not implement it STALLs, which is tolerated.
-                self.stage = EnumStage::SetProtocol;
-                self.control_optional(setup_set_protocol_boot(iface.interface_number))?;
-                // `SET_IDLE(indefinite)` so the device reports only when its
-                // report data changes and NAKs otherwise. Without it a boot
-                // mouse streams duplicate reports every polling interval after
-                // the first movement — a controller interrupt storm on an idle
-                // device — and a boot keyboard auto-repeats. A device that does
-                // not implement the request STALLs, which is tolerated.
-                self.stage = EnumStage::SetIdle;
-                self.control_optional(setup_set_idle_indefinite(iface.interface_number))?;
+        // Bring each HID interface up in **report protocol** where its Report
+        // Descriptor can be parsed: report protocol is what lets `SET_IDLE`
+        // quiesce an idle device, so it reports only on change instead of
+        // streaming a duplicate every polling interval (some devices honour
+        // `SET_IDLE` only in report protocol — the on-metal mouse whose idle
+        // reports pegged a core). An interface whose descriptor cannot be read
+        // or parsed falls back to boot protocol, unchanged. The parsed map is
+        // kept per plan slot so the installed device normalises its
+        // report-protocol reports back into the boot layout the class drivers
+        // consume.
+        let mut maps: [Option<tairix_hid::HidReportMap>; MAX_INTERFACES] = [None; MAX_INTERFACES];
+        for (slot_pos, entry) in plan.iter().enumerate() {
+            if let Some((_, iface)) = entry {
+                if iface.is_hid() {
+                    maps[slot_pos] = self.configure_hid_protocol(iface)?;
+                }
             }
         }
 
         let mut installed = false;
-        for (entry, rings_slot) in plan.iter().zip(rings.iter_mut()) {
+        for (slot_pos, (entry, rings_slot)) in plan.iter().zip(rings.iter_mut()).enumerate() {
             let (Some((target, iface)), Some(configured)) = (entry, rings_slot.take()) else {
                 continue;
             };
@@ -3559,6 +3793,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 iface,
                 int_dci,
                 configured.int_ring,
+                maps[slot_pos],
                 configured.bulk_rings,
             );
             installed = true;
@@ -3575,6 +3810,99 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         }
         self.stage = EnumStage::Configured;
         Ok(descriptor)
+    }
+
+    /// Bring one HID `interface` up in the protocol it needs, returning the
+    /// parsed [`tairix_hid::HidReportMap`] used to normalise a report-protocol
+    /// interface's reports back into the boot layout, or `None` when the
+    /// interface runs in **boot protocol** (the report is already in the boot
+    /// layout).
+    ///
+    /// Report protocol is used only where a device needs it to fall silent at
+    /// idle. The on-metal mouse streams a duplicate report every polling
+    /// interval in **boot** protocol — it ignores `SET_IDLE` there and only
+    /// honours it in report protocol — so a pointer runs in report protocol,
+    /// its report-descriptor layout parsed back into the boot layout the class
+    /// driver consumes. A **keyboard** needs none of that: it reports only on
+    /// a key-state change (so it never causes the idle interrupt storm a
+    /// report-streaming mouse does) and stays in the standardised boot
+    /// protocol — the fixed 8-byte report the boot decoder is built for —
+    /// rather than a report-descriptor parse a composite keyboard's multiple
+    /// Report IDs (or an NKRO layout) can misread and silently drop (the
+    /// on-metal keyboard whose native report arrived under a Report ID our
+    /// parser had not pinned to, dropping every keypress).
+    ///
+    /// In every case `SET_IDLE(indefinite)` is issued so an idle device
+    /// reports only when its report data changes. All class requests are
+    /// optional (a device that STALLs one simply keeps its current mode);
+    /// only a non-STALL fault fails the enumeration.
+    ///
+    /// # Errors
+    ///
+    /// A non-STALL controller/device fault from a class request or the
+    /// descriptor read.
+    fn configure_hid_protocol(
+        &mut self,
+        interface: &InterfaceInfo,
+    ) -> Result<Option<tairix_hid::HidReportMap>, DriverError> {
+        // A keyboard stays in boot protocol; only a pointer is driven in
+        // report protocol (and only then is its Report Descriptor read).
+        let map = if interface.is_keyboard() {
+            None
+        } else {
+            self.read_and_parse_report_descriptor(interface)?
+        };
+        self.stage = EnumStage::SetProtocol;
+        let protocol = if map.is_some() {
+            setup_set_protocol_report(interface.interface_number)
+        } else {
+            setup_set_protocol_boot(interface.interface_number)
+        };
+        self.control_optional(protocol)?;
+        self.stage = EnumStage::SetIdle;
+        self.control_optional(setup_set_idle_indefinite(interface.interface_number))?;
+        Ok(map)
+    }
+
+    /// Read the HID `interface`'s Report Descriptor over EP0 and parse it into
+    /// the boot vocabulary, or `None` when the interface declares no HID
+    /// descriptor, the standard `GET_DESCRIPTOR(Report)` read faults/STALLs,
+    /// or the descriptor is unparsable — the caller then uses boot protocol.
+    /// A refused descriptor never fails the enumeration; only a non-STALL
+    /// controller fault does.
+    ///
+    /// # Errors
+    ///
+    /// A non-STALL controller/device fault, or a register-window fault
+    /// reading the delivered bytes.
+    fn read_and_parse_report_descriptor(
+        &mut self,
+        interface: &InterfaceInfo,
+    ) -> Result<Option<tairix_hid::HidReportMap>, DriverError> {
+        let declared = usize::from(interface.report_descriptor_len);
+        if declared == 0 {
+            return Ok(None);
+        }
+        let want = declared
+            .min(tairix_hid::MAX_REPORT_DESCRIPTOR)
+            .min(CTRL_DATA_LEN);
+        let want_u16 = u16::try_from(want).map_err(|_| DriverError::LengthOutOfRange)?;
+        let want_u32 = u32::try_from(want).map_err(|_| DriverError::LengthOutOfRange)?;
+        self.stage = EnumStage::GetReportDescriptor;
+        let setup = setup_get_report_descriptor(interface.interface_number, want_u16);
+        // A device that refuses the request (a STALL) keeps boot protocol.
+        let transferred = match self.control(setup, want_u32) {
+            Ok(transferred) => usize::try_from(transferred).unwrap_or(0),
+            Err(DriverError::EndpointStalled) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        let read = transferred.min(want);
+        if read == 0 {
+            return Ok(None);
+        }
+        let mut buf = [0u8; CTRL_DATA_LEN];
+        self.dma.read(self.layout.ctrl_data, &mut buf[..read])?;
+        Ok(tairix_hid::parse_report_descriptor(&buf[..read]))
     }
 
     /// Plan which interfaces of the decoded set are served and at which
@@ -3683,7 +4011,15 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             &link.to_bytes(),
         )?;
         let max_packet = u32::from(iface.int_max_packet);
-        let interval = interrupt_interval(base.speed, iface.int_b_interval);
+        let mut interval = interrupt_interval(base.speed, iface.int_b_interval);
+        // Cap a mouse's poll rate: a gaming mouse advertising a 1 ms (1000 Hz)
+        // interval otherwise wakes the HCD and its class driver a thousand
+        // times a second while moving. Only ever slows an aggressive endpoint
+        // down to the pointer cap; a mouse polling slower keeps its interval,
+        // and a keyboard is never touched.
+        if iface.is_mouse() {
+            interval = interval.max(pointer_min_interval());
+        }
         self.write_input_ctx(
             0,
             &input_control_dwords(1 | (1u32 << u32::from(iface.int_dci))),
@@ -3728,6 +4064,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         interface: &InterfaceInfo,
         int_dci: u8,
         int_ring: Option<ProducerRing>,
+        report_map: Option<tairix_hid::HidReportMap>,
         bulk_rings: Option<BulkRings>,
     ) {
         let (bulk_in_ring, bulk_out_ring, bulk_in2_ring, bulk_out2_ring) = match bulk_rings {
@@ -3763,7 +4100,9 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 interface_class: interface.class24,
             },
             int_dci,
+            int_max_packet: interface.int_max_packet,
             int_ring,
+            report_map,
             reports: Fifo::new(),
             report_fault: None,
             dropped_reports: 0,
@@ -3782,6 +4121,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             pending_bulk: Fifo::new(),
             aborted_bulk: Fifo::new(),
             last_report_fault_code: 0,
+            report_descriptor_len: interface.report_descriptor_len,
         });
     }
 
@@ -5985,6 +6325,31 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             .map_or(0, |device| device.last_report_fault_code)
     }
 
+    /// The HID enumeration decision for the interface at `index`, or `None`
+    /// when no device is live there or the interface carries no interrupt-IN
+    /// endpoint (a bulk interface has no report path to diagnose).
+    ///
+    /// A one-shot diagnostic the host-controller driver logs when it publishes
+    /// the interface node, so a metal capture shows whether the device runs in
+    /// report or boot protocol, the parsed field layout, and the armed
+    /// transfer size — the only window on the live path (QEMU models no Pi
+    /// USB). It mints no resources and takes no capability.
+    #[must_use]
+    pub fn hid_enum_diag(&self, index: usize) -> Option<HidEnumDiag> {
+        let device = self.device(index)?;
+        if device.int_dci == DCI_CONTROL || device.int_ring.is_none() {
+            return None;
+        }
+        let capture_len = u16::try_from(device.int_capture_len()).unwrap_or(u16::MAX);
+        Some(HidEnumDiag {
+            report_descriptor_len: device.report_descriptor_len,
+            report_protocol: device.report_map.is_some(),
+            map: device.report_map.map(|map| map.summary()),
+            int_max_packet: device.int_max_packet,
+            capture_len,
+        })
+    }
+
     /// Read the controller's `USBCMD` for a one-shot bring-up diagnostic
     /// (delegates to [`Xhci::read_usbcmd`]), or `None` if the read faults.
     pub fn read_usbcmd(&mut self) -> Option<u32> {
@@ -6181,7 +6546,11 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
         }
         let residual =
             usize::try_from(event.transfer_residual()).map_err(|_| DriverError::DeviceFault)?;
-        let len = REPORT_LEN
+        // The transfer was armed to the endpoint's packet size; the residual is
+        // the tail the device left untransferred, so the delivered report is
+        // the difference.
+        let len = device
+            .int_capture_len()
             .checked_sub(residual)
             .ok_or(DriverError::DeviceFault)?;
         if len > buf.len() {
@@ -6194,7 +6563,7 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
             return Ok(None);
         }
         self.dma
-            .read(region.report_bufs + slot * REPORT_LEN, &mut buf[..len])?;
+            .read(region.report_bufs + slot * CAPTURE_LEN, &mut buf[..len])?;
         Ok(Some(len))
     }
 
@@ -6811,12 +7180,12 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// report must not fault unrelated work. Recorded faults surface only
     /// through [`Self::next_report`].
     fn capture_report_event(&mut self, index: usize, event: Trb) -> Result<(), DriverError> {
-        let mut data = [0u8; REPORT_LEN];
+        let mut data = [0u8; CAPTURE_LEN];
         let decoded = self.decode_transfer_report(index, event, &mut data);
         self.retire_interrupt_transfer(index)?;
         match decoded {
             Ok(Some(len)) => {
-                self.enqueue_report(index, &data[..len]);
+                self.enqueue_captured_report(index, &data[..len]);
                 self.ensure_reports_armed(index)?;
             }
             Ok(None) => {
@@ -6850,6 +7219,35 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             },
         }
         Ok(())
+    }
+
+    /// Buffer a captured interrupt-IN report for device `index`, first
+    /// normalising a report-protocol report into the fixed boot layout the
+    /// class drivers consume when the interface runs in report protocol
+    /// ([`DeviceState::report_map`]).
+    ///
+    /// A report that does not match this interface's map — a different Report
+    /// ID (a sibling collection sharing the endpoint) or one truncated below
+    /// the fields the map names — is dropped, exactly like an idle no-op
+    /// report: it is not this interface's mouse/keyboard report, so nothing is
+    /// buffered and the class driver's URB stays parked. An interface on the
+    /// boot-protocol fallback (`report_map` `None`) buffers the report as
+    /// delivered.
+    fn enqueue_captured_report(&mut self, index: usize, raw: &[u8]) {
+        let map = self.device(index).and_then(|device| device.report_map);
+        let Some(map) = map else {
+            // Boot-protocol fallback: the report is buffered as delivered.
+            self.enqueue_report(index, raw);
+            return;
+        };
+        // Report-protocol normalisation may drop a report (a report-ID
+        // mismatch — a sibling collection sharing the endpoint — or a field
+        // past the captured bytes), exactly like an idle no-op: nothing is
+        // buffered and the class driver's URB stays parked.
+        let mut boot = [0u8; REPORT_LEN];
+        if let Some(n) = map.normalize(raw, &mut boot) {
+            self.enqueue_report(index, &boot[..n]);
+        }
     }
 
     /// Buffer one decoded report for device `index`, dropping the **oldest**

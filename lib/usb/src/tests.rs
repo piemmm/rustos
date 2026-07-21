@@ -10,10 +10,11 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::device::{
-    hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child, AttachOutcome,
-    BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage, EventWait, HubEvent,
-    InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH,
-    MAX_HUB_DEPTH, REPORT_LEN, REPORT_QUEUE_CAP, RING_TRBS,
+    hub_port_connected, hub_port_enabled, hub_port_speed, interrupt_interval, pointer_min_interval,
+    route_for_child, AttachOutcome, BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage,
+    EventWait, HubEvent, InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, CAPTURE_LEN,
+    EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, MAX_HUB_DEPTH, REPORT_LEN, REPORT_QUEUE_CAP,
+    RING_TRBS, SPEED_HIGH,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -478,6 +479,76 @@ const MOCK_MOUSE_CONFIG_DESCRIPTOR: [u8; 25] = [
     0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
 ];
 
+/// A boot-mouse configuration that also carries a **HID class descriptor**
+/// (type `0x21`) declaring a Report Descriptor length: interface `0x03_01_02`
+/// (HID boot mouse), HID descriptor pointing at a 50-byte Report Descriptor,
+/// then the interrupt-IN endpoint. `wTotalLength` = 34 (a 9-byte config, 9-byte
+/// interface, 9-byte HID, and 7-byte endpoint descriptor). A device serving
+/// this together with [`MOCK_MOUSE_REPORT_DESCRIPTOR`] runs in report protocol
+/// (so `SET_IDLE` quiesces it).
+const MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR: [u8; 34] = [
+    // Configuration: wTotalLength=34, 1 interface.
+    0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: class=0x03 (HID), sub=0x01 (boot), protocol=0x02 (mouse).
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
+    // HID descriptor (type 0x21): bcdHID 1.11, one Report Descriptor
+    // (type 0x22) of wDescriptorLength = 50.
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x32, 0x00, //
+    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=4, bInterval=10.
+    0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
+];
+
+/// The canonical boot-mouse Report Descriptor (USB HID 1.11 Appendix E.10),
+/// the model answers `GET_DESCRIPTOR(Report)` with: 3 button bits + 5 padding
+/// bits, then 8-bit relative X and Y. It parses to the boot-mouse layout, so a
+/// 3-byte `[buttons, x, y]` report-protocol report normalises to the 4-byte
+/// `[buttons, x, y, wheel=0]` boot report.
+const MOCK_MOUSE_REPORT_DESCRIPTOR: [u8; 50] = [
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+    0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+    0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+    0xC0, 0xC0,
+];
+
+/// A boot-keyboard configuration whose HID class descriptor points at a
+/// **Report-ID** Report Descriptor and whose interrupt-IN endpoint carries a
+/// nine-byte max packet: interface `0x03_01_01` (HID boot keyboard), a 47-byte
+/// Report Descriptor ([`MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR`]), then a 9-byte
+/// interrupt-IN endpoint. A device serving this runs in report protocol and
+/// emits a nine-byte report (the leading Report ID byte) — the report that
+/// used to be clipped to eight bytes and dropped.
+const MOCK_REPORT_ID_KEYBOARD_CONFIG_DESCRIPTOR: [u8; 34] = [
+    // Configuration: wTotalLength=34, 1 interface.
+    0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: class=0x03 (HID), sub=0x01 (boot), protocol=0x01 (keyboard).
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, //
+    // HID descriptor (type 0x21): one Report Descriptor of length 47.
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x2F, 0x00, //
+    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=9, bInterval=10.
+    0x07, 0x05, 0x81, 0x03, 0x09, 0x00, 0x0A,
+];
+
+/// As [`MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR`], but the interrupt-IN endpoint
+/// advertises `bInterval` = 4 — a 1 ms (1000 Hz) high-speed poll, the
+/// aggressive rate a gaming mouse reports. The driver must clamp it down to
+/// the pointer cap rather than poll it 1000 times a second.
+const MOCK_FAST_MOUSE_REPORT_CONFIG_DESCRIPTOR: [u8; 34] = [
+    0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x32, 0x00, //
+    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=4, bInterval=4 (1 ms HS).
+    0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x04,
+];
+
+/// A keyboard Report Descriptor that declares a Report ID (item `0x85 0x01`),
+/// so its reports are prefixed with the ID byte: modifiers at bit 8, the
+/// reserved byte at 16, and the six-key array at bit 24 — a nine-byte report.
+const MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR: [u8; 47] = [
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00,
+    0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01, 0x95, 0x06,
+    0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0,
+];
+
 /// The device descriptor fixture for a **composite** wireless
 /// keyboard+mouse receiver (vendor `0x046D` product `0xC534` — a generic
 /// unifying-receiver identity): one device whose single configuration
@@ -802,11 +873,30 @@ struct MockXhci {
     /// addressed keyboard never typed. The mock gates
     /// [`Self::process_int_ring`] on it being non-zero.
     int_max_esit: u32,
+    /// The **Interval** exponent the interrupt-IN Configure Endpoint carried
+    /// in the endpoint context (§6.2.3.6 dword 0 bits 16:23): the xHCI poll
+    /// period is `2^Interval · 125µs`. Captured so a test can assert a mouse's
+    /// poll rate is capped below its advertised interval.
+    int_interval: u32,
+    /// The **TRB Transfer Length** the most recent interrupt-IN Normal TRB was
+    /// armed with (§6.4.1.1 dword 2 bits 0:16). The driver must arm this to the
+    /// endpoint's `wMaxPacketSize`, not the full capture buffer: a full/low-speed
+    /// endpoint's periodic split faults (Split Transaction Error) when the
+    /// transfer exceeds the transaction translator's per-interval budget. `0`
+    /// until an interrupt-IN transfer has been serviced.
+    int_armed_len: u32,
     /// The configuration-descriptor fixture answered for the keyboard
     /// (the non-hub device). A test can point this at a fixture whose
     /// interrupt endpoint is not endpoint 1 to prove the driver reads
     /// the endpoint's real DCI rather than assuming it.
     keyboard_config: &'static [u8],
+    /// The Report Descriptor the model answers `GET_DESCRIPTOR(Report)` with
+    /// (`None` = the model STALLs the request, so enumeration falls back to
+    /// boot protocol — the default, matching a device that serves no report
+    /// descriptor). When set, the enumeration reads and parses it, runs the
+    /// interface in report protocol, and normalises its reports to the boot
+    /// layout.
+    report_descriptor: Option<&'static [u8]>,
     /// Device Context Index the interrupt-IN Configure Endpoint named,
     /// derived from its Add Context flags (§6.2.3) rather than assumed.
     /// The mock posts interrupt Transfer Events with it, so a keyboard
@@ -1120,7 +1210,10 @@ impl MockXhci {
             hub_ctx_num_ports: 0,
             hub_ctx_tt_think_time: 0,
             int_max_esit: 0,
+            int_interval: 0,
+            int_armed_len: 0,
             keyboard_config: &MOCK_CONFIG_DESCRIPTOR,
+            report_descriptor: None,
             int_dci: 3,
             msd_device: false,
             msd_downstream_port: 0,
@@ -1261,6 +1354,40 @@ impl MockXhci {
         let hi = (count >> 5) & 0x1F;
         mock.hcsparams2 = (lo << 27) | (hi << 21);
         mock.pagesize = 1;
+        mock
+    }
+
+    /// As [`Self::with_device`], but the attached device serves a HID Report
+    /// Descriptor ([`MOCK_MOUSE_REPORT_DESCRIPTOR`]) and a configuration that
+    /// declares it ([`MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR`]), so enumeration
+    /// reads and parses it and runs the mouse in **report protocol** — the
+    /// mode in which `SET_IDLE` quiesces the device — normalising its
+    /// report-protocol reports back into the boot layout.
+    fn with_report_mouse(mem: &SharedMem) -> Self {
+        let mut mock = Self::with_device(mem);
+        mock.keyboard_config = &MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR;
+        mock.report_descriptor = Some(&MOCK_MOUSE_REPORT_DESCRIPTOR);
+        mock
+    }
+
+    /// As [`Self::with_report_mouse`], but a keyboard whose Report Descriptor
+    /// declares a Report ID ([`MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR`]) and whose
+    /// interrupt-IN endpoint carries a nine-byte report — the shape that used
+    /// to be clipped to the eight-byte capture buffer and dropped.
+    fn with_report_id_keyboard(mem: &SharedMem) -> Self {
+        let mut mock = Self::with_device(mem);
+        mock.keyboard_config = &MOCK_REPORT_ID_KEYBOARD_CONFIG_DESCRIPTOR;
+        mock.report_descriptor = Some(&MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR);
+        mock
+    }
+
+    /// As [`Self::with_report_mouse`], but the mouse advertises a 1 ms
+    /// (1000 Hz) interrupt interval ([`MOCK_FAST_MOUSE_REPORT_CONFIG_DESCRIPTOR`]),
+    /// so a test can prove the driver caps the pointer poll rate.
+    fn with_fast_report_mouse(mem: &SharedMem) -> Self {
+        let mut mock = Self::with_device(mem);
+        mock.keyboard_config = &MOCK_FAST_MOUSE_REPORT_CONFIG_DESCRIPTOR;
+        mock.report_descriptor = Some(&MOCK_MOUSE_REPORT_DESCRIPTOR);
         mock
     }
 
@@ -1898,6 +2025,8 @@ impl MockXhci {
             // Max ESIT Payload Lo (§6.2.3.8 dword 4 bits 16:31): the
             // periodic scheduler reserves no bandwidth when it is zero.
             self.int_max_esit = (int_ctx[4] >> 16) & 0xFFFF;
+            // Interval exponent (§6.2.3.6 dword 0 bits 16:23).
+            self.int_interval = (int_ctx[0] >> 16) & 0xFF;
             self.int_base = self.ep_ctx_dequeue(ep_ctx_off);
             self.int_index = 0;
             self.int_cycle = true;
@@ -2187,6 +2316,21 @@ impl MockXhci {
                     return;
                 }
             }
+            // Standard GET_DESCRIPTOR(Report) to an interface (HID 1.11
+            // §7.1.1): deliver the scripted Report Descriptor so enumeration
+            // runs report protocol, or STALL when none is set — a device that
+            // serves no report descriptor, for which the driver falls back to
+            // boot protocol.
+            (0x81, 0x06) if setup[3] == 0x22 => {
+                let Some(report_descriptor) = self.report_descriptor else {
+                    self.ep0_halted = true;
+                    self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+                    return;
+                };
+                if !self.deliver_in_data(data, report_descriptor, w_length, status_addr) {
+                    return;
+                }
+            }
             // Class GET_DESCRIPTOR(hub) (USB 2.0 §11.24.2.5 / USB 3.2
             // §10.16.2.4) — the hub serves only its own protocol's type.
             (0xA0, 0x06) if setup[3] == 0x29 || setup[3] == 0x2A => {
@@ -2331,6 +2475,7 @@ impl MockXhci {
             }
             self.int_index = index;
             self.int_cycle = cycle;
+            self.int_armed_len = trb.status;
             self.pending_reports.pop_front();
             self.write_mem(trb.parameter, &report);
             let residual = if self.forge_report_residual {
@@ -4303,6 +4448,221 @@ fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
 }
 
 #[test]
+fn decode_all_captures_the_hid_report_descriptor_length() {
+    // A configuration carrying a HID class descriptor exposes its Report
+    // Descriptor length, so enumeration knows how many bytes to fetch.
+    let ifaces = InterfaceInfo::decode_all(&MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR).expect("decodes");
+    let iface = ifaces[0].expect("one interface");
+    assert!(iface.is_hid());
+    assert_eq!(iface.report_descriptor_len, 50);
+    // A configuration with no HID descriptor reports a zero length, so the
+    // interface falls back to boot protocol.
+    let plain = InterfaceInfo::decode_all(&MOCK_MOUSE_CONFIG_DESCRIPTOR).expect("decodes");
+    assert_eq!(plain[0].expect("one interface").report_descriptor_len, 0);
+}
+
+#[test]
+fn a_report_protocol_mouse_is_configured_and_normalizes_reports() {
+    // A mouse whose Report Descriptor can be read and parsed is driven in
+    // report protocol — SET_PROTOCOL(report), wValue 1 — so SET_IDLE quiesces
+    // it (the on-metal mouse that streamed a duplicate report every polling
+    // interval in boot protocol and pegged a core). Its report-protocol
+    // reports are normalized back into the boot layout the class driver reads.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_report_mouse(&mem), &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the report-protocol mouse enumerates");
+    assert_eq!(
+        device.host_mut().protocol,
+        Some(1),
+        "report protocol selected so SET_IDLE takes effect"
+    );
+    assert_eq!(
+        device.host_mut().idle_value,
+        Some(0),
+        "SET_IDLE(indefinite) issued for all reports"
+    );
+
+    // The enumeration diagnostic (the payload-free window a metal boot logs,
+    // as QEMU models no Pi USB) reports report protocol with the parsed
+    // pointer field layout.
+    let enum_diag = device
+        .hid_enum_diag(0)
+        .expect("a HID interface has an enumeration diagnostic");
+    assert!(enum_diag.report_protocol, "the mouse runs report protocol");
+    assert!(
+        enum_diag.map.is_some_and(|map| !map.is_keyboard),
+        "a parsed mouse report map, not a keyboard"
+    );
+
+    // A report-protocol report [buttons=right, x=+3, y=-2] normalizes to the
+    // 4-byte boot report [buttons, x, y, wheel=0].
+    arm_report_request(&mut device);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x02, 0x03, 0xFE]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(0, &mut buf)
+        .expect("a report drains")
+        .expect("a normalized report is available");
+    assert_eq!(len, 4, "the normalized boot mouse report is four bytes");
+    assert_eq!(buf[0], 0x02, "the button byte");
+    assert_eq!(buf[1], 3, "the X delta");
+    assert_eq!(i8::from_le_bytes([buf[2]]), -2, "the Y delta");
+    assert_eq!(buf[3], 0, "no wheel field, so a zero wheel byte");
+}
+
+#[test]
+fn a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses() {
+    // The metal defect: a composite keyboard streamed its native keyboard
+    // report under a Report ID the descriptor parser had not pinned to (it
+    // pinned the first keyboard collection's ID, but the device reported under
+    // a later one), so report-protocol normalisation dropped every keypress. A
+    // keyboard needs none of report protocol — it reports only on a key-state
+    // change and so never causes the idle interrupt storm a mouse does — so it
+    // is driven in the standardised boot protocol, whose fixed 8-byte report
+    // the boot decoder consumes directly, regardless of what its Report
+    // Descriptor declares. This fixture's descriptor *parses* as a keyboard
+    // (it declares a Report ID); the interface must still be boot protocol.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_report_id_keyboard(&mem), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the keyboard enumerates");
+    assert_eq!(
+        device.host_mut().protocol,
+        Some(0),
+        "boot protocol for a keyboard, not report protocol"
+    );
+
+    // The enumeration diagnostic confirms boot protocol: no report map is used,
+    // so no Report-ID demux can drop the device's reports.
+    let enum_diag = device
+        .hid_enum_diag(0)
+        .expect("a HID interface has an enumeration diagnostic");
+    assert!(
+        !enum_diag.report_protocol,
+        "the keyboard interface runs boot protocol"
+    );
+    assert!(enum_diag.map.is_none(), "no report map in boot protocol");
+
+    // A standard 8-byte boot keyboard report [modifiers, reserved, k1..k6] is
+    // delivered as-is (LeftShift held, key A pressed).
+    arm_report_request(&mut device);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x02, 0x00, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(0, &mut buf)
+        .expect("a report drains")
+        .expect("the keyboard report is delivered, not dropped");
+    assert_eq!(len, REPORT_LEN, "the boot keyboard report");
+    assert_eq!(buf[0], 0x02, "the LeftShift modifier");
+    assert_eq!(buf[2], 0x04, "the key");
+
+    // The transfer is still armed to the endpoint's own wMaxPacketSize, never
+    // the full capture buffer (which would fault a hub's TT split).
+    assert_eq!(
+        device.host_mut().int_armed_len,
+        9,
+        "armed to the endpoint max packet, not the capture buffer"
+    );
+}
+
+#[test]
+fn a_report_transfer_is_armed_to_the_endpoint_max_packet_not_the_capture_buffer() {
+    // The metal "keyboard registers no keypresses" defect for a keyboard behind
+    // the Pi 4 hub. Arming every interrupt-IN transfer to the full 64-byte
+    // capture buffer made a full/low-speed endpoint's periodic split through
+    // the hub's transaction translator exceed the per-interval budget the TT
+    // scheduled, which the controller reported as a Split Transaction Error and
+    // then retracted the interface. The transfer must be armed to the
+    // endpoint's own wMaxPacketSize (eight bytes for a boot keyboard); a
+    // directly-attached high-speed device tolerated the over-length transfer
+    // (it short-packets with no split), which is why only the hub-attached
+    // keyboard failed.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the boot keyboard enumerates");
+
+    arm_report_request(&mut device);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x02, 0x00, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    let armed = usize::try_from(device.host_mut().int_armed_len).expect("armed length fits");
+    assert_eq!(
+        armed, REPORT_LEN,
+        "the transfer is armed to the endpoint's eight-byte max packet"
+    );
+    assert!(
+        armed < CAPTURE_LEN,
+        "never to the full capture buffer, which faults the hub's TT split"
+    );
+
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(0, &mut buf)
+        .expect("a report drains")
+        .expect("the keyboard report is delivered");
+    assert_eq!(len, REPORT_LEN, "the packet-sized capture still delivers");
+    assert_eq!(buf[0], 0x02, "the modifier byte survives");
+    assert_eq!(buf[2], 0x04, "the key survives the packet-sized capture");
+}
+
+#[test]
+fn a_fast_mouses_poll_rate_is_capped() {
+    // A 1000 Hz (1 ms, bInterval=4) high-speed mouse would otherwise wake the
+    // HCD and its class driver a thousand times a second while moving. The
+    // driver raises its endpoint-context Interval to the pointer cap so it is
+    // polled no faster than ~100 Hz.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_fast_report_mouse(&mem), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the fast mouse enumerates");
+    let advertised = interrupt_interval(SPEED_HIGH, 4);
+    assert!(
+        pointer_min_interval() > advertised,
+        "the fixture must advertise a rate faster than the cap"
+    );
+    assert_eq!(
+        device.host_mut().int_interval,
+        pointer_min_interval(),
+        "the mouse poll rate is clamped to the pointer cap"
+    );
+}
+
+#[test]
+fn a_device_without_a_report_descriptor_falls_back_to_boot_protocol() {
+    // A HID device that serves no Report Descriptor (the model STALLs
+    // GET_DESCRIPTOR(Report)) is driven in boot protocol —
+    // SET_PROTOCOL(boot), wValue 0 — unchanged, so a device the parser cannot
+    // handle is never left unconfigured.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the boot-protocol keyboard enumerates");
+    assert_eq!(
+        device.host_mut().protocol,
+        Some(0),
+        "boot protocol when no report descriptor is served"
+    );
+}
+
+#[test]
 fn a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost() {
     // The metal "missed keystrokes under load" defect. A boot keyboard
     // reports only on a state change; the class driver reads one report per
@@ -5379,9 +5739,11 @@ fn start_enables_the_interrupter() {
     // The engine's synchronous waits park on the controller interrupt, so
     // starting the controller enables its interrupter as part of
     // `UsbDevice::start` (and every post-reset re-program): the
-    // per-interrupter Interrupt Enable is set, moderation is disabled
-    // (lowest completion latency), and the global `USBCMD.INTE` is set so a
-    // posted event asserts the device's interrupt.
+    // per-interrupter Interrupt Enable is set, moderation is programmed to
+    // the 1 ms reset default (so a device that streams a report every service
+    // interval cannot storm the CPU with one interrupt per report), and the
+    // global `USBCMD.INTE` is set so a posted event asserts the device's
+    // interrupt.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     let host = device.host_mut();
@@ -5391,8 +5753,9 @@ fn start_enables_the_interrupter() {
         "interrupter Interrupt Enable is set by start"
     );
     assert_eq!(
-        host.imod, 0,
-        "interrupt moderation disabled (lowest latency)"
+        host.imod,
+        regs::IMODI_DEFAULT,
+        "interrupt moderation is enabled at the 1 ms default (no interrupt storm)"
     );
     assert_eq!(
         host.usbcmd & regs::USBCMD_INTE,

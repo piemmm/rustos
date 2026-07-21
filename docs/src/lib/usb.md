@@ -36,10 +36,37 @@ build on the *same* engine without depending on each other — exactly the split
   validated `bMaxPacketSize0` drives an Evaluate Context EP0 fix-up when
   it differs from the speed's assumed worst case (a full-speed receiver's
   8-byte EP0) → the full `GET_DESCRIPTOR` reads (the configuration at its
-  exact advertised `wTotalLength`) → `SET_CONFIGURATION` →
-  `SET_PROTOCOL(boot)` + `SET_IDLE(indefinite)` per HID interface (the
-  latter so an idle report endpoint reports only on change instead of
-  storming the controller with duplicate reports) → Configure Endpoint, into a
+  exact advertised `wTotalLength`) → `SET_CONFIGURATION` → per HID interface
+  the protocol it needs: a **mouse** interface reads `GET_DESCRIPTOR(Report)`
+  and, when it parses, runs **report protocol** (`SET_PROTOCOL(report)` +
+  `SET_IDLE(indefinite)`) — report protocol is what lets `SET_IDLE` quiesce a
+  pointer that would otherwise stream a duplicate report every polling interval
+  and storm the controller — while a **keyboard** runs the standardised **boot
+  protocol** (`SET_PROTOCOL(boot)` + `SET_IDLE`, its Report Descriptor not
+  read): it reports only on a key-state change (so never causes that idle
+  storm) and its fixed 8-byte boot report avoids a report-descriptor parse a
+  composite keyboard's multiple Report IDs (or NKRO layout) can misread — the
+  metal "keyboard registers no keypresses" defect, where a report-protocol
+  keyboard streamed its native report under a Report ID the parser had not
+  pinned to and every keypress was dropped. A device the parser cannot handle
+  also falls back to boot protocol. Each report-protocol report is normalised
+  back into the fixed boot layout (`tairix_hid`) the class drivers read, so
+  they and the URB ABI are unchanged. The interrupt-IN transfer lands in a
+  `CAPTURE_LEN`-byte buffer (not the 8-byte boot `REPORT_LEN`), so a
+  report-protocol mouse report longer than eight bytes is captured in full;
+  normalisation is also fail-soft, keeping the fields that did arrive. The
+  transfer is *armed* to the endpoint's own `wMaxPacketSize`, never the full
+  capture buffer: a full/low-speed HID endpoint behind a high-speed hub's
+  transaction translator faults with a Split Transaction Error when a transfer
+  exceeds the per-interval budget the TT scheduled. Because that live report
+  path is invisible under QEMU, the engine latches the per-interface
+  enumeration decision the HCD logs once — `hid_enum_diag` (report vs boot
+  protocol, the parsed `tairix_hid::ReportMapSummary` field layout when in
+  report protocol, `wMaxPacketSize`, armed capture length) at node publish — so
+  a metal boot shows how each device's reports are read (a keyboard as
+  boot-protocol, a mouse as report-protocol); it carries no report payload.
+  Enumeration decode
+  → Configure Endpoint, into a
   growable table of concurrently served **interfaces**, each with its own
   demand-allocated DMA region (EP0 / interrupt / bulk rings and buffers)
   claimed on attach and released on detach — the only concurrency bounds
@@ -160,11 +187,21 @@ build on the *same* engine without depending on each other — exactly the split
 - Synchronous completion waits **park** on the caller-supplied
   `device::EventWait` seam (on metal: the HCD's `irq_wait` on the
   controller's bound interrupt line, which the caller binds before
-  `UsbDevice::start` — start enables the completion interrupter itself) and
+  `UsbDevice::start` — start enables the completion interrupter itself, at the
+  1 ms xHCI reset moderation default `regs::IMODI_DEFAULT`, never `IMOD = 0`,
+  so an interrupt-IN endpoint that streams a report every service interval — a
+  mouse polling every microframe — is coalesced to ≤~1000 interrupts/s rather
+  than storming a core with one interrupt per report) and
   are bounded by wall-clock budgets (the USB 2.0 §9.2.6 request ceiling for
   a completion, the power-on-good + attach-debounce window for the boot
   connect scan). Only the brief register handshakes (`Xhci` open/start/
   reset readiness) keep the bounded iteration poll budget.
+- A **mouse**'s poll rate is capped (`pointer_min_interval`, derived from
+  `POINTER_MAX_REPORT_HZ` = 100): a mouse interface's endpoint-context Interval
+  is raised so it is polled no faster than ~100 Hz, so a 1000 Hz gaming mouse
+  cannot wake the HCD and its class driver a thousand times a second while
+  moving. The cap only lowers an aggressive rate; a slower mouse keeps its own
+  interval, and a keyboard is never touched.
 - Fail-closed (§2.9): an implausible capability block, an out-of-range port or
   doorbell target, a malformed descriptor, or an exhausted wait budget is a
   typed `DriverError`, never a panic or an unbounded spin (§2.1).

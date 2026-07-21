@@ -25,13 +25,11 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # event-ring cycle-bit read before the entry body. Arch-specific instruction,
 # host/wasm32 no-op.
 tairix-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
-
-[dev-dependencies]
-# End-to-end seam proof: the boot-protocol decoders polling reports
-# straight off this crate's interrupt-IN transfer ring. Test scaffolding
-# only (a `[dev-dependencies]` edge, excluded from the §17.4 layering
-# graph) — neither crate depends on this one, so there is no cycle. The
-# decoders live in `lib/hid` (`BootKeyboard`); the §18.3 bind keys a class
-# driver carries are constructed inline in the test, so this protocol crate
-# depends on no concrete driver.
+# The HID report-descriptor parser + boot-layout normaliser. The HID
+# enumeration engine runs a report-protocol HID device (so `SET_IDLE` quiesces
+# an idle device instead of it streaming a duplicate report every interval) and
+# rewrites each report-protocol report back into the fixed boot layout the
+# class drivers already consume — one HID decode definition (§2.2), reused
+# rather than a second parser here. No cycle: `lib/hid` does not depend on this
+# crate.
 tairix-hid = { path = "../hid", version = "=0.0.0" }

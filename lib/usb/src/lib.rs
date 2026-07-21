@@ -699,13 +699,17 @@ impl<H: XhciHost> Xhci<H> {
     /// asserts the device's interrupt (the MSI write, on the PCIe VL805)
     /// rather than only landing on the event ring for a poller to find.
     ///
-    /// Disables interrupt moderation (`IMOD = 0`, lowest completion
-    /// latency — a boot keyboard posts at most one report per a few
-    /// milliseconds, so there is nothing to coalesce), sets the
+    /// Programs interrupt moderation to the 1 ms reset default
+    /// ([`regs::IMODI_DEFAULT`]) so a device that streams a report every
+    /// service interval — a mouse can post thousands per second — is coalesced
+    /// to at most ~1000 interrupts/s instead of storming the CPU with one
+    /// interrupt per report; a lone, sparse report is not delayed past the
+    /// interval, so genuine input latency is unaffected. It then sets the
     /// per-interrupter Interrupt Enable while clearing any stale Interrupt
     /// Pending the firmware hand-off left latched, then sets the global
     /// `USBCMD.INTE`. Idempotent: re-enabling an already-enabled
-    /// interrupter re-clears IP and re-sets the same bits.
+    /// interrupter re-programs moderation and re-clears IP and re-sets the
+    /// same bits.
     ///
     /// A driver that drives the controller interrupt-driven calls this once
     /// after [`Self::start`] and after its device's interrupt has been
@@ -723,7 +727,7 @@ impl<H: XhciHost> Xhci<H> {
             self.write_op(regs::USBSTS, stale_status)?;
             self.read_op(regs::USBSTS)?;
         }
-        self.write_ir0(regs::IR_IMOD, 0)?;
+        self.write_ir0(regs::IR_IMOD, regs::IMODI_DEFAULT)?;
         // Write IE together with IP: IP is write-1-to-clear, so this both
         // arms the interrupter and discards any pending bit a prior owner
         // (firmware) left set, without a read-modify-write that could race

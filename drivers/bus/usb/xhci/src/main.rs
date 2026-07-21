@@ -143,6 +143,12 @@ mod program {
     /// Diagnostic event id: a wait-set or IPC transport error happened.
     const HCD_WAIT_ERROR: EventId = EventId(4154);
 
+    /// Diagnostic event id: a served HID interface's enumeration decision
+    /// (report vs boot protocol, parsed field layout, armed transfer size).
+    /// Logged once per interface at node publish, so a metal capture shows how
+    /// a keyboard/mouse's reports will be read (QEMU models no Pi USB).
+    const HCD_HID_ENUM: EventId = EventId(4150);
+
     /// Reserved base of the URB call-endpoint id range the HCDs allocate from.
     ///
     /// A grant-restricted endpoint id the class driver reaches only through
@@ -321,6 +327,10 @@ mod program {
             "node_hex",
             u64::from(id),
         );
+        // One-shot: record how this interface's reports will be read (report
+        // vs boot protocol, parsed field layout, armed transfer size) so a
+        // metal capture can diagnose a silenced device without guessing.
+        log_hid_enum_diag(device, index);
     }
 
     /// Retract `transport`'s published interface node (best-effort) and
@@ -824,6 +834,110 @@ mod program {
             );
             *reported_drops = dropped;
         }
+    }
+
+    /// Log the HID enumeration decision for the interface at `index` once, at
+    /// node publish: whether it runs report or boot protocol, its declared
+    /// report-descriptor length, the interrupt endpoint's `wMaxPacketSize` and
+    /// the armed transfer length, and — when a report map was parsed — the
+    /// located field layout. This is the metal window on *how* a device's
+    /// reports will be read (QEMU models no Pi USB); a non-HID interface has no
+    /// diagnostic and logs nothing.
+    fn log_hid_enum_diag(
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
+        index: usize,
+    ) {
+        let Some(diag) = device.hid_enum_diag(index) else {
+            return;
+        };
+        let u = |v: u64| tairix_log::FieldValue::UnsignedInt(v);
+        let b = tairix_log::FieldValue::Bool;
+        match diag.map {
+            Some(map) => log(
+                &LogSink,
+                &Event {
+                    level: Level::Info,
+                    id: HCD_HID_ENUM,
+                    message: "usb-hcd: HID interface report protocol",
+                    fields: &[
+                        Field {
+                            key: "index",
+                            value: u(index as u64),
+                        },
+                        Field {
+                            key: "report_proto",
+                            value: b(diag.report_protocol),
+                        },
+                        Field {
+                            key: "desc_len",
+                            value: u(u64::from(diag.report_descriptor_len)),
+                        },
+                        Field {
+                            key: "max_packet",
+                            value: u(u64::from(diag.int_max_packet)),
+                        },
+                        Field {
+                            key: "capture_len",
+                            value: u(u64::from(diag.capture_len)),
+                        },
+                        Field {
+                            key: "keyboard",
+                            value: b(map.is_keyboard),
+                        },
+                        Field {
+                            key: "report_id",
+                            value: u(u64::from(map.report_id)),
+                        },
+                        Field {
+                            key: "primary_off_bits",
+                            value: u(u64::from(map.primary_offset_bits)),
+                        },
+                        Field {
+                            key: "secondary_off_bits",
+                            value: u(u64::from(map.secondary_offset_bits)),
+                        },
+                        Field {
+                            key: "secondary_size_bits",
+                            value: u(u64::from(map.secondary_size_bits)),
+                        },
+                        Field {
+                            key: "secondary_count",
+                            value: u(u64::from(map.secondary_count)),
+                        },
+                    ],
+                },
+            ),
+            None => log(
+                &LogSink,
+                &Event {
+                    level: Level::Info,
+                    id: HCD_HID_ENUM,
+                    message: "usb-hcd: HID interface boot-protocol fallback",
+                    fields: &[
+                        Field {
+                            key: "index",
+                            value: u(index as u64),
+                        },
+                        Field {
+                            key: "report_proto",
+                            value: b(diag.report_protocol),
+                        },
+                        Field {
+                            key: "desc_len",
+                            value: u(u64::from(diag.report_descriptor_len)),
+                        },
+                        Field {
+                            key: "max_packet",
+                            value: u(u64::from(diag.int_max_packet)),
+                        },
+                        Field {
+                            key: "capture_len",
+                            value: u(u64::from(diag.capture_len)),
+                        },
+                    ],
+                },
+            ),
+        };
     }
 
     /// A diagnostic field carrying a controller value that may not have been
