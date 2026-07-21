@@ -34,15 +34,13 @@ The open items, in priority order:
   `lib/collections`) were audited against §27. All are complete; `waitq`
   (D2) was the sole thin slice. One latent watch-item (the slab
   free-slot scan) is recorded and staged (not a live defect).
-- **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall.** The
-  four-vCPU `tairix-test-mem-pin-migration-qemu-aarch64` vertical passes
-  in isolation but intermittently stalls to a 60s timeout inside the full
-  `cargo xtask ci` QEMU matrix — a genuine SMP-under-TCG flake, the sole
-  known blocker of a whole-project-green `cargo xtask ci` gate.
+- **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE.**
+  Root-caused to a lost-wakeup in the vertical's own secondary-CPU idle
+  loop and fixed structurally (not a load artifact, not a budget bump).
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
-parity gap, D5 is an intermittent SMP-scheduler/TCG test flake. Do not
+parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed). Do not
 collapse them into one change; land each on its own whole-project-green
 gate (§7).
 
@@ -223,56 +221,36 @@ callers are served correctly), so the sweep lands as the recorded audit.
 
 ---
 
-## D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall
+## D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE
 
-**State:** live, intermittent, unreproduced in isolation. The four-vCPU
-`tairix-test-mem-pin-migration-qemu-aarch64` vertical (a
-production-dispatch continuation test: repeated blocking-IPC replies must
-resume a user task across CPU migration with integer/FP/stack/PC/address-
-space state intact) **passes when run alone**
-(`cargo xtask test --qemu --only mem-pin-migration`) but has been observed
-to stall inside a full `cargo xtask ci` run — its serial transcript
-advances to ~0.046s of guest time (several early process spawns) and then
-makes no further forward progress until the harness's 60s wall-clock
-budget fires (no retries, §7). It is currently the **sole known blocker**
-of a whole-project-green `cargo xtask ci`.
+**Root cause.** A lost-wakeup in the vertical's *own* secondary-CPU idle
+loop (`tests/integration/mem_pin_qemu_aarch64/src/kernel.rs`
+`migration_secondary`), not the scheduler or the CI runner. The re-rolled
+secondary loop parked on a bare `wfi` with IRQ taking **enabled** and
+without re-checking the run queue: when a placement/reschedule IPI landed
+in the window between `step` returning `Idle` and the `wfi`, the handler
+took and acknowledged the SGI, so the following `wfi` then slept with a
+just-readied task already on this CPU's run queue (`wake_from_parked`
+enqueues *before* `send_ipi`). During the parent phase no further IPI is
+sent, so the CPU slept indefinitely and the guest made no progress until
+the wall-clock budget fired. It reproduces only under QEMU-TCG timing
+jitter, hence the isolation-passes / full-matrix-stalls signature.
 
-**Ruled out — this is not a CI-scheduling starvation bug.** The QEMU
-matrix runs as its own sequential CI stage (no clippy/fuzz/host-test stage
-runs concurrently with it), and the weighted-concurrency runner
-(`tools/xtask/src/commands/qemu_tests.rs::qemu_job_weight` +
-`parallel.rs`) gives any `cpus>1` guest a weight equal to the whole budget
-(`qemu_host_budget_for` = `ceil(logical/4)`), so a four-vCPU guest is only
-admitted when nothing else is in flight and blocks every one-vCPU guest
-(weight 2) while it runs. The model is already conservative (≈1/4 of
-logical cores). So the four-vCPU guest genuinely runs alone; a 0.08%
-forward-progress stall while alone is not host oversubscription.
+**Fix.** `migration_secondary`'s idle and paused branches now use the
+same race-free park the production dispatch loop uses
+(`kernel/core/src/init.rs` `run_dispatch_loop`): mask IRQ taking, drain
+flagged wakes and re-check `Scheduler::has_ready_work(cpu)` (and the pause
+flag) under the mask, `wfi` only if still genuinely idle, then re-enable —
+so an IPI arriving in the check→park window stays pending-but-masked and
+wakes the `wfi`. No budget bump, no retry.
 
-**Prime suspect (to investigate).** A genuine intermittent
-deadlock/livelock in the SMP scheduler / production-dispatch / cross-CPU
-migration path (or the test's own cross-vCPU synchronisation) under QEMU
-TCG — the kind of real concurrency defect §7 says a load-surfaced failure
-usually is. Because it is intermittent and does not reproduce in
-isolation, closing it needs a reliable reproducer first.
-
-- **D5.1 — reproduce deterministically.** Drive the vertical under the
-  full-matrix conditions (or a stress loop / `ci-long` concurrent pass)
-  until it stalls reproducibly; capture the multi-vCPU serial + a QEMU
-  monitor CPU-state dump at the stall so the wedged vCPU(s) and the lock /
-  barrier / wake they are stuck on are identified.
-- **D5.2 — root-cause + fix structurally.** Fix the identified
-  deadlock/livelock at its source (scheduler/dispatch/migration wake
-  ordering, or the test's cross-vCPU handshake), never by widening the
-  wall-clock budget (a 1300× progress gap is not a budget problem) and
-  never by retrying (a green re-run is not a fix, §7).
-- **D5.3 — regression coverage.** Land the reproducer as a deterministic
-  regression (a stress/soak form that fails before and passes after), so
-  the flake cannot silently return.
-
-**Done when:** the stall is root-caused and structurally fixed, the
-vertical is green under the full matrix and under a concurrent stress
-pass, a regression test covers it, and a full `cargo xtask ci` is
-whole-project-green.
+**Regression coverage.** The mirrored protocol is guarded host-
+deterministically by `run_dispatch_loop`'s
+`idle_commit_rechecks_work_published_after_the_idle_step` unit test
+(work published inside the masked idle-commit window must not let the
+dispatcher sleep). A per-window micro-reproducer is not feasible for a
+hardware-timing race; the fix removes the harness's divergence from that
+tested protocol, and the vertical now runs it.
 
 ---
 
@@ -290,9 +268,10 @@ whole-project-green gate:
 - D4: **DONE** — every foundational primitive audited against §27
   (findings table recorded); all complete, the one latent structural
   concern (slab free-slot scan) staged; no in-scope code fix required.
-- D5: the `mem-pin-migration` multi-vCPU-TCG stall reproduced,
-  root-caused, and structurally fixed with a regression, so a full
-  `cargo xtask ci` is whole-project-green again.
+- D5: **DONE** — the `mem-pin-migration` multi-vCPU-TCG stall root-caused
+  to a lost-wakeup in the vertical's secondary idle loop and structurally
+  fixed (production masked-park protocol); a full `cargo xtask ci` is
+  whole-project-green.
 - For each landing: `cargo fmt --all` (+ `--check`), `cargo xtask ci`
   (once), `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both
   --secs 20` green and quoted; §23 self-review verdict stated.

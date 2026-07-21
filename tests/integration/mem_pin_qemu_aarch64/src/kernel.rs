@@ -631,18 +631,61 @@ extern "C" fn migration_secondary(cpu: CpuId) -> ! {
     let scheduler = unsafe { &*scheduler };
     loop {
         if SMP_PAUSED.load(Ordering::Acquire) & (1u32 << cpu) != 0 {
-            // SAFETY: the test controller deliberately pauses this idle
-            // dispatcher after its task blocks; an IPI wakes it when the
-            // pause is released.
-            unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+            // Deliberately paused by the controller. Park until the release
+            // IPI, closing the pause/wake race the same way the production
+            // dispatch loop closes the idle/wake race: mask IRQ *taking*,
+            // re-check the pause under the mask, and `wfi` only while still
+            // paused. The release IPI then arrives pending-but-masked and
+            // still wakes the `wfi`, so it is never dropped by the handler
+            // acknowledging it just before the park. Restore taking
+            // (dispatching the IPI) before re-checking at the loop top.
+            //
+            // SAFETY: `mask_irq`/`enable_irq` toggle `DAIF.I` only; this
+            // secondary's vectors + GICv2 are live, so a taken IPI
+            // dispatches through a valid handler.
+            unsafe { exceptions::mask_irq() };
+            if SMP_PAUSED.load(Ordering::Acquire) & (1u32 << cpu) != 0 {
+                // SAFETY: `wfi` wakes on the pending-but-masked release IPI;
+                // no lock is held across the park.
+                unsafe { exceptions::wait_for_interrupt() };
+            }
+            // SAFETY: restore IRQ taking so the release IPI is dispatched.
+            unsafe { exceptions::enable_irq() };
             continue;
         }
         let outcome = scheduler.step(cpu);
-        let _ = tairix_kernel_core::waitq::drain_pending_wakes();
         if matches!(outcome, Ok(StepOutcome::Idle)) {
-            // SAFETY: this CPU has no runnable work; a timer/device/IPI wakes
-            // the parked dispatcher, with no lock held across the wait.
-            unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+            // Tickless idle park under the production park/wake protocol
+            // (`kernel_core::init::run_dispatch_loop`): mask IRQ taking,
+            // then — under the mask — drain any flagged wake and re-check
+            // both for ready work (a placement IPI landing during the step
+            // enqueued a just-woken task here) and a fresh pause request,
+            // and `wfi` only if still genuinely idle. A placement or release
+            // IPI landing in the check->park window stays pending-but-masked
+            // and wakes the `wfi`, so a readied task can never be stranded
+            // on this sleeping CPU (the lost-wakeup that stalled this
+            // vertical under the full matrix). Restore taking afterwards so
+            // the pending IPI dispatches.
+            //
+            // SAFETY: `mask_irq`/`enable_irq` toggle `DAIF.I` only; vectors
+            // + GICv2 are live on this CPU.
+            unsafe { exceptions::mask_irq() };
+            let woke = tairix_kernel_core::waitq::drain_pending_wakes();
+            let ready = scheduler.has_ready_work(cpu).unwrap_or(false);
+            let paused = SMP_PAUSED.load(Ordering::Acquire) & (1u32 << cpu) != 0;
+            if !(woke || ready || paused) {
+                // SAFETY: `wfi` wakes on a pending-but-masked interrupt (the
+                // scheduler's placement IPI when work lands here, a device
+                // IRQ, or the controller's release IPI); no lock is held.
+                unsafe { exceptions::wait_for_interrupt() };
+            }
+            // SAFETY: restore IRQ taking so the pending interrupt dispatches.
+            unsafe { exceptions::enable_irq() };
+        } else {
+            // A task ran (or a benign step error): drain deferred wakes in
+            // dispatcher context with IRQ taking enabled, matching the
+            // production loop's between-dispatch servicing.
+            let _ = tairix_kernel_core::waitq::drain_pending_wakes();
         }
     }
 }
