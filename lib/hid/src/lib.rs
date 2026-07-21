@@ -66,6 +66,7 @@ use tairix_abi::DriverError;
 pub mod console;
 pub mod keyboard;
 pub mod mouse;
+pub mod report;
 
 #[cfg(test)]
 mod tests;
@@ -73,6 +74,10 @@ mod tests;
 pub use console::{pump_once, ConsoleSink, KeyboardConsole};
 pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
+pub use report::{
+    parse as parse_report_descriptor, HidReportMap, ReportMapSummary, BOOT_KEYBOARD_NORM_LEN,
+    BOOT_MOUSE_NORM_LEN, MAX_REPORT_DESCRIPTOR,
+};
 // The axis and pointer-button codes are the platform-neutral `lib/abi`
 // vocabulary; one definition, imported rather than re-derived here.
 pub use tairix_abi::driver::input::{

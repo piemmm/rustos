@@ -464,14 +464,54 @@ request a buggy device might mishandle; the interface descriptors'
 class triples and `bConfigurationValue` / `bInterfaceNumber` drive the
 steps below — never assumed), and `SET_CONFIGURATION`.
 
-The interrupt-IN endpoint is configured (Configure Endpoint) and
-`SET_PROTOCOL(boot)` followed by `SET_IDLE(indefinite)` is issued **only
-for a HID interface**. `SET_IDLE` with an indefinite duration makes the
-device report only when its report data changes and NAK otherwise; without
-it a boot mouse streams a duplicate report every polling interval after the
-first movement — a controller interrupt storm on an idle device — and a
-boot keyboard auto-repeats a held key (both requests are optional, so a
-device that STALLs either is tolerated). The endpoint is not
+The interrupt-IN endpoint is configured (Configure Endpoint), and each
+HID interface is put in the protocol it needs. A **mouse** honours
+`SET_IDLE(indefinite)` — reporting only on change and NAKing otherwise —
+**only in report protocol**: an on-metal mouse ignored `SET_IDLE` in boot
+protocol and streamed a duplicate report every polling interval, storming
+the controller and pegging a core while idle. So a mouse interface reads its
+Report Descriptor (`GET_DESCRIPTOR(Report)`) and, when it parses, runs in
+**report protocol** (`SET_PROTOCOL(report)` + `SET_IDLE`); each
+report-protocol report is normalised back into the fixed boot layout the
+class driver reads (the shared `tairix_hid` parser + normaliser), so the
+class driver and the URB ABI are unchanged. A **keyboard** is driven in
+**boot protocol** (`SET_PROTOCOL(boot)` + `SET_IDLE`) and its Report
+Descriptor is not read: it reports only on a key-state change and so never
+causes that idle storm, and the fixed 8-byte boot report avoids a
+report-descriptor parse a composite keyboard's multiple Report IDs (or an
+NKRO layout) can misread. That was the metal "keyboard registers no
+keypresses" defect — put in report protocol, a composite keyboard streamed
+its native report under a Report ID the parser had not pinned to (it pinned
+the first keyboard collection's ID, but the device reported under a later
+one), so normalisation dropped every keypress. Boot protocol makes the
+device emit the report the boot decoder is built for. A device the parser
+cannot handle also falls back to boot protocol, so it is never left
+unconfigured.
+
+The interrupt-IN transfer lands in a `CAPTURE_LEN`-byte buffer, not the
+8-byte boot `REPORT_LEN`, so a report-protocol mouse report longer than
+eight bytes is captured in full rather than clipped; normalisation is
+fail-soft, keeping the fields that did arrive. The transfer is *armed* to
+the endpoint's own `wMaxPacketSize`, never the full capture buffer: a
+full/low-speed HID endpoint behind the high-speed hub's transaction
+translator faults with a Split Transaction Error when a transfer exceeds the
+per-interval budget the TT scheduled, retracting the interface.
+
+Because that live report path is invisible under QEMU (which models no Pi
+USB), the engine latches the per-interface enumeration decision the HCD logs
+once, so a metal boot shows *how* each device's reports are read — a keyboard
+as boot-protocol, a mouse as report-protocol — without guessing.
+`UsbDevice::hid_enum_diag` records report vs boot protocol, the declared
+report-descriptor length, the parsed field layout when in report protocol
+(`tairix_hid::ReportMapSummary`: kind, report ID, primary/secondary
+offsets/size/count), `wMaxPacketSize`, and the armed capture length — logged
+at node publish (`usb-hcd: HID interface report protocol` /
+`… boot-protocol fallback`, event id 4150). It carries no report payload, so
+no keystroke ever reaches the log.
+
+These class requests are optional (a device that STALLs
+one keeps its current mode; a STALLed `GET_DESCRIPTOR(Report)` simply
+selects the boot fallback). The endpoint is not
 primed during enumeration: `next_report` arms one transfer only when the
 class driver has submitted a URB and is waiting for that report. A hub
 reports interface class `0x09`, not HID: it keeps only its control endpoint,
@@ -497,7 +537,8 @@ port, §8.9) and — for a full/low-speed device behind the high-speed hub
 — the **transaction-translator** Hub Slot ID and Port Number (§6.2.2),
 so the controller splits its transactions through the hub's TT. The
 post-Address sequence (descriptors → Configure Endpoint →
-`SET_CONFIGURATION` → `SET_PROTOCOL(boot)` → `SET_IDLE(indefinite)` →
+`SET_CONFIGURATION` → per HID interface `GET_DESCRIPTOR(Report)` → report
+protocol or the boot fallback + `SET_IDLE(indefinite)` →
 ready for request-driven report
 arming) is the shared `finish_enumeration`, identical to a root-port device —
 only the topology in the slot context differs. A failed attach restores
@@ -570,7 +611,12 @@ interrupt-IN endpoint and takes its Device Context Index
 `interrupt_interval` encodes the endpoint-context Interval from the
 descriptor's `bInterval` and the device speed (high/SuperSpeed
 `bInterval − 1`; full/low-speed frames → the `fls(bInterval × 8) − 1`
-microframe exponent, clamped 3..=10, xHCI Table 6-12). Hard-coding the
+microframe exponent, clamped 3..=10, xHCI Table 6-12). A **mouse**
+interface's Interval is then raised to at least `pointer_min_interval`
+(derived from `POINTER_MAX_REPORT_HZ` = 100) so an aggressive 1000 Hz
+mouse is polled no faster than ~100 Hz — otherwise it woke the HCD and
+its class driver a thousand times a second while moving; the cap only
+lowers a fast rate, and a keyboard is never touched. Hard-coding the
 endpoint as endpoint 1 (DCI 3) left the controller polling — and the
 doorbell ringing — the wrong endpoint for a keyboard whose interrupt-IN
 endpoint sat elsewhere, so it scheduled the real endpoint never: the
@@ -995,8 +1041,9 @@ receiver carrying a boot-keyboard *and* a boot-mouse interface — gets one
 device-table entry and one emitted node **per served interface**, the
 siblings sharing the device's slot and EP0. The discovered
 `bConfigurationValue` and each `bInterfaceNumber` drive
-`SET_CONFIGURATION` and the per-interface HID `SET_PROTOCOL(boot)` +
-`SET_IDLE(indefinite)` —
+`SET_CONFIGURATION` and the per-interface HID protocol setup
+(`GET_DESCRIPTOR(Report)` → report protocol + `SET_IDLE(indefinite)`, or
+the boot-protocol fallback) —
 neither is assumed to be `1` / `0` any more — and the 24-bit interface class
 `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`
 (an HID boot keyboard is `0x03_01_01`, a boot mouse `0x03_01_02`) is

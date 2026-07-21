@@ -25,6 +25,27 @@ dependency (`AGENTS.md` §17.4 /
   reports rejected whole, a forged length is a `DeviceFault`, overflowing
   events are latched not dropped, a per-`poll` budget bounds a flooding device,
   `AGENTS.md` §5.4 / §2.1).
+- **Report-descriptor parser + boot-layout normaliser** (`report`:
+  `parse_report_descriptor` → `HidReportMap`, `HidReportMap::normalize`): a
+  fail-closed HID Report Descriptor parser (USB HID 1.11 §6.2.2) that locates
+  the boot fields (mouse buttons/X/Y/wheel, keyboard modifiers/key-array)
+  inside a **report-protocol** report, and a normaliser that rewrites one such
+  report back into the fixed boot layout the decoders above consume. The HID
+  enumeration engine (`tairix-usb`) uses it to run a device in report protocol
+  — the mode in which `SET_IDLE` quiesces an idle device that would otherwise
+  stream a duplicate report every polling interval — while the class drivers
+  and the URB ABI keep seeing boot-format reports. It handles a device that
+  declares a **Report ID** (reports carry a leading ID byte, so the boot fields
+  sit one byte later), and `normalize` is fail-soft — a report captured a byte
+  short (a longer report clipped to the capture buffer) still delivers the
+  fields that arrived rather than dropping the whole report, which had silenced
+  every keypress on a Report-ID keyboard. Pure, `no_std`, alloc-free;
+  an undecodable or unsupported descriptor yields `None` (the caller falls back
+  to boot protocol), never a guess or a panic (`AGENTS.md` §2.9).
+  `HidReportMap::summary` → `ReportMapSummary` exposes what the parser decided
+  (kind, report ID, primary/secondary field offsets/size/count) so the xHCI
+  driver can log how a device's reports are being read on metal — the diagnostic
+  window the invisible-under-QEMU report path needs.
 - **Console-input producer** (`KeyboardConsole`, `pump_once`, `ConsoleSink`):
   resolves each HID-usage key edge into the `tairix_input::Key` a US layout
   produces (applying held modifiers + caps/num lock) and emits the decoded
@@ -69,6 +90,12 @@ and mock `DriverHost`:
 - Mouse decode: button diff, X/Y/wheel deltas, 3-byte (wheel-less) reports,
   device-specific button bits and trailing bytes ignored, short reports
   rejected.
+- Report-descriptor parse + normalise: the canonical boot mouse and keyboard
+  Report Descriptors parse to the right field layout; a report-protocol report
+  normalises to the boot bytes (idle no-op, wheel, 12-bit axes clamped to
+  `i8`); a Report-ID-prefixed report demuxes by ID; a foreign ID, a truncated
+  report, or a too-small output buffer fails closed; junk/empty/oversize
+  descriptors are rejected.
 - Console producer: US-layout letters/digits/shifted symbols, caps/num lock,
   the held modifiers, named/editing/arrow/function sequences, releases and
   non-key events producing nothing, and the full decode→keymap→sink chain
