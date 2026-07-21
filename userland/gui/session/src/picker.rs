@@ -30,6 +30,8 @@ use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::Errno;
 use tairix_browse::render::{entry_index_at, render};
 use tairix_browse::{vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
+use tairix_font::BitmapFont;
+use tairix_theme::Theme;
 use tairix_wm::{Compositor, Point, Rect, WindowId};
 
 use crate::shell::DesktopShell;
@@ -194,8 +196,11 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         // A served click is window-local and non-negative; refuse rather
         // than wrap if the router ever handed anything else.
         let y = u32::try_from(local.y).ok()?;
-        self.navigate(shell, compositor, |browser| {
-            match entry_index_at(browser, WIN_HEIGHT, y) {
+        // Hit-test with the same font the picker renders with, so a click
+        // resolves to exactly the row the user saw.
+        let font = picker_font(shell.session().active_theme());
+        self.navigate(shell, compositor, move |browser| {
+            match entry_index_at(browser, font, WIN_HEIGHT, y) {
                 Some(index) => open_or_choose(browser, index),
                 None => NavOutcome::None,
             }
@@ -317,11 +322,20 @@ fn render_surface<S: DirectorySource>(
     browser: &Browser<S>,
     shell: &DesktopShell,
 ) -> Option<tairix_wm::Surface> {
+    let theme = shell.session().active_theme();
     render(
         browser,
-        shell.session().active_theme(),
+        theme,
+        picker_font(theme),
         Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
     )
+}
+
+/// The picker's text font, resolved from the active theme's logical UI font
+/// size (the picker window is not DPI-scaled today, so logical is physical) —
+/// the one place the render and hit-test paths agree on a size.
+fn picker_font(theme: &Theme) -> BitmapFont {
+    BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px))
 }
 
 /// Repaint the picker window after a navigation change. A surface that

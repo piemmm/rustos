@@ -34,6 +34,9 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # Shared integer screen geometry (`Rect`) for the render viewport (§2.2).
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The shared text rasteriser: the browser renders its labels at the theme's
+# font size, so the binary resolves the `BitmapFont` it passes to `render`.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The single shared theme definition (§10).
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The app half of the window channel: `WindowClient` (create / present /

@@ -44,6 +44,7 @@ mod program {
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_browse::render::render;
     use tairix_browse::{Browser, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH};
+    use tairix_font::BitmapFont;
     use tairix_geometry::Rect;
     use tairix_theme::ThemeRegistry;
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
@@ -183,7 +184,11 @@ mod program {
         T: WindowTransport,
     {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let surface = render(browser, theme, viewport).ok_or(Errno::LengthOutOfRange)?;
+        // Render the listing at the theme's logical UI font size (the browser
+        // window is not DPI-scaled today, so the logical size is the physical
+        // size), not the larger native atlas cell.
+        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let surface = render(browser, theme, font, viewport).ok_or(Errno::LengthOutOfRange)?;
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;

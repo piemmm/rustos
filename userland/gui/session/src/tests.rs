@@ -1916,7 +1916,12 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
 
-    let row = i32::try_from(row_height()).expect("a small row height");
+    // The picker resolves its font from the active theme's UI size; the
+    // click row must be computed from the same font so it lands on row 0.
+    let font = tairix_font::BitmapFont::with_pixel_height(u32::from(
+        shell.session().active_theme().fonts().ui.size_px,
+    ));
+    let row = i32::try_from(row_height(font)).expect("a small row height");
     // The first entry row sits directly below the path bar.
     let first_row = Point::new(4, row);
     assert_eq!(

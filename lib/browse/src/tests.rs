@@ -217,7 +217,13 @@ fn refresh_clamps_a_stale_selection_into_the_new_listing() {
 fn render_produces_a_surface_the_size_of_the_viewport() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
     let theme = Theme::dark();
-    let surface = crate::render(&browser, &theme, Rect::new(0, 0, 200, 120)).expect("surface");
+    let surface = crate::render(
+        &browser,
+        &theme,
+        tairix_font::BitmapFont::inconsolata(),
+        Rect::new(0, 0, 200, 120),
+    )
+    .expect("surface");
     assert_eq!(surface.width(), 200);
     assert_eq!(surface.height(), 120);
 }
@@ -227,7 +233,13 @@ fn render_highlights_the_selected_entry_with_the_accent() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(1).expect("select Users");
     let theme = Theme::dark();
-    let surface = crate::render(&browser, &theme, Rect::new(0, 0, 200, 120)).expect("surface");
+    let surface = crate::render(
+        &browser,
+        &theme,
+        tairix_font::BitmapFont::inconsolata(),
+        Rect::new(0, 0, 200, 120),
+    )
+    .expect("surface");
 
     let accent = Color::from(theme.palette().accent).premultiply();
     let raised = Color::from(theme.palette().surface_raised).premultiply();
@@ -248,7 +260,13 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     let theme = Theme::dark();
     // Too short for even the path bar: paints what it can and returns a
     // surface rather than panicking.
-    let surface = crate::render(&browser, &theme, Rect::new(0, 0, 4, 3)).expect("surface");
+    let surface = crate::render(
+        &browser,
+        &theme,
+        tairix_font::BitmapFont::inconsolata(),
+        Rect::new(0, 0, 4, 3),
+    )
+    .expect("surface");
     assert_eq!(surface.width(), 4);
     assert_eq!(surface.height(), 3);
 }
@@ -385,39 +403,47 @@ fn a_browser_navigates_the_vfs_source_end_to_end() {
 fn entry_index_at_mirrors_the_rendered_rows() {
     use crate::render::{entry_index_at, row_height};
 
+    let font = tairix_font::BitmapFont::inconsolata();
     let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
-    let row = row_height();
+    let row = row_height(font);
     let viewport_height = row * 4; // the path bar plus three entry rows
 
     // The path bar resolves to no entry; the first list row is entry 0.
-    assert_eq!(entry_index_at(&browser, viewport_height, 0), None);
-    assert_eq!(entry_index_at(&browser, viewport_height, row - 1), None);
-    assert_eq!(entry_index_at(&browser, viewport_height, row), Some(0));
+    assert_eq!(entry_index_at(&browser, font, viewport_height, 0), None);
     assert_eq!(
-        entry_index_at(&browser, viewport_height, row * 2 + row / 2),
+        entry_index_at(&browser, font, viewport_height, row - 1),
+        None
+    );
+    assert_eq!(
+        entry_index_at(&browser, font, viewport_height, row),
+        Some(0)
+    );
+    assert_eq!(
+        entry_index_at(&browser, font, viewport_height, row * 2 + row / 2),
         Some(1)
     );
     // A row past the listing's end and a coordinate outside the viewport
     // resolve to nothing rather than a clamped guess.
     let last = u32::try_from(browser.entries().len()).expect("a tiny fixture listing");
     assert_eq!(
-        entry_index_at(&browser, row * (last + 2), row * (last + 1)),
+        entry_index_at(&browser, font, row * (last + 2), row * (last + 1)),
         None
     );
     assert_eq!(
-        entry_index_at(&browser, viewport_height, viewport_height),
+        entry_index_at(&browser, font, viewport_height, viewport_height),
         None
     );
     // A degenerate viewport (path bar only) has no clickable rows.
-    assert_eq!(entry_index_at(&browser, row, row), None);
+    assert_eq!(entry_index_at(&browser, font, row, row), None);
 }
 
 #[test]
 fn entry_index_at_accounts_for_the_scroll_anchor() {
     use crate::render::{entry_index_at, row_height};
 
+    let font = tairix_font::BitmapFont::inconsolata();
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
-    let row = row_height();
+    let row = row_height(font);
     // Two visible entry rows; select the last entry so the list scrolls.
     let viewport_height = row * 3;
     let last = browser.entries().len() - 1;
@@ -425,11 +451,11 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
     // The bottom visible row is the selected (last) entry; the row above
     // it is its predecessor — exactly what `render` draws.
     assert_eq!(
-        entry_index_at(&browser, viewport_height, row * 2),
+        entry_index_at(&browser, font, viewport_height, row * 2),
         Some(last)
     );
     assert_eq!(
-        entry_index_at(&browser, viewport_height, row),
+        entry_index_at(&browser, font, viewport_height, row),
         Some(last - 1)
     );
 }

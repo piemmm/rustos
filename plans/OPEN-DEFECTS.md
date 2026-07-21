@@ -37,12 +37,18 @@ The open items, in priority order:
 - **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE.**
   Root-caused to a lost-wakeup in the vertical's own secondary-CPU idle
   loop and fixed structurally (not a load artifact, not a budget bump).
+- **D6 — Pre-existing `docs-check` failure documenting `tairix-kernel`.**
+  `cargo xtask ci`'s `docs-check` step fails closed with `error[E0432]:
+  unresolved import tairix_abi::driver::virtio_pci::virtio_pci_window_resource`
+  while documenting `kernel/tairix-kernel/src/hwdiscovery.rs`, blocking a
+  fully green gate. Not a kernel-logic defect: it is a cross-crate rustdoc
+  resolution failure, unrelated to any current feature work.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
-parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed). Do not
-collapse them into one change; land each on its own whole-project-green
-gate (§7).
+parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), and D6
+is a rustdoc/docs-build failure. Do not collapse them into one change;
+land each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -254,9 +260,39 @@ tested protocol, and the vertical now runs it.
 
 ---
 
+## D6 — Pre-existing `docs-check` failure documenting `tairix-kernel`
+
+**State:** open, pre-existing (reproduces on a clean tree). It is
+independent of feature work: unrelated changes elsewhere pass the whole
+gate up to `docs-check`, which then fails.
+
+**Symptom.** `cargo xtask ci` → `docs-check` (`cargo doc` with
+`RUSTDOCFLAGS="-D warnings"`) fails while documenting `tairix-kernel`:
+
+```
+error[E0432]: unresolved import
+  tairix_abi::driver::virtio_pci::virtio_pci_window_resource
+ --> kernel/tairix-kernel/src/hwdiscovery.rs:24:5
+```
+
+**Not a kernel-logic defect.** `virtio_pci_window_resource` is a real,
+unconditional `pub fn` in `lib/abi/src/driver/virtio_pci.rs` (no `cfg`,
+no feature gate); `tairix-abi` documents cleanly on its own
+(`cargo doc -p tairix-abi --no-deps` succeeds) and the kernel *compiles*
+for its bare-metal targets. Only the cross-crate rustdoc pass documenting
+`tairix-kernel` on the host fails to resolve the import.
+
+**What remains.** Root-cause the cross-crate rustdoc resolution failure
+(rustdoc under the pinned nightly documenting `tairix-kernel` against the
+`tairix-abi` rmeta) and restore a green `docs-check`. Fix in its own
+change on a whole-project-green gate (§7); do not fold it into unrelated
+work.
+
+---
+
 ## Definition of done (whole plan, §7/§15/§23)
 
-This umbrella is closed only when D1–D5 are each closed on their own
+This umbrella is closed only when D1–D6 are each closed on their own
 whole-project-green gate:
 
 - D1: syscall-body verticals green on all bare-metal targets + wasm32
@@ -272,6 +308,9 @@ whole-project-green gate:
   to a lost-wakeup in the vertical's secondary idle loop and structurally
   fixed (production masked-park protocol); a full `cargo xtask ci` is
   whole-project-green.
+- D6: the cross-crate rustdoc `docs-check` failure documenting
+  `tairix-kernel` root-caused and fixed; `cargo xtask ci` (`docs-check`
+  included) whole-project-green again.
 - For each landing: `cargo fmt --all` (+ `--check`), `cargo xtask ci`
   (once), `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both
   --secs 20` green and quoted; §23 self-review verdict stated.

@@ -15,7 +15,8 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_vt::{char_width, truncate_to_width as truncate_to_columns};
 
 use crate::atlas;
-use crate::glyph::{lookup_or_fallback, Glyph};
+use crate::cache;
+use crate::glyph::{cell_index, lookup_or_fallback, Glyph};
 
 /// The system monospace bitmap font: Inconsolata EX with its M PLUS 1 Code
 /// Japanese, `D2Coding` Korean, and Noto Sans Hebrew companions, plus their shared
@@ -24,40 +25,113 @@ use crate::glyph::{lookup_or_fallback, Glyph};
 /// The face's uniform advance already carries the inter-glyph side bearings
 /// and its ascent + descent carry the line box, so the pen advances by
 /// exactly the cell width and lines by exactly the cell height.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct BitmapFont(());
+///
+/// A font renders at a chosen **cell height in physical pixels**. The atlas is
+/// authored at one native size ([`atlas::CELL_HEIGHT`]); [`inconsolata`] keeps
+/// that size for the text console, while [`with_pixel_height`] asks for a
+/// smaller cell — the desktop resolves a comfortable physical size from the
+/// theme's logical font size and the DPI scale. A smaller cell resamples each
+/// glyph from the native bitmap with an area-averaging filter (cached, see
+/// [`crate::cache`]); at the native size the resampler is bypassed entirely, so
+/// console rendering is byte-for-byte what it always was. Every derived metric
+/// (advance, cell width, line height) scales with the cell height, keeping the
+/// font monospaced and its width-to-height ratio constant.
+///
+/// [`inconsolata`]: Self::inconsolata
+/// [`with_pixel_height`]: Self::with_pixel_height
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BitmapFont {
+    /// The cell height this font renders at, in physical pixels, always in
+    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`atlas::CELL_HEIGHT`].
+    cell_height: u32,
+}
+
+impl Default for BitmapFont {
+    /// The native-size built-in family ([`inconsolata`](Self::inconsolata)).
+    fn default() -> Self {
+        Self::inconsolata()
+    }
+}
 
 impl BitmapFont {
-    /// The built-in family, with Inconsolata EX primary, M PLUS 1 Code for
-    /// Japanese, `D2Coding` for Korean, and Noto Sans Hebrew for Hebrew and
-    /// Yiddish coverage.
+    /// The smallest cell height a font may render at, in physical pixels.
+    ///
+    /// Below this a monospace glyph loses the distinguishing strokes that keep
+    /// text legible, so [`with_pixel_height`](Self::with_pixel_height) never
+    /// resamples smaller.
+    pub const MIN_PIXEL_HEIGHT: u32 = 8;
+
+    /// The built-in family at its **native** atlas size, with Inconsolata EX
+    /// primary, M PLUS 1 Code for Japanese, `D2Coding` for Korean, and Noto
+    /// Sans Hebrew for Hebrew and Yiddish coverage.
+    ///
+    /// This is the size the text console renders at; its glyphs come straight
+    /// from the atlas with no resampling.
     #[must_use]
     pub const fn inconsolata() -> Self {
-        Self(())
+        Self {
+            cell_height: atlas::CELL_HEIGHT,
+        }
     }
 
-    /// The glyph cell width in pixels.
+    /// The built-in family rendered at a cell height of `pixels` physical
+    /// pixels, clamped to
+    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`atlas::CELL_HEIGHT`].
+    ///
+    /// The desktop uses this to render UI text at the theme's requested size:
+    /// a height below the native atlas cell resamples each glyph down with an
+    /// area-averaging filter, so smaller text stays smoothly anti-aliased
+    /// rather than pixel-dropped. Asking for the native height (or larger, which
+    /// clamps to it) yields exactly [`inconsolata`](Self::inconsolata); the
+    /// atlas is never upscaled.
     #[must_use]
-    pub const fn glyph_width(&self) -> u32 {
-        atlas::CELL_WIDTH
+    pub const fn with_pixel_height(pixels: u32) -> Self {
+        let cell_height = if pixels < Self::MIN_PIXEL_HEIGHT {
+            Self::MIN_PIXEL_HEIGHT
+        } else if pixels > atlas::CELL_HEIGHT {
+            atlas::CELL_HEIGHT
+        } else {
+            pixels
+        };
+        Self { cell_height }
+    }
+
+    /// `true` when this font renders straight from the atlas with no
+    /// resampling (its cell height is the native atlas height).
+    #[must_use]
+    const fn is_native(self) -> bool {
+        self.cell_height == atlas::CELL_HEIGHT
+    }
+
+    /// The glyph cell width in pixels: the native cell width scaled to this
+    /// font's cell height (rounded to a whole pixel, never below one).
+    #[must_use]
+    pub const fn glyph_width(self) -> u32 {
+        let scaled =
+            (atlas::CELL_WIDTH * self.cell_height + atlas::CELL_HEIGHT / 2) / atlas::CELL_HEIGHT;
+        if scaled == 0 {
+            1
+        } else {
+            scaled
+        }
     }
 
     /// The glyph cell height in pixels.
     #[must_use]
-    pub const fn glyph_height(&self) -> u32 {
-        atlas::CELL_HEIGHT
+    pub const fn glyph_height(self) -> u32 {
+        self.cell_height
     }
 
-    /// The horizontal pen advance per character in pixels.
+    /// The horizontal pen advance per character in pixels (the cell width).
     #[must_use]
-    pub const fn advance(&self) -> u32 {
-        atlas::CELL_WIDTH
+    pub const fn advance(self) -> u32 {
+        self.glyph_width()
     }
 
-    /// The vertical distance between baselines in pixels.
+    /// The vertical distance between baselines in pixels (the cell height).
     #[must_use]
-    pub const fn line_height(&self) -> u32 {
-        atlas::CELL_HEIGHT
+    pub const fn line_height(self) -> u32 {
+        self.cell_height
     }
 
     /// The pixel width of `text` rendered on one line, including two-cell
@@ -66,7 +140,7 @@ impl BitmapFont {
     /// Arithmetic saturates, so a pathologically long string reports
     /// [`u32::MAX`] rather than wrapping.
     #[must_use]
-    pub fn text_width(&self, text: &str) -> u32 {
+    pub fn text_width(self, text: &str) -> u32 {
         text.chars().fold(0, |width, ch| {
             width.saturating_add(self.advance().saturating_mul(u32::from(char_width(ch))))
         })
@@ -82,7 +156,7 @@ impl BitmapFont {
     /// per consumer. A `width` too small for even one glyph yields the empty
     /// string; a `text` that already fits is returned whole.
     #[must_use]
-    pub fn truncate_to_width<'a>(&self, text: &'a str, width: u32) -> &'a str {
+    pub fn truncate_to_width(self, text: &str, width: u32) -> &str {
         truncate_to_columns(text, (width / self.advance()) as usize)
     }
 
@@ -96,8 +170,17 @@ impl BitmapFont {
     /// coverage, so translucent text and glyph edges blend correctly. A
     /// character the face does not cover draws the U+FFFD replacement glyph
     /// rather than being silently dropped.
-    pub fn draw_text(
-        &self,
+    pub fn draw_text(self, surface: &mut Surface, x: i32, y: i32, text: &str, color: Color) -> i32 {
+        if self.is_native() {
+            return self.draw_text_native(surface, x, y, text, color);
+        }
+        self.draw_text_scaled(surface, x, y, text, color)
+    }
+
+    /// Draw `text` straight from the atlas at the native cell size — the exact
+    /// path the text console has always used, with no resampling.
+    fn draw_text_native(
+        self,
         surface: &mut Surface,
         x: i32,
         y: i32,
@@ -118,6 +201,39 @@ impl BitmapFont {
                 &sources,
             );
             pen = pen.saturating_add(advance_step(self.advance().saturating_mul(cells)));
+        }
+        pen
+    }
+
+    /// Draw `text` at a sub-native cell size, blitting each glyph's resampled
+    /// coverage (fetched from the shared cache) instead of the atlas bitmap.
+    fn draw_text_scaled(
+        self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+    ) -> i32 {
+        let sources = coverage_sources(color);
+        let advance = self.advance();
+        // A glyph may cover two cells, so its resampled bitmap is two cells
+        // wide; a one-cell glyph is clipped to the left cell, exactly as the
+        // native path clips a narrow glyph to `CELL_WIDTH` of `GLYPH_WIDTH`.
+        let full_width = advance.saturating_mul(2);
+        let height = self.cell_height;
+        // Bounded by the native glyph, so the resampled bitmap always fits.
+        let mut buffer = [0u8; (atlas::GLYPH_WIDTH * atlas::CELL_HEIGHT) as usize];
+        let mut pen = x;
+        for ch in text.chars() {
+            let cells = u32::from(char_width(ch));
+            let index = cell_index(ch);
+            cache::scaled_coverage(index, full_width, height, &mut buffer);
+            let visible = advance.saturating_mul(cells).min(full_width);
+            draw_scaled_glyph(
+                surface, pen, y, &buffer, full_width, height, visible, &sources,
+            );
+            pen = pen.saturating_add(advance_step(advance.saturating_mul(cells)));
         }
         pen
     }
@@ -152,6 +268,41 @@ fn draw_glyph(
         let Ok(uy) = u32::try_from(py) else { continue };
         for col in 0..width.min(atlas::GLYPH_WIDTH) {
             let coverage = glyph.coverage(col, row);
+            if coverage == 0 {
+                continue;
+            }
+            let px = x.saturating_add(step(col));
+            let Ok(ux) = u32::try_from(px) else { continue };
+            if let Some(dst) = surface.get(ux, uy) {
+                surface.set(ux, uy, sources[usize::from(coverage)].over(dst));
+            }
+        }
+    }
+}
+
+/// Blit one resampled glyph at top-left `(x, y)` from its row-major coverage
+/// `bitmap` (`bitmap_width` wide, `height` tall), blending each covered pixel
+/// up to `visible` columns. Off-surface pixels clip rather than panic, exactly
+/// like the native blitter.
+#[allow(clippy::too_many_arguments)]
+fn draw_scaled_glyph(
+    surface: &mut Surface,
+    x: i32,
+    y: i32,
+    bitmap: &[u8],
+    bitmap_width: u32,
+    height: u32,
+    visible: u32,
+    sources: &[Pixel; 16],
+) {
+    for row in 0..height {
+        let py = y.saturating_add(step(row));
+        let Ok(uy) = u32::try_from(py) else { continue };
+        for col in 0..visible.min(bitmap_width) {
+            let coverage = bitmap
+                .get((row * bitmap_width + col) as usize)
+                .copied()
+                .unwrap_or(0);
             if coverage == 0 {
                 continue;
             }

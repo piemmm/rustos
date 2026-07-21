@@ -75,6 +75,32 @@ the payload exceeds the pre-Korean size ceiling.
   blend correctly with no colour arithmetic duplicated here (`AGENTS.md`
   §2.2). `text_width` and `truncate_to_width` give the shared layout
   arithmetic.
+- `cache` — the resampled-glyph downscaler and its bounded, process-global
+  cache (behind `render`). See *Rendering at a chosen size* below.
+
+## Rendering at a chosen size
+
+A `BitmapFont` renders at a chosen **cell height in physical pixels**.
+`BitmapFont::inconsolata()` keeps the atlas's native height and is what the
+text console (`lib/fbcon`) draws at — its glyphs come straight from the atlas
+with no resampling, so console rendering is byte-for-byte unchanged.
+`BitmapFont::with_pixel_height(px)` asks for a smaller cell: the desktop
+resolves a comfortable physical size from the theme's logical font size and
+the DPI scale (`tairix_geometry::Scale`), so window titles, the taskbar, the
+start menu, and the file browser render at that size rather than the larger
+native cell. Every derived metric (advance, cell width, line height) scales
+with the cell height, keeping the font monospaced and its aspect ratio fixed.
+
+A sub-native cell resamples each glyph from the native 4-bit coverage bitmap
+with an **exact area-averaging box filter** — every destination pixel is the
+coverage-weighted mean of the source pixels it overlaps — so small text stays
+smoothly anti-aliased instead of pixel-dropped. Because the desktop redraws
+the same glyphs at the same size every frame, resampled glyphs are memoised in
+a bounded, spinlock-guarded process-global cache keyed by
+`(atlas cell index, width, height)`; a hit copies into a stack buffer with no
+allocation and the cache evicts its oldest entry when full, so its footprint
+stays bounded (`AGENTS.md` §2.16, §24.1). The cache and downscaler ride the
+`render` feature; the allocator-free `atlas`/`glyph` view never touches them.
 
 The cell model is **one scalar per grid entry** — the deliberate simplification
 `lib/vt` and `lib/curses` document. A zero-advance combining mark renders in

@@ -797,6 +797,7 @@ dependencies = [
  "tairix-caps",
  "tairix-cursor",
  "tairix-display",
+ "tairix-font",
  "tairix-help",
  "tairix-icon",
  "tairix-rt",
@@ -1213,6 +1214,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-browse",
+ "tairix-font",
  "tairix-geometry",
  "tairix-rt",
  "tairix-theme",
@@ -1224,6 +1226,7 @@ name = "tairix-font"
 version = "0.0.0"
 dependencies = [
  "tairix-raster",
+ "tairix-sync",
  "tairix-vt",
 ]
 

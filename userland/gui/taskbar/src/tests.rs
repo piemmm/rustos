@@ -545,6 +545,43 @@ fn region_has_pixel(surface: &Surface, bar: Rect, region: Rect, want: Pixel) -> 
         .any(|y| (region.left()..region.right()).any(|x| pixel_at(surface, bar, x, y) == want))
 }
 
+/// Whether `region` shows anti-aliased text of the `want` role composited
+/// over `background`: some pixel is a coverage blend of the role over the
+/// background (partial *or* full coverage). Desktop text now renders at the
+/// theme's sub-native size, where a downscaled thin stroke may never reach
+/// full coverage, so an exact-role match ([`region_has_pixel`]) is too strict
+/// for "a label was drawn here"; a blend on the `background`→role segment is
+/// the faithful check.
+fn region_has_role_ink(
+    surface: &Surface,
+    bar: Rect,
+    region: Rect,
+    want: tairix_theme::Rgba,
+    background: Pixel,
+) -> bool {
+    let fg = role(want);
+    (region.top()..region.bottom()).any(|y| {
+        (region.left()..region.right())
+            .any(|x| is_coverage_blend(pixel_at(surface, bar, x, y), fg, background))
+    })
+}
+
+/// Whether opaque pixel `p` is a coverage blend of opaque `fg` over opaque
+/// `bg` — each channel lies on the `bg`→`fg` segment (±1 for rounding) and
+/// `p` differs from the bare background.
+fn is_coverage_blend(p: Pixel, fg: Pixel, bg: Pixel) -> bool {
+    fn on_segment(value: u8, from: u8, to: u8) -> bool {
+        let lo = from.min(to).saturating_sub(1);
+        let hi = from.max(to).saturating_add(1);
+        value >= lo && value <= hi
+    }
+    p.a == 255
+        && p != bg
+        && on_segment(p.r, bg.r, fg.r)
+        && on_segment(p.g, bg.g, fg.g)
+        && on_segment(p.b, bg.b, fg.b)
+}
+
 #[test]
 fn rendered_surface_matches_bar_dimensions() {
     let theme = Theme::dark();
@@ -886,11 +923,12 @@ fn clock_label_paints_foreground_text() {
         .render(&bar, &theme, Scale::ONE)
         .expect("bar renders");
     assert!(
-        region_has_pixel(
+        region_has_role_ink(
             &surface,
             layout.bar,
             layout.clock,
-            role(theme.palette().on_surface)
+            theme.palette().on_surface,
+            role(theme.palette().surface_raised),
         ),
         "the clock label draws on_surface text inside the clock region"
     );
@@ -1403,11 +1441,12 @@ fn render_menu_paints_the_panel_and_entry_labels() {
         role(palette.surface_raised)
     );
     assert!(
-        region_has_pixel(
+        region_has_role_ink(
             &surface,
             menu.panel,
             menu.entries[0],
-            role(palette.on_surface)
+            palette.on_surface,
+            role(palette.surface_raised),
         ),
         "the first entry's label draws on_surface text in its row"
     );
