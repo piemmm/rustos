@@ -370,6 +370,19 @@ pub mod driver_store_server;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod unlock_orchestrate;
 
+// The one definition of an interrupt-driven UART console's receive drain:
+// the lossless, backpressured loop that moves bytes from a hardware receive
+// FIFO into a `kernel/core` `ConsoleInputQueue`, shared verbatim by the
+// aarch64 PL011 and x86_64 16550 console paths so the subtle flow-control /
+// clear-then-recheck logic lives in exactly one place. It is pure and
+// arch-neutral — every hardware touch (the FIFO read, the receive-latch
+// clear, the flow-control brake) is an injected closure — so it host-tests
+// against a fake FIFO and compiles on the two ports whose console is a
+// discovered UART. riscv64 has no interrupt-driven UART receive (its boot
+// console is the SBI console), so it is excluded.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", test))]
+pub mod console_uart;
+
 // The architecture ports. Each subtree gathers exactly one instruction
 // set's `KernelArch` wrapper, fail-closed dispatch callback, production
 // boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus

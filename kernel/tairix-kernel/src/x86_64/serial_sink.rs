@@ -125,12 +125,44 @@ impl ConsoleWrite for Com1Console {
 /// `BootInfo::with_consoles` console list.
 pub static COM1_CONSOLE: Com1Console = Com1Console::new();
 
-/// The x86_64 boot console list: COM1 is the only console. Its read half
-/// is the fail-closed [`tairix_kernel_core::NULL_CONSOLE_READ`] (no
-/// non-blocking COM1 RX drain is wired on this slice), so fd 0 reads keep
-/// failing closed exactly as before.
+/// COM1's console-0 read half, gated on the in-kernel root-unlock service's
+/// ownership latch (`plans/PI.md` P11): a `stream_read` from the primary
+/// console's `login` is withheld (parked) until the unlock kthread has
+/// finished reading the root passphrase off the same interrupt-fed queue and
+/// opened the gate, so the two never race for console-0 input. Wraps the
+/// interrupt-fed [`crate::x86_64::com1_rx::COM1_CONSOLE_READ`]; the
+/// receive-drain (`console_input`) half stays the raw
+/// [`crate::x86_64::com1_rx::COM1_INPUT`] queue the interrupt fills.
+static GATED_COM1_READ: crate::unlock_service::GatedConsoleRead =
+    crate::unlock_service::GatedConsoleRead::new(
+        &crate::x86_64::com1_rx::COM1_CONSOLE_READ,
+        &crate::unlock_service::CONSOLE0_GATE,
+    );
+
+/// The x86_64 boot console list: COM1 is the only console (index 0, PID 1's
+/// banner + the login session). Its read half is the interrupt-fed,
+/// unlock-gated COM1 receive queue: once the gate opens a parked `login`
+/// reader is woken by a keystroke (`crate::x86_64::com1_rx`), never left
+/// polling. The receive-drain half is that same [`COM1_INPUT`] queue, so a
+/// pushed byte reaches the parked reader.
+///
+/// [`COM1_INPUT`]: crate::x86_64::com1_rx::COM1_INPUT
 pub static COM1_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] =
-    [tairix_kernel_core::ConsoleDevice::new(
+    [tairix_kernel_core::ConsoleDevice::with_input(
         &COM1_CONSOLE,
-        &tairix_kernel_core::NULL_CONSOLE_READ,
+        &GATED_COM1_READ,
+        &crate::x86_64::com1_rx::COM1_INPUT,
     )];
+
+/// The **installed** COM1 console device — the primary (and only) console
+/// on the QEMU PC target.
+///
+/// The receive drain pushes bytes through this device rather than the raw
+/// [`crate::x86_64::com1_rx::COM1_INPUT`] queue, so the console's cooked-mode
+/// line discipline sees every byte at arrival time (`plans/SPAWN.md` SP9): a
+/// `^C`/`^Z` typed while a foreground job runs is delivered as a signal even
+/// though no task is reading.
+#[must_use]
+pub fn com1_console_device() -> &'static tairix_kernel_core::ConsoleDevice {
+    &COM1_CONSOLES[0]
+}

@@ -79,6 +79,18 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
         // we return.
         return;
     };
+    // The COM1 console receive line is not an `irq_wait`-bound source: it
+    // drives the interrupt-fed console queue directly. When this GSI fires,
+    // drain the 16550 receive FIFO into the console queue (whose push wakes
+    // the reader parked in `BlockingConsoleRead` via `console_wake`) before
+    // the generic `IrqTable::fire`/`irq_wake` below runs — the x86_64 analogue
+    // of the aarch64 device-IRQ dispatch's console drain. The `fire` for this
+    // GSI is a harmless `Stray` (the line is unbound), so the drain is the
+    // whole effect.
+    #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+    if crate::x86_64::com1_rx::com1_console_gsi() == Some(gsi) {
+        crate::x86_64::com1_rx::drain_com1_into_console();
+    }
     let Ok(Some(table)) = IRQ_TABLE_SLOT.get() else {
         // Slot empty or poisoned. The boot pipeline installs the
         // table strictly before unmasking any IO-APIC line, so this

@@ -186,24 +186,56 @@ aarch64 admission vertical keys on — is impossible until A3 wires
 interrupt-driven COM1 input. It is therefore *not* a thin bin over the shared
 scenario; it is a live exercise of the A3 console and belongs with A3.
 
-### A3 — Interrupt-driven console + login/session supervision (`planned`)
+### A3 — Interrupt-driven console + login/session supervision (`in progress`)
 
-COM1 console input moves from the polled cooperative shim to
-interrupt-driven wake-ups through `kernel/irq` (the `PLAN.md`
-"interrupt-driven ps2/virtio wake-ups" note), so a parked reader wakes on
-the IRQ, never a poll loop (§2.23). This also unblocks the production
-root-unlock passphrase prompt (today the port's unlock kthread reads the
-fail-closed `NULL_CONSOLE_READ`, so it cannot accept a typed passphrase). The
-production boot then supervises the same arch-neutral `login` → session
-pipeline off the disk store (the binaries are the same bundles A2 mounts).
-Verticals: `uart_console_qemu_x86_64` (COM1 sibling of the aarch64 UART
-scenario), `pipeline_qemu_x86_64`, and
-`root_unlock_admission_qemu_x86_64` (the production kthread-admission path —
-the x86_64 sibling of `root_unlock_admission_qemu_aarch64`; it boots
-`tairix_kernel::boot` verbatim, types the passphrase over the now-interactive
-COM1, and keys PASS on the `unlock_service::USERS_DB_INSTALLED_MESSAGE`
-witness), which A2 deferred here because it depends on this interactive
-console.
+**The interrupt-driven COM1 console is implemented and host-tested**; its
+live verticals are blocked on `plans/OPEN-DEFECTS.md` D7 (a separate A2
+MSI-X defect), not on the console work. Done-state:
+
+- COM1 receive is interrupt-driven, replacing the fail-closed
+  `NULL_CONSOLE_READ`: `tairix_arch_x86_64::serial` gained the 16550 RX
+  primitives (`read_console_bytes`/`enable`/`disable_rx_interrupt`, pure
+  `lsr_data_ready`/`ier_with_rx_*` helpers, host-tested);
+  `kernel/tairix-kernel/src/x86_64/com1_rx.rs` carries the `RflagsIrqControl`
+  receive gate, the `COM1_INPUT` queue, the poll-backed `Com1ConsoleRead`,
+  `enable_uart_console_irq` (device IER + IO-APIC unmask), and the
+  device-IER flow-control brake; `production_external_irq_dispatch` drains
+  the FIFO into the console queue on the COM1 GSI (resolved from the MADT
+  interrupt-source-override for ISA IRQ 4, else identity); `serial_sink`
+  installs the unlock-gated interrupt-fed read half; and `root_unlock`'s
+  `X86UnlockConsole` arms the receive interrupt and hands the interactive
+  read half to the unlock kthread.
+- **The lossless backpressured FIFO→`ConsoleInputQueue` drain is one shared
+  definition** (`kernel/tairix-kernel/src/console_uart.rs`
+  `drain_fifo_into_console`, host-tested), used by both the x86_64 16550 and
+  the aarch64 PL011 paths (the aarch64 `drain_uart_locked` was re-wired onto
+  it, §2.2/§2.21) — only the per-UART FIFO read / receive-latch clear /
+  flow-control brake are injected closures. **Regression-confirmed live**:
+  `root_unlock_admission_qemu_aarch64` (which types a passphrase over the
+  interrupt-driven PL011 console) still passes on a real guest boot.
+
+**Blocked (D7).** The x86_64 live verticals
+(`root_unlock_admission_qemu_x86_64`, and the `pipeline`/`uart_console`
+siblings) exercise the production x86_64 kthread-admission disk bring-up,
+which stalls on a live boot: the virtio-blk-PCI completion MSI-X never wakes
+the scheduler-parked unlock kthread (`plans/OPEN-DEFECTS.md` D7), so the
+passphrase prompt is never reached. This is the never-live-confirmed A2
+production path, not the console. The `root_unlock_admission_qemu_x86_64`
+bin + enrolment were authored and then removed this session to keep the gate
+green; recreate them once D7 is fixed (thin bin over `tairix_kernel::boot`
+with an `UnlockAdmissionSink` on `USERS_DB_INSTALLED_MESSAGE`, `EncryptedRootDisk`,
+`serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]`).
+
+**Also landed this increment (a live-confirmed A2/A4 discovery fix).** The
+production x86_64 PCI discovery (`boot_x86_64::seed_virtio_pci`) had never
+worked on a live boot: it used ECAM only, but the QEMU default `pc`/i440fx
+machine exposes no MCFG/ECAM, so the root disk was never discovered. It now
+prefers ECAM when the firmware advertises an MCFG (real UEFI/PCIe, `q35`)
+and falls back to the universal PCI mechanism #1 (CF8/CFC port I/O)
+otherwise, over one generic `probe_virtio_pci` — hardware-capability
+detection, not a shim. Live-confirmed: the disk is now discovered and the
+virtio-blk driver loads on the `pc` machine (the D7 stall is strictly after
+that, in the completion wait).
 
 ### A4 — `devmgr` autoload over the ACPI/PCI tree (`planned`)
 
@@ -275,5 +307,12 @@ because its blocker is not an aarch64-parity item.
   `root_unlock_admission_qemu_x86_64` moved to **A3**: the production unlock
   kthread reads `NULL_CONSOLE_READ`, so the interactive passphrase prompt it
   needs is an A3 (interrupt-driven COM1) deliverable, not an A2 thin bin.
-- **A1, A3, A4, A5, A6 `planned`**; **A7 `blocked`** on the Stage 6
+- **A3 `in progress`**: the interrupt-driven COM1 console is implemented and
+  host-tested, and its shared FIFO-drain helper is regression-confirmed live
+  via the aarch64 interrupt-console vertical; the x86_64 production PCI
+  disk-discovery gap it surfaced is fixed and live-confirmed. Its x86_64
+  live verticals are blocked on `plans/OPEN-DEFECTS.md` D7 (the production
+  MSI-X kthread disk-completion never wakes the parked bring-up), a separate
+  A2 defect.
+- **A1, A4, A5, A6 `planned`**; **A7 `blocked`** on the Stage 6
   user/kernel page-table boundary.

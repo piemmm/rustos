@@ -20,6 +20,8 @@ pub mod virtio_boot;
 #[cfg(freestanding)]
 pub mod boot;
 #[cfg(freestanding)]
+pub mod com1_rx;
+#[cfg(freestanding)]
 pub mod init_spawn;
 #[cfg(freestanding)]
 pub mod panic_ctx;

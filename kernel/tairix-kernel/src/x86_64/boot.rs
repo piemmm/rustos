@@ -625,11 +625,10 @@ pub fn bring_up_bsp(
     // syscalls expose the real x86_64 hardware to user space — the sibling
     // of the riscv64/aarch64 device-tree seed.
     //
-    // SAFETY: `rsdp` was validated above; its XSDT/RSDT pointers and the
-    // MCFG they reference sit in the identity-mapped 0..4 GiB window
-    // (`boot.s` SAFETY-INVARIANT 4). The ECAM configuration-space window
-    // the PCI probe reads is likewise identity-mapped (the seed rejects an
-    // ECAM base outside that window).
+    // SAFETY: `madt_bytes` and `rsdp` were validated above; their tables
+    // (and the MCFG the ECAM branch reads) sit in the identity-mapped
+    // 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4), and the ECAM window is
+    // re-validated against that window before it is mapped.
     let tree = unsafe { seed_hardware_tree(madt_bytes, &rsdp, log_sink) };
 
     // 6. Build the `cpu_to_lapic` map with **only** the BSP populated.
@@ -929,11 +928,8 @@ fn try_boot(
 ///    [`tairix_arch_x86_64::platform::AcpiDiscovery`] — the root, every
 ///    enabled Local APIC as a CPU node, and the I/O APICs as
 ///    interrupt-controller nodes — from the already-validated `madt_bytes`.
-/// 2. The virtio-PCI probe: locate the firmware MCFG
-///    ([`acpi::locate_mcfg`] + [`acpi::mcfg_first_ecam`]), build an ECAM
-///    configuration-space bus (`tairix_pci::mechanism_ecam`) over the
-///    identity-mapped ECAM window, and emit every virtio-net function as a
-///    role-tagged network node
+/// 2. The virtio-PCI probe: enumerate configuration space and emit every
+///    virtio-net function as a role-tagged network node
 ///    ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]) the
 ///    two-process user-space driver autoloads against, plus every
 ///    virtio-blk function as a match-key-only storage node
@@ -945,20 +941,19 @@ fn try_boot(
 ///    only its bind key, as its in-kernel bring-up re-resolves the
 ///    transport from configuration space itself.
 ///
-/// Fail closed at every step: a malformed ACPI table, an absent MCFG, an
-/// ECAM base outside the identity-mapped window, or an enumeration error
-/// each leave the affected devices undiscovered and seed whatever *was*
-/// collected rather than failing the boot. The buffered tree is leaked to
-/// `'static` (a one-shot boot publish, never a mutable global) so the
-/// inventory readers can borrow it for the kernel's lifetime.
+/// Fail closed at every step: a malformed ACPI table, an ECAM window
+/// outside the identity map, or an enumeration error each leave the
+/// affected devices undiscovered and seed whatever *was* collected rather
+/// than failing the boot. The buffered tree is leaked to `'static` (a
+/// one-shot boot publish, never a mutable global) so the inventory readers
+/// can borrow it for the kernel's lifetime.
 ///
 /// # Safety
 ///
-/// `rsdp` must be a validated RSDP whose XSDT/RSDT and the tables they
-/// reference lie in the boot trampoline's 0..4 GiB identity-mapped window
-/// and stay unmodified for the kernel's lifetime (the ACPI guarantee). The
-/// ECAM window this reads is validated to lie in that same window before it
-/// is mapped.
+/// `madt_bytes` and `rsdp` must lie in the boot trampoline's 0..4 GiB
+/// identity-mapped window and stay unmodified for the kernel's lifetime
+/// (the ACPI guarantee); the ECAM window `rsdp`'s MCFG references is
+/// re-validated against that window before it is mapped.
 unsafe fn seed_hardware_tree(
     madt_bytes: &[u8],
     rsdp: &acpi::Rsdp,
@@ -970,8 +965,8 @@ unsafe fn seed_hardware_tree(
     let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
     // A discovery error leaves the sink empty; seed whatever was collected.
     let _ = AcpiDiscovery::new(madt_bytes).discover(&mut sink);
-    // SAFETY: forwarded — the caller's contract pins the firmware tables
-    // into the identity-mapped window.
+    // SAFETY: forwarded — the caller pins the firmware tables (and the MCFG
+    // the ECAM branch reads) into the identity-mapped window.
     unsafe { seed_virtio_pci(rsdp, &mut sink, log) };
     // Leak the buffered tree to `'static` (a one-shot boot publish, never a
     // mutable global) so the `hw_tree_read` / `hw_tree_wait` syscalls and the
@@ -982,27 +977,66 @@ unsafe fn seed_hardware_tree(
     tree
 }
 
-/// Enumerate the virtio-PCI bus over the firmware-described ECAM window and
-/// emit every virtio-net function (with its resolved config windows) and
-/// every virtio-blk function (match-key-only) into `sink`.
+/// Enumerate the virtio-PCI bus and emit every virtio-net function (with its
+/// resolved config windows + interrupt line) and every virtio-blk function
+/// (match-key-only) into `sink`.
+///
+/// Configuration space is reached through the modern memory-mapped ECAM
+/// (MMCONFIG) mechanism when the firmware advertises it (an `MCFG` table),
+/// falling back to the universal PCI **mechanism #1** (`0xCF8`/`0xCFC` port
+/// I/O) otherwise. This is hardware-capability detection, not a
+/// compatibility shim: a real UEFI/PCIe machine (and QEMU `q35`) exposes
+/// ECAM — the standard path with extended-config reach — while the legacy
+/// `pc`/i440fx machine (and any firmware without MCFG) has none, and
+/// mechanism #1 reaches the standard 256-byte configuration space every
+/// boot-critical virtio function's registers live in. Both are members of
+/// the `lib/pci` config-access family (`mechanism_ecam` / `mechanism_one`),
+/// and the same generic [`probe_virtio_pci`] runs over whichever the
+/// firmware provides, so there is one probe definition and no path is dead.
 ///
 /// Split from [`seed_hardware_tree`] so the ACPI seed stays a pure
-/// byte-slice normalisation and the (MMIO-reading) PCI walk is isolated
-/// behind its own SAFETY contract. A missing MCFG, an ECAM window outside
-/// the identity map, or an enumeration error leaves the affected devices
-/// undiscovered (fail closed) rather than faulting the boot.
+/// byte-slice normalisation and the PCI walk is isolated.
 ///
 /// # Safety
 ///
-/// See [`seed_hardware_tree`]: `rsdp` and the MCFG it references must be in
-/// the identity-mapped 0..4 GiB window. The ECAM base is re-validated to
-/// lie wholly in that window before the register window is formed.
+/// `rsdp` and the MCFG it references must lie in the boot trampoline's
+/// 0..4 GiB identity-mapped window (the ECAM branch validates the window
+/// lies wholly within it before mapping).
 unsafe fn seed_virtio_pci(
     rsdp: &acpi::Rsdp,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
 ) {
-    use tairix_abi::driver::pci::PciBus;
+    // Prefer ECAM when the firmware advertises an MCFG; else the universal
+    // mechanism #1. Whichever is chosen feeds the one generic probe.
+    // SAFETY: forwarded — `rsdp` (and its MCFG) are identity-mapped per the
+    // caller's contract.
+    match unsafe { ecam_bus(rsdp) } {
+        Some(pci) => probe_virtio_pci(&pci, sink, log),
+        None => probe_virtio_pci(
+            &tairix_pci::mechanism_one(tairix_arch_x86_64::pio::x86_port_io()),
+            sink,
+            log,
+        ),
+    }
+}
+
+/// Build a memory-mapped ECAM configuration-space bus from the firmware
+/// `MCFG`, or `None` when the firmware advertises no MMCONFIG region or its
+/// window does not lie wholly within the boot trampoline's identity map
+/// (fail closed — the caller then falls back to mechanism #1).
+///
+/// # Safety
+///
+/// `rsdp` must be a validated RSDP whose tables lie in the identity-mapped
+/// 0..4 GiB window (forwarded from [`seed_virtio_pci`]).
+unsafe fn ecam_bus(
+    rsdp: &acpi::Rsdp,
+) -> Option<
+    impl tairix_abi::driver::virtio_pci::VirtioPciBus
+        + tairix_abi::driver::msix::MsixBus
+        + tairix_abi::driver::pci::PciBus,
+> {
     use tairix_abi::RegisterWindow;
 
     /// Upper bound of the boot trampoline's identity map: an ECAM window
@@ -1010,32 +1044,19 @@ unsafe fn seed_virtio_pci(
     /// [`RegisterWindow`] (`boot.s` SAFETY-INVARIANT 4).
     const IDENTITY_LIMIT: u64 = 4u64 << 30;
 
-    // Locate the ECAM base; absent on a firmware without PCIe MMCONFIG.
     // SAFETY: forwarded — `rsdp` is identity-mapped per the caller.
-    let Some(mcfg_bytes) = (unsafe { acpi::locate_mcfg(rsdp) }) else {
-        return;
-    };
-    let Some(ecam) = acpi::mcfg_first_ecam(mcfg_bytes) else {
-        return;
-    };
+    let mcfg_bytes = unsafe { acpi::locate_mcfg(rsdp) }?;
+    let ecam = acpi::mcfg_first_ecam(mcfg_bytes)?;
     // The window must lie wholly inside the identity map, or an identity
     // `RegisterWindow` over it would touch unmapped memory (fail closed).
     let window_len = ecam.window_len();
-    let Some(end) = ecam.base.checked_add(window_len) else {
-        return;
-    };
+    let end = ecam.base.checked_add(window_len)?;
     if ecam.base == 0 || end > IDENTITY_LIMIT {
-        return;
+        return None;
     }
-    let Ok(len) = usize::try_from(window_len) else {
-        return;
-    };
-    let Ok(addr) = usize::try_from(ecam.base) else {
-        return;
-    };
-    let Some(ptr) = core::ptr::NonNull::new(addr as *mut u8) else {
-        return;
-    };
+    let len = usize::try_from(window_len).ok()?;
+    let addr = usize::try_from(ecam.base).ok()?;
+    let ptr = core::ptr::NonNull::new(addr as *mut u8)?;
     // SAFETY: `ecam.base .. ecam.base + len` is the firmware-described ECAM
     // configuration window (`mcfg_first_ecam`), proven above to lie wholly
     // within the 0..4 GiB identity map, so `ptr` is a valid, uniquely-owned
@@ -1043,7 +1064,20 @@ unsafe fn seed_virtio_pci(
     // ever accessed through the bounded `RegisterWindow` accessors this
     // window backs; nothing else aliases it during single-CPU bring-up.
     let window = unsafe { RegisterWindow::from_mapping(ecam.base, ptr, len) };
-    let pci = tairix_pci::mechanism_ecam(window);
+    Some(tairix_pci::mechanism_ecam(window))
+}
+
+/// Run both virtio-PCI observers over `pci` (whichever config-access
+/// mechanism [`seed_virtio_pci`] selected), emitting the discovered
+/// virtio-net and virtio-blk nodes into `sink`. One generic definition, so
+/// the ECAM and mechanism-#1 paths share the exact same probe.
+fn probe_virtio_pci<B>(pci: &B, sink: &mut crate::boot_hwtree::CollectingHwNodeSink, log: &dyn Sink)
+where
+    B: tairix_abi::driver::virtio_pci::VirtioPciBus
+        + tairix_abi::driver::msix::MsixBus
+        + tairix_abi::driver::pci::PciBus,
+{
+    use tairix_abi::driver::pci::PciBus;
 
     // Resolve each function's interrupt line from its own configuration
     // space (the firmware-assigned PCI Interrupt Line register at offset
@@ -1051,7 +1085,7 @@ unsafe fn seed_virtio_pci(
     // board constant. `0xFF` is the PCI "no connection" sentinel — a
     // function with no routed line is left undiscovered (fail closed).
     let dev_irq = |bdf: u64| -> Option<u32> {
-        let dword = PciBus::read_config(&pci, bdf, 0x3C).ok()?;
+        let dword = PciBus::read_config(pci, bdf, 0x3C).ok()?;
         let line = dword & 0xFF;
         if line == 0xFF {
             None
@@ -1062,18 +1096,17 @@ unsafe fn seed_virtio_pci(
 
     // An enumeration error leaves the NIC undiscovered; the ACPI nodes
     // already collected are seeded regardless.
-    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(&pci, &dev_irq, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &dev_irq, sink, log);
 
     // Emit every virtio-blk function as a match-key-only storage node the
     // root-mount autoload resolves the bootstrap-floor block driver from —
     // the x86_64 storage-discovery sibling of the aarch64/riscv64
     // device-tree block probe. The block bring-up re-resolves the transport
     // from PCI configuration space itself, so the node carries only its
-    // bind key (no register-window grant): it needs neither the ECAM window
-    // resolution the net probe does nor an interrupt line. An enumeration
-    // error leaves the disk undiscovered; whatever was collected is seeded
-    // regardless (fail closed).
-    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(&pci, sink);
+    // bind key (no register-window grant): it needs no interrupt line. An
+    // enumeration error leaves the disk undiscovered; whatever was collected
+    // is seeded regardless (fail closed).
+    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, sink);
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.
@@ -1354,10 +1387,41 @@ fn discover_and_program_io_apics(
         }
     }
 
+    // Publish the GSI COM1's interrupt is routed to so the console receive
+    // path (`crate::x86_64::com1_rx`) can recognise and unmask it. COM1 is
+    // the legacy ISA IRQ 4; the MADT may remap it through an
+    // Interrupt-Source-Override, so honour any override for source 4 and
+    // fall back to identity (GSI 4). Only publish when a pin actually owns
+    // the resolved GSI (it was programmed above), so an override pointing at
+    // a non-existent line leaves the console on the poll-backed path (fail
+    // closed).
+    let com1_gsi = resolve_com1_gsi(madt);
+    if com1_gsi <= max_gsi {
+        crate::x86_64::com1_rx::set_com1_console_gsi(com1_gsi);
+    }
+
     Ok(IrqRouting {
         max_line: max_gsi,
         controller: controller_static as &'static (dyn IrqController + Send + Sync),
     })
+}
+
+/// The legacy ISA interrupt line COM1 asserts on every x86 PC platform.
+const COM1_ISA_IRQ: u8 = 4;
+
+/// Resolve the GSI the COM1 (ISA IRQ 4) interrupt is routed to: an
+/// Interrupt-Source-Override in the MADT remaps a legacy ISA IRQ to a GSI,
+/// so honour an override for source 4; absent one, the ISA IRQ maps
+/// identically (GSI 4), the ACPI default.
+fn resolve_com1_gsi(madt: &acpi::Madt<'_>) -> u32 {
+    for entry in madt.entries() {
+        if let acpi::MadtEntry::InterruptSourceOverride { source, gsi, .. } = entry {
+            if source == COM1_ISA_IRQ {
+                return gsi;
+            }
+        }
+    }
+    u32::from(COM1_ISA_IRQ)
 }
 
 fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u8) -> Result<(), BootError> {

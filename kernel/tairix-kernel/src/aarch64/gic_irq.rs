@@ -655,77 +655,32 @@ fn drain_uart_into_console_queue() {
 /// drains reorder or duplicate input (see the gate's docs).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 fn drain_uart_locked() {
-    use tairix_kernel_core::ConsoleInput as _;
     let queue = &crate::aarch64::arch_wrapper::UART_INPUT;
     // Push through the installed UART console *device*, not the raw queue:
     // its line discipline maps a cooked-mode `^C`/`^Z` to a foreground
     // signal at arrival time (`plans/SPAWN.md` SP9) and forwards every
-    // other byte to this same queue, so the free-space flow control below
-    // is unchanged.
+    // other byte to this same queue. The lossless-backpressure /
+    // clear-then-recheck loop is the one shared definition both this port
+    // and the x86_64 16550 console reuse — the PL011 specifics are the
+    // injected closures: `read_console_bytes` reads the hardware FIFO,
+    // `clear_rx_interrupt` clears the receive-timeout latch the PL011
+    // asserts even with a drained FIFO, and the flow-control brake masks the
+    // receive line at the GIC (`rearm_uart_rx_if_masked` re-opens it once the
+    // reader frees queue space, and the level-sensitive line re-asserts on
+    // the bytes left in the FIFO).
     let console = crate::aarch64::arch_wrapper::uart_console_device();
-    loop {
-        // Lossless backpressure: dequeue from the hardware FIFO only what the
-        // console queue can accept this instant. Reading more would force the
-        // surplus to be dropped (the bytes leave the FIFO but the queue's
-        // `push` is short), which truncates a `login` line — including its
-        // terminating newline — and wedges the line-oriented reader. Leaving
-        // the surplus in the FIFO keeps the receive interrupt asserted; it
-        // re-fires once `login` drains the queue and frees space, so input
-        // streams through a sliding window with no byte lost (the software
-        // analogue of the FIFO's own flow control). `login`
-        // is already runnable (the first push woke it), so it drains promptly
-        // and the re-fire is progress, not a storm.
-        let free = queue.free_capacity();
-        if free == 0 {
-            // The console queue is full and the reader has not yet drained
-            // it. Spinning here (re-reading a full queue) would storm the CPU
-            // and starve the reader, so apply flow control: **mask** the
-            // receive line at the GIC and leave the surplus in the hardware
-            // FIFO. [`rearm_uart_rx_if_masked`], called from the reader's
-            // drain path, re-enables the line once space frees, and the
-            // level-sensitive line re-asserts on the bytes still in the FIFO
-            // — the software analogue of a hardware FIFO releasing flow
-            // control, with no byte lost and no storm.
+    crate::console_uart::drain_fifo_into_console(
+        console,
+        queue,
+        |buf| tairix_arch_aarch64::serial::read_console_bytes(buf),
+        || tairix_arch_aarch64::serial::clear_rx_interrupt(),
+        || {
             if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
                 let _ = GIC_IRQ_CONTROLLER.mask(intid);
                 UART_RX_MASKED.store(true, Ordering::Release);
             }
-            break;
-        }
-        let mut buf = [0u8; 32];
-        let want = free.min(buf.len());
-        let n = tairix_arch_aarch64::serial::read_console_bytes(&mut buf[..want]);
-        if n == 0 {
-            // The FIFO read empty: clear the latched receive / receive-timeout
-            // interrupt so the line deasserts. The PL011 receive-timeout latch
-            // is *not* cleared by emptying the FIFO, so without this the line
-            // stays asserted and this ISR re-fires forever, starving every
-            // other task.
-            tairix_arch_aarch64::serial::clear_rx_interrupt();
-            // Clear-then-recheck (no lost byte): a byte the device latched in
-            // the window *between* the empty read above and the clear just
-            // issued would have had its interrupt cleared with it — stranding
-            // it in the FIFO with no re-fire, which wedges the parked
-            // line-oriented `login` reader forever (the lost-wakeup race
-            // the charter forbids). So read once more: a byte that raced
-            // in before the clear is drained now, and any byte that arrives
-            // *after* the clear latches a fresh, uncleared interrupt that
-            // re-fires this ISR. Only a genuinely still-empty FIFO ends the
-            // drain.
-            let n2 = tairix_arch_aarch64::serial::read_console_bytes(&mut buf[..want]);
-            if n2 == 0 {
-                break;
-            }
-            // `n2 <= want <= free`: the raced-in chunk fits and its push wakes
-            // the parked reader. Loop to keep draining (and to re-clear on the
-            // next genuine empty).
-            let _ = console.push(&buf[..n2]);
-            continue;
-        }
-        // `n <= want <= free`, so the whole chunk fits and the push wakes the
-        // parked reader (`ConsoleInputQueue::push` → `console_wake`).
-        let _ = console.push(&buf[..n]);
-    }
+        },
+    );
 }
 
 /// Synchronously drain the console UART's hardware receive FIFO into the

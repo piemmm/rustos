@@ -47,7 +47,6 @@ use tairix_drv_bus_virtio::PciTransport;
 use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
-    NULL_CONSOLE_READ,
 };
 use tairix_kernel_irq::{IrqController, IrqTable};
 use tairix_kernel_mem::{
@@ -151,9 +150,9 @@ fn hlt_fallback_park(table: &IrqTable, handle: IrqHandle) {
 /// so they flip together. Opening the gate lets `login`'s gated console
 /// reads through; resolving the late users-database flips a `login` parked
 /// on the pending `users_db_read` into its prompt — against the installed
-/// database if the unlock succeeded, else fail-closed deny-all. No
-/// receive-interrupt arm: interactive COM1 console input is a later
-/// increment, so `login` fails closed on fd 0 this slice.
+/// database if the unlock succeeded, else fail-closed deny-all. The COM1
+/// receive interrupt is (idempotently) armed here too, so a `login` reader
+/// now parks off the run queue and a keystroke wakes it.
 fn release_console0_to_login() {
     CONSOLE0_GATE.open();
     // Nudge the console wait-queue so any `login` already parked on the
@@ -161,19 +160,24 @@ fn release_console0_to_login() {
     // no-op before the wait-queue arch hook is installed.
     tairix_kernel_core::console_wake();
     crate::root_mount::LATE_USERS_DB.resolve();
+    // Switch COM1 from the poll-backed to the interrupt-driven receive path
+    // for the `login` session: a keystroke now wakes the parked reader
+    // rather than requiring a poll. Idempotent with the `acquire_console0`
+    // arm; a no-op if the boot path could not resolve the console GSI.
+    crate::x86_64::com1_rx::enable_uart_console_irq();
 }
 
 /// The x86_64 console-0 seam the shared root-unlock orchestration reaches
 /// the primary console through.
 ///
 /// The COM1 UART is the primary console: its write half streams the
-/// passphrase prompt, and its read half is the fail-closed
-/// [`NULL_CONSOLE_READ`] (no non-blocking COM1 RX drain is wired this
-/// slice), so the first passphrase read returns an error and the unlock
-/// gives up fail-closed at once — never a reader parked forever on input
-/// that cannot arrive. Login is then refused (the correct secure default):
-/// the users database resolves deny-all and the console-0 gate opens.
-/// Interactive COM1 input is the later interrupt-driven-console increment.
+/// passphrase prompt, and its read half is the interrupt-fed
+/// [`Com1ConsoleRead`](crate::x86_64::com1_rx::Com1ConsoleRead) — arming
+/// the device's receive interrupt so a typed passphrase wakes the parked
+/// unlock kthread rather than busy-polling the FIFO. A boot that could not
+/// resolve the console interrupt leaves the receive line disabled and the
+/// reader on the poll-backed path (fail closed), never a reader parked
+/// forever.
 struct X86UnlockConsole;
 
 /// The single `'static` [`X86UnlockConsole`] the bring-up hands the shared
@@ -187,8 +191,18 @@ impl UnlockConsole for X86UnlockConsole {
         &'static dyn ConsoleWrite,
         &'static (dyn ConsoleRead + Sync + 'static),
     ) {
+        // Arm COM1's interrupt-driven receive for the unlock window so a
+        // keystroke wakes the parked passphrase reader (`console_wake`) —
+        // the receive ISR drains the FIFO into `COM1_INPUT`, which
+        // `COM1_CONSOLE_READ` reads. Idempotent with the
+        // `release_console0_to_login` handoff arm.
+        crate::x86_64::com1_rx::enable_uart_console_irq();
         let write: &'static dyn ConsoleWrite = &COM1_CONSOLE;
-        let read: &'static (dyn ConsoleRead + Sync + 'static) = &NULL_CONSOLE_READ;
+        // The unlock kthread reads the *ungated* interrupt-fed read half
+        // directly; the console list installs the gate-wrapped sibling for
+        // `login`.
+        let read: &'static (dyn ConsoleRead + Sync + 'static) =
+            &crate::x86_64::com1_rx::COM1_CONSOLE_READ;
         (write, read)
     }
 

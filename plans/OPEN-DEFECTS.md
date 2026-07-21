@@ -290,6 +290,46 @@ work.
 
 ---
 
+## D7 — x86_64 production MSI-X kthread disk-completion never wakes
+
+**State:** open, discovered by the `plans/ARCHSUPPORT.md` A3 work (the
+x86_64 interrupt-driven-console increment, whose admission live vertical
+first boots the production x86_64 kthread-admission disk bring-up). It is
+**not** a console defect — it sits in the never-live-confirmed A2
+production path (`plans/ARCHSUPPORT.md` A2 was landed host-gate-green
+only).
+
+**Symptom.** On a live x86_64 `pc`/PVH boot, `unlock_service::
+spawn_if_present` admits the in-kernel root-unlock kthread, which brings
+the virtio-blk-PCI root up over the production MSI-X path
+(`kernel/tairix-kernel/src/x86_64/root_unlock.rs` `virtio_blk_unlock`):
+the transport provisions, MSI-X is routed, the driver is admitted through
+the signed gate, and `VirtioBlk::open` allocates its DMA buffers — then
+the kthread parks (`IrqParkWaiter`) on the first device read and **is
+never woken**: the disk completion never reaches the parked task, so the
+mount/users-DB-install never runs, `login` opens deny-all, and the run
+times out with no `ARXFS passphrase:` prompt.
+
+**Not the discovered GSI.** Pinning the bound line to the scenario's
+known-good `DEVICE_GSI` (16) instead of the discovered PCI Interrupt-Line
+did not help (it regressed earlier), so the stall is in MSI-X
+delivery/wake of the *scheduler-parked kthread*, not the line value. The
+passing `root_unlock_login_qemu_x86_64` proves MSI-X completions work at
+GSI 16 in the *boot-observer* context (its own `HltWaiter` busy-`hlt`
+loop), which does **not** exercise the production scheduler-park →
+`irq_wake` → re-dispatch path the kthread uses; aarch64/riscv64 drive that
+same production kthread path successfully, so the gap is x86_64-specific
+(MSI-X delivery into, or scheduler re-dispatch after, the parked kthread).
+
+**What remains.** Instrument the live x86_64 kthread bring-up (does the
+MSI-X ISR fire? does `irq_wake` wake IRQ_WAITQ? is the kthread
+re-dispatched?) and fix the delivery/wake gap, then land the x86_64
+interrupt-driven-console live verticals A3 needs
+(`root_unlock_admission_qemu_x86_64` — thin bin over the production boot
+with an `UnlockAdmissionSink` keying on `USERS_DB_INSTALLED_MESSAGE` and a
+`serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]` enrolment,
+which this session authored and then removed to keep the gate green).
+
 ## Definition of done (whole plan, §7/§15/§23)
 
 This umbrella is closed only when D1–D6 are each closed on their own
