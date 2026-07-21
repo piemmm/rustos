@@ -68,7 +68,6 @@ use crate::unlock_service::{
 use crate::x86_64::arch_wrapper::published_irq_table;
 use crate::x86_64::ioapic_controller::published_typed;
 use crate::x86_64::serial_sink::{COM1_CONSOLE, SERIAL_SINK};
-use crate::x86_64::spawn_producer::X86_64_PROCESS_SPAWN;
 
 /// PCI configuration-space offset of the Interrupt Line register (PCI 3.0
 /// §6.2.4, low byte of the dword at 0x3C). Firmware programs it with the
@@ -483,5 +482,5 @@ fn virtio_blk_unlock<'a>(
     // `VirtioBlk<'static>` and can be shared for life behind the
     // block-sharing layer.
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "root-unlock: virtio-blk open")?;
-    finish_unlock(blk, coop, env, &X86_UNLOCK_CONSOLE, &X86_64_PROCESS_SPAWN)
+    finish_unlock(blk, coop, env, &X86_UNLOCK_CONSOLE)
 }
