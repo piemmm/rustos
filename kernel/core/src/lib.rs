@@ -197,8 +197,9 @@ pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};
 pub use introspect::{IntrospectSource, NullIntrospectSource, NULL_INTROSPECT};
 pub use introspect_source::KernelIntrospectSource;
 pub use kthread::{
-    reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_user_kthread,
-    spawn_user_kthread_with_stack, spawn_user_kthread_with_stack_live, with_current_live_space,
+    reschedule_current, spawn_kthread, spawn_kthread_with_stack,
+    spawn_kthread_with_stack_parked, spawn_user_kthread, spawn_user_kthread_with_stack,
+    spawn_user_kthread_with_stack_live, with_current_live_space,
     BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder, YielderHandle,
     KTHREAD_STACK_BYTES,
 };
@@ -233,16 +234,16 @@ pub use seat::{
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{
-    refuse_admit, refuse_build, refuse_spawn, spawn_and_enter, spawn_caller_errno, spawn_image,
-    AdmitError, ArchImageBuilder, BuiltImage, EmbeddedProgram, ImageBuildCtx, InitSpawn,
-    InitSpawnCtx, NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx,
-    SpawnCtxBuild, SpawnRequest, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+    admit_errno, refuse_build, spawn_and_enter, spawn_caller_errno, spawn_image, AdmitError,
+    ArchImageBuilder, BuiltImage, EmbeddedProgram, ImageBuildCtx, InitSpawn, InitSpawnCtx,
+    NullArchImageBuilder, ProgramRegistry, SpawnCallerError, SpawnRequest, EMPTY_PROGRAM_REGISTRY,
+    NULL_ARCH_IMAGE_BUILDER,
 };
 pub use spawn_services::{
     install_spawn_services, installed_spawn_services, ArchSpawnRuntime, SpawnRuntime,
     SpawnServices, SpawnServicesAlreadyInstalled,
 };
-pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
+pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers, LoadPlan};
 pub use useradmin::{
     LateUsersAdmin, NullUsersAdmin, UserAdminBacking, UserAdminEngine, UsersAdmin,
     UsersAdminAlreadyInstalled, NULL_USERS_ADMIN,

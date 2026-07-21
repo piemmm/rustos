@@ -50,7 +50,7 @@ use tairix_devmgr::DriverLoader;
 use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, HostError, ImageSource, Sink, SpawnContext, SpawnRegisterError,
 };
-use tairix_kernel_core::{InitSpawnCtx, ProcessSpawn};
+use tairix_kernel_core::InitSpawnCtx;
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 /// Spawn a verified user-space driver image into its own process.
@@ -117,8 +117,10 @@ pub trait DriverProcessSpawn {
 /// policy ([`SpawnDriverLoader`]) and the kernel's spawn mechanism. It holds
 /// the boot-time [`InitSpawnCtx`] (`tairix_kernel_core::KernelInitSpawner`,
 /// which owns the live scheduler / capability table / address-space registry)
-/// and the architecture's [`ProcessSpawn`] producer, and forwards each
-/// `spawn_driver` straight to [`InitSpawnCtx::spawn_driver_process`]. The
+/// and forwards each `spawn_driver` straight to
+/// [`InitSpawnCtx::spawn_driver_process`], which admits the driver as a
+/// deferred-load child that builds its own image through the boot-installed
+/// architecture image builder (`plans/FIX-DESKTOP.md` §2.6.5). The
 /// `KernelSpawnCtx` assembly — and therefore every mention of the
 /// feature-selected concrete scheduler — stays inside kernel/core, so this
 /// bin-crate type names neither the scheduler nor `KernelSpawnCtx`.
@@ -131,18 +133,14 @@ pub struct InitCtxDriverProcessSpawn<'a> {
     /// the seam builds the child's [`KernelSpawnCtx`](tairix_kernel_core::KernelSpawnCtx)
     /// over.
     init_ctx: &'a dyn InitSpawnCtx,
-    /// The architecture's process-spawn producer that builds the isolated
-    /// address space and re-asserts every kernel-side check.
-    producer: &'a dyn ProcessSpawn,
 }
 
 impl<'a> InitCtxDriverProcessSpawn<'a> {
     /// Bridge driver spawns to `init_ctx`'s
-    /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process), built
-    /// over the architecture `producer`.
+    /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process).
     #[must_use]
-    pub fn new(init_ctx: &'a dyn InitSpawnCtx, producer: &'a dyn ProcessSpawn) -> Self {
-        Self { init_ctx, producer }
+    pub fn new(init_ctx: &'a dyn InitSpawnCtx) -> Self {
+        Self { init_ctx }
     }
 }
 
@@ -157,7 +155,7 @@ impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
         node_id: Option<u32>,
     ) -> Result<u64, Errno> {
         self.init_ctx
-            .spawn_driver_process(self.producer, path, rxe, granted, grants, args, node_id)
+            .spawn_driver_process(path, rxe, granted, grants, args, node_id)
     }
 
     fn terminate_driver(&self, handle: u64) -> Result<(), Errno> {
@@ -626,7 +624,6 @@ mod tests {
 
         fn spawn_driver_process(
             &self,
-            _spawn: &dyn ProcessSpawn,
             path: &str,
             rxe: &[u8],
             caps: CapabilitySet,
@@ -645,23 +642,6 @@ mod tests {
         }
     }
 
-    /// A [`ProcessSpawn`] that must never be invoked: the recording
-    /// `InitSpawnCtx` overrides `spawn_driver_process` and ignores the
-    /// producer, so the adapter never reaches it.
-    struct UnusedProcessSpawn;
-    impl ProcessSpawn for UnusedProcessSpawn {
-        fn spawn_with(
-            &self,
-            _rxe: &[u8],
-            _ctx: &dyn tairix_kernel_core::SpawnCtx,
-            _caps: tairix_caps::CapabilitySet,
-            _args: &[&[u8]],
-            _env: &[&[u8]],
-        ) -> Result<u64, Errno> {
-            unreachable!("the recording context does not consult the producer")
-        }
-    }
-
     #[test]
     fn init_ctx_adapter_forwards_to_the_seam_unchanged() {
         // `InitCtxDriverProcessSpawn` must hand the verified payload, the
@@ -670,8 +650,7 @@ mod tests {
         // its PID — the bin crate's scheduler-agnostic bridge to the kernel
         // spawn mechanism.
         let init_ctx = RecordingInitCtx::new(0x7fff);
-        let producer = UnusedProcessSpawn;
-        let adapter = InitCtxDriverProcessSpawn::new(&init_ctx, &producer);
+        let adapter = InitCtxDriverProcessSpawn::new(&init_ctx);
 
         let window = HwResource::mmio(0xfe34_0000, 0x200);
         let dma = HwResource::dma(0x3fff_ffff, 0x1000);

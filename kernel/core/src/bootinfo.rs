@@ -40,7 +40,7 @@ use crate::fs::{
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
-    InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+    ArchImageBuilder, InitSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_ARCH_IMAGE_BUILDER,
 };
 use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
 use crate::users::{UsersDbSource, NULL_USERS_DB};
@@ -697,18 +697,21 @@ where
     /// for the running kernel's lifetime, exactly like the console device.
     pub programs: &'static ProgramRegistry,
 
-    /// Architecture-specific producer the `spawn` syscall drives to build a
-    /// child's hardware-isolated address space and admit it as a runnable
-    /// process (`plans/SPAWN.md` SP3).
+    /// Architecture-specific image builder the deferred launch path drives
+    /// to build a child's hardware-isolated address space *on the child's
+    /// own task* (`plans/FIX-DESKTOP.md` §2.6.5). `kernel_main` captures it
+    /// to build the boot-installed [`crate::spawn_services::SpawnServices`]
+    /// bundle; it is not threaded into the syscall handler.
     ///
-    /// Defaults to [`NULL_PROCESS_SPAWN`], which fails closed with
-    /// [`tairix_abi::Errno::NotImplemented`]: a port that
-    /// has no runtime-spawn producer wired leaves this default and `spawn`
-    /// announces an inert subsystem rather than half-building a task. A port
-    /// that can build a child address space installs its producer through
-    /// [`Self::with_spawn`]; spawning is *not* a privileged bypass — the
-    /// child receives only its manifest∩user-grant authority. Held as a `'static` borrow, like the console device.
-    pub spawn_service: &'static (dyn ProcessSpawn + 'static),
+    /// Defaults to [`NULL_ARCH_IMAGE_BUILDER`], whose `build` fails closed
+    /// with [`tairix_abi::Errno::NotImplemented`]: a port that has no image
+    /// builder wired leaves this default and a deferred load fails the child
+    /// closed rather than half-building a task. A port that can build a child
+    /// address space installs its builder through [`Self::with_spawn`];
+    /// spawning is *not* a privileged bypass — the child receives only its
+    /// manifest∩user-grant authority. Held as a `'static` borrow, like the
+    /// console device.
+    pub image_builder: &'static (dyn ArchImageBuilder + 'static),
 
     /// The on-disk application store the `spawn` syscall resolves a
     /// non-embedded `…/<Name>.app/Run` path against (`plans/APPS.md`
@@ -924,7 +927,7 @@ where
             // registry + producer through `with_spawn` (`plans/SPAWN.md`
             // SP3): `spawn` fails closed (`NotFound` / `NotImplemented`).
             programs: &EMPTY_PROGRAM_REGISTRY,
-            spawn_service: &NULL_PROCESS_SPAWN,
+            image_builder: &NULL_ARCH_IMAGE_BUILDER,
             // No on-disk application store until a boot path with a storage
             // floor installs one: a store-bundle spawn fails closed.
             app_store: None,
@@ -1061,10 +1064,10 @@ where
     pub fn with_spawn(
         mut self,
         programs: &'static ProgramRegistry,
-        spawn_service: &'static (dyn ProcessSpawn + 'static),
+        image_builder: &'static (dyn ArchImageBuilder + 'static),
     ) -> Self {
         self.programs = programs;
-        self.spawn_service = spawn_service;
+        self.image_builder = image_builder;
         self
     }
 

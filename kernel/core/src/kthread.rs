@@ -826,6 +826,41 @@ where
     )
 }
 
+/// Admit a resumable **plain kernel** kthread onto `scheduler` over a
+/// caller-supplied stack, born **parked** (off every run queue).
+///
+/// The asynchronous process-launch path (`plans/FIX-DESKTOP.md` §2.6.5)
+/// admits its loading child this way: the caller installs the child's
+/// per-task state (its placeholder capability record, streams, limits, cwd,
+/// grants, and parent/child wait link) under the returned [`TaskId`] and
+/// only then unparks it, so no CPU can dispatch — and take work from — the
+/// child before that state exists (the same born-parked discipline the user
+/// admit path uses). The child later upgrades itself into a user kthread
+/// through [`Yielder::become_user`] once it has built its image.
+///
+/// # Errors
+///
+/// As [`spawn_kthread`].
+pub fn spawn_kthread_with_stack_parked<C, A, P, S, W>(
+    scheduler: &P,
+    cs: C,
+    stack: S,
+    home_cpu: CpuId,
+    priority: Priority,
+    work: W,
+) -> SchedResult<TaskId>
+where
+    C: ContextSwitch + Copy + Send + 'static,
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+    S: KernelStack + Send + 'static,
+    W: FnMut(&mut Yielder<C>) + Send + 'static,
+{
+    spawn_control(
+        scheduler, home_cpu, priority, cs, stack, work, None, None, true,
+    )
+}
+
 /// Admit a resumable **user** (EL0) kthread onto `scheduler`, giving it a
 /// fresh heap-backed kernel stack ([`BoxStack`]).
 ///

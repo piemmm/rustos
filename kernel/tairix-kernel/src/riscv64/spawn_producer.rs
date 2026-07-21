@@ -44,10 +44,9 @@ use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use tairix_arch_api::EnterUser;
 use tairix_arch_riscv64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_riscv64::userentry::UserMode;
-use tairix_caps::CapabilitySet;
 use tairix_kernel_core::{
-    refuse_admit, refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack,
-    BuiltImage, ImageBuildCtx, KernelStack, ProcessSpawn, SpawnCtx, SpawnCtxBuild, SpawnRequest,
+    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
+    ImageBuildCtx, KernelStack, SpawnRequest,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -348,53 +347,5 @@ impl ArchImageBuilder for RiscvProcessSpawn {
             pre_resume,
             enter,
         })
-    }
-}
-
-impl ProcessSpawn for RiscvProcessSpawn {
-    /// Build and admit one child process from `rxe`, delegating to the
-    /// [`ArchImageBuilder`] split — [`alloc_kernel_stack`] then [`build`] —
-    /// and admitting the result through [`SpawnCtx::admit_process`], so the
-    /// image-build logic has one definition shared with the deferred-load
-    /// path (`§2.2`). `caps` is the manifest∩user-grant set the caller
-    /// already derived; this seam never widens it (no ambient authority).
-    ///
-    /// [`alloc_kernel_stack`]: ArchImageBuilder::alloc_kernel_stack
-    /// [`build`]: ArchImageBuilder::build
-    ///
-    /// # Errors
-    ///
-    /// A stable [`Errno`] for every failure (fail closed, never a panic).
-    fn spawn_with(
-        &self,
-        rxe: &[u8],
-        ctx: &dyn SpawnCtx,
-        caps: CapabilitySet,
-        args: &[&[u8]],
-        env: &[&[u8]],
-    ) -> Result<u64, Errno> {
-        let (kernel_stack, guard) =
-            self.alloc_kernel_stack(ctx.frames(), ctx.page_table_allocator());
-        let build_ctx = SpawnCtxBuild::new(ctx, guard);
-        let image = self.build(rxe, &build_ctx, args, env)?;
-        // SAFETY: `image.frozen` faithfully describes the mappings just
-        // built, `image.physmap` backs them, `image.pre_resume` activates
-        // the child's root before it is first entered, `kernel_stack` is a
-        // region exclusive to this child that stays mapped for the task's
-        // lifetime, and `image.live` retains the same arch space `frozen`
-        // was taken from — the `admit_process` contract.
-        unsafe {
-            ctx.admit_process(
-                caps,
-                image.frozen,
-                image.physmap,
-                image.stack_span,
-                kernel_stack,
-                image.pre_resume,
-                image.live,
-                image.enter,
-            )
-        }
-        .map_err(|err| refuse_admit(ctx, err))
     }
 }

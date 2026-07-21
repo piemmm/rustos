@@ -66,7 +66,6 @@ use crate::aarch64::arch_wrapper::{
 use crate::aarch64::gic_irq::{
     published_irq_table, COMPOSITE_IRQ_CONTROLLER, CPU0_TARGET, GIC_IRQ_CONTROLLER,
 };
-use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
 use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::root_mount::LATE_USERS_DB;
@@ -661,13 +660,7 @@ fn virtio_blk_unlock<'a>(
     // `'static`, so the opened device is `VirtioBlk<'static>` and can be
     // shared for life behind the block-sharing layer (`finish_unlock`).
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "root-unlock: virtio-blk open")?;
-    finish_unlock(
-        blk,
-        coop,
-        env,
-        &AARCH64_UNLOCK_CONSOLE,
-        &AARCH64_PROCESS_SPAWN,
-    )
+    finish_unlock(blk, coop, env, &AARCH64_UNLOCK_CONSOLE)
 }
 
 /// Bring the Raspberry Pi 4 EMMC2 SD host up over its interrupt-driven SDHCI
@@ -825,13 +818,7 @@ fn emmc2_unlock<'a>(
             },
         )?
     };
-    finish_unlock(
-        blk,
-        coop,
-        env,
-        &AARCH64_UNLOCK_CONSOLE,
-        &AARCH64_PROCESS_SPAWN,
-    )
+    finish_unlock(blk, coop, env, &AARCH64_UNLOCK_CONSOLE)
 }
 
 /// A minimal in-kernel [`DriverHost`] exposing a capability-gated

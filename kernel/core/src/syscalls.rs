@@ -142,8 +142,10 @@ use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
-    AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+    admit_errno, AdmitError, ImageBuildCtx, ProgramRegistry, EMPTY_PROGRAM_REGISTRY,
 };
+use crate::spawn_services::installed_spawn_services;
+use crate::kthread::{reschedule_current, spawn_kthread_with_stack_parked, Yielder};
 use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
 use crate::users::{UsersDbSource, NULL_USERS_DB};
 use crate::wallclock::{WallClockSource, NULL_WALL_CLOCK};
@@ -292,13 +294,11 @@ where
     /// the registry's program bytes live for the lifetime of the running
     /// kernel.
     programs: &'static ProgramRegistry,
-    /// The architecture-specific spawn producer the `spawn` syscall drives
-    /// to build a child's isolated address space and admit it
-    /// (`plans/SPAWN.md` SP3). Defaults to [`NULL_PROCESS_SPAWN`] (fail
-    /// closed with [`Errno::NotImplemented`]); the boot
-    /// path installs the concrete producer through [`Self::with_spawn`].
-    /// Held as a `'static` borrow, exactly like the console device.
-    spawn_service: &'static (dyn ProcessSpawn + 'static),
+    // The architecture spawn producer no longer lives on the handler: the
+    // asynchronous launch path (`plans/FIX-DESKTOP.md` §2.6.5) builds a
+    // child's image on the *child's* own task through the boot-installed
+    // `SpawnServices` bundle's architecture image builder, not a per-syscall
+    // handler borrow. The boot path installs that bundle directly.
     /// The on-disk application store the `spawn` syscall resolves a
     /// non-embedded `…/<Name>.app/Run` path against (`plans/APPS.md`
     /// deliverable 8): the build's embedded app trust anchor plus the
@@ -532,12 +532,13 @@ where
             // rather than touching a device that does not exist.
             consoles: &NO_CONSOLES,
             // Spawn subsystem unwired until the boot path threads a frame
-            // allocator + populated registry + producer (`plans/SPAWN.md`
-            // SP3): `spawn` fails closed (`NotImplemented` / `NotFound`).
+            // allocator + populated registry (`plans/SPAWN.md` SP3): `spawn`
+            // fails closed (`NotFound` for an unknown path; the deferred
+            // load fails the child closed when the launch services are
+            // unwired, `plans/FIX-DESKTOP.md` §2.6.5).
             frames: None,
             page_table_frames: None,
             programs: &EMPTY_PROGRAM_REGISTRY,
-            spawn_service: &NULL_PROCESS_SPAWN,
             // No on-disk application store until a boot path with a storage
             // floor installs one: a store-bundle spawn fails closed with
             // `NotFound` immediately, parking nothing.
@@ -842,23 +843,20 @@ where
         self
     }
 
-    /// Install the embedded-program registry and the architecture spawn
-    /// producer the `spawn` syscall drives, consuming and returning `self`
+    /// Install the embedded boot-floor program registry the `spawn` syscall
+    /// resolves a path against, consuming and returning `self`
     /// (`plans/SPAWN.md` SP3).
     ///
-    /// Until this is called the handler holds the empty registry and
-    /// [`NULL_PROCESS_SPAWN`], so `spawn` fails closed
-    /// ([`Errno::NotFound`] / [`Errno::NotImplemented`]). Both must be
-    /// `'static`: the program bytes and the producer live for the lifetime
-    /// of the running kernel, exactly like the console device.
+    /// Until this is called the handler holds the empty registry, so a
+    /// `spawn` of any path fails closed with [`Errno::NotFound`]. The
+    /// registry must be `'static`: its program bytes live for the lifetime of
+    /// the running kernel, exactly like the console device. The architecture
+    /// image builder the deferred load uses is installed separately, on the
+    /// boot-installed [`crate::spawn_services::SpawnServices`] bundle
+    /// (`plans/FIX-DESKTOP.md` §2.6.5), not on the handler.
     #[must_use]
-    pub const fn with_spawn(
-        mut self,
-        programs: &'static ProgramRegistry,
-        spawn_service: &'static (dyn ProcessSpawn + 'static),
-    ) -> Self {
+    pub const fn with_spawn(mut self, programs: &'static ProgramRegistry) -> Self {
         self.programs = programs;
-        self.spawn_service = spawn_service;
         self
     }
 
@@ -2406,136 +2404,6 @@ where
         }
     }
 
-    /// Resolve, verify, and authorise the on-disk store bundle at `parsed`
-    /// through the one shared `tairix_appload` load gate, returning the
-    /// validated entry-point image and its manifest capability request.
-    ///
-    /// The read authority is passed **explicitly** as `(uid, effective)` —
-    /// the kernel-attested user id and effective capability set the bundle
-    /// is read under — plus `task`, the id of the task that parks while the
-    /// store's readiness latch is still pending. Taking the authority as an
-    /// explicit pair rather than a borrowed [`CallerContext`] lets the one
-    /// definition serve both the synchronous caller-side read and a
-    /// deferred child-side read under the child's own credential
-    /// (`plans/FIX-DESKTOP.md` §2.2). Every per-inode and mount-flag check
-    /// stays kernel-side under `(uid, effective)`; the manifest must be
-    /// signed by the build's embedded app trust anchor. A build with no
-    /// installed store, a store that resolved unavailable, or any gate
-    /// refusal fails closed.
-    ///
-    /// A bundle on the immutable read-only system stores is fully verified
-    /// **once per boot**: the accepted result is cached in the
-    /// [`AppStore`](crate::appspawn::AppStore)'s classified, budgeted,
-    /// pressure-governed semantic launch cache
-    /// ([`LaunchCache`](crate::launch_cache::LaunchCache)) and every later
-    /// launch serves the cached image after re-authorising the
-    /// `(uid, effective)` read of the entry point through the secured VFS —
-    /// verification is hoisted off the launch hot path, authorisation is
-    /// not. Bundles on writable volumes are never cached, and a cache
-    /// entry reclaimed under memory pressure simply re-verifies through
-    /// the full gate.
-    fn load_store_bundle(
-        &self,
-        uid: u32,
-        effective: &dyn tairix_abi::CapabilityQuery,
-        task: u64,
-        parsed: &crate::appspawn::BundleRunPath<'_>,
-    ) -> Result<alloc::sync::Arc<tairix_appload::LoadedApp>, Errno> {
-        let Some(store) = self.app_store else {
-            return Err(Errno::NotFound);
-        };
-        self.wait_app_store(task, store)?;
-        if !store.is_available() {
-            return Err(Errno::NotFound);
-        }
-        let cacheable = crate::appspawn::AppStore::cacheable_bundle(parsed.bundle);
-        if cacheable {
-            if let Some(app) = store.cached(parsed.bundle) {
-                // The hit skips re-verification of immutable bytes, never
-                // the read authority: the read of the entry point is
-                // re-authorised through the secured VFS (per-inode
-                // owner/mode/ACL and mount flags) under `(uid, effective)`,
-                // so a principal who could not read the bundle cannot
-                // launch it from the cache.
-                self.filesystem
-                    .open(uid, effective, app.run_path(), OpenFlags::READ)?;
-                return Ok(app);
-            }
-        }
-        let fs_store = crate::appspawn::FsBundleStore::new(self.filesystem, uid, effective);
-        let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
-        let clock = crate::appspawn::ArchClock::new(self.arch);
-        let loader = tairix_appload::AppLoader::new(tairix_appload::AppLoaderConfig {
-            accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
-            syscall_table_hash: tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-            store: &fs_store,
-            verifier: &verifier,
-            clock: &clock,
-            sink: self.audit,
-        });
-        // The full-word set is the identity element of the gate's
-        // request∩grants intersection, so the returned ceiling is exactly
-        // the manifest request — the same value an embedded row carries —
-        // and the admit path's single intersection with the spawning
-        // credential's user ceiling stays the one authority bound. It also
-        // makes the verified result caller-independent, which is what lets
-        // the cache below serve it to a different caller.
-        let full_grants = CapabilitySet::from_words([u64::MAX; 4]);
-        let app = loader
-            .load(parsed.bundle, &full_grants)
-            .map(alloc::sync::Arc::new)
-            .map_err(crate::appspawn::app_error_errno)?;
-        if cacheable {
-            store.cache_verified(parsed.bundle, &app);
-        }
-        Ok(app)
-    }
-
-    /// Park the task `task` while the installed application store's
-    /// readiness latch is still *pending* — the boot kthread that publishes
-    /// the `/System` mount has not reached a terminal state.
-    ///
-    /// `task` parks off the run queue on
-    /// [`crate::waitq::APP_STORE_WAITQ`] (no busy yield) and is woken by
-    /// [`crate::waitq::app_store_wake`] the instant the latch resolves —
-    /// available or unavailable — re-checking the condition after every
-    /// wake. The wait is untimed: the boot path resolves the latch on every
-    /// outcome, so only an explicit wake releases a waiter. Taking the task
-    /// id explicitly (rather than a borrowed [`CallerContext`]) lets a
-    /// deferred child-side load park the child on its own id
-    /// (`plans/FIX-DESKTOP.md` §2.2).
-    fn wait_app_store(&self, task: u64, store: &crate::appspawn::AppStore) -> Result<(), Errno> {
-        if !store.is_pending() {
-            return Ok(());
-        }
-        // Register so a waker can find and `unpark` us, then loop check →
-        // park. The scheduler's wake-pending token closes the check/park
-        // race — mirrors `users_db_wait` exactly.
-        crate::waitq::APP_STORE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
-        let result = loop {
-            if !store.is_pending() {
-                break Ok(());
-            }
-            // Park off the run queue until woken, keyed to the CPU this task
-            // occupies right now (`park_current_task` reads it live, so a
-            // mid-wait migration is handled); the fallback yield covers a
-            // caller with no live dispatch loop so it never busy-spins.
-            match park_current_task(self.sched, self.arch, task) {
-                ParkStep::Parked => {}
-                ParkStep::TaskVanished => break Err(Errno::NotFound),
-                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
-            }
-            // A doomed waiter never re-parks: a termination deferred against
-            // this task unwinds the wait so the kill lands at the syscall
-            // boundary (the errno never reaches user space).
-            if crate::procsignal::kill_pending(task) {
-                break Err(Errno::Interrupted);
-            }
-        };
-        crate::waitq::APP_STORE_WAITQ.deregister(task);
-        result
-    }
-
     /// Resolve the child's kernel-attested credential (uid + group set +
     /// capability ceiling) for `spawn`, never a caller-supplied value.
     ///
@@ -3619,39 +3487,39 @@ where
         if program.is_none() && bundle.is_none() {
             return Err(Errno::NotFound);
         }
-        let loaded = match (&program, &bundle) {
-            (None, Some(parsed)) => Some(self.load_store_bundle(
-                caller.caps.owner().0,
-                caller.caps.effective(),
-                caller.task_id.0,
-                parsed,
-            )?),
-            _ => None,
-        };
+        // The bundle read + signature/hash verification is **not** done
+        // here: it moves onto the child's own first slice (§2.6.5), so the
+        // spawning caller (a desktop, a shell) is never blocked on disk I/O
+        // + cryptography. The handler only resolves the *shape* synchronously;
+        // the heavy load is the child's `LoadPlan` below. An embedded
+        // boot-floor program's bytes are already `'static` and verified at
+        // build time, so it is a prebuilt plan with no deferred read.
 
-        // The child's effective startup strings: a present block carries
-        // the caller's chosen argument vector and environment verbatim
-        // (a shell passing the typed command words and its exported
-        // variables); with no block the child receives the program's
-        // registered default arguments and an empty environment — exactly
-        // what every pre-existing caller expressed.
-        let mut args: Vec<&[u8]> = Vec::new();
-        let mut env: Vec<&[u8]> = Vec::new();
+        // The child's effective startup strings, captured as **owned** bytes
+        // because the child materialises long after this handler returns and
+        // cannot borrow the caller's staged blocks: a present block carries
+        // the caller's chosen argument vector and environment verbatim (a
+        // shell passing the typed command words and its exported variables);
+        // with no block the child receives the program's registered default
+        // arguments and an empty environment — exactly what every
+        // pre-existing caller expressed.
+        let mut args: Vec<Vec<u8>> = Vec::new();
+        let mut env: Vec<Vec<u8>> = Vec::new();
         if let Some(block) = &strings_buf {
             let view = ProcessStart::parse(block)?;
             for index in 0..view.arg_count() {
-                args.push(view.arg(index).ok_or(Errno::OutOfRange)?);
+                args.push(view.arg(index).ok_or(Errno::OutOfRange)?.to_vec());
             }
             for index in 0..view.env_count() {
-                env.push(view.env(index).ok_or(Errno::OutOfRange)?);
+                env.push(view.env(index).ok_or(Errno::OutOfRange)?.to_vec());
             }
         } else if let Some(program) = program {
-            args.extend_from_slice(program.args);
+            args.extend(program.args.iter().map(|a| a.to_vec()));
         } else if let Some(parsed) = &bundle {
             // A store bundle's default argument vector is its command name
             // (the bundle-directory stem) — the same one-word convention
             // every registered boot-floor row declares.
-            args.push(parsed.command.as_bytes());
+            args.push(parsed.command.as_bytes().to_vec());
         }
 
         // Resolve the child's kernel-attested credential (uid + group set +
@@ -3719,17 +3587,35 @@ where
             // credential; it can only narrow the child.
             attach.is_sandbox(),
         );
-        let (rxe, requested): (&[u8], CapabilitySet) = if let Some(program) = program {
-            (program.rxe, program.capability_set())
-        } else if let Some(app) = &loaded {
-            (app.run_image(), *app.granted())
+        // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
+        // boot-floor program is a **prebuilt** plan carrying its already-
+        // verified `'static` image and manifest request, so the child only
+        // builds an address space; a store bundle is a **bundle** plan the
+        // child reads and verifies itself, on its own task, under its own
+        // credential. A syntactically valid path always matches exactly one
+        // (the resolve step above returned on every other shape).
+        let plan = if let Some(program) = program {
+            LoadPlan::Prebuilt {
+                rxe: alloc::borrow::Cow::Borrowed(program.rxe),
+                requested: program.capability_set(),
+            }
+        } else if let Some(parsed) = &bundle {
+            LoadPlan::Bundle {
+                bundle: String::from(parsed.bundle),
+                command: String::from(parsed.command),
+            }
         } else {
-            // Unreachable by construction (the resolve step above returned
-            // on every other shape); keep the arm fail-closed.
+            // Unreachable by construction; keep the arm fail-closed.
             return Err(Errno::NotFound);
         };
-        self.spawn_service
-            .spawn_with(rxe, &ctx, requested, &args, &env)
+
+        // Admit the child in its loading state and return its PID at once —
+        // the caller keeps running while the child performs the disk read,
+        // verification, and image build on its own first slice. A load
+        // failure surfaces through the child's reserved-status exit, not this
+        // return value (§2.3). Only a synchronous admission failure (launch
+        // services unwired, or scheduler exhaustion) maps to an errno.
+        ctx.admit_loading(plan, args, env).map_err(admit_errno)
     }
 
     fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -7611,48 +7497,6 @@ where
         }
     }
 
-    /// Derive the child's kernel-attested capability record for `sec_id`:
-    /// the `user ceiling ∩ manifest request` effective set plus the process
-    /// identity, parentage, credential, start time, and console attestation
-    /// — every field kernel-resolved, never caller-supplied — with a sandbox
-    /// child's sets structurally stripped last. `caps` is the program's
-    /// manifest request. Factored out of `admit_process` so that admission
-    /// path stays a readable linear sequence.
-    fn derive_child_record(&self, sec_id: SecTaskId, caps: CapabilitySet) -> TaskCapabilities {
-        // The parent's own attested process-instance identity (read from its
-        // kernel-held record, never a caller value) so the child is
-        // attributable to the exact parent instance even across PID reuse; a
-        // kernel-parented admit leaves the kernel sentinel.
-        let parent_proc_id = self
-            .caps
-            .read()
-            .caps_for(self.parent)
-            .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
-        // Kernel monotonic clock at admission: lets an audit/origin consumer
-        // order and age the instance and tell apart two lifetimes that reused
-        // a numeric id. Read kernel-side, never caller-supplied.
-        let start_time = SchedulerArch::ticks_now(self.arch);
-        // The one console backing every attached standard descriptor, or the
-        // "not console-backed" sentinel for a closed/split table — a
-        // per-console service trusts this to place a caller.
-        let console = self
-            .streams
-            .session_console()
-            .map_or(tairix_abi::ORIGIN_CONSOLE_NONE, u64::from);
-        derive_task_record(
-            sec_id,
-            caps,
-            &self.credential,
-            self.proc_id,
-            parent_proc_id,
-            &self.name,
-            &self.spawn_path,
-            start_time,
-            console,
-            self.sandbox,
-            self.audit,
-        )
-    }
 }
 
 /// Build a freshly spawned child's kernel-attested [`TaskCapabilities`]
@@ -7667,11 +7511,11 @@ where
 /// stay manifest-bounded. A sandbox child's three capability sets are
 /// stripped structurally last, after every attestation is attached.
 ///
-/// Every argument is kernel-resolved, never caller-supplied. Shared by the
-/// synchronous admit path ([`KernelSpawnCtx::derive_child_record`]) and the
-/// asynchronous-launch loading body, which installs the *placeholder* record
-/// (empty request) at admit and the *effective* record (the loaded
-/// manifest's request) once the image is verified — the same identity,
+/// Every argument is kernel-resolved, never caller-supplied. Both the
+/// *placeholder* record (empty request, installed synchronously at admit)
+/// and the *effective* record (the loaded manifest's request, installed by
+/// the loading body once the image is verified) are derived through this one
+/// definition from a single [`ChildRecordSeed`] — the same identity,
 /// parentage, credential, start time, and console on both, so the two
 /// derivations can never diverge (`plans/FIX-DESKTOP.md` §2.6.5, item 2).
 #[allow(clippy::too_many_arguments)]
@@ -7718,110 +7562,515 @@ fn derive_task_record(
     }
 }
 
-impl<A> SpawnCtx for KernelSpawnCtx<'_, A>
-where
-    A: KernelArch + 'static,
-{
+/// The pre-verified or on-disk source an admitted **loading** child
+/// materialises into an image on its own first scheduled slice
+/// (`plans/FIX-DESKTOP.md` §2.6.5). Owned data captured by the deferred
+/// loading body; it never borrows the spawning caller's task, so it can be
+/// carried across the arbitrary delay before the child is dispatched.
+pub enum LoadPlan {
+    /// A pre-verified in-memory image whose manifest capability request is
+    /// already known: a boot-floor embedded program (`'static` bytes) or a
+    /// driver image the signed `drvhost` load gate already verified (owned
+    /// bytes). The child only builds an isolated address space from it — no
+    /// disk read, no re-verification.
+    Prebuilt {
+        /// The `rxe` image bytes (borrowed `'static` for an embedded program,
+        /// owned for a verified driver image the loader read from disk).
+        rxe: alloc::borrow::Cow<'static, [u8]>,
+        /// The manifest capability request the child's effective set is
+        /// derived from (`ceiling ∩ request`).
+        requested: CapabilitySet,
+    },
+    /// An on-disk `<Name>.app/Run` store bundle the child reads and verifies
+    /// itself, on its own task, under its own credential.
+    Bundle {
+        /// The bundle root directory the shared load gate judges.
+        bundle: String,
+        /// The bundle directory stem — retained for symmetry with the
+        /// synchronous resolver; the child re-derives its manifest request
+        /// from the verified `AppInfo`.
+        command: String,
+    },
+}
+
+/// The kernel-resolved inputs [`derive_task_record`] needs, captured at
+/// admit so the placeholder (empty-request) record installed synchronously
+/// and the effective record the loading body installs after verification
+/// share every kernel-attested field but the manifest request — the two
+/// derivations can never diverge (`plans/FIX-DESKTOP.md` §2.6.5, item 2).
+#[derive(Clone)]
+struct ChildRecordSeed {
+    proc_id: ProcId,
+    parent_proc_id: ProcId,
+    name: ProcName,
+    spawn_path: Vec<u8>,
+    start_time: u64,
+    console: u64,
+    credential: SpawnCredential,
+    sandbox: bool,
+}
+
+impl ChildRecordSeed {
+    /// Derive the child's kernel-attested capability record for
+    /// `manifest_request` from this seed. Called once at admit with an empty
+    /// request (the placeholder) and once in the loading body with the
+    /// verified manifest's request (the effective record that replaces it).
+    fn record(
+        &self,
+        sec_id: SecTaskId,
+        manifest_request: CapabilitySet,
+        audit: &dyn Sink,
+    ) -> TaskCapabilities {
+        derive_task_record(
+            sec_id,
+            manifest_request,
+            &self.credential,
+            self.proc_id,
+            self.parent_proc_id,
+            &self.name,
+            &self.spawn_path,
+            self.start_time,
+            self.console,
+            self.sandbox,
+            audit,
+        )
+    }
+}
+
+/// The [`ImageBuildCtx`] the loading body hands the architecture image
+/// builder, backed by the boot-installed `'static`
+/// [`crate::spawn_services::SpawnServices`] bundle rather than a per-call
+/// [`KernelSpawnCtx`] borrow (the build runs long after the `spawn` handler
+/// returned).
+struct ServicesBuildCtx {
+    services: &'static crate::spawn_services::SpawnServices,
+    /// The loading child's kernel-stack guard VA (`Some` for an arena stack,
+    /// `None` for the software-canary `BoxStack`), re-expressed in the
+    /// child's own root by the build.
+    guard: Option<u64>,
+}
+
+impl ImageBuildCtx for ServicesBuildCtx {
     fn frames(&self) -> &FrameAllocator {
-        self.frames
+        self.services.frames()
     }
 
     fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
-        self.page_table_frames
+        self.services.page_table_frames()
     }
 
     fn audit(&self) -> &(dyn Sink + Sync) {
-        self.audit
+        self.services.audit()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn admit_process(
-        &self,
-        caps: CapabilitySet,
-        space: Box<dyn UserAddressSpace + Send + Sync>,
-        physmap: Box<dyn PhysMap + Send + Sync>,
-        stack_span: crate::aspace::StackSpan,
-        stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut(u64) + Send>,
-        live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
-        mut enter: Box<dyn FnMut() + Send>,
-    ) -> Result<u64, AdmitError> {
-        let cpu = SchedulerArch::current_cpu(self.arch);
+    fn kernel_stack_guard(&self) -> Option<u64> {
+        self.guard
+    }
+}
 
-        // Admit the child as a resumable user kthread (`plans/SPAWN.md`
-        // SP2): the work body performs the user-mode transition on the
-        // task's own kernel stack, and the `pre_resume` hook reactivates
-        // the child's address-space root before every switch into it so it
-        // `eret`s into EL0 under the correct, isolated translation regime. `enter` diverges into EL0, so the `()` it
-        // yields satisfies the body signature for the (impossible) case the
-        // transition ever returned. The arch seam owns the kernel stack
-        // (`stack`) — an arena-backed stack whose guard page it has unmapped
-        // in the child's own root, else the software-canary `BoxStack`
-        // fallback (`plans/PI.md` G3b-2).
-        let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
-            enter();
-        };
-        let cs = self.arch.context_switch();
-        // When the producer retained a live, mutable address space, admit the
-        // child with it so its `mem_map` / `mmio_map` syscalls mutate its own
-        // space through the per-CPU live-space slot (`plans/PI.md`
-        // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
-        // fail closed.
-        //
-        // The child is admitted **parked** (the trailing `true`): registered
-        // but off every run queue, so no CPU can dispatch it and take its
-        // first syscall before the per-task state below exists. The `unpark`
-        // at the end makes it runnable once that state is installed. On a
-        // multi-core boot a Ready admission here raced those installs and the
-        // child's first syscall found no capability record.
-        let admitted = match live {
-            Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
-                self.sched,
-                cs,
-                stack,
-                cpu,
-                Priority::Normal,
-                pre_resume,
-                live,
-                work,
-                true,
-            ),
-            None => crate::kthread::spawn_user_kthread_with_stack(
-                self.sched,
-                cs,
-                stack,
-                cpu,
-                Priority::Normal,
-                pre_resume,
-                work,
-                true,
-            ),
-        };
-        let task_id = admitted.map_err(|_| AdmitError::SchedulerFull)?;
+/// A [`tairix_appload::Clock`] over the boot-installed
+/// [`crate::spawn_services::SpawnRuntime`], so the child-side bundle read
+/// times its load phases without the loading body naming the concrete
+/// architecture.
+struct RuntimeClock<'a> {
+    runtime: &'a dyn crate::spawn_services::SpawnRuntime,
+}
 
-        // Register the child's caps under the *same* numeric id the
-        // dispatcher recovers (`SecTaskId(task_id)`), so its first syscall
-        // (once unparked below) resolves a caller context. The record's
-        // kernel-attested fields are built by `derive_child_record`.
-        let sec_id = SecTaskId(task_id);
-        let record = self.derive_child_record(sec_id, caps);
-        self.caps.write().insert(record);
+impl tairix_appload::Clock for RuntimeClock<'_> {
+    fn now_ns(&self) -> u64 {
+        self.runtime.now_ns()
+    }
+}
 
-        // Register the child's frozen address space + direct map under the
-        // same id, so its first user-memory copy resolves its own mappings
-        // instead of failing closed with `BadAddress` (`plans/PI.md` P6c-3
-        // follow-up). A fresh task id is never already present; a refusal is
-        // a kernel invariant violation — retire the still-parked task and
-        // fail closed rather than leave an unrunnable orphan.
-        if self
-            .aspaces
-            .write()
-            .register(sec_id, space, physmap)
+/// The pieces the loading body needs to upgrade itself into a user task once
+/// its image is built, verified, and registered: the address-space-root
+/// reactivation hook, the retained live space (for a task whose producer
+/// wired one), and the user-mode entry thunk.
+struct ReadyToEnter {
+    pre_resume: Box<dyn FnMut(u64) + Send>,
+    live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
+    enter: Box<dyn FnMut() + Send>,
+}
+
+/// Park the loading child while the application store's readiness latch is
+/// still pending, then return.
+///
+/// The child is a resumable kthread, so it suspends through its published
+/// per-CPU resume handle ([`reschedule_current`]) — no scheduler borrow is
+/// needed in the body — and is woken by [`crate::waitq::app_store_wake`] the
+/// instant the boot path resolves the latch (available or unavailable). A
+/// caller with no live dispatch loop (a host test) cannot park, so the loop
+/// breaks rather than busy-spinning; such a build never leaves the latch
+/// pending. A termination deferred against the child unwinds the wait.
+fn body_wait_app_store(
+    services: &'static crate::spawn_services::SpawnServices,
+    task: u64,
+) -> Result<(), Errno> {
+    let Some(store) = services.app_store() else {
+        return Ok(());
+    };
+    if !store.is_pending() {
+        return Ok(());
+    }
+    crate::waitq::APP_STORE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
+    let result = loop {
+        if !store.is_pending() {
+            break Ok(());
+        }
+        let cpu = services.runtime().current_cpu();
+        if !reschedule_current(cpu, RescheduleAction::Park) {
+            break Ok(());
+        }
+        if crate::procsignal::kill_pending(task) {
+            break Err(Errno::Interrupted);
+        }
+    };
+    crate::waitq::APP_STORE_WAITQ.deregister(task);
+    result
+}
+
+/// Resolve, verify, and authorise the on-disk store bundle `bundle` through
+/// the one shared `tairix_appload` load gate, under the child's own
+/// `(uid, effective)` authority — the deferred-load counterpart of
+/// [`KernelSyscallHandlers::load_store_bundle`], driven from the child's own
+/// task off the boot-installed services (`plans/FIX-DESKTOP.md` §2.2). The
+/// `LaunchCache` still hoists verification off a re-launch; the entry-point
+/// read is always re-authorised through the secured VFS, so a principal who
+/// could not read the bundle cannot launch it from the cache.
+fn body_load_bundle(
+    services: &'static crate::spawn_services::SpawnServices,
+    uid: u32,
+    effective: &dyn tairix_abi::CapabilityQuery,
+    bundle: &str,
+) -> Result<alloc::sync::Arc<tairix_appload::LoadedApp>, Errno> {
+    let Some(store) = services.app_store() else {
+        return Err(Errno::NotFound);
+    };
+    if !store.is_available() {
+        return Err(Errno::NotFound);
+    }
+    let cacheable = crate::appspawn::AppStore::cacheable_bundle(bundle);
+    if cacheable {
+        if let Some(app) = store.cached(bundle) {
+            services
+                .filesystem()
+                .open(uid, effective, app.run_path(), OpenFlags::READ)?;
+            return Ok(app);
+        }
+    }
+    let fs_store = crate::appspawn::FsBundleStore::new(services.filesystem(), uid, effective);
+    let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
+    let clock = RuntimeClock {
+        runtime: services.runtime(),
+    };
+    let loader = tairix_appload::AppLoader::new(tairix_appload::AppLoaderConfig {
+        accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
+        syscall_table_hash: tairix_kernel_syscall::SYSCALL_TABLE_HASH,
+        store: &fs_store,
+        verifier: &verifier,
+        clock: &clock,
+        sink: services.audit(),
+    });
+    // The full-word set is the identity element of the gate's request∩grants
+    // intersection, so the returned ceiling is exactly the manifest request;
+    // the child's single intersection with its credential's user ceiling
+    // (in `ChildRecordSeed::record`) stays the one authority bound.
+    let full_grants = CapabilitySet::from_words([u64::MAX; 4]);
+    let app = loader
+        .load(bundle, &full_grants)
+        .map(alloc::sync::Arc::new)
+        .map_err(crate::appspawn::app_error_errno)?;
+    if cacheable {
+        store.cache_verified(bundle, &app);
+    }
+    Ok(app)
+}
+
+/// Build the child's isolated address space from `rxe`, install its
+/// effective capability record and frozen space, and return what it needs to
+/// enter user mode.
+///
+/// The effective capability record replaces the placeholder empty-set record
+/// **before** the frozen space is registered and before the child can become
+/// a user task, so it is never dispatchable under the wrong authority. On any
+/// failure nothing is left half-installed for the caller to enter: the caps
+/// record is either the placeholder (untouched) or the effective set of a
+/// child that is about to be torn down, and no frozen space is registered.
+fn build_from_bytes(
+    services: &'static crate::spawn_services::SpawnServices,
+    sec_id: SecTaskId,
+    seed: &ChildRecordSeed,
+    guard: Option<u64>,
+    rxe: &[u8],
+    requested: CapabilitySet,
+    args: &[&[u8]],
+    env: &[&[u8]],
+) -> Result<ReadyToEnter, Errno> {
+    // Install the effective capability record (replacing the admit-time
+    // placeholder), so the running child is bounded by `ceiling ∩ manifest`
+    // from the moment it can act, not the empty placeholder set.
+    let record = seed.record(sec_id, requested, services.audit());
+    services.caps().write().insert(record);
+
+    let ctx = ServicesBuildCtx { services, guard };
+    let image = services.image_builder().build(rxe, &ctx, args, env)?;
+
+    // Register the frozen space + direct map and the reserved user-stack span
+    // under the child's id before it enters user mode, so its first
+    // user-memory access resolves its own mappings and the stack-growth fault
+    // path can back pages inside the span.
+    {
+        let mut aspaces = services.aspaces().write();
+        if aspaces
+            .register(sec_id, image.frozen, image.physmap)
             .is_err()
         {
-            let _ = self.sched.exit(task_id);
-            return Err(AdmitError::AspaceConflict);
+            return Err(Errno::AlreadyExists);
         }
+        aspaces.set_stack_span(sec_id, image.stack_span);
+    }
+    Ok(ReadyToEnter {
+        pre_resume: image.pre_resume,
+        live: image.live,
+        enter: image.enter,
+    })
+}
+
+/// The full child-side load: obtain the verified image (a prebuilt image
+/// directly, or a bundle the child reads and verifies under its own
+/// credential after parking for the store), then build and register it.
+///
+/// Runs entirely on the child's own task, off the spawning caller
+/// (`plans/FIX-DESKTOP.md` §2.6.5). Any failure returns a stable [`Errno`]
+/// the caller maps to a reserved [`tairix_abi::load_failure_status`] exit.
+fn build_child_image(
+    services: &'static crate::spawn_services::SpawnServices,
+    sec_id: SecTaskId,
+    task: u64,
+    plan: &LoadPlan,
+    seed: &ChildRecordSeed,
+    guard: Option<u64>,
+    args: &[&[u8]],
+    env: &[&[u8]],
+) -> Result<ReadyToEnter, Errno> {
+    match plan {
+        LoadPlan::Prebuilt { rxe, requested } => {
+            build_from_bytes(services, sec_id, seed, guard, rxe.as_ref(), *requested, args, env)
+        }
+        LoadPlan::Bundle { bundle, .. } => {
+            // Park until the store latch resolves, then read + verify under
+            // the child's own credential. The effective set for the read is
+            // the account ceiling (a system principal with no ceiling reads
+            // under its full system identity, exactly as the synchronous
+            // predecessor did); it is never wider than the account allows.
+            body_wait_app_store(services, task)?;
+            let uid = seed.credential.uid.0;
+            let effective = seed
+                .credential
+                .ceiling
+                .unwrap_or_else(|| CapabilitySet::from_words([u64::MAX; 4]));
+            let app = body_load_bundle(services, uid, &effective, bundle)?;
+            // The build copies the image bytes before `app` is dropped at the
+            // end of this arm, so the borrow of the retained image is sound.
+            build_from_bytes(
+                services,
+                sec_id,
+                seed,
+                guard,
+                app.run_image(),
+                *app.granted(),
+                args,
+                env,
+            )
+        }
+    }
+}
+
+/// Audit a deferred load refusal, attributed to the failing child `sec_id`.
+///
+/// The heavy load failures (missing bundle bytes, tampered signature,
+/// malformed `rxe`, OOM) are discovered on the child's own task, so the
+/// refusal is recorded here — beside the child's reserved-status exit — with
+/// the stable errno that classified it, rather than surfacing as a `spawn`
+/// return value (`plans/FIX-DESKTOP.md` §2.3).
+fn emit_load_refusal(audit: &(dyn Sink + Sync), sec_id: SecTaskId, errno: Errno) {
+    crate::audit::emit(
+        audit,
+        Level::Warn,
+        AuditEvent::ProcessSpawnDenied,
+        &[
+            Field {
+                key: "cause",
+                value: tairix_log::FieldValue::Str("deferred_load_failed"),
+            },
+            Field {
+                key: "task",
+                value: tairix_log::FieldValue::UnsignedInt(sec_id.0),
+            },
+            Field {
+                key: "status",
+                value: tairix_log::FieldValue::SignedInt(i64::from(
+                    tairix_abi::load_failure_status(errno),
+                )),
+            },
+        ],
+    );
+}
+
+impl<A> KernelSpawnCtx<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    /// Admit a **loading** child and return its PID at once
+    /// (`plans/FIX-DESKTOP.md` §2.6.5 — asynchronous process launch).
+    ///
+    /// The child is registered as a parked plain kernel kthread carrying
+    /// only the manifest-*independent* admit state — a placeholder empty
+    /// capability record, the spawner-resolved standard streams and wired
+    /// open entries, inherited resource limits and working directory, any
+    /// device-resource grants + matched node, and the parent/child wait link
+    /// — all resolved synchronously on the calling task so the spawner learns
+    /// the PID immediately. The child then materialises its own image on its
+    /// first scheduled slice, on its *own* kernel stack: it reads and
+    /// verifies its bundle under its own credential where required, derives
+    /// and installs its effective capability set (`ceiling ∩ manifest`),
+    /// builds its isolated address space, and upgrades itself into a user
+    /// task through [`crate::kthread::Yielder::become_user`]. No unverified
+    /// byte is ever mapped and the child is never dispatchable as a user task
+    /// under the placeholder authority — the effective set and the frozen
+    /// address space are installed strictly before `become_user`. On any load
+    /// failure the child exits with a reserved [`tairix_abi::load_failure_status`]
+    /// status and the refusal is audited, so the spawner observes the failure
+    /// through the ordinary child-exit path rather than a `spawn` errno
+    /// (`plans/FIX-DESKTOP.md` §2.3).
+    ///
+    /// The `'static` load services the child body captures are the
+    /// boot-installed [`crate::spawn_services::SpawnServices`] bundle; a build
+    /// that never installed it fails the admit closed. Every registry install
+    /// below therefore uses that bundle's handles, which are the *same*
+    /// objects the syscall dispatcher resolves a caller against — so the
+    /// child the placeholder record is written for is exactly the child the
+    /// dispatcher finds.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmitError`] if the launch services are not installed or the
+    /// scheduler refuses the admission (fail closed, never a panic).
+    pub fn admit_loading(
+        &self,
+        plan: LoadPlan,
+        args: Vec<Vec<u8>>,
+        env: Vec<Vec<u8>>,
+    ) -> Result<u64, AdmitError> {
+        let services = installed_spawn_services().ok_or(AdmitError::SchedulerFull)?;
+
+        // Compute the record seed once, so the placeholder record installed
+        // synchronously below and the effective record the loading body
+        // installs after verification share every kernel-attested field but
+        // the manifest request (the two derivations can never diverge). The
+        // synchronous installs below use this context's own borrows into the
+        // live kernel state — the same registries the boot-installed services
+        // wrap and the dispatcher resolves a caller against — so the child the
+        // placeholder record is written for is exactly the child that runs.
+        let parent_proc_id = self
+            .caps
+            .read()
+            .caps_for(self.parent)
+            .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
+        let start_time = SchedulerArch::ticks_now(self.arch);
+        let console = self
+            .streams
+            .session_console()
+            .map_or(tairix_abi::ORIGIN_CONSOLE_NONE, u64::from);
+        let seed = ChildRecordSeed {
+            proc_id: self.proc_id,
+            parent_proc_id,
+            name: self.name.clone(),
+            spawn_path: self.spawn_path.clone(),
+            start_time,
+            console,
+            credential: self.credential.clone(),
+            sandbox: self.sandbox,
+        };
+
+        // Allocate the loading child's kernel stack synchronously, before its
+        // address space exists, so its own loading body runs on it. The guard
+        // VA (`Some` for an arena stack, `None` for the software-canary
+        // `BoxStack`) is threaded to the build, which re-expresses it in the
+        // child's own root. The stack frames come from this context's own
+        // allocator borrows; the architecture image builder is the
+        // boot-installed one.
+        let (stack, guard) = services
+            .image_builder()
+            .alloc_kernel_stack(self.frames, self.page_table_frames);
+
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let cs = self.arch.context_switch();
+
+        // The child's own scheduler id, published after admit and read by the
+        // loading body (which runs only after `unpark`, so the release store
+        // below happens-before any body read).
+        let id_cell = alloc::sync::Arc::new(core::sync::atomic::AtomicU64::new(0));
+        let body_id = alloc::sync::Arc::clone(&id_cell);
+        let body_seed = seed.clone();
+
+        let work = move |yielder: &mut Yielder<A::Cs>| {
+            let task = body_id.load(core::sync::atomic::Ordering::Acquire);
+            let sec_id = SecTaskId(task);
+            let arg_refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+            let env_refs: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
+            match build_child_image(
+                services, sec_id, task, &plan, &body_seed, guard, &arg_refs, &env_refs,
+            ) {
+                Ok(ready) => {
+                    // The effective capability record and the frozen address
+                    // space are installed (inside `build_child_image`) before
+                    // this upgrade, so the child is never dispatchable as a
+                    // user task under the placeholder authority.
+                    yielder.become_user(ready.pre_resume, ready.live);
+                    let mut enter = ready.enter;
+                    enter();
+                }
+                Err(errno) => {
+                    // Attributed to the child: audit the refusal, record the
+                    // reserved load-failure exit status the parent reaps, and
+                    // release the admit-time bookkeeping the child holds
+                    // (it never reached user mode, so it acquired nothing
+                    // beyond that subset). Returning makes the task terminal.
+                    emit_load_refusal(services.audit(), sec_id, errno);
+                    services
+                        .process_wait()
+                        .record_exit(sec_id, tairix_abi::load_failure_status(errno));
+                    reclaim_process_bookkeeping(
+                        services.caps(),
+                        services.aspaces(),
+                        services.process_wait(),
+                        sec_id,
+                    );
+                }
+            }
+        };
+
+        let task_id = spawn_kthread_with_stack_parked(
+            self.sched,
+            cs,
+            stack,
+            cpu,
+            Priority::Normal,
+            work,
+        )
+        .map_err(|_| AdmitError::SchedulerFull)?;
+        let sec_id = SecTaskId(task_id);
+
+        // Publish the id to the still-parked body before installing per-task
+        // state and unparking.
+        id_cell.store(task_id, core::sync::atomic::Ordering::Release);
+
+        // Install the placeholder empty-capability record so the child's
+        // first (loading) slice resolves a caller context yet can exercise no
+        // authority before its effective set is derived and installed.
+        let placeholder = seed.record(sec_id, CapabilitySet::empty(), self.audit);
+        self.caps.write().insert(placeholder);
 
         // Establish the child's standard streams: the
         // spawner-resolved table — the parent's own (inherit) or the
@@ -7833,16 +8082,16 @@ where
         // console slot for a wired fd closed so exactly one authority
         // backs each descriptor. The program names only the fd numbers; it
         // never reaches an ambient device.
+        //
+        // The child's frozen address space and its reserved user-stack span
+        // are **not** registered here (no image exists yet) — the loading
+        // body registers them after the build, before the child enters user
+        // mode. The stream/limit/cwd install below operates on the aspaces
+        // registry keyed by `sec_id` independently of a registered address
+        // space, so it stands.
         {
             let mut aspaces = self.aspaces.write();
             aspaces.set_streams(sec_id, self.streams);
-            // Record the child's reserved user-stack span beside its
-            // streams, under the same write lock, so the stack-growth
-            // fault path can back pages inside it on demand — bounded by
-            // the `StackBytes` limit inherited below. The span is
-            // producer-derived from the validated spawn layout, never a
-            // caller-supplied value.
-            aspaces.set_stack_span(sec_id, stack_span);
             for (fd, file) in &self.wired {
                 // `fd` is a standard slot by construction (the wire loop
                 // indexes the fixed table); a refusal here would signal a
@@ -7914,9 +8163,10 @@ where
 
         // Record the parent/child link with the process-wait producer so the
         // spawning parent can later `wait` on this child and reap its exit
-        // code (`plans/SPAWN.md` SP6). Done only after the child is fully
-        // admitted (scheduler + caps + aspace + streams) so a parent that
-        // observes the returned PID can immediately and soundly reap it.
+        // code (`plans/SPAWN.md` SP6). Done before the child is unparked so a
+        // parent that observes the returned PID can immediately and soundly
+        // reap it — including a child that fails its load and exits with a
+        // reserved status on its very first slice.
         self.process_wait.register_child(self.parent, sec_id);
 
         // Every piece of per-task state is installed, so make the parked
@@ -8121,7 +8371,6 @@ where
         frames: &'a FrameAllocator,
         page_table_frames: &'static FrameAllocator,
         programs: &'static ProgramRegistry,
-        spawn_service: &'static (dyn ProcessSpawn + 'static),
         process_wait: &'static (dyn ProcessWait + 'static),
         seat_registry: &'static SeatRegistry,
         mem_map: &'static (dyn MemMap + 'static),
@@ -8143,7 +8392,7 @@ where
             .with_consoles(consoles)
             .with_frames(frames)
             .with_page_table_frames(page_table_frames)
-            .with_spawn(programs, spawn_service)
+            .with_spawn(programs)
             .with_process_wait(process_wait)
             .with_seat_registry(seat_registry)
             .with_mem_map(mem_map)

@@ -638,34 +638,61 @@ Each stage is independently reviewable and must leave the whole-project
   §1.2) and every affected interactive loop identified; the design is
   fully specified through demand-paged, CoW-shared, verified images
   (§2.6) — no "future work" left implicit (§2.6.4).
-- **DESK-1 — in progress (multi-session atomic change).** The
-  deferred-load design is fixed (§2.6.5: loading kthread → child-side
-  load+build → `become_user` upgrade → enter-user, or exit with a
-  reserved `LOAD_*` status + audit). The task-model primitive and the ABI
-  contract it exits through are landed; the remaining producer/handler
-  rewire is a **single atomic change** (the `ProcessSpawn`/admit contract
-  ripples to all arch producers + the driver-spawn loader at once), so the
-  tree does not build until it completes and it lands across sessions.
-  The full remaining mechanism has since been **validated end-to-end
-  against the live code** (the `spawn` handler, `KernelSpawnCtx`,
-  `admit_process`, `reclaim_task_resources`, `load_store_bundle`,
-  `wait_app_store`, `dispatch_step`, and all three arch producers): the
-  three "**Validated:**" refinements in the "Remaining" items below —
-  a *non-generic* `SpawnServices` fronted by a `SpawnRuntime` A-eraser, a
-  complete failed-loading-child teardown factored out of
-  `reclaim_task_resources`, and a fail-closed guard-unmap in a mechanical
-  producer split — are the resolved contract the atomic change is built to.
-  The build-breaking part is genuinely all-or-nothing: **deleting**
-  `ProcessSpawn`/`admit_process` and rewiring the producers breaks every
-  arch producer + the driver/init path + ~15 QEMU crates at once, so that
-  deletion + rewrite lands as one dedicated change, not partially. The
-  arch-neutral *seam types* (item 1), by contrast, are exported trait/struct
-  definitions the imminent producer rewrite will implement — landing them
-  ahead of the wiring keeps the tree green and is a reserved contract, not
-  forbidden dead code, exactly like the already-landed task-model primitive
-  and `LOAD_*` ABI. The `§2.3`/`§2.4` concern binds the *deletion + rewrite*
-  step (which must be complete, never partial), not the reserved-contract
-  definitions.
+- **DESK-1 — production flip landed; host spawn-test suite + QEMU + docs
+  outstanding.** The kernel-side deferred load is complete and every
+  Tier-1 kernel binary (`x86_64`, `aarch64`, `riscv64`) plus `kernel-core`
+  (lib) compile clean. What is live:
+  - `SPAWN` and the driver spawn are **admit-then-load**: the handler does
+    only the synchronous §2.1 work (cap check, path copy-in + `SPAWN_SELF`,
+    attach/streams, `resolve_spawn_credential`, `proc_id`/name/spawn_path,
+    program-vs-bundle **syntax**), builds a `LoadPlan`
+    (`Prebuilt{Cow<'static,[u8]>,requested}` for an embedded/driver image,
+    `Bundle{bundle,command}` for a store bundle), and calls
+    `KernelSpawnCtx::admit_loading`, returning the minted PID at once.
+  - `admit_loading` (`kernel/core/src/syscalls.rs`) admits a **parked plain
+    kernel kthread** (`spawn_kthread_with_stack_parked`), installs the
+    manifest-independent admit state (placeholder empty-set caps record via
+    the shared `ChildRecordSeed`/`derive_task_record`, streams + wired std
+    entries, inherited limits, cwd, device grants + loaded node, parent/child
+    wait link), then `unpark`s. Its loading body (captures the boot-installed
+    `&'static SpawnServices` + `LoadPlan` + seed) runs on the child's own
+    task: `body_wait_app_store` (park via `reschedule_current`, no scheduler
+    borrow) → obtain rxe+requested (prebuilt directly; bundle via
+    `body_load_bundle` under `(uid=credential.uid, effective=ceiling)`) →
+    derive+replace the effective record → `ArchImageBuilder::build` →
+    register frozen aspace + `stack_span` → `become_user` → `enter`; on any
+    failure it audits (`emit_load_refusal`) + `record_exit(load_failure_status)`
+    + `reclaim_process_bookkeeping` (the shared teardown subset).
+  - `ProcessSpawn` / `SpawnCtx` / `admit_process` / `NullProcessSpawn` /
+    `refuse_spawn` / `refuse_admit` / `SpawnCtxBuild` are **deleted**; a pure
+    `admit_errno` + a fail-closed `NullArchImageBuilder`/`NULL_ARCH_IMAGE_BUILDER`
+    replace them. The three producers now only `impl ArchImageBuilder`.
+    `BootInfo` carries `image_builder: &dyn ArchImageBuilder` (was
+    `spawn_service`); `kernel_main`/`run_phases` builds + installs the
+    production `SpawnServices` (`ArchSpawnRuntime` over the leaked state) after
+    the state is leaked. `driver_spawn_loader` + `unlock_orchestrate` +
+    per-arch `root_unlock` drop the producer arg; `InitSpawnCtx::spawn_driver_process`
+    lost its `spawn` param and drives `admit_loading` with a prebuilt plan.
+  - **Outstanding (the remaining DESK-1 test/doc work):**
+    1. The `kernel/core/src/syscalls.rs` **host spawn-test suite** still uses
+       the old synchronous-build doubles (`RecordingSpawn`/`SpawnCtx` admit).
+       Rewriting it to the deferred model needs a test-isolation decision: the
+       loading body reads the **process-global** `SpawnServices` `OnceCell`,
+       so the many independent per-test handlers cannot each inject their own
+       leaked registries + a recording `ArchImageBuilder` and then drive the
+       parked loading kthread to completion. Resolve by consolidating the
+       spawn tests onto one shared leaked kernel state (single global install)
+       or adding a test-injectable services seam, then assert admit-returns-PID
+       + placeholder record synchronously and the effective record/aspace/
+       `LOAD_*` exit after driving the body. `spawn.rs` + `init.rs` host test
+       modules are already converted.
+    2. The DESK-1 **host tests** enumerated below (admit touches no bundle
+       bytes; missing/tampered/malformed/OOM → reserved `LOAD_*` + audit;
+       valid embedded + bundle reach `enter`) and the **per-arch QEMU
+       verticals**, plus the DESK-1 **docs/C-header** updates.
+    3. The QEMU integration test kernels that call `spawn_driver_process` /
+       `InitCtxDriverProcessSpawn::new` with a producer arg need the arg
+       dropped (mechanical).
   - **Landed — task-model primitive.** The arch-neutral primitive in
     `kernel/core/src/kthread.rs`: `UserUpgrade`, the
     `ThreadControl::pending_upgrade` slot, `Yielder::become_user`, and the

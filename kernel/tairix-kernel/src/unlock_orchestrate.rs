@@ -31,8 +31,8 @@ use tairix_abi::driver::block::Block;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::{VolumeKey, ARXFS};
 use tairix_kernel_core::{
-    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, ProcessSpawn, SecretFeedback,
-    SleepLock, YieldHandle,
+    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, SecretFeedback, SleepLock,
+    YieldHandle,
 };
 use tairix_kernel_mem::MemoryPressure;
 use tairix_kernel_sec::captable::TaskCapabilities;
@@ -228,9 +228,10 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
 /// *before* the unlock prompt — no chicken-and-egg, and no cooperative
 /// interleaving of the two on one kthread.
 ///
-/// `console` is the port's console-0 seam and `producer` its process-spawn
-/// producer — the two hardware-specific inputs the otherwise arch-neutral tail
-/// needs.
+/// `console` is the port's console-0 seam — the one hardware-specific input
+/// the otherwise arch-neutral tail needs. The architecture image builder a
+/// driver spawn drives is the boot-installed one (`SpawnServices`), so it is
+/// no longer threaded here (`plans/FIX-DESKTOP.md` §2.6.5).
 ///
 /// On success this never returns. Every fallible *setup* step fails closed
 /// with a stable stage string the caller logs.
@@ -239,7 +240,6 @@ pub fn finish_unlock<B: Block + 'static>(
     coop: &CooperativeYield<'_>,
     env: UnlockEnv,
     console: &'static dyn UnlockConsole,
-    producer: &'static dyn ProcessSpawn,
 ) -> Result<Infallible, &'static str> {
     let UnlockEnv {
         ctx,
@@ -391,7 +391,7 @@ pub fn finish_unlock<B: Block + 'static>(
     // user-space `devmgr` autoloads signed `/System` drivers through — bound
     // over the always-readable `/System` volume, independent of the user-data
     // passphrase (`plans/PI.md` design B). Never returns on success.
-    serve_driver_store(store, coop, env, producer)
+    serve_driver_store(store, coop, env)
 }
 
 /// Become the persistent capability-gated driver-store serve loop the
@@ -405,15 +405,15 @@ pub fn finish_unlock<B: Block + 'static>(
 /// owning the disk so an `ipc_call` to the unbound endpoint fails closed with
 /// `NotFound` rather than blocking.
 ///
-/// `producer` is the port's process-spawn producer, bridged through the
-/// arch-neutral [`InitCtxDriverProcessSpawn`] so a matched user-space driver
-/// is spawned into its own hardware-isolated process granted exactly its
-/// matched node's resources (no ambient authority).
+/// A matched user-space driver is spawned into its own hardware-isolated
+/// process (granted exactly its matched node's resources, no ambient
+/// authority) through the arch-neutral [`InitCtxDriverProcessSpawn`], which
+/// admits it as a deferred-load child that builds its own image through the
+/// boot-installed architecture image builder (`plans/FIX-DESKTOP.md` §2.6.5).
 fn serve_driver_store<B: Block + 'static>(
     store: &'static DriverStoreService<BlockCache<B>>,
     coop: &CooperativeYield<'_>,
     env: UnlockEnv,
-    producer: &'static dyn ProcessSpawn,
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
     // The driver-signing trust anchor the autoload load gate verifies each
@@ -428,7 +428,7 @@ fn serve_driver_store<B: Block + 'static>(
     // + the port's process producer — the one per-arch input the otherwise
     // arch-neutral driver-store load op needs to spawn a verified driver into
     // its own process.
-    let driver_spawn = InitCtxDriverProcessSpawn::new(env.ctx, producer);
+    let driver_spawn = InitCtxDriverProcessSpawn::new(env.ctx);
     // The kernel-side load mechanism the persistent driver-store service keeps
     // in its trusted base (Design D D2b-2c): the driver-signing trust anchor,
     // the delegatable `autoload_caps` gate superset (`CAP_DRV_LOAD` to pass
