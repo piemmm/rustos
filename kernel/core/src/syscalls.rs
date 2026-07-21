@@ -1819,40 +1819,21 @@ where
         // lines, reclaimed around here), so dropping the sets is the
         // whole reclamation.
         crate::waitset::release_owned_by(task.0);
-        // Drop the task's signal-intake state (its opt-in and any pending
-        // observed signal): a dead task's intake must never linger, and
-        // task ids are never reused, so a leaked entry could never be
-        // reclaimed later.
-        crate::procsignal::clear_intake(task.0);
-        // Drop the task's kill-gate state for the same reason — and so a
-        // task that exits on its own while a termination was deferred
-        // against it (both raced) leaves no pending kill behind.
-        crate::procsignal::clear_kill_gate(task.0);
-        // Drop any termination deferred against the task while it ran in
-        // user mode: a self-exit or fault teardown running here means the
-        // task is already being reclaimed, so the dispatch loop's later
-        // `land_running_kill` must find nothing and never reclaim twice.
-        crate::procsignal::clear_running_kill(task.0);
-        // Prune the dead task's own child rows from the wait bookkeeping:
-        // a dead parent can never reap, so a row it never collected — a
-        // running orphan's link or an unreaped zombie — would be stranded
-        // forever (task ids are never reused). The orphans themselves keep
-        // running and are reclaimed through this same path when they die.
-        self.process_wait.parent_exited(task);
         // Release any console foreground ownership the dead task holds,
         // so the console returns to its open state the moment the owner
         // is gone rather than waiting for a reader to prove the owner
-        // dead (`plans/DISPLAY.md` D5).
+        // dead (`plans/DISPLAY.md` D5). Independent of the shared
+        // process-bookkeeping teardown below, so it runs first.
         for device in self.consoles {
             device.clear_dead_foreground(task);
         }
-        let _ = self.caps.write().remove(task);
-        // Withdraw the address-space registry entry last: streams, open
-        // files (pipe ends wake their parked peers as they drop), limits,
-        // grants, and the frozen space snapshot all go together, so no
-        // stale entry outlives the task (task ids are never reused, so a
-        // leaked entry could never be reclaimed later).
-        self.aspaces.write().withdraw(task);
+        // Tear down the process-bookkeeping subset — signal gates,
+        // parent/child wait rows, capability record, and address-space
+        // registry entry — through the one helper the deferred-launch
+        // loading-child teardown also drives, so a fully-admitted task and
+        // a child that failed to load release the same bookkeeping through
+        // one definition.
+        reclaim_process_bookkeeping(self.caps, self.aspaces, self.process_wait, task);
     }
 
     /// Whether one wait-set member is ready, as a **non-consuming peek**
@@ -7305,6 +7286,56 @@ where
     }
 }
 
+/// Tear down the process-bookkeeping subset a task holds regardless of
+/// whether it ever reached user mode: its signal-intake / kill-gate /
+/// running-kill overlays, its own parent/child wait rows, its capability
+/// record, and its address-space registry entry (streams, open files,
+/// limits, grants, cwd, and — when registered — the frozen space snapshot).
+///
+/// Factored out of [`KernelSyscallHandlers::reclaim_task_resources`] so the
+/// full task teardown and the asynchronous-launch loading-child teardown
+/// release the *same* bookkeeping through one definition
+/// (`plans/FIX-DESKTOP.md` §2.6.5, item 2). It covers only the bookkeeping
+/// every principal owns from admission; the resource teardown a
+/// fully-running task also needs (IPC ports, IRQ bindings, shared memory,
+/// wait-sets, console foreground) stays in `reclaim_task_resources`, which a
+/// loading child that failed before entering user mode provably never
+/// acquired.
+///
+/// The three registry mutations take separate write locks: a task being
+/// reclaimed is never concurrently admitted under the same id (ids are
+/// never reused), so there is no cross-lock invariant to hold.
+fn reclaim_process_bookkeeping(
+    caps: &RwLock<CapTable>,
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    process_wait: &(dyn ProcessWait + 'static),
+    task: SecTaskId,
+) {
+    // Drop the task's signal-intake state (its opt-in and any pending
+    // observed signal): a dead task's intake must never linger, and task
+    // ids are never reused, so a leaked entry could never be reclaimed.
+    crate::procsignal::clear_intake(task.0);
+    // Drop the task's kill-gate state for the same reason — and so a task
+    // that exits on its own while a termination was deferred against it
+    // (both raced) leaves no pending kill behind.
+    crate::procsignal::clear_kill_gate(task.0);
+    // Drop any termination deferred against the task while it ran in user
+    // mode: a self-exit or fault teardown running here means the task is
+    // already being reclaimed, so the dispatch loop's later
+    // `land_running_kill` must find nothing and never reclaim twice.
+    crate::procsignal::clear_running_kill(task.0);
+    // Prune the dead task's own child rows from the wait bookkeeping: a
+    // dead parent can never reap, so a row it never collected — a running
+    // orphan's link or an unreaped zombie — would be stranded forever.
+    process_wait.parent_exited(task);
+    let _ = caps.write().remove(task);
+    // Withdraw the address-space registry entry last: streams, open files
+    // (pipe ends wake their parked peers as they drop), limits, grants, cwd,
+    // and any frozen space snapshot all go together, so no stale entry
+    // outlives the task.
+    aspaces.write().withdraw(task);
+}
+
 /// The kernel-attested identity a freshly spawned child is admitted under:
 /// its owning user and full group set (`PREREQUISITES.md` P-C, spawn-as-user).
 ///
@@ -7608,38 +7639,82 @@ where
             .streams
             .session_console()
             .map_or(tairix_abi::ORIGIN_CONSOLE_NONE, u64::from);
-        // Effective set = `user ceiling ∩ manifest request`
-        // (`plans/CAPABILITY_USE.md` CU1): `caps` is the manifest request and
-        // the ceiling rides on the credential. A system-principal credential
-        // carries no users-db ceiling, so its manifest is its ceiling (`caps`
-        // stands on both sides — the one legitimate manifest-as-ceiling
-        // shape) and the record is marked so its inherit-spawns stay
-        // manifest-bounded.
-        let record = match self.credential.ceiling {
-            Some(ceiling) => {
-                TaskCapabilities::derive(sec_id, self.credential.uid, ceiling, caps, self.audit)
-            }
-            None => TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
-                .as_system_principal(),
-        }
-        .with_proc_id(self.proc_id)
-        .with_parent_proc_id(parent_proc_id)
-        .with_name(self.name.clone())
-        .with_spawn_path(self.spawn_path.clone())
-        .with_credential(
-            self.credential.primary_gid,
-            self.credential.supplementary_gids.clone(),
+        derive_task_record(
+            sec_id,
+            caps,
+            &self.credential,
+            self.proc_id,
+            parent_proc_id,
+            &self.name,
+            &self.spawn_path,
+            start_time,
+            console,
+            self.sandbox,
+            self.audit,
         )
-        .with_start_time(start_time)
-        .with_console(console);
-        // Brand a sandbox child last, after every attestation is attached:
-        // the brand strips all three capability sets structurally and marks
-        // the record for the dispatcher's allow-list confinement.
-        if self.sandbox {
-            record.as_sandboxed()
-        } else {
-            record
+    }
+}
+
+/// Build a freshly spawned child's kernel-attested [`TaskCapabilities`]
+/// record from wholly kernel-resolved inputs.
+///
+/// The effective set is `user ceiling ∩ manifest request`
+/// (`plans/CAPABILITY_USE.md` CU1): `manifest_request` is the manifest side
+/// and the ceiling rides on `credential`. A system-principal credential
+/// carries no users-db ceiling, so its manifest stands as its ceiling
+/// (`manifest_request` on both sides — the one legitimate
+/// manifest-as-ceiling shape) and the record is marked so its inherit-spawns
+/// stay manifest-bounded. A sandbox child's three capability sets are
+/// stripped structurally last, after every attestation is attached.
+///
+/// Every argument is kernel-resolved, never caller-supplied. Shared by the
+/// synchronous admit path ([`KernelSpawnCtx::derive_child_record`]) and the
+/// asynchronous-launch loading body, which installs the *placeholder* record
+/// (empty request) at admit and the *effective* record (the loaded
+/// manifest's request) once the image is verified — the same identity,
+/// parentage, credential, start time, and console on both, so the two
+/// derivations can never diverge (`plans/FIX-DESKTOP.md` §2.6.5, item 2).
+#[allow(clippy::too_many_arguments)]
+fn derive_task_record(
+    sec_id: SecTaskId,
+    manifest_request: CapabilitySet,
+    credential: &SpawnCredential,
+    proc_id: ProcId,
+    parent_proc_id: ProcId,
+    name: &ProcName,
+    spawn_path: &[u8],
+    start_time: u64,
+    console: u64,
+    sandbox: bool,
+    audit: &dyn Sink,
+) -> TaskCapabilities {
+    let record = match credential.ceiling {
+        Some(ceiling) => {
+            TaskCapabilities::derive(sec_id, credential.uid, ceiling, manifest_request, audit)
         }
+        None => TaskCapabilities::derive(
+            sec_id,
+            credential.uid,
+            manifest_request,
+            manifest_request,
+            audit,
+        )
+        .as_system_principal(),
+    }
+    .with_proc_id(proc_id)
+    .with_parent_proc_id(parent_proc_id)
+    .with_name(name.clone())
+    .with_spawn_path(spawn_path.to_vec())
+    .with_credential(
+        credential.primary_gid,
+        credential.supplementary_gids.clone(),
+    )
+    .with_start_time(start_time)
+    .with_console(console);
+    if sandbox {
+        record.as_sandboxed()
+    } else {
+        record
     }
 }
 
