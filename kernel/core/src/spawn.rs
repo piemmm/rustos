@@ -1073,7 +1073,7 @@ pub trait ImageBuildCtx {
 /// [`ProcessSpawn`].
 ///
 /// Installed into the syscall handler exactly as [`ProcessSpawn`] was, and
-/// captured by the boot-installed [`crate::SpawnServices`] so the child's
+/// captured by the boot-installed `SpawnServices` handle so the child's
 /// loading body — running on its own kernel stack, off the spawning
 /// caller's task — can drive the build. Splitting the old `spawn_with` into
 /// [`alloc_kernel_stack`](Self::alloc_kernel_stack) (run synchronously at
@@ -1082,7 +1082,7 @@ pub trait ImageBuildCtx {
 /// off the caller's task.
 ///
 /// `Sync` because the installed builder is shared, immutably, by every
-/// CPU's dispatch path and captured in the `'static` [`crate::SpawnServices`].
+/// CPU's dispatch path and captured in the `'static` `SpawnServices` handle.
 pub trait ArchImageBuilder: Send + Sync {
     /// Allocate the loading child's kernel stack, returning it boxed behind
     /// the object-safe [`crate::kthread::KernelStack`] boundary together

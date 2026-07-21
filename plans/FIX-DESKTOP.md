@@ -690,6 +690,20 @@ Each stage is independently reviewable and must leave the whole-project
     producer (child load path) and consumer (parent reap) are wired when
     the mechanism below lands — until then these are the reserved contract
     the remaining work targets, not a live code path.
+  - **Landed — the `(uid, effective, task)` bundle-read authority split
+    (Remaining item 2's `load_store_bundle` signature change).**
+    `KernelSyscallHandlers::load_store_bundle` and `wait_app_store`
+    (`kernel/core/src/syscalls.rs`) no longer borrow a `CallerContext`:
+    the bundle read takes its authority as an explicit `(uid: u32,
+    effective: &dyn CapabilityQuery)` pair and the app-store park takes an
+    explicit `task: u64`. This is the one definition that serves both the
+    current caller-side read and the deferred child-side read under the
+    child's own credential (`§2.2`), landed live ahead of the flip: the
+    sole caller (the synchronous `spawn` handler) passes the caller's own
+    `owner()`/`effective()`/`task_id`, so behaviour is unchanged and the
+    whole `tairix-kernel-core` suite (1097 host tests) stays green. It is a
+    live, in-place refactor, not reserved scaffolding: the child-side call
+    site is added by the atomic flip.
   - **Remaining (in dependency order), the atomic mechanism.** The design
     below is validated against the live code (`syscalls.rs` `spawn`
     handler, `KernelSpawnCtx`, `admit_process`, `kthread.rs`, the arch
@@ -825,11 +839,15 @@ Each stage is independently reviewable and must leave the whole-project
          `yielder.become_user(pre_resume, live)` → `enter()`; caps and aspace
          are installed strictly **before** `become_user`, so the child is
          never dispatchable as a user task under the wrong authority.
-       - **`load_store_bundle` signature change:** take an explicit
-         `(uid: UserId, effective: &CapabilitySet)` pair instead of a
-         borrowed `CallerContext`, so the one definition serves the child-side
-         read under the child's credential (`§2.2`). Its `ArchClock`/`audit`
-         come from `SpawnServices`.
+       - **`load_store_bundle` signature change — landed.** It now takes an
+         explicit `(uid: u32, effective: &dyn CapabilityQuery, task: u64)`
+         instead of a borrowed `CallerContext` (`wait_app_store` likewise
+         takes an explicit `task: u64`), so the one definition serves the
+         child-side read under the child's credential (`§2.2`). The child
+         body passes `(uid = credential.uid, effective = credential.ceiling,
+         task = child_task_id)`; its `ArchClock`/`audit` come from
+         `SpawnServices`. Only the child-side *call site* remains for the
+         flip.
     3. **Arch producers + `driver_spawn_loader`
        (`kernel/tairix-kernel/src/{aarch64,riscv64,x86_64}/`).** Each
        existing `spawn_with` body splits: the build portion (parse rxe,

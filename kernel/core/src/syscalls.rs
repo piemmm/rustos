@@ -2429,57 +2429,59 @@ where
     /// through the one shared `tairix_appload` load gate, returning the
     /// validated entry-point image and its manifest capability request.
     ///
-    /// The bundle is read through the secured VFS under the **caller's**
-    /// kernel-attested identity, so every per-inode and mount-flag check
-    /// stays kernel-side; the manifest must be signed by the build's
-    /// embedded app trust anchor. A build with no installed store, a store
-    /// that resolved unavailable, or any gate refusal fails closed. A spawn
-    /// racing the boot kthread that publishes the mount parks (event-woken)
-    /// until the store's readiness latch resolves.
+    /// The read authority is passed **explicitly** as `(uid, effective)` —
+    /// the kernel-attested user id and effective capability set the bundle
+    /// is read under — plus `task`, the id of the task that parks while the
+    /// store's readiness latch is still pending. Taking the authority as an
+    /// explicit pair rather than a borrowed [`CallerContext`] lets the one
+    /// definition serve both the synchronous caller-side read and a
+    /// deferred child-side read under the child's own credential
+    /// (`plans/FIX-DESKTOP.md` §2.2). Every per-inode and mount-flag check
+    /// stays kernel-side under `(uid, effective)`; the manifest must be
+    /// signed by the build's embedded app trust anchor. A build with no
+    /// installed store, a store that resolved unavailable, or any gate
+    /// refusal fails closed.
     ///
     /// A bundle on the immutable read-only system stores is fully verified
     /// **once per boot**: the accepted result is cached in the
     /// [`AppStore`](crate::appspawn::AppStore)'s classified, budgeted,
     /// pressure-governed semantic launch cache
     /// ([`LaunchCache`](crate::launch_cache::LaunchCache)) and every later
-    /// launch serves the cached image after re-authorising
-    /// the caller's own read of the entry point through the secured VFS —
+    /// launch serves the cached image after re-authorising the
+    /// `(uid, effective)` read of the entry point through the secured VFS —
     /// verification is hoisted off the launch hot path, authorisation is
     /// not. Bundles on writable volumes are never cached, and a cache
     /// entry reclaimed under memory pressure simply re-verifies through
     /// the full gate.
     fn load_store_bundle(
         &self,
-        caller: &CallerContext<'_>,
+        uid: u32,
+        effective: &dyn tairix_abi::CapabilityQuery,
+        task: u64,
         parsed: &crate::appspawn::BundleRunPath<'_>,
     ) -> Result<alloc::sync::Arc<tairix_appload::LoadedApp>, Errno> {
         let Some(store) = self.app_store else {
             return Err(Errno::NotFound);
         };
-        self.wait_app_store(caller, store)?;
+        self.wait_app_store(task, store)?;
         if !store.is_available() {
             return Err(Errno::NotFound);
         }
-        let uid = caller.caps.owner().0;
         let cacheable = crate::appspawn::AppStore::cacheable_bundle(parsed.bundle);
         if cacheable {
             if let Some(app) = store.cached(parsed.bundle) {
                 // The hit skips re-verification of immutable bytes, never
-                // the caller's authority: the caller's read of the entry
-                // point is re-authorised through the secured VFS (per-inode
-                // owner/mode/ACL and mount flags), so a caller who could
-                // not read the bundle cannot launch it from the cache.
-                self.filesystem.open(
-                    uid,
-                    caller.caps.effective(),
-                    app.run_path(),
-                    OpenFlags::READ,
-                )?;
+                // the read authority: the read of the entry point is
+                // re-authorised through the secured VFS (per-inode
+                // owner/mode/ACL and mount flags) under `(uid, effective)`,
+                // so a principal who could not read the bundle cannot
+                // launch it from the cache.
+                self.filesystem
+                    .open(uid, effective, app.run_path(), OpenFlags::READ)?;
                 return Ok(app);
             }
         }
-        let fs_store =
-            crate::appspawn::FsBundleStore::new(self.filesystem, uid, caller.caps.effective());
+        let fs_store = crate::appspawn::FsBundleStore::new(self.filesystem, uid, effective);
         let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
         let clock = crate::appspawn::ArchClock::new(self.arch);
         let loader = tairix_appload::AppLoader::new(tairix_appload::AppLoaderConfig {
@@ -2508,25 +2510,23 @@ where
         Ok(app)
     }
 
-    /// Park the caller while the installed application store's readiness
-    /// latch is still *pending* — the boot kthread that publishes the
-    /// `/System` mount has not reached a terminal state.
+    /// Park the task `task` while the installed application store's
+    /// readiness latch is still *pending* — the boot kthread that publishes
+    /// the `/System` mount has not reached a terminal state.
     ///
-    /// The caller parks off the run queue on
+    /// `task` parks off the run queue on
     /// [`crate::waitq::APP_STORE_WAITQ`] (no busy yield) and is woken by
     /// [`crate::waitq::app_store_wake`] the instant the latch resolves —
     /// available or unavailable — re-checking the condition after every
     /// wake. The wait is untimed: the boot path resolves the latch on every
-    /// outcome, so only an explicit wake releases a waiter.
-    fn wait_app_store(
-        &self,
-        caller: &CallerContext<'_>,
-        store: &crate::appspawn::AppStore,
-    ) -> Result<(), Errno> {
+    /// outcome, so only an explicit wake releases a waiter. Taking the task
+    /// id explicitly (rather than a borrowed [`CallerContext`]) lets a
+    /// deferred child-side load park the child on its own id
+    /// (`plans/FIX-DESKTOP.md` §2.2).
+    fn wait_app_store(&self, task: u64, store: &crate::appspawn::AppStore) -> Result<(), Errno> {
         if !store.is_pending() {
             return Ok(());
         }
-        let task = caller.task_id.0;
         // Register so a waker can find and `unpark` us, then loop check →
         // park. The scheduler's wake-pending token closes the check/park
         // race — mirrors `users_db_wait` exactly.
@@ -3639,7 +3639,12 @@ where
             return Err(Errno::NotFound);
         }
         let loaded = match (&program, &bundle) {
-            (None, Some(parsed)) => Some(self.load_store_bundle(caller, parsed)?),
+            (None, Some(parsed)) => Some(self.load_store_bundle(
+                caller.caps.owner().0,
+                caller.caps.effective(),
+                caller.task_id.0,
+                parsed,
+            )?),
             _ => None,
         };
 
