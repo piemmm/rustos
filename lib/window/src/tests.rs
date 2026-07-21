@@ -117,7 +117,7 @@ impl CallerIdentity for MockIdentity {
 /// picker requests.
 #[derive(Default)]
 struct RecordingHost {
-    opened: Vec<(u64, DisplayMode, String)>,
+    opened: Vec<(u64, DisplayMode, String, bool)>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
@@ -133,11 +133,13 @@ impl WindowHost for RecordingHost {
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
+        resizable: bool,
     ) -> Result<(), Errno> {
         if self.refuse_open {
             return Err(Errno::WouldBlock);
         }
-        self.opened.push((window_id, *surface, String::from(title)));
+        self.opened
+            .push((window_id, *surface, String::from(title), resizable));
         Ok(())
     }
 
@@ -255,7 +257,7 @@ fn create_id(
     title: &str,
 ) -> Result<u64, Errno> {
     client
-        .create(shm, events, frames, &SURFACE, title)
+        .create(shm, events, frames, &SURFACE, title, false)
         .map(|(id, _)| id)
 }
 
@@ -265,7 +267,7 @@ fn create_present_close_round_trips_through_the_loopback() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
     let (window, server) = client
-        .create(7, EVENTS_A, 2, &SURFACE, "Files")
+        .create(7, EVENTS_A, 2, &SURFACE, "Files", false)
         .expect("a valid create succeeds");
     assert_eq!(window, 1);
     assert_eq!(
@@ -277,7 +279,7 @@ fn create_present_close_round_trips_through_the_loopback() {
         assert_eq!(inner.server.window_count(), 1);
         assert_eq!(
             inner.host.opened,
-            alloc::vec![(1, SURFACE, String::from("Files"))]
+            alloc::vec![(1, SURFACE, String::from("Files"), false)]
         );
     }
 
@@ -308,6 +310,28 @@ fn create_present_close_round_trips_through_the_loopback() {
     }
     // The window is gone: a second close finds nothing.
     assert_eq!(client.close(window), Err(Errno::NotFound));
+}
+
+#[test]
+fn create_forwards_the_resizable_flag_to_the_host() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    client
+        .create(7, EVENTS_A, 1, &SURFACE, "fixed", false)
+        .expect("fixed window");
+    client
+        .create(8, EVENTS_A, 1, &SURFACE, "resizable", true)
+        .expect("resizable window");
+
+    let inner = loopback.borrow();
+    let flags: Vec<bool> = inner
+        .host
+        .opened
+        .iter()
+        .map(|(_, _, _, resizable)| *resizable)
+        .collect();
+    assert_eq!(flags, alloc::vec![false, true]);
 }
 
 #[test]
@@ -449,13 +473,13 @@ fn create_is_refused_fail_closed() {
     // A kernel-domain caller is not a window client.
     loopback.borrow_mut().ticket = TICKET_KERNEL;
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x"),
+        client.create(7, EVENTS_A, 1, &SURFACE, "x", false),
         Err(Errno::PermissionDenied)
     );
     // A caller the kernel cannot attest.
     loopback.borrow_mut().ticket = TICKET_UNATTESTED;
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x"),
+        client.create(7, EVENTS_A, 1, &SURFACE, "x", false),
         Err(Errno::NotFound)
     );
     // Nothing leaked out of any refusal.
@@ -488,7 +512,7 @@ fn a_refused_host_open_commits_nothing() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x"),
+        client.create(7, EVENTS_A, 1, &SURFACE, "x", false),
         Err(Errno::WouldBlock)
     );
     loopback.borrow_mut().host.refuse_open = false;

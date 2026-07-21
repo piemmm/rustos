@@ -1368,7 +1368,7 @@ fn open_app(
         .open_window(comp, origin, app_surface(), title)
         .expect("opens");
     assert!(
-        shell.decorate_window(comp, window, title),
+        shell.decorate_window(comp, window, title, false),
         "a served application window is decorated"
     );
     window
@@ -1715,7 +1715,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
     // The window manager decorates the served window, exactly as
     // `ShellWindowHost::window_opened` does in the live serve loop — the app
     // itself draws no chrome.
-    assert!(shell.decorate_window(&mut comp, window, "Files"));
+    assert!(shell.decorate_window(&mut comp, window, "Files", false));
     assert_eq!(
         comp.window_frame(window)
             .expect("the presented window is decorated")

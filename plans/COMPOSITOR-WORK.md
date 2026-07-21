@@ -87,9 +87,10 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stages A–E are **done**. Server-side window decorations are live:
-every served application window is decorated by the window manager, and the
-whole-project validation gate is green.
+**Status:** Stages A–F are **done**. Server-side window decorations are live:
+every served application window is decorated by the window manager, client-driven
+resizability is live (the file viewer opens resizable and re-lays-out on
+`Resized`), and the whole-project validation gate is green.
 Per the User's direction, one full stage lands per change.
 
 Each stage lands complete — its rendering for **both** dark and light themes,
@@ -279,9 +280,40 @@ complete. What it now guarantees:
   clicking every command control and mapping it through the lifecycle; the AW3
   click-through vertical asserts the presented window is decorated.
 
-Client-driven resizability (an app opting in and re-rendering on `Resized`)
-remains a future, per-app opt-in over the existing `WindowRequest::Resize`
-protocol (Stage D); the default apps present fixed size by design.
+### Stage F — Client-driven resizability, live and per-app opt-in — DONE
+
+An app can now ask to be resizable, and the file viewer does, end to end. What
+it guarantees:
+
+- **The `resizable` request rides the existing create, no new syscall.**
+  `WindowRequest::Create` carries a validated `resizable` flag (the reserved
+  byte after the title; decode refuses anything but `0`/`1`), threaded through
+  `WindowClient::create` → the engine's `CreateSpec` → `WindowHost::window_opened`
+  → `DesktopShell::decorate_window`. A resizable-requested window is decorated
+  with the resize grabber and a live maximize/restore size toggle; a fixed-size
+  app passes `false` and is offered neither (and never receives a `Resized`).
+  The mechanism is per-app opt-in, never forced on an app that renders at one
+  size (`AGENTS.md` §2.4 — the app decides, the window manager honours it).
+- **The file viewer is the shipping resizable app.** `userland/apps/viewer`
+  opens `resizable: true`, and on every `WindowEvent::Resized` (an interactive
+  grab settling, or a maximize/restore) it allocates a fresh frame region at the
+  new client size, `WindowRequest::Resize`s the window onto it, unmaps the old
+  region **only after** the session adopts the new one, re-wraps its text to the
+  new column count, and repaints — preserving the reader's scroll position. It
+  fails closed (keeping the current surface, never crashing) if a new region
+  cannot be allocated or the session refuses the re-map. Files and the terminal
+  present fixed size by design and pass `resizable: false`.
+- **The viewer's render is size-parameterized and host-tested.** `render_status`/
+  `render_lines` take the current `width`/`height`, `visible_{rows,cols}_for`
+  derive the grid from the client size, and `ScrollView::relayout` re-wraps and
+  clamps the offset into the resized content — all covered by `tairix_viewer`
+  unit tests (arbitrary-size render, geometry scaling, and offset-preserving
+  relayout).
+- **Tests.** `lib/abi` covers the `resizable` flag round-trip and its dirty-byte
+  rejection; `lib/window` covers the flag forwarding to the host; `userland/gui/session`
+  covers a resizable-requested open decorating with a resizable frame and a live
+  size toggle; the viewer engine covers size-aware render and relayout; the
+  freestanding viewer/terminal/files cross-compile against the new signatures.
 
 ## 3. Definition of done
 

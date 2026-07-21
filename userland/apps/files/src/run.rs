@@ -352,9 +352,14 @@ mod program {
         // --- Open the window and paint the first listing.
         let mut client = WindowClient::new(RtWindowTransport);
         #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        let Ok((window, server)) =
-            client.create(grant as u64, event_endpoint, FRAME_COUNT, &mode, "Files")
-        else {
+        let Ok((window, server)) = client.create(
+            grant as u64,
+            event_endpoint,
+            FRAME_COUNT,
+            &mode,
+            "Files",
+            false,
+        ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
         let themes = ThemeRegistry::with_builtins();

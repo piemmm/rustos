@@ -68,6 +68,13 @@ impl<T: WindowTransport> WindowClient<T> {
     /// `title`, with this window's events delivered to the app's own
     /// `event_endpoint`.
     ///
+    /// `resizable` asks the window manager to present the window with a
+    /// resize grabber and a live maximize/restore size toggle; a
+    /// fixed-size app passes `false` and is offered neither affordance
+    /// (and never receives a [`WindowEvent::Resized`]). A resizable app
+    /// re-lays-out to each reported size and re-maps its region with
+    /// [`Self::resize`].
+    ///
     /// Returns the session-minted window id and the serving session's
     /// [`ProcId`]: the identity the app then requires of every event's
     /// kernel-attested sender, so no other process can feed it forged
@@ -81,6 +88,8 @@ impl<T: WindowTransport> WindowClient<T> {
     /// * The session's typed refusal, a transport failure, or a corrupt
     ///   reply (fail closed, never a guessed id or an unauthenticatable
     ///   event stream).
+    ///
+    /// [`WindowEvent::Resized`]: tairix_abi::window_ipc::WindowEvent::Resized
     pub fn create(
         &mut self,
         shm_handle: u64,
@@ -88,6 +97,7 @@ impl<T: WindowTransport> WindowClient<T> {
         frame_count: u32,
         surface: &DisplayMode,
         title: &str,
+        resizable: bool,
     ) -> Result<(u64, ProcId), Errno> {
         let title = WindowTitle::new(title)?;
         let request = WindowRequest::Create {
@@ -99,6 +109,7 @@ impl<T: WindowTransport> WindowClient<T> {
             stride_bytes: surface.stride_bytes,
             format: surface.format,
             title,
+            resizable,
         }
         .to_le_bytes();
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];

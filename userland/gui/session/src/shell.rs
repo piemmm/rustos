@@ -266,21 +266,27 @@ impl DesktopShell {
     /// outer top-left and the content insets to the client rectangle), so the
     /// app never draws its own chrome and its content never overlaps the
     /// furniture. Served application windows are decorated (the serve loop
-    /// calls this when a window opens); the window is movable by its title bar
-    /// but presents a fixed size (`resizable: false`) — the default apps render
-    /// at one size, so no resize grabber is drawn and the size-toggle reports
-    /// no change. A future resizable app opts in through its own window request.
+    /// calls this when a window opens) and are always movable by their title
+    /// bar.
+    ///
+    /// `resizable` is the opening app's own request (carried on its window
+    /// create): when set, the window manager draws a resize grabber and a live
+    /// maximize/restore size toggle, and the app re-lays-out to each new client
+    /// size it reports. A fixed-size app passes `false` — no grabber is drawn
+    /// and the size-toggle is inert — so the mechanism is per-app opt-in, never
+    /// forced on an app that renders at one size.
     pub fn decorate_window(
         &mut self,
         compositor: &mut Compositor,
         window: WindowId,
         title: &str,
+        resizable: bool,
     ) -> bool {
         let frame = WindowFrame::new(WindowFurnitureState {
             activation: WindowActivationState::Active,
             size: WindowSizeState::Restored,
             movable: true,
-            resizable: false,
+            resizable,
         });
         if !compositor.set_window_frame(window, frame) {
             return false;

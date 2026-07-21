@@ -50,8 +50,8 @@ mod program {
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_theme::ThemeRegistry;
     use tairix_viewer::{
-        content_lines, render_lines, render_status, visible_cols, visible_rows, ScrollView,
-        CONTENT_MAX, MAX_LINES, WIN_HEIGHT, WIN_WIDTH,
+        content_lines, render_lines, render_status, visible_cols_for, visible_rows_for, ScrollView,
+        CONTENT_MAX, MAX_LINES, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
@@ -209,43 +209,118 @@ mod program {
         client.present(window, 0, DamageRect::full(mode))
     }
 
-    /// Program entry point. `tairix-rt`'s `_start` calls it once the
-    /// runtime is set up and routes its return value through the `exit`
-    /// syscall.
-    fn main() -> i32 {
-        // --- The shared window surface: FRAME_COUNT frames shaped as the
-        // window mode, created here and granted to the session.
-        let mode = DisplayMode {
-            width_px: WIN_WIDTH,
-            height_px: WIN_HEIGHT,
-            stride_bytes: WIN_WIDTH * 4,
+    /// A `width_px` × `height_px` RGBA window mode, one frame's worth per
+    /// row. The one place the viewer's mode is shaped, so the create and
+    /// every resize agree on stride and format.
+    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
+        DisplayMode {
+            width_px,
+            height_px,
+            stride_bytes: width_px * 4,
             format: DisplayFormat::Rgba8888,
-        };
-        let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
-        let total = frame_len * FRAME_COUNT as usize;
+        }
+    }
+
+    /// Total bytes a `FRAME_COUNT`-frame region shaped as `mode` needs.
+    fn region_bytes(mode: &DisplayMode) -> usize {
+        (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize
+    }
+
+    /// Create a `total`-byte frame region and grant it to the window
+    /// endpoint, returning the region id, its mapped base, and the
+    /// endpoint-directed grant handle. Fails closed to `None` on any
+    /// refusal, unmapping a region that mapped but could not be granted so
+    /// a refused (re)allocation never leaves pinned memory behind.
+    fn allocate_frames(total: usize) -> Option<(u64, usize, u64)> {
         let mut region_id: u64 = 0;
         let base = tairix_rt::shm_create(total, &mut region_id);
         if base < 0 {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
+            return None;
         }
+        let base = usize::try_from(base).ok()?;
         let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
         if grant < 1 {
-            return fail(EXIT_NO_FRAMES, "frame region grant refused");
+            let _ = tairix_rt::shm_unmap(base as u64, total);
+            return None;
         }
-        let Ok(base) = usize::try_from(base) else {
-            return fail(
-                EXIT_NO_FRAMES,
-                "frame region base outside the address width",
-            );
+        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        Some((region_id, base, grant as u64))
+    }
+
+    /// The live frame region: the once-granted shared surface the app
+    /// paints into. Re-mapped on every resize; the old mapping is unmapped
+    /// only after the session adopts the new one, so a refused resize keeps
+    /// the current surface intact.
+    struct Frames {
+        base: usize,
+        len: usize,
+    }
+
+    impl Frames {
+        /// The region as a mutable byte slice.
+        fn as_mut(&mut self) -> &mut [u8] {
+            // SAFETY: the kernel mapped exactly `len` zeroed bytes
+            // read/write at `base` (`shm_create` maps the length it was
+            // asked for) and the mapping stays live until the next resize
+            // unmaps it — nothing else aliases it, and the window protocol
+            // serialises access (the app is parked in `present` while the
+            // session reads). A resize replaces `base`/`len` together only
+            // after the old region is unmapped, so the pair is never stale.
+            unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) }
+        }
+    }
+
+    /// Paint the one-line status message `text` for the current window.
+    fn show_status<T: WindowTransport>(
+        text: &str,
+        theme: &tairix_theme::Theme,
+        client: &mut WindowClient<T>,
+        window: u64,
+        frames: &mut Frames,
+        mode: &DisplayMode,
+    ) -> Result<(), Errno> {
+        render_status(text, theme, mode.width_px, mode.height_px)
+            .ok_or(Errno::NoSpace)
+            .and_then(|surface| present_surface(&surface, client, window, frames.as_mut(), mode))
+    }
+
+    /// Repaint the current window of the scrolled file for the current
+    /// window size.
+    fn repaint_view<T: WindowTransport>(
+        scroll: &ScrollView,
+        theme: &tairix_theme::Theme,
+        client: &mut WindowClient<T>,
+        window: u64,
+        frames: &mut Frames,
+        mode: &DisplayMode,
+    ) -> Result<(), Errno> {
+        render_lines(scroll.visible(), theme, mode.width_px, mode.height_px)
+            .ok_or(Errno::NoSpace)
+            .and_then(|surface| present_surface(&surface, client, window, frames.as_mut(), mode))
+    }
+
+    /// The waiting/prompt status shown before a file is chosen and after a
+    /// resize while no file is open. One definition so the prompt reads the
+    /// same everywhere.
+    const WAITING: &str = "Choose a file...";
+
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the
+    /// runtime is set up and routes its return value through the `exit`
+    /// syscall.
+    #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would obscure the resize teardown ordering.
+    fn main() -> i32 {
+        // --- The shared window surface: FRAME_COUNT frames shaped as the
+        // initial window mode, created here and granted to the session. The
+        // viewer is resizable, so the region is re-created (and the old one
+        // unmapped) whenever the window manager reports a new client size.
+        let mut mode = mode_for(WIN_WIDTH, WIN_HEIGHT);
+        let Some((_region_id, base, grant)) = allocate_frames(region_bytes(&mode)) else {
+            return fail(EXIT_NO_FRAMES, "shared frame region refused");
         };
-        // SAFETY: the kernel mapped at least `total` zeroed bytes
-        // read/write into this process at `base` (`shm_create` maps the
-        // exact length it was asked for) and the mapping stays live for
-        // the life of the process — nothing below unmaps or aliases it.
-        // The session maps the same frames read-only for its blit, and
-        // the protocol serialises access: this app is parked in its
-        // present call while the session reads.
-        let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
+        let mut frames = Frames {
+            base,
+            len: region_bytes(&mode),
+        };
 
         // --- The event mailbox the app parks on. The id is unique by
         // construction (the shared `event_endpoint_for` naming rule: this
@@ -277,40 +352,32 @@ mod program {
             return fail(EXIT_NO_EVENTS, "event mailbox wait refused");
         }
 
-        // --- Open the window, show the waiting state, and immediately
-        // ask the session's trusted picker for a file.
+        // --- Open the window (resizable: the viewer re-lays-out its text to
+        // each new client size), show the waiting state, and immediately ask
+        // the session's trusted picker for a file.
         let mut client = WindowClient::new(RtWindowTransport);
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let Ok((window, server)) =
-            client.create(grant as u64, event_endpoint, FRAME_COUNT, &mode, "Viewer")
+            client.create(grant, event_endpoint, FRAME_COUNT, &mode, "Viewer", true)
         else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
-        let show = |text: &str, client: &mut WindowClient<RtWindowTransport>, frames: &mut [u8]| {
-            render_status(text, theme)
-                .ok_or(Errno::NoSpace)
-                .and_then(|surface| present_surface(&surface, client, window, frames, &mode))
-        };
-        // Repaint the current window of lines. The single definition every
-        // caller (a fresh pick, keyboard navigation, and wheel scrolling)
-        // shares so the content-repaint path is never duplicated.
-        let repaint = |scroll: &ScrollView,
-                       client: &mut WindowClient<RtWindowTransport>,
-                       frames: &mut [u8]| {
-            render_lines(scroll.visible(), theme)
-                .ok_or(Errno::NoSpace)
-                .and_then(|surface| present_surface(&surface, client, window, frames, &mode))
-        };
-        if show("Choose a file...", &mut client, frames).is_err() {
+        if show_status(WAITING, theme, &mut client, window, &mut frames, &mode).is_err() {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
         if client.pick_file(window).is_err() {
             // A refused pick (another pick showing, or a session without
             // filesystem reach) is not fatal: the viewer stays open and
             // Enter asks again.
-            let _ = show("Pick refused - Enter retries", &mut client, frames);
+            let _ = show_status(
+                "Pick refused - Enter retries",
+                theme,
+                &mut client,
+                window,
+                &mut frames,
+                &mode,
+            );
         }
 
         // --- The event loop: park, apply, repaint. A dead channel ends
@@ -321,8 +388,12 @@ mod program {
             server,
         });
         // The currently viewed file, scrolled through the shared engine. None
-        // until a pick delivers content; a re-pick or refusal replaces it.
+        // until a pick delivers content; a re-pick or refusal replaces it. The
+        // raw bytes are kept alongside the view so a resize can re-wrap the
+        // file to the new column count rather than losing content past the old
+        // width.
         let mut view: Option<ScrollView> = None;
+        let mut content: Option<Vec<u8>> = None;
         loop {
             let event = match events.wait() {
                 Ok(event) => event,
@@ -333,13 +404,18 @@ mod program {
             };
             let outcome = match event {
                 WindowEvent::FilePicked { handle, .. } => match read_picked(handle) {
-                    Some(content) => {
+                    Some(bytes) => {
                         // Keep every line (bounded) so the file can be
-                        // scrolled, not just its first screenful.
-                        let lines = content_lines(&content, MAX_LINES, visible_cols());
-                        view = Some(ScrollView::new(lines, visible_rows()));
+                        // scrolled, not just its first screenful, and keep the
+                        // raw bytes so a resize can re-wrap them.
+                        let lines =
+                            content_lines(&bytes, MAX_LINES, visible_cols_for(mode.width_px));
+                        view = Some(ScrollView::new(lines, visible_rows_for(mode.height_px)));
+                        content = Some(bytes);
                         match view.as_ref() {
-                            Some(scroll) => repaint(scroll, &mut client, frames),
+                            Some(scroll) => {
+                                repaint_view(scroll, theme, &mut client, window, &mut frames, &mode)
+                            }
                             None => Ok(()),
                         }
                     }
@@ -347,12 +423,25 @@ mod program {
                     // viewer can show; state it honestly.
                     None => {
                         view = None;
-                        show("Delegated read refused", &mut client, frames)
+                        content = None;
+                        show_status(
+                            "Delegated read refused",
+                            theme,
+                            &mut client,
+                            window,
+                            &mut frames,
+                            &mode,
+                        )
                     }
                 },
-                WindowEvent::PickCancelled { .. } => {
-                    show("No file chosen - Enter retries", &mut client, frames)
-                }
+                WindowEvent::PickCancelled { .. } => show_status(
+                    "No file chosen - Enter retries",
+                    theme,
+                    &mut client,
+                    window,
+                    &mut frames,
+                    &mode,
+                ),
                 WindowEvent::Key {
                     key: KeyInput::Pressed { key, .. },
                     ..
@@ -368,7 +457,9 @@ mod program {
                     KeyValue::Named(nav) => scroll_view(nav, view.as_mut())
                         .filter(|moved| *moved)
                         .map_or(Ok(()), |_| match view.as_ref() {
-                            Some(scroll) => repaint(scroll, &mut client, frames),
+                            Some(scroll) => {
+                                repaint_view(scroll, theme, &mut client, window, &mut frames, &mode)
+                            }
                             None => Ok(()),
                         }),
                     KeyValue::Char(_) => Ok(()),
@@ -379,16 +470,40 @@ mod program {
                 WindowEvent::Scrolled { dy, .. } => {
                     if view.as_mut().is_some_and(|scroll| scroll.scroll_ticks(dy)) {
                         match view.as_ref() {
-                            Some(scroll) => repaint(scroll, &mut client, frames),
+                            Some(scroll) => {
+                                repaint_view(scroll, theme, &mut client, window, &mut frames, &mode)
+                            }
                             None => Ok(()),
                         }
                     } else {
                         Ok(())
                     }
                 }
+                // The window manager resized (or maximized/restored) the
+                // window. Re-map the frame region at the new client size, then
+                // re-wrap the file and repaint so the content fills the new
+                // window rather than leaving stale or clipped pixels.
+                WindowEvent::Resized {
+                    width_px,
+                    height_px,
+                    ..
+                } => resize_window(
+                    mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT)),
+                    theme,
+                    &mut client,
+                    window,
+                    &mut frames,
+                    &mut mode,
+                    content.as_deref(),
+                    &mut view,
+                ),
                 WindowEvent::CloseRequested { .. } => {
                     // The desktop asked; close the window and end cleanly.
                     let _ = client.close(window);
+                    // Free the frame region before exiting so nothing is left
+                    // pinned (the runtime reclaims on exit, but the app is
+                    // explicit about the mapping it owns).
+                    let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
                     return 0;
                 }
                 // Focus changes, key releases, and pointer events repaint
@@ -398,6 +513,69 @@ mod program {
             if outcome.is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
+        }
+    }
+
+    /// Re-map the window's frame region onto `new_mode` and repaint at the
+    /// new size, keeping the reader's place.
+    ///
+    /// The ordering is fail-closed: a fresh region is created and granted
+    /// first, then adopted only if the session accepts the
+    /// [`WindowClient::resize`]. On success the *old* region is unmapped
+    /// (never before, so a refused resize leaves the current surface intact);
+    /// on refusal the freshly-allocated region is unmapped so nothing leaks.
+    /// A region that cannot be allocated at all keeps the current size rather
+    /// than crashing or presenting nothing.
+    #[allow(clippy::too_many_arguments)] // The resize touches every piece of the window's live state exactly once.
+    fn resize_window(
+        new_mode: DisplayMode,
+        theme: &tairix_theme::Theme,
+        client: &mut WindowClient<RtWindowTransport>,
+        window: u64,
+        frames: &mut Frames,
+        mode: &mut DisplayMode,
+        content: Option<&[u8]>,
+        view: &mut Option<ScrollView>,
+    ) -> Result<(), Errno> {
+        let total = region_bytes(&new_mode);
+        let Some((_region_id, new_base, new_grant)) = allocate_frames(total) else {
+            // Out of memory for a new region: honestly keep the current
+            // window rather than fail the whole app.
+            return Ok(());
+        };
+        if client
+            .resize(window, new_grant, FRAME_COUNT, &new_mode)
+            .is_err()
+        {
+            // The session refused the re-map: drop the new region and stand on
+            // the old geometry (fail closed, no crash).
+            let _ = tairix_rt::shm_unmap(new_base as u64, total);
+            return Ok(());
+        }
+        // The session adopted the new region; release the old mapping and
+        // switch the app onto the new one.
+        let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
+        *frames = Frames {
+            base: new_base,
+            len: total,
+        };
+        *mode = new_mode;
+        // Re-wrap the stored file to the new width and repaint, keeping the
+        // reader near their place; with no file open, redraw the prompt.
+        match content {
+            Some(bytes) => {
+                let lines = content_lines(bytes, MAX_LINES, visible_cols_for(mode.width_px));
+                let rows = visible_rows_for(mode.height_px);
+                match view.as_mut() {
+                    Some(scroll) => scroll.relayout(lines, rows),
+                    None => *view = Some(ScrollView::new(lines, rows)),
+                }
+                match view.as_ref() {
+                    Some(scroll) => repaint_view(scroll, theme, client, window, frames, mode),
+                    None => Ok(()),
+                }
+            }
+            None => show_status(WAITING, theme, client, window, frames, mode),
         }
     }
 

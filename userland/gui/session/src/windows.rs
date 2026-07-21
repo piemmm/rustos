@@ -197,6 +197,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
+        resizable: bool,
     ) -> Result<(), Errno> {
         // The engine validated the geometry (non-zero, stride covers a
         // row); a surface too large to allocate is refused, never a
@@ -217,10 +218,14 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         };
         // A served application window is decorated by the window manager: the
         // title bar (with the Close / Minimize / PutToBack / SizeToggle
-        // controls), the frame rim, and the resize edges are composed around
-        // the app's content. The app never draws its own chrome; it reacts to
-        // the typed lifecycle events the controls raise over the window path.
-        self.shell.decorate_window(self.compositor, wm, title);
+        // controls), the frame rim, and — when the app asked to be resizable —
+        // the resize grabber are composed around the app's content. The app
+        // never draws its own chrome; it reacts to the typed lifecycle events
+        // the controls raise over the window path. The app's own `resizable`
+        // request decides whether the grabber and a live size toggle are
+        // offered.
+        self.shell
+            .decorate_window(self.compositor, wm, title, resizable);
         self.windows.opened += 1;
         self.windows.records.insert(window_id, WindowRecord { wm });
         self.windows.by_wm.insert(wm, window_id);
@@ -417,9 +422,9 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
             };
-            host.window_opened(7, &mode(64, 48, DisplayFormat::Rgba8888), "files")
+            host.window_opened(7, &mode(64, 48, DisplayFormat::Rgba8888), "files", false)
                 .expect("opens");
-            host.window_opened(9, &mode(64, 48, DisplayFormat::Rgba8888), "terminal")
+            host.window_opened(9, &mode(64, 48, DisplayFormat::Rgba8888), "terminal", false)
                 .expect("opens");
         }
         assert_eq!(windows.len(), 2);
@@ -459,7 +464,7 @@ mod tests {
                     windows: &mut windows,
                     picker: &mut picker,
                 };
-                host.window_opened(1, &m, "w").expect("opens");
+                host.window_opened(1, &m, "w", false).expect("opens");
                 // One frame with the probe pixel at (2, 1).
                 let mut frame = [0u8; 4 * 4 * 4];
                 let offset = (4 + 2) * 4;
@@ -502,7 +507,7 @@ mod tests {
             picker: &mut picker,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
-        host.window_opened(1, &m, "w").expect("opens");
+        host.window_opened(1, &m, "w", false).expect("opens");
         let frame = [0u8; 4 * 4 * 4];
         let full = DamageRect {
             x: 0,
@@ -551,7 +556,7 @@ mod tests {
             picker: &mut picker,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        host.window_opened(1, &m, "w").expect("opens");
+        host.window_opened(1, &m, "w", false).expect("opens");
         let wm = host.windows.records.get(&1).expect("live").wm;
         host.window_closed(1);
         assert!(host.windows.is_empty());
@@ -573,7 +578,7 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
             };
-            host.window_opened(3, &mode(120, 80, DisplayFormat::Rgba8888), "Files")
+            host.window_opened(3, &mode(120, 80, DisplayFormat::Rgba8888), "Files", false)
                 .expect("opens");
             host.windows.records.get(&3).expect("live").wm
         };
@@ -597,6 +602,50 @@ mod tests {
     }
 
     #[test]
+    fn window_opened_honours_a_resizable_request() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+            };
+            open_one_sized(&mut host, 3, true)
+        };
+        // The app asked to be resizable, so the window manager decorates it
+        // with a resizable frame — its grabber and a live size toggle. A
+        // fixed-size open (asserted separately) gets neither.
+        let frame = compositor
+            .window_frame(wm)
+            .expect("the served window is decorated");
+        assert!(frame.furniture().movable, "movable by its title bar");
+        assert!(
+            frame.furniture().resizable,
+            "a resizable-requested window is decorated resizable"
+        );
+        // And the size toggle now drives a real maximize (a fixed-size window
+        // yields nothing): the mechanism is live for the opted-in window.
+        let work_area = shell.work_area(&compositor);
+        assert!(
+            matches!(
+                window_control_event(
+                    WindowControlKind::SizeToggle,
+                    wm,
+                    work_area,
+                    &mut shell,
+                    &mut compositor,
+                    &windows,
+                ),
+                Some(WindowEvent::Resized { window_id: 3, .. })
+            ),
+            "the size toggle maximizes a resizable window and reports the new client size"
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One linear end-to-end drive of all four command controls.
     fn clicking_each_title_bar_control_drives_the_window_lifecycle_end_to_end() {
         use tairix_wm::{InputEvent, InputResponse, PointerButton};
@@ -613,7 +662,7 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
             };
-            host.window_opened(7, &mode(480, 320, DisplayFormat::Rgba8888), "Files")
+            host.window_opened(7, &mode(480, 320, DisplayFormat::Rgba8888), "Files", false)
                 .expect("opens");
             host.windows.records.get(&7).expect("live").wm
         };
@@ -773,8 +822,18 @@ mod tests {
 
     /// Open one served window and return its window-channel id → compositor id.
     fn open_one(host: &mut ShellWindowHost<'_>, window_id: u64) -> WindowId {
-        host.window_opened(window_id, &mode(120, 80, DisplayFormat::Rgba8888), "app")
-            .expect("opens");
+        open_one_sized(host, window_id, false)
+    }
+
+    /// Open one served window with an explicit `resizable` request.
+    fn open_one_sized(host: &mut ShellWindowHost<'_>, window_id: u64, resizable: bool) -> WindowId {
+        host.window_opened(
+            window_id,
+            &mode(120, 80, DisplayFormat::Rgba8888),
+            "app",
+            resizable,
+        )
+        .expect("opens");
         host.windows.records.get(&window_id).expect("live").wm
     }
 
@@ -1011,7 +1070,7 @@ mod tests {
             picker: &mut picker,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        host.window_opened(1, &m, "w").expect("opens");
+        host.window_opened(1, &m, "w", false).expect("opens");
         host.pick_requested(1).expect("slot accepts");
         host.window_closed(1);
         assert_eq!(picker.begun, alloc::vec![1]);

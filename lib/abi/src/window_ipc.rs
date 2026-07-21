@@ -173,6 +173,15 @@ pub enum WindowRequest {
         format: DisplayFormat,
         /// The window's title, listed on the taskbar.
         title: WindowTitle,
+        /// Whether the app wants the window manager to present the window
+        /// as resizable — a drawn resize grabber and a live maximize/
+        /// restore size toggle. A resizable app re-lays-out to each new
+        /// client size the window manager reports
+        /// ([`WindowEvent::Resized`]), re-mapping its frame region with
+        /// [`Self::Resize`]. A fixed-size app leaves this `false`: the
+        /// window manager offers neither affordance and never sends it a
+        /// size change.
+        resizable: bool,
     },
     /// Show frame `frame_index` of window `window_id`, of which only
     /// `damage` changed since the previously presented frame.
@@ -265,6 +274,7 @@ impl WindowRequest {
                 stride_bytes,
                 format,
                 title,
+                resizable,
             } => {
                 put_u16(&mut out, 6, OP_CREATE);
                 put_u64(&mut out, 8, shm_handle);
@@ -276,6 +286,7 @@ impl WindowRequest {
                 out[40] = format.as_u8();
                 out[41] = title.len;
                 out[42..42 + WINDOW_TITLE_MAX].copy_from_slice(&title.bytes);
+                out[42 + WINDOW_TITLE_MAX] = u8::from(resizable);
             }
             Self::Present {
                 window_id,
@@ -357,7 +368,7 @@ impl WindowRequest {
         let op = read_u16(bytes, 6);
         match op {
             OP_CREATE => {
-                reserved_zero(bytes, 42 + WINDOW_TITLE_MAX)?;
+                reserved_zero(bytes, 42 + WINDOW_TITLE_MAX + 1)?;
                 let shm_handle = read_u64(bytes, 8);
                 let event_endpoint = read_u64(bytes, 16);
                 if crate::ipc::is_reserved_endpoint(event_endpoint) {
@@ -367,6 +378,11 @@ impl WindowRequest {
                 let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
                 title_bytes.copy_from_slice(&bytes[42..42 + WINDOW_TITLE_MAX]);
                 let title = WindowTitle::from_wire(bytes[41], &title_bytes)?;
+                let resizable = match bytes[42 + WINDOW_TITLE_MAX] {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(Errno::OutOfRange),
+                };
                 Ok(Self::Create {
                     shm_handle,
                     event_endpoint,
@@ -376,6 +392,7 @@ impl WindowRequest {
                     stride_bytes: layout.stride_bytes,
                     format: layout.format,
                     title,
+                    resizable,
                 })
             }
             OP_PRESENT => {
@@ -908,6 +925,7 @@ mod tests {
             stride_bytes: 1280,
             format: DisplayFormat::Bgra8888,
             title: WindowTitle::new("Files").expect("a valid title"),
+            resizable: false,
         }
     }
 
@@ -1113,6 +1131,28 @@ mod tests {
         assert_eq!(encode(2, 320, 200, 1279, 2), Err(Errno::LengthOutOfRange));
         assert_eq!(encode(2, 320, 200, 1280, 9), Err(Errno::OutOfRange));
         assert!(encode(WINDOW_MAX_FRAMES, 320, 200, 1280, 2).is_ok());
+    }
+
+    #[test]
+    fn create_carries_the_resizable_flag_and_rejects_a_dirty_flag_byte() {
+        // The flag round-trips both ways.
+        let mut resizable = sample_create();
+        if let WindowRequest::Create {
+            resizable: ref mut flag,
+            ..
+        } = resizable
+        {
+            *flag = true;
+        }
+        let bytes = resizable.to_le_bytes();
+        assert_eq!(WindowRequest::from_bytes(&bytes), Ok(resizable));
+        // The flag lives at the byte just past the title.
+        assert_eq!(bytes[42 + WINDOW_TITLE_MAX], 1);
+        assert_eq!(sample_create().to_le_bytes()[42 + WINDOW_TITLE_MAX], 0);
+        // A flag byte outside {0, 1} is refused, never coerced.
+        let mut bad = sample_create().to_le_bytes();
+        bad[42 + WINDOW_TITLE_MAX] = 2;
+        assert_eq!(WindowRequest::from_bytes(&bad), Err(Errno::OutOfRange));
     }
 
     #[test]

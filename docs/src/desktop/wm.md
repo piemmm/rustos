@@ -200,11 +200,25 @@ The desktop session (`userland/gui/session`) turns decorations on for every
 **served application window**. When a window opens over the channel,
 `ShellWindowHost::window_opened` opens the bare window through the shell and
 then calls `DesktopShell::decorate_window`, which attaches a `WindowFrame`
-(movable, presenting a fixed size — the default apps render at one size, so no
-resize grabber is drawn and the size-toggle reports no change) and labels its
-title bar with the channel's `WindowTitle`. Files, the terminal, and any future
-windowed app are decorated this way with **no per-app decoration code** — the
-one place a served window is dressed is the window manager.
+(always movable by its title bar) and labels its title bar with the channel's
+`WindowTitle`. Files, the terminal, and any future windowed app are decorated
+this way with **no per-app decoration code** — the one place a served window is
+dressed is the window manager.
+
+Whether the frame is **resizable** is the opening app's own choice, carried on
+its window `Create` (`WindowRequest::Create { resizable, .. }` → `WindowClient::create`'s
+`resizable` argument → `WindowHost::window_opened`). A resizable window is drawn
+with a resize grabber and a live maximize/restore size toggle; the app
+re-lays-out to each new client size the window manager reports
+(`WindowEvent::Resized`), re-mapping its frame region with `WindowRequest::Resize`
+so the resize keeps the window identity. A fixed-size app passes `resizable:
+false` — no grabber is drawn and the size-toggle is inert — so an app that
+renders at one size is never handed a size it did not ask to handle. The file
+**viewer** (`userland/apps/viewer`) is the shipping resizable app: it re-wraps
+its text to the new width, preserves the reader's scroll position across the
+resize, and fails closed (keeping the current surface) if a new frame region
+cannot be allocated or the session refuses the re-map. Files and the terminal
+present fixed-size windows.
 
 `DesktopShell::sync_active_frame` keeps exactly one window showing its active
 frame: on every focus change — a click-to-activate press, a taskbar activation,

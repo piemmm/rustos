@@ -78,9 +78,11 @@ pub trait CallerIdentity {
 /// re-derives protocol policy.
 pub trait WindowHost {
     /// A validated `Create` opened `window_id` with `surface` geometry,
-    /// titled `title`. An error refuses the create: the engine unmaps
-    /// the region and replies the refusal, keeping engine and host in
-    /// lockstep.
+    /// titled `title`. `resizable` is the app's request that the window
+    /// manager present the window with a resize grabber and a live
+    /// maximize/restore size toggle (a fixed-size app passes `false`).
+    /// An error refuses the create: the engine unmaps the region and
+    /// replies the refusal, keeping engine and host in lockstep.
     ///
     /// # Errors
     ///
@@ -91,6 +93,7 @@ pub trait WindowHost {
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
+        resizable: bool,
     ) -> Result<(), Errno>;
 
     /// A validated `Present`: `frame` is exactly one frame of
@@ -169,6 +172,7 @@ struct CreateSpec {
     frame_count: u32,
     surface: DisplayMode,
     title: WindowTitle,
+    resizable: bool,
 }
 
 /// Everything one validated `Resize` asks for, in one place, so the
@@ -280,6 +284,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 stride_bytes,
                 format,
                 title,
+                resizable,
             } => {
                 let spec = CreateSpec {
                     shm_handle,
@@ -292,6 +297,7 @@ impl<M: ShmMapper> WindowServer<M> {
                         format,
                     },
                     title,
+                    resizable,
                 };
                 create_reply(reply, self.create(host, caller, spec), self.server)
             }
@@ -368,7 +374,12 @@ impl<M: ShmMapper> WindowServer<M> {
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
         // Tell the host before committing: a refused open leaves no
         // record and drops the mapping (the mapper's cue to unmap).
-        host.window_opened(window_id, &spec.surface, spec.title.as_str())?;
+        host.window_opened(
+            window_id,
+            &spec.surface,
+            spec.title.as_str(),
+            spec.resizable,
+        )?;
         self.next_id = next;
         self.windows.insert(
             window_id,
