@@ -64,17 +64,18 @@ mod program {
     };
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::driver::virtio::VirtioHost;
+    use tairix_abi::driver::virtio_pci::{virtio_pci_windows, VirtioPciWindows};
     use tairix_abi::hwtree::HW_NODE_ROOT;
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{
-        CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, MmioMapper,
+        CapabilityId, DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, MmioMapper,
     };
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_log::{log, Event, EventId, Level};
     use tairix_rt::LogSink;
-    use tairix_virtio::MmioTransport;
+    use tairix_virtio::{MmioTransport, PciTransport, PciTransportWindows};
     use tairix_virtio_net::{NetChannelServer, VirtioNet};
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -82,9 +83,11 @@ mod program {
     /// delivery did not fit). A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
-    /// Exit code when the delivered grants do not name the single register
-    /// window (and interrupt line) this driver needs — an unbound or
-    /// mis-provisioned node. A reserved, fail-closed value.
+    /// Exit code when the delivered grants do not name a usable register
+    /// window (a single MMIO aperture or the full set of four role-tagged
+    /// virtio-PCI config windows) and interrupt line this driver needs — an
+    /// unbound, mis-provisioned, or malformed node. A reserved, fail-closed
+    /// value.
     const EXIT_NO_RESOURCES: i32 = 81;
 
     /// Exit code when the device bring-up failed (the register window could
@@ -121,6 +124,17 @@ mod program {
     /// Wait forever on the serve wait-set (a doorbell or an interrupt arrives
     /// whenever there is work).
     const WAIT_FOREVER_NS: u64 = u64::MAX;
+
+    /// MSI-X table entry the kernel PCI probe routes this device's single
+    /// interrupt to, and the entry the driver selects for the config change
+    /// and every virtqueue. The driver uses one interrupt line (it parks on
+    /// one bound handle), so one shared MSI-X vector — entry `0` — carries
+    /// every device notification; the kernel programs that entry's table
+    /// slot at spawn and the driver only echoes the entry number into the
+    /// device's vector registers (writing its own mapped common window, no
+    /// PCI config access). Ignored on the single-aperture MMIO bus, which
+    /// has no MSI-X.
+    const MSIX_ENTRY: u16 = 0;
 
     /// The capability set the driver host re-checks up front before issuing a
     /// `mmio_map` / `dma_alloc` / `irq_bind` trap, so a missing grant fails
@@ -229,27 +243,16 @@ mod program {
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
-        let Ok((base, len)) = sole_register_window(host.resources()) else {
-            return EXIT_NO_RESOURCES;
-        };
         let Some(irq_line) = host.irq_line() else {
             return EXIT_NO_RESOURCES;
-        };
-        let Ok(window) = host.map_window(base, len) else {
-            return EXIT_BRINGUP_FAILED;
-        };
-        let Ok(transport) = MmioTransport::new(window) else {
-            return EXIT_BRINGUP_FAILED;
-        };
-        let vhost: &dyn VirtioHost = &host;
-        let Ok(net) = VirtioNet::open(transport, vhost) else {
-            return EXIT_BRINGUP_FAILED;
         };
 
         // Bind the device interrupt line the serve loop parks on. This is the
         // audited readiness witness, issued once the device is live: a driver
         // that cannot bind it must exit rather than degrade into a busy
-        // re-poll.
+        // re-poll. It is bound once here and shared by both bus paths (the
+        // MMIO line and the kernel-routed MSI-X vector alike surface as one
+        // bound handle).
         let irq_ret = tairix_rt::irq_bind(irq_line);
         if irq_ret <= 0 {
             return EXIT_BRINGUP_FAILED;
@@ -257,6 +260,86 @@ mod program {
         #[allow(clippy::cast_sign_loss)] // `irq_ret > 0` is the minted IrqHandle.
         let irq_handle = irq_ret as u64;
 
+        // Shape-key the transport by the grant set the kernel minted, so one
+        // signed bundle binds on either virtio bus: a scattered PCI device
+        // grants the four role-tagged config windows (`common`/`notify`/`isr`/
+        // `device`), while a single-aperture MMIO device grants one register
+        // window. The kernel resolved and role-tagged every window — the
+        // driver never reads PCI configuration space.
+        match virtio_pci_windows(host.resources()) {
+            Ok(windows) => {
+                let Some(transport) = build_pci_transport(&host, &windows) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                let vhost: &dyn VirtioHost = &host;
+                let Ok(net) = VirtioNet::open(transport, vhost) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                serve(net, irq_handle)
+            }
+            // No role-tagged window at all: a single-aperture MMIO delivery.
+            Err(DriverError::NotFound) => {
+                let Ok((base, len)) = sole_register_window(host.resources()) else {
+                    return EXIT_NO_RESOURCES;
+                };
+                let Ok(window) = host.map_window(base, len) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                let Ok(transport) = MmioTransport::new(window) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                let vhost: &dyn VirtioHost = &host;
+                let Ok(net) = VirtioNet::open(transport, vhost) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                serve(net, irq_handle)
+            }
+            // Some virtio-PCI windows but not the full four — a malformed,
+            // mis-provisioned node. Fail closed rather than half-bind.
+            Err(_) => EXIT_NO_RESOURCES,
+        }
+    }
+
+    /// Build the modern virtio-PCI [`PciTransport`] from the four
+    /// kernel-resolved config windows, mapping each through the host's
+    /// capability-gated MMIO facility and selecting the kernel-routed MSI-X
+    /// entry before the transport programs the device's virtqueues.
+    ///
+    /// Returns [`None`] on any window map failure (a refused or malformed
+    /// grant) or a malformed common-configuration window — fail closed, never
+    /// a half-built transport.
+    fn build_pci_transport(
+        mapper: &dyn MmioMapper,
+        windows: &VirtioPciWindows,
+    ) -> Option<PciTransport> {
+        let common = mapper.map_window(windows.common.0, windows.common.1).ok()?;
+        let notify = mapper.map_window(windows.notify.0, windows.notify.1).ok()?;
+        let isr = mapper.map_window(windows.isr.0, windows.isr.1).ok()?;
+        let device = mapper.map_window(windows.device.0, windows.device.1).ok()?;
+        let mut transport = PciTransport::new(PciTransportWindows {
+            common,
+            notify,
+            isr,
+            device,
+            notify_off_multiplier: windows.notify_off_multiplier,
+        })
+        .ok()?;
+        // Select the MSI-X entry the kernel routed this device's interrupt to,
+        // before `VirtioNet::open` drives the virtqueue programming that reads
+        // it back. Writes only the driver's own mapped common window.
+        transport.enable_msix(MSIX_ENTRY);
+        Some(transport)
+    }
+
+    /// Stand up the device-channel service over an opened virtio-net device,
+    /// whatever transport backs it: claim the reserved endpoint, publish the
+    /// `netchan` node, build the wait set over the call endpoint and the bound
+    /// interrupt, and run the serve loop for the life of the driver.
+    ///
+    /// Generic over the [`Net`] device so the MMIO and PCI transports share
+    /// exactly one service path (no per-bus duplication). Never returns on the
+    /// success path; any set-up refusal exits fail-closed.
+    fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
         let Some(endpoint) = claim_channel_endpoint() else {
             return EXIT_NO_SERVICE;
         };

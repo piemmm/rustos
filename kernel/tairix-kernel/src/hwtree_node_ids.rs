@@ -65,6 +65,14 @@ pub const BOOT_DISPLAY_NODE_ID: u32 = region(2);
 /// per enumerated network slot, so distinct NICs stay distinct.
 pub const VIRTIO_NET_PROBE_NODE_BASE_ID: u32 = region(3);
 
+/// First synthetic id for a probed virtio-**PCI** network child node
+/// ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]). One id
+/// per enumerated virtio-net PCI function; a distinct region from the
+/// MMIO network base so a machine that probed both buses (it will not,
+/// but the map is disjoint by construction regardless) keeps every NIC
+/// node id unambiguous.
+pub const VIRTIO_PCI_NET_PROBE_NODE_BASE_ID: u32 = region(4);
+
 // A single probe walk emits at most one id per enumerated bus slot
 // (`bus.enumerate` fills at most `MAX_SLOTS`; an overfull bus fails closed),
 // so the highest id a walk can reach in its region is
@@ -81,11 +89,12 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 4] = [
+    const BASES: [u32; 5] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
         VIRTIO_NET_PROBE_NODE_BASE_ID,
+        VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
     ];
 
     #[test]

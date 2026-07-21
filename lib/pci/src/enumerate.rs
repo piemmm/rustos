@@ -533,23 +533,22 @@ impl<C: ConfigSpace> Pci<C> {
         Ok(aligned)
     }
 
-    /// Resolve the virtio-1.x configuration structure of kind
-    /// `cfg_type` on function `bdf` and ask the kernel `mapper` to map
-    /// it, returning the resulting [`RegisterWindow`].
+    /// Resolve the virtio-1.x configuration structure of kind `cfg_type`
+    /// on function `bdf` to its CPU-physical `(base, len)` window,
+    /// **without mapping it**.
     ///
-    /// This is the boot-time hand-off the virtio PCI transport needs:
-    /// the bus driver walks the function's capability list, locates
-    /// the vendor-specific virtio capability of the requested
-    /// `cfg_type` (one of [`VIRTIO_CFG_COMMON`](crate::config::VIRTIO_CFG_COMMON),
+    /// The bus driver walks the function's capability list, locates the
+    /// vendor-specific virtio capability of the requested `cfg_type` (one
+    /// of [`VIRTIO_CFG_COMMON`](crate::config::VIRTIO_CFG_COMMON),
     /// [`VIRTIO_CFG_NOTIFY`],
     /// [`VIRTIO_CFG_ISR`](crate::config::VIRTIO_CFG_ISR), or
-    /// [`VIRTIO_CFG_DEVICE`](crate::config::VIRTIO_CFG_DEVICE)),
-    /// resolves the `(bar, bar_offset, length)` triple to a physical
-    /// base, and asks the kernel's MMIO-map facility for a window over
-    /// exactly that region. The driver never synthesises a pointer —
-    /// the kernel allocates and validates the mapping.
-    /// The four windows so produced are what
-    /// `PciTransport::new` consumes.
+    /// [`VIRTIO_CFG_DEVICE`](crate::config::VIRTIO_CFG_DEVICE)), and
+    /// resolves the `(bar, bar_offset, length)` triple to a CPU-physical
+    /// base. This is the resolve primitive the two-process driver contract
+    /// grants to a user-space driver, which maps the window in its own
+    /// address space through its capability-gated MMIO facility;
+    /// [`map_virtio_window`](Self::map_virtio_window) is the in-kernel
+    /// resolve-and-map sibling.
     ///
     /// # Errors
     ///
@@ -562,20 +561,11 @@ impl<C: ConfigSpace> Pci<C> {
     ///   `bar_offset + length` exceeds the resolved BAR size.
     /// * [`DriverError::LengthOutOfRange`] — the region length does not
     ///   fit in `usize` on this target.
-    /// * [`DriverError::PermissionDenied`] — the caller does not hold
-    ///   [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
-    ///   (propagated from the mapper).
-    ///
-    /// # Capabilities
-    ///
-    /// The `mapper` enforces
-    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP).
-    pub fn map_virtio_window(
+    pub fn virtio_window_region(
         &self,
         bdf: u64,
         cfg_type: u8,
-        mapper: &dyn MmioMapper,
-    ) -> Result<RegisterWindow, DriverError> {
+    ) -> Result<(u64, usize), DriverError> {
         let (bar_index, bar_offset, length) = self.find_virtio_region(bdf, cfg_type)?;
         let bar = self.resolve_bar(bdf, bar_index)?;
         if matches!(bar.kind, BarKind::Io) {
@@ -594,6 +584,36 @@ impl<C: ConfigSpace> Pci<C> {
             .checked_add(u64::from(bar_offset))
             .ok_or(DriverError::OutOfRange)?;
         let len = usize::try_from(length).map_err(|_| DriverError::LengthOutOfRange)?;
+        Ok((phys_base, len))
+    }
+
+    /// Resolve the virtio-1.x configuration structure of kind `cfg_type`
+    /// on function `bdf` ([`virtio_window_region`](Self::virtio_window_region))
+    /// and ask the kernel `mapper` to map it, returning the resulting
+    /// [`RegisterWindow`] — the resolve-and-map hand-off the in-kernel,
+    /// single-process virtio PCI transport uses. The driver never
+    /// synthesises a pointer; the kernel allocates and validates the
+    /// mapping. The four windows so produced are what `PciTransport::new`
+    /// consumes.
+    ///
+    /// # Errors
+    ///
+    /// As [`virtio_window_region`](Self::virtio_window_region), plus
+    /// [`DriverError::PermissionDenied`] when the caller does not hold
+    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
+    /// (propagated from the mapper).
+    ///
+    /// # Capabilities
+    ///
+    /// The `mapper` enforces
+    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP).
+    pub fn map_virtio_window(
+        &self,
+        bdf: u64,
+        cfg_type: u8,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        let (phys_base, len) = self.virtio_window_region(bdf, cfg_type)?;
         mapper
             .map_window(phys_base, len)
             .map_err(MmioMapError::as_driver_error)

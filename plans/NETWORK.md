@@ -773,10 +773,30 @@ improvement, not test scaffolding):
   riscv64/aarch64 pure device-tree seed. It is pure ACPI byte-slice
   normalisation (no MMIO register access), so it is safe before any
   bootstrap-floor bus bring-up, and fails closed (a malformed table seeds
-  whatever was collected rather than failing the boot). The bootstrap-floor
-  **virtio-PCI** `DeviceID` probe (the ECAM/`lib/pci` analogue of the riscv64
-  virtio-MMIO probe) that emits the autoloadable Block/Input/Network child
-  nodes is the next x86_64 tranche, on top of this seed.
+  whatever was collected rather than failing the boot). **Second x86_64
+  foundation landed: the two-process virtio-PCI driver *contract*** (the
+  `abi-v1`-unfrozen multi-window grant work), host-gate-green. The kernel PCI
+  probe resolves a virtio function's four config windows to CPU-physical
+  `(base,len)` **without mapping** (`VirtioPciBus::virtio_window_region`, the
+  resolve-only sibling of `map_virtio_window`) and emits them as four
+  role-tagged MMIO grants (`lib/abi` `virtio_pci_window_resource` /
+  `HwResource::mmio_tagged`, role in the tag + `notify_off_multiplier` on the
+  notify window's aux) + `dma(0,0)` + the discovered IRQ line, on a node keyed
+  by the *shared* `HwMatchKey::virtio(type)` (PCI device id `0x1040+type`
+  translated back to the virtio type, so **one** signed bundle binds on both
+  buses). `hwdiscovery::observe_virtio_pci_network_devices` is the ECAM
+  analogue of the MMIO probe (node-id `region(4)`); `boot_x86_64::seed_hardware_tree`
+  builds the `tairix_pci::mechanism_ecam` bus over the identity-mapped ECAM
+  window (`acpi::locate_mcfg`+`mcfg_first_ecam`, over one signature-parameterised
+  (X|R)SDT walk shared with `locate_madt`) and runs it, resolving each
+  function's IRQ from its PCI Interrupt-Line register. The `virtio_net_driver`
+  process is grant-shape-keyed (four role-tagged windows ⇒ `PciTransport` +
+  `enable_msix`, one window ⇒ `MmioTransport`) over one shared generic serve
+  path. Host-test-validated only — x86_64 still has no autoload subsystem, so
+  no *live* boot exercises the PCI path yet. The next x86_64 tranche is the
+  autoload parity port (root mount, unlock kthread, `devmgr`,
+  `driver_spawn_loader`), then the verticals — the first live exercise of this
+  contract.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

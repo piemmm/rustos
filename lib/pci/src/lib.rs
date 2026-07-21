@@ -197,20 +197,17 @@ impl<C: ConfigSpace> Bus for Pci<C> {
     }
 }
 
-// The frozen `abi-v1` virtio-PCI transport-provisioning seam. The ring-0 boot walk reaches the concrete `Pci`
-// through `&dyn VirtioPciBus`, so the bus driver never leaks its
-// concrete type across the crate boundary. Both
-// methods forward to the inherent enumeration core; the inherent
-// `Pci::map_virtio_window` wins method resolution, so the forward is
-// not recursive.
+// The `abi-v1` virtio-PCI transport-provisioning seam. The ring-0 boot
+// walk reaches the concrete `Pci` through `&dyn VirtioPciBus`, so the bus
+// driver never leaks its concrete type across the crate boundary. The
+// window-resolve and notify-multiplier methods forward to the inherent
+// enumeration core (the inherent names win method resolution, so the
+// forward is not recursive); the trait's `map_virtio_window` default
+// (resolve-then-map) is inherited unchanged, so it is not re-implemented
+// here.
 impl<C: ConfigSpace> VirtioPciBus for Pci<C> {
-    fn map_virtio_window(
-        &self,
-        bdf: u64,
-        cfg_type: u8,
-        mapper: &dyn MmioMapper,
-    ) -> Result<RegisterWindow, DriverError> {
-        Pci::map_virtio_window(self, bdf, cfg_type, mapper)
+    fn virtio_window_region(&self, bdf: u64, cfg_type: u8) -> Result<(u64, usize), DriverError> {
+        Pci::virtio_window_region(self, bdf, cfg_type)
     }
 
     fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError> {

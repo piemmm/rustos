@@ -20,6 +20,10 @@
 
 use tairix_abi::driver::bus::{Bus, BusDevice};
 use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
+use tairix_abi::driver::virtio_pci::{
+    virtio_pci_window_resource, VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
+    VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
+};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID};
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
@@ -31,8 +35,17 @@ use tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 use crate::hwtree_node_ids::{
-    VIRTIO_BLOCK_PROBE_NODE_BASE_ID, VIRTIO_INPUT_PROBE_NODE_BASE_ID, VIRTIO_NET_PROBE_NODE_BASE_ID,
+    VIRTIO_BLOCK_PROBE_NODE_BASE_ID, VIRTIO_INPUT_PROBE_NODE_BASE_ID,
+    VIRTIO_NET_PROBE_NODE_BASE_ID, VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
 };
+
+/// PCI device-ID base of a **modern** virtio function: the device ID is
+/// `0x1040 + virtio_device_type` (virtio 1.1 §4.1.2), so a virtio-net
+/// function (type [`VIRTIO_NET_DEVICE_ID`] = 1) reports `0x1041`. The PCI
+/// probe translates a function's PCI device ID back to the virtio *type*
+/// so it emits the *same* [`HwMatchKey::virtio`]`(type)` node the
+/// MMIO probe does — one signed driver bundle binds on either bus.
+const VIRTIO_PCI_MODERN_DEVICE_ID_BASE: u32 = 0x1040;
 
 /// Enumerate the virtio-MMIO `bus` and emit each populated **block** slot
 /// into `sink` as a probed child node.
@@ -348,6 +361,211 @@ fn observe_virtio_mmio_interrupt_devices(
     Ok(())
 }
 
+/// Enumerate the virtio-**PCI** `bus` and emit each virtio-net function as
+/// a [`HwDeviceClass::Network`] node carrying the four role-tagged config
+/// windows, a coherent DMA constraint, and its routed interrupt line — the
+/// PCI-bus analogue of [`observe_virtio_mmio_network_devices`]
+/// (`plans/NETWORK.md` N4e-x86_64).
+///
+/// A modern virtio-net PCI function reports vendor
+/// [`VIRTIO_PCI_VENDOR_ID`] and device ID
+/// `0x1040 + `[`VIRTIO_NET_DEVICE_ID`]. Unlike a single-aperture MMIO
+/// device, its register blocks are scattered across BARs at
+/// capability-referenced offsets that only PCI-configuration-space access
+/// can resolve — which a user-space driver cannot do. So the kernel
+/// resolves the four windows here (through the frozen [`VirtioPciBus`]
+/// seam, never naming a concrete `drivers/bus/*` type) and emits each as a
+/// role-tagged [`virtio_pci_window_resource`] grant, so the autoloaded
+/// driver receives pre-resolved `(base, len)` windows it maps in its own
+/// address space (`AGENTS.md` §4 — no ambient authority, the driver never
+/// touches config space). The node is keyed by the shared
+/// [`HwMatchKey::virtio`]`(`[`VIRTIO_NET_DEVICE_ID`]`)` — the *virtio
+/// type*, not the PCI device ID — so the same signed bundle binds on the
+/// MMIO and PCI buses alike (§2.2).
+///
+/// `dev_irq(bdf)` resolves the interrupt line the platform routes the
+/// function to (arch-specific: the x86_64 port allocates a vector and
+/// routes MSI-X; the line is a discovered value, never a board constant).
+/// A function whose windows, notify multiplier, or interrupt line cannot
+/// be resolved is left undiscovered rather than emitted on a partial
+/// identity (fail closed).
+///
+/// # Errors
+///
+/// As [`observe_virtio_mmio_network_devices`]: propagates the bus
+/// enumeration error and surfaces a full sink as
+/// [`DriverError::BufferTooSmall`] (fail closed).
+pub fn observe_virtio_pci_network_devices(
+    bus: &dyn VirtioPciBus,
+    dev_irq: &dyn Fn(u64) -> Option<u32>,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+) -> Result<(), DriverError> {
+    observe_virtio_pci_devices(
+        bus,
+        dev_irq,
+        sink,
+        log,
+        VIRTIO_NET_DEVICE_ID,
+        HwDeviceClass::Network,
+        VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
+    )
+}
+
+/// Shared core of the virtio-PCI class probes: enumerate the bus, and for
+/// every modern virtio function of the requested `virtio_type` resolve its
+/// four config windows and emit a role-tagged node of `class` (numbered
+/// from `node_base_id`). Written once so a future virtio-PCI block/input
+/// probe reuses it (§2.2); the MMIO probes stay separate because their
+/// window shape (a single aperture) differs.
+fn observe_virtio_pci_devices(
+    bus: &dyn VirtioPciBus,
+    dev_irq: &dyn Fn(u64) -> Option<u32>,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+    virtio_type: u32,
+    class: HwDeviceClass,
+    node_base_id: u32,
+) -> Result<(), DriverError> {
+    let blank = BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    };
+    let mut table = [blank; MAX_SLOTS];
+    let count = bus.enumerate(&mut table)?;
+    // The PCI device ID a modern virtio function of this type reports.
+    let want_device_id = VIRTIO_PCI_MODERN_DEVICE_ID_BASE + virtio_type;
+    let mut next_id = node_base_id;
+    for device in &table[..count] {
+        // Only modern virtio functions are candidates.
+        if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) {
+            continue;
+        }
+        // Diagnostic audit: every virtio-vendor function the walk sees,
+        // with its PCI device ID and bus address — the PCI counterpart of
+        // the MMIO probe's slot audit, so an unexpected function is visible
+        // in the boot log rather than silent.
+        log_virtio_pci_function(log, want_device_id, device);
+        if device.device != want_device_id {
+            continue;
+        }
+        let bdf = device.address;
+        // Resolve the four config windows to CPU-physical `(base, len)`
+        // without mapping (the driver maps them in its own space), plus the
+        // notification multiplier. A function whose capability layout the
+        // kernel cannot resolve is skipped rather than granted a guessed
+        // window (fail closed).
+        let (Ok(common), Ok(notify), Ok(isr), Ok(devcfg), Ok(multiplier)) = (
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_COMMON),
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_NOTIFY),
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_ISR),
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_DEVICE),
+            bus.notify_off_multiplier(bdf),
+        ) else {
+            continue;
+        };
+        // The interrupt line the platform routes this function to. A
+        // virtio-net driver parks its serve loop on this line (it never
+        // busy-polls), so a function whose interrupt cannot be resolved is
+        // left undiscovered rather than emitted without the line its driver
+        // needs (fail closed).
+        let Some(line) = dev_irq(bdf) else {
+            continue;
+        };
+        let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, class);
+        next_id = next_id.wrapping_add(1);
+        // The shared virtio-type bind key, the four role-tagged config
+        // windows (the notify window alone carrying the multiplier), a
+        // coherent DMA constraint (the modern virtio PCI transport DMAs to
+        // driver-allocated memory with no IOMMU limit — a discovered
+        // property, never a board constant), and the routed interrupt line
+        // — six grant requests the spawn path mints one grant each for. All
+        // fit a fresh node by the ABI's capacity; a node that somehow could
+        // not hold them is dropped rather than emitted on a partial
+        // identity.
+        if node.push_match_key(HwMatchKey::virtio(virtio_type)).is_ok()
+            && node
+                .push_resource(virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_COMMON,
+                    common.0,
+                    common.1 as u64,
+                    0,
+                ))
+                .is_ok()
+            && node
+                .push_resource(virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_NOTIFY,
+                    notify.0,
+                    notify.1 as u64,
+                    multiplier,
+                ))
+                .is_ok()
+            && node
+                .push_resource(virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_ISR,
+                    isr.0,
+                    isr.1 as u64,
+                    0,
+                ))
+                .is_ok()
+            && node
+                .push_resource(virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_DEVICE,
+                    devcfg.0,
+                    devcfg.1 as u64,
+                    0,
+                ))
+                .is_ok()
+            && node.push_resource(HwResource::dma(0, 0)).is_ok()
+            && node
+                .push_resource(HwResource::irq(u64::from(line), 1))
+                .is_ok()
+        {
+            sink.emit(node)
+                .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
+        }
+    }
+    Ok(())
+}
+
+/// Emit the per-function virtio-PCI discovery diagnostic: the wanted PCI
+/// device ID, the one the function reports, and its bus address — the PCI
+/// counterpart of the MMIO probe's slot audit, so a mis-probed or
+/// unexpected function is visible in the boot log rather than silent.
+fn log_virtio_pci_function(log: &dyn Sink, want_device_id: u32, device: &BusDevice) {
+    let mut want_buf = [0u8; 16];
+    let mut got_buf = [0u8; 16];
+    let mut addr_buf = [0u8; 16];
+    log.write_event(&Event {
+        level: Level::Debug,
+        id: EventId(4138),
+        message: "virtio-pci function probed",
+        fields: &[
+            Field {
+                key: "want",
+                value: tairix_log::FieldValue::Str(format_hex_u64(
+                    u64::from(want_device_id),
+                    &mut want_buf,
+                )),
+            },
+            Field {
+                key: "got",
+                value: tairix_log::FieldValue::Str(format_hex_u64(
+                    u64::from(device.device),
+                    &mut got_buf,
+                )),
+            },
+            Field {
+                key: "bdf",
+                value: tairix_log::FieldValue::Str(format_hex_u64(device.address, &mut addr_buf)),
+            },
+        ],
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +841,188 @@ mod tests {
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
         observe_virtio_mmio_input_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert!(sink.nodes.is_empty());
+    }
+
+    // --- virtio-PCI probe ------------------------------------------------
+    //
+    // The `VirtioPciBus` trait, the `VIRTIO_PCI_CFG_*` roles, the vendor
+    // id, and `virtio_pci_window_resource` are all in scope via
+    // `super::*` (the module imports them for the probe itself).
+
+    /// Deterministic interrupt line the PCI-probe tests hand `dev_irq` for
+    /// every function; the value is the test's own, never a production
+    /// constant.
+    const TEST_PCI_INTID: u32 = 40;
+
+    /// Notification multiplier the fake PCI bus advertises, so a test can
+    /// assert it flows onto the notify window's grant.
+    const TEST_NOTIFY_MULTIPLIER: u32 = 4;
+
+    /// A fake virtio-PCI bus enumerating a fixed function list and
+    /// resolving each virtio config window to a synthetic `(base, len)`
+    /// keyed by `cfg_type`, so a test can assert the exact windows the
+    /// probe grants without any real config-space access.
+    struct FakePciBus {
+        functions: alloc::vec::Vec<BusDevice>,
+    }
+
+    impl FakePciBus {
+        /// A bus carrying one function per `(device_id, bdf)`, all
+        /// reporting the virtio vendor id.
+        fn with(functions: &[(u16, u64)]) -> Self {
+            Self {
+                functions: functions
+                    .iter()
+                    .map(|&(device, address)| BusDevice {
+                        vendor: u32::from(VIRTIO_PCI_VENDOR_ID),
+                        device: u32::from(device),
+                        class: 0x0200,
+                        reserved0: 0,
+                        address,
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl Bus for FakePciBus {
+        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+            if out.len() < self.functions.len() {
+                return Err(DriverError::BufferTooSmall);
+            }
+            out[..self.functions.len()].copy_from_slice(&self.functions);
+            Ok(self.functions.len())
+        }
+    }
+
+    impl VirtioPciBus for FakePciBus {
+        fn virtio_window_region(
+            &self,
+            bdf: u64,
+            cfg_type: u8,
+        ) -> Result<(u64, usize), DriverError> {
+            // Base encodes the function (bdf) and structure (cfg_type) so
+            // distinct windows are distinguishable in assertions.
+            let len = match cfg_type {
+                VIRTIO_PCI_CFG_COMMON => 0x38,
+                VIRTIO_PCI_CFG_NOTIFY => 0x10,
+                VIRTIO_PCI_CFG_ISR => 0x4,
+                VIRTIO_PCI_CFG_DEVICE => 0x8,
+                _ => return Err(DriverError::NotFound),
+            };
+            let base = 0xC000_0000 + (bdf << 16) + (u64::from(cfg_type) << 8);
+            Ok((base, len))
+        }
+
+        fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
+            Ok(TEST_NOTIFY_MULTIPLIER)
+        }
+    }
+
+    /// The modern virtio-net PCI device id (`0x1040 + 1`).
+    const VIRTIO_NET_PCI_DEVICE_ID: u16 = 0x1041;
+
+    #[test]
+    fn a_virtio_net_pci_function_is_discovered_with_role_tagged_windows() {
+        // A modern virtio-net PCI function is emitted as a `Network` node
+        // keyed by the shared virtio *type* (1), carrying its four
+        // role-tagged config windows (the notify window alone carrying the
+        // multiplier), a coherent DMA constraint, and its routed interrupt
+        // line — the exact grant set the autoloaded user-space driver's
+        // `virtio_pci_windows` resolver consumes.
+        let bus = FakePciBus::with(&[(VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800)]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_network_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1);
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Network));
+        assert_eq!(node.id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
+        // The bind key is the virtio *type*, identical to the MMIO probe's,
+        // so one signed bundle binds on both buses.
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::virtio(tairix_virtio_net::VIRTIO_NET_DEVICE_ID)]
+        );
+        let base = 0xC000_0000 + (0x0000_0800u64 << 16);
+        assert_eq!(
+            node.resources(),
+            &[
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_COMMON,
+                    base + (u64::from(VIRTIO_PCI_CFG_COMMON) << 8),
+                    0x38,
+                    0,
+                ),
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_NOTIFY,
+                    base + (u64::from(VIRTIO_PCI_CFG_NOTIFY) << 8),
+                    0x10,
+                    TEST_NOTIFY_MULTIPLIER,
+                ),
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_ISR,
+                    base + (u64::from(VIRTIO_PCI_CFG_ISR) << 8),
+                    0x4,
+                    0,
+                ),
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_DEVICE,
+                    base + (u64::from(VIRTIO_PCI_CFG_DEVICE) << 8),
+                    0x8,
+                    0,
+                ),
+                HwResource::dma(0, 0),
+                HwResource::irq(u64::from(TEST_PCI_INTID), 1),
+            ]
+        );
+        // The emitted windows round-trip through the driver-side resolver.
+        let windows =
+            tairix_abi::driver::virtio_pci::virtio_pci_windows(node.resources()).expect("resolve");
+        assert_eq!(windows.notify_off_multiplier, TEST_NOTIFY_MULTIPLIER);
+        assert_eq!(
+            windows.common,
+            (base + (u64::from(VIRTIO_PCI_CFG_COMMON) << 8), 0x38)
+        );
+    }
+
+    #[test]
+    fn a_non_net_virtio_pci_function_emits_no_network_node() {
+        // A virtio-blk PCI function (0x1042) and a non-virtio device id are
+        // not virtio-net, so the network probe emits nothing.
+        let bus = FakePciBus::with(&[(0x1042, 0x0000_0800), (0x1050, 0x0000_0900)]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_network_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert!(sink.nodes.is_empty());
+    }
+
+    #[test]
+    fn two_virtio_net_pci_functions_get_distinct_ids() {
+        // Two virtio-net functions each become a distinct node from the PCI
+        // network base, so a machine with two NICs never merges them.
+        let bus = FakePciBus::with(&[
+            (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800),
+            (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_1000),
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_network_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 2);
+        assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
+        assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID + 1);
+    }
+
+    #[test]
+    fn a_virtio_net_pci_function_without_an_irq_is_skipped_fail_closed() {
+        // The driver parks on its interrupt, so a function whose line the
+        // arch resolver cannot route is left undiscovered rather than
+        // emitted without it.
+        let bus = FakePciBus::with(&[(VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800)]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_network_devices(&bus, &|_| None, &mut sink, &DiscardLog)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }

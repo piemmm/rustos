@@ -580,6 +580,33 @@ impl HwResource {
         Self::new(HwResourceKind::Mmio, base, len, 0)
     }
 
+    /// A memory-mapped register window carrying a consumer-interpreted
+    /// `tag` and an auxiliary datum `aux`.
+    ///
+    /// Mapped exactly like [`mmio`](Self::mmio) — a driver names the
+    /// window by its [`base`](Self::base) and the kernel maps it under
+    /// `CAP_MMIO_MAP` — but it additionally carries two opaque fields the
+    /// granting bus and the matched driver agree on, so a device that
+    /// exposes several windows can hand them all to one driver without
+    /// the driver re-reading the bus's configuration space:
+    ///
+    /// * `tag` (read back through [`flags`](Self::flags)) labels which
+    ///   window this is. The modern virtio-PCI transport tags its four
+    ///   config windows by `cfg_type`
+    ///   ([`crate::driver::virtio_pci`]).
+    /// * `aux` (read back through [`translated_base`](Self::translated_base),
+    ///   which a plain register window does not otherwise use) carries one
+    ///   window-specific 64-bit datum — for the virtio notify window, its
+    ///   `notify_off_multiplier`.
+    ///
+    /// Both fields are opaque to the kernel and to the mapping path; only
+    /// the emitting bus and the consuming driver interpret them, so this
+    /// stays platform-neutral.
+    #[must_use]
+    pub fn mmio_tagged(base: u64, len: u64, tag: u32, aux: u64) -> Self {
+        Self::new_xlate(HwResourceKind::Mmio, base, len, tag, aux)
+    }
+
     /// An interrupt line (`line` number, `count` consecutive lines).
     #[must_use]
     pub fn irq(line: u64, count: u64) -> Self {

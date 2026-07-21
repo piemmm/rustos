@@ -408,6 +408,92 @@ fn decode_entry(ty: u8, body: &[u8]) -> MadtEntry {
 /// details across an API).
 pub const ACPI_SDT_HEADER_LEN: usize = SDT_HEADER_LEN;
 
+// --- MCFG (PCI Firmware Specification §4.1.2) ------------------------
+
+/// 4-byte ASCII signature for the PCI Express memory-mapped
+/// configuration-space description table (ECAM).
+pub const MCFG_SIGNATURE: [u8; 4] = *b"MCFG";
+
+/// One ECAM configuration-space allocation from the MCFG: the physical
+/// base of a segment group's memory-mapped configuration window and the
+/// bus-number range it covers (PCI Firmware Specification §4.1.2).
+///
+/// A function's configuration space lives at
+/// `base + (bus << 20) + (device << 15) + (function << 12)`, so the
+/// window for `[start_bus, end_bus]` spans
+/// `(end_bus - start_bus + 1) << 20` bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EcamAllocation {
+    /// Physical base of this segment group's ECAM window.
+    pub base: u64,
+    /// PCI segment group number.
+    pub segment: u16,
+    /// First bus number the window covers.
+    pub start_bus: u8,
+    /// Last bus number the window covers (inclusive).
+    pub end_bus: u8,
+}
+
+impl EcamAllocation {
+    /// Byte length of this allocation's ECAM window: one 1 MiB region per
+    /// bus in `[start_bus, end_bus]` (256 functions × 4 KiB each).
+    #[must_use]
+    pub fn window_len(&self) -> u64 {
+        (u64::from(self.end_bus - self.start_bus) + 1) << 20
+    }
+}
+
+/// Byte length of one MCFG configuration-space allocation structure
+/// (base `u64` + segment `u16` + start/end bus `u8` + 4 reserved).
+const MCFG_ALLOCATION_LEN: usize = 16;
+
+/// Byte offset of the first allocation structure in an MCFG: the 36-byte
+/// SDT header plus 8 reserved bytes.
+const MCFG_ALLOCATIONS_OFFSET: usize = SDT_HEADER_LEN + 8;
+
+/// Parse the **first** ECAM allocation from an MCFG byte slice.
+///
+/// The MCFG (PCI Firmware Specification §4.1.2) is an SDT header, 8
+/// reserved bytes, then one or more 16-byte configuration-space
+/// allocation structures. The first covers segment group 0 on every
+/// platform TAIRiX targets, which is the bus the PCI probe enumerates, so
+/// its base is the ECAM window the kernel maps.
+///
+/// This is a **pure** parser (no MMIO), host-tested, so the byte
+/// validation is exercised off-target: the on-target (bare-metal)
+/// `locate_mcfg` supplies the slice.
+///
+/// # Errors
+///
+/// Returns `None` (fail closed) if the signature is not [`MCFG_SIGNATURE`],
+/// the declared length is short, or the table carries no allocation.
+#[must_use]
+pub fn mcfg_first_ecam(bytes: &[u8]) -> Option<EcamAllocation> {
+    let header = SdtHeader::validate(bytes, &MCFG_SIGNATURE).ok()?;
+    let len = header.length as usize;
+    // The declared length must reach at least one whole allocation past
+    // the reserved area, and must not exceed the slice we were handed.
+    if len < MCFG_ALLOCATIONS_OFFSET + MCFG_ALLOCATION_LEN || len > bytes.len() {
+        return None;
+    }
+    let a = &bytes[MCFG_ALLOCATIONS_OFFSET..MCFG_ALLOCATIONS_OFFSET + MCFG_ALLOCATION_LEN];
+    let base = u64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]);
+    let segment = u16::from_le_bytes([a[8], a[9]]);
+    let start_bus = a[10];
+    let end_bus = a[11];
+    // A window whose end precedes its start is malformed; refuse it rather
+    // than compute a wrapping length.
+    if end_bus < start_bus {
+        return None;
+    }
+    Some(EcamAllocation {
+        base,
+        segment,
+        start_bus,
+        end_bus,
+    })
+}
+
 /// Locate the MADT by walking the firmware (X|R)SDT pointed at by
 /// `rsdp`.
 ///
@@ -429,17 +515,60 @@ pub const ACPI_SDT_HEADER_LEN: usize = SDT_HEADER_LEN;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
+    // SAFETY: forwarded — caller's contract pins the tables into the
+    // identity-mapped window.
+    unsafe { locate_sdt(rsdp, &MADT_SIGNATURE) }
+}
+
+/// Locate the MCFG (PCI Express memory-mapped configuration space
+/// description, PCI Firmware Specification §4.1.2) by walking the
+/// firmware (X|R)SDT pointed at by `rsdp`.
+///
+/// Returns the MCFG bytes as a `'static` slice if found; the caller
+/// hands them to [`mcfg_first_ecam`] to recover the ECAM base. The x86_64
+/// PCI probe needs this to build a configuration-space bus.
+///
+/// # Safety
+///
+/// Identical to [`locate_madt`]: the firmware (X|R)SDT and every table it
+/// references must lie in the identity-mapped 0..4 GiB window and remain
+/// unmodified for the returned slice's `'static` lifetime.
+///
+/// Returns `None` if no entry advertises the [`MCFG_SIGNATURE`] (a
+/// firmware without an ECAM description — the caller falls back or leaves
+/// PCI undiscovered).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub unsafe fn locate_mcfg(rsdp: &Rsdp) -> Option<&'static [u8]> {
+    // SAFETY: forwarded — caller's contract pins the tables into the
+    // identity-mapped window.
+    unsafe { locate_sdt(rsdp, &MCFG_SIGNATURE) }
+}
+
+/// Walk the firmware (X|R)SDT pointed at by `rsdp` for the first table
+/// whose signature is `signature`, returning its bytes.
+///
+/// The one signature-parameterised walk both [`locate_madt`] and
+/// [`locate_mcfg`] share, so the (X|R)SDT traversal is defined once.
+///
+/// # Safety
+///
+/// See [`locate_madt`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+unsafe fn locate_sdt(rsdp: &Rsdp, signature: &[u8; 4]) -> Option<&'static [u8]> {
     if rsdp.xsdt_address != 0 {
         // SAFETY: forwarded — caller's contract pins the address into
         // the identity-mapped window.
-        unsafe { locate_madt_via_xsdt(rsdp.xsdt_address) }
+        unsafe { locate_sdt_via_xsdt(rsdp.xsdt_address, signature) }
     } else {
         // SAFETY: forwarded.
-        unsafe { locate_madt_via_rsdt(u64::from(rsdp.rsdt_address)) }
+        unsafe { locate_sdt_via_rsdt(u64::from(rsdp.rsdt_address), signature) }
     }
 }
 
-/// Walk an XSDT (64-bit entry pointers) for the MADT.
+/// Walk an XSDT (64-bit entry pointers) for the table matching
+/// `signature`.
 ///
 /// # Safety
 ///
@@ -447,7 +576,7 @@ pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
 /// identity-mapped 0..4 GiB window.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
-pub unsafe fn locate_madt_via_xsdt(xsdt_phys: u64) -> Option<&'static [u8]> {
+unsafe fn locate_sdt_via_xsdt(xsdt_phys: u64, signature: &[u8; 4]) -> Option<&'static [u8]> {
     // SAFETY: caller's contract — `xsdt_phys` is identity-mapped.
     let len = unsafe { read_phys_u32(xsdt_phys + 4) } as usize;
     if len < ACPI_SDT_HEADER_LEN {
@@ -459,14 +588,15 @@ pub unsafe fn locate_madt_via_xsdt(xsdt_phys: u64) -> Option<&'static [u8]> {
         let entry =
             unsafe { read_phys_u64(xsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 8) };
         // SAFETY: caller's contract.
-        if let Some(bytes) = unsafe { try_madt_at(entry) } {
+        if let Some(bytes) = unsafe { try_sdt_at(entry, signature) } {
             return Some(bytes);
         }
     }
     None
 }
 
-/// Walk an RSDT (32-bit entry pointers) for the MADT.
+/// Walk an RSDT (32-bit entry pointers) for the table matching
+/// `signature`.
 ///
 /// # Safety
 ///
@@ -474,7 +604,7 @@ pub unsafe fn locate_madt_via_xsdt(xsdt_phys: u64) -> Option<&'static [u8]> {
 /// identity-mapped 0..4 GiB window.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
-pub unsafe fn locate_madt_via_rsdt(rsdt_phys: u64) -> Option<&'static [u8]> {
+unsafe fn locate_sdt_via_rsdt(rsdt_phys: u64, signature: &[u8; 4]) -> Option<&'static [u8]> {
     // SAFETY: caller's contract.
     let len = unsafe { read_phys_u32(rsdt_phys + 4) } as usize;
     if len < ACPI_SDT_HEADER_LEN {
@@ -487,7 +617,7 @@ pub unsafe fn locate_madt_via_rsdt(rsdt_phys: u64) -> Option<&'static [u8]> {
             read_phys_u32(rsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 4)
         });
         // SAFETY: caller's contract.
-        if let Some(bytes) = unsafe { try_madt_at(entry) } {
+        if let Some(bytes) = unsafe { try_sdt_at(entry, signature) } {
             return Some(bytes);
         }
     }
@@ -495,18 +625,18 @@ pub unsafe fn locate_madt_via_rsdt(rsdt_phys: u64) -> Option<&'static [u8]> {
 }
 
 /// Inspect a candidate SDT at `phys` and return the byte slice if its
-/// signature is [`MADT_SIGNATURE`].
+/// signature matches `signature`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-unsafe fn try_madt_at(phys: u64) -> Option<&'static [u8]> {
+unsafe fn try_sdt_at(phys: u64, signature: &[u8; 4]) -> Option<&'static [u8]> {
     // SAFETY: caller's contract pins `phys` into the identity-mapped
     // window. We only deref the first four bytes (signature) before
     // sizing the rest of the slice.
     let sig = unsafe { core::slice::from_raw_parts(phys as *const u8, 4) };
-    if sig != MADT_SIGNATURE {
+    if sig != signature {
         return None;
     }
     // SAFETY: caller's contract; the length is bounded by the
-    // length field which `Madt::parse` re-validates.
+    // length field which the caller's parser re-validates.
     let len = unsafe { read_phys_u32(phys + 4) } as usize;
     // SAFETY: caller's contract.
     Some(unsafe { core::slice::from_raw_parts(phys as *const u8, len) })
@@ -799,5 +929,77 @@ pub(crate) mod tests {
                 flags: 0b1101,
             }),
         );
+    }
+
+    // Helper: build an MCFG with one ECAM allocation and a valid checksum.
+    fn build_mcfg(base: u64, segment: u16, start_bus: u8, end_bus: u8) -> Vec<u8> {
+        // SDT header (36) + 8 reserved + one 16-byte allocation.
+        let total = MCFG_ALLOCATIONS_OFFSET + MCFG_ALLOCATION_LEN;
+        let mut buf = vec![0u8; total];
+        buf[..4].copy_from_slice(&MCFG_SIGNATURE);
+        let total_u32 = u32::try_from(total).expect("test MCFG fits u32");
+        buf[4..8].copy_from_slice(&total_u32.to_le_bytes());
+        buf[8] = 1; // revision
+                    // byte 9 = checksum, fixed below.
+        let a = MCFG_ALLOCATIONS_OFFSET;
+        buf[a..a + 8].copy_from_slice(&base.to_le_bytes());
+        buf[a + 8..a + 10].copy_from_slice(&segment.to_le_bytes());
+        buf[a + 10] = start_bus;
+        buf[a + 11] = end_bus;
+        let s = buf.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
+        buf[9] = 0u8.wrapping_sub(s);
+        buf
+    }
+
+    #[test]
+    fn mcfg_first_ecam_decodes_the_allocation() {
+        // The QEMU q35 ECAM base, one segment, all 256 buses.
+        let bytes = build_mcfg(0xB000_0000, 0, 0, 0xFF);
+        let ecam = mcfg_first_ecam(&bytes).expect("ecam allocation");
+        assert_eq!(
+            ecam,
+            EcamAllocation {
+                base: 0xB000_0000,
+                segment: 0,
+                start_bus: 0,
+                end_bus: 0xFF,
+            }
+        );
+        // 256 buses × 1 MiB.
+        assert_eq!(ecam.window_len(), 256 << 20);
+    }
+
+    #[test]
+    fn mcfg_first_ecam_window_len_for_a_single_bus() {
+        let bytes = build_mcfg(0xC000_0000, 0, 0, 0);
+        let ecam = mcfg_first_ecam(&bytes).expect("ecam allocation");
+        assert_eq!(ecam.window_len(), 1 << 20);
+    }
+
+    #[test]
+    fn mcfg_first_ecam_rejects_a_bad_signature() {
+        let mut bytes = build_mcfg(0xB000_0000, 0, 0, 0xFF);
+        bytes[0] = b'X';
+        assert_eq!(mcfg_first_ecam(&bytes), None);
+    }
+
+    #[test]
+    fn mcfg_first_ecam_rejects_a_table_with_no_allocation() {
+        // A well-formed MCFG header + reserved area but zero allocations
+        // (length stops at the reserved area) carries no ECAM window.
+        let total = MCFG_ALLOCATIONS_OFFSET;
+        let mut buf = vec![0u8; total];
+        buf[..4].copy_from_slice(&MCFG_SIGNATURE);
+        buf[4..8].copy_from_slice(&u32::try_from(total).unwrap().to_le_bytes());
+        buf[8] = 1;
+        let s = buf.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
+        buf[9] = 0u8.wrapping_sub(s);
+        assert_eq!(mcfg_first_ecam(&buf), None);
+    }
+
+    #[test]
+    fn mcfg_first_ecam_rejects_an_inverted_bus_range() {
+        let bytes = build_mcfg(0xB000_0000, 0, 0x10, 0x00);
+        assert_eq!(mcfg_first_ecam(&bytes), None);
     }
 }

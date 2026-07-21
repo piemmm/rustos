@@ -246,19 +246,16 @@ mod tests {
     }
 
     impl VirtioPciBus for FakeBus {
-        fn map_virtio_window(
+        fn virtio_window_region(
             &self,
             _bdf: u64,
             cfg_type: u8,
-            mapper: &dyn MmioMapper,
-        ) -> Result<RegisterWindow, DriverError> {
+        ) -> Result<(u64, usize), DriverError> {
             let len = cfg_len(cfg_type);
             if len == 0 {
                 return Err(DriverError::NotFound);
             }
-            mapper
-                .map_window(0xC000_0000 + u64::from(cfg_type), len)
-                .map_err(MmioMapError::as_driver_error)
+            Ok((0xC000_0000 + u64::from(cfg_type), len))
         }
 
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {

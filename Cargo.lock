@@ -1425,6 +1425,7 @@ dependencies = [
  "tairix-kernel-virtio",
  "tairix-log",
  "tairix-partition",
+ "tairix-pci",
  "tairix-sync",
  "tairix-test-arxfs-image",
  "tairix-test-encrypted-root-image",

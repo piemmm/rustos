@@ -200,6 +200,14 @@ zeroize = { version = "1.8.1", default-features = false }
 tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
+# The PCI configuration-access library (`AGENTS.md` §17.4, kernel → lib/*):
+# `boot_x86_64::seed_hardware_tree` builds an ECAM configuration-space bus
+# (`mechanism_ecam`) over the firmware MCFG window to enumerate the
+# virtio-PCI NIC and resolve its config windows for the two-process
+# virtio-net driver (`plans/NETWORK.md` N4e-x86_64). PCI config-access
+# mechanism logic is shared `lib/*` (`AGENTS.md` §2.2), so the kernel names
+# no `drivers/bus/*` PCI type.
+tairix-pci = { path = "../../lib/pci", version = "=0.0.0" }
 # The user-space device manager's autoload policy (`AGENTS.md` §18.3): the
 # kernel binary's `driver_spawn_loader` implements its `DriverLoader` seam to
 # spawn a discovered user-space driver, bridging `devmgr` policy to the

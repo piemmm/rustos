@@ -196,7 +196,7 @@ mod tests {
     };
     use tairix_abi::{
         CapabilityId, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest, Errno,
-        MmioMapError, MmioMapper, MsiMessage, RegisterWindow, DRIVER_MANIFEST_MAGIC,
+        MmioMapper, MsiMessage, DRIVER_MANIFEST_MAGIC,
     };
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_virtio::transport_pci::common;
@@ -285,16 +285,12 @@ mod tests {
     }
 
     impl VirtioPciBus for SimBus {
-        fn map_virtio_window(
+        fn virtio_window_region(
             &self,
             _bdf: u64,
             cfg_type: u8,
-            mapper: &dyn MmioMapper,
-        ) -> Result<RegisterWindow, DriverError> {
-            let (phys, len) = window(cfg_type).ok_or(DriverError::NotFound)?;
-            mapper
-                .map_window(phys, len)
-                .map_err(MmioMapError::as_driver_error)
+        ) -> Result<(u64, usize), DriverError> {
+            window(cfg_type).ok_or(DriverError::NotFound)
         }
 
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
