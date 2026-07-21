@@ -34,11 +34,17 @@ The open items, in priority order:
   `lib/collections`) were audited against §27. All are complete; `waitq`
   (D2) was the sole thin slice. One latent watch-item (the slab
   free-slot scan) is recorded and staged (not a live defect).
+- **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall.** The
+  four-vCPU `tairix-test-mem-pin-migration-qemu-aarch64` vertical passes
+  in isolation but intermittently stalls to a 60s timeout inside the full
+  `cargo xtask ci` QEMU matrix — a genuine SMP-under-TCG flake, the sole
+  known blocker of a whole-project-green `cargo xtask ci` gate.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
-parity gap. Do not collapse them into one change; land each on its own
-whole-project-green gate (§7).
+parity gap, D5 is an intermittent SMP-scheduler/TCG test flake. Do not
+collapse them into one change; land each on its own whole-project-green
+gate (§7).
 
 ## Coupling to be aware of
 
@@ -217,9 +223,62 @@ callers are served correctly), so the sweep lands as the recorded audit.
 
 ---
 
+## D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall
+
+**State:** live, intermittent, unreproduced in isolation. The four-vCPU
+`tairix-test-mem-pin-migration-qemu-aarch64` vertical (a
+production-dispatch continuation test: repeated blocking-IPC replies must
+resume a user task across CPU migration with integer/FP/stack/PC/address-
+space state intact) **passes when run alone**
+(`cargo xtask test --qemu --only mem-pin-migration`) but has been observed
+to stall inside a full `cargo xtask ci` run — its serial transcript
+advances to ~0.046s of guest time (several early process spawns) and then
+makes no further forward progress until the harness's 60s wall-clock
+budget fires (no retries, §7). It is currently the **sole known blocker**
+of a whole-project-green `cargo xtask ci`.
+
+**Ruled out — this is not a CI-scheduling starvation bug.** The QEMU
+matrix runs as its own sequential CI stage (no clippy/fuzz/host-test stage
+runs concurrently with it), and the weighted-concurrency runner
+(`tools/xtask/src/commands/qemu_tests.rs::qemu_job_weight` +
+`parallel.rs`) gives any `cpus>1` guest a weight equal to the whole budget
+(`qemu_host_budget_for` = `ceil(logical/4)`), so a four-vCPU guest is only
+admitted when nothing else is in flight and blocks every one-vCPU guest
+(weight 2) while it runs. The model is already conservative (≈1/4 of
+logical cores). So the four-vCPU guest genuinely runs alone; a 0.08%
+forward-progress stall while alone is not host oversubscription.
+
+**Prime suspect (to investigate).** A genuine intermittent
+deadlock/livelock in the SMP scheduler / production-dispatch / cross-CPU
+migration path (or the test's own cross-vCPU synchronisation) under QEMU
+TCG — the kind of real concurrency defect §7 says a load-surfaced failure
+usually is. Because it is intermittent and does not reproduce in
+isolation, closing it needs a reliable reproducer first.
+
+- **D5.1 — reproduce deterministically.** Drive the vertical under the
+  full-matrix conditions (or a stress loop / `ci-long` concurrent pass)
+  until it stalls reproducibly; capture the multi-vCPU serial + a QEMU
+  monitor CPU-state dump at the stall so the wedged vCPU(s) and the lock /
+  barrier / wake they are stuck on are identified.
+- **D5.2 — root-cause + fix structurally.** Fix the identified
+  deadlock/livelock at its source (scheduler/dispatch/migration wake
+  ordering, or the test's cross-vCPU handshake), never by widening the
+  wall-clock budget (a 1300× progress gap is not a budget problem) and
+  never by retrying (a green re-run is not a fix, §7).
+- **D5.3 — regression coverage.** Land the reproducer as a deterministic
+  regression (a stress/soak form that fails before and passes after), so
+  the flake cannot silently return.
+
+**Done when:** the stall is root-caused and structurally fixed, the
+vertical is green under the full matrix and under a concurrent stress
+pass, a regression test covers it, and a full `cargo xtask ci` is
+whole-project-green.
+
+---
+
 ## Definition of done (whole plan, §7/§15/§23)
 
-This umbrella is closed only when D1–D4 are each closed on their own
+This umbrella is closed only when D1–D5 are each closed on their own
 whole-project-green gate:
 
 - D1: syscall-body verticals green on all bare-metal targets + wasm32
@@ -231,6 +290,9 @@ whole-project-green gate:
 - D4: **DONE** — every foundational primitive audited against §27
   (findings table recorded); all complete, the one latent structural
   concern (slab free-slot scan) staged; no in-scope code fix required.
+- D5: the `mem-pin-migration` multi-vCPU-TCG stall reproduced,
+  root-caused, and structurally fixed with a regression, so a full
+  `cargo xtask ci` is whole-project-green again.
 - For each landing: `cargo fmt --all` (+ `--check`), `cargo xtask ci`
   (once), `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both
   --secs 20` green and quoted; §23 self-review verdict stated.

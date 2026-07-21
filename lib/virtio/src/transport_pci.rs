@@ -31,7 +31,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_virtio::{PciTransportWindows, Status, Transport, VirtioError};
+use crate::{PciTransportWindows, Status, Transport, VirtioError};
 
 /// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
 /// to `queue_msix_vector` / `msix_config` tells the device not to
@@ -343,10 +343,10 @@ impl Transport for PciTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{MockHost, SplitQueue};
     use alloc::boxed::Box;
     use core::ptr::NonNull;
     use tairix_abi::RegisterWindow;
-    use tairix_virtio::{MockHost, SplitQueue};
 
     /// One device register region. The leaked, 8-byte-aligned
     /// backing storage outlives every window built over it (the test

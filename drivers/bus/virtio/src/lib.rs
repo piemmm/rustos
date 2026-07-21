@@ -1,20 +1,20 @@
-//! TAIRiX concrete virtio PCI transport + register-window backends.
+//! TAIRiX virtio register-window backends + driver-crate entry point.
 //!
 //! This crate provides the **architecture-specific bus bindings** for
 //! the bus-agnostic virtio split-virtqueue protocol that lives in
-//! [`tairix_virtio`] (`lib/virtio`): the PCI ([`PciTransport`])
-//! implementation of the [`tairix_virtio::Transport`] trait, plus the
-//! [`PciBackend`] / [`MmioBackend`] register-window adapters.
+//! [`tairix_virtio`] (`lib/virtio`): the [`PciBackend`] / [`MmioBackend`]
+//! register-window adapters and the driver-crate [`register`] entry.
 //!
-//! The concrete **MMIO** transport ([`MmioTransport`]) does *not* live
-//! here: it depends only on the bounds-checked [`tairix_abi`] register
-//! window and the protocol types, so it lives in [`tairix_virtio`] where
-//! both this crate's kernel-side consumers and an arch-neutral
-//! user-space virtio driver process can construct it without a
-//! `drivers/* → drivers/*` edge (the
-//! `lib/usb` ↔ `drivers/bus/usb` precedent). It is re-exported below so
-//! existing `tairix_drv_bus_virtio::MmioTransport` import sites keep
-//! resolving.
+//! Neither concrete [`Transport`] implementation lives here. Both the
+//! MMIO transport ([`MmioTransport`]) and the PCI transport
+//! ([`PciTransport`]) depend only on the bounds-checked [`tairix_abi`]
+//! register window and the protocol types, so both live in
+//! [`tairix_virtio`] where this crate's kernel-side consumers *and* an
+//! arch-neutral user-space virtio driver process can construct them
+//! without a `drivers/* → drivers/*` edge (the
+//! `lib/usb` ↔ `drivers/bus/usb` precedent). Both are re-exported below
+//! so existing `tairix_drv_bus_virtio::{MmioTransport, PciTransport}`
+//! import sites keep resolving.
 //!
 //! The queue management, owned DMA-slab abstraction, and the
 //! in-process [`MockHost`] / [`MockTransport`] doubles do **not** live
@@ -48,13 +48,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-extern crate alloc;
-
 pub mod backend;
-pub mod transport_pci;
 
 pub use backend::{MmioBackend, PciBackend};
-pub use transport_pci::PciTransport;
 
 // The bus-agnostic protocol now lives in `lib/virtio`. Re-export it so
 // existing `tairix_drv_bus_virtio::{...}` import sites in the kernel-side
@@ -63,9 +59,14 @@ pub use transport_pci::PciTransport;
 // definition, re-exported, never duplicated).
 pub use tairix_virtio::{
     BounceBuffer, ChainSegment, ChainView, Direction, DmaSlab, MmioTransport, MockHost,
-    MockTransport, PciTransportWindows, PoolId, SlabFreeFn, SplitQueue, Status, Transport,
-    UsedToken, VirtioError, VirtioHost,
+    MockTransport, PciTransport, PciTransportWindows, PoolId, SlabFreeFn, SplitQueue, Status,
+    Transport, UsedToken, VirtioError, VirtioHost, VIRTIO_MSI_NO_VECTOR,
 };
+// The PCI transport's common-configuration offset table
+// (`transport_pci::common`) is named directly by the kernel-side
+// provisioning wiring; re-export the module so those sites keep
+// resolving through this crate.
+pub use tairix_virtio::transport_pci;
 
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 

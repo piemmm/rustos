@@ -55,6 +55,7 @@ pub mod packed;
 pub mod queue;
 pub mod transport;
 pub mod transport_mmio;
+pub mod transport_pci;
 
 #[cfg(test)]
 mod tests;
@@ -67,3 +68,4 @@ pub use transport::{
     ChainView, Direction, MockTransport, PciTransportWindows, Status, Transport, VirtioError,
 };
 pub use transport_mmio::MmioTransport;
+pub use transport_pci::{PciTransport, VIRTIO_MSI_NO_VECTOR};
