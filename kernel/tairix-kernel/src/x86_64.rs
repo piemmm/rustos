@@ -24,6 +24,8 @@ pub mod init_spawn;
 #[cfg(freestanding)]
 pub mod panic_ctx;
 #[cfg(freestanding)]
+pub mod root_unlock;
+#[cfg(freestanding)]
 pub mod serial_sink;
 #[cfg(freestanding)]
 pub mod spawn_producer;

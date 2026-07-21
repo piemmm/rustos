@@ -365,6 +365,16 @@ impl InitSpawn for X86_64InitSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
+        // Start the in-kernel root-unlock service alongside PID 1
+        // (`plans/ARCHSUPPORT.md` A2). Admitted onto the boot CPU's run queue
+        // *before* `admit_init` diverges into the dispatch loop, the kthread
+        // brings up the bound virtio-blk-PCI root device over the production
+        // MSI-X interrupt path, then serves the driver store and (fail-closed
+        // on the input-less COM1 console this slice) resolves login. With no
+        // bound disk (a PC shape without a planted root) it starts nothing,
+        // opens the console-0 gate, and PID 1 runs unchanged.
+        let _unlock_started = crate::x86_64::root_unlock::spawn_if_present(ctx);
+
         // Register PID 1's caps + address space, publish it as the current
         // task, and dispatch it — `admit_init` drains the run queue until PID
         // 1 has exited, then returns so `kernel_main` halts fail-closed.
