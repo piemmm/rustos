@@ -182,6 +182,13 @@ typed outcomes, entirely inside `userland/gui/wm`. What it now guarantees:
   Space/Enter activate) when the frame furniture holds the keyboard; a control
   press claims that focus and a client press returns it, so a decorated
   window's content keeps its keys until the user reaches for the furniture.
+- **A furniture control shows its border only while pressed or being navigated
+  with the keyboard, and returns to rest once its command fires.** A completed
+  activation (`WindowControl::on_pointer`/`on_key`) clears the control's
+  hover/press highlight and keyboard focus ring (`WindowControl::rest`), so no
+  border lingers after the click — a genuine hover is re-established by the next
+  pointer move — and a maximize/put-to-back that relocates or hides the button
+  leaves no stale highlight behind, as a desktop title-bar control does.
 - The furniture press/keyboard repaint marks only the furniture bands dirty
   (never the client), and the resize corner is reserved clear of the scrollbar
   tracks/thumbs (`plans/GUI-CONTROLS-DESIGN.md` §1218) — asserted.

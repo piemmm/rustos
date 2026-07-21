@@ -395,19 +395,49 @@ impl WindowControl {
     /// Feed a pointer event, given the control's current `bounds`, returning
     /// [`WindowControlAction::Invoked`] on a completed primary click. The
     /// press is never forwarded to the client surface (spec §11.18).
+    ///
+    /// On the release that completes a click the control returns to rest — its
+    /// hover/press highlight and any keyboard focus ring are cleared — so a
+    /// furniture button loses its border once its command fires, the way a
+    /// desktop title-bar control does. A genuine hover is re-established by the
+    /// next pointer move if the pointer still lies over the control, so this
+    /// only drops the *stale* highlight left when activation relocates the
+    /// control (a size toggle) or takes the frame away (close/minimise/back).
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<WindowControlAction> {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
         let inside = bounds.contains(self.pointer);
-        pointer_activation(&mut self.state, &mut self.armed, event, inside)
-            .then_some(WindowControlAction::Invoked(self.kind))
+        if pointer_activation(&mut self.state, &mut self.armed, event, inside) {
+            self.rest();
+            Some(WindowControlAction::Invoked(self.kind))
+        } else {
+            None
+        }
     }
 
     /// Feed a key event, returning [`WindowControlAction::Invoked`] when a
     /// focused, actionable control is activated with Space or Enter.
+    ///
+    /// Activation clears the control's focus ring, so the border shows only
+    /// while the group is being navigated with the keyboard, not after the
+    /// command has fired.
     pub fn on_key(&mut self, key: Key) -> Option<WindowControlAction> {
-        key_activation(self.state, key).then_some(WindowControlAction::Invoked(self.kind))
+        if key_activation(self.state, key) {
+            self.rest();
+            Some(WindowControlAction::Invoked(self.kind))
+        } else {
+            None
+        }
+    }
+
+    /// Return the control to rest after its command fires: drop the pointer
+    /// hover/press highlight and the keyboard focus ring so no border lingers
+    /// once activation completes.
+    fn rest(&mut self) {
+        self.state.pointer = PointerState::None;
+        self.state.focus.focused = false;
+        self.armed = false;
     }
 
     /// Whether the control currently holds a captured press latch.

@@ -90,11 +90,26 @@ impl Pixel {
     /// Recover the straight-alpha [`Color`] this pixel encodes.
     ///
     /// Transparent pixels carry no colour, so they un-premultiply to
-    /// [`Color::TRANSPARENT`].
+    /// [`Color::TRANSPARENT`]. Fully opaque pixels are already straight
+    /// (premultiplying by `a = 255` is the identity), so they are returned
+    /// channel-for-channel without the per-channel divide — this is the
+    /// common case for an opaque window frame, and skipping the division on
+    /// it keeps a whole-surface conversion (e.g. presenting a maximised
+    /// window) a plain copy rather than one integer division per channel per
+    /// pixel, mirroring the `factor == 255` fast path in
+    /// [`Self::scale_alpha`].
     #[must_use]
     pub fn unpremultiply(self) -> Color {
         if self.a == 0 {
             return Color::TRANSPARENT;
+        }
+        if self.a == 255 {
+            return Color {
+                r: self.r,
+                g: self.g,
+                b: self.b,
+                a: 255,
+            };
         }
         let a = u32::from(self.a);
         let recover = |c: u8| u8::try_from((u32::from(c) * 255 + a / 2) / a).unwrap_or(u8::MAX);
