@@ -23,8 +23,10 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::DriverError;
 
+use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::CursorImage;
-use tairix_theme::CursorKind;
+use tairix_input::{InputEvent, Key};
+use tairix_theme::{CursorKind, Theme};
 
 use crate::color::{Color, Pixel};
 use crate::corner::Corners;
@@ -54,6 +56,7 @@ enum ChannelOrder {
 pub struct Compositor {
     mode: DisplayMode,
     scale: Scale,
+    theme: Theme,
     background: Color,
     order: ChannelOrder,
     windows: Vec<Window>,
@@ -88,6 +91,7 @@ impl Compositor {
         let mut compositor = Self {
             mode,
             scale: Scale::ONE,
+            theme: Theme::dark(),
             background,
             order,
             windows: Vec::new(),
@@ -138,8 +142,47 @@ impl Compositor {
             return false;
         }
         self.scale = scale;
+        self.refresh_frame_bands();
         self.damage.add(self.screen_rect());
         true
+    }
+
+    /// The active desktop theme this output decorates windows with.
+    ///
+    /// The window manager draws decoration frames (title bar, borders, resize
+    /// edges) from this theme's palette and metrics; it is the single theme the
+    /// output owns, read here rather than copied.
+    #[must_use]
+    pub const fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Switch the active desktop theme, returning whether it changed.
+    ///
+    /// A runtime light/dark switch is one call here: every decorated window
+    /// re-resolves its reserved furniture band (a theme may change the border,
+    /// inset, or title-bar metrics), and the whole screen is marked dirty so
+    /// the next composite repaints every window and its decorations under the
+    /// new palette. Setting the theme already in effect changes nothing and
+    /// returns `false`.
+    pub fn set_theme(&mut self, theme: Theme) -> bool {
+        if theme == self.theme {
+            return false;
+        }
+        self.theme = theme;
+        self.refresh_frame_bands();
+        self.damage.add(self.screen_rect());
+        true
+    }
+
+    /// Re-resolve every decorated window's furniture band for the current
+    /// output scale and theme (after a DPI or theme change), so each window's
+    /// outer bounds reflect the new band thickness.
+    fn refresh_frame_bands(&mut self) {
+        let scale = self.scale;
+        for window in &mut self.windows {
+            window.refresh_band(scale, &self.theme);
+        }
     }
 
     /// The desktop background colour behind every window (always opaque).
@@ -344,6 +387,102 @@ impl Compositor {
         self.window(id).and_then(Window::viewport)
     }
 
+    /// Decorate the window named by `id` with the window-manager-owned frame
+    /// `frame` (title bar, borders, resize edges). Returns `false` for an
+    /// unknown id.
+    ///
+    /// The frame band is reserved *around* the client at the active
+    /// scale/theme, so the window's outer [`bounds`](Window::bounds) grow to
+    /// hold the decoration and its content surface is presented inset at the
+    /// [`client_rect`](Window::client_rect); the client never overlaps the
+    /// furniture. The union of the old and new outer bounds is marked dirty.
+    pub fn set_window_frame(&mut self, id: WindowId, frame: WindowFrame) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        let before = window.bounds();
+        window.set_frame(Some(frame), scale, &self.theme);
+        let after = window.bounds();
+        self.damage.add(before);
+        self.damage.add(after);
+        true
+    }
+
+    /// Remove the decoration frame from the window named by `id`, so the window
+    /// manager stops reserving and drawing furniture and the window's outer
+    /// bounds collapse back to the bare content surface. Returns `false` for an
+    /// unknown id. The union of the old and new bounds is marked dirty.
+    pub fn clear_window_frame(&mut self, id: WindowId) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        let before = window.bounds();
+        window.set_frame(None, scale, &self.theme);
+        let after = window.bounds();
+        self.damage.add(before);
+        self.damage.add(after);
+        true
+    }
+
+    /// The decoration frame of the window named by `id`, or `None` when the id
+    /// is unknown or the window is undecorated.
+    #[must_use]
+    pub fn window_frame(&self, id: WindowId) -> Option<&WindowFrame> {
+        self.window(id).and_then(Window::frame)
+    }
+
+    /// The screen rectangle the application content of the window named by `id`
+    /// occupies — the inset client viewport for a decorated window, or the full
+    /// bounds for a plain one — or `None` for an unknown id.
+    #[must_use]
+    pub fn window_client_rect(&self, id: WindowId) -> Option<Rect> {
+        self.window(id).map(Window::client_rect)
+    }
+
+    /// Mark the decorated window named by `id` active or inactive, repainting
+    /// its frame rim, title, and controls under the new activation. Returns
+    /// `false` for an unknown or undecorated window.
+    ///
+    /// The window manager keeps this in step with the focused window the
+    /// [`InputRouter`](crate::InputRouter) tracks. Only the furniture bands are
+    /// marked dirty — the client area does not change on a focus flip — so a
+    /// focus change never triggers a full-window recomposite.
+    pub fn set_active_frame(&mut self, id: WindowId, active: bool) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        if !window.set_frame_active(active, scale, &self.theme) {
+            return false;
+        }
+        for band in window.furniture_bands() {
+            self.damage.add(band);
+        }
+        true
+    }
+
+    /// Set the decorated window named by `id`'s title, repainting the title
+    /// bar. Returns `false` for an unknown or undecorated window.
+    ///
+    /// The title is the untrusted string the window channel already carries
+    /// (`WindowTitle`); the title bar sanitises and truncates it. Only the top
+    /// (title) furniture band is marked dirty — a title edit never touches the
+    /// client or the other frame edges.
+    pub fn set_window_title(&mut self, id: WindowId, title: &str) -> bool {
+        let scale = self.scale;
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        if !window.set_frame_title(title, scale, &self.theme) {
+            return false;
+        }
+        let band = window.title_band();
+        self.damage.add(band);
+        true
+    }
+
     /// Classify the screen `point` against the furniture of the window named
     /// by `id`, or `None` when the id is unknown or the window has no root
     /// viewport. This is the furniture hit map: a point on a scrollbar or the
@@ -353,6 +492,82 @@ impl Compositor {
         let window = self.window(id)?;
         let viewport = window.viewport()?;
         Some(viewport.hit_test(window.bounds(), point))
+    }
+
+    /// Classify the screen `point` against the decoration frame of the window
+    /// named by `id`, or `None` when the id is unknown or the window is
+    /// undecorated. This is the outer-frame furniture hit map: the title bar,
+    /// the command controls, the resize edges, and the inert rim each classify
+    /// distinctly, and the inset client viewport reads as
+    /// [`FurniturePart::Client`] — the client can never receive a point the
+    /// frame owns.
+    #[must_use]
+    pub fn frame_hit(&self, id: WindowId, point: Point) -> Option<FurniturePart> {
+        let window = self.window(id)?;
+        let frame = window.frame()?;
+        Some(frame.hit(window.bounds(), self.scale, &self.theme, point))
+    }
+
+    /// Feed a pointer `event` to the decoration furniture of the window named
+    /// by `id`, repainting only its furniture bands, and return the typed
+    /// [`TitleBarEvent`] it produced (a completed command-control click, or a
+    /// title-bar activation/drag gesture). Returns `None` for an unknown or
+    /// undecorated window.
+    ///
+    /// The window manager owns this furniture, so the event is never delivered
+    /// to the client; only the furniture bands are marked dirty, so a hover or
+    /// press repaint never touches the client area.
+    pub fn frame_pointer(&mut self, id: WindowId, event: &InputEvent) -> Option<TitleBarEvent> {
+        let scale = self.scale;
+        let (result, bands) = {
+            let theme = &self.theme;
+            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+            let result = window.on_frame_pointer(event, scale, theme);
+            (result, window.furniture_bands())
+        };
+        for band in bands {
+            self.damage.add(band);
+        }
+        result
+    }
+
+    /// Feed a key `key` to the decoration furniture of the window named by
+    /// `id` (the title bar's command controls), repainting the title band, and
+    /// return the typed [`TitleBarEvent`] it produced. Returns `None` for an
+    /// unknown or undecorated window.
+    pub fn frame_key(&mut self, id: WindowId, key: Key) -> Option<TitleBarEvent> {
+        let scale = self.scale;
+        let (result, band) = {
+            let theme = &self.theme;
+            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+            let result = window.on_frame_key(key, scale, theme);
+            (result, window.title_band())
+        };
+        self.damage.add(band);
+        result
+    }
+
+    /// Resize the window named by `id` so its outer rectangle becomes
+    /// `new_outer` (its content surface reallocated to the implied client
+    /// size, existing pixels preserved, origin and decoration following).
+    /// Returns `false` for an unknown window or when the implied client size
+    /// is empty. The union of the old and new outer bounds is marked dirty.
+    pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
+        let scale = self.scale;
+        let (changed, before, after) = {
+            let theme = &self.theme;
+            let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+                return false;
+            };
+            let before = window.bounds();
+            let changed = window.resize_to_outer(new_outer, scale, theme);
+            (changed, before, window.bounds())
+        };
+        if changed {
+            self.damage.add(before);
+            self.damage.add(after);
+        }
+        changed
     }
 
     /// Mutate the root viewport of the window named by `id` through `change`,
@@ -421,6 +636,15 @@ impl Compositor {
     #[must_use]
     pub fn has_damage(&self) -> bool {
         !self.damage.is_empty()
+    }
+
+    /// Whether `point` lies within a currently-dirty rectangle. Test-only: it
+    /// lets the decoration tests assert that a furniture-only change (a focus
+    /// flip, a title edit) confines its damage to the furniture and never
+    /// marks the client area dirty.
+    #[cfg(test)]
+    pub(crate) fn damage_covers(&self, point: Point) -> bool {
+        self.damage.covers(point)
     }
 
     /// Recompose every damaged pixel into the back buffer and the

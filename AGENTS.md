@@ -617,8 +617,16 @@ tairix/
 │   │                    #   command glyphs that read without colour, drag/resize
 │   │                    #   capture, active/inactive/attention frame, the client
 │   │                    #   never receiving furniture input, and the resize corner
-│   │                    #   never overlapping a scrollbar thumb)
-│   │                    #   so far, over one
+│   │                    #   never overlapping a scrollbar thumb), the shell
+│   │                    #   surfaces (Notification composing a Card with a
+│   │                    #   source attribution, TaskbarItem with a
+│   │                    #   TaskVisibility state + activity/attention/recovery
+│   │                    #   beads, TraySignal stacking severity-ordered beads
+│   │                    #   with a hover/focus instrument readout), and the
+│   │                    #   decision surfaces (Dialog with honest Action
+│   │                    #   Warmth + §13 denial rendering, the short anchored
+│   │                    #   Tooltip, and HelpTip with one safe next step) —
+│   │                    #   over one
 │   │                    #   shared draw+interaction core —
 │   │                    #   resolving colour/metric/radius
 │   │                    #   from lib/theme+lib/geometry, rounding plates through
@@ -633,8 +641,11 @@ tairix/
 │   │                    #   active on a query (TextAction). A
 │   │                    #   control renders state and emits a typed action; the
 │   │                    #   service enforces authority. Fail closed, no panic
-│   │                    #   (§2.2, §17.4). The remaining control families are
-│   │                    #   staged.
+│   │                    #   (§2.2, §17.4). The full drawn control set and the
+│   │                    #   Switchboard reference composition (spec §17,
+│   │                    #   module switchboard: WindowFrame/TitleBar/Tabs/
+│   │                    #   ListRow/Card/Panel/Button/ScrollBar from typed view
+│   │                    #   models, typed SwitchboardAction) are complete.
 │   ├── crt0/            # C-callable abi-v1 program startup object: the per-arch
 │   │                    #   _start trampoline for NON-Rust programs (§9, §16.4).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
@@ -1630,6 +1641,7 @@ You are not exempt from any rule above. In addition:
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
+    | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/ARXFS-METADATA.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md`; `plans/SPARSE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |

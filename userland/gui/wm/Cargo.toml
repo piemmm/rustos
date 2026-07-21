@@ -42,6 +42,10 @@ tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # manager is the first consumer; nested application content (e.g. the viewer
 # app) is the second, so the behaviour lives in `lib/controls`, never here.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The shared text rasteriser (§6, §16.4, §17.4): the window manager draws the
+# title-bar identity/title through the one `lib/font` blitter every consumer
+# uses, so decorated windows render text without a second font path (§2.2).
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 
 [lints]
 workspace = true

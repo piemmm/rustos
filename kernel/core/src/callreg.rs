@@ -290,8 +290,15 @@ mod tests {
         let id = EndpointId(0xCA11_0004);
         let ep = endpoint(id.0);
         register(Arc::clone(&ep), &NullSink).expect("bound");
+        // The poster task id must be unique to this test, not a small
+        // shared constant: `cancel_posted_by` scrubs the poster's calls
+        // across the whole (process-global) registry, so a sibling test
+        // reusing the same id and scrubbing it in parallel would cancel
+        // this call between the post and the assert. The endpoint id is
+        // already made unique for the same reason.
+        let poster = 0x0004_1234;
         let caller = TaskCapabilities::derive(
-            TaskId(9),
+            TaskId(poster),
             UserId(1),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
@@ -300,7 +307,7 @@ mod tests {
         ep.post(&caller, 0, b"q", &NullSink).expect("posted");
         assert!(ep.has_pending());
 
-        cancel_posted_by(9, &NullSink);
+        cancel_posted_by(poster, &NullSink);
 
         // The dead poster's queued call is gone before any server sees it.
         assert!(!ep.has_pending());

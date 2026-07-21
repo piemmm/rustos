@@ -14,7 +14,9 @@ use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
 use crate::{Compositor, WindowId};
 
-use tairix_theme::{ThemeId, ThemeRegistry};
+use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
+
+use crate::{WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
 
 fn mode(w: u32, h: u32) -> DisplayMode {
     DisplayMode {
@@ -1462,4 +1464,640 @@ fn clearing_a_root_viewport_removes_the_furniture() {
 
     // A clear against an unknown id is refused.
     assert!(!c.clear_root_viewport(WindowId(9_999)));
+}
+
+// ---- server-side window decorations (Stage A geometry) ---------------
+
+/// A movable, resizable, active furniture state for a decorated test window.
+fn decorated() -> WindowFurnitureState {
+    WindowFurnitureState {
+        activation: WindowActivationState::Active,
+        size: WindowSizeState::Restored,
+        movable: true,
+        resizable: true,
+    }
+}
+
+#[test]
+fn decorating_a_window_reserves_a_band_around_the_client() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+
+    // Undecorated: outer bounds are the bare content surface and the client is
+    // the whole window.
+    assert_eq!(c.window(id).unwrap().bounds(), Rect::new(10, 10, 40, 30));
+    assert_eq!(c.window_client_rect(id), Some(Rect::new(10, 10, 40, 30)));
+
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+
+    // The outer bounds grow to hold the band; the content keeps its own size.
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).expect("decorated client");
+    assert_eq!(client.width, 40);
+    assert_eq!(client.height, 30);
+    assert!(bounds.width > 40 && bounds.height > 30);
+
+    // The client sits strictly inside the outer bounds on every edge, and the
+    // top band (title bar) is thicker than the others.
+    let left = client.left() - bounds.left();
+    let right = bounds.right() - client.right();
+    let top = client.top() - bounds.top();
+    let bottom = bounds.bottom() - client.bottom();
+    assert!(left > 0 && right > 0 && top > 0 && bottom > 0);
+    assert!(top > bottom, "the title band is the thickest edge");
+    assert!(bounds.contains(client.origin));
+}
+
+#[test]
+fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).expect("client");
+    let frame_active = c.theme().palette().frame_active.to_array();
+    let surface = c.theme().palette().surface.to_array();
+    c.composite();
+
+    // A pixel inside the client shows the application content.
+    let cx = u32::try_from(client.left() + 2).unwrap();
+    let cy = u32::try_from(client.top() + 2).unwrap();
+    assert_eq!(frame_pixel(&c, cx, cy), [255, 0, 0, 255]);
+
+    // Stage B paints the furniture in the reserved band, not the desktop
+    // background: the outer top-edge rim shows the active frame colour...
+    let rim_x = u32::try_from(bounds.left() + i32::try_from(bounds.width / 2).unwrap()).unwrap();
+    let rim_y = u32::try_from(bounds.top()).unwrap();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), frame_active);
+    assert_ne!(
+        frame_active,
+        [0, 0, 255, 255],
+        "chrome is not the background"
+    );
+
+    // ...and the title-bar interior above the client shows the window surface.
+    let by = u32::try_from(client.top() - 1).unwrap();
+    assert_eq!(frame_pixel(&c, cx, by), surface);
+}
+
+#[test]
+fn clearing_the_frame_restores_the_bare_bounds() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    assert!(c.window(id).unwrap().bounds().width > 40);
+
+    assert!(c.clear_window_frame(id));
+    assert_eq!(c.window(id).unwrap().bounds(), Rect::new(10, 10, 40, 30));
+    assert_eq!(c.window_client_rect(id), Some(Rect::new(10, 10, 40, 30)));
+    assert!(c.window_frame(id).is_none());
+
+    // Operations against an unknown id are refused.
+    assert!(!c.set_window_frame(WindowId(9_999), WindowFrame::new(decorated())));
+    assert!(!c.clear_window_frame(WindowId(9_999)));
+    assert!(c.window_client_rect(WindowId(9_999)).is_none());
+}
+
+#[test]
+fn rescaling_grows_the_reserved_band() {
+    let mut c = Compositor::new(mode(400, 400), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    let before = c.window(id).unwrap().bounds();
+
+    assert!(c.set_scale(Scale::from_percent(200).expect("scale")));
+    let after = c.window(id).unwrap().bounds();
+
+    // The band scales with density, so the outer bounds grow while the client
+    // content keeps its pixel size.
+    assert!(after.width > before.width);
+    assert!(after.height > before.height);
+    assert_eq!(c.window_client_rect(id).unwrap().width, 40);
+}
+
+#[test]
+fn switching_theme_is_reported_and_keeps_decorated_windows() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+
+    // Switching to a different theme reports the change and leaves the window
+    // decorated; re-applying the same theme is a no-op.
+    assert!(c.set_theme(Theme::light()));
+    assert!(c.window_frame(id).is_some());
+    assert!(!c.set_theme(Theme::light()));
+}
+
+#[test]
+fn an_undecorated_window_keeps_its_surface_bounds() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(5, 7), opaque(40, 30, RED));
+    // No frame: bounds and client are the bare surface, unchanged by this work.
+    assert_eq!(c.window(id).unwrap().bounds(), Rect::new(5, 7, 40, 30));
+    assert_eq!(c.window_client_rect(id), Some(Rect::new(5, 7, 40, 30)));
+    assert!(c.window_frame(id).is_none());
+}
+
+// ---- server-side window decorations (Stage B rendering) --------------
+
+/// The centre point of a rectangle, in screen coordinates.
+fn centre(r: Rect) -> Point {
+    Point::new(
+        r.left() + i32::try_from(r.width / 2).unwrap(),
+        r.top() + i32::try_from(r.height / 2).unwrap(),
+    )
+}
+
+/// A copy of `base` with a different [`Contrast`] policy (same palette,
+/// metrics, and motion), so a test can render the furniture under high
+/// contrast without a second built-in theme.
+fn with_contrast(base: &Theme, contrast: Contrast) -> Theme {
+    Theme::new(
+        base.id(),
+        base.name(),
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        base.fonts().clone(),
+        base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        contrast,
+    )
+}
+
+/// A copy of `base` with reduced motion enabled; everything else is identical,
+/// so a reduced-motion render must be pixel-identical to the full-motion one
+/// (the furniture is animation-free).
+fn with_reduced_motion(base: &Theme) -> Theme {
+    Theme::new(
+        base.id(),
+        base.name(),
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        base.fonts().clone(),
+        base.cursors().clone(),
+        base.motion().with_reduced_motion(true),
+        base.density(),
+        base.contrast(),
+    )
+}
+
+/// A compositor with one decorated window whose content is wide enough to hold
+/// a full title bar (identity text plus the four command controls) and a
+/// resize grabber, so the furniture renders as it would on a real desktop.
+fn decorated_compositor() -> (Compositor, WindowId) {
+    let mut c = Compositor::new(mode(320, 240), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 20), opaque(240, 150, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    (c, id)
+}
+
+#[test]
+fn active_and_inactive_frames_use_distinct_rim_colours() {
+    let (mut c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let rim = Point::new(centre(bounds).x, bounds.top());
+    let rim_x = u32::try_from(rim.x).unwrap();
+    let rim_y = u32::try_from(rim.y).unwrap();
+    let active = c.theme().palette().frame_active.to_array();
+    let inactive = c.theme().palette().frame_inactive.to_array();
+    assert_ne!(
+        active, inactive,
+        "the two rim states must be distinguishable"
+    );
+
+    // A window starts active and paints the active rim.
+    c.composite();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), active);
+
+    // Deactivating repaints the rim to the inactive colour, and reactivating
+    // restores it — the rim state follows the focused window.
+    assert!(c.set_active_frame(id, false));
+    c.composite();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), inactive);
+    assert!(c.set_active_frame(id, true));
+    c.composite();
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), active);
+
+    // An undecorated or unknown window has no frame to activate.
+    let plain = c.add_window(Point::new(150, 150), opaque(10, 10, RED));
+    assert!(!c.set_active_frame(plain, false));
+    assert!(!c.set_active_frame(WindowId(9_999), false));
+}
+
+#[test]
+fn a_focus_flip_repaints_only_the_furniture() {
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    assert!(!c.has_damage(), "composite clears damage");
+
+    let client = c.window_client_rect(id).unwrap();
+    let bounds = c.window(id).unwrap().bounds();
+
+    // Flipping focus repaints the furniture and marks it dirty...
+    assert!(c.set_active_frame(id, false));
+    assert!(c.has_damage());
+
+    // ...but the client interior is never in the damage — a focus change does
+    // not touch the application content, so it is not recomposited.
+    assert!(!c.damage_covers(centre(client)));
+    // The title rim, by contrast, is dirty.
+    assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
+
+    // The furniture bands never overlap the client (the separate furniture
+    // paint/hit map the design language requires).
+    for band in c.window(id).unwrap().furniture_bands() {
+        assert!(band.intersection(&client).is_empty());
+    }
+}
+
+#[test]
+fn setting_a_title_repaints_only_the_title_band() {
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    assert!(!c.has_damage());
+
+    assert!(c.set_window_title(id, "Documents"));
+    assert!(c.has_damage());
+
+    let client = c.window_client_rect(id).unwrap();
+    let bounds = c.window(id).unwrap().bounds();
+    // The client and the bottom edge are untouched; only the top title band is
+    // dirty.
+    assert!(!c.damage_covers(centre(client)));
+    assert!(!c.damage_covers(Point::new(centre(bounds).x, bounds.bottom() - 1)));
+    assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
+
+    // Refused for an undecorated or unknown window.
+    let plain = c.add_window(Point::new(150, 150), opaque(10, 10, RED));
+    assert!(!c.set_window_title(plain, "x"));
+    assert!(!c.set_window_title(WindowId(9_999), "x"));
+}
+
+#[test]
+fn the_window_title_is_rendered_in_the_title_bar() {
+    // Two identical decorated windows differing only in their title must
+    // composite to different frames — the title is drawn, not merely stored.
+    let (mut blank, _) = decorated_compositor();
+    blank.composite();
+
+    let (mut titled, id) = decorated_compositor();
+    assert!(titled.set_window_title(id, "TAIRiX Files"));
+    titled.composite();
+
+    assert_ne!(
+        blank.frame(),
+        titled.frame(),
+        "the title text changes the rendered title bar"
+    );
+}
+
+#[test]
+fn the_light_theme_draws_the_furniture_chrome() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_theme(Theme::light()));
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    let frame_active = c.theme().palette().frame_active.to_array();
+    let surface = c.theme().palette().surface.to_array();
+    let desktop = c.theme().palette().desktop.to_array();
+    c.composite();
+
+    // The light theme paints its own rim and title-bar surface, distinct from
+    // the desktop background.
+    let rim = Point::new(centre(bounds).x, bounds.top());
+    assert_eq!(
+        frame_pixel(
+            &c,
+            u32::try_from(rim.x).unwrap(),
+            u32::try_from(rim.y).unwrap()
+        ),
+        frame_active
+    );
+    assert_ne!(frame_active, desktop);
+    let by = u32::try_from(client.top() - 1).unwrap();
+    let cx = u32::try_from(client.left() + 2).unwrap();
+    assert_eq!(frame_pixel(&c, cx, by), surface);
+    // The client still shows its content.
+    let cc = centre(client);
+    assert_eq!(
+        frame_pixel(
+            &c,
+            u32::try_from(cc.x).unwrap(),
+            u32::try_from(cc.y).unwrap()
+        ),
+        [255, 0, 0, 255]
+    );
+}
+
+#[test]
+fn reduced_motion_renders_furniture_identically() {
+    // The furniture is animation-free, so a reduced-motion theme must produce
+    // the exact same pixels as the full-motion theme (reduced-motion correct
+    // by construction).
+    let (mut full, _) = decorated_compositor();
+    full.composite();
+
+    let (mut reduced, _) = decorated_compositor();
+    assert!(reduced.set_theme(with_reduced_motion(&Theme::dark())));
+    reduced.composite();
+
+    assert_eq!(full.frame(), reduced.frame());
+}
+
+#[test]
+fn high_contrast_thickens_the_furniture_glyphs() {
+    // High contrast keeps the same palette but thickens the command-glyph and
+    // grip strokes, so the rendered furniture differs from normal contrast.
+    let (mut normal, _) = decorated_compositor();
+    normal.composite();
+
+    let (mut heavy, id) = decorated_compositor();
+    assert!(heavy.set_theme(with_contrast(&Theme::dark(), Contrast::High)));
+    heavy.composite();
+
+    assert_ne!(
+        normal.frame(),
+        heavy.frame(),
+        "high contrast changes the glyph rendering"
+    );
+
+    // The chrome is still correct: the active rim is drawn.
+    let bounds = heavy.window(id).unwrap().bounds();
+    let rim = Point::new(centre(bounds).x, bounds.top());
+    assert_eq!(
+        frame_pixel(
+            &heavy,
+            u32::try_from(rim.x).unwrap(),
+            u32::try_from(rim.y).unwrap()
+        ),
+        heavy.theme().palette().frame_active.to_array()
+    );
+}
+
+// ---- server-side window decorations (Stage C input) ------------------
+
+use tairix_controls::{FurniturePart, ResizeEdge};
+
+/// The mid-height of the title band of decorated window `id`, in screen
+/// coordinates — a y that lands inside the title bar (above the client).
+fn title_y(c: &Compositor, id: WindowId) -> i32 {
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    (bounds.top() + client.top()) / 2
+}
+
+/// The first screen point on the title band (scanning left→right at
+/// [`title_y`]) whose [`Compositor::frame_hit`] satisfies `pred`.
+fn scan_title(c: &Compositor, id: WindowId, pred: impl Fn(FurniturePart) -> bool) -> Option<Point> {
+    let bounds = c.window(id).unwrap().bounds();
+    let y = title_y(c, id);
+    (bounds.left()..bounds.right()).find_map(|x| {
+        let point = Point::new(x, y);
+        match c.frame_hit(id, point) {
+            Some(part) if pred(part) => Some(point),
+            _ => None,
+        }
+    })
+}
+
+#[test]
+fn frame_hit_classifies_furniture_and_never_the_client() {
+    let (c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+
+    // A client interior point is the client; a point beyond the window is
+    // outside; the bottom-right corner is a resize edge on a resizable window.
+    assert_eq!(c.frame_hit(id, centre(client)), Some(FurniturePart::Client));
+    assert_eq!(
+        c.frame_hit(id, Point::new(bounds.right() + 5, bounds.bottom() + 5)),
+        Some(FurniturePart::Outside)
+    );
+    assert_eq!(
+        c.frame_hit(id, Point::new(bounds.right() - 1, bounds.bottom() - 1)),
+        Some(FurniturePart::ResizeEdge(ResizeEdge::BottomRight))
+    );
+
+    // The title band carries both a draggable region and command controls, and
+    // no point on it ever classifies as the client — the frame hit map keeps
+    // furniture strictly separate from the application surface.
+    assert!(
+        scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).is_some(),
+        "the title bar has a draggable region"
+    );
+    assert!(
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).is_some(),
+        "the title bar has command controls"
+    );
+    let y = title_y(&c, id);
+    for x in bounds.left()..bounds.right() {
+        assert_ne!(
+            c.frame_hit(id, Point::new(x, y)),
+            Some(FurniturePart::Client),
+            "no point on the title band is the client"
+        );
+    }
+
+    // An unknown window has no frame hit map (fail closed).
+    assert_eq!(c.frame_hit(WindowId(9_999), centre(client)), None);
+}
+
+#[test]
+fn a_title_bar_drag_moves_the_window() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let start = c.window(id).unwrap().origin();
+    let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("drag region");
+
+    router.handle(moved(drag.x, drag.y), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert!(router.is_moving(), "a title-bar press begins a move-grab");
+
+    // Motion drags the window's outer origin; the press is never the client's.
+    let response = router.handle(moved(drag.x + 15, drag.y + 10), &mut c);
+    assert!(matches!(response, InputResponse::Moved { window, .. } if window == id));
+    assert_eq!(
+        c.window(id).unwrap().origin(),
+        Point::new(start.x + 15, start.y + 10)
+    );
+
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::MoveEnded { window: id }
+    );
+    assert!(!router.is_moving());
+}
+
+#[test]
+fn a_resize_grab_resizes_the_window_from_the_corner() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let before = c.window(id).unwrap().bounds();
+    let corner = Point::new(before.right() - 1, before.bottom() - 1);
+
+    router.handle(moved(corner.x, corner.y), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert!(router.is_resizing(), "a corner press begins a resize-grab");
+
+    // Dragging out grows the window's outer bounds by the pointer delta.
+    let response = router.handle(moved(corner.x + 40, corner.y + 30), &mut c);
+    assert!(matches!(response, InputResponse::Resized { window } if window == id));
+    let grown = c.window(id).unwrap().bounds();
+    assert_eq!(grown.width, before.width + 40);
+    assert_eq!(grown.height, before.height + 30);
+
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::ResizeEnded { window: id }
+    );
+    assert!(!router.is_resizing());
+}
+
+#[test]
+fn a_resize_grab_clamps_to_a_minimum_and_escape_restores() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let before = c.window(id).unwrap().bounds();
+    let corner = Point::new(before.right() - 1, before.bottom() - 1);
+
+    router.handle(moved(corner.x, corner.y), &mut c);
+    router.handle(press_primary(), &mut c);
+
+    // Dragging far past the top-left cannot shrink the client below the floor.
+    router.handle(moved(before.left(), before.top()), &mut c);
+    let shrunk = c.window(id).unwrap().bounds();
+    assert!(shrunk.width < before.width && shrunk.height < before.height);
+    let client = c.window_client_rect(id).unwrap();
+    assert!(
+        client.width >= 96 && client.height >= 64,
+        "the client is clamped to its minimum size"
+    );
+
+    // Escape cancels the gesture and restores the exact pre-drag geometry.
+    assert_eq!(
+        router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c),
+        InputResponse::ResizeEnded { window: id }
+    );
+    assert_eq!(c.window(id).unwrap().bounds(), before);
+    assert!(!router.is_resizing());
+}
+
+#[test]
+fn a_command_control_click_emits_its_typed_action() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+    let kind = match c.frame_hit(id, control) {
+        Some(FurniturePart::WindowControl(kind)) => kind,
+        other => panic!("expected a control, found {other:?}"),
+    };
+
+    router.handle(moved(control.x, control.y), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    // Releasing over the same control completes the click (a click activates on
+    // release), emitting the typed command — never delivered to the client.
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::WindowControl {
+            window: id,
+            control: kind,
+        }
+    );
+}
+
+#[test]
+fn the_keyboard_reaches_the_command_controls() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+
+    // A control press hands the frame furniture the keyboard.
+    router.handle(moved(control.x, control.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    router.handle(release_primary(), &mut c);
+
+    // The arrow keys move focus between the controls and Enter activates the
+    // focused one, so the group is fully usable without a pointer.
+    assert_eq!(
+        router.handle(key_pressed(Key::Named(NamedKey::Right)), &mut c),
+        InputResponse::Ignored,
+        "the arrow moves furniture focus and is consumed, not sent to the client"
+    );
+    let response = router.handle(key_pressed(Key::Named(NamedKey::Enter)), &mut c);
+    assert!(matches!(
+        response,
+        InputResponse::WindowControl { window, .. } if window == id
+    ));
+}
+
+#[test]
+fn a_client_press_returns_the_keyboard_to_the_client() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+    let client_point = centre(c.window_client_rect(id).unwrap());
+
+    // Take furniture keyboard focus via a control, then press the client.
+    router.handle(moved(control.x, control.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    router.handle(release_primary(), &mut c);
+    router.handle(moved(client_point.x, client_point.y), &mut c);
+    assert!(matches!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::Activated { window, .. } if window == id
+    ));
+
+    // Keys now reach the client again — the furniture released the keyboard.
+    assert!(matches!(
+        router.handle(key_pressed(Key::Char('x')), &mut c),
+        InputResponse::Key { window, .. } if window == id
+    ));
+}
+
+#[test]
+fn the_resize_corner_never_overlaps_a_scrollbar_thumb() {
+    // A resizable window reserves its client's bottom-right corner for the
+    // resize grabber, sized to hold it, so the scrollbar tracks (and the
+    // thumbs that live inside them) stop short of the corner and the grabber
+    // can never cover a thumb.
+    let (c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    let extent = c.theme().metrics().resize_grabber_extent;
+
+    // Both scrollbars present, their reserved corner sized to the grabber.
+    let viewport = RootViewport::new(ScrollPolicy::ReservedGutter, extent, 12)
+        .with_vertical(ScrollModel::new(ScrollRange::new(1000, 100, 0), 10, 100))
+        .with_horizontal(ScrollModel::new(ScrollRange::new(1000, 100, 0), 10, 100));
+    let layout = viewport.layout(client);
+    let vtrack = layout.vertical_track.expect("vertical track");
+    let htrack = layout.horizontal_track.expect("horizontal track");
+
+    // The grabber occupies the outer frame's bottom-right extent square.
+    let e = i32::try_from(extent).unwrap();
+    let grabber = Rect::new(bounds.right() - e, bounds.bottom() - e, extent, extent);
+
+    assert!(
+        grabber.intersection(&vtrack).is_empty(),
+        "the resize corner never intrudes into the vertical scrollbar track"
+    );
+    assert!(
+        grabber.intersection(&htrack).is_empty(),
+        "the resize corner never intrudes into the horizontal scrollbar track"
+    );
 }

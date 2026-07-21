@@ -29,12 +29,11 @@ use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
-    draw_outline, heavy_contrast, inset, key_activation, paint_bead, plate_border,
-    pointer_activation, resolve_bead, resolve_rail, surface_rect, to_i32,
+    dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, plate_border,
+    pointer_activation, rail_thickness, resolve_bead, resolve_rail, seam_thickness, seam_width,
+    surface_rect, to_i32,
 };
-use crate::state::{
-    ActivityState, ControlDisposition, ControlRole, ControlState, RecoveryState, SelectionState,
-};
+use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
 
 /// The outcome of feeding input to a [`ListRow`] or [`TableRow`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -51,45 +50,6 @@ pub enum RowAction {
 // of aligned cells) differs. That shared recipe lives here once so a change
 // to how a selected or pressured row reads cannot diverge between the two
 // (`AGENTS.md` §2.2).
-
-/// The scaled thickness of a leading rail (selection or pressure), doubled
-/// under heavy contrast so the rail strengthens before any tint.
-fn rail_thickness(theme: &Theme, scale: Scale) -> u32 {
-    scale
-        .scale_length(theme.metrics().rail_thickness)
-        .max(1)
-        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
-}
-
-/// The scaled thickness of a Heat Seam (the bottom activity/progress trace).
-fn seam_thickness(theme: &Theme, scale: Scale) -> u32 {
-    scale.scale_length(theme.metrics().seam_thickness).max(1)
-}
-
-/// The width a Heat Seam of activity `activity` covers across `w` pixels:
-/// a known fraction fills proportionally, working/indeterminate fills fully,
-/// and anything else draws nothing.
-fn seam_width(activity: ActivityState, w: u32) -> u32 {
-    match activity {
-        ActivityState::Progress(value) => {
-            u32::try_from(u64::from(w) * u64::from(value.permille()) / 1000).unwrap_or(w)
-        }
-        ActivityState::Working | ActivityState::Indeterminate => w,
-        _ => 0,
-    }
-}
-
-/// The foreground colour for row/cell text: muted when the disposition is
-/// disabled, the normal on-surface foreground otherwise. A denied row keeps
-/// full-contrast text and shows its Authority Mark instead of dimming (§13).
-fn foreground(theme: &Theme, disposition: ControlDisposition) -> Color {
-    let palette = theme.palette();
-    Color::from(if disposition == ControlDisposition::DisabledByState {
-        palette.on_surface_muted
-    } else {
-        palette.on_surface
-    })
-}
 
 /// Paint the shared row chrome — background tint, leading pressure and
 /// selection rails, the bottom activity Heat Seam, the trailing Signal Bead,
@@ -687,29 +647,6 @@ impl TableRow {
 }
 
 // --- Card --------------------------------------------------------------
-
-/// The colour a card's leading edge or a panel's header uses for its dominant
-/// state: a resource-pressure rail wins, then an authority/recovery state, then
-/// the control role's emphasis, falling back to the quiet rim for a plain
-/// neutral surface.
-fn dominant_color(theme: &Theme, role: ControlRole, state: ControlState) -> Color {
-    if let Some(color) = resolve_rail(theme, state) {
-        return color;
-    }
-    let palette = theme.palette();
-    let rgba = match state.disposition() {
-        ControlDisposition::DeniedByAuthority => palette.denied,
-        ControlDisposition::FailedClosed => palette.recovery,
-        _ if state.recovery != RecoveryState::None => palette.recovery,
-        _ => match role {
-            ControlRole::Destructive => palette.danger,
-            ControlRole::Recovery => palette.recovery,
-            ControlRole::Primary | ControlRole::Recommended => palette.accent,
-            _ => palette.rim,
-        },
-    };
-    Color::from(rgba)
-}
 
 /// The outcome of feeding input to a [`Card`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

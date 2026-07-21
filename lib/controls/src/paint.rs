@@ -16,7 +16,7 @@ use tairix_theme::{Contrast, SignalRole, Theme};
 
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, PressureKind,
-    PressureState, RecoveryState,
+    PressureState, RecoveryState, ValidationState,
 };
 
 /// Map a resource pressure to its theme signal role, in one place so no
@@ -393,6 +393,84 @@ pub(crate) fn draw_outline(
     surface.fill_rect(x, y + h - edge, w, edge, color);
     surface.fill_rect(x, y, edge, h, color);
     surface.fill_rect(x + w - edge, y, edge, h, color);
+}
+
+/// The scaled thickness of a leading rail (selection or resource pressure),
+/// doubled under heavy contrast so the rail strengthens before any tint.
+///
+/// One definition shared by the collection controls and the shell surfaces
+/// (a card's leading dominant rail, a notification's warning rail, a tray
+/// signal's pressure rail) so the rail breadth cannot diverge between them.
+#[must_use]
+pub(crate) fn rail_thickness(theme: &Theme, scale: Scale) -> u32 {
+    scale
+        .scale_length(theme.metrics().rail_thickness)
+        .max(1)
+        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+}
+
+/// The scaled thickness of a Heat Seam (an activity/progress trace on an
+/// edge), shared by every family that draws one so the seam breadth is one
+/// value.
+#[must_use]
+pub(crate) fn seam_thickness(theme: &Theme, scale: Scale) -> u32 {
+    scale.scale_length(theme.metrics().seam_thickness).max(1)
+}
+
+/// The width a Heat Seam of the given `activity` covers across `w` pixels: a
+/// known fraction fills proportionally, working/indeterminate fills fully, and
+/// anything else draws nothing (fail-closed, no guessed extent).
+#[must_use]
+pub(crate) fn seam_width(activity: ActivityState, w: u32) -> u32 {
+    match activity {
+        ActivityState::Progress(value) => {
+            u32::try_from(u64::from(w) * u64::from(value.permille()) / 1000).unwrap_or(w)
+        }
+        ActivityState::Working | ActivityState::Indeterminate => w,
+        _ => 0,
+    }
+}
+
+/// The foreground colour for a surface's body text: muted when the disposition
+/// is disabled, the normal on-surface foreground otherwise. A denied surface
+/// keeps full-contrast text and shows its Authority Mark instead of dimming.
+#[must_use]
+pub(crate) fn foreground(theme: &Theme, disposition: ControlDisposition) -> Color {
+    let palette = theme.palette();
+    Color::from(if disposition == ControlDisposition::DisabledByState {
+        palette.on_surface_muted
+    } else {
+        palette.on_surface
+    })
+}
+
+/// The colour a grouped surface's dominant edge uses for its overall state:
+/// a resource-pressure rail wins, then an authority/recovery/failed state,
+/// then a validation warning, then the control role's emphasis, falling back
+/// to the quiet rim for a plain neutral surface.
+///
+/// One definition shared by the card's leading rail, the panel's header, and
+/// the shell surfaces (a notification's semantic rail, a taskbar item's / tray
+/// signal's dominant state) so the priority order cannot diverge between them.
+#[must_use]
+pub(crate) fn dominant_color(theme: &Theme, role: ControlRole, state: ControlState) -> Color {
+    if let Some(color) = resolve_rail(theme, state) {
+        return color;
+    }
+    let palette = theme.palette();
+    let rgba = match state.disposition() {
+        ControlDisposition::DeniedByAuthority => palette.denied,
+        ControlDisposition::FailedClosed => palette.recovery,
+        _ if state.recovery != RecoveryState::None => palette.recovery,
+        _ if state.validation == ValidationState::Warning => palette.warning,
+        _ => match role {
+            ControlRole::Destructive => palette.danger,
+            ControlRole::Recovery => palette.recovery,
+            ControlRole::Primary | ControlRole::Recommended => palette.accent,
+            _ => palette.rim,
+        },
+    };
+    Color::from(rgba)
 }
 
 /// Draw one Signal Bead of `size` at `(bx, by)` in the given shape, so the

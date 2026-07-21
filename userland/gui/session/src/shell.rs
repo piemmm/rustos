@@ -381,8 +381,14 @@ impl DesktopShell {
             InputResponse::Activated { window, .. }
             | InputResponse::FurniturePressed { window } => Some(window),
             InputResponse::DesktopPressed => None,
+            // A drag, resize, command-control activation, key, or scroll acts
+            // on the already-focused window (the press that started it moved
+            // focus), so none of them changes the highlighted task.
             InputResponse::Moved { .. }
             | InputResponse::MoveEnded { .. }
+            | InputResponse::Resized { .. }
+            | InputResponse::ResizeEnded { .. }
+            | InputResponse::WindowControl { .. }
             | InputResponse::Key { .. }
             | InputResponse::Scrolled { .. }
             | InputResponse::AppScroll { .. }

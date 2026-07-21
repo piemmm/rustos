@@ -800,17 +800,26 @@ mod program {
                         }
                     }
                 }
-                // Root-viewport scrollbar interactions: the window manager has
-                // already updated its scroll model. The session does not yet
-                // attach a root viewport to any app window (that, and the
-                // window-channel message that forwards a new offset so the
-                // client re-renders, are a later stage), so these do not arise
-                // in the shipping desktop today; they are handled here for
-                // completeness rather than left to a wildcard.
+                // Window-manager-local outcomes the session does not forward
+                // app-ward. A move-grab and a resize-grab have already updated
+                // the compositor's own geometry; a scrollbar interaction has
+                // updated the window manager's scroll model. The remaining
+                // decoration outcomes — a command-control activation
+                // (`WindowControl`) and a resize (`Resized`/`ResizeEnded`) —
+                // arise only once the session decorates its served windows,
+                // which it does not do yet (turning decorations on, and the
+                // window-channel messages that forward a close request, a
+                // size-state change, and a new client size so the client
+                // re-renders, are a later stage). They are matched explicitly
+                // here for completeness rather than left to a wildcard, so the
+                // day decorations are enabled the compiler points at this arm.
                 InputResponse::Scrolled { .. }
                 | InputResponse::FurniturePressed { .. }
                 | InputResponse::Moved { .. }
                 | InputResponse::MoveEnded { .. }
+                | InputResponse::WindowControl { .. }
+                | InputResponse::Resized { .. }
+                | InputResponse::ResizeEnded { .. }
                 | InputResponse::Ignored => {}
             },
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
