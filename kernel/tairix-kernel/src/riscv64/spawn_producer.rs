@@ -46,8 +46,8 @@ use tairix_arch_riscv64::paging::{activate_user_root, AddressSpace as ArchAddres
 use tairix_arch_riscv64::userentry::UserMode;
 use tairix_caps::CapabilitySet;
 use tairix_kernel_core::{
-    refuse_admit, refuse_spawn, spawn_caller_errno, spawn_image, BoxStack, KernelStack,
-    ProcessSpawn, SpawnCtx, SpawnRequest,
+    refuse_admit, refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack,
+    BuiltImage, ImageBuildCtx, KernelStack, ProcessSpawn, SpawnCtx, SpawnCtxBuild, SpawnRequest,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -157,105 +157,89 @@ pub struct RiscvProcessSpawn;
 /// The single, `'static` [`RiscvProcessSpawn`] the boot path borrows.
 pub static RISCV_PROCESS_SPAWN: RiscvProcessSpawn = RiscvProcessSpawn;
 
-impl ProcessSpawn for RiscvProcessSpawn {
-    fn spawn_with(
+impl ArchImageBuilder for RiscvProcessSpawn {
+    fn alloc_kernel_stack(
+        &self,
+        frames: &FrameAllocator,
+        pt_frames: Option<&'static FrameAllocator>,
+    ) -> (Box<dyn KernelStack + Send>, Option<u64>) {
+        // Allocate the loading child's kernel stack synchronously at admit,
+        // before its address space exists, so the child's own loading body
+        // runs on it. An arena-backed guard-paged stack when a region is
+        // available (its guard VA returned for [`build`] to unmap in the
+        // child root), else the software-canary [`BoxStack`] fallback.
+        let Some(pt_frames) = pt_frames else {
+            return (Box::new(BoxStack::new()), None);
+        };
+        crate::stack_arena::publish_reclaim_frames(pt_frames);
+        let grow = FrameArenaGrow::new(frames, (IDENTITY_GIB as u64) << 30);
+        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
+            Some(stack) => {
+                let guard = stack.guard_page();
+                (Box::new(stack), Some(guard))
+            }
+            None => (Box::new(BoxStack::new()), None),
+        }
+    }
+
+    fn build(
         &self,
         rxe: &[u8],
-        ctx: &dyn SpawnCtx,
-        caps: CapabilitySet,
+        ctx: &dyn ImageBuildCtx,
         args: &[&[u8]],
         env: &[&[u8]],
-    ) -> Result<u64, Errno> {
+    ) -> Result<BuiltImage, Errno> {
         // The child's Sv39 hierarchy is drawn from the kernel's live frame
-        // allocator: there is no fixed page-table reserve
-        // and so no hard cap on how many processes can be spawned — the
-        // capacity scales with discovered RAM and grows on demand. A build
-        // with no `'static` allocator wired fails closed,
-        // as does genuine RAM exhaustion below.
+        // allocator: there is no fixed page-table reserve and so no hard cap
+        // on how many processes can be spawned — the capacity scales with
+        // discovered RAM and grows on demand. A build with no `'static`
+        // allocator wired fails closed, as does genuine RAM exhaustion below.
         let pt_frames = ctx
             .page_table_allocator()
-            .ok_or_else(|| refuse_spawn(ctx, "page_table_allocator_unwired"))?;
+            .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
-        // Publish the same `'static` allocator the kthread-stack arena
-        // returns idle chained blocks to when a spawned task later exits and
-        // its `ArenaStack` is dropped (the capacity
-        // shrinks as well as grows). Idempotent (set-once); the boot path
-        // threads one allocator, so every spawn publishes the same handle.
-        crate::stack_arena::publish_reclaim_frames(pt_frames);
 
         // Build an Sv39 address space identity-mapping the kernel + MMIO, and
-        // capture its root *without* switching to it: the spawning caller
-        // stays active under its own `satp`, so the running parent is never
-        // moved out from under itself. The child's mappings below are written
-        // through the identity `physmap` (physical frame addresses the
-        // caller's active identity space already maps), so the build does not
-        // require the child space to be active. The child's own root is
-        // reactivated by its `pre_resume` hook before the scheduler first
-        // resumes it (`plans/SPAWN.md` SP2). An allocator exhausted of even
-        // the root table fails closed with `NoSpace`.
+        // capture its root *without* switching to it: the loading child runs
+        // on its own kernel stack under the kernel's identity regime, so the
+        // running task is never moved out from under itself. The child's own
+        // root is reactivated by its `pre_resume` hook before the scheduler
+        // first resumes it as a user task (`plans/SPAWN.md` SP2). An
+        // allocator exhausted of even the root table fails closed.
         let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, IDENTITY_GIB)
-            .ok_or_else(|| refuse_spawn(ctx, "page_table_frames_exhausted"))?;
+            .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.root_phys();
 
-        // Build the child's kernel stack (`plans/PI.md` G3b-2, mirroring
-        // the PID-1 `init_spawn_riscv64` seam). The boot path published the
-        // reserved guard arena to the kthread-stack allocator; if a region
-        // is available, re-express the coarse identity block covering its
-        // guard page at 4 KiB granularity in the *child's own* root and
-        // unmap that single page, so an overrun of the child's kernel stack
-        // takes a synchronous store page fault under the child's `satp`
-        // rather than corrupting the lower-addressed neighbour (the real
-        // guard-page fault-form). Doing it on `arch`
-        // — which is *never switched to* here (the spawning caller keeps its
-        // own `satp`) — disturbs no live access: the child pool is in the
-        // caller's identity window, so `split_block` only reads/writes the
-        // child's tables through identity addresses, only adds table levels
-        // reproducing the existing translation, and needs no TLB maintenance
-        // (the child's root is not active). If no arena region is available,
-        // or the split/unmap could not be applied, fall back to a heap-backed
-        // software-canary `BoxStack` rather than ever running on an unguarded
-        // stack (fail closed).
-        // The arena grows on demand by chaining fresh 2 MiB blocks out of
-        // the kernel's live frame allocator when its boot-carved block is
-        // exhausted, so the number of hardware-guarded
-        // child stacks scales with discovered RAM rather than capping at
-        // the boot block. A chained block is bounded to the identity window
-        // so the stack stays mapped in the child's own root.
-        let grow = FrameArenaGrow::new(ctx.frames(), (IDENTITY_GIB as u64) << 30);
-        let kernel_stack: Box<dyn KernelStack + Send> =
-            match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
-                Some(stack) => {
-                    let guard = stack.guard_page();
-                    match arch
-                        .split_block(guard)
-                        .and_then(|()| arch.unmap(guard).map(|_| ()))
-                    {
-                        Ok(()) => Box::new(stack),
-                        Err(_) => Box::new(BoxStack::new()),
-                    }
-                }
-                None => Box::new(BoxStack::new()),
-            };
+        // Re-express the loading kthread's kernel-stack guard page in the
+        // *child's own* (inactive) Sv39 root: split the coarse identity block
+        // covering it to 4 KiB granularity and unmap the single guard page,
+        // so an overrun of the child's kernel stack takes a synchronous store
+        // page fault under the child's `satp` rather than corrupting the
+        // lower-addressed neighbour. Doing it on `arch` — never switched to
+        // here — disturbs no live access and needs no TLB maintenance. A
+        // `Some(guard)` whose split+unmap fails fails the build closed rather
+        // than running on an unguarded stack; `None` is the software-canary
+        // `BoxStack` (self-guarded, nothing to unmap).
+        if let Some(guard) = ctx.kernel_stack_guard() {
+            arch.split_block(guard)
+                .and_then(|()| arch.unmap(guard).map(|_| ()))
+                .map_err(|_| refuse_build(ctx, "kernel_stack_guard_unmap_failed"))?;
+        }
 
         let mut space = AddressSpace::new(arch);
         let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
-        // syscall CFI tag. A mismatch fails closed; the registry
-        // holds bytes that already parsed once at build time, so reaching this
-        // is a kernel build defect, surfaced as a stable errno.
+        // syscall CFI tag. A mismatch fails closed.
         let image = LoadImage::parse(rxe, &SYSCALL_TABLE_HASH).map_err(|_| Errno::BadMagic)?;
 
         // Place the stack and startup block above the image's mapped top
         // through the shared per-spawn derivation (one definition across
         // the ports); an image too large for the user region fails closed.
         let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS)
-            .ok_or_else(|| refuse_spawn(ctx, "user_layout_unfit"))?;
-        // The span record the admission path stores so the stack-growth
-        // fault path can back pages inside it (one shared derivation
-        // across the ports; a malformed span refuses the spawn closed).
+            .ok_or_else(|| refuse_build(ctx, "user_layout_unfit"))?;
         let stack_span = spawn_layout::stack_span(&layout)
-            .ok_or_else(|| refuse_spawn(ctx, "stack_span_malformed"))?;
+            .ok_or_else(|| refuse_build(ctx, "stack_span_malformed"))?;
 
         let request = SpawnRequest {
             image: &image,
@@ -276,14 +260,10 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // is only entered later, once the child is dispatched and its
         // `pre_resume` hook has made `space` active (the `spawn_image`
         // contract). The frame source draws identity-mapped RAM frames from
-        // the kernel's live allocator. When the child space is not active the
-        // build reaches the child's tables + frames through the caller's
-        // identity window (the pool and frames are in `[0, 4 GiB)`), so the
-        // child's space need not be active to be built (the cross-port
-        // producer discipline). The retained live space below owns the
-        // whole footprint and returns it (frames zeroed, tables freed)
-        // when the task exits. A returning `Err` maps to a stable errno;
-        // the cause is already audited by `spawn_image`.
+        // the kernel's live allocator; the retained live space below owns the
+        // whole footprint and returns it when the task exits. A returning
+        // `Err` maps to a stable errno; the cause is already audited by
+        // `spawn_image`.
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(
@@ -300,12 +280,9 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // The child's user-address-space reactivation hook (`plans/SPAWN.md`
         // SP2): the core runs it on the dispatcher's context immediately
         // before every switch into the child, so it `sret`s into U-mode under
-        // its own `satp` root and stays hardware-isolated from the spawning
-        // parent and every sibling. It captures only the
-        // `u64` root, so it is `Send`. The kernel-stack top it is handed is
-        // unused on riscv64: `sscratch` is per-task hardware state armed by
-        // `userentry::enter_user` and re-armed by the trap vector from each
-        // task's own kernel-stack frame on every U-return.
+        // its own `satp` root. It captures only the `u64` root, so it is
+        // `Send`. The kernel-stack top it is handed is unused on riscv64
+        // (`sscratch` is per-task hardware state armed by `enter_user`).
         let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |_stack_top: u64| {
             // SAFETY: paging is enabled and `child_root_phys` is the Sv39 root
             // of the child's space, which identity-maps the low kernel window
@@ -314,39 +291,25 @@ impl ProcessSpawn for RiscvProcessSpawn {
             unsafe { activate_user_root(child_root_phys) };
         });
 
-        // The user-mode transition, boxed for the scheduler task body the core
-        // wraps the child in. `enter_user` diverges into U-mode, so the
-        // closure never truly returns (its `!` coerces to `()`).
+        // The user-mode transition, boxed for the loading body to invoke once
+        // `become_user` has installed the hook. `enter_user` diverges into
+        // U-mode, so its `!` coerces to `()`.
         let user_mode = UserMode::new();
         let enter: Box<dyn FnMut() + Send> = Box::new(move || {
             // SAFETY: by the time this body runs the child has been dispatched,
             // so its `pre_resume` hook has activated `space` and the S-mode
             // trap vector + production dispatch callback are installed; the
-            // child's first `ecall` is handled. `build_process_image` mapped
-            // the entry/stack as user pages.
+            // child's first `ecall` is handled.
             unsafe { user_mode.enter_user(entry) }
         });
 
         // Freeze the just-built mappings into the registry-storable,
-        // `Send + Sync` snapshot the kernel-wide address-space registry holds
-        // (the live arch `space` is not `Sync`), and box the direct map that
-        // backs it, so the child's `stream_write` can copy its banner out of
-        // its own user memory. Freezing *after* `spawn_image` captures every
-        // mapped page — segments, stack, and the startup-vector block.
+        // `Send + Sync` snapshot, then retain the live, mutable arch space
+        // (the same one frozen above) behind `LiveUserSpace` so the child's
+        // `mem_map` / `mmio_map` mutate its own space. A build context with
+        // no `'static` allocator, or a window the allocator rejects, retains
+        // no live space and those syscalls fail closed.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
-
-        // Retain the live, mutable arch space behind the object-safe
-        // `LiveUserSpace` boundary so the child's `mem_map` / `mmio_map` /
-        // `dma_alloc` syscalls mutate *its own* address space (`plans/PI.md`
-        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 producer. The `LiveSpace` composes the audited
-        // anonymous-map mechanism (over the kernel's `'static` frame
-        // allocator) and the guarded device-window allocator (over the
-        // `[MMIO_WINDOW_BASE, …)` region); it carries the *same* arch space
-        // the snapshot above was frozen from, and zeroes anonymous frames
-        // through a fresh identity [`DirectPhysMap`] over the same identity
-        // window the child runs under. A build context with no `'static`
-        // allocator, or a window the allocator rejects, retains no live space
-        // and the child's `mem_map` / `mmio_map` fail closed.
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
@@ -377,27 +340,59 @@ impl ProcessSpawn for RiscvProcessSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
-        // Register the child's caps + frozen address space and admit it Ready,
-        // returning its PID. The spawning caller keeps running.
-        // SAFETY: `frozen` faithfully describes the mappings just built into
-        // `space`, `physmap` backs them, `pre_resume` activates the child's
-        // root before it is first entered, `kernel_stack` is a region
-        // exclusive to this child that stays mapped for the task's lifetime,
-        // and `live` retains the same arch space `frozen` was taken from —
-        // the `admit_process` contract.
-        // The child receives exactly the capability set the caller already
-        // derived (its manifest request, intersected at admission) — never
-        // the spawning caller's authority.
+        Ok(BuiltImage {
+            frozen,
+            physmap,
+            stack_span,
+            live,
+            pre_resume,
+            enter,
+        })
+    }
+}
+
+impl ProcessSpawn for RiscvProcessSpawn {
+    /// Build and admit one child process from `rxe`, delegating to the
+    /// [`ArchImageBuilder`] split — [`alloc_kernel_stack`] then [`build`] —
+    /// and admitting the result through [`SpawnCtx::admit_process`], so the
+    /// image-build logic has one definition shared with the deferred-load
+    /// path (`§2.2`). `caps` is the manifest∩user-grant set the caller
+    /// already derived; this seam never widens it (no ambient authority).
+    ///
+    /// [`alloc_kernel_stack`]: ArchImageBuilder::alloc_kernel_stack
+    /// [`build`]: ArchImageBuilder::build
+    ///
+    /// # Errors
+    ///
+    /// A stable [`Errno`] for every failure (fail closed, never a panic).
+    fn spawn_with(
+        &self,
+        rxe: &[u8],
+        ctx: &dyn SpawnCtx,
+        caps: CapabilitySet,
+        args: &[&[u8]],
+        env: &[&[u8]],
+    ) -> Result<u64, Errno> {
+        let (kernel_stack, guard) =
+            self.alloc_kernel_stack(ctx.frames(), ctx.page_table_allocator());
+        let build_ctx = SpawnCtxBuild::new(ctx, guard);
+        let image = self.build(rxe, &build_ctx, args, env)?;
+        // SAFETY: `image.frozen` faithfully describes the mappings just
+        // built, `image.physmap` backs them, `image.pre_resume` activates
+        // the child's root before it is first entered, `kernel_stack` is a
+        // region exclusive to this child that stays mapped for the task's
+        // lifetime, and `image.live` retains the same arch space `frozen`
+        // was taken from — the `admit_process` contract.
         unsafe {
             ctx.admit_process(
                 caps,
-                frozen,
-                physmap,
-                stack_span,
+                image.frozen,
+                image.physmap,
+                image.stack_span,
                 kernel_stack,
-                pre_resume,
-                live,
-                enter,
+                image.pre_resume,
+                image.live,
+                image.enter,
             )
         }
         .map_err(|err| refuse_admit(ctx, err))

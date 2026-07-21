@@ -670,13 +670,24 @@ Each stage is independently reviewable and must leave the whole-project
     `kernel/core/src/kthread.rs`: `UserUpgrade`, the
     `ThreadControl::pending_upgrade` slot, `Yielder::become_user`, and the
     dispatcher-side install in `dispatch_step`, with host tests.
-  - **Landed — the arch-neutral image-build seam (Remaining item 1).**
-    `BuiltImage`, `ImageBuildCtx`, and `ArchImageBuilder` in
-    `kernel/core/src/spawn.rs`, exported from `lib.rs`. The deferred-load
-    replacement for `ProcessSpawn`/`SpawnCtx::admit_process`: the arch seam
-    builds an isolated image off the loading child's own stack and returns
-    it as a value for the core to admit. Builds green; clippy + `fmt --check`
-    clean. Wired (and `ProcessSpawn` deleted) when items 2–3 land.
+  - **Landed — the arch-neutral image-build seam *and its three producer
+    implementations* (Remaining items 1 + 3's build split).** `BuiltImage`,
+    `ImageBuildCtx`, and `ArchImageBuilder` in `kernel/core/src/spawn.rs`,
+    exported from `lib.rs`, plus the shared `SpawnCtxBuild` `ImageBuildCtx`
+    adapter and the `refuse_build` counterpart (sharing `emit_refuse` with
+    `refuse_spawn`, `§2.2`). All three arch producers
+    (`kernel/tairix-kernel/src/{x86_64,aarch64,riscv64}/spawn_producer.rs`)
+    now implement `ArchImageBuilder::{alloc_kernel_stack, build}` — the
+    kernel-stack allocation hoisted to `alloc_kernel_stack`, the guard-page
+    split/unmap moved into `build` (gated on `kernel_stack_guard`, and now
+    **fail-closed** rather than the former `BoxStack` downgrade, `§2.17`).
+    Each producer's `ProcessSpawn::spawn_with` **delegates** to
+    `alloc_kernel_stack` → `build` → `admit_process`, so the image-build
+    logic has one definition shared with the deferred-load path (`§2.2`).
+    Verified green: all four targets build, `tairix-kernel-core` host tests,
+    `cargo fmt --all --check`, `cargo xtask clippy`, `cfg-check`,
+    `deps-check`. `ProcessSpawn`/`admit_process` stay live until the flip
+    (items 2 + 4–5) rewires the handler onto the deferred-load `build`.
   - **Landed — the reserved `LOAD_*` exit-status ABI (the child→parent
     contract).** `lib/abi` (`process.rs`) defines the reserved band
     (`LOAD_FAILURE_STATUS_BASE` + `LOAD_NOT_FOUND` / `LOAD_UNVERIFIED` /
@@ -716,8 +727,13 @@ Each stage is independently reviewable and must leave the whole-project
     `LOAD_*` ABI above are landed ahead of their live use.
 
     1. **Landed — `BuiltImage` + `ArchImageBuilder` + `ImageBuildCtx` seam
-       (`kernel/core/src/spawn.rs`, exported from `lib.rs`).** Builds green;
-       `cargo clippy -p tairix-kernel-core` and `cargo fmt --check` clean.
+       (`kernel/core/src/spawn.rs`, exported from `lib.rs`) *and its three
+       producer implementations*.** All three producers implement
+       `ArchImageBuilder::{alloc_kernel_stack, build}` and their
+       `spawn_with` delegates to it (see the summary bullet above); the
+       shared `SpawnCtxBuild` adapter + `refuse_build` live in
+       `kernel/core/src/spawn.rs`. Verified green (4 targets, host tests,
+       `fmt --all --check`, `cargo xtask clippy`, `cfg-check`, `deps-check`).
        - `struct BuiltImage { frozen: Box<dyn UserAddressSpace + Send +
          Sync>, physmap: Box<dyn PhysMap + Send + Sync>, stack_span:
          StackSpan, live: Option<Box<dyn LiveUserSpace + Send>>,
@@ -849,22 +865,22 @@ Each stage is independently reviewable and must leave the whole-project
          `SpawnServices`. Only the child-side *call site* remains for the
          flip.
     3. **Arch producers + `driver_spawn_loader`
-       (`kernel/tairix-kernel/src/{aarch64,riscv64,x86_64}/`).** Each
-       existing `spawn_with` body splits: the build portion (parse rxe,
+       (`kernel/tairix-kernel/src/{aarch64,riscv64,x86_64}/`).** The build
+       split is **landed** (item 1 above): each producer's `spawn_with`
+       body was split into `ArchImageBuilder::build` (parse rxe,
        `user_layout`/`stack_span`, `spawn_image`, freeze, retain `LiveSpace`,
-       `pre_resume`, `enter`) becomes `ArchImageBuilder::build` returning a
-       `BuiltImage`; the arena/BoxStack allocation becomes
-       `alloc_kernel_stack`; the guard-page split+unmap moves into `build`
-       driven by `ImageBuildCtx::kernel_stack_guard`. **Validated:** the
-       three producers are structurally identical up to the final
-       `ctx.admit_process(...)` call (only the arch address-space type, the
-       identity-window derivation, and the `pre_resume` body differ), so the
-       split is a mechanical extraction with no behavioural change to the
-       image build itself. `admit_process` and the
-       `ProcessSpawn` trait are **deleted** (the core owns admit now, `§2.14`).
-       `driver_spawn_loader` calls the same core admit-loading entry with an
-       embedded `LoadPlan` (the verified driver image + granted caps + node
-       grants), so a driver spawn defers identically.
+       `pre_resume`, `enter` → `BuiltImage`) and `alloc_kernel_stack`
+       (arena/`BoxStack` + guard VA), with the guard-page split+unmap moved
+       into `build` driven by `ImageBuildCtx::kernel_stack_guard`;
+       `spawn_with` now delegates to both then `admit_process`. The three
+       producers were structurally identical up to the final
+       `ctx.admit_process(...)`, so the split was a mechanical extraction.
+       **Remaining in the flip:** `admit_process` and the `ProcessSpawn`
+       trait are **deleted** (the core owns admit now, `§2.14`) and each
+       producer's residual `spawn_with` is dropped once the handler calls the
+       core admit-loading entry directly; `driver_spawn_loader` calls that
+       same entry with an embedded `LoadPlan` (verified driver image +
+       granted caps + node grants) so a driver spawn defers identically.
     4. **`LOAD_*` wiring.** Child body: on any pre-`become_user` failure,
        audit the load refusal through `SpawnServices.audit` (attributed to
        the child) and `exit(load_failure_status(errno))`. Parent side: the

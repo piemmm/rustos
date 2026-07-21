@@ -605,8 +605,25 @@ where
 /// exhaustion apart from a derivation or translate failure at the same
 /// site.
 pub fn refuse_spawn(ctx: &dyn SpawnCtx, cause: &'static str) -> Errno {
+    emit_refuse(ctx.audit(), ctx.frames().free_frames() as u64, cause);
+    Errno::NoSpace
+}
+
+/// [`refuse_spawn`]'s [`ImageBuildCtx`] counterpart: audit one refusal a
+/// [`ArchImageBuilder::build`] takes around [`spawn_image`] and return the
+/// stable resource errno. One definition shared with [`refuse_spawn`]
+/// (`§2.2`) — the build path holds an [`ImageBuildCtx`], not a
+/// [`SpawnCtx`], but the audited fields are identical.
+pub fn refuse_build(ctx: &dyn ImageBuildCtx, cause: &'static str) -> Errno {
+    emit_refuse(ctx.audit(), ctx.frames().free_frames() as u64, cause);
+    Errno::NoSpace
+}
+
+/// Emit the shared `ProcessSpawnFailed` audit record for [`refuse_spawn`]
+/// and [`refuse_build`] (`§2.2`).
+fn emit_refuse(audit: &(dyn Sink + Sync), free_frames: u64, cause: &'static str) {
     emit(
-        ctx.audit(),
+        audit,
         AuditEvent::ProcessSpawnFailed,
         Level::Error,
         &[
@@ -616,11 +633,10 @@ pub fn refuse_spawn(ctx: &dyn SpawnCtx, cause: &'static str) -> Errno {
             },
             Field {
                 key: "free_frames",
-                value: tairix_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
+                value: tairix_log::FieldValue::UnsignedInt(free_frames),
             },
         ],
     );
-    Errno::NoSpace
 }
 
 /// Map an [`AdmitError`] onto its stable [`Errno`], auditing the refusal
@@ -1126,6 +1142,49 @@ pub trait ArchImageBuilder: Send + Sync {
         args: &[&[u8]],
         env: &[&[u8]],
     ) -> Result<BuiltImage, Errno>;
+}
+
+/// The shared [`ImageBuildCtx`] every arch [`ArchImageBuilder`] reads to
+/// build a child image, so the identical adapter is not copied into each
+/// port (`§2.2`).
+///
+/// It wraps the [`SpawnCtx`] the caller already holds (for the frame
+/// sources and audit sink) plus the guard VA
+/// [`ArchImageBuilder::alloc_kernel_stack`] returned for the loading
+/// child's kernel stack, so [`ArchImageBuilder::build`] can re-express that
+/// guard page in the child's own root.
+pub struct SpawnCtxBuild<'a> {
+    ctx: &'a dyn SpawnCtx,
+    guard: Option<u64>,
+}
+
+impl<'a> SpawnCtxBuild<'a> {
+    /// Adapt `ctx` into an [`ImageBuildCtx`] carrying the loading child's
+    /// kernel-stack guard VA (`Some` for an arena stack whose guard page
+    /// [`build`](ArchImageBuilder::build) unmaps in the child root, `None`
+    /// for the software-canary [`BoxStack`] fallback).
+    #[must_use]
+    pub fn new(ctx: &'a dyn SpawnCtx, guard: Option<u64>) -> Self {
+        Self { ctx, guard }
+    }
+}
+
+impl ImageBuildCtx for SpawnCtxBuild<'_> {
+    fn frames(&self) -> &FrameAllocator {
+        self.ctx.frames()
+    }
+
+    fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
+        self.ctx.page_table_allocator()
+    }
+
+    fn audit(&self) -> &(dyn Sink + Sync) {
+        self.ctx.audit()
+    }
+
+    fn kernel_stack_guard(&self) -> Option<u64> {
+        self.guard
+    }
 }
 
 /// Emit one structured audit record for `event` with `fields`.

@@ -232,10 +232,10 @@ pub use seat::{
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{
-    refuse_admit, refuse_spawn, spawn_and_enter, spawn_caller_errno, spawn_image, AdmitError,
-    ArchImageBuilder, BuiltImage, EmbeddedProgram, ImageBuildCtx, InitSpawn, InitSpawnCtx,
-    NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx, SpawnRequest,
-    EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+    refuse_admit, refuse_build, refuse_spawn, spawn_and_enter, spawn_caller_errno, spawn_image,
+    AdmitError, ArchImageBuilder, BuiltImage, EmbeddedProgram, ImageBuildCtx, InitSpawn,
+    InitSpawnCtx, NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx,
+    SpawnCtxBuild, SpawnRequest, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
 pub use useradmin::{
