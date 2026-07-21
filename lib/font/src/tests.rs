@@ -272,15 +272,52 @@ mod render {
 
     #[test]
     fn native_height_is_the_default_font() {
-        // Asking for the native height (or larger, which clamps) is exactly
-        // the console font, so nothing about console rendering changes.
+        // Exactly the native cell height is the console font, drawn straight
+        // from the atlas, so nothing about console rendering changes.
         assert_eq!(
             BitmapFont::with_pixel_height(atlas::CELL_HEIGHT),
             BitmapFont::inconsolata()
         );
+    }
+
+    #[test]
+    fn oversized_height_is_clamped_to_the_maximum() {
+        // A larger-than-native size is honoured (no longer clamped to native),
+        // but a pathologically huge request clamps to the bound.
         assert_eq!(
-            BitmapFont::with_pixel_height(atlas::CELL_HEIGHT + 100),
-            BitmapFont::inconsolata()
+            BitmapFont::with_pixel_height(atlas::CELL_HEIGHT + 100).glyph_height(),
+            atlas::CELL_HEIGHT + 100
+        );
+        assert_eq!(
+            BitmapFont::with_pixel_height(10_000).glyph_height(),
+            BitmapFont::MAX_PIXEL_HEIGHT
+        );
+    }
+
+    #[test]
+    fn a_large_font_rasterises_bigger_crisp_glyphs_from_the_outline() {
+        // The core fix: a size well above native rasterises a large glyph
+        // straight from the outline (never an upscaled 28px bitmap). Metrics
+        // and ink both scale up, and the tall cell is filled with real ink.
+        let big = BitmapFont::with_pixel_height(200);
+        assert_eq!(big.glyph_height(), 200);
+        assert!(big.advance() > BitmapFont::inconsolata().advance());
+
+        let ink = |font: BitmapFont| {
+            let mut surface =
+                Surface::new(font.advance() * 2, font.glyph_height()).expect("surface");
+            font.draw_text(&mut surface, 0, 0, "R", WHITE);
+            surface.pixels().iter().filter(|p| p.a > 0).count()
+        };
+        let large_ink = ink(big);
+        let small_ink = ink(BitmapFont::with_pixel_height(14));
+        assert!(
+            large_ink > 1000,
+            "200px glyph has too little ink: {large_ink}"
+        );
+        assert!(
+            large_ink > small_ink,
+            "large glyph did not scale up ({large_ink} vs {small_ink})"
         );
     }
 
@@ -324,8 +361,9 @@ mod render {
 
     #[test]
     fn scaled_full_block_is_opaque() {
-        // A fully-covered source region averages to full coverage, so the
-        // block glyph stays solid at the caller's colour when downscaled.
+        // The full-block outline fills the whole cell, so an interior pixel is
+        // fully covered and stays the caller's exact colour at a non-native
+        // size too.
         let font = BitmapFont::with_pixel_height(14);
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "█", WHITE);

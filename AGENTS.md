@@ -715,8 +715,21 @@ tairix/
 │   │                    #   §17.4, §24.1).
 │   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
 │   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
-│   ├── font/            # Shared text rasterisation: monospace bitmap font +
-│   │                    #   glyph blitter onto a raster Surface (§16.4, §17.4).
+│   ├── font/            # Shared text rasterisation: monospace font + glyph
+│   │                    #   blitter onto a raster Surface. The text console
+│   │                    #   draws the generated native atlas; the desktop
+│   │                    #   rasterises resized glyphs from the outlines at the
+│   │                    #   requested size via lib/fontface, cached, so text is
+│   │                    #   crisp at any size, not a stretched bitmap (§16.4,
+│   │                    #   §17.4, §2.16).
+│   ├── fontface/        # Shared TrueType glyph-outline engine: the one parser
+│   │                    #   + anti-aliased non-zero-winding rasteriser turning a
+│   │                    #   committed face into 4-bit coverage at ANY requested
+│   │                    #   pixel size, plus the merged-family (repertoire +
+│   │                    #   earliest-face-wins) codepoint resolution. Shared by
+│   │                    #   the `cargo xtask font-atlas` generator and the
+│   │                    #   runtime lib/font, so the atlas and live resized text
+│   │                    #   can never diverge (§2.2). no_std+alloc, fail-closed.
 │   ├── fsmeta/          # Shared extended-file-metadata model: the namespaced
 │   │                    #   attribute-key grammar, the bounded AttrSet/AttrEntry
 │   │                    #   store + self-identifying encoding, and the closed

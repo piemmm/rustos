@@ -127,25 +127,6 @@ fn decode_glyph(mut encoded: &[u8]) -> Option<[u8; atlas::BYTES_PER_GLYPH]> {
 /// with no allocation, cheap enough for a per-character hot path.
 #[must_use]
 pub fn lookup(ch: char) -> Option<Glyph> {
-    Glyph::at(mapped_index(ch)?)
-}
-
-/// The atlas cell index a scalar maps to, or [`atlas::FALLBACK_INDEX`] when
-/// the face does not cover it.
-///
-/// This is the stable key a scaled-glyph cache is indexed by: two scalars
-/// that share a cell (the fallback) share a downscaled bitmap, and the key is
-/// a plain integer rather than the decoded 4-bit block, so the cache never
-/// stores or compares whole bitmaps.
-#[must_use]
-pub fn cell_index(ch: char) -> u32 {
-    mapped_index(ch).unwrap_or(atlas::FALLBACK_INDEX)
-}
-
-/// The atlas cell index a scalar maps to, or `None` when the face does not
-/// cover it. Shared by [`lookup`] and [`cell_index`] so the range search is
-/// written once.
-fn mapped_index(ch: char) -> Option<u32> {
     let code = u32::from(ch);
     let ranges = atlas::RANGES;
     let index = ranges
@@ -160,19 +141,7 @@ fn mapped_index(ch: char) -> Option<u32> {
         })
         .ok()?;
     let (first, _, base) = ranges[index];
-    Some(base + (code - first))
-}
-
-/// The decoded glyph at atlas cell `index`, falling back to the U+FFFD
-/// replacement glyph when the index is out of range or its block is
-/// malformed — fail closed, never a panic.
-///
-/// [`cell_index`] returns exactly the indices this accepts, so the scaled
-/// renderer decodes a cached key back to its bitmap without re-searching the
-/// range table.
-#[must_use]
-pub fn glyph_at(index: u32) -> Glyph {
-    Glyph::at(index).unwrap_or_else(Glyph::fallback)
+    Glyph::at(base + (code - first))
 }
 
 /// The atlas glyph for `ch`, falling back to the U+FFFD replacement glyph

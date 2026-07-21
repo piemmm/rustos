@@ -57,6 +57,7 @@ members = [
     "lib/fbcon",
     "lib/fdt",
     "lib/font",
+    "lib/fontface",
     "lib/fsmeta",
     "lib/fsprobe",
     "lib/fwcfg",

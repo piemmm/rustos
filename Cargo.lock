@@ -1225,10 +1225,15 @@ dependencies = [
 name = "tairix-font"
 version = "0.0.0"
 dependencies = [
+ "tairix-fontface",
  "tairix-raster",
  "tairix-sync",
  "tairix-vt",
 ]
+
+[[package]]
+name = "tairix-fontface"
+version = "0.0.0"
 
 [[package]]
 name = "tairix-fsmeta"
@@ -4139,6 +4144,7 @@ dependencies = [
  "tairix-drv-storage-usb-msd",
  "tairix-drv-storage-volmgr",
  "tairix-drvhost",
+ "tairix-fontface",
  "tairix-fsmeta",
  "tairix-fuzzseed",
  "tairix-fwcfg",

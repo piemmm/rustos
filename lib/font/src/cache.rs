@@ -1,48 +1,83 @@
-//! Downscaled-glyph rasterisation and its process-global cache.
+//! On-demand glyph rasterisation from the outline faces, and its
+//! process-global cache.
 //!
-//! The atlas ([`crate::atlas`]) is authored at one native cell size; the
-//! desktop renders its text at a smaller size (a comfortable *physical* pixel
-//! size derived from the theme). Rather than ship a second atlas, a glyph is
-//! resampled from the native 4-bit coverage bitmap down to the requested cell
-//! size with an **area-averaging box filter**: every destination pixel is the
-//! coverage-weighted average of the source pixels it overlaps, so an
-//! anti-aliased edge stays smooth instead of the jagged holes a
-//! nearest-neighbour pick would leave. The filter is exact — it apportions
-//! each source pixel by the fractional area it contributes — and produces the
-//! same 4-bit coverage the blitter already blends.
+//! The generated atlas ([`crate::atlas`]) is authored at one native cell size
+//! and is what the text console draws. The desktop, however, asks for text at
+//! *other* sizes (a comfortable physical pixel size derived from the theme,
+//! or a large heading). Rather than resample the fixed native bitmap — which
+//! smears when enlarged and drops detail when shrunk — a glyph is rasterised
+//! **directly from the TrueType outline** at the requested cell size through
+//! the shared `lib/fontface` engine, exactly as the atlas generator rasterises
+//! the native size. The result is crisp at any size, small or large, because
+//! the curve is sampled at the target resolution rather than stretched.
 //!
-//! Resampling a glyph is not free, and the desktop redraws the same glyphs at
-//! the same size every frame, so the result is memoised in a bounded,
+//! Rasterising an outline is not free, and the desktop redraws the same glyphs
+//! at the same size every frame, so each result is memoised in a bounded,
 //! process-global [`SpinLock`]-guarded cache keyed by
-//! `(atlas cell index, destination width, destination height)`. A hit copies
-//! the stored coverage into the caller's stack buffer with no allocation; a
-//! miss resamples once, inserts (evicting the oldest entry when the cache is
-//! full so memory stays bounded), and copies out. The key is an integer triple
-//! and the value a compact one-byte-per-pixel coverage buffer, so neither
-//! whole bitmaps nor scalars are stored.
+//! `(face index, glyph id, cell height)`. A hit copies the stored coverage
+//! into the caller's reusable buffer with no rasterisation; a miss rasterises
+//! once, inserts (evicting the oldest entry when the cache is full so memory
+//! stays bounded), and copies out.
+//!
+//! The four committed faces are embedded and parsed once, lazily, into a
+//! shared [`FontFamily`]; a scalar resolves to the same face the atlas would
+//! pick, so resized text keeps the same glyph coverage the console shows. If
+//! the (trusted, committed) faces ever fail to parse, rasterisation fails
+//! closed to a blank glyph rather than panicking.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::vec;
+use alloc::vec::Vec;
 
-use tairix_sync::SpinLock;
+use tairix_fontface::{CellGeometry, FontFamily, Repertoire, ATLAS_EM_PX};
+use tairix_sync::{Once, SpinLock};
 
 use crate::atlas;
-use crate::glyph::glyph_at;
 
-/// The largest number of distinct `(glyph, size)` bitmaps the cache retains.
+/// The committed system faces, embedded so a resized glyph is rasterised from
+/// the same outlines the atlas is generated from (SIL OFL 1.1; see
+/// `assets/OFL.txt`, `D2Coding-OFL.txt`, `NotoSansHebrew-OFL.txt`).
+static PRIMARY_FACE: &[u8] = include_bytes!("../assets/Inconsolata-EX.ttf");
+static JAPANESE_FACE: &[u8] = include_bytes!("../assets/MPLUS1Code-Regular.ttf");
+static KOREAN_FACE: &[u8] = include_bytes!("../assets/D2Coding-Regular.ttf");
+static HEBREW_FACE: &[u8] = include_bytes!("../assets/NotoSansHebrew-ExtraCondensed.ttf");
+
+/// The shared merged family, parsed once on first resized draw.
+static FAMILY: Once<FontFamily<'static>> = Once::new();
+
+/// The parsed family, or `None` if the committed faces failed to parse.
 ///
-/// The desktop uses a small number of sizes and the visible glyph repertoire
-/// is small, so this comfortably holds a steady-state working set while
-/// capping worst-case memory: a pathological caller that resamples at ever
-/// more sizes evicts the oldest entries rather than growing without bound.
+/// The faces are trusted repository data, so this succeeds in practice; a
+/// (structurally impossible) parse failure fails closed to `None`, and the
+/// caller renders nothing rather than panicking.
+fn family() -> Option<&'static FontFamily<'static>> {
+    FAMILY
+        .call_once(|| {
+            FontFamily::parse(&[
+                (PRIMARY_FACE, Repertoire::Full),
+                (JAPANESE_FACE, Repertoire::Full),
+                (KOREAN_FACE, Repertoire::Korean),
+                (HEBREW_FACE, Repertoire::Full),
+            ])
+        })
+        .ok()
+}
+
+/// The largest number of distinct `(face, glyph, size)` bitmaps the cache
+/// retains.
+///
+/// The desktop uses a small number of sizes and a small visible glyph
+/// repertoire, so this comfortably holds a steady-state working set while
+/// capping the entry count: a pathological caller that rasterises at ever more
+/// sizes evicts the oldest entries rather than growing without bound.
 const MAX_ENTRIES: usize = 1024;
 
-/// The cache key: atlas cell index and the destination cell dimensions the
-/// glyph was resampled to.
+/// The cache key: the resolved face index and glyph id, and the cell height
+/// the glyph was rasterised at (the cell width and baseline are a fixed
+/// function of the height, so the height alone keys the geometry).
 type Key = (u32, u32, u32);
 
-/// A bounded FIFO map from [`Key`] to a resampled coverage buffer.
+/// A bounded FIFO map from [`Key`] to a rasterised coverage buffer.
 struct GlyphCache {
     entries: BTreeMap<Key, Box<[u8]>>,
     order: VecDeque<Key>,
@@ -77,89 +112,65 @@ impl GlyphCache {
 /// The one process-global glyph cache.
 static CACHE: SpinLock<GlyphCache> = SpinLock::new(GlyphCache::new());
 
-/// Fill `out[..dst_w * dst_h]` with the `dst_w * dst_h` coverage bytes of atlas
-/// cell `index` resampled to that size, returning the number of bytes written.
+/// Fill `out` with the `2 * geometry.width * geometry.height` coverage bytes of
+/// `ch` rasterised at `geometry` (two cells wide, so a full-width glyph reaches
+/// its continuation cell), resizing `out` to that length.
 ///
-/// `out` must be at least `dst_w * dst_h` bytes; the scaled renderer sizes it
-/// to the native glyph bound so it always is. A cache hit copies; a miss
-/// resamples once (outside the lock), memoises the result, and copies. The
-/// result is deterministic in the key, so a concurrent miss on the same key
-/// merely recomputes the identical bytes.
-pub(crate) fn scaled_coverage(index: u32, dst_w: u32, dst_h: u32, out: &mut [u8]) -> usize {
-    let len = (dst_w as usize) * (dst_h as usize);
-    let out = &mut out[..len];
-    let key: Key = (index, dst_w, dst_h);
+/// The bitmap is two cells wide regardless of the scalar's own width; the
+/// blitter clips a narrow glyph to its single cell, exactly as the native
+/// blitter clips to `CELL_WIDTH` of `GLYPH_WIDTH`. A scalar the face does not
+/// cover resolves to the U+FFFD replacement glyph, matching the atlas. A cache
+/// hit copies; a miss rasterises once (outside the lock), memoises, and copies.
+/// If the faces are unavailable the buffer is cleared to transparent (fail
+/// closed).
+pub(crate) fn scaled_coverage(
+    ch: char,
+    geometry: &CellGeometry,
+    px_per_em: f64,
+    out: &mut Vec<u8>,
+) {
+    let bitmap_width = geometry.width.saturating_mul(2);
+    let len = (bitmap_width as usize).saturating_mul(geometry.height as usize);
+    out.clear();
+    out.resize(len, 0);
+
+    let Some(family) = family() else {
+        return;
+    };
+    let code = u32::from(ch);
+    let Some((face, glyph)) = family
+        .resolve(code)
+        .or_else(|| family.resolve(u32::from(char::REPLACEMENT_CHARACTER)))
+    else {
+        return;
+    };
+    // The family holds a handful of faces, so the index always fits a `u32`;
+    // a structurally impossible overflow keys a distinct-but-harmless slot.
+    let key: Key = (
+        u32::try_from(face).unwrap_or(u32::MAX),
+        u32::from(glyph),
+        geometry.height,
+    );
 
     if let Some(coverage) = CACHE.lock().entries.get(&key) {
-        out.copy_from_slice(&coverage[..]);
-        return len;
-    }
-
-    let coverage = resample(index, dst_w, dst_h);
-    out.copy_from_slice(&coverage);
-    CACHE.lock().insert(key, coverage);
-    len
-}
-
-/// Resample atlas cell `index` from the native glyph bitmap down to
-/// `dst_w * dst_h` coverage bytes with an exact area-averaging box filter.
-fn resample(index: u32, dst_w: u32, dst_h: u32) -> Box<[u8]> {
-    let glyph = glyph_at(index);
-    let src_w = atlas::GLYPH_WIDTH;
-    let src_h = atlas::CELL_HEIGHT;
-    // Total area a single destination pixel spans in the shared axis units
-    // where a source pixel is `dst` wide and a destination pixel is `src`
-    // wide: the per-pixel weights sum to exactly this.
-    let total = u64::from(src_w) * u64::from(src_h);
-
-    let mut coverage = vec![0u8; (dst_w as usize) * (dst_h as usize)];
-    for dy in 0..dst_h {
-        let (sy0, sy1) = source_span(dy, src_h, dst_h);
-        for dx in 0..dst_w {
-            let (sx0, sx1) = source_span(dx, src_w, dst_w);
-            let mut accum = 0u64;
-            for sy in sy0..sy1 {
-                let oy = overlap(dy, src_h, sy, dst_h);
-                if oy == 0 {
-                    continue;
-                }
-                for sx in sx0..sx1 {
-                    let cov = u64::from(glyph.coverage(sx, sy));
-                    if cov == 0 {
-                        continue;
-                    }
-                    let ox = overlap(dx, src_w, sx, dst_w);
-                    accum += cov * ox * oy;
-                }
-            }
-            // Round to nearest 4-bit coverage level. The weighted mean of
-            // values in 0..=15 is itself in 0..=15; the fallback caps at full
-            // coverage so the value can never exceed a 4-bit level.
-            let value = (accum + total / 2) / total;
-            coverage[(dy as usize) * (dst_w as usize) + dx as usize] =
-                u8::try_from(value).unwrap_or(15);
+        if coverage.len() == len {
+            out.copy_from_slice(coverage);
         }
+        return;
     }
-    coverage.into_boxed_slice()
+
+    let Ok(coverage) = family.rasterise(face, glyph, geometry, px_per_em, bitmap_width) else {
+        return;
+    };
+    if coverage.len() == len {
+        out.copy_from_slice(&coverage);
+    }
+    CACHE.lock().insert(key, coverage.into_boxed_slice());
 }
 
-/// The half-open range of source rows/columns that a destination pixel
-/// overlaps: `dst_index`'s span is `[dst_index * src, (dst_index + 1) * src)`
-/// and a source pixel `s`'s span is `[s * dst, (s + 1) * dst)`, both in the
-/// shared `src * dst` axis. Returns `[floor, ceil)` clamped to `src`.
-fn source_span(dst_index: u32, src: u32, dst: u32) -> (u32, u32) {
-    let lo = dst_index * src / dst;
-    let hi = ((dst_index + 1) * src).div_ceil(dst).min(src);
-    (lo, hi)
-}
-
-/// The length of the overlap between destination pixel `dst_index` (span
-/// `[dst_index * src, (dst_index + 1) * src)`) and source pixel `s` (span
-/// `[s * dst, (s + 1) * dst)`) in the shared `src * dst` axis, clamped at zero.
-fn overlap(dst_index: u32, src: u32, s: u32, dst: u32) -> u64 {
-    let d_lo = u64::from(dst_index) * u64::from(src);
-    let d_hi = d_lo + u64::from(src);
-    let s_lo = u64::from(s) * u64::from(dst);
-    let s_hi = s_lo + u64::from(dst);
-    d_hi.min(s_hi).saturating_sub(d_lo.max(s_lo))
+/// The pixels-per-em to rasterise a glyph at so a cell `height` pixels tall is
+/// proportional to the native atlas cell — the reference size scaled linearly.
+#[must_use]
+pub(crate) fn px_per_em(height: u32) -> f64 {
+    f64::from(ATLAS_EM_PX) * f64::from(height) / f64::from(atlas::CELL_HEIGHT)
 }

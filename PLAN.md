@@ -3029,9 +3029,15 @@ Shipped (headless-testable, model + renderer over injected seams):
   tracking, window ops; fails closed on bad modes.
 - Shared desktop libs (§2.2, one path each): `lib/raster` (incl. the
   `RasterCache` SVG→scale cache), `lib/theme`, `lib/geometry` (DPI/`Scale`),
-  `lib/font` (the system Inconsolata face: a generated 12×26 4-bit-coverage
+  `lib/font` (the system Inconsolata face: a generated 15×28 4-bit-coverage
   atlas of every codepoint the face maps — `cargo xtask font-atlas`, drift
-  gated in `ci` — with binary-search Unicode lookup and a U+FFFD fallback),
+  gated in `ci` — with binary-search Unicode lookup and a U+FFFD fallback;
+  the text console draws the atlas verbatim, while the desktop rasterises
+  resized glyphs from the outlines at the requested size via `lib/fontface`,
+  cached, so UI text is crisp at any size and never a stretched bitmap),
+  `lib/fontface` (the shared TrueType parser + anti-aliased rasteriser and
+  merged-family resolution, used by both the `font-atlas` generator and the
+  runtime `lib/font` so the atlas and live text share one rasteriser, §2.2),
   `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
 - `userland/gui/taskbar` (start menu + running-task list + clock/notification
   area) and `userland/gui/session` glue (theme registry, taskbar model,

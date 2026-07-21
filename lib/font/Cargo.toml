@@ -18,15 +18,26 @@ tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
 # The one Unicode terminal-column width definition. The bitmap blitter uses it
 # to advance wide CJK scalars by the same two cells every terminal grid reserves.
 tairix-vt = { path = "../vt", version = "=0.0.0", optional = true }
-# The spinlock guarding the process-global resampled-glyph cache. Only the
-# `render` blitter downscales glyphs; the atlas-only view stays lock-free.
+# The spinlock + one-shot init guarding the process-global glyph cache and the
+# lazily-parsed outline family. Only the `render` blitter resizes glyphs; the
+# atlas-only view stays lock-free.
 tairix-sync = { path = "../sync", version = "=0.0.0", optional = true }
+# The shared TrueType glyph engine: the runtime rasterises a resized glyph from
+# the same outlines the atlas is generated from, so on-screen text is crisp at
+# any size and the atlas and live text share one rasteriser (§2.2). Only the
+# `render` blitter needs it; the atlas-only view stays outline-free.
+tairix-fontface = { path = "../fontface", version = "=0.0.0", optional = true }
 
 [features]
 default = ["render"]
 # The `lib/raster`-backed glyph blitter (`font::BitmapFont`). Disable
 # default features for the atlas-only, allocator-free view.
-render = ["dep:tairix-raster", "dep:tairix-vt", "dep:tairix-sync"]
+render = [
+    "dep:tairix-raster",
+    "dep:tairix-vt",
+    "dep:tairix-sync",
+    "dep:tairix-fontface",
+]
 
 [lints]
 workspace = true

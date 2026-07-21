@@ -11,12 +11,15 @@
 //! anti-aliased edges and translucent text both come out right with no
 //! colour arithmetic duplicated here.
 
+use alloc::vec::Vec;
+
+use tairix_fontface::CellGeometry;
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_vt::{char_width, truncate_to_width as truncate_to_columns};
 
 use crate::atlas;
 use crate::cache;
-use crate::glyph::{cell_index, lookup_or_fallback, Glyph};
+use crate::glyph::{lookup_or_fallback, Glyph};
 
 /// The system monospace bitmap font: Inconsolata EX with its M PLUS 1 Code
 /// Japanese, `D2Coding` Korean, and Noto Sans Hebrew companions, plus their shared
@@ -28,21 +31,23 @@ use crate::glyph::{cell_index, lookup_or_fallback, Glyph};
 ///
 /// A font renders at a chosen **cell height in physical pixels**. The atlas is
 /// authored at one native size ([`atlas::CELL_HEIGHT`]); [`inconsolata`] keeps
-/// that size for the text console, while [`with_pixel_height`] asks for a
-/// smaller cell — the desktop resolves a comfortable physical size from the
-/// theme's logical font size and the DPI scale. A smaller cell resamples each
-/// glyph from the native bitmap with an area-averaging filter (cached, see
-/// [`crate::cache`]); at the native size the resampler is bypassed entirely, so
-/// console rendering is byte-for-byte what it always was. Every derived metric
-/// (advance, cell width, line height) scales with the cell height, keeping the
-/// font monospaced and its width-to-height ratio constant.
+/// that size for the text console, while [`with_pixel_height`] asks for any
+/// other cell — the desktop resolves a comfortable physical size from the
+/// theme's logical font size and the DPI scale. A non-native cell rasterises
+/// each glyph **directly from the TrueType outline** at that exact size
+/// (cached, see [`crate::cache`]), so text is crisp whether tiny or very
+/// large — never a stretched bitmap. At the native size the atlas is used
+/// verbatim, so console rendering is byte-for-byte what it always was. Every
+/// derived metric (advance, cell width, baseline, line height) scales with the
+/// cell height, keeping the font monospaced and its width-to-height ratio
+/// constant.
 ///
 /// [`inconsolata`]: Self::inconsolata
 /// [`with_pixel_height`]: Self::with_pixel_height
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct BitmapFont {
     /// The cell height this font renders at, in physical pixels, always in
-    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`atlas::CELL_HEIGHT`].
+    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
     cell_height: u32,
 }
 
@@ -58,8 +63,16 @@ impl BitmapFont {
     ///
     /// Below this a monospace glyph loses the distinguishing strokes that keep
     /// text legible, so [`with_pixel_height`](Self::with_pixel_height) never
-    /// resamples smaller.
+    /// renders smaller.
     pub const MIN_PIXEL_HEIGHT: u32 = 8;
+
+    /// The largest cell height a font may render at, in physical pixels.
+    ///
+    /// The outline rasteriser produces a crisp glyph at any size, but a cell
+    /// this tall is already a large heading; the bound caps the size of a
+    /// single cached bitmap so a pathological request cannot demand an
+    /// unbounded rasterisation.
+    pub const MAX_PIXEL_HEIGHT: u32 = 512;
 
     /// The built-in family at its **native** atlas size, with Inconsolata EX
     /// primary, M PLUS 1 Code for Japanese, `D2Coding` for Korean, and Noto
@@ -76,20 +89,20 @@ impl BitmapFont {
 
     /// The built-in family rendered at a cell height of `pixels` physical
     /// pixels, clamped to
-    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`atlas::CELL_HEIGHT`].
+    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
     ///
-    /// The desktop uses this to render UI text at the theme's requested size:
-    /// a height below the native atlas cell resamples each glyph down with an
-    /// area-averaging filter, so smaller text stays smoothly anti-aliased
-    /// rather than pixel-dropped. Asking for the native height (or larger, which
-    /// clamps to it) yields exactly [`inconsolata`](Self::inconsolata); the
-    /// atlas is never upscaled.
+    /// The desktop uses this to render UI text at the theme's requested size.
+    /// Any non-native height rasterises each glyph from the outline at that
+    /// exact size, so both smaller and larger text stay crisply anti-aliased
+    /// rather than stretched from the fixed atlas bitmap. Asking for exactly
+    /// the native height yields [`inconsolata`](Self::inconsolata), which draws
+    /// straight from the atlas.
     #[must_use]
     pub const fn with_pixel_height(pixels: u32) -> Self {
         let cell_height = if pixels < Self::MIN_PIXEL_HEIGHT {
             Self::MIN_PIXEL_HEIGHT
-        } else if pixels > atlas::CELL_HEIGHT {
-            atlas::CELL_HEIGHT
+        } else if pixels > Self::MAX_PIXEL_HEIGHT {
+            Self::MAX_PIXEL_HEIGHT
         } else {
             pixels
         };
@@ -120,6 +133,14 @@ impl BitmapFont {
     #[must_use]
     pub const fn glyph_height(self) -> u32 {
         self.cell_height
+    }
+
+    /// The baseline row within the cell (pixel rows above the baseline): the
+    /// native atlas baseline scaled to this font's cell height, so a resized
+    /// glyph sits on the baseline exactly as the native cell does.
+    #[must_use]
+    pub const fn baseline(self) -> u32 {
+        (atlas::BASELINE * self.cell_height + atlas::CELL_HEIGHT / 2) / atlas::CELL_HEIGHT
     }
 
     /// The horizontal pen advance per character in pixels (the cell width).
@@ -205,8 +226,9 @@ impl BitmapFont {
         pen
     }
 
-    /// Draw `text` at a sub-native cell size, blitting each glyph's resampled
-    /// coverage (fetched from the shared cache) instead of the atlas bitmap.
+    /// Draw `text` at a non-native cell size, blitting each glyph's coverage
+    /// rasterised from the outline (fetched from the shared cache) instead of
+    /// the atlas bitmap.
     fn draw_text_scaled(
         self,
         surface: &mut Surface,
@@ -217,21 +239,34 @@ impl BitmapFont {
     ) -> i32 {
         let sources = coverage_sources(color);
         let advance = self.advance();
-        // A glyph may cover two cells, so its resampled bitmap is two cells
+        // A glyph may cover two cells, so its rasterised bitmap is two cells
         // wide; a one-cell glyph is clipped to the left cell, exactly as the
         // native path clips a narrow glyph to `CELL_WIDTH` of `GLYPH_WIDTH`.
-        let full_width = advance.saturating_mul(2);
-        let height = self.cell_height;
-        // Bounded by the native glyph, so the resampled bitmap always fits.
-        let mut buffer = [0u8; (atlas::GLYPH_WIDTH * atlas::CELL_HEIGHT) as usize];
+        let geometry = CellGeometry {
+            width: self.glyph_width(),
+            height: self.cell_height,
+            baseline: self.baseline(),
+        };
+        let full_width = geometry.width.saturating_mul(2);
+        let px_per_em = cache::px_per_em(self.cell_height);
+        // One reusable buffer for every glyph in the run: the cache copies each
+        // glyph's coverage into it, so a glyph costs no allocation after the
+        // first (the size varies with the cell height, not per glyph).
+        let mut buffer: Vec<u8> = Vec::new();
         let mut pen = x;
         for ch in text.chars() {
             let cells = u32::from(char_width(ch));
-            let index = cell_index(ch);
-            cache::scaled_coverage(index, full_width, height, &mut buffer);
+            cache::scaled_coverage(ch, &geometry, px_per_em, &mut buffer);
             let visible = advance.saturating_mul(cells).min(full_width);
             draw_scaled_glyph(
-                surface, pen, y, &buffer, full_width, height, visible, &sources,
+                surface,
+                pen,
+                y,
+                &buffer,
+                full_width,
+                geometry.height,
+                visible,
+                &sources,
             );
             pen = pen.saturating_add(advance_step(advance.saturating_mul(cells)));
         }
