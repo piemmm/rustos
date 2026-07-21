@@ -1687,6 +1687,7 @@ You are not exempt from any rule above. In addition:
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
     | CPU-lockup watchdog (soft/hard lockup detection, diagnostics, recovery, the Arch-HAL watchdog slice) | `plans/WATCHDOG.md` |
+    | Kernel-panic diagnostics (register dump + stack backtrace, the Arch-HAL backtrace slice, unified panic path) | `plans/FIX-PANICS.md` |
     | Syscall interruptibility / IRQ-on-entry (interruptible syscall bodies, non-preemptible kernel, reschedule-at-return) | `plans/FIX-SYSCALL.md` |
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
     | Boot chain / bootloader (Rust-only UEFI/BIOS loader, kernel ELF load + multiboot2 handoff, GPT/ESP whole-disk image) | `plans/BOOTLOADER.md` |
