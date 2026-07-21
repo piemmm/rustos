@@ -340,6 +340,25 @@ impl<M: IoApicMmio + Send + 'static> IrqController for IoApicController<M> {
         fence(Ordering::SeqCst);
         Ok(())
     }
+
+    fn rearm(&self, line: u32) -> Result<(), MaskError> {
+        // Re-enable the line at the controller after a completion.
+        // [`tairix_kernel_irq::IrqTable::fire`] masks a line before its
+        // waiter observes the wake (mask-before-wake), so once a driver has
+        // drained the completion the line must be unmasked for the next
+        // device interrupt — a user-space interrupt-driven driver cannot
+        // touch the IO-APIC, so its `irq_wait` park path re-arms the bound
+        // line through this method on the driver's behalf (no ambient
+        // hardware access). The default no-op would leave an INTx line
+        // masked-forever after the first completion, so the override is
+        // required — the sibling of the aarch64 `GicIrqController` /
+        // riscv64 `PlicIrqController` re-arm. Re-uses the cached
+        // vector + destination the boot pipeline programmed; a line no
+        // block owns, or one never programmed, maps to
+        // [`MaskError::OutOfRange`] (fail closed). Idempotent: unmasking an
+        // already-unmasked line is a no-op.
+        self.unmask(line).map_err(|_| MaskError::OutOfRange)
+    }
 }
 
 /// The Arch HAL view of the IO-APIC controller
@@ -658,5 +677,38 @@ mod tests {
     fn unmask_rejects_unprogrammed_pin() {
         let (controller, _mmio) = fresh_controller(0, 24);
         assert_eq!(controller.unmask(7), Err(ProgramError::GsiOutOfRange));
+    }
+
+    /// The [`IrqController::rearm`] override clears the mask bit through the
+    /// controller — the counterpart of the mask-before-wake `mask` write the
+    /// user-space `irq_wait` park path drives on a bound line's behalf. A
+    /// line masked by `IrqController::mask` re-reads unmasked after `rearm`,
+    /// with the cached vector + destination preserved.
+    #[test]
+    fn rearm_clears_the_mask_bit_after_a_masking_fire() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        controller.program_pin(7, 0x61, 0x0C, false).expect("prog");
+        // A `fire`-time mask leaves the pin masked.
+        IrqController::mask(&controller, 7).expect("mask");
+        assert!(
+            controller.read_pin_low(7).expect("readable") & (1 << 16) != 0,
+            "post-mask: masked"
+        );
+        // `rearm` re-enables it for the next device interrupt.
+        IrqController::rearm(&controller, 7).expect("rearm");
+        let low = controller.read_pin_low(7).expect("readable");
+        assert_eq!(low & 0xFF, 0x61, "vector preserved");
+        assert_eq!(low & (1 << 16), 0, "mask bit cleared by rearm");
+    }
+
+    /// `rearm` on a line no block owns fails closed with
+    /// [`MaskError::OutOfRange`], mirroring `mask`.
+    #[test]
+    fn rearm_rejects_gsi_out_of_range() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        assert_eq!(
+            IrqController::rearm(&controller, 99),
+            Err(MaskError::OutOfRange)
+        );
     }
 }

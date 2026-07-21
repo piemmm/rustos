@@ -48,6 +48,16 @@ use crate::hwtree_node_ids::{
 /// MMIO probe does — one signed driver bundle binds on either bus.
 const VIRTIO_PCI_MODERN_DEVICE_ID_BASE: u32 = 0x1040;
 
+/// The PCI device id a **modern** virtio function of virtio *type*
+/// `virtio_type` reports: `0x1040 + virtio_type` (virtio 1.1 §4.1.2). The
+/// one definition the PCI probes and the in-kernel bootstrap-floor bring-up
+/// (`crate::x86_64::root_unlock`) share, so the `0x1040 + type` encoding is
+/// never respelled.
+#[must_use]
+pub fn virtio_pci_modern_device_id(virtio_type: u32) -> u32 {
+    VIRTIO_PCI_MODERN_DEVICE_ID_BASE + virtio_type
+}
+
 /// Enumerate the virtio-MMIO `bus` and emit each populated **block** slot
 /// into `sink` as a probed child node.
 ///
@@ -186,7 +196,7 @@ pub fn observe_virtio_pci_block_devices(
     let mut table = [blank; MAX_SLOTS];
     let count = bus.enumerate(&mut table)?;
     // The PCI device id a modern virtio-blk function reports.
-    let want_device_id = VIRTIO_PCI_MODERN_DEVICE_ID_BASE + VIRTIO_BLK_DEVICE_ID;
+    let want_device_id = virtio_pci_modern_device_id(VIRTIO_BLK_DEVICE_ID);
     let mut next_id = VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID;
     for device in &table[..count] {
         if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) || device.device != want_device_id {
@@ -511,7 +521,7 @@ fn observe_virtio_pci_devices(
     let mut table = [blank; MAX_SLOTS];
     let count = bus.enumerate(&mut table)?;
     // The PCI device ID a modern virtio function of this type reports.
-    let want_device_id = VIRTIO_PCI_MODERN_DEVICE_ID_BASE + virtio_type;
+    let want_device_id = virtio_pci_modern_device_id(virtio_type);
     let mut next_id = node_base_id;
     for device in &table[..count] {
         // Only modern virtio functions are candidates.

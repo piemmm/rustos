@@ -108,30 +108,45 @@ profiles matching the Pi builder's semantics, host tests over the produced
 layout, and the QEMU whole-disk fixture able to serve the same image shape
 the verticals mount.
 
-### A2 — Production boot storage floor + registry deletion (`planned`)
+### A2 — Production boot storage floor + registry deletion (`in progress`)
 
-Foundation in place: the x86_64 boot hardware-tree seed
-(`boot_x86_64::seed_virtio_pci`) emits the discovered virtio-blk-PCI disk
-as a match-key-only `Storage` node, via the arch-neutral
-`hwdiscovery::observe_virtio_pci_block_devices` probe (its node-id region
-claimed in `hwtree_node_ids.rs`, the shared `emit_virtio_block_node` body
-also backing the MMIO block probe). The node the `root_storage` gate binds
-the bootstrap-floor block driver from is therefore discovered; what remains
-is the boot composition that consumes it.
+The boot composition is **landed and host-gate-green** (the live QEMU
+verticals + registry deletion remain, gated on the A1 image builder —
+staged exactly as the riscv64 parity port was: production composition
+host-gate-green first, then boot-confirmed). Done-state:
 
-The `PLAN.md` increment-5 end state. Bind the virtio-blk-PCI root through
-the shared `root_storage` gate in the x86_64 production boot; add the
-port's `root_unlock` admission (the unlock kthread composing the shared
-`root_mount` pipeline: PBKDF2 unlock → ARXFS root mount → users DB +
-admin publish → read-only `/System` mount → volume forest → disk-backed
-app store), wiring `with_app_store`/`with_users_db`/`with_users_admin`/
-`with_filesystem`/`with_volumes` exactly as the aarch64 boot does. riscv64
-gains the same over its virtio-MMIO floor (same increment or the next).
-Then **delete** `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1
-`init`), `spawn_paths.rs`, and `program_manifests.rs`, updating `PLAN.md`
-(§2.14). Verticals: `root_unlock_login_qemu_x86_64`,
+- `boot_x86_64::seed_hardware_tree` returns the leaked `&'static [HwNode]`
+  tree it publishes to `HW_TREE`; `try_boot` resolves the bootstrap root
+  block binding from it through the shared `root_storage::
+  resolve_root_block_driver` gate and stashes it with
+  `unlock_service::record_boot(binding, /* dtb */ 0, tree)` — dtb is `0`
+  because the x86_64 bring-up re-resolves the transport from PCI config
+  space, not a firmware device tree.
+- `try_boot` composes the shared pipeline exactly as the aarch64/riscv64
+  boots do: `with_app_store` / `with_users_db` / `with_users_admin` /
+  `with_filesystem` / `with_volumes` / `with_volume_service`.
+- `kernel/tairix-kernel/src/x86_64/root_unlock.rs` is the port's unlock
+  admission (`spawn_if_present` at the init seam, `virtio_blk_unlock`):
+  it brings the bound virtio-blk-PCI root up over `mechanism_one` +
+  `provision_virtio_pci`, routes the device's interrupt through **MSI-X**
+  (binding the discovered PCI Interrupt-Line GSI, reusing its boot-assigned
+  vector), drives an `IrqParkWaiter` (with a `sti;hlt;cli` fallback park),
+  and hands the opened `VirtioBlk` to the shared
+  `unlock_orchestrate::finish_unlock`. `x86_64/init_spawn.rs` calls
+  `spawn_if_present(ctx)` before `admit_init`. The console-0 read half is
+  the fail-closed `NULL_CONSOLE_READ` this slice (interactive COM1 input is
+  A3), so `login` fails closed while the disk still mounts and the driver
+  store still serves.
+- `IoApicController::rearm` now unmasks the line (the riscv64-class
+  re-arm fix), so a user-space INTx `irq_wait` re-arm re-enables its pin.
+
+Remaining for A2 (this increment did **not** land): the A1 image builder,
+the live verticals (`root_unlock_login_qemu_x86_64`,
 `root_unlock_admission_qemu_x86_64`, `users_db_qemu_x86_64` as thin bins
-over the shared scenarios.
+over the shared scenarios), and — once A1 lands for both remaining
+disk-booting ports — deleting `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s
+(all but PID 1 `init`), `spawn_paths.rs`, and `program_manifests.rs`
+(§2.14).
 
 ### A3 — Interrupt-driven console + login/session supervision (`planned`)
 
@@ -205,4 +220,8 @@ because its blocker is not an aarch64-parity item.
 
 ## 4. Status
 
-All increments `planned` (A7 `blocked` on Stage 6) — nothing started.
+- **A2 `in progress`**: the production boot composition + `root_unlock`
+  admission is landed and host-gate-green (see A2 above); its A1 image
+  builder, live QEMU verticals, and the registry deletion remain.
+- **A1, A3, A4, A5, A6 `planned`**; **A7 `blocked`** on the Stage 6
+  user/kernel page-table boundary.
