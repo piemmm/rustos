@@ -471,7 +471,6 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             // unused here (the empty registry fails any
             // `spawn` closed).
             &EMPTY_PROGRAM_REGISTRY,
-            &AARCH64_PROCESS_SPAWN,
             &NULL_PROCESS_WAIT,
             // This test exercises the driver-spawn / IPC path, not keyboard
             // input; the seat registry stays fail-closed.
@@ -526,6 +525,21 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // crate's `InitCtxDriverProcessSpawn` bridge rather than re-implementing
     // the context assembly. `NULL_PROCESS_WAIT`:
     // this vertical does not reap the long-lived spawned driver.
+    // Publish the launch-services bundle the deferred driver-load path reads:
+    // the arch image builder builds the autoloaded driver's image on the
+    // driver task's own first slice. The one shared build+publish the
+    // production boot path uses.
+    let _ = tairix_kernel_core::spawn_services::install_over(
+        sys.arch,
+        sys.frames,
+        &SERIAL_SINK,
+        &tairix_kernel_core::NULL_FILESYSTEM,
+        None,
+        sys.aspaces,
+        sys.caps,
+        &NULL_PROCESS_WAIT,
+        &AARCH64_PROCESS_SPAWN,
+    );
     let init_ctx = KernelInitSpawner::new(
         sys.frames,
         &SERIAL_SINK,
@@ -537,7 +551,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
     );
-    let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
+    let spawn = InitCtxDriverProcessSpawn::new(&init_ctx);
     let args: [&[u8]; 3] = [b"drvstub", REPLY_ENDPOINT_ARG, REPLY_PORT_NAME];
     // The matched node id (the device node, id 2) the kernel records against
     // the spawned driver so its `hw_emit_node` children parent under it.

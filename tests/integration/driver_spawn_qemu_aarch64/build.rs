@@ -38,7 +38,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Virtual base the stub program image is mapped at: the production aarch64
-/// spawn producer's image bias (`spawn_with` passes it to
+/// spawn producer's image bias (the image builder passes it to
 /// `build_process_image`, so the `rxe`'s baked relocations must target the
 /// same value). It is the shared [`tairix_itest_harness::USER_IMAGE_BIAS`]
 /// definition; the test kernel asserts it agrees with the

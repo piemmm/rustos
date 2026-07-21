@@ -229,3 +229,61 @@ the shared per-CPU slot. Both fixes are detailed on [the x86_64 platform
 page](../platform/x86_64.md) ("Two-task ring-3 timeshare") and proven by
 `tests/integration/spawn_el0_timeshare_qemu_x86_64`, the x86_64 sibling of
 the aarch64 vertical above.
+
+## Asynchronous process launch (admit-then-load)
+
+`SyscallNumber::SPAWN` never blocks the calling task on the heavy work of
+starting a program. The freeze it used to cause — a desktop, shell, or any
+interactive loop stalled for the whole of a disk read, signature
+verification, and address-space build — is removed by splitting the launch
+into a small synchronous half on the caller and a deferred half on the new
+child's own first scheduled slice. The design is staged in
+[`plans/FIX-DESKTOP.md`](../../../plans/FIX-DESKTOP.md) (DESK-1); this
+section is the source of truth for the task model.
+
+**Synchronous on the caller (fail-fast, fail-closed).** The `spawn`
+handler does only manifest-independent work whose cost is bounded and does
+not touch the program's bytes: the `CAP_PROC_SPAWN` check, the path
+copy-in and `@self` substitution, attach/standard-stream resolution, the
+kernel-attested credential (`resolve_spawn_credential`), the process
+identity (`proc_id`, name, spawn path), and the **syntactic** resolution
+of the path to either a boot-floor program or a well-formed
+`<Name>.app/Run` store bundle. An unresolvable path or a malformed
+attach/strings block fails closed here with an errno, admitting nothing.
+It then builds a `LoadPlan` — `Prebuilt` (an embedded/driver image whose
+`'static`/owned bytes and manifest request are already known) or `Bundle`
+(a store bundle the child will read itself) — and calls
+`KernelSpawnCtx::admit_loading`, which returns the minted PID at once. The
+caller keeps running: no repaint, cursor, or input loop is stalled.
+
+**Deferred on the child.** `admit_loading` registers a **parked plain
+kernel kthread** carrying only the manifest-independent admit state: a
+*placeholder empty-capability* record (derived through the shared
+`ChildRecordSeed`/`derive_task_record` so it and the later effective
+record can never diverge), the resolved standard streams and wired open
+entries, inherited resource limits and working directory, any device
+grants and matched node, and the parent/child wait link. Its loading body
+then runs on the child's *own* task: it parks for the app store if needed
+(`body_wait_app_store`, via `reschedule_current` — never a busy-spin),
+obtains the verified image (a prebuilt image directly, or a bundle read
+and verified under the child's *own* `(uid, ceiling)` credential through
+the shared load gate), derives and installs the effective capability set
+(`ceiling ∩ manifest`) **replacing** the placeholder, builds the isolated
+address space through `ArchImageBuilder::build`, registers the frozen
+space and user-stack span, and finally upgrades itself into a user task
+via `Yielder::become_user`. No unverified byte is ever mapped, and the
+child is never dispatchable under the placeholder authority: the effective
+record and the frozen space are installed strictly before `become_user`.
+
+**Failure is loud, never silent (`AGENTS.md` §24).** A load that fails on
+the child's own slice does not surface as a `spawn` errno — the caller
+already has the PID. Instead the child audits the refusal
+(`emit_load_refusal`, a `ProcessSpawnDenied` event attributed to the child
+with the reserved status) and exits with a reserved load-failure status,
+so the parent reaps a code it can turn into a `stderr` diagnosis. The
+status band is one `lib/abi` definition both sides share:
+`load_failure_status(Errno) -> i32` maps every load-path error onto
+`LOAD_NOT_FOUND` / `LOAD_UNVERIFIED` / `LOAD_MALFORMED` / `LOAD_OOM`, and
+`load_failure_reason(i32) -> Option<&str>` is the reverse map the parent
+reap uses. A refused load leaves nothing half-installed: no address space
+is registered and the admit-time bookkeeping is reclaimed.

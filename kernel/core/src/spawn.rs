@@ -244,7 +244,7 @@ pub trait InitSpawnCtx {
     /// kernel (a device's DMA mapping lives for the driver
     /// load), so it needs a `'static` allocator, not the call-scoped borrow
     /// [`frames`](Self::frames) hands out. Mirrors
-    /// [`SpawnCtx::page_table_allocator`].
+    /// [`ImageBuildCtx::page_table_allocator`].
     ///
     /// The default returns [`None`] — a context with no `'static` allocator
     /// (a host test double) makes a service spawner fall back / fail closed rather than allocating from a borrow it cannot
@@ -296,20 +296,27 @@ pub trait InitSpawnCtx {
     /// [`KernelSpawnCtx`](crate::KernelSpawnCtx) over the feature-selected
     /// scheduler, capability table, and address-space registry — types a
     /// scheduler-agnostic caller (the bin crate) deliberately never names —
-    /// and drives `spawn`'s [`ProcessSpawn::spawn_with`]. `spawn` is the
-    /// architecture's process-spawn producer; it builds the isolated address
-    /// space and re-asserts every kernel-side check (the spawn path re-checks
-    /// `CAP_PROC_SPAWN` and re-parses the `rxe` against the kernel's syscall
-    /// CFI tag), so spawning is not a privileged bypass.
+    /// and drives the deferred-load admit
+    /// ([`KernelSpawnCtx::admit_loading`](crate::KernelSpawnCtx::admit_loading),
+    /// `plans/FIX-DESKTOP.md` §2.6.5). The verified driver image is a
+    /// *prebuilt* load plan, so the driver builds its own isolated address
+    /// space on its own first slice — the autoloading boot service is never
+    /// blocked on the build. Every kernel-side check still applies (the image
+    /// was signature-verified by the load gate, and the build re-parses the
+    /// `rxe` against the kernel's syscall CFI tag), so spawning is not a
+    /// privileged bypass.
     ///
     /// # Errors
     ///
-    /// Fails closed with a stable [`Errno`] on any error — a malformed
-    /// `rxe`, a build or page-table-frame exhaustion, an unrunnable context,
-    /// or an admission failure — never a panic or a half-built task. The default returns [`Errno::NotImplemented`]: a
-    /// context that wires no scheduler offers no driver spawn rather than
-    /// pretending to, mirroring [`spawn_kernel_service`](Self::spawn_kernel_service)
-    /// returning [`None`] and [`ProcessSpawn::spawn_with`]'s own default.
+    /// Fails closed with a stable [`Errno`] on any *admission* error (launch
+    /// services unwired, scheduler exhaustion) — never a panic or a
+    /// half-built task. A load failure discovered on the driver's own task
+    /// surfaces through its reserved-status exit, not this return value
+    /// (`plans/FIX-DESKTOP.md` §2.3). The default returns
+    /// [`Errno::NotImplemented`]: a context that wires no scheduler offers no
+    /// driver spawn rather than pretending to, mirroring
+    /// [`spawn_kernel_service`](Self::spawn_kernel_service) returning
+    /// [`None`].
     ///
     /// `node_id` is the discovered hardware-tree node the driver was matched
     /// for; it is recorded against the child so the
@@ -328,7 +335,6 @@ pub trait InitSpawnCtx {
     #[allow(clippy::too_many_arguments)]
     fn spawn_driver_process(
         &self,
-        spawn: &dyn ProcessSpawn,
         path: &str,
         rxe: &[u8],
         caps: CapabilitySet,
@@ -336,7 +342,7 @@ pub trait InitSpawnCtx {
         args: &[&[u8]],
         node_id: Option<u32>,
     ) -> Result<u64, Errno> {
-        let _ = (spawn, path, rxe, caps, grants, args, node_id);
+        let _ = (path, rxe, caps, grants, args, node_id);
         Err(Errno::NotImplemented)
     }
 
@@ -588,58 +594,29 @@ where
     ))
 }
 
-/// Audit one spawn-producer refusal taken *around* [`spawn_image`] — the
-/// page-table, layout, and stack-span derivations a
-/// [`ProcessSpawn::spawn_with`] implementation performs before the image
-/// build — and return the stable resource errno the `spawn` caller sees.
+/// Audit one refusal an [`ArchImageBuilder::build`] takes *around*
+/// [`spawn_image`] — the page-table, layout, and stack-span derivations the
+/// build performs before the image is materialised — and return the stable
+/// resource errno the load surfaces.
 ///
 /// [`spawn_image`] audits the capability decision and the image build
-/// itself, but the producer steps around it used to refuse a spawn
-/// silently: the audit log showed a rejected syscall with no cause, which
-/// is exactly the gap that made a boot-service launch refusal
-/// undiagnosable from a serial transcript. A refused spawn is a
-/// security-relevant decision, so it is logged with a stable `cause`
-/// (the same closed cause vocabulary the build-failure audit record
-/// uses) plus the kernel
-/// frame allocator's remaining free-frame count, which tells genuine RAM
-/// exhaustion apart from a derivation or translate failure at the same
-/// site.
-pub fn refuse_spawn(ctx: &dyn SpawnCtx, cause: &'static str) -> Errno {
-    emit(
-        ctx.audit(),
-        AuditEvent::ProcessSpawnFailed,
-        Level::Error,
-        &[
-            Field {
-                key: "cause",
-                value: tairix_log::FieldValue::Str(cause),
-            },
-            Field {
-                key: "free_frames",
-                value: tairix_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
-            },
-        ],
-    );
+/// itself, but the build steps around it used to refuse silently: the audit
+/// log showed a rejected load with no cause, which is exactly the gap that
+/// made a boot-service launch refusal undiagnosable from a serial
+/// transcript. A refused build is a security-relevant decision, so it is
+/// logged with a stable `cause` (the closed build-failure cause vocabulary)
+/// plus the kernel frame allocator's remaining free-frame count, which tells
+/// genuine RAM exhaustion apart from a derivation or translate failure at
+/// the same site.
+pub fn refuse_build(ctx: &dyn ImageBuildCtx, cause: &'static str) -> Errno {
+    emit_refuse(ctx.audit(), ctx.frames().free_frames() as u64, cause);
     Errno::NoSpace
 }
 
-/// Map an [`AdmitError`] onto its stable [`Errno`], auditing the refusal
-/// exactly as [`refuse_spawn`] does.
-///
-/// The admit step runs *after* [`spawn_image`]'s `ProcessSpawned` record,
-/// so without this record a failed admission would sit invisibly between
-/// "process spawned" and the rejected syscall. One definition shared by
-/// every port's producer, never a per-arch copy.
-pub fn refuse_admit(ctx: &dyn SpawnCtx, err: AdmitError) -> Errno {
-    // `AdmitError` is `#[non_exhaustive]` only *outside* this crate; here
-    // the match is exhaustive, so a future variant fails the build until it
-    // declares its own stable cause and errno.
-    let (cause, errno) = match err {
-        AdmitError::SchedulerFull => ("scheduler_admit_refused", Errno::NoSpace),
-        AdmitError::AspaceConflict => ("aspace_registry_conflict", Errno::AlreadyExists),
-    };
+/// Emit the shared `ProcessSpawnFailed` audit record for [`refuse_build`].
+fn emit_refuse(audit: &(dyn Sink + Sync), free_frames: u64, cause: &'static str) {
     emit(
-        ctx.audit(),
+        audit,
         AuditEvent::ProcessSpawnFailed,
         Level::Error,
         &[
@@ -649,11 +626,30 @@ pub fn refuse_admit(ctx: &dyn SpawnCtx, err: AdmitError) -> Errno {
             },
             Field {
                 key: "free_frames",
-                value: tairix_log::FieldValue::UnsignedInt(ctx.frames().free_frames() as u64),
+                value: tairix_log::FieldValue::UnsignedInt(free_frames),
             },
         ],
     );
-    errno
+}
+
+/// Map an [`AdmitError`] onto its stable [`Errno`] for the `spawn` syscall's
+/// caller (`plans/FIX-DESKTOP.md` §2.3).
+///
+/// A pure mapping: the asynchronous-launch admit path
+/// ([`KernelSpawnCtx::admit_loading`](crate::KernelSpawnCtx::admit_loading))
+/// fails synchronously only when the launch services are unwired or the
+/// scheduler is exhausted — neither is a *load* refusal (those surface
+/// through the child's reserved-status exit and are audited on the child's
+/// task), so this maps the admit outcome without a second audit record.
+#[must_use]
+pub fn admit_errno(err: AdmitError) -> Errno {
+    // `AdmitError` is `#[non_exhaustive]` only outside this crate; here the
+    // match is exhaustive, so a future variant fails the build until it
+    // declares its own stable errno.
+    match err {
+        AdmitError::SchedulerFull => Errno::NoSpace,
+        AdmitError::AspaceConflict => Errno::AlreadyExists,
+    }
 }
 
 /// Map a [`SpawnCallerError`] onto a stable [`Errno`] for the `spawn`
@@ -726,7 +722,7 @@ impl EmbeddedProgram {
 /// console seam: it boots [`EMPTY`](Self::EMPTY), so a `spawn` of any path
 /// fails closed with [`Errno::NotFound`] until the kernel binary registers
 /// its embedded programs (the host-only `elf2rxe` build glue). It is pure data with no ambient authority and no audit sink of
-/// its own — the `spawn` handler and the [`ProcessSpawn`] producer own the
+/// its own — the `spawn` handler and the [`ArchImageBuilder`] producer own the
 /// security-relevant logging, exactly as the dispatcher audits IPC
 /// endpoint lookups rather than the registry doing so internally.
 pub struct ProgramRegistry {
@@ -774,9 +770,9 @@ pub static EMPTY_PROGRAM_REGISTRY: ProgramRegistry = ProgramRegistry::EMPTY;
 
 /// Why admitting a freshly built process as a runnable task failed.
 ///
-/// The [`ProcessSpawn`] producer maps each variant onto a stable
-/// [`Errno`] for the `spawn` syscall's caller; the partially built
-/// resources are reclaimed before returning.
+/// [`admit_errno`] maps each variant onto a stable [`Errno`] for the
+/// `spawn` syscall's caller; the partially built resources are reclaimed
+/// before returning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmitError {
@@ -788,199 +784,190 @@ pub enum AdmitError {
     AspaceConflict,
 }
 
-/// The core-side registration context a [`ProcessSpawn`] producer drives
-/// to register a freshly built process and obtain its PID
-/// (`plans/SPAWN.md` SP3).
+/// A freshly built, not-yet-admitted user image an [`ArchImageBuilder`]
+/// hands the core after materialising a program into a hardware-isolated
+/// address space (`plans/FIX-DESKTOP.md` §5 item 1).
 ///
-/// It is the runtime-spawn analogue of [`InitSpawnCtx`]: the arch-specific
-/// producer builds the isolated address space (naming the port's concrete
-/// page table + [`EnterUser`] primitive, which `kernel/core` cannot spell) and hands it back through
-/// [`admit_process`](Self::admit_process), which registers the task with
-/// the scheduler, capability table, and address-space registry. Unlike
-/// [`InitSpawnCtx::admit_init`] it admits the task **Ready** and returns
-/// its PID **without** entering user mode or draining the scheduler: the
-/// child runs when the scheduler next steps, and the spawning caller keeps
-/// running (a true concurrent spawn, not an `exec`-style hand-off).
-pub trait SpawnCtx {
-    /// The kernel's live physical-frame allocator, the source of the
-    /// frames the new image's pages are mapped to.
+/// This is the deferred-load counterpart of the eager `admit_process`
+/// hand-off: the arch seam still owns the irreducibly architecture-specific
+/// work (spelling the port's concrete page table, [`EnterUser`] primitive,
+/// and direct physical map), but it now runs on the **loading child's own
+/// kernel stack** and returns the built image *as a value* for the core to
+/// register, rather than admitting the task itself. Keeping admission in the
+/// core (one definition, all ports) is what lets the load run off the
+/// spawning caller's task so an interactive loop never freezes behind it.
+///
+/// It carries **no** kernel stack: the loading kthread already owns the
+/// stack it runs on (allocated at admit through
+/// [`ArchImageBuilder::alloc_kernel_stack`]), and [`ArchImageBuilder::build`]
+/// only re-expresses that stack's guard page in the child's own (inactive)
+/// root ([`ImageBuildCtx::kernel_stack_guard`]).
+pub struct BuiltImage {
+    /// The registry-storable, `Send + Sync` frozen snapshot of the child's
+    /// user mappings (an arch port's *live* address space is not `Sync`),
+    /// registered under the child's id so its first user-memory copy
+    /// resolves its own mappings.
+    pub frozen: Box<dyn UserAddressSpace + Send + Sync>,
+    /// The kernel direct map backing `frozen`, so the copy path reads
+    /// exactly the memory the program sees.
+    pub physmap: Box<dyn PhysMap + Send + Sync>,
+    /// The user-stack span the seam's layout placed in `frozen`; the fault
+    /// path backs growth pages inside it.
+    pub stack_span: StackSpan,
+    /// The retained live, mutable address space (`plans/PI.md`
+    /// 5d-0-ii (b′)) built from the *same* arch space `frozen` was frozen
+    /// from, so the child's `mem_map` / `mmio_map` mutate its own space.
+    /// [`None`] retains no live space and those syscalls fail closed.
+    pub live: Option<Box<dyn LiveUserSpace + Send>>,
+    /// The child's page-table-root reactivation hook, run on the
+    /// dispatcher's context before every switch into the child so it enters
+    /// user mode under its own isolated root. Handed the task's kernel-stack
+    /// top (x86_64 repoints its per-CPU entry stack; aarch64/riscv64 ignore
+    /// it).
+    pub pre_resume: Box<dyn FnMut(u64) + Send>,
+    /// The arch-specific user-mode transition; it diverges, so its `!`
+    /// coerces to `()`. The loading body invokes it once, after
+    /// [`crate::kthread::Yielder::become_user`] has installed `pre_resume`
+    /// and `live`.
+    pub enter: Box<dyn FnMut() + Send>,
+}
+
+/// The build-only subset of the spawn context an [`ArchImageBuilder`] reads
+/// to materialise a child image (`plans/FIX-DESKTOP.md` §5 item 1).
+///
+/// It exposes exactly the frame sources and audit sink the build path
+/// needs, plus the loading kthread's kernel-stack guard VA so
+/// [`ArchImageBuilder::build`] can re-express that guard page in the child's
+/// own root — the same split+unmap the eager producer did at admit, now on
+/// the child's own (inactive) space. Admission is **not** part of this
+/// boundary: the core owns it.
+pub trait ImageBuildCtx {
+    /// The kernel's live physical-frame allocator — the source of the
+    /// frames the image's pages are mapped to.
     fn frames(&self) -> &FrameAllocator;
 
-    /// The kernel's live physical-frame allocator as a `'static` borrow,
-    /// when one is wired, so an arch producer can build the child's
-    /// **page tables** out of ordinary reclaimable RAM instead of a
-    /// fixed-size `.bss` pool (a capacity scales with
-    /// discovered RAM and grows on demand, never a hard-wired `const`
-    /// ceiling on how many processes can be spawned).
-    ///
-    /// This is the *same* allocator as [`frames`](Self::frames); the
-    /// distinct accessor exists only because a port's `AddressSpace`
-    /// retains its page-table frame source as a `&'static dyn
-    /// PageTableFrames`, so the source must be `'static` (the elided
-    /// lifetime of [`frames`](Self::frames) is the call only). The default
-    /// returns [`None`] — a build context with no `'static` allocator (a
-    /// host test double) makes the producer fall back / fail closed rather than over-spawning. The production
-    /// [`KernelSyscallHandlers`](crate::KernelSyscallHandlers) returns the
-    /// leaked-`'static` kernel allocator.
-    fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
-        None
-    }
+    /// The live physical-frame allocator as a `'static` borrow, when one is
+    /// wired, so the seam can build the child's page tables out of
+    /// reclaimable RAM that scales with the machine. [`None`] makes the
+    /// producer fail closed rather than over-spawn.
+    fn page_table_allocator(&self) -> Option<&'static FrameAllocator>;
 
-    /// The boot audit sink the build path records `ProcessSpawn*` events
-    /// through.
+    /// The audit sink the build path records `ProcessSpawn*` events through.
     fn audit(&self) -> &(dyn Sink + Sync);
 
-    /// Register the freshly built process as a runnable (**Ready**) task
-    /// with the scheduler (as a resumable user kthread, `plans/SPAWN.md`
-    /// SP2), the capability table, and the address-space registry (`space` +
-    /// `physmap`, under the same numeric id the dispatcher recovers so the
-    /// child's first user-memory copy resolves its own mappings), and return
-    /// its PID.
+    /// The guard virtual address of the kernel stack the loading kthread
+    /// runs on (from [`ArchImageBuilder::alloc_kernel_stack`]), so
+    /// [`ArchImageBuilder::build`] can split the coarse identity block
+    /// covering it and unmap the single guard page in the *child's own*
+    /// root — turning an overrun of the child's kernel stack into a
+    /// synchronous fault under the child's translation regime rather than
+    /// corrupting a neighbour.
     ///
-    /// `caps` is the program's **manifest request**. The production context
-    /// derives the child's effective set as `caps ∩ the spawn credential's
-    /// user ceiling` (`plans/CAPABILITY_USE.md` CU1); a system-principal
-    /// credential carries no users-db ceiling, so its manifest stands as
-    /// both sides and the effective set is exactly `caps`.
-    ///
-    /// `enter` is the arch-specific user-mode transition boxed as a
-    /// `FnMut()` (it diverges, so its `!` coerces to `()`); it becomes the
-    /// task's kthread work body, run once on the task's first dispatch.
-    /// `pre_resume` reactivates the task's page-table root before every
-    /// switch into it, keeping it hardware-isolated from its siblings. It is handed the task's own kernel-stack top so a
-    /// port whose syscall entry does not implicitly resume on that stack
-    /// (x86_64) can repoint its per-CPU entry stack at it (`plans/PI.md`
-    /// §X); aarch64 reuses `SP_EL1` and ignores the argument.
-    ///
-    /// `stack` is the child's kernel stack, built by the arch seam so the
-    /// concrete stack source never leaks into this object-safe boundary, exactly as [`InitSpawnCtx::admit_init`] takes it.
-    /// The seam supplies either the heap-backed software-canary
-    /// [`crate::BoxStack`] or an arena-backed stack whose guard page it has
-    /// **unmapped in the child's own page-table root**, so an overrun of the
-    /// child's kernel stack takes a synchronous fault under the child's
-    /// translation regime rather than corrupting a neighbour (`plans/PI.md`
-    /// guard-page fault-form;). The runtime stores it
-    /// in the child's control block and frees it when the task exits.
-    ///
-    /// `live` is the child's **retained live, mutable** user address space
-    /// (`plans/PI.md` 5d-0-ii (b′)), the runtime-spawn analogue of the
-    /// parameter [`InitSpawnCtx::admit_init`] takes: when [`Some`], the
-    /// runtime owns it in the child's control block and publishes it on the
-    /// per-CPU live-space slot while the child is switched in, so the
-    /// child's `mem_map` / `mmio_map` syscalls mutate its own address space
-    /// through [`crate::kthread::with_current_live_space`]. The producer
-    /// builds it from the *same* arch address space it froze into `space`. A
-    /// producer that retains no live space passes [`None`] and the child's
-    /// `mem_map` / `mmio_map` fail closed.
-    ///
-    /// This does **not** enter user mode or step the scheduler: it returns
-    /// the new PID and the caller resumes. Every failure reclaims what it
-    /// built and returns an [`AdmitError`].
-    ///
-    /// # Safety
-    ///
-    /// `space` must faithfully describe the isolated user mappings the
-    /// producer just built and `physmap` must back them, so the copy path
-    /// reads exactly the memory the program sees; `pre_resume` must
-    /// activate that space's root before the task is first entered.
-    /// `stack` must be a region exclusive to the child that stays mapped
-    /// (its guard page aside) and valid for as long as the task lives.
-    /// When `live` is [`Some`] it must wrap the same arch address space
-    /// `space` was frozen from. `stack_span` must describe the user-stack
-    /// span the producer's layout actually placed in `space` — the fault
-    /// path backs growth pages inside it, so a span naming the wrong
-    /// region would let a fault map memory the layout never reserved.
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn admit_process(
-        &self,
-        caps: CapabilitySet,
-        space: Box<dyn UserAddressSpace + Send + Sync>,
-        physmap: Box<dyn PhysMap + Send + Sync>,
-        stack_span: StackSpan,
-        stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut(u64) + Send>,
-        live: Option<Box<dyn LiveUserSpace + Send>>,
-        enter: Box<dyn FnMut() + Send>,
-    ) -> Result<u64, AdmitError>;
+    /// [`None`] when the stack is the heap-backed software-canary
+    /// [`crate::BoxStack`] fallback (which guards itself with a poison
+    /// canary and needs no page unmapped in the child root).
+    fn kernel_stack_guard(&self) -> Option<u64>;
 }
 
 /// The architecture-specific seam that builds a fresh, hardware-isolated
-/// address space from a validated `rxe` and admits it as a runnable
-/// process (`plans/SPAWN.md` SP3).
+/// user image from a validated `rxe` **without admitting it**
+/// (`plans/FIX-DESKTOP.md` §5 item 1), the deferred-load replacement for the
+/// former synchronous process producer.
 ///
-/// Installed into the syscall handler through
-/// [`KernelSyscallHandlers::with_spawn`](crate::KernelSyscallHandlers::with_spawn),
-/// exactly as the console list is installed through `with_consoles`. It
-/// defaults to
-/// [`NULL_PROCESS_SPAWN`], which fails closed with
-/// [`Errno::NotImplemented`] until an arch port wires a
-/// real producer. The producer builds the image through the production,
-/// capability-checked, audited [`spawn_image`] caller — spawning is *not*
-/// a privileged bypass: the child receives only the authority its manifest
-/// requests intersected with its user's grants.
+/// Installed into the syscall handler exactly as that producer was, and
+/// captured by the boot-installed `SpawnServices` handle so the child's
+/// loading body — running on its own kernel stack, off the spawning
+/// caller's task — can drive the build. Splitting the old `spawn_with` into
+/// [`alloc_kernel_stack`](Self::alloc_kernel_stack) (run synchronously at
+/// admit, before the child exists) and [`build`](Self::build) (run in the
+/// loading body) is what moves the disk read + verification + image build
+/// off the caller's task.
 ///
-/// `Sync` because the installed producer is shared, immutably, by every
-/// CPU's syscall dispatch path (the handler is held inside the `Sync`
-/// [`crate::DispatchHook`]), exactly like the console device.
-pub trait ProcessSpawn: Sync {
-    /// Build `rxe` into a fresh isolated address space and admit it as a
-    /// runnable process granted exactly `caps` and handed `args` and `env`
-    /// as its startup argument vector and environment, returning its PID.
+/// `Sync` because the installed builder is shared, immutably, by every
+/// CPU's dispatch path and captured in the `'static` `SpawnServices` handle.
+pub trait ArchImageBuilder: Send + Sync {
+    /// Allocate the loading child's kernel stack, returning it boxed behind
+    /// the object-safe [`crate::kthread::KernelStack`] boundary together
+    /// with its guard VA (`Some` for an arena-backed stack whose guard page
+    /// [`build`](Self::build) will unmap in the child root, `None` for the
+    /// heap-backed software-canary [`crate::BoxStack`] fallback).
     ///
-    /// This is the trait's single entry point, driven by two callers. The
-    /// `spawn` syscall handler passes a registered [`EmbeddedProgram`]'s
-    /// image and declared capability set with the effective startup strings
-    /// it resolved (the caller-supplied block, or the program's registered
-    /// defaults) — per-program authority, never the spawning caller's. A
-    /// *driver* spawn passes the verified driver image's bytes, the
-    /// manifest∩caller capability set the load gate already derived, and
-    /// the argument vector the driver reads through `tairix_rt::arg`. The
-    /// matched hardware-tree node's device-resource grants ride on `ctx`
-    /// (the production context mints one owner-checked grant per requested
-    /// resource as the child is registered); this seam never widens
-    /// authority beyond `caps` plus those grants (no ambient authority) —
-    /// `args` and `env` are data, not authority. The child's effective set
-    /// is `caps` ∩ the spawn credential's user ceiling, derived at
-    /// admission.
+    /// Run **synchronously at admit**, before the child's address space
+    /// exists, so the loading kthread has a stack to run its own build on.
+    /// The runtime stores the stack in the child's control block and frees
+    /// it when the task exits.
+    fn alloc_kernel_stack(
+        &self,
+        frames: &FrameAllocator,
+        pt_frames: Option<&'static FrameAllocator>,
+    ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>);
+
+    /// Build `rxe` into a fresh, hardware-isolated address space and return
+    /// it as a [`BuiltImage`] for the core to admit — never admitting it
+    /// here.
     ///
-    /// Living on the trait lets a scheduler-agnostic caller (a generic
-    /// `kernel_main` holding `&dyn ProcessSpawn`) spawn a process into its
-    /// own hardware-isolated address space without naming the port's
-    /// concrete spawn mechanism or the selected scheduler.
-    ///
-    /// The default fails closed with [`Errno::NotImplemented`]: a port that
-    /// has not wired a spawn mechanism ([`NullProcessSpawn`]) refuses
-    /// rather than pretending to spawn.
+    /// Runs in the loading child's body, on the stack
+    /// [`alloc_kernel_stack`](Self::alloc_kernel_stack) allocated. It builds
+    /// the image through the production, capability-checked, audited
+    /// [`spawn_image`] caller (spawning is *not* a privileged bypass), then
+    /// re-expresses the loading stack's guard page
+    /// ([`ImageBuildCtx::kernel_stack_guard`]) in the child's own inactive
+    /// root. A `Some(guard)` whose split+unmap fails in the child root fails
+    /// the build **closed** rather than silently downgrading to an unguarded
+    /// stack.
     ///
     /// # Errors
     ///
-    /// Fails closed with a stable [`Errno`] on any error — a malformed
-    /// `rxe`, a build or page-table-frame exhaustion, an unrunnable context,
-    /// or an admission failure — never a panic or a half-built task.
-    fn spawn_with(
+    /// A stable [`Errno`] on any failure — a malformed `rxe`, a build or
+    /// page-table-frame exhaustion, or a guard-unmap failure — never a panic
+    /// or a half-built image.
+    fn build(
         &self,
         rxe: &[u8],
-        ctx: &dyn SpawnCtx,
-        caps: CapabilitySet,
+        ctx: &dyn ImageBuildCtx,
         args: &[&[u8]],
         env: &[&[u8]],
-    ) -> Result<u64, Errno> {
-        let _ = (rxe, ctx, caps, args, env);
+    ) -> Result<BuiltImage, Errno>;
+}
+
+/// The fail-closed default [`ArchImageBuilder`]: a build with no real image
+/// builder wired fails the deferred load closed with
+/// [`Errno::NotImplemented`], the deferred-launch counterpart of the former
+/// `NullProcessSpawn`.
+///
+/// A port that has not wired a runtime image builder leaves this default, so
+/// a `spawn` admits the child but the child's own load then exits with the
+/// reserved [`tairix_abi::LOAD_MALFORMED`] status
+/// ([`tairix_abi::load_failure_status`] of [`Errno::NotImplemented`]) rather
+/// than the boot path half-building a task. `alloc_kernel_stack` hands back
+/// the software-canary [`crate::BoxStack`] (which self-guards, so it returns
+/// `None` for the guard VA).
+pub struct NullArchImageBuilder;
+
+impl ArchImageBuilder for NullArchImageBuilder {
+    fn alloc_kernel_stack(
+        &self,
+        _frames: &FrameAllocator,
+        _pt_frames: Option<&'static FrameAllocator>,
+    ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>) {
+        (Box::new(crate::kthread::BoxStack::new()), None)
+    }
+
+    fn build(
+        &self,
+        _rxe: &[u8],
+        _ctx: &dyn ImageBuildCtx,
+        _args: &[&[u8]],
+        _env: &[&[u8]],
+    ) -> Result<BuiltImage, Errno> {
         Err(Errno::NotImplemented)
     }
 }
 
-/// The fail-closed default [`ProcessSpawn`] producer: every build with no
-/// real spawn service wired returns [`Errno::NotImplemented`], exactly as [`crate::NULL_CONSOLE`] does for the
-/// `stream_write` syscall.
-pub struct NullProcessSpawn;
-
-impl ProcessSpawn for NullProcessSpawn {}
-
-/// The shared [`NullProcessSpawn`] the syscall handler defaults to until
-/// an arch port installs a real producer through
-/// [`KernelSyscallHandlers::with_spawn`](crate::KernelSyscallHandlers::with_spawn).
-pub static NULL_PROCESS_SPAWN: NullProcessSpawn = NullProcessSpawn;
+/// The shared [`NullArchImageBuilder`] the boot handover defaults to until
+/// an arch port installs a real image builder through
+/// [`crate::BootInfo::with_spawn`].
+pub static NULL_ARCH_IMAGE_BUILDER: NullArchImageBuilder = NullArchImageBuilder;
 
 /// Emit one structured audit record for `event` with `fields`.
 fn emit(audit: &dyn Sink, event: AuditEvent, level: Level, fields: &[Field<'_>]) {
@@ -1216,11 +1203,11 @@ mod tests {
         assert!(!ids.contains(&AuditEvent::ProcessSpawned.id().0));
     }
 
-    /// A minimal [`SpawnCtx`] for exercising the [`ProcessSpawn::spawn_with`]
-    /// default: the default returns before touching the context, so
-    /// [`admit_process`](SpawnCtx::admit_process) is unreachable. It owns a
-    /// one-region [`FrameAllocator`] so [`frames`](SpawnCtx::frames) can hand
-    /// out a reference, and audits through a leaked [`TestSink`].
+    /// A minimal [`ImageBuildCtx`] for exercising the [`ArchImageBuilder::build`]
+    /// default: the default returns [`Errno::NotImplemented`] before touching
+    /// the context. It owns a one-region [`FrameAllocator`] so
+    /// [`frames`](ImageBuildCtx::frames) can hand out a reference, and audits
+    /// through a leaked [`TestSink`].
     struct StubCtx {
         frames: FrameAllocator,
         sink: &'static TestSink,
@@ -1245,40 +1232,43 @@ mod tests {
         }
     }
 
-    impl SpawnCtx for StubCtx {
+    impl ImageBuildCtx for StubCtx {
         fn frames(&self) -> &FrameAllocator {
             &self.frames
+        }
+
+        fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
+            None
         }
 
         fn audit(&self) -> &(dyn Sink + Sync) {
             self.sink
         }
 
-        unsafe fn admit_process(
-            &self,
-            _caps: CapabilitySet,
-            _space: Box<dyn UserAddressSpace + Send + Sync>,
-            _physmap: Box<dyn PhysMap + Send + Sync>,
-            _stack_span: StackSpan,
-            _stack: Box<dyn crate::kthread::KernelStack + Send>,
-            _pre_resume: Box<dyn FnMut(u64) + Send>,
-            _live: Option<Box<dyn LiveUserSpace + Send>>,
-            _enter: Box<dyn FnMut() + Send>,
-        ) -> Result<u64, AdmitError> {
-            unreachable!("the default spawn_with returns before admitting a process")
+        fn kernel_stack_guard(&self) -> Option<u64> {
+            None
         }
     }
 
     #[test]
-    fn spawn_with_default_fails_closed_through_a_trait_object() {
-        // A port that has not wired a driver-spawn mechanism (here the
-        // shared `NullProcessSpawn`) must refuse `spawn_with` with
-        // `NotImplemented` rather than pretending to spawn — reached through
-        // `&dyn ProcessSpawn`, the path the generic boot wiring uses.
+    fn null_arch_image_builder_fails_closed_through_a_trait_object() {
+        // A port that has not wired an image builder (here the shared
+        // `NULL_ARCH_IMAGE_BUILDER`) must refuse `build` with
+        // `NotImplemented` rather than pretending to build — reached through
+        // `&dyn ArchImageBuilder`, the path the boot handover default uses.
         let ctx = StubCtx::new();
-        let producer: &dyn ProcessSpawn = &NULL_PROCESS_SPAWN;
-        let result = producer.spawn_with(b"unused-rxe", &ctx, CapabilitySet::empty(), &[], &[]);
-        assert_eq!(result, Err(Errno::NotImplemented));
+        let builder: &dyn ArchImageBuilder = &NULL_ARCH_IMAGE_BUILDER;
+        // `BuiltImage` is neither `Debug` nor `PartialEq` (it holds boxed
+        // closures and address-space handles), so match rather than
+        // `assert_eq!`.
+        assert!(matches!(
+            builder.build(b"unused-rxe", &ctx, &[], &[]),
+            Err(Errno::NotImplemented)
+        ));
+        // Its kernel-stack allocation hands back the software-canary
+        // `BoxStack` with no guard page to unmap in the child root.
+        let (_stack, guard) = builder.alloc_kernel_stack(&ctx.frames, None);
+        assert!(guard.is_none());
     }
 
     /// A minimal [`InitSpawnCtx`] exercising the default
@@ -1340,7 +1330,6 @@ mod tests {
         let ctx = StubInitCtx::new();
         let init: &dyn InitSpawnCtx = &ctx;
         let result = init.spawn_driver_process(
-            &NULL_PROCESS_SPAWN,
             "/System/Drivers/input/usb_kbd",
             b"unused-rxe",
             CapabilitySet::empty(),
@@ -1377,39 +1366,33 @@ mod tests {
         );
     }
 
-    /// A producer refusal taken before the image build audits its cause and
-    /// the allocator margin, and maps onto the stable resource errno — a
-    /// refused spawn is never silent (regression: the x86_64 spawn-session
-    /// CI failure showed a rejected `spawn` with no cause on the log).
+    /// A build refusal taken before the image is materialised audits its
+    /// cause and the allocator margin, and maps onto the stable resource
+    /// errno — a refused build is never silent (regression: the x86_64
+    /// spawn-session CI failure showed a rejected `spawn` with no cause on
+    /// the log).
     #[test]
-    fn refuse_spawn_audits_cause_and_returns_no_space() {
+    fn refuse_build_audits_cause_and_returns_no_space() {
         set_max_level(Level::Trace);
         let ctx = StubCtx::new();
         assert_eq!(
-            refuse_spawn(&ctx, "page_table_frames_exhausted"),
+            refuse_build(&ctx, "page_table_frames_exhausted"),
             Errno::NoSpace
         );
         assert_refusal_audited(ctx.sink, "page_table_frames_exhausted");
     }
 
-    /// A refused admission audits its cause exactly as the pre-build sites
-    /// do, and each [`AdmitError`] keeps its stable errno.
+    /// The synchronous admit-outcome mapping keeps each [`AdmitError`]'s
+    /// stable errno (a scheduler-exhaustion / launch-services-unwired admit
+    /// failure is `NoSpace`; an id conflict `AlreadyExists`). The load
+    /// refusals are audited on the child's own task, so this mapping is pure.
     #[test]
-    fn refuse_admit_audits_cause_and_maps_stable_errnos() {
-        set_max_level(Level::Trace);
-        let ctx = StubCtx::new();
+    fn admit_errno_maps_stable_codes() {
+        assert_eq!(admit_errno(AdmitError::SchedulerFull), Errno::NoSpace);
         assert_eq!(
-            refuse_admit(&ctx, AdmitError::SchedulerFull),
-            Errno::NoSpace
-        );
-        assert_refusal_audited(ctx.sink, "scheduler_admit_refused");
-
-        let ctx = StubCtx::new();
-        assert_eq!(
-            refuse_admit(&ctx, AdmitError::AspaceConflict),
+            admit_errno(AdmitError::AspaceConflict),
             Errno::AlreadyExists
         );
-        assert_refusal_audited(ctx.sink, "aspace_registry_conflict");
     }
 
     /// The shared caller-errno mapping keeps the stable codes: a denied

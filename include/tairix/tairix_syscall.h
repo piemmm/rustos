@@ -137,6 +137,19 @@ typedef struct tairix_wait_status {
     int32_t value;
 } tairix_wait_status_t;
 
+/* Reserved load-failure exit statuses (a tairix_wait_status_t.value when kind is
+* EXITED). A spawn() returns once the child is ADMITTED, not once it is LOADED, so
+* a load failure the child discovers on its own task surfaces as one of these
+* exit statuses rather than as a spawn() error. They sit in a high reserved band
+* well above the small codes a program passes to exit(), so a parent can tell a
+* loader refusal apart from an ordinary exit: NOT_FOUND (missing or unreadable
+* bundle), UNVERIFIED (bad signature / content or interface hash), MALFORMED
+* (un-parseable or unfit image), OOM (out of memory building the image). */
+#define TAIRIX_LOAD_NOT_FOUND ((int32_t)2136604673)
+#define TAIRIX_LOAD_UNVERIFIED ((int32_t)2136604674)
+#define TAIRIX_LOAD_MALFORMED ((int32_t)2136604675)
+#define TAIRIX_LOAD_OOM ((int32_t)2136604676)
+
 /* spawn() attach block: the child's credential, base console, and one wire per
 * standard descriptor (fd 0..3). Pass NULL/0 for full inherit. Every wire kind
 * other than the values below (including 0) is reserved and refused; a HANDLE

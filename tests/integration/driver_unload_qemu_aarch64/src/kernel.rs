@@ -10,9 +10,10 @@
 //! `virt` board, enables the identity MMU + EL1 vectors, builds the live
 //! kernel registries, and autoloads the stub through the production
 //! `DeviceManager::autoload` + `SpawnDriverLoader` +
-//! `InitCtxDriverProcessSpawn` over `Aarch64ProcessSpawn::spawn_with` — the
-//! driver is admitted **Ready** and its capability record + address-space
-//! registry entry minted.
+//! `InitCtxDriverProcessSpawn` over the `Aarch64ProcessSpawn` image builder —
+//! the driver is admitted as a parked **loading** task with its placeholder
+//! capability record minted (its address space is built on the driver's own
+//! first slice, which this teardown test never runs).
 //!
 //! It then drives the symmetric partner of the spawn seam,
 //! `InitSpawnCtx::terminate_driver_process` (the mechanism the driver-store
@@ -357,6 +358,21 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // `KernelInitSpawner` (owning the live registries and the IRQ table the
     // teardown reclaims from), reached via the bin crate's
     // `InitCtxDriverProcessSpawn` bridge over `Aarch64ProcessSpawn`.
+    // Publish the launch-services bundle the deferred driver-load path reads
+    // (the one shared build+publish the production boot path uses); the driver
+    // is admitted as a parked loading task and would build its image on its
+    // own first slice.
+    let _ = tairix_kernel_core::spawn_services::install_over(
+        sys.arch,
+        sys.frames,
+        &SERIAL_SINK,
+        &tairix_kernel_core::NULL_FILESYSTEM,
+        None,
+        sys.aspaces,
+        sys.caps,
+        &NULL_PROCESS_WAIT,
+        &AARCH64_PROCESS_SPAWN,
+    );
     let init_ctx = KernelInitSpawner::new(
         sys.frames,
         &SERIAL_SINK,
@@ -368,7 +384,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.irq_table,
         &NULL_SHARED_MEM_FACILITY,
     );
-    let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
+    let spawn = InitCtxDriverProcessSpawn::new(&init_ctx);
     let args: [&[u8]; 1] = [b"drvstub"];
     // The matched node id (the device node, id 2) the kernel records against
     // the spawned driver.
@@ -396,11 +412,16 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let handle = report.bindings[0].handle.as_u64();
     let sec = SecTaskId(handle);
 
-    // The driver was admitted **Ready** (never dispatched): it is live, and
-    // its capability record + address-space-registry entry are registered.
+    // The driver was admitted as a parked **loading** task (never dispatched):
+    // it is a live scheduler task carrying its admit-time placeholder
+    // capability record. Its isolated address space is registered by the
+    // loading body on the driver's own first slice, which this teardown test
+    // never runs — so it is deliberately *not* yet in the address-space
+    // registry, and terminating a still-loading driver must reclaim it just
+    // the same (`plans/FIX-DESKTOP.md` DESK-1).
     if sys.sched.live_task_count() != 1
         || sys.caps.read().caps_for(sec).is_none()
-        || !sys.aspaces.read().contains(sec)
+        || sys.aspaces.read().contains(sec)
     {
         qemu_exit::exit_failure(FAIL_NOT_LIVE);
     }

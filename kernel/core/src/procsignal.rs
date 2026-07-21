@@ -5,7 +5,7 @@
 //! arch-neutral syscall handler in `kernel/core` and the scheduler-side
 //! producer that delivers a control signal to one of the sender's children.
 //! Like the [`ProcessWait`],
-//! [`ProcessSpawn`](crate::spawn::ProcessSpawn), and
+//! [`ArchImageBuilder`](crate::spawn::ArchImageBuilder), and
 //! [`MemMap`](crate::memmap::MemMap) seams, the concrete producer is
 //! installed at boot through the `with_process_signal` builder and the
 //! handler reaches it through this trait.

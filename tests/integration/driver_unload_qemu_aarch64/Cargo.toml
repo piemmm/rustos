@@ -24,7 +24,7 @@ workspace = true
 # capability) into a live PortRegistry, installs the production
 # KernelDispatchHook through a DispatchCallbackSlot, spawns the stub through
 # the production InitSpawnCtx::spawn_driver_process seam (KernelInitSpawner +
-# InitCtxDriverProcessSpawn over Aarch64ProcessSpawn::spawn_with), and drains the
+# InitCtxDriverProcessSpawn over the Aarch64ProcessSpawn image builder), and drains the
 # cooperative `step` loop polling `Port::recv` under a bounded budget. PASS
 # once the decoded DriverRegisterReply round-trips the stub's handle; any
 # shortfall writes a distinct failure finisher or times out (fail-loud,

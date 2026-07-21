@@ -47,7 +47,7 @@ use crate::dispatch_slot::AlreadyInstalledError;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
 use crate::rlimit::{default_pinned_limit_bytes, LimitSet};
-use crate::spawn::{InitSpawnCtx, ProcessSpawn};
+use crate::spawn::InitSpawnCtx;
 use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
 /// Ordered identifier of every subsystem init phase orchestrated by
@@ -1408,7 +1408,6 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
     fn spawn_driver_process(
         &self,
-        spawn: &dyn ProcessSpawn,
         path: &str,
         rxe: &[u8],
         caps: CapabilitySet,
@@ -1417,10 +1416,13 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         node_id: Option<u32>,
     ) -> Result<u64, Errno> {
         // Build the production runtime-spawn context over the same live
-        // subsystems PID-1 admission uses and drive the architecture's
-        // `ProcessSpawn::spawn_with` (`plans/SPAWN.md` SP3). The bin-crate
-        // caller never names `Scheduler<A>` / `KernelSpawnCtx` — that
-        // assembly happens here, behind the object-safe `InitSpawnCtx`
+        // subsystems PID-1 admission uses and drive the deferred-load admit
+        // (`plans/FIX-DESKTOP.md` §2.6.5): the driver image the signed
+        // `drvhost` load gate already verified is a *prebuilt* plan, so the
+        // driver builds its own isolated address space on its own first slice
+        // — the autoloading boot service is never blocked on the build. The
+        // bin-crate caller never names `Scheduler<A>` / `KernelSpawnCtx` —
+        // that assembly happens here, behind the object-safe `InitSpawnCtx`
         // boundary.
         //
         // `frames` is `'static`, so it doubles as the `'static` page-table
@@ -1482,8 +1484,17 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         );
         // A boot-floor driver reads its configuration from its argument
         // vector alone; it inherits no environment (there is no principal
-        // yet whose exported variables it could meaningfully receive).
-        spawn.spawn_with(rxe, &ctx, caps, args, &[])
+        // yet whose exported variables it could meaningfully receive). The
+        // verified image bytes and argument vector are copied into the
+        // prebuilt plan because the driver materialises on its own task,
+        // after this call returns, and cannot borrow the caller's buffers.
+        let plan = crate::syscalls::LoadPlan::Prebuilt {
+            rxe: alloc::borrow::Cow::Owned(rxe.to_vec()),
+            requested: caps,
+        };
+        let owned_args = args.iter().map(|a| a.to_vec()).collect();
+        ctx.admit_loading(plan, owned_args, alloc::vec::Vec::new())
+            .map_err(crate::spawn::admit_errno)
     }
 
     fn terminate_driver_process(&self, handle: u64) -> Result<(), Errno> {
@@ -1642,7 +1653,7 @@ fn run_phases<A: KernelArch>(
         dispatcher_callback_slot,
         consoles,
         programs,
-        spawn_service,
+        image_builder,
         app_store,
         seat_registry,
         users_db,
@@ -2002,7 +2013,6 @@ fn run_phases<A: KernelArch>(
             // machine rather than a fixed `.bss` pool.
             state.frame_allocator,
             programs,
-            spawn_service,
             process_wait,
             seat_registry,
             mem_map,
@@ -2131,6 +2141,32 @@ fn run_phases<A: KernelArch>(
     // so the boot timeline is uniform.
     phase_started(log_sink, Phase::Ipc);
     phase_ready(log_sink, Phase::Ipc);
+
+    // Publish the launch-services bundle the asynchronous process-launch
+    // path captures (`plans/FIX-DESKTOP.md` §2.6.5): a `spawn` admits its
+    // child at once and the child materialises its own image on its first
+    // slice, off the spawning caller's task, through the `'static` handles
+    // bundled here. Every handle is the *same* leaked `KernelState` /
+    // boot-handover object the syscall dispatcher resolves a caller against,
+    // so the loading child's re-derived capability record and registered
+    // address space land in exactly the registries the dispatcher reads.
+    // `install_over` is the one shared build+publish both this boot path and
+    // a manually-assembled boot (a QEMU integration kernel) use, so the
+    // launch bundle is wired identically everywhere; it is set-once and
+    // idempotent, so a host binary that drives `run_phases` twice in one
+    // process leaves the first live bundle in place rather than overwriting
+    // it.
+    let _ = crate::spawn_services::install_over(
+        state.arch.as_ref(),
+        state.frame_allocator,
+        audit_sink,
+        filesystem,
+        app_store,
+        &state.aspaces,
+        &state.caps,
+        process_wait,
+        image_builder,
+    );
 
     Ok((state, process_wait))
 }
@@ -2536,43 +2572,14 @@ mod tests {
         assert!(!crate::preempt::take_preempt_pending(CPU));
     }
 
-    /// A [`ProcessSpawn`] recording the `rxe`, capability set, and argument
-    /// vector its `spawn_with` is handed, returning a fixed PID without
-    /// building anything (it never consults the `SpawnCtx`). Lets the host
-    /// suite assert [`KernelInitSpawner::spawn_driver_process`] forwards its
-    /// inputs to the architecture producer's `spawn_with`; the matched
-    /// node's grant threading is proven end-to-end by the `-M virt`
-    /// `driver_spawn_qemu_aarch64` vertical (the grants live inside the
-    /// opaque `KernelSpawnCtx`).
-    struct RecordingSpawn {
-        recorded: RwLock<Option<(alloc::vec::Vec<u8>, bool, usize)>>,
-        pid: u64,
-    }
-
-    impl ProcessSpawn for RecordingSpawn {
-        fn spawn_with(
-            &self,
-            rxe: &[u8],
-            _ctx: &dyn crate::spawn::SpawnCtx,
-            caps: CapabilitySet,
-            args: &[&[u8]],
-            _env: &[&[u8]],
-        ) -> Result<u64, Errno> {
-            *self.recorded.write() = Some((
-                rxe.to_vec(),
-                caps.contains(tairix_abi::CapabilityId::DRV_LOAD),
-                args.len(),
-            ));
-            Ok(self.pid)
-        }
-    }
-
     #[test]
-    fn spawn_driver_process_delegates_to_the_arch_producer() {
-        // The production `KernelInitSpawner` must forward a driver spawn to
-        // the architecture's `ProcessSpawn::spawn_with` with the gate-derived
-        // capability set and argument vector intact, returning the producer's
-        // PID — the path the bin crate's driver autoloader drives.
+    fn spawn_driver_process_admits_a_loading_child() {
+        // The production `KernelInitSpawner` admits a driver spawn as a
+        // *loading* child (`plans/FIX-DESKTOP.md` §2.6.5) and returns its PID
+        // at once; the child builds its own image on its own first slice (this
+        // host suite never dispatches it). Synchronously observable: a
+        // placeholder capability record is installed under the returned id, so
+        // the child's first slice resolves a caller context.
         let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
@@ -2590,83 +2597,32 @@ mod tests {
             &crate::devres::NULL_SHARED_MEM_FACILITY,
         );
 
-        let producer = RecordingSpawn {
-            recorded: RwLock::new(None),
-            pid: 0x4242,
-        };
         let mut caps = CapabilitySet::empty();
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
-        let rxe = b"driver-image-bytes";
         let args: [&[u8]; 1] = [b"reply-endpoint"];
 
         let pid = ctx
             .spawn_driver_process(
-                &producer,
                 "/System/Drivers/storage/virtio_blk",
-                rxe,
+                b"driver-image-bytes",
                 caps,
                 &[],
                 &args,
                 Some(7),
             )
-            .expect("the recording producer admits the driver");
-        assert_eq!(pid, 0x4242);
+            .expect("the deferred-load admit returns the driver's PID");
+        assert_ne!(pid, 0, "a real scheduler task id is minted");
 
-        let recorded = producer.recorded.read().clone();
-        let (rxe_seen, had_drv_load, arg_count) =
-            recorded.expect("spawn_with was invoked exactly once");
-        assert_eq!(rxe_seen.as_slice(), rxe);
-        assert!(had_drv_load, "the gate-derived capability set is forwarded");
-        assert_eq!(arg_count, 1);
-    }
-
-    /// A [`ProcessSpawn`] that admits a host-built one-page address space
-    /// through `ctx.admit_process` (mirroring the syscall suite's admitting
-    /// double), so this suite can observe what the production
-    /// `KernelInitSpawner` context attests onto the child's capability
-    /// record.
-    struct AdmittingSpawn;
-
-    impl ProcessSpawn for AdmittingSpawn {
-        fn spawn_with(
-            &self,
-            _rxe: &[u8],
-            ctx: &dyn crate::spawn::SpawnCtx,
-            caps: CapabilitySet,
-            _args: &[&[u8]],
-            _env: &[&[u8]],
-        ) -> Result<u64, Errno> {
-            use tairix_kernel_mem::{
-                AddressSpace, Frame, HostPageTable, MapFlags, Page, SimPhysMap, VirtAddr,
-            };
-            let mut space = AddressSpace::new(HostPageTable::new());
-            space
-                .map(
-                    Page::from_addr(VirtAddr::new(0x1000)).expect("aligned"),
-                    Frame(9),
-                    MapFlags::READ | MapFlags::USER,
-                )
-                .expect("host map");
-            let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
-            let physmap: Box<dyn PhysMap + Send + Sync> =
-                Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
-            let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(|_stack_top| {});
-            let enter: Box<dyn FnMut() + Send> = Box::new(|| {});
-            let stack: Box<dyn crate::kthread::KernelStack + Send> =
-                Box::new(crate::kthread::BoxStack::new());
-            let stack_span = crate::aspace::StackSpan::new(0x2000, 0x2000, 0x3000)
-                .expect("the host test span is page-aligned and well-formed");
-            // SAFETY: the host test never dispatches the admitted task, so
-            // the inert `enter`/`pre_resume` closures never run and the
-            // frozen host space need only answer `translate`; it faithfully
-            // describes the one page mapped above.
-            unsafe {
-                ctx.admit_process(
-                    caps, frozen, physmap, stack_span, stack, pre_resume, None, enter,
-                )
-            }
-            .map_err(|_| Errno::NoSpace)
-        }
+        // The placeholder record exists and carries an empty effective set:
+        // the child derives its `ceiling ∩ manifest` set only when it loads.
+        let table = state.caps.read();
+        let record = table
+            .caps_for(SecTaskId(pid))
+            .expect("the admitted loading driver has a placeholder capability record");
+        assert!(
+            !record.has(tairix_abi::CapabilityId::DRV_LOAD),
+            "the placeholder set is empty until the child derives its effective set on load"
+        );
     }
 
     #[test]
@@ -2698,7 +2654,6 @@ mod tests {
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let pid = ctx
             .spawn_driver_process(
-                &AdmittingSpawn,
                 "/System/Drivers/storage/virtio_blk",
                 b"driver-image-bytes",
                 caps,
@@ -2726,7 +2681,6 @@ mod tests {
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let pid = ctx
             .spawn_driver_process(
-                &AdmittingSpawn,
                 "/System/Drivers/input/usb_kbd/Run",
                 b"driver-image-bytes",
                 caps,

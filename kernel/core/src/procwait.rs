@@ -18,7 +18,7 @@
 //! Blocking the caller means cooperatively parking it back on the scheduler
 //! until a child becomes reapable — work that belongs with the live scheduler
 //! integration, not the decoupled handler — so, like the
-//! [`ProcessSpawn`](crate::spawn::ProcessSpawn) and
+//! [`ArchImageBuilder`](crate::spawn::ArchImageBuilder) and
 //! [`MemMap`](crate::memmap::MemMap) producers, the concrete producer
 //! ([`KernelProcessWait`]) is installed at boot through the
 //! `with_process_wait` builder and the handler reaches it through this trait.
@@ -26,7 +26,7 @@
 //! Until a producer is installed the handler holds [`NULL_PROCESS_WAIT`],
 //! which fails closed: every `wait` returns [`Errno::NotImplemented`] and the bookkeeping hooks are inert — exactly as
 //! [`NULL_MEM_MAP`](crate::memmap::NULL_MEM_MAP) and
-//! [`NULL_PROCESS_SPAWN`](crate::spawn::NULL_PROCESS_SPAWN) do for their
+//! [`NULL_ARCH_IMAGE_BUILDER`](crate::spawn::NULL_ARCH_IMAGE_BUILDER) do for their
 //! syscalls.
 
 use alloc::collections::BTreeMap;

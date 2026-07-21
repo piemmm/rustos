@@ -1685,6 +1685,7 @@ You are not exempt from any rule above. In addition:
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/ARXFS-METADATA.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md`; `plans/SPARSE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
+    | Kernel-heap growth: fragmentation-immune growth, the frame-backed heap source, the heap-allocation-size vs `MAX_ORDER` decoupling | `plans/FIX-KHEAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
     | CPU-lockup watchdog (soft/hard lockup detection, diagnostics, recovery, the Arch-HAL watchdog slice) | `plans/WATCHDOG.md` |
     | Kernel-panic diagnostics (register dump + stack backtrace, the Arch-HAL backtrace slice, unified panic path) | `plans/FIX-PANICS.md` |

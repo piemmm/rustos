@@ -1,22 +1,23 @@
 //! x86_64 runtime `spawn` producer — `plans/PI.md` `X3b`.
 //!
 //! [`X86_64ProcessSpawn`] implements the architecture-neutral
-//! [`tairix_kernel_core::ProcessSpawn`] seam the boot pipeline installs into
-//! the [`tairix_kernel_core::BootInfo`] hand-off (`boot::try_boot` →
+//! [`tairix_kernel_core::ArchImageBuilder`] seam the boot pipeline installs
+//! into the [`tairix_kernel_core::BootInfo`] hand-off (`boot::try_boot` →
 //! `BootInfo::with_spawn`). It is the cross-port sibling of the aarch64
 //! `spawn_producer` (`plans/SPAWN.md` `SP3b`): when a task that holds
 //! `CAP_PROC_SPAWN` issues the `spawn` syscall, the kernel resolves the
 //! requested path against the shared
-//! [`crate::spawn_layout::PROGRAM_REGISTRY`] and hands the matching
-//! `rxe` bytes to [`ProcessSpawn::spawn`], which builds the child a *fresh,
-//! hardware-isolated* PML4 hierarchy, populates it through the production
+//! [`crate::spawn_layout::PROGRAM_REGISTRY`], admits a parked **loading**
+//! child, and returns its PID at once. On the child's own first scheduled
+//! slice this producer's
+//! [`build`](tairix_kernel_core::ArchImageBuilder::build) builds it a *fresh,
+//! hardware-isolated* PML4 hierarchy and populates it through the production
 //! capability-checked, audited spawn caller ([`spawn_image`], gated on
-//! `CAP_PROC_SPAWN`), and admits it **Ready** through
-//! [`SpawnCtx::admit_process`]. Unlike the PID-1 [`InitSpawn`] seam
-//! (`init_spawn_x86_64.rs`) it does **not** switch CR3 or enter ring 3: the
-//! spawning caller keeps running under its own root, and the child runs when
-//! the scheduler next steps it (a true concurrent spawn, not an `exec`-style
-//! hand-off).
+//! `CAP_PROC_SPAWN`). Unlike the PID-1 [`tairix_kernel_core::InitSpawn`] seam
+//! (`init_spawn_x86_64.rs`) it does **not** switch CR3 or enter ring 3 from
+//! the caller: the spawning caller keeps running under its own root, and the
+//! child enters ring 3 from its own loading body when the scheduler next steps
+//! it (a true concurrent, non-blocking spawn, not an `exec`-style hand-off).
 //!
 //! # Building the child without switching CR3
 //!
@@ -50,10 +51,9 @@ use tairix_arch_x86_64::paging::{
 };
 use tairix_arch_x86_64::syscall_entry;
 use tairix_arch_x86_64::userentry::UserMode;
-use tairix_caps::CapabilitySet;
 use tairix_kernel_core::{
-    refuse_admit, refuse_spawn, spawn_caller_errno, spawn_image, BoxStack, KernelStack,
-    ProcessSpawn, SpawnCtx, SpawnRequest,
+    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
+    ImageBuildCtx, KernelStack, SpawnRequest,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -181,15 +181,38 @@ pub struct X86_64ProcessSpawn;
 /// The single, `'static` [`X86_64ProcessSpawn`] the boot path borrows.
 pub static X86_64_PROCESS_SPAWN: X86_64ProcessSpawn = X86_64ProcessSpawn;
 
-impl ProcessSpawn for X86_64ProcessSpawn {
-    fn spawn_with(
+impl ArchImageBuilder for X86_64ProcessSpawn {
+    fn alloc_kernel_stack(
+        &self,
+        frames: &FrameAllocator,
+        pt_frames: Option<&'static FrameAllocator>,
+    ) -> (Box<dyn KernelStack + Send>, Option<u64>) {
+        // Allocate the loading child's kernel stack synchronously at admit,
+        // before its address space exists, so the child's own loading body
+        // runs on it. An arena-backed guard-paged stack when a region is
+        // available (its guard VA returned for `build` to unmap in the child
+        // root), else the software-canary `BoxStack` fallback.
+        let Some(pt_frames) = pt_frames else {
+            return (Box::new(BoxStack::new()), None);
+        };
+        crate::stack_arena::publish_reclaim_frames(pt_frames);
+        let grow = FrameArenaGrow::new(frames, (IDENTITY_GIB as u64) << 30);
+        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
+            Some(stack) => {
+                let guard = stack.guard_page();
+                (Box::new(stack), Some(guard))
+            }
+            None => (Box::new(BoxStack::new()), None),
+        }
+    }
+
+    fn build(
         &self,
         rxe: &[u8],
-        ctx: &dyn SpawnCtx,
-        caps: CapabilitySet,
+        ctx: &dyn ImageBuildCtx,
         args: &[&[u8]],
         env: &[&[u8]],
-    ) -> Result<u64, Errno> {
+    ) -> Result<BuiltImage, Errno> {
         // The child's PML4 hierarchy is drawn from the kernel's live frame
         // allocator: there is no fixed page-table reserve
         // and so no hard cap on how many processes can be spawned — the
@@ -198,15 +221,8 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // as does genuine RAM exhaustion below.
         let pt_frames = ctx
             .page_table_allocator()
-            .ok_or_else(|| refuse_spawn(ctx, "page_table_allocator_unwired"))?;
+            .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
-        // Publish the same `'static` allocator the kthread-stack arena returns
-        // idle chained blocks to when a spawned task later exits and its
-        // `ArenaStack` is dropped (the capacity shrinks as
-        // well as grows). Idempotent (set-once); the boot path threads one
-        // allocator, so every spawn publishes the same handle (mirrors the
-        // aarch64 producer).
-        crate::stack_arena::publish_reclaim_frames(pt_frames);
 
         // Build a PML4 identity-mapping the low `IDENTITY_GIB` GiB (RAM + the
         // LAPIC MMIO page) and the higher-half kernel window, and capture its
@@ -220,47 +236,26 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // The child's own CR3 is reloaded by its `pre_resume` hook before the
         // scheduler first resumes it (`plans/SPAWN.md` SP2, `plans/PI.md` X1).
         let mut arch = ArchAddressSpace::new_identity_first_gib(table_frames, IDENTITY_GIB)
-            .ok_or_else(|| refuse_spawn(ctx, "page_table_frames_exhausted"))?;
+            .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.pml4_phys();
 
-        // Build the child's kernel stack (`plans/PI.md` G3b-2-ii, mirroring
-        // the PID-1 `init_spawn_x86_64` seam). The boot path carved a guard
-        // arena out of firmware-usable RAM and published it to the kthread-
-        // stack allocator; if a region is available, re-express the coarse
-        // identity block covering its guard page at 4 KiB granularity in the
-        // *child's own* PML4 and unmap that single page, so an overrun of the
-        // child's kernel stack takes a synchronous page fault under the
-        // child's CR3 rather than corrupting the lower-addressed neighbour
-        // (the real guard-page fault-form). Doing it on
-        // `arch` — which is *never switched to* here (the spawning caller
-        // keeps its own CR3) — disturbs no live access: the child tables live
-        // in the caller's low identity window, so `split_block` reads/writes
-        // them through identity addresses, only adds table levels reproducing
-        // the existing translation, and needs no TLB maintenance (the child's
-        // root is not active). The arena grows on demand by chaining fresh
-        // 2 MiB blocks out of the kernel's live frame allocator when its
-        // boot-carved block is exhausted, so the number of
-        // hardware-guarded child stacks scales with discovered RAM; a chained
-        // block is bounded to the identity window so the stack stays mapped in
-        // the child's own root. If no arena region is available, or the
-        // split/unmap could not be applied, fall back to a heap-backed
-        // software-canary `BoxStack` rather than ever running on an unguarded
-        // stack (fail closed).
-        let grow = FrameArenaGrow::new(ctx.frames(), (IDENTITY_GIB as u64) << 30);
-        let kernel_stack: Box<dyn KernelStack + Send> =
-            match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
-                Some(stack) => {
-                    let guard = stack.guard_page();
-                    match arch
-                        .split_block(guard)
-                        .and_then(|()| arch.unmap(guard).map(|_| ()))
-                    {
-                        Ok(()) => Box::new(stack),
-                        Err(_) => Box::new(BoxStack::new()),
-                    }
-                }
-                None => Box::new(BoxStack::new()),
-            };
+        // Re-express the loading kthread's kernel-stack guard page in the
+        // *child's own* (inactive) PML4: split the coarse identity block
+        // covering it to 4 KiB granularity and unmap the single guard page,
+        // so an overrun of the child's kernel stack takes a synchronous page
+        // fault under the child's CR3 rather than corrupting the
+        // lower-addressed neighbour. Doing it on `arch` — never switched to
+        // here — disturbs no live access (the child tables live in the
+        // caller's low identity window) and needs no TLB maintenance (the
+        // child's root is not active). A `Some(guard)` whose split+unmap
+        // fails fails the build closed rather than running on an unguarded
+        // stack; `None` is the software-canary `BoxStack` (self-guarded,
+        // nothing to unmap).
+        if let Some(guard) = ctx.kernel_stack_guard() {
+            arch.split_block(guard)
+                .and_then(|()| arch.unmap(guard).map(|_| ()))
+                .map_err(|_| refuse_build(ctx, "kernel_stack_guard_unmap_failed"))?;
+        }
 
         let mut space = AddressSpace::new(arch);
         let physmap = DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN);
@@ -275,12 +270,12 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // through the shared per-spawn derivation (one definition across
         // the ports); an image too large for the user region fails closed.
         let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS)
-            .ok_or_else(|| refuse_spawn(ctx, "user_layout_unfit"))?;
+            .ok_or_else(|| refuse_build(ctx, "user_layout_unfit"))?;
         // The span record the admission path stores so the stack-growth
         // fault path can back pages inside it (one shared derivation
         // across the ports; a malformed span refuses the spawn closed).
         let stack_span = spawn_layout::stack_span(&layout)
-            .ok_or_else(|| refuse_spawn(ctx, "stack_span_malformed"))?;
+            .ok_or_else(|| refuse_build(ctx, "stack_span_malformed"))?;
 
         let request = SpawnRequest {
             image: &image,
@@ -408,29 +403,13 @@ impl ProcessSpawn for X86_64ProcessSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
-        // Register the child's caps + frozen address space and admit it Ready,
-        // returning its PID. The spawning caller keeps running.
-        // SAFETY: `frozen` faithfully describes the mappings just built into
-        // `space`, `physmap` backs them, `pre_resume` activates the child's
-        // root before it is first entered, `kernel_stack` is a region
-        // exclusive to this child that stays mapped (in the low identity
-        // window) for the task's lifetime, and `live` retains the same arch
-        // space `frozen` was taken from — the `admit_process` contract.
-        // The child receives exactly the capability set the caller already
-        // derived (its manifest request, intersected at admission) — never
-        // the spawning caller's authority.
-        unsafe {
-            ctx.admit_process(
-                caps,
-                frozen,
-                physmap,
-                stack_span,
-                kernel_stack,
-                pre_resume,
-                live,
-                enter,
-            )
-        }
-        .map_err(|err| refuse_admit(ctx, err))
+        Ok(BuiltImage {
+            frozen,
+            physmap,
+            stack_span,
+            live,
+            pre_resume,
+            enter,
+        })
     }
 }

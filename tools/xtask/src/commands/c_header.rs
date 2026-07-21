@@ -2479,6 +2479,38 @@ fn emit_wait_contract(out: &mut String) {
          } tairix_wait_status_t;\n",
     );
     out.push('\n');
+
+    out.push_str(
+        "/* Reserved load-failure exit statuses (a tairix_wait_status_t.value when kind is\n\
+         * EXITED). A spawn() returns once the child is ADMITTED, not once it is LOADED, so\n\
+         * a load failure the child discovers on its own task surfaces as one of these\n\
+         * exit statuses rather than as a spawn() error. They sit in a high reserved band\n\
+         * well above the small codes a program passes to exit(), so a parent can tell a\n\
+         * loader refusal apart from an ordinary exit: NOT_FOUND (missing or unreadable\n\
+         * bundle), UNVERIFIED (bad signature / content or interface hash), MALFORMED\n\
+         * (un-parseable or unfit image), OOM (out of memory building the image). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOAD_NOT_FOUND ((int32_t){})",
+        tairix_abi::LOAD_NOT_FOUND
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOAD_UNVERIFIED ((int32_t){})",
+        tairix_abi::LOAD_UNVERIFIED
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOAD_MALFORMED ((int32_t){})",
+        tairix_abi::LOAD_MALFORMED
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOAD_OOM ((int32_t){})",
+        tairix_abi::LOAD_OOM
+    );
+    out.push('\n');
 }
 
 /// Emit the `spawn()` attach-block contract items into `tairix_syscall.h`:
@@ -2938,6 +2970,25 @@ mod tests {
             h.contains("int32_t tairix_sys_console_foreground(uint32_t a0, int32_t a1);"),
             "console_foreground prototype carries the fd and pid arguments: {h}"
         );
+    }
+
+    /// The reserved load-failure exit statuses are read from `lib/abi` and
+    /// emitted into the wait contract, never re-typed, so the C view can
+    /// never drift from the source of truth.
+    #[test]
+    fn syscall_header_carries_the_reserved_load_failure_statuses() {
+        let h = body("tairix_syscall.h");
+        for (name, value) in [
+            ("TAIRIX_LOAD_NOT_FOUND", tairix_abi::LOAD_NOT_FOUND),
+            ("TAIRIX_LOAD_UNVERIFIED", tairix_abi::LOAD_UNVERIFIED),
+            ("TAIRIX_LOAD_MALFORMED", tairix_abi::LOAD_MALFORMED),
+            ("TAIRIX_LOAD_OOM", tairix_abi::LOAD_OOM),
+        ] {
+            assert!(
+                h.contains(&format!("#define {name} ((int32_t){value})")),
+                "load status {name}: {h}"
+            );
+        }
     }
 
     #[test]

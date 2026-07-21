@@ -43,7 +43,6 @@ use crate::driver_catalog::VIRTIO_BLK_PATH;
 use crate::driver_loader::KernelDriverLoader;
 use crate::riscv64::boot::IDENTITY_GIGABYTES;
 use crate::riscv64::irq::{plic_controller, published_irq_table};
-use crate::riscv64::spawn_producer::RISCV_PROCESS_SPAWN;
 use crate::root_storage::RootBlockBinding;
 use crate::unlock_orchestrate::{finish_unlock, UnlockConsole, UnlockEnv};
 use crate::unlock_service::{
@@ -436,5 +435,5 @@ fn virtio_blk_unlock<'a>(
     // borrowed backing is `'static`, so the opened device is `VirtioBlk<'static>`
     // and can be shared for life behind the block-sharing layer.
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "root-unlock: virtio-blk open")?;
-    finish_unlock(blk, coop, env, &RISCV_UNLOCK_CONSOLE, &RISCV_PROCESS_SPAWN)
+    finish_unlock(blk, coop, env, &RISCV_UNLOCK_CONSOLE)
 }

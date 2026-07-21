@@ -432,7 +432,6 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
             sys.frames,
             sys.frames,
             &PROGRAMS,
-            &X86_64_PROCESS_SPAWN,
             wait_producer,
             // No seat / MMIO / DMA surface in this vertical; those
             // producers stay fail-closed. No filesystem or file-map
@@ -451,6 +450,22 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // Spawn the parent role through the production runtime-spawn seam
     // (`KernelSpawnCtx` assembly inside `KernelInitSpawner`), recorded
     // against the kernel supervisor identity so this chassis can reap it.
+    // Publish the launch-services bundle the deferred child-load path reads:
+    // the arch image builder builds each admitted child's image on the
+    // child's own first slice, off this chassis's cooperative drive. The one
+    // shared build+publish the production boot path uses.
+    let _ = tairix_kernel_core::spawn_services::install_over(
+        sys.arch,
+        sys.frames,
+        &SERIAL_SINK,
+        &tairix_kernel_core::NULL_FILESYSTEM,
+        None,
+        sys.aspaces,
+        sys.caps,
+        wait_producer,
+        &X86_64_PROCESS_SPAWN,
+    );
+
     let init_ctx = KernelInitSpawner::new(
         sys.frames,
         &SERIAL_SINK,
@@ -463,7 +478,6 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         &NULL_SHARED_MEM_FACILITY,
     );
     let Ok(parent_pid) = init_ctx.spawn_driver_process(
-        &X86_64_PROCESS_SPAWN,
         "/bin/sg-parent",
         PROGRAM_RXE,
         parent_caps(),

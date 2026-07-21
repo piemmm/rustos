@@ -4,7 +4,7 @@
 //!
 //! The consuming vertical (`tests/integration/driver_spawn_qemu_aarch64`)
 //! spawns this program through the production parameterised spawn path
-//! (`Aarch64ProcessSpawn::spawn_with`) with the argument vector
+//! (`Aarch64ProcessSpawn` image builder) with the argument vector
 //! `[b"drvstub", <reply endpoint id, ASCII decimal>, <reply port name>]`
 //! — exactly the shape the driver host hands a spawned driver process. The
 //! stub:

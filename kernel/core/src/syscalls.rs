@@ -135,6 +135,7 @@ use crate::fs::{
 };
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
+use crate::kthread::{reschedule_current, spawn_kthread_with_stack_parked, Yielder};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
 use crate::procwait::{ChildPeek, ProcessWait, NULL_PROCESS_WAIT};
@@ -142,8 +143,9 @@ use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
-    AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+    admit_errno, AdmitError, ImageBuildCtx, ProgramRegistry, EMPTY_PROGRAM_REGISTRY,
 };
+use crate::spawn_services::installed_spawn_services;
 use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
 use crate::users::{UsersDbSource, NULL_USERS_DB};
 use crate::wallclock::{WallClockSource, NULL_WALL_CLOCK};
@@ -292,13 +294,11 @@ where
     /// the registry's program bytes live for the lifetime of the running
     /// kernel.
     programs: &'static ProgramRegistry,
-    /// The architecture-specific spawn producer the `spawn` syscall drives
-    /// to build a child's isolated address space and admit it
-    /// (`plans/SPAWN.md` SP3). Defaults to [`NULL_PROCESS_SPAWN`] (fail
-    /// closed with [`Errno::NotImplemented`]); the boot
-    /// path installs the concrete producer through [`Self::with_spawn`].
-    /// Held as a `'static` borrow, exactly like the console device.
-    spawn_service: &'static (dyn ProcessSpawn + 'static),
+    // The architecture spawn producer no longer lives on the handler: the
+    // asynchronous launch path (`plans/FIX-DESKTOP.md` §2.6.5) builds a
+    // child's image on the *child's* own task through the boot-installed
+    // `SpawnServices` bundle's architecture image builder, not a per-syscall
+    // handler borrow. The boot path installs that bundle directly.
     /// The on-disk application store the `spawn` syscall resolves a
     /// non-embedded `…/<Name>.app/Run` path against (`plans/APPS.md`
     /// deliverable 8): the build's embedded app trust anchor plus the
@@ -532,12 +532,13 @@ where
             // rather than touching a device that does not exist.
             consoles: &NO_CONSOLES,
             // Spawn subsystem unwired until the boot path threads a frame
-            // allocator + populated registry + producer (`plans/SPAWN.md`
-            // SP3): `spawn` fails closed (`NotImplemented` / `NotFound`).
+            // allocator + populated registry (`plans/SPAWN.md` SP3): `spawn`
+            // fails closed (`NotFound` for an unknown path; the deferred
+            // load fails the child closed when the launch services are
+            // unwired, `plans/FIX-DESKTOP.md` §2.6.5).
             frames: None,
             page_table_frames: None,
             programs: &EMPTY_PROGRAM_REGISTRY,
-            spawn_service: &NULL_PROCESS_SPAWN,
             // No on-disk application store until a boot path with a storage
             // floor installs one: a store-bundle spawn fails closed with
             // `NotFound` immediately, parking nothing.
@@ -842,23 +843,20 @@ where
         self
     }
 
-    /// Install the embedded-program registry and the architecture spawn
-    /// producer the `spawn` syscall drives, consuming and returning `self`
+    /// Install the embedded boot-floor program registry the `spawn` syscall
+    /// resolves a path against, consuming and returning `self`
     /// (`plans/SPAWN.md` SP3).
     ///
-    /// Until this is called the handler holds the empty registry and
-    /// [`NULL_PROCESS_SPAWN`], so `spawn` fails closed
-    /// ([`Errno::NotFound`] / [`Errno::NotImplemented`]). Both must be
-    /// `'static`: the program bytes and the producer live for the lifetime
-    /// of the running kernel, exactly like the console device.
+    /// Until this is called the handler holds the empty registry, so a
+    /// `spawn` of any path fails closed with [`Errno::NotFound`]. The
+    /// registry must be `'static`: its program bytes live for the lifetime of
+    /// the running kernel, exactly like the console device. The architecture
+    /// image builder the deferred load uses is installed separately, on the
+    /// boot-installed [`crate::spawn_services::SpawnServices`] bundle
+    /// (`plans/FIX-DESKTOP.md` §2.6.5), not on the handler.
     #[must_use]
-    pub const fn with_spawn(
-        mut self,
-        programs: &'static ProgramRegistry,
-        spawn_service: &'static (dyn ProcessSpawn + 'static),
-    ) -> Self {
+    pub const fn with_spawn(mut self, programs: &'static ProgramRegistry) -> Self {
         self.programs = programs;
-        self.spawn_service = spawn_service;
         self
     }
 
@@ -1819,40 +1817,21 @@ where
         // lines, reclaimed around here), so dropping the sets is the
         // whole reclamation.
         crate::waitset::release_owned_by(task.0);
-        // Drop the task's signal-intake state (its opt-in and any pending
-        // observed signal): a dead task's intake must never linger, and
-        // task ids are never reused, so a leaked entry could never be
-        // reclaimed later.
-        crate::procsignal::clear_intake(task.0);
-        // Drop the task's kill-gate state for the same reason — and so a
-        // task that exits on its own while a termination was deferred
-        // against it (both raced) leaves no pending kill behind.
-        crate::procsignal::clear_kill_gate(task.0);
-        // Drop any termination deferred against the task while it ran in
-        // user mode: a self-exit or fault teardown running here means the
-        // task is already being reclaimed, so the dispatch loop's later
-        // `land_running_kill` must find nothing and never reclaim twice.
-        crate::procsignal::clear_running_kill(task.0);
-        // Prune the dead task's own child rows from the wait bookkeeping:
-        // a dead parent can never reap, so a row it never collected — a
-        // running orphan's link or an unreaped zombie — would be stranded
-        // forever (task ids are never reused). The orphans themselves keep
-        // running and are reclaimed through this same path when they die.
-        self.process_wait.parent_exited(task);
         // Release any console foreground ownership the dead task holds,
         // so the console returns to its open state the moment the owner
         // is gone rather than waiting for a reader to prove the owner
-        // dead (`plans/DISPLAY.md` D5).
+        // dead (`plans/DISPLAY.md` D5). Independent of the shared
+        // process-bookkeeping teardown below, so it runs first.
         for device in self.consoles {
             device.clear_dead_foreground(task);
         }
-        let _ = self.caps.write().remove(task);
-        // Withdraw the address-space registry entry last: streams, open
-        // files (pipe ends wake their parked peers as they drop), limits,
-        // grants, and the frozen space snapshot all go together, so no
-        // stale entry outlives the task (task ids are never reused, so a
-        // leaked entry could never be reclaimed later).
-        self.aspaces.write().withdraw(task);
+        // Tear down the process-bookkeeping subset — signal gates,
+        // parent/child wait rows, capability record, and address-space
+        // registry entry — through the one helper the deferred-launch
+        // loading-child teardown also drives, so a fully-admitted task and
+        // a child that failed to load release the same bookkeeping through
+        // one definition.
+        reclaim_process_bookkeeping(self.caps, self.aspaces, self.process_wait, task);
     }
 
     /// Whether one wait-set member is ready, as a **non-consuming peek**
@@ -2423,136 +2402,6 @@ where
                 Ok(render_view_path(&components))
             }
         }
-    }
-
-    /// Resolve, verify, and authorise the on-disk store bundle at `parsed`
-    /// through the one shared `tairix_appload` load gate, returning the
-    /// validated entry-point image and its manifest capability request.
-    ///
-    /// The bundle is read through the secured VFS under the **caller's**
-    /// kernel-attested identity, so every per-inode and mount-flag check
-    /// stays kernel-side; the manifest must be signed by the build's
-    /// embedded app trust anchor. A build with no installed store, a store
-    /// that resolved unavailable, or any gate refusal fails closed. A spawn
-    /// racing the boot kthread that publishes the mount parks (event-woken)
-    /// until the store's readiness latch resolves.
-    ///
-    /// A bundle on the immutable read-only system stores is fully verified
-    /// **once per boot**: the accepted result is cached in the
-    /// [`AppStore`](crate::appspawn::AppStore)'s classified, budgeted,
-    /// pressure-governed semantic launch cache
-    /// ([`LaunchCache`](crate::launch_cache::LaunchCache)) and every later
-    /// launch serves the cached image after re-authorising
-    /// the caller's own read of the entry point through the secured VFS —
-    /// verification is hoisted off the launch hot path, authorisation is
-    /// not. Bundles on writable volumes are never cached, and a cache
-    /// entry reclaimed under memory pressure simply re-verifies through
-    /// the full gate.
-    fn load_store_bundle(
-        &self,
-        caller: &CallerContext<'_>,
-        parsed: &crate::appspawn::BundleRunPath<'_>,
-    ) -> Result<alloc::sync::Arc<tairix_appload::LoadedApp>, Errno> {
-        let Some(store) = self.app_store else {
-            return Err(Errno::NotFound);
-        };
-        self.wait_app_store(caller, store)?;
-        if !store.is_available() {
-            return Err(Errno::NotFound);
-        }
-        let uid = caller.caps.owner().0;
-        let cacheable = crate::appspawn::AppStore::cacheable_bundle(parsed.bundle);
-        if cacheable {
-            if let Some(app) = store.cached(parsed.bundle) {
-                // The hit skips re-verification of immutable bytes, never
-                // the caller's authority: the caller's read of the entry
-                // point is re-authorised through the secured VFS (per-inode
-                // owner/mode/ACL and mount flags), so a caller who could
-                // not read the bundle cannot launch it from the cache.
-                self.filesystem.open(
-                    uid,
-                    caller.caps.effective(),
-                    app.run_path(),
-                    OpenFlags::READ,
-                )?;
-                return Ok(app);
-            }
-        }
-        let fs_store =
-            crate::appspawn::FsBundleStore::new(self.filesystem, uid, caller.caps.effective());
-        let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
-        let clock = crate::appspawn::ArchClock::new(self.arch);
-        let loader = tairix_appload::AppLoader::new(tairix_appload::AppLoaderConfig {
-            accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
-            syscall_table_hash: tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-            store: &fs_store,
-            verifier: &verifier,
-            clock: &clock,
-            sink: self.audit,
-        });
-        // The full-word set is the identity element of the gate's
-        // request∩grants intersection, so the returned ceiling is exactly
-        // the manifest request — the same value an embedded row carries —
-        // and the admit path's single intersection with the spawning
-        // credential's user ceiling stays the one authority bound. It also
-        // makes the verified result caller-independent, which is what lets
-        // the cache below serve it to a different caller.
-        let full_grants = CapabilitySet::from_words([u64::MAX; 4]);
-        let app = loader
-            .load(parsed.bundle, &full_grants)
-            .map(alloc::sync::Arc::new)
-            .map_err(crate::appspawn::app_error_errno)?;
-        if cacheable {
-            store.cache_verified(parsed.bundle, &app);
-        }
-        Ok(app)
-    }
-
-    /// Park the caller while the installed application store's readiness
-    /// latch is still *pending* — the boot kthread that publishes the
-    /// `/System` mount has not reached a terminal state.
-    ///
-    /// The caller parks off the run queue on
-    /// [`crate::waitq::APP_STORE_WAITQ`] (no busy yield) and is woken by
-    /// [`crate::waitq::app_store_wake`] the instant the latch resolves —
-    /// available or unavailable — re-checking the condition after every
-    /// wake. The wait is untimed: the boot path resolves the latch on every
-    /// outcome, so only an explicit wake releases a waiter.
-    fn wait_app_store(
-        &self,
-        caller: &CallerContext<'_>,
-        store: &crate::appspawn::AppStore,
-    ) -> Result<(), Errno> {
-        if !store.is_pending() {
-            return Ok(());
-        }
-        let task = caller.task_id.0;
-        // Register so a waker can find and `unpark` us, then loop check →
-        // park. The scheduler's wake-pending token closes the check/park
-        // race — mirrors `users_db_wait` exactly.
-        crate::waitq::APP_STORE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
-        let result = loop {
-            if !store.is_pending() {
-                break Ok(());
-            }
-            // Park off the run queue until woken, keyed to the CPU this task
-            // occupies right now (`park_current_task` reads it live, so a
-            // mid-wait migration is handled); the fallback yield covers a
-            // caller with no live dispatch loop so it never busy-spins.
-            match park_current_task(self.sched, self.arch, task) {
-                ParkStep::Parked => {}
-                ParkStep::TaskVanished => break Err(Errno::NotFound),
-                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
-            }
-            // A doomed waiter never re-parks: a termination deferred against
-            // this task unwinds the wait so the kill lands at the syscall
-            // boundary (the errno never reaches user space).
-            if crate::procsignal::kill_pending(task) {
-                break Err(Errno::Interrupted);
-            }
-        };
-        crate::waitq::APP_STORE_WAITQ.deregister(task);
-        result
     }
 
     /// Resolve the child's kernel-attested credential (uid + group set +
@@ -3638,35 +3487,27 @@ where
         if program.is_none() && bundle.is_none() {
             return Err(Errno::NotFound);
         }
-        let loaded = match (&program, &bundle) {
-            (None, Some(parsed)) => Some(self.load_store_bundle(caller, parsed)?),
-            _ => None,
-        };
+        // The bundle read + signature/hash verification is **not** done
+        // here: it moves onto the child's own first slice (§2.6.5), so the
+        // spawning caller (a desktop, a shell) is never blocked on disk I/O
+        // + cryptography. The handler only resolves the *shape* synchronously;
+        // the heavy load is the child's `LoadPlan` below. An embedded
+        // boot-floor program's bytes are already `'static` and verified at
+        // build time, so it is a prebuilt plan with no deferred read.
 
-        // The child's effective startup strings: a present block carries
-        // the caller's chosen argument vector and environment verbatim
-        // (a shell passing the typed command words and its exported
-        // variables); with no block the child receives the program's
-        // registered default arguments and an empty environment — exactly
-        // what every pre-existing caller expressed.
-        let mut args: Vec<&[u8]> = Vec::new();
-        let mut env: Vec<&[u8]> = Vec::new();
-        if let Some(block) = &strings_buf {
-            let view = ProcessStart::parse(block)?;
-            for index in 0..view.arg_count() {
-                args.push(view.arg(index).ok_or(Errno::OutOfRange)?);
-            }
-            for index in 0..view.env_count() {
-                env.push(view.env(index).ok_or(Errno::OutOfRange)?);
-            }
-        } else if let Some(program) = program {
-            args.extend_from_slice(program.args);
-        } else if let Some(parsed) = &bundle {
-            // A store bundle's default argument vector is its command name
-            // (the bundle-directory stem) — the same one-word convention
-            // every registered boot-floor row declares.
-            args.push(parsed.command.as_bytes());
-        }
+        // The child's effective startup strings, captured as **owned** bytes
+        // because the child materialises long after this handler returns and
+        // cannot borrow the caller's staged blocks: a present block carries
+        // the caller's chosen argument vector and environment verbatim (a
+        // shell passing the typed command words and its exported variables);
+        // with no block the child receives the program's registered default
+        // arguments and an empty environment — exactly what every
+        // pre-existing caller expressed.
+        let (args, env) = resolve_spawn_args(
+            strings_buf.as_deref(),
+            program.map(|program| program.args),
+            bundle.as_ref().map(|parsed| parsed.command),
+        )?;
 
         // Resolve the child's kernel-attested credential (uid + group set +
         // capability ceiling), never a caller-supplied value.
@@ -3733,17 +3574,35 @@ where
             // credential; it can only narrow the child.
             attach.is_sandbox(),
         );
-        let (rxe, requested): (&[u8], CapabilitySet) = if let Some(program) = program {
-            (program.rxe, program.capability_set())
-        } else if let Some(app) = &loaded {
-            (app.run_image(), *app.granted())
+        // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
+        // boot-floor program is a **prebuilt** plan carrying its already-
+        // verified `'static` image and manifest request, so the child only
+        // builds an address space; a store bundle is a **bundle** plan the
+        // child reads and verifies itself, on its own task, under its own
+        // credential. A syntactically valid path always matches exactly one
+        // (the resolve step above returned on every other shape).
+        let plan = if let Some(program) = program {
+            LoadPlan::Prebuilt {
+                rxe: alloc::borrow::Cow::Borrowed(program.rxe),
+                requested: program.capability_set(),
+            }
+        } else if let Some(parsed) = &bundle {
+            LoadPlan::Bundle {
+                bundle: String::from(parsed.bundle),
+                command: String::from(parsed.command),
+            }
         } else {
-            // Unreachable by construction (the resolve step above returned
-            // on every other shape); keep the arm fail-closed.
+            // Unreachable by construction; keep the arm fail-closed.
             return Err(Errno::NotFound);
         };
-        self.spawn_service
-            .spawn_with(rxe, &ctx, requested, &args, &env)
+
+        // Admit the child in its loading state and return its PID at once —
+        // the caller keeps running while the child performs the disk read,
+        // verification, and image build on its own first slice. A load
+        // failure surfaces through the child's reserved-status exit, not this
+        // return value (§2.3). Only a synchronous admission failure (launch
+        // services unwired, or scheduler exhaustion) maps to an errno.
+        ctx.admit_loading(plan, args, env).map_err(admit_errno)
     }
 
     fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -7300,6 +7159,56 @@ where
     }
 }
 
+/// Tear down the process-bookkeeping subset a task holds regardless of
+/// whether it ever reached user mode: its signal-intake / kill-gate /
+/// running-kill overlays, its own parent/child wait rows, its capability
+/// record, and its address-space registry entry (streams, open files,
+/// limits, grants, cwd, and — when registered — the frozen space snapshot).
+///
+/// Factored out of [`KernelSyscallHandlers::reclaim_task_resources`] so the
+/// full task teardown and the asynchronous-launch loading-child teardown
+/// release the *same* bookkeeping through one definition
+/// (`plans/FIX-DESKTOP.md` §2.6.5, item 2). It covers only the bookkeeping
+/// every principal owns from admission; the resource teardown a
+/// fully-running task also needs (IPC ports, IRQ bindings, shared memory,
+/// wait-sets, console foreground) stays in `reclaim_task_resources`, which a
+/// loading child that failed before entering user mode provably never
+/// acquired.
+///
+/// The three registry mutations take separate write locks: a task being
+/// reclaimed is never concurrently admitted under the same id (ids are
+/// never reused), so there is no cross-lock invariant to hold.
+fn reclaim_process_bookkeeping(
+    caps: &RwLock<CapTable>,
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    process_wait: &(dyn ProcessWait + 'static),
+    task: SecTaskId,
+) {
+    // Drop the task's signal-intake state (its opt-in and any pending
+    // observed signal): a dead task's intake must never linger, and task
+    // ids are never reused, so a leaked entry could never be reclaimed.
+    crate::procsignal::clear_intake(task.0);
+    // Drop the task's kill-gate state for the same reason — and so a task
+    // that exits on its own while a termination was deferred against it
+    // (both raced) leaves no pending kill behind.
+    crate::procsignal::clear_kill_gate(task.0);
+    // Drop any termination deferred against the task while it ran in user
+    // mode: a self-exit or fault teardown running here means the task is
+    // already being reclaimed, so the dispatch loop's later
+    // `land_running_kill` must find nothing and never reclaim twice.
+    crate::procsignal::clear_running_kill(task.0);
+    // Prune the dead task's own child rows from the wait bookkeeping: a
+    // dead parent can never reap, so a row it never collected — a running
+    // orphan's link or an unreaped zombie — would be stranded forever.
+    process_wait.parent_exited(task);
+    let _ = caps.write().remove(task);
+    // Withdraw the address-space registry entry last: streams, open files
+    // (pipe ends wake their parked peers as they drop), limits, grants, cwd,
+    // and any frozen space snapshot all go together, so no stale entry
+    // outlives the task.
+    aspaces.write().withdraw(task);
+}
+
 /// The kernel-attested identity a freshly spawned child is admitted under:
 /// its owning user and full group set (`PREREQUISITES.md` P-C, spawn-as-user).
 ///
@@ -7386,16 +7295,16 @@ impl SpawnCredential {
     }
 }
 
-/// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
-/// spawn producer (`plans/SPAWN.md` SP3).
+/// The admit context the `spawn` syscall handler builds to launch a child
+/// (`plans/SPAWN.md` SP3, `plans/FIX-DESKTOP.md` DESK-1).
 ///
 /// Built fresh per `spawn` call from the handler's borrows; it carries no
-/// state of its own. [`SpawnCtx::admit_process`] registers the producer's
-/// freshly built process with this kernel state's scheduler, capability
-/// table, and address-space registry and returns its PID — the
-/// runtime-spawn analogue of the PID-1 `KernelInitSpawner` (`init.rs`), but
-/// it admits the task **Ready** and does **not** enter user mode or drain
-/// the scheduler (the spawning caller keeps running).
+/// state of its own. [`KernelSpawnCtx::admit_loading`] registers the child
+/// as a parked **loading** kthread with this kernel state's scheduler,
+/// capability table, and address-space registry and returns its PID at once
+/// — the child reads/verifies its bundle and builds its image on its *own*
+/// first slice, off the caller, so the spawning caller keeps running and is
+/// never blocked on the load.
 ///
 /// Public so a kernel-side (host-driven) spawn — the drvhost driver-spawn
 /// path and its proving QEMU vertical (`PLAN.md` Stage 4.HW) — can drive
@@ -7574,174 +7483,631 @@ where
             sandbox,
         }
     }
+}
 
-    /// Derive the child's kernel-attested capability record for `sec_id`:
-    /// the `user ceiling ∩ manifest request` effective set plus the process
-    /// identity, parentage, credential, start time, and console attestation
-    /// — every field kernel-resolved, never caller-supplied — with a sandbox
-    /// child's sets structurally stripped last. `caps` is the program's
-    /// manifest request. Factored out of `admit_process` so that admission
-    /// path stays a readable linear sequence.
-    fn derive_child_record(&self, sec_id: SecTaskId, caps: CapabilitySet) -> TaskCapabilities {
-        // The parent's own attested process-instance identity (read from its
-        // kernel-held record, never a caller value) so the child is
-        // attributable to the exact parent instance even across PID reuse; a
-        // kernel-parented admit leaves the kernel sentinel.
+/// Build a freshly spawned child's kernel-attested [`TaskCapabilities`]
+/// record from wholly kernel-resolved inputs.
+///
+/// The effective set is `user ceiling ∩ manifest request`
+/// (`plans/CAPABILITY_USE.md` CU1): `manifest_request` is the manifest side
+/// and the ceiling rides on `credential`. A system-principal credential
+/// carries no users-db ceiling, so its manifest stands as its ceiling
+/// (`manifest_request` on both sides — the one legitimate
+/// manifest-as-ceiling shape) and the record is marked so its inherit-spawns
+/// stay manifest-bounded. A sandbox child's three capability sets are
+/// stripped structurally last, after every attestation is attached.
+///
+/// Every argument is kernel-resolved, never caller-supplied. Both the
+/// *placeholder* record (empty request, installed synchronously at admit)
+/// and the *effective* record (the loaded manifest's request, installed by
+/// the loading body once the image is verified) are derived through this one
+/// definition from a single [`ChildRecordSeed`] — the same identity,
+/// parentage, credential, start time, and console on both, so the two
+/// derivations can never diverge (`plans/FIX-DESKTOP.md` §2.6.5, item 2).
+#[allow(clippy::too_many_arguments)]
+fn derive_task_record(
+    sec_id: SecTaskId,
+    manifest_request: CapabilitySet,
+    credential: &SpawnCredential,
+    proc_id: ProcId,
+    parent_proc_id: ProcId,
+    name: &ProcName,
+    spawn_path: &[u8],
+    start_time: u64,
+    console: u64,
+    sandbox: bool,
+    audit: &dyn Sink,
+) -> TaskCapabilities {
+    let record = match credential.ceiling {
+        Some(ceiling) => {
+            TaskCapabilities::derive(sec_id, credential.uid, ceiling, manifest_request, audit)
+        }
+        None => TaskCapabilities::derive(
+            sec_id,
+            credential.uid,
+            manifest_request,
+            manifest_request,
+            audit,
+        )
+        .as_system_principal(),
+    }
+    .with_proc_id(proc_id)
+    .with_parent_proc_id(parent_proc_id)
+    .with_name(name.clone())
+    .with_spawn_path(spawn_path.to_vec())
+    .with_credential(
+        credential.primary_gid,
+        credential.supplementary_gids.clone(),
+    )
+    .with_start_time(start_time)
+    .with_console(console);
+    if sandbox {
+        record.as_sandboxed()
+    } else {
+        record
+    }
+}
+
+/// A resolved `(argv, envp)` pair for a spawned child: each is a vector of
+/// owned byte strings, captured off the caller because the child
+/// materialises long after the `spawn` handler returns.
+type ResolvedSpawnStrings = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// Resolve the child's effective startup argument vector and environment
+/// from the three mutually exclusive sources a `spawn` can carry, in
+/// priority order: a caller-supplied startup-strings block (a shell's typed
+/// words and exported variables), else a boot-floor program's registered
+/// default arguments, else a store bundle's command stem (the one-word
+/// convention every registered row declares). With none of the three the
+/// child receives an empty argument vector and environment.
+///
+/// Extracted from the `spawn` handler so the derivation is unit-testable in
+/// isolation: the vectors are captured as **owned** bytes because the child
+/// materialises long after the handler returns and cannot borrow the
+/// caller's staged blocks (`plans/FIX-DESKTOP.md` §2.6.5). A present block
+/// that does not parse as a canonical startup vector fails closed.
+fn resolve_spawn_args(
+    strings_block: Option<&[u8]>,
+    program_args: Option<&[&[u8]]>,
+    bundle_command: Option<&str>,
+) -> Result<ResolvedSpawnStrings, Errno> {
+    let mut args: Vec<Vec<u8>> = Vec::new();
+    let mut env: Vec<Vec<u8>> = Vec::new();
+    if let Some(block) = strings_block {
+        let view = ProcessStart::parse(block)?;
+        for index in 0..view.arg_count() {
+            args.push(view.arg(index).ok_or(Errno::OutOfRange)?.to_vec());
+        }
+        for index in 0..view.env_count() {
+            env.push(view.env(index).ok_or(Errno::OutOfRange)?.to_vec());
+        }
+    } else if let Some(defaults) = program_args {
+        args.extend(defaults.iter().map(|arg| arg.to_vec()));
+    } else if let Some(command) = bundle_command {
+        args.push(command.as_bytes().to_vec());
+    }
+    Ok((args, env))
+}
+
+/// The pre-verified or on-disk source an admitted **loading** child
+/// materialises into an image on its own first scheduled slice
+/// (`plans/FIX-DESKTOP.md` §2.6.5). Owned data captured by the deferred
+/// loading body; it never borrows the spawning caller's task, so it can be
+/// carried across the arbitrary delay before the child is dispatched.
+pub enum LoadPlan {
+    /// A pre-verified in-memory image whose manifest capability request is
+    /// already known: a boot-floor embedded program (`'static` bytes) or a
+    /// driver image the signed `drvhost` load gate already verified (owned
+    /// bytes). The child only builds an isolated address space from it — no
+    /// disk read, no re-verification.
+    Prebuilt {
+        /// The `rxe` image bytes (borrowed `'static` for an embedded program,
+        /// owned for a verified driver image the loader read from disk).
+        rxe: alloc::borrow::Cow<'static, [u8]>,
+        /// The manifest capability request the child's effective set is
+        /// derived from (`ceiling ∩ request`).
+        requested: CapabilitySet,
+    },
+    /// An on-disk `<Name>.app/Run` store bundle the child reads and verifies
+    /// itself, on its own task, under its own credential.
+    Bundle {
+        /// The bundle root directory the shared load gate judges.
+        bundle: String,
+        /// The bundle directory stem — retained for symmetry with the
+        /// synchronous resolver; the child re-derives its manifest request
+        /// from the verified `AppInfo`.
+        command: String,
+    },
+}
+
+/// The kernel-resolved inputs [`derive_task_record`] needs, captured at
+/// admit so the placeholder (empty-request) record installed synchronously
+/// and the effective record the loading body installs after verification
+/// share every kernel-attested field but the manifest request — the two
+/// derivations can never diverge (`plans/FIX-DESKTOP.md` §2.6.5, item 2).
+#[derive(Clone)]
+struct ChildRecordSeed {
+    proc_id: ProcId,
+    parent_proc_id: ProcId,
+    name: ProcName,
+    spawn_path: Vec<u8>,
+    start_time: u64,
+    console: u64,
+    credential: SpawnCredential,
+    sandbox: bool,
+}
+
+impl ChildRecordSeed {
+    /// Derive the child's kernel-attested capability record for
+    /// `manifest_request` from this seed. Called once at admit with an empty
+    /// request (the placeholder) and once in the loading body with the
+    /// verified manifest's request (the effective record that replaces it).
+    fn record(
+        &self,
+        sec_id: SecTaskId,
+        manifest_request: CapabilitySet,
+        audit: &dyn Sink,
+    ) -> TaskCapabilities {
+        derive_task_record(
+            sec_id,
+            manifest_request,
+            &self.credential,
+            self.proc_id,
+            self.parent_proc_id,
+            &self.name,
+            &self.spawn_path,
+            self.start_time,
+            self.console,
+            self.sandbox,
+            audit,
+        )
+    }
+}
+
+/// The [`ImageBuildCtx`] the loading body hands the architecture image
+/// builder, backed by the boot-installed `'static`
+/// [`crate::spawn_services::SpawnServices`] bundle rather than a per-call
+/// [`KernelSpawnCtx`] borrow (the build runs long after the `spawn` handler
+/// returned).
+struct ServicesBuildCtx {
+    services: &'static crate::spawn_services::SpawnServices,
+    /// The loading child's kernel-stack guard VA (`Some` for an arena stack,
+    /// `None` for the software-canary `BoxStack`), re-expressed in the
+    /// child's own root by the build.
+    guard: Option<u64>,
+}
+
+impl ImageBuildCtx for ServicesBuildCtx {
+    fn frames(&self) -> &FrameAllocator {
+        self.services.frames()
+    }
+
+    fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
+        self.services.page_table_frames()
+    }
+
+    fn audit(&self) -> &(dyn Sink + Sync) {
+        self.services.audit()
+    }
+
+    fn kernel_stack_guard(&self) -> Option<u64> {
+        self.guard
+    }
+}
+
+/// A [`tairix_appload::Clock`] over the boot-installed
+/// [`crate::spawn_services::SpawnRuntime`], so the child-side bundle read
+/// times its load phases without the loading body naming the concrete
+/// architecture.
+struct RuntimeClock<'a> {
+    runtime: &'a dyn crate::spawn_services::SpawnRuntime,
+}
+
+impl tairix_appload::Clock for RuntimeClock<'_> {
+    fn now_ns(&self) -> u64 {
+        self.runtime.now_ns()
+    }
+}
+
+/// The pieces the loading body needs to upgrade itself into a user task once
+/// its image is built, verified, and registered: the address-space-root
+/// reactivation hook, the retained live space (for a task whose producer
+/// wired one), and the user-mode entry thunk.
+struct ReadyToEnter {
+    pre_resume: Box<dyn FnMut(u64) + Send>,
+    live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
+    enter: Box<dyn FnMut() + Send>,
+}
+
+/// Park the loading child while the application store's readiness latch is
+/// still pending, then return.
+///
+/// The child is a resumable kthread, so it suspends through its published
+/// per-CPU resume handle ([`reschedule_current`]) — no scheduler borrow is
+/// needed in the body — and is woken by [`crate::waitq::app_store_wake`] the
+/// instant the boot path resolves the latch (available or unavailable). A
+/// caller with no live dispatch loop (a host test) cannot park, so the loop
+/// breaks rather than busy-spinning; such a build never leaves the latch
+/// pending. A termination deferred against the child unwinds the wait.
+fn body_wait_app_store(
+    services: &'static crate::spawn_services::SpawnServices,
+    task: u64,
+) -> Result<(), Errno> {
+    let Some(store) = services.app_store() else {
+        return Ok(());
+    };
+    if !store.is_pending() {
+        return Ok(());
+    }
+    crate::waitq::APP_STORE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
+    let result = loop {
+        if !store.is_pending() {
+            break Ok(());
+        }
+        let cpu = services.runtime().current_cpu();
+        if !reschedule_current(cpu, RescheduleAction::Park) {
+            break Ok(());
+        }
+        if crate::procsignal::kill_pending(task) {
+            break Err(Errno::Interrupted);
+        }
+    };
+    crate::waitq::APP_STORE_WAITQ.deregister(task);
+    result
+}
+
+/// Resolve, verify, and authorise the on-disk store bundle `bundle` through
+/// the one shared `tairix_appload` load gate, under the child's own
+/// `(uid, effective)` authority — the deferred-load counterpart of the
+/// synchronous store-bundle read, driven from the child's own task off the
+/// boot-installed services (`plans/FIX-DESKTOP.md` §2.2). The
+/// `LaunchCache` still hoists verification off a re-launch; the entry-point
+/// read is always re-authorised through the secured VFS, so a principal who
+/// could not read the bundle cannot launch it from the cache.
+fn body_load_bundle(
+    services: &'static crate::spawn_services::SpawnServices,
+    uid: u32,
+    effective: &dyn tairix_abi::CapabilityQuery,
+    bundle: &str,
+) -> Result<alloc::sync::Arc<tairix_appload::LoadedApp>, Errno> {
+    let Some(store) = services.app_store() else {
+        return Err(Errno::NotFound);
+    };
+    if !store.is_available() {
+        return Err(Errno::NotFound);
+    }
+    let cacheable = crate::appspawn::AppStore::cacheable_bundle(bundle);
+    if cacheable {
+        if let Some(app) = store.cached(bundle) {
+            services
+                .filesystem()
+                .open(uid, effective, app.run_path(), OpenFlags::READ)?;
+            return Ok(app);
+        }
+    }
+    let fs_store = crate::appspawn::FsBundleStore::new(services.filesystem(), uid, effective);
+    let verifier = crate::appspawn::AnchorVerifier::new(store.anchor());
+    let clock = RuntimeClock {
+        runtime: services.runtime(),
+    };
+    let loader = tairix_appload::AppLoader::new(tairix_appload::AppLoaderConfig {
+        accepted_abi_version: tairix_abi::ABI_VERSION_CURRENT,
+        syscall_table_hash: tairix_kernel_syscall::SYSCALL_TABLE_HASH,
+        store: &fs_store,
+        verifier: &verifier,
+        clock: &clock,
+        sink: services.audit(),
+    });
+    // The full-word set is the identity element of the gate's request∩grants
+    // intersection, so the returned ceiling is exactly the manifest request;
+    // the child's single intersection with its credential's user ceiling
+    // (in `ChildRecordSeed::record`) stays the one authority bound.
+    let full_grants = CapabilitySet::from_words([u64::MAX; 4]);
+    let app = loader
+        .load(bundle, &full_grants)
+        .map(alloc::sync::Arc::new)
+        .map_err(crate::appspawn::app_error_errno)?;
+    if cacheable {
+        store.cache_verified(bundle, &app);
+    }
+    Ok(app)
+}
+
+/// Build the child's isolated address space from `rxe`, install its
+/// effective capability record and frozen space, and return what it needs to
+/// enter user mode.
+///
+/// The effective capability record replaces the placeholder empty-set record
+/// **before** the frozen space is registered and before the child can become
+/// a user task, so it is never dispatchable under the wrong authority. On any
+/// failure nothing is left half-installed for the caller to enter: the caps
+/// record is either the placeholder (untouched) or the effective set of a
+/// child that is about to be torn down, and no frozen space is registered.
+// Threads the full child-load context (services, the kernel-attested record
+// seed, the stack guard, the verified image + its manifest request, and the
+// resolved argv/envp) into one build; bundling these into a struct would only
+// rename the same fields, so the count stands.
+#[allow(clippy::too_many_arguments)]
+fn build_from_bytes(
+    services: &'static crate::spawn_services::SpawnServices,
+    sec_id: SecTaskId,
+    seed: &ChildRecordSeed,
+    guard: Option<u64>,
+    rxe: &[u8],
+    requested: CapabilitySet,
+    args: &[&[u8]],
+    env: &[&[u8]],
+) -> Result<ReadyToEnter, Errno> {
+    // Install the effective capability record (replacing the admit-time
+    // placeholder), so the running child is bounded by `ceiling ∩ manifest`
+    // from the moment it can act, not the empty placeholder set.
+    let record = seed.record(sec_id, requested, services.audit());
+    services.caps().write().insert(record);
+
+    let ctx = ServicesBuildCtx { services, guard };
+    let image = services.image_builder().build(rxe, &ctx, args, env)?;
+
+    // Register the frozen space + direct map and the reserved user-stack span
+    // under the child's id before it enters user mode, so its first
+    // user-memory access resolves its own mappings and the stack-growth fault
+    // path can back pages inside the span.
+    {
+        let mut aspaces = services.aspaces().write();
+        if aspaces
+            .register(sec_id, image.frozen, image.physmap)
+            .is_err()
+        {
+            return Err(Errno::AlreadyExists);
+        }
+        aspaces.set_stack_span(sec_id, image.stack_span);
+    }
+    Ok(ReadyToEnter {
+        pre_resume: image.pre_resume,
+        live: image.live,
+        enter: image.enter,
+    })
+}
+
+/// The full child-side load: obtain the verified image (a prebuilt image
+/// directly, or a bundle the child reads and verifies under its own
+/// credential after parking for the store), then build and register it.
+///
+/// Runs entirely on the child's own task, off the spawning caller
+/// (`plans/FIX-DESKTOP.md` §2.6.5). Any failure returns a stable [`Errno`]
+/// the caller maps to a reserved [`tairix_abi::load_failure_status`] exit.
+// Threads the full child-load context (services, the child's scheduler id and
+// task number, its load plan and record seed, the stack guard, and the
+// resolved argv/envp); a struct would only rename the same fields.
+#[allow(clippy::too_many_arguments)]
+fn build_child_image(
+    services: &'static crate::spawn_services::SpawnServices,
+    sec_id: SecTaskId,
+    task: u64,
+    plan: &LoadPlan,
+    seed: &ChildRecordSeed,
+    guard: Option<u64>,
+    args: &[&[u8]],
+    env: &[&[u8]],
+) -> Result<ReadyToEnter, Errno> {
+    match plan {
+        LoadPlan::Prebuilt { rxe, requested } => build_from_bytes(
+            services,
+            sec_id,
+            seed,
+            guard,
+            rxe.as_ref(),
+            *requested,
+            args,
+            env,
+        ),
+        LoadPlan::Bundle { bundle, .. } => {
+            // Park until the store latch resolves, then read + verify under
+            // the child's own credential. The effective set for the read is
+            // the account ceiling (a system principal with no ceiling reads
+            // under its full system identity, exactly as the synchronous
+            // predecessor did); it is never wider than the account allows.
+            body_wait_app_store(services, task)?;
+            let uid = seed.credential.uid.0;
+            let effective = seed
+                .credential
+                .ceiling
+                .unwrap_or_else(|| CapabilitySet::from_words([u64::MAX; 4]));
+            let app = body_load_bundle(services, uid, &effective, bundle)?;
+            // The build copies the image bytes before `app` is dropped at the
+            // end of this arm, so the borrow of the retained image is sound.
+            build_from_bytes(
+                services,
+                sec_id,
+                seed,
+                guard,
+                app.run_image(),
+                *app.granted(),
+                args,
+                env,
+            )
+        }
+    }
+}
+
+/// Audit a deferred load refusal, attributed to the failing child `sec_id`.
+///
+/// The heavy load failures (missing bundle bytes, tampered signature,
+/// malformed `rxe`, OOM) are discovered on the child's own task, so the
+/// refusal is recorded here — beside the child's reserved-status exit — with
+/// the stable errno that classified it, rather than surfacing as a `spawn`
+/// return value (`plans/FIX-DESKTOP.md` §2.3).
+fn emit_load_refusal(audit: &(dyn Sink + Sync), sec_id: SecTaskId, errno: Errno) {
+    crate::audit::emit(
+        audit,
+        Level::Warn,
+        AuditEvent::ProcessSpawnDenied,
+        &[
+            Field {
+                key: "cause",
+                value: tairix_log::FieldValue::Str("deferred_load_failed"),
+            },
+            Field {
+                key: "task",
+                value: tairix_log::FieldValue::UnsignedInt(sec_id.0),
+            },
+            Field {
+                key: "status",
+                value: tairix_log::FieldValue::SignedInt(i64::from(
+                    tairix_abi::load_failure_status(errno),
+                )),
+            },
+        ],
+    );
+}
+
+impl<A> KernelSpawnCtx<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    /// Admit a **loading** child and return its PID at once
+    /// (`plans/FIX-DESKTOP.md` §2.6.5 — asynchronous process launch).
+    ///
+    /// The child is registered as a parked plain kernel kthread carrying
+    /// only the manifest-*independent* admit state — a placeholder empty
+    /// capability record, the spawner-resolved standard streams and wired
+    /// open entries, inherited resource limits and working directory, any
+    /// device-resource grants + matched node, and the parent/child wait link
+    /// — all resolved synchronously on the calling task so the spawner learns
+    /// the PID immediately. The child then materialises its own image on its
+    /// first scheduled slice, on its *own* kernel stack: it reads and
+    /// verifies its bundle under its own credential where required, derives
+    /// and installs its effective capability set (`ceiling ∩ manifest`),
+    /// builds its isolated address space, and upgrades itself into a user
+    /// task through [`crate::kthread::Yielder::become_user`]. No unverified
+    /// byte is ever mapped and the child is never dispatchable as a user task
+    /// under the placeholder authority — the effective set and the frozen
+    /// address space are installed strictly before `become_user`. On any load
+    /// failure the child exits with a reserved [`tairix_abi::load_failure_status`]
+    /// status and the refusal is audited, so the spawner observes the failure
+    /// through the ordinary child-exit path rather than a `spawn` errno
+    /// (`plans/FIX-DESKTOP.md` §2.3).
+    ///
+    /// The `'static` load services the child body captures are the
+    /// boot-installed [`crate::spawn_services::SpawnServices`] bundle; a build
+    /// that never installed it fails the admit closed. Every registry install
+    /// below therefore uses that bundle's handles, which are the *same*
+    /// objects the syscall dispatcher resolves a caller against — so the
+    /// child the placeholder record is written for is exactly the child the
+    /// dispatcher finds.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmitError`] if the launch services are not installed or the
+    /// scheduler refuses the admission (fail closed, never a panic).
+    pub fn admit_loading(
+        &self,
+        plan: LoadPlan,
+        args: Vec<Vec<u8>>,
+        env: Vec<Vec<u8>>,
+    ) -> Result<u64, AdmitError> {
+        let services = installed_spawn_services().ok_or(AdmitError::SchedulerFull)?;
+
+        // Compute the record seed once, so the placeholder record installed
+        // synchronously below and the effective record the loading body
+        // installs after verification share every kernel-attested field but
+        // the manifest request (the two derivations can never diverge). The
+        // synchronous installs below use this context's own borrows into the
+        // live kernel state — the same registries the boot-installed services
+        // wrap and the dispatcher resolves a caller against — so the child the
+        // placeholder record is written for is exactly the child that runs.
         let parent_proc_id = self
             .caps
             .read()
             .caps_for(self.parent)
             .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
-        // Kernel monotonic clock at admission: lets an audit/origin consumer
-        // order and age the instance and tell apart two lifetimes that reused
-        // a numeric id. Read kernel-side, never caller-supplied.
         let start_time = SchedulerArch::ticks_now(self.arch);
-        // The one console backing every attached standard descriptor, or the
-        // "not console-backed" sentinel for a closed/split table — a
-        // per-console service trusts this to place a caller.
         let console = self
             .streams
             .session_console()
             .map_or(tairix_abi::ORIGIN_CONSOLE_NONE, u64::from);
-        // Effective set = `user ceiling ∩ manifest request`
-        // (`plans/CAPABILITY_USE.md` CU1): `caps` is the manifest request and
-        // the ceiling rides on the credential. A system-principal credential
-        // carries no users-db ceiling, so its manifest is its ceiling (`caps`
-        // stands on both sides — the one legitimate manifest-as-ceiling
-        // shape) and the record is marked so its inherit-spawns stay
-        // manifest-bounded.
-        let record = match self.credential.ceiling {
-            Some(ceiling) => {
-                TaskCapabilities::derive(sec_id, self.credential.uid, ceiling, caps, self.audit)
-            }
-            None => TaskCapabilities::derive(sec_id, self.credential.uid, caps, caps, self.audit)
-                .as_system_principal(),
-        }
-        .with_proc_id(self.proc_id)
-        .with_parent_proc_id(parent_proc_id)
-        .with_name(self.name.clone())
-        .with_spawn_path(self.spawn_path.clone())
-        .with_credential(
-            self.credential.primary_gid,
-            self.credential.supplementary_gids.clone(),
-        )
-        .with_start_time(start_time)
-        .with_console(console);
-        // Brand a sandbox child last, after every attestation is attached:
-        // the brand strips all three capability sets structurally and marks
-        // the record for the dispatcher's allow-list confinement.
-        if self.sandbox {
-            record.as_sandboxed()
-        } else {
-            record
-        }
-    }
-}
+        let seed = ChildRecordSeed {
+            proc_id: self.proc_id,
+            parent_proc_id,
+            name: self.name.clone(),
+            spawn_path: self.spawn_path.clone(),
+            start_time,
+            console,
+            credential: self.credential.clone(),
+            sandbox: self.sandbox,
+        };
 
-impl<A> SpawnCtx for KernelSpawnCtx<'_, A>
-where
-    A: KernelArch + 'static,
-{
-    fn frames(&self) -> &FrameAllocator {
-        self.frames
-    }
+        // Allocate the loading child's kernel stack synchronously, before its
+        // address space exists, so its own loading body runs on it. The guard
+        // VA (`Some` for an arena stack, `None` for the software-canary
+        // `BoxStack`) is threaded to the build, which re-expresses it in the
+        // child's own root. The stack frames come from this context's own
+        // allocator borrows; the architecture image builder is the
+        // boot-installed one.
+        let (stack, guard) = services
+            .image_builder()
+            .alloc_kernel_stack(self.frames, self.page_table_frames);
 
-    fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
-        self.page_table_frames
-    }
-
-    fn audit(&self) -> &(dyn Sink + Sync) {
-        self.audit
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn admit_process(
-        &self,
-        caps: CapabilitySet,
-        space: Box<dyn UserAddressSpace + Send + Sync>,
-        physmap: Box<dyn PhysMap + Send + Sync>,
-        stack_span: crate::aspace::StackSpan,
-        stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut(u64) + Send>,
-        live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
-        mut enter: Box<dyn FnMut() + Send>,
-    ) -> Result<u64, AdmitError> {
         let cpu = SchedulerArch::current_cpu(self.arch);
-
-        // Admit the child as a resumable user kthread (`plans/SPAWN.md`
-        // SP2): the work body performs the user-mode transition on the
-        // task's own kernel stack, and the `pre_resume` hook reactivates
-        // the child's address-space root before every switch into it so it
-        // `eret`s into EL0 under the correct, isolated translation regime. `enter` diverges into EL0, so the `()` it
-        // yields satisfies the body signature for the (impossible) case the
-        // transition ever returned. The arch seam owns the kernel stack
-        // (`stack`) — an arena-backed stack whose guard page it has unmapped
-        // in the child's own root, else the software-canary `BoxStack`
-        // fallback (`plans/PI.md` G3b-2).
-        let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
-            enter();
-        };
         let cs = self.arch.context_switch();
-        // When the producer retained a live, mutable address space, admit the
-        // child with it so its `mem_map` / `mmio_map` syscalls mutate its own
-        // space through the per-CPU live-space slot (`plans/PI.md`
-        // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
-        // fail closed.
-        //
-        // The child is admitted **parked** (the trailing `true`): registered
-        // but off every run queue, so no CPU can dispatch it and take its
-        // first syscall before the per-task state below exists. The `unpark`
-        // at the end makes it runnable once that state is installed. On a
-        // multi-core boot a Ready admission here raced those installs and the
-        // child's first syscall found no capability record.
-        let admitted = match live {
-            Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
-                self.sched,
-                cs,
-                stack,
-                cpu,
-                Priority::Normal,
-                pre_resume,
-                live,
-                work,
-                true,
-            ),
-            None => crate::kthread::spawn_user_kthread_with_stack(
-                self.sched,
-                cs,
-                stack,
-                cpu,
-                Priority::Normal,
-                pre_resume,
-                work,
-                true,
-            ),
+
+        // The child's own scheduler id, published after admit and read by the
+        // loading body (which runs only after `unpark`, so the release store
+        // below happens-before any body read).
+        let id_cell = alloc::sync::Arc::new(core::sync::atomic::AtomicU64::new(0));
+        let body_id = alloc::sync::Arc::clone(&id_cell);
+        let body_seed = seed.clone();
+
+        let work = move |yielder: &mut Yielder<A::Cs>| {
+            let task = body_id.load(core::sync::atomic::Ordering::Acquire);
+            let sec_id = SecTaskId(task);
+            let arg_refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+            let env_refs: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
+            match build_child_image(
+                services, sec_id, task, &plan, &body_seed, guard, &arg_refs, &env_refs,
+            ) {
+                Ok(ready) => {
+                    // The effective capability record and the frozen address
+                    // space are installed (inside `build_child_image`) before
+                    // this upgrade, so the child is never dispatchable as a
+                    // user task under the placeholder authority.
+                    yielder.become_user(ready.pre_resume, ready.live);
+                    let mut enter = ready.enter;
+                    enter();
+                }
+                Err(errno) => {
+                    // Attributed to the child: audit the refusal, record the
+                    // reserved load-failure exit status the parent reaps, and
+                    // release the admit-time bookkeeping the child holds
+                    // (it never reached user mode, so it acquired nothing
+                    // beyond that subset). Returning makes the task terminal.
+                    emit_load_refusal(services.audit(), sec_id, errno);
+                    services
+                        .process_wait()
+                        .record_exit(sec_id, tairix_abi::load_failure_status(errno));
+                    reclaim_process_bookkeeping(
+                        services.caps(),
+                        services.aspaces(),
+                        services.process_wait(),
+                        sec_id,
+                    );
+                }
+            }
         };
-        let task_id = admitted.map_err(|_| AdmitError::SchedulerFull)?;
 
-        // Register the child's caps under the *same* numeric id the
-        // dispatcher recovers (`SecTaskId(task_id)`), so its first syscall
-        // (once unparked below) resolves a caller context. The record's
-        // kernel-attested fields are built by `derive_child_record`.
+        let task_id =
+            spawn_kthread_with_stack_parked(self.sched, cs, stack, cpu, Priority::Normal, work)
+                .map_err(|_| AdmitError::SchedulerFull)?;
         let sec_id = SecTaskId(task_id);
-        let record = self.derive_child_record(sec_id, caps);
-        self.caps.write().insert(record);
 
-        // Register the child's frozen address space + direct map under the
-        // same id, so its first user-memory copy resolves its own mappings
-        // instead of failing closed with `BadAddress` (`plans/PI.md` P6c-3
-        // follow-up). A fresh task id is never already present; a refusal is
-        // a kernel invariant violation — retire the still-parked task and
-        // fail closed rather than leave an unrunnable orphan.
-        if self
-            .aspaces
-            .write()
-            .register(sec_id, space, physmap)
-            .is_err()
-        {
-            let _ = self.sched.exit(task_id);
-            return Err(AdmitError::AspaceConflict);
-        }
+        // Publish the id to the still-parked body before installing per-task
+        // state and unparking.
+        id_cell.store(task_id, core::sync::atomic::Ordering::Release);
+
+        // Install the placeholder empty-capability record so the child's
+        // first (loading) slice resolves a caller context yet can exercise no
+        // authority before its effective set is derived and installed.
+        let placeholder = seed.record(sec_id, CapabilitySet::empty(), self.audit);
+        self.caps.write().insert(placeholder);
 
         // Establish the child's standard streams: the
         // spawner-resolved table — the parent's own (inherit) or the
@@ -7753,16 +8119,16 @@ where
         // console slot for a wired fd closed so exactly one authority
         // backs each descriptor. The program names only the fd numbers; it
         // never reaches an ambient device.
+        //
+        // The child's frozen address space and its reserved user-stack span
+        // are **not** registered here (no image exists yet) — the loading
+        // body registers them after the build, before the child enters user
+        // mode. The stream/limit/cwd install below operates on the aspaces
+        // registry keyed by `sec_id` independently of a registered address
+        // space, so it stands.
         {
             let mut aspaces = self.aspaces.write();
             aspaces.set_streams(sec_id, self.streams);
-            // Record the child's reserved user-stack span beside its
-            // streams, under the same write lock, so the stack-growth
-            // fault path can back pages inside it on demand — bounded by
-            // the `StackBytes` limit inherited below. The span is
-            // producer-derived from the validated spawn layout, never a
-            // caller-supplied value.
-            aspaces.set_stack_span(sec_id, stack_span);
             for (fd, file) in &self.wired {
                 // `fd` is a standard slot by construction (the wire loop
                 // indexes the fixed table); a refusal here would signal a
@@ -7834,9 +8200,10 @@ where
 
         // Record the parent/child link with the process-wait producer so the
         // spawning parent can later `wait` on this child and reap its exit
-        // code (`plans/SPAWN.md` SP6). Done only after the child is fully
-        // admitted (scheduler + caps + aspace + streams) so a parent that
-        // observes the returned PID can immediately and soundly reap it.
+        // code (`plans/SPAWN.md` SP6). Done before the child is unparked so a
+        // parent that observes the returned PID can immediately and soundly
+        // reap it — including a child that fails its load and exits with a
+        // reserved status on its very first slice.
         self.process_wait.register_child(self.parent, sec_id);
 
         // Every piece of per-task state is installed, so make the parked
@@ -8041,7 +8408,6 @@ where
         frames: &'a FrameAllocator,
         page_table_frames: &'static FrameAllocator,
         programs: &'static ProgramRegistry,
-        spawn_service: &'static (dyn ProcessSpawn + 'static),
         process_wait: &'static (dyn ProcessWait + 'static),
         seat_registry: &'static SeatRegistry,
         mem_map: &'static (dyn MemMap + 'static),
@@ -8063,7 +8429,7 @@ where
             .with_consoles(consoles)
             .with_frames(frames)
             .with_page_table_frames(page_table_frames)
-            .with_spawn(programs, spawn_service)
+            .with_spawn(programs)
             .with_process_wait(process_wait)
             .with_seat_registry(seat_registry)
             .with_mem_map(mem_map)
@@ -11883,46 +12249,145 @@ mod tests {
 
     /// Absolute program path the spawn tests register and look up.
     static SPAWN_PATH: &[u8] = b"/Apps/Child.app/Run";
+    /// A syntactically well-formed path that is neither a registered
+    /// boot-floor program nor a `<Name>.app/Run` store bundle (no `.app`
+    /// component), so it resolves to nothing and fails closed synchronously.
+    static UNKNOWN_PATH: &[u8] = b"/Apps/Child/Run";
     /// Stand-in `rxe` bytes; the host producer double only records them,
     /// it does not parse them (parsing is the arch producer's job, `SP3b`).
     static SPAWN_RXE: &[u8] = b"child-rxe-blob";
 
-    /// A `ProcessSpawn` double that admits a freshly built **host**
-    /// address space through `ctx.admit_process` and records the `rxe` it
-    /// was handed, returning the new PID. It proves the core admit
-    /// machinery (scheduler + caps + aspace registration) end-to-end
-    /// without the arch-specific image build (`plans/SPAWN.md` SP3 host
-    /// proof; `SP3b` wires the real aarch64 producer).
-    struct RecordingSpawn {
+    // Deferred-launch (`plans/FIX-DESKTOP.md` DESK-1) test scaffolding.
+    //
+    // `SPAWN` is now **admit-then-load**: the handler resolves the path
+    // shape, credential, streams, and args synchronously and admits a parked
+    // loading child, returning its PID at once; the child reads/verifies its
+    // bundle and builds its image on its *own* first slice, off the caller.
+    // A host test never drives a real context switch, so the loading body's
+    // logic (`build_child_image` / `body_load_bundle`) is exercised directly
+    // with a per-test `SpawnServices` fixture, and the synchronous `spawn`
+    // handler is exercised through the boot-installed global stub services.
+
+    use crate::spawn::{ArchImageBuilder, BuiltImage, ImageBuildCtx};
+    use crate::spawn_services::{SpawnRuntime, SpawnServices};
+
+    /// A [`SpawnRuntime`] returning fixed values; the deferred body times its
+    /// phases and parks against it, none of which a host test reaches.
+    struct TestSpawnRuntime;
+
+    impl SpawnRuntime for TestSpawnRuntime {
+        fn current_cpu(&self) -> CpuId {
+            0
+        }
+        fn ticks_now(&self) -> u64 {
+            0
+        }
+        fn now_ns(&self) -> u64 {
+            0
+        }
+    }
+
+    /// The minimal architecture image builder the synchronous-admit tests
+    /// need: `alloc_kernel_stack` hands the loading kthread a plain
+    /// software-canary `BoxStack` (an arena guard-page stack is the arch
+    /// producer's job, unreachable from a host test), and `build` fails
+    /// closed because the host suite never runs the loading body through the
+    /// global services.
+    struct StubImageBuilder;
+
+    impl ArchImageBuilder for StubImageBuilder {
+        fn alloc_kernel_stack(
+            &self,
+            _frames: &FrameAllocator,
+            _pt_frames: Option<&'static FrameAllocator>,
+        ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>) {
+            (Box::new(crate::kthread::BoxStack::new()), None)
+        }
+
+        fn build(
+            &self,
+            _rxe: &[u8],
+            _ctx: &dyn ImageBuildCtx,
+            _args: &[&[u8]],
+            _env: &[&[u8]],
+        ) -> Result<BuiltImage, Errno> {
+            Err(Errno::NotImplemented)
+        }
+    }
+
+    /// An [`ArchImageBuilder`] that records the `rxe`, args, env, and whether
+    /// the static page-table allocator was threaded through the
+    /// [`ImageBuildCtx`], then returns a freezable one-page host image so
+    /// [`build_child_image`] can register the child's address space and
+    /// install its effective capability record — the deferred-body analogue
+    /// of the old synchronous recording producer.
+    ///
+    /// `build_result` lets a test force a build failure (an OOM /
+    /// malformed-image proof) instead of the default success.
+    struct RecordingImageBuilder {
         rxe: tairix_sync::SpinLock<alloc::vec::Vec<u8>>,
         args: tairix_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
         env: tairix_sync::SpinLock<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+        builds: core::sync::atomic::AtomicUsize,
+        saw_page_table_alloc: core::sync::atomic::AtomicBool,
+        build_result: Option<Errno>,
     }
 
-    impl RecordingSpawn {
+    impl RecordingImageBuilder {
         fn new() -> Self {
             Self {
                 rxe: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
                 args: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
                 env: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+                builds: core::sync::atomic::AtomicUsize::new(0),
+                saw_page_table_alloc: core::sync::atomic::AtomicBool::new(false),
+                build_result: None,
             }
+        }
+
+        /// A builder whose `build` fails closed with `err` (an OOM / malformed
+        /// proof), after recording that it was reached.
+        fn failing(err: Errno) -> Self {
+            let mut this = Self::new();
+            this.build_result = Some(err);
+            this
+        }
+
+        fn build_count(&self) -> usize {
+            self.builds.load(core::sync::atomic::Ordering::Relaxed)
         }
     }
 
-    impl ProcessSpawn for RecordingSpawn {
-        fn spawn_with(
+    impl ArchImageBuilder for RecordingImageBuilder {
+        fn alloc_kernel_stack(
+            &self,
+            _frames: &FrameAllocator,
+            _pt_frames: Option<&'static FrameAllocator>,
+        ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>) {
+            (Box::new(crate::kthread::BoxStack::new()), None)
+        }
+
+        fn build(
             &self,
             rxe: &[u8],
-            ctx: &dyn SpawnCtx,
-            caps: CapabilitySet,
+            ctx: &dyn ImageBuildCtx,
             args: &[&[u8]],
             env: &[&[u8]],
-        ) -> Result<u64, Errno> {
+        ) -> Result<BuiltImage, Errno> {
+            self.rxe.lock().clear();
             self.rxe.lock().extend_from_slice(rxe);
             *self.args.lock() = args.iter().map(|arg| arg.to_vec()).collect();
             *self.env.lock() = env.iter().map(|entry| entry.to_vec()).collect();
-            // Build a one-page host user space and freeze it into the
-            // registry-storable snapshot, exactly as the real producer
+            self.saw_page_table_alloc.store(
+                ctx.page_table_allocator().is_some(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            self.builds
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if let Some(err) = self.build_result {
+                return Err(err);
+            }
+            // Freeze a one-page host user space, exactly as the real producer
             // freezes its built image.
             let mut space = AddressSpace::new(HostPageTable::new());
             space
@@ -11935,39 +12400,107 @@ mod tests {
             let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
             let physmap: Box<dyn PhysMap + Send + Sync> =
                 Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
-            // Forward the manifest request the handler derived exactly as
-            // the real producers do, so the admit path's `ceiling ∩
-            // manifest` derivation is exercised against the registered
-            // entry.
-            let child_caps = caps;
-            // Inert closures: a host test never enters user mode or
-            // reactivates a page-table root.
-            let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(|_stack_top| {});
-            let enter: Box<dyn FnMut() + Send> = Box::new(|| {});
-            // The host double hands a plain software-canary `BoxStack` — the
-            // arena-backed guard-page stack is the arch producer's job
-            // (`plans/PI.md` G3b-2), unreachable from a host test.
-            let stack: Box<dyn crate::kthread::KernelStack + Send> =
-                Box::new(crate::kthread::BoxStack::new());
             let stack_span = crate::aspace::StackSpan::new(0x2000, 0x2000, 0x3000)
                 .expect("the host test span is page-aligned and well-formed");
-            // SAFETY: the host test never dispatches the admitted task, so
-            // the (inert) `enter`/`pre_resume` closures never run and the
-            // frozen host space need only answer `translate`; it faithfully
-            // describes the one page mapped above. The host double retains no
-            // live space (`None`), so the child's `mem_map`/`mmio_map` would
-            // fail closed — unexercised here.
-            unsafe {
-                ctx.admit_process(
-                    child_caps, frozen, physmap, stack_span, stack, pre_resume, None, enter,
-                )
-            }
-            .map_err(|_| Errno::NoSpace)
+            // Inert closures: a host test never enters user mode or reactivates
+            // a page-table root.
+            Ok(BuiltImage {
+                frozen,
+                physmap,
+                stack_span,
+                live: None,
+                pre_resume: Box::new(|_stack_top| {}),
+                enter: Box::new(|| {}),
+            })
         }
     }
 
-    /// Build a handler whose `spawn` subsystem is fully wired: frames +
-    /// a registry holding `SPAWN_PATH` + a producer.
+    /// Leak a per-test [`SpawnServices`] over the given deferred-load handles,
+    /// so a test can drive [`build_child_image`] / [`body_load_bundle`]
+    /// directly under fully isolated registries (no process-global sharing).
+    #[allow(clippy::too_many_arguments)]
+    fn leak_body_services(
+        frames: &'static FrameAllocator,
+        audit: &'static (dyn Sink + Sync),
+        filesystem: &'static (dyn crate::fs::FilesystemService + 'static),
+        app_store: Option<&'static crate::appspawn::AppStore>,
+        aspaces: &'static RwLock<AddressSpaceRegistry>,
+        caps: &'static RwLock<CapTable>,
+        image_builder: &'static (dyn ArchImageBuilder + 'static),
+    ) -> &'static SpawnServices {
+        let runtime: &'static TestSpawnRuntime = Box::leak(Box::new(TestSpawnRuntime));
+        Box::leak(Box::new(SpawnServices::new(
+            frames,
+            Some(frames),
+            audit,
+            filesystem,
+            app_store,
+            aspaces,
+            caps,
+            &crate::procwait::NULL_PROCESS_WAIT,
+            image_builder,
+            runtime,
+        )))
+    }
+
+    /// Ensure a boot-installed global [`SpawnServices`] exists so the
+    /// synchronous `spawn` handler's `admit_loading` can allocate the loading
+    /// child's kernel stack and admit it. The stub's registries are never
+    /// touched synchronously (the admit installs the placeholder record and
+    /// streams through the handler's *own* borrows; only `alloc_kernel_stack`
+    /// and the never-run loading body reach the global), so one shared stub
+    /// serves every synchronous-admit test. Set-once and idempotent.
+    fn ensure_global_spawn_services() {
+        if installed_spawn_services().is_some() {
+            return;
+        }
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+        let services = leak_body_services(
+            frames,
+            audit,
+            &crate::fs::NULL_FILESYSTEM,
+            None,
+            aspaces,
+            caps,
+            builder,
+        );
+        // A parallel test thread may have installed it between the check above
+        // and here; either publish wins and the loser's fixture is dropped.
+        let _ = crate::spawn_services::install_spawn_services(services);
+    }
+
+    /// Admit a boot-floor-style **prebuilt** child through the production
+    /// deferred-load admit ([`KernelSpawnCtx::admit_loading`]) and return its
+    /// PID — the synchronous half every driver/PID-1 admit runs. The child is
+    /// parked and never dispatched by the host suite, so its (never-run)
+    /// loading body only needs the boot-installed global services to have
+    /// supplied its kernel stack; every synchronously-observable admit effect
+    /// (placeholder record, name/proc_id/start-time attestation, grants,
+    /// loaded node, parent link) lands in the `ctx`'s own registries.
+    fn admit_prebuilt_child(
+        ctx: &KernelSpawnCtx<'_, TestArch>,
+        program: &EmbeddedProgram,
+    ) -> Result<u64, AdmitError> {
+        ensure_global_spawn_services();
+        ctx.admit_loading(
+            LoadPlan::Prebuilt {
+                rxe: alloc::borrow::Cow::Borrowed(program.rxe),
+                requested: program.capability_set(),
+            },
+            program.args.iter().map(|arg| arg.to_vec()).collect(),
+            Vec::new(),
+        )
+    }
+
+    /// Build a handler whose synchronous `spawn` subsystem is fully wired
+    /// (frames + a program registry) and ensure the boot-installed global
+    /// launch services exist so the admit can allocate the loading child's
+    /// kernel stack.
     #[allow(clippy::too_many_arguments)]
     fn spawn_handler<'a>(
         sched: &'a Scheduler<TestArch>,
@@ -11981,11 +12514,11 @@ mod tests {
         rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
         frames: &'a FrameAllocator,
         programs: &'static ProgramRegistry,
-        producer: &'static (dyn ProcessSpawn + 'static),
     ) -> KernelSyscallHandlers<'a, TestArch> {
+        ensure_global_spawn_services();
         KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_frames(frames)
-            .with_spawn(programs, producer)
+            .with_spawn(programs)
     }
 
     /// `spawn` copies the caller's path in, resolves the embedded program,
@@ -12025,11 +12558,9 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
 
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let before = sched.live_task_count();
@@ -12054,16 +12585,24 @@ mod tests {
                 .name(),
             "Child"
         );
+        // The child is admitted in its loading state carrying the manifest-
+        // *independent* placeholder record; it reads/builds its own image on
+        // its first slice, so no address space is registered yet.
         assert!(
-            aspaces.read().contains(SecTaskId(pid)),
-            "child address space registered under its pid"
+            !aspaces.read().contains(SecTaskId(pid)),
+            "no address space is registered until the child builds its image"
         );
-        assert_eq!(producer.rxe.lock().as_slice(), SPAWN_RXE);
-        // No startup-strings block was supplied, so the child receives the
-        // program's registered default arguments (empty here) and an empty
-        // environment.
-        assert!(producer.args.lock().is_empty());
-        assert!(producer.env.lock().is_empty());
+        // The placeholder record carries the empty capability set until the
+        // child derives `ceiling ∩ manifest` on load.
+        assert!(
+            table
+                .read()
+                .caps_for(SecTaskId(pid))
+                .expect("child record")
+                .effective()
+                .is_empty(),
+            "the admit-time record is the empty-set placeholder"
+        );
         // A user-driven `spawn` grants the child no device resources: the
         // handler passes an empty grant slice, so the child holds no
         // resolvable handle (no ambient authority).
@@ -12072,11 +12611,27 @@ mod tests {
 
     /// Absolute store-bundle entry-point path the disk-spawn tests use.
     static BUNDLE_PATH: &[u8] = b"/System/Apps/ps.app/Run";
+    /// The bundle root directory the shared load gate judges (the entry
+    /// point's parent), and its command stem.
+    static BUNDLE_ROOT: &str = "/System/Apps/ps.app";
+    static BUNDLE_COMMAND: &str = "ps";
 
-    /// A bundle-shaped path with no installed application store fails
-    /// closed with `NotFound` — immediately, parking nothing.
+    /// The child's on-disk load plan for the store bundle above.
+    fn bundle_plan() -> LoadPlan {
+        LoadPlan::Bundle {
+            bundle: String::from(BUNDLE_ROOT),
+            command: String::from(BUNDLE_COMMAND),
+        }
+    }
+
+    /// A bundle-shaped path is admitted **immediately** — the store read and
+    /// verification are deferred onto the child's own first slice
+    /// (`plans/FIX-DESKTOP.md` §2.6.5), so the caller is never blocked on
+    /// disk I/O even with no store wired. The child then fails its own load
+    /// closed (proven by the body tests below); the caller learns only the
+    /// admitted PID.
     #[test]
-    fn spawn_bundle_path_without_a_store_fails_not_found() {
+    fn spawn_of_a_bundle_path_admits_immediately_without_a_store() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -12098,7 +12653,6 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched,
             &table,
@@ -12111,134 +12665,255 @@ mod tests {
             &rng,
             &frames,
             &EMPTY_PROGRAM_REGISTRY,
-            producer,
         );
-        assert_eq!(
-            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
-            Err(Errno::NotFound)
+        let before = sched.live_task_count();
+        let pid = h
+            .spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
+            .expect("a well-formed bundle path is admitted, not refused");
+        assert!(
+            sched.live_task_count() > before,
+            "the child is admitted as a live loading task"
+        );
+        // The placeholder record is installed synchronously; the child's own
+        // image and effective set are built later, on its first slice.
+        assert!(
+            table.read().caps_for(SecTaskId(pid)).is_some(),
+            "the loading child has a placeholder record"
+        );
+        assert!(
+            !aspaces.read().contains(SecTaskId(pid)),
+            "no address space is registered until the child loads"
         );
     }
 
-    /// A store that resolved *unavailable* fails a bundle spawn closed with
+    /// The child's own load fails closed with `NotFound` (→ `LOAD_NOT_FOUND`)
+    /// when no application store is installed — the deferred counterpart of
+    /// the old synchronous refusal, now on the child's task.
+    #[test]
+    fn body_load_of_a_bundle_without_a_store_is_not_found() {
+        install_trace_filter();
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+        let services = leak_body_services(
+            frames,
+            audit,
+            &crate::fs::NULL_FILESYSTEM,
+            None,
+            aspaces,
+            caps,
+            builder,
+        );
+        let seed = body_seed();
+        let err = expect_load_err(build_child_image(
+            services,
+            SecTaskId(1),
+            1,
+            &bundle_plan(),
+            &seed,
+            None,
+            &[],
+            &[],
+        ));
+        assert_eq!(err, Errno::NotFound);
+        assert_eq!(
+            tairix_abi::load_failure_status(err),
+            tairix_abi::LOAD_NOT_FOUND
+        );
+        assert!(
+            !aspaces.read().contains(SecTaskId(1)),
+            "a refused load registers no address space"
+        );
+    }
+
+    /// A store that resolved *unavailable* fails the child's load closed with
     /// `NotFound` even when the on-disk bundle exists and would verify.
     #[test]
-    fn spawn_bundle_path_with_an_unavailable_store_fails_not_found() {
+    fn body_load_of_a_bundle_with_an_unavailable_store_is_not_found() {
         install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("caller registration");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
         let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
         let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_unavailable();
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
-        let h = spawn_handler(
-            &sched,
-            &table,
-            &arch,
-            sink,
-            &irq,
-            &ctl,
-            &ipc,
-            &aspaces,
-            &rng,
-            &frames,
-            &EMPTY_PROGRAM_REGISTRY,
-            producer,
-        )
-        .with_filesystem(memfs)
-        .with_app_store(store);
-        assert_eq!(
-            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
-            Err(Errno::NotFound)
-        );
-        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+        let services =
+            leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
+        let seed = body_seed();
+        let err = expect_load_err(build_child_image(
+            services,
+            SecTaskId(1),
+            1,
+            &bundle_plan(),
+            &seed,
+            None,
+            &[],
+            &[],
+        ));
+        assert_eq!(err, Errno::NotFound);
     }
 
-    /// With an available store, `spawn` reads the bundle off the mounted
-    /// filesystem, verifies it through the shared load gate, and spawns
-    /// exactly the validated `Run` image with the bundle's command name as
-    /// its default argument vector (`plans/APPS.md` deliverable 8).
+    /// With an available store, the child's own load reads the bundle off
+    /// the mounted filesystem, verifies it through the shared load gate, and
+    /// builds exactly the validated `Run` image — installing its effective
+    /// capability record (the verified manifest request, since the system
+    /// credential's ceiling is `None`) and registering its address space,
+    /// all on the child's own task (`plans/FIX-DESKTOP.md` §2.6.5).
     #[test]
-    fn spawn_of_a_verified_store_bundle_spawns_the_validated_image() {
+    fn body_load_of_a_verified_store_bundle_builds_the_validated_image() {
         install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("caller registration");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
         let (memfs, anchor, run) =
             crate::test_bundle::composed_bundle(alloc::vec![CapabilityId::CONSOLE_WRITE]);
         let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_available();
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
-        let h = spawn_handler(
-            &sched,
-            &table,
-            &arch,
-            sink,
-            &irq,
-            &ctl,
-            &ipc,
-            &aspaces,
-            &rng,
-            &frames,
-            &EMPTY_PROGRAM_REGISTRY,
-            producer,
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static RecordingImageBuilder =
+            Box::leak(Box::new(RecordingImageBuilder::new()));
+        let services =
+            leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
+        let seed = body_seed();
+        // The default argument vector the handler resolves for a bundle is
+        // its command stem (`resolve_spawn_args`, tested separately); the body
+        // threads whatever it is handed into the build verbatim.
+        let args: [&[u8]; 1] = [BUNDLE_COMMAND.as_bytes()];
+        build_child_image(
+            services,
+            SecTaskId(7),
+            7,
+            &bundle_plan(),
+            &seed,
+            None,
+            &args,
+            &[],
         )
-        .with_filesystem(memfs)
-        .with_app_store(store);
-        let pid = h
-            .spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
-            .expect("disk-backed spawn succeeds");
-        assert!(pid > 0);
-        // The producer received byte-for-byte the validated on-disk image,
-        // and the child's default argument vector is the bundle's command
-        // name.
-        assert_eq!(producer.rxe.lock().as_slice(), run.as_slice());
-        assert_eq!(producer.args.lock().as_slice(), &[b"ps".to_vec()]);
-        let guard = table.read();
+        .expect("a verified store bundle loads");
+        // The arch build received byte-for-byte the validated on-disk image
+        // and the resolved argument vector.
+        assert_eq!(builder.rxe.lock().as_slice(), run.as_slice());
+        assert_eq!(builder.args.lock().as_slice(), &[b"ps".to_vec()]);
+        // The child's effective capability record is installed before it can
+        // enter user mode: the verified manifest request, since the system
+        // credential imposes no narrower ceiling.
+        let guard = caps.read();
         let record = guard
-            .caps_for(SecTaskId(pid))
-            .expect("child caps registered under its pid");
-        // The attested name is the bundle's command stem, never the `Run`
-        // leaf every bundle shares — a process listing must name the app.
-        assert_eq!(record.name(), "ps");
+            .caps_for(SecTaskId(7))
+            .expect("effective record installed under the child id");
+        assert!(
+            record.has(CapabilityId::CONSOLE_WRITE),
+            "the verified manifest capability is granted"
+        );
+        assert!(
+            !record.has(CapabilityId::FS_MOUNT),
+            "no capability the manifest did not request is granted"
+        );
+        drop(guard);
+        // The child's isolated address space is registered under its id.
+        assert!(
+            aspaces.read().contains(SecTaskId(7)),
+            "the built address space is registered before entry"
+        );
+    }
+
+    /// A prebuilt child whose architecture image build itself fails — a
+    /// malformed `rxe` the builder cannot parse, or frame/page-table
+    /// exhaustion while laying out the address space — fails the load closed
+    /// with that errno, maps it to the matching reserved load-failure exit
+    /// status, and leaves **no** address space registered: the caller is never
+    /// handed a half-built child to enter (`plans/FIX-DESKTOP.md` §2.6.5). The
+    /// build is reached (recorded), so the failure is the build's, not a
+    /// short-circuit before it.
+    #[test]
+    fn body_build_failure_fails_closed_and_registers_no_space() {
+        install_trace_filter();
+        for (errno, status) in [
+            (Errno::BadMagic, tairix_abi::LOAD_MALFORMED),
+            (Errno::OutOfMemory, tairix_abi::LOAD_OOM),
+        ] {
+            let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+            let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            let aspaces: &'static RwLock<AddressSpaceRegistry> =
+                Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            let builder: &'static RecordingImageBuilder =
+                Box::leak(Box::new(RecordingImageBuilder::failing(errno)));
+            let services = leak_body_services(
+                frames,
+                audit,
+                &crate::fs::NULL_FILESYSTEM,
+                None,
+                aspaces,
+                caps,
+                builder,
+            );
+            let seed = body_seed();
+            let plan = LoadPlan::Prebuilt {
+                rxe: alloc::borrow::Cow::Borrowed(SPAWN_RXE),
+                requested: CapabilitySet::empty(),
+            };
+            let err = expect_load_err(build_child_image(
+                services,
+                SecTaskId(1),
+                1,
+                &plan,
+                &seed,
+                None,
+                &[],
+                &[],
+            ));
+            assert_eq!(err, errno);
+            assert_eq!(tairix_abi::load_failure_status(err), status);
+            assert_eq!(
+                builder.build_count(),
+                1,
+                "the failing build must be reached"
+            );
+            assert!(
+                !aspaces.read().contains(SecTaskId(1)),
+                "a failed build registers no address space for the caller to enter"
+            );
+        }
+    }
+
+    /// A deferred load refusal is audited against the *failing child*, not the
+    /// spawning caller: a `ProcessSpawnDenied` event carrying the
+    /// `deferred_load_failed` cause, the child's task id, and the reserved
+    /// load-failure exit status the errno maps to (`plans/FIX-DESKTOP.md`
+    /// §2.3) — the record beside the child's reserved-status exit, since the
+    /// heavy load fails on the child's own task rather than a `spawn` errno.
+    #[test]
+    fn emit_load_refusal_audits_the_failing_child() {
+        install_trace_filter();
+        let sink = make_sink();
+        emit_load_refusal(sink, SecTaskId(42), Errno::SignatureInvalid);
+        let event = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::ProcessSpawnDenied.id())
+            .expect("a spawn-denied event is recorded");
+        assert!(event
+            .fields
+            .iter()
+            .any(|(k, v)| k == "cause" && v == "deferred_load_failed"));
+        assert!(event.fields.iter().any(|(k, v)| k == "task" && v == "42"));
+        assert!(event.fields.iter().any(|(k, v)| k == "status"
+            && v == &alloc::format!(
+                "{}",
+                tairix_abi::load_failure_status(Errno::SignatureInvalid)
+            )));
     }
 
     /// A [`FilesystemService`] over the shared [`MemFs`] fixture that
@@ -12444,168 +13119,95 @@ mod tests {
         );
     }
 
-    /// A second spawn of the same system-store bundle is served from the
-    /// per-boot semantic launch cache: the same validated image is spawned
+    /// A full-word capability set — the identity element of the load gate's
+    /// request∩grants intersection, matching the authority the child's own
+    /// loading body reads a bundle under (its account ceiling).
+    fn full_grants() -> CapabilitySet {
+        CapabilitySet::from_words([u64::MAX; 4])
+    }
+
+    /// A second child-side load of the same system-store bundle is served
+    /// from the per-boot semantic launch cache: the same validated image
     /// with **zero** further data reads (no whole-bundle re-read, re-hash,
-    /// or re-verify on the launch hot path) — the regression that made
-    /// every command launch re-verify its bundle from disk.
+    /// or re-verify on the launch hot path) — the regression that made every
+    /// command launch re-verify its bundle from disk.
     #[test]
-    fn a_second_spawn_of_a_store_bundle_is_served_from_the_cache() {
+    fn a_second_body_load_of_a_store_bundle_is_served_from_the_cache() {
         install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        // The caller sits at task id 9: the two admitted children receive
-        // the scheduler's low ids, which must not collide with the
-        // caller's own aspace registration.
-        aspaces
-            .write()
-            .register(SecTaskId(9), space, physmap)
-            .expect("caller registration");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let frames = spawn_test_frames();
-        let caps = make_caps_record(9, &[CapabilityId::PROC_SPAWN], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(9),
-            caps: &caps,
-        };
         let (memfs, anchor, run) = crate::test_bundle::composed_bundle(alloc::vec![]);
         let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, false)));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
         install_launch_cache(store);
         store.note_available();
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
-        let h = spawn_handler(
-            &sched,
-            &table,
-            &arch,
-            sink,
-            &irq,
-            &ctl,
-            &ipc,
-            &aspaces,
-            &rng,
-            &frames,
-            &EMPTY_PROGRAM_REGISTRY,
-            producer,
-        )
-        .with_filesystem(fs)
-        .with_app_store(store);
-        h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
-            .expect("first spawn verifies the bundle");
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+        let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
+        let grants = full_grants();
+
+        let first =
+            body_load_bundle(services, 0, &grants, BUNDLE_ROOT).expect("first load verifies");
+        assert_eq!(first.run_image(), run.as_slice());
         let reads_after_first = fs.reads();
-        assert!(reads_after_first > 0, "the first spawn reads the bundle");
-        h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
-            .expect("second spawn serves the cache");
+        assert!(reads_after_first > 0, "the first load reads the bundle");
+
+        let second =
+            body_load_bundle(services, 0, &grants, BUNDLE_ROOT).expect("second load serves cache");
+        assert_eq!(second.run_image(), run.as_slice());
         assert_eq!(
             fs.reads(),
             reads_after_first,
             "a cached launch performs no data reads"
         );
-        // Both spawns handed the producer the same validated image.
-        assert_eq!(producer.rxe.lock().len(), 2 * run.len());
-        assert_eq!(&producer.rxe.lock()[..run.len()], run.as_slice());
-        assert_eq!(&producer.rxe.lock()[run.len()..], run.as_slice());
     }
 
     /// A cache hit never bypasses authorisation: when the secured VFS
-    /// refuses the caller's read of the entry point, the cached launch is
-    /// refused too and nothing is spawned.
+    /// refuses the caller's read of the entry point, the cached load is
+    /// refused too and nothing is served.
     #[test]
-    fn a_cache_hit_still_authorises_the_callers_read() {
+    fn a_cached_body_load_still_authorises_the_read() {
         install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        // The caller sits at task id 9: the two admitted children receive
-        // the scheduler's low ids, which must not collide with the
-        // caller's own aspace registration.
-        aspaces
-            .write()
-            .register(SecTaskId(9), space, physmap)
-            .expect("caller registration");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let frames = spawn_test_frames();
-        let caps = make_caps_record(9, &[CapabilityId::PROC_SPAWN], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(9),
-            caps: &caps,
-        };
-        let (memfs, anchor, run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        // `deny_open` refuses the cache-hit re-authorisation `open`; the
+        // non-cache verify path uses the store's per-file `read`, so the
+        // first load still succeeds and caches.
         let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, true)));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
         install_launch_cache(store);
         store.note_available();
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
-        let h = spawn_handler(
-            &sched,
-            &table,
-            &arch,
-            sink,
-            &irq,
-            &ctl,
-            &ipc,
-            &aspaces,
-            &rng,
-            &frames,
-            &EMPTY_PROGRAM_REGISTRY,
-            producer,
-        )
-        .with_filesystem(fs)
-        .with_app_store(store);
-        // The first spawn verifies and caches the bundle (its reads are
-        // authorised per-file by the store's own read path).
-        h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
-            .expect("first spawn verifies the bundle");
-        // The second spawn hits the cache, but the secured VFS refuses the
-        // caller's read of the entry point: the launch fails closed.
-        assert_eq!(
-            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
-            Err(Errno::PermissionDenied)
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+        let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
+        let grants = full_grants();
+
+        body_load_bundle(services, 0, &grants, BUNDLE_ROOT)
+            .expect("first load verifies and caches");
+        // The second load hits the cache, but the secured VFS refuses the
+        // re-authorising open of the entry point: it fails closed.
+        assert!(
+            matches!(
+                body_load_bundle(services, 0, &grants, BUNDLE_ROOT),
+                Err(Errno::PermissionDenied)
+            ),
+            "a cache hit must re-authorise the read and fail closed"
         );
-        // Only the first, verified launch reached the producer.
-        assert_eq!(producer.rxe.lock().len(), run.len());
     }
 
-    /// A tampered on-disk `Run` breaks the signed content hash and the
-    /// spawn is refused with `SignatureInvalid` — nothing is launched.
+    /// A tampered on-disk `Run` breaks the signed content hash: the child's
+    /// own load fails closed with `SignatureInvalid` (→ `LOAD_UNVERIFIED`)
+    /// and no image is mapped.
     #[test]
-    fn spawn_of_a_tampered_store_bundle_is_refused() {
+    fn body_load_of_a_tampered_store_bundle_is_unverified() {
         install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("caller registration");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
         let (mut memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
         memfs
             .files
@@ -12616,28 +13218,39 @@ mod tests {
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_available();
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
-        let h = spawn_handler(
-            &sched,
-            &table,
-            &arch,
-            sink,
-            &irq,
-            &ctl,
-            &ipc,
-            &aspaces,
-            &rng,
-            &frames,
-            &EMPTY_PROGRAM_REGISTRY,
-            producer,
-        )
-        .with_filesystem(memfs)
-        .with_app_store(store);
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static RecordingImageBuilder =
+            Box::leak(Box::new(RecordingImageBuilder::new()));
+        let services =
+            leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
+        let seed = body_seed();
+        let err = expect_load_err(build_child_image(
+            services,
+            SecTaskId(1),
+            1,
+            &bundle_plan(),
+            &seed,
+            None,
+            &[],
+            &[],
+        ));
+        assert_eq!(err, Errno::SignatureInvalid);
         assert_eq!(
-            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
-            Err(Errno::SignatureInvalid)
+            tairix_abi::load_failure_status(err),
+            tairix_abi::LOAD_UNVERIFIED
         );
-        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
+        // The verification failed before any image was built, so no unverified
+        // byte was mapped and no address space was registered.
+        assert_eq!(
+            builder.build_count(),
+            0,
+            "no image is built for a refused bundle"
+        );
+        assert!(!aspaces.read().contains(SecTaskId(1)));
     }
 
     /// A caller-supplied startup-strings block replaces the program's
@@ -12685,10 +13298,8 @@ mod tests {
                     args: &[b"registry-default"],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let strings_addr = 0x1000 + SPAWN_PATH.len() as u64;
@@ -12703,14 +13314,17 @@ mod tests {
                 block.len(),
             )
             .expect("spawn with strings succeeds");
-        assert!(pid > 0);
-        // The caller's block governs: the registered default argument is
-        // replaced, and the environment arrives verbatim.
-        assert_eq!(
-            producer.args.lock().as_slice(),
-            &[b"man".to_vec(), b"ps".to_vec()]
+        assert!(
+            pid > 0,
+            "a valid strings block is accepted and the child admitted"
         );
-        assert_eq!(producer.env.lock().as_slice(), &[b"LANG=fr-FR".to_vec()]);
+        // The child is admitted carrying the caller's staged argument vector
+        // and environment, applied by its own loading body on its first slice
+        // (the block -> (args, env) derivation is proven by the
+        // `resolve_spawn_args` unit tests below, and the flow into the arch
+        // build by `build_child_image_of_a_prebuilt_program_*`). It cannot be
+        // read back synchronously here because the host suite never runs the
+        // loading body.
     }
 
     /// With no startup-strings block the child receives the program's
@@ -12748,20 +13362,81 @@ mod tests {
                     args: &[b"registry-default"],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
-        let _pid = h
+        let pid = h
             .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
-        assert_eq!(
-            producer.args.lock().as_slice(),
-            &[b"registry-default".to_vec()]
+        assert!(
+            pid > 0,
+            "with no strings block the child is admitted with the program's registered defaults"
         );
-        assert!(producer.env.lock().is_empty());
+        // The registered default argument vector reaches the child on its own
+        // loading slice (derivation proven by `resolve_spawn_args` units).
+    }
+
+    /// `resolve_spawn_args` unit — a present, canonical startup-strings block
+    /// wins over both the program's registered defaults and a bundle command:
+    /// its argument vector and environment are decoded verbatim (a shell's
+    /// typed words and exported variables), the owned bytes the deferred
+    /// loading body will hand the arch build.
+    #[test]
+    fn resolve_spawn_args_block_overrides_defaults_and_bundle_command() {
+        let args_in: [&[u8]; 2] = [b"man", b"ps"];
+        let env_in: [&[u8]; 1] = [b"LANG=fr-FR"];
+        let len = tairix_abi::process_start_encoded_len(&args_in, &env_in).expect("sized");
+        let mut block = alloc::vec![0u8; len];
+        tairix_abi::process_start_write_into(&mut block, &args_in, &env_in, 0).expect("encoded");
+        let defaults: [&[u8]; 1] = [b"registry-default"];
+        let (args, env) = resolve_spawn_args(Some(&block), Some(&defaults), Some("ps"))
+            .expect("a canonical block parses");
+        assert_eq!(args, alloc::vec![b"man".to_vec(), b"ps".to_vec()]);
+        assert_eq!(env, alloc::vec![b"LANG=fr-FR".to_vec()]);
+    }
+
+    /// `resolve_spawn_args` unit — with no block, a boot-floor program's
+    /// registered default arguments are used and the environment is empty
+    /// (a bundle command, if any, is not consulted while defaults exist).
+    #[test]
+    fn resolve_spawn_args_falls_back_to_registered_defaults() {
+        let defaults: [&[u8]; 2] = [b"init", b"--boot"];
+        let (args, env) = resolve_spawn_args(None, Some(&defaults), Some("ignored"))
+            .expect("defaults need no parse");
+        assert_eq!(args, alloc::vec![b"init".to_vec(), b"--boot".to_vec()]);
+        assert!(env.is_empty());
+    }
+
+    /// `resolve_spawn_args` unit — with neither a block nor registered
+    /// defaults, a store bundle's one-word command stem becomes `argv[0]`
+    /// and the environment is empty.
+    #[test]
+    fn resolve_spawn_args_falls_back_to_the_bundle_command() {
+        let (args, env) =
+            resolve_spawn_args(None, None, Some("ps")).expect("a bundle command needs no parse");
+        assert_eq!(args, alloc::vec![b"ps".to_vec()]);
+        assert!(env.is_empty());
+    }
+
+    /// `resolve_spawn_args` unit — with none of the three sources the child
+    /// receives an empty argument vector and environment (never a fabricated
+    /// default).
+    #[test]
+    fn resolve_spawn_args_with_no_source_is_empty() {
+        let (args, env) = resolve_spawn_args(None, None, None).expect("empty is well-formed");
+        assert!(args.is_empty());
+        assert!(env.is_empty());
+    }
+
+    /// `resolve_spawn_args` unit — a present block that is not a canonical
+    /// `PSV1` startup vector fails closed through the one shared decoder;
+    /// nothing is partially applied.
+    #[test]
+    fn resolve_spawn_args_rejects_a_malformed_block() {
+        let bogus = [0u8; 64];
+        let defaults: [&[u8]; 1] = [b"registry-default"];
+        assert!(resolve_spawn_args(Some(&bogus), Some(&defaults), Some("ps")).is_err());
     }
 
     /// A present block that does not parse as a `PSV1` startup vector is
@@ -12804,10 +13479,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let strings_addr = 0x1000 + SPAWN_PATH.len() as u64;
@@ -12823,7 +13496,6 @@ mod tests {
             ),
             Err(Errno::BadMagic)
         );
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// The strings pair's shape is validated before any state is touched:
@@ -12862,10 +13534,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         // Zero address with a non-zero length: a contradictory pair.
@@ -12885,7 +13555,6 @@ mod tests {
             h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0x2000, oversized,),
             Err(Errno::LengthOutOfRange)
         );
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// The privileged driver-spawn path mints one device-resource grant
@@ -12952,18 +13621,10 @@ mod tests {
             caps: &[],
             args: &[],
         };
-        // `RecordingSpawn::spawn` admits a host child through
-        // `ctx.admit_process`, returning the new PID the grants are minted
-        // against.
-        let pid = RecordingSpawn::new()
-            .spawn_with(
-                program.rxe,
-                &ctx,
-                program.capability_set(),
-                program.args,
-                &[],
-            )
-            .expect("driver child admitted");
+        // The deferred-load admit installs the child's synchronous state
+        // (placeholder record, grants, loaded node) and returns its PID; the
+        // heavy image build is the child's own first slice, unreached here.
+        let pid = admit_prebuilt_child(&ctx, &program).expect("driver child admitted");
         let child = SecTaskId(pid);
 
         // The minted process-instance identity is attested onto the child's
@@ -13101,15 +13762,7 @@ mod tests {
         // as `proc_id`.
         let child_proc = tairix_abi::ProcId::from_raw([0x11; 16]);
         let ctx = make_ctx(parent_task, child_proc);
-        let pid = RecordingSpawn::new()
-            .spawn_with(
-                program.rxe,
-                &ctx,
-                program.capability_set(),
-                program.args,
-                &[],
-            )
-            .expect("child admitted");
+        let pid = admit_prebuilt_child(&ctx, &program).expect("child admitted");
         let child = SecTaskId(pid);
         assert_eq!(
             table.read().caps_for(child).map(TaskCapabilities::proc_id),
@@ -13128,15 +13781,8 @@ mod tests {
         // A kernel-parented admit — the parent id names no capability record
         // — records the kernel sentinel, never a fabricated value.
         let orphan_ctx = make_ctx(SecTaskId(9999), tairix_abi::ProcId::from_raw([0x33; 16]));
-        let orphan_pid = RecordingSpawn::new()
-            .spawn_with(
-                program.rxe,
-                &orphan_ctx,
-                program.capability_set(),
-                program.args,
-                &[],
-            )
-            .expect("kernel-parented child admitted");
+        let orphan_pid =
+            admit_prebuilt_child(&orphan_ctx, &program).expect("kernel-parented child admitted");
         assert_eq!(
             table
                 .read()
@@ -13147,112 +13793,163 @@ mod tests {
         );
     }
 
-    /// A [`ProcessSpawn`] double that records whether the [`SpawnCtx`] it
-    /// is handed exposes a `'static` page-table frame allocator. It never admits a task — it returns
-    /// `NotImplemented` after recording — so a test can assert the wiring
-    /// without standing up an arch image build.
-    struct PageTableAllocProbeSpawn {
-        saw_static_allocator: core::sync::atomic::AtomicBool,
-    }
-
-    impl PageTableAllocProbeSpawn {
-        fn new() -> Self {
-            Self {
-                saw_static_allocator: core::sync::atomic::AtomicBool::new(false),
-            }
+    /// Unwrap the error of a deferred load, panicking if it unexpectedly
+    /// succeeded. [`ReadyToEnter`] is not `Debug` (it holds boxed closures),
+    /// so a direct `expect_err` will not compile. Takes the result **by
+    /// value** on purpose: the unexpected `Ok` image is dropped here rather
+    /// than left for every call site to discard.
+    #[allow(clippy::needless_pass_by_value)]
+    fn expect_load_err(result: Result<ReadyToEnter, Errno>) -> Errno {
+        match result {
+            Err(err) => err,
+            Ok(_) => panic!("the load was expected to fail closed"),
         }
     }
 
-    impl ProcessSpawn for PageTableAllocProbeSpawn {
-        fn spawn_with(
-            &self,
-            _rxe: &[u8],
-            ctx: &dyn SpawnCtx,
-            _caps: CapabilitySet,
-            _args: &[&[u8]],
-            _env: &[&[u8]],
-        ) -> Result<u64, Errno> {
-            self.saw_static_allocator.store(
-                ctx.page_table_allocator().is_some(),
-                core::sync::atomic::Ordering::SeqCst,
-            );
-            Err(Errno::NotImplemented)
+    /// A kernel-attested [`ChildRecordSeed`] for the deferred-body tests,
+    /// carrying the system credential (ceiling `None`, so the effective set
+    /// the loading body derives is exactly the manifest request).
+    fn body_seed() -> ChildRecordSeed {
+        ChildRecordSeed {
+            proc_id: tairix_abi::ProcId::from_raw([0x11; 16]),
+            parent_proc_id: tairix_abi::ProcId::KERNEL,
+            name: ProcName::from_bytes_truncating(b"child"),
+            spawn_path: SPAWN_PATH.to_vec(),
+            start_time: 0,
+            console: tairix_abi::ORIGIN_CONSOLE_NONE,
+            credential: SpawnCredential::system(),
+            sandbox: false,
         }
     }
 
-    /// When the boot path threads a `'static` page-table allocator through
-    /// [`KernelSyscallHandlers::with_page_table_frames`], the producer sees
-    /// it via [`SpawnCtx::page_table_allocator`] — the seam an arch producer
-    /// builds a child's page tables out of reclaimable RAM through.
-    #[test]
-    fn spawn_threads_the_static_page_table_allocator_to_the_producer() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("caller registration");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let frames = spawn_test_frames();
-        // The page-table allocator is a `'static` borrow in production; leak
-        // a test one so the type matches.
-        let ptf: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
-        let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
-                EmbeddedProgram {
-                    path: SPAWN_PATH,
-                    rxe: SPAWN_RXE,
-                    caps: &[],
-                    args: &[],
-                },
-            ])))));
-        let probe: &'static PageTableAllocProbeSpawn =
-            Box::leak(Box::new(PageTableAllocProbeSpawn::new()));
-
-        // Wired: the producer must observe `Some`.
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+    /// Reconstruct the exact kernel-resolved [`SpawnCredential`] the
+    /// synchronous `spawn` handler installed on a just-admitted loading child,
+    /// read back from its placeholder capability record (uid, group set, and
+    /// capability ceiling). The deferred-body derivation tests use it to drive
+    /// the real `ceiling ∩ manifest` derivation under the *same* credential the
+    /// handler resolved: the host suite cannot dispatch the child's loading
+    /// kthread, so the two production halves — synchronous credential
+    /// resolution and the deferred effective-set derivation — are stitched
+    /// here through the child's own attested record.
+    fn credential_from_record(child: &TaskCapabilities) -> SpawnCredential {
+        SpawnCredential::new(
+            child.owner(),
+            child.primary_gid(),
+            child.supplementary_gids().to_vec(),
+            child.user_ceiling().copied(),
         )
-        .with_frames(&frames)
-        .with_page_table_frames(ptf)
-        .with_spawn(programs, probe);
-        // The probe records and returns `NotImplemented`; the recording, not
-        // the result, is what proves the wiring.
-        let _ = h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0);
+    }
+
+    /// Drive the deferred loading body for a **prebuilt** child under
+    /// `credential` with manifest request `requested`, over freshly leaked,
+    /// isolated services (a recording arch builder, its own capability table
+    /// and audit sink). Returns the leaked capability table and the child's id
+    /// so the caller can read the installed effective record, plus the audit
+    /// sink that captured the `ceiling ∩ manifest` derive event.
+    fn derive_prebuilt_effective(
+        credential: SpawnCredential,
+        requested: CapabilitySet,
+    ) -> (&'static RwLock<CapTable>, SecTaskId, &'static TestSink) {
+        let seed = ChildRecordSeed {
+            credential,
+            ..body_seed()
+        };
+        let plan = LoadPlan::Prebuilt {
+            rxe: alloc::borrow::Cow::Borrowed(SPAWN_RXE),
+            requested,
+        };
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static RecordingImageBuilder =
+            Box::leak(Box::new(RecordingImageBuilder::new()));
+        let services = leak_body_services(
+            frames,
+            audit,
+            &crate::fs::NULL_FILESYSTEM,
+            None,
+            aspaces,
+            caps,
+            builder,
+        );
+        let sec_id = SecTaskId(1);
+        build_child_image(services, sec_id, 1, &plan, &seed, None, &[], &[])
+            .expect("prebuilt build succeeds");
+        (caps, sec_id, audit)
+    }
+
+    /// The loading body threads the boot-installed `'static` page-table frame
+    /// allocator through to the architecture image builder via
+    /// [`ImageBuildCtx::page_table_allocator`] — the seam an arch build builds
+    /// a child's page tables out of reclaimable RAM through. A build over
+    /// services with no page-table allocator wired sees `None` and an arch
+    /// build fails closed.
+    #[test]
+    fn build_threads_the_static_page_table_allocator_to_the_arch_build() {
+        install_trace_filter();
+        let seed = body_seed();
+        let plan = LoadPlan::Prebuilt {
+            rxe: alloc::borrow::Cow::Borrowed(SPAWN_RXE),
+            requested: CapabilitySet::empty(),
+        };
+
+        // Wired: `leak_body_services` builds `SpawnServices` with a `Some`
+        // page-table allocator, so the recording builder must observe it.
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static RecordingImageBuilder =
+            Box::leak(Box::new(RecordingImageBuilder::new()));
+        let services = leak_body_services(
+            frames,
+            audit,
+            &crate::fs::NULL_FILESYSTEM,
+            None,
+            aspaces,
+            caps,
+            builder,
+        );
+        build_child_image(services, SecTaskId(1), 1, &plan, &seed, None, &[], &[])
+            .expect("prebuilt build succeeds");
         assert!(
-            probe
-                .saw_static_allocator
-                .load(core::sync::atomic::Ordering::SeqCst),
-            "the producer must see the wired `'static` page-table allocator"
+            builder
+                .saw_page_table_alloc
+                .load(core::sync::atomic::Ordering::Relaxed),
+            "the arch build must see the wired `'static` page-table allocator"
         );
 
-        // Unwired: with no `with_page_table_frames`, the producer sees `None`
-        // and an arch producer fails closed.
-        probe
-            .saw_static_allocator
-            .store(true, core::sync::atomic::Ordering::SeqCst);
-        let h2 = spawn_handler(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs, probe,
-        );
-        let _ = h2.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0);
+        // Unwired: services built with no page-table allocator hand the build
+        // `None` (an arch build then fails closed).
+        let audit2: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces2: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps2: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder2: &'static RecordingImageBuilder =
+            Box::leak(Box::new(RecordingImageBuilder::new()));
+        let runtime2: &'static TestSpawnRuntime = Box::leak(Box::new(TestSpawnRuntime));
+        let services2: &'static SpawnServices = Box::leak(Box::new(SpawnServices::new(
+            frames,
+            None,
+            audit2,
+            &crate::fs::NULL_FILESYSTEM,
+            None,
+            aspaces2,
+            caps2,
+            &crate::procwait::NULL_PROCESS_WAIT,
+            builder2,
+            runtime2,
+        )));
+        build_child_image(services2, SecTaskId(1), 1, &plan, &seed, None, &[], &[])
+            .expect("prebuilt build succeeds");
         assert!(
-            !probe
-                .saw_static_allocator
-                .load(core::sync::atomic::Ordering::SeqCst),
-            "with no page-table allocator wired the producer must see None"
+            !builder2
+                .saw_page_table_alloc
+                .load(core::sync::atomic::Ordering::Relaxed),
+            "with no page-table allocator wired the arch build must see None"
         );
     }
 
@@ -13297,11 +13994,9 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
 
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let pid = h
@@ -13353,7 +14048,6 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let wait_producer: &'static RecordingProcessWait = Box::leak(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 0,
@@ -13363,7 +14057,6 @@ mod tests {
 
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         )
         .with_process_wait(wait_producer);
 
@@ -13372,56 +14065,6 @@ mod tests {
             .expect("spawn succeeds");
         // The child (its returned PID) was registered against parent 2.
         assert_eq!(*wait_producer.last_register.lock(), Some((2, pid)));
-    }
-
-    /// With no spawn producer wired the handler holds `NULL_PROCESS_SPAWN`
-    /// and fails closed with `NotImplemented` — but only
-    /// after the path resolves, proving the null producer is reached.
-    #[test]
-    fn spawn_without_producer_is_not_implemented() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let table = RwLock::new(CapTable::new());
-        let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("caller registration");
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-        let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps: &caps,
-        };
-
-        let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
-                EmbeddedProgram {
-                    path: SPAWN_PATH,
-                    rxe: SPAWN_RXE,
-                    caps: &[],
-                    args: &[],
-                },
-            ])))));
-
-        // Registry + frames wired, but the producer is the null default.
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_frames(&frames)
-        .with_spawn(programs, &NULL_PROCESS_SPAWN);
-
-        assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
-            Err(Errno::NotImplemented)
-        );
     }
 
     /// With no frame allocator threaded the spawn subsystem is unwired, so
@@ -13463,7 +14106,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, UNKNOWN_PATH);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -13479,20 +14122,25 @@ mod tests {
             caps: &caps,
         };
 
-        // Frames + a real producer wired, but the registry is empty, so no
-        // path resolves and the producer is never reached.
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        // Frames wired, but the registry is empty and the path is not a
+        // well-formed bundle, so nothing resolves: the shape check fails
+        // closed synchronously and admits no loading child.
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_frames(&frames)
-        .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
+        .with_spawn(&EMPTY_PROGRAM_REGISTRY);
 
+        let before = sched.live_task_count();
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
+            h.spawn(&ctx, 0x1000, UNKNOWN_PATH.len(), 0, 0, 0, 0),
             Err(Errno::NotFound)
         );
-        assert!(producer.rxe.lock().is_empty());
+        assert_eq!(
+            sched.live_task_count(),
+            before,
+            "a synchronously-refused path admits no loading child"
+        );
     }
 
     /// `spawn` from a caller with no registered address space fails closed
@@ -13516,7 +14164,6 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let programs: &'static ProgramRegistry =
             Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
                 EmbeddedProgram {
@@ -13530,13 +14177,12 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_frames(&frames)
-        .with_spawn(programs, producer);
+        .with_spawn(programs);
 
         assert_eq!(
             h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
             Err(Errno::BadAddress)
         );
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A zero-length or over-long path cannot name a registered program,
@@ -13561,19 +14207,17 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_frames(&frames)
-        .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
+        .with_spawn(&EMPTY_PROGRAM_REGISTRY);
 
         assert_eq!(h.spawn(&ctx, 0x1000, 0, 0, 0, 0, 0), Err(Errno::NotFound));
         assert_eq!(
             h.spawn(&ctx, 0x1000, SPAWN_PATH_MAX + 1, 0, 0, 0, 0),
             Err(Errno::NotFound)
         );
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// `pipe_create` mints a read/write descriptor pair in the caller's own
@@ -13785,10 +14429,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let pid = h
@@ -13877,10 +14519,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let pid = h
@@ -13958,10 +14598,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let pid = h
@@ -14023,10 +14661,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         let pid = h
@@ -14083,10 +14719,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         assert_eq!(
@@ -14166,10 +14800,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         assert_eq!(
@@ -14196,7 +14828,6 @@ mod tests {
             ),
             Err(Errno::PermissionDenied)
         );
-        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
     }
 
     /// The attach pair's shape is validated before any state is touched: a
@@ -14234,10 +14865,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
 
         // Zero address with a non-zero length: a contradictory pair.
@@ -14264,7 +14893,6 @@ mod tests {
             ),
             Err(Errno::BadMagic)
         );
-        assert!(producer.rxe.lock().is_empty(), "nothing may be spawned");
     }
 
     /// `console_count` reports the installed list's length, and zero on
@@ -15780,7 +16408,6 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
         let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
             ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
@@ -15789,7 +16416,6 @@ mod tests {
 
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         )
         .with_consoles(consoles);
 
@@ -15875,7 +16501,6 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
         let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
             ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
@@ -15884,7 +16509,6 @@ mod tests {
 
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         )
         .with_consoles(consoles);
 
@@ -15929,7 +16553,6 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let programs: &'static ProgramRegistry =
             Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
                 EmbeddedProgram {
@@ -15943,7 +16566,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_frames(&frames)
-        .with_spawn(programs, producer);
+        .with_spawn(programs);
 
         let mut args = RawArgs::ZERO;
         args.0[0] = 0x1000;
@@ -15953,7 +16576,6 @@ mod tests {
             d.dispatch(&ctx, SyscallNumber::SPAWN.as_u16(), args),
             Err(Errno::PermissionDenied)
         );
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// The default `spawn` (`SPAWN_UID_INHERIT`) snapshots the spawning
@@ -15997,10 +16619,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
         let pid = h
             .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
@@ -16051,10 +16671,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
         assert_eq!(
             h.spawn(
@@ -16069,7 +16687,6 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
         // Fail closed before building: the producer was never reached.
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A spawn-as-user switch by a `CAP_SPAWN_AS_USER` holder resolves the
@@ -16129,10 +16746,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         )
         .with_identity(identity);
         let pid = h
@@ -16218,10 +16833,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         )
         .with_identity(identity);
         // Narrow the audit assertions below to the spawn itself: drop the
@@ -16238,8 +16851,26 @@ mod tests {
                 0,
             )
             .expect("switch spawn succeeds");
-        let guard = table.read();
-        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The synchronously-admitted placeholder carries the kernel-resolved
+        // credential — uid 2000 and the account ceiling (the console pair) —
+        // even before the effective set is derived on the child's own slice.
+        let placeholder = table.read();
+        let child = placeholder.caps_for(SecTaskId(pid)).expect("child record");
+        assert_eq!(child.owner(), UserId(2000));
+        assert_eq!(child.user_ceiling(), Some(&ceiling));
+        let credential = credential_from_record(child);
+        drop(placeholder);
+
+        // Drive the child's own loading body: it derives and installs the
+        // effective set as `manifest ∩ ceiling` off the spawning caller.
+        let manifest = caps_with(&[
+            CapabilityId::FS_ACCESS,
+            CapabilityId::CONSOLE_READ,
+            CapabilityId::CONSOLE_WRITE,
+        ]);
+        let (derived_caps, child_id, derive_sink) = derive_prebuilt_effective(credential, manifest);
+        let derived = derived_caps.read();
+        let child = derived.caps_for(child_id).expect("effective child record");
         // The effective set is the intersection: the console pair passes,
         // the uncovered `FS_ACCESS` request does not.
         assert!(child.has(CapabilityId::CONSOLE_READ));
@@ -16251,12 +16882,12 @@ mod tests {
         assert_eq!(child.user_grant(), &ceiling);
         // The derive audit event attributes the child and carries the
         // derived (intersected) count: 2, not the manifest's 3.
-        let derived: alloc::vec::Vec<_> = sink
+        let derived_events: alloc::vec::Vec<_> = derive_sink
             .snapshot()
             .into_iter()
             .filter(|e| e.id == tairix_kernel_sec::AuditEvent::TaskCapabilitiesDerived.id())
             .collect();
-        let child_derive = derived.last().expect("child derive audited");
+        let child_derive = derived_events.last().expect("child derive audited");
         assert!(child_derive
             .fields
             .iter()
@@ -16321,10 +16952,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         )
         .with_identity(identity);
         let pid = h
@@ -16338,10 +16967,19 @@ mod tests {
                 0,
             )
             .expect("service-account switch spawn succeeds");
-        let guard = table.read();
-        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
-        // The child runs as the target service account.
+        // The placeholder carries the kernel-resolved credential (the target
+        // service account and its compiled ceiling); reconstruct it and derive
+        // the effective set on the child's own loading body, off the caller.
+        let placeholder = table.read();
+        let child = placeholder.caps_for(SecTaskId(pid)).expect("child record");
         assert_eq!(child.owner(), UserId(uid));
+        let credential = credential_from_record(child);
+        drop(placeholder);
+
+        let (derived_caps, child_id, _derive_sink) =
+            derive_prebuilt_effective(credential, caps_with(manifest));
+        let derived = derived_caps.read();
+        let child = derived.caps_for(child_id).expect("effective child record");
         // Every capability the account's own ceiling grants survives.
         for cap in ceiling {
             assert!(
@@ -16450,16 +17088,26 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
         let pid = h
             .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("inherit spawn succeeds");
-        let guard = table.read();
-        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The placeholder carries the inherited credential (uid 1000, the
+        // caller's own account ceiling); reconstruct it and derive the child's
+        // effective set on its own loading body, off the caller.
+        let placeholder = table.read();
+        let child = placeholder.caps_for(SecTaskId(pid)).expect("child record");
+        assert_eq!(child.user_ceiling(), Some(&ceiling));
+        let credential = credential_from_record(child);
+        drop(placeholder);
+
+        let child_manifest = caps_with(&[CapabilityId::FS_ACCESS, CapabilityId::CONSOLE_WRITE]);
+        let (derived_caps, child_id, _derive_sink) =
+            derive_prebuilt_effective(credential, child_manifest);
+        let derived = derived_caps.read();
+        let child = derived.caps_for(child_id).expect("effective child record");
         // The child's manifest requests are honoured within the *ceiling*,
         // even though the caller's own effective set never held them…
         assert!(child.has(CapabilityId::FS_ACCESS));
@@ -16513,16 +17161,26 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
         let pid = h
             .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("inherit spawn succeeds");
-        let guard = table.read();
-        let child = guard.caps_for(SecTaskId(pid)).expect("child record");
+        // The placeholder carries the inherited system-principal credential
+        // (uid 0, no ceiling); reconstruct it and derive the child's effective
+        // set on its own loading body, off the caller.
+        let placeholder = table.read();
+        let child = placeholder.caps_for(SecTaskId(pid)).expect("child record");
+        assert!(child.user_ceiling().is_none());
+        let credential = credential_from_record(child);
+        drop(placeholder);
+
+        let child_manifest = caps_with(&[CapabilityId::USERS_READ, CapabilityId::SPAWN_AS_USER]);
+        let (derived_caps, child_id, _derive_sink) =
+            derive_prebuilt_effective(credential, child_manifest);
+        let derived = derived_caps.read();
+        let child = derived.caps_for(child_id).expect("effective child record");
         // The child is bounded by its own manifest, not the caller's.
         assert!(child.has(CapabilityId::USERS_READ));
         assert!(child.has(CapabilityId::SPAWN_AS_USER));
@@ -16574,7 +17232,6 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
 
         // An installed table that holds no account for the target uid:
         // denied, never a guessed identity.
@@ -16585,7 +17242,6 @@ mod tests {
         identity.install(id_table).expect("identity install");
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         )
         .with_identity(identity);
         assert_eq!(
@@ -16600,7 +17256,6 @@ mod tests {
             ),
             Err(Errno::PermissionDenied)
         );
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A spawn-as-user switch by a capable caller against an **uninstalled**
@@ -16642,12 +17297,10 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
         // No `.with_identity`, so the handler holds the fail-closed
         // `NULL_IDENTITY`.
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-            producer,
         );
         assert_eq!(
             h.spawn(
@@ -16661,7 +17314,6 @@ mod tests {
             ),
             Err(Errno::NotImplemented)
         );
-        assert!(producer.rxe.lock().is_empty());
     }
 
     /// A `MemMap` producer that records the last `(len, flags, addr_hint)`

@@ -2,21 +2,23 @@
 //! `SP3b`.
 //!
 //! [`Aarch64ProcessSpawn`] implements the architecture-neutral
-//! [`tairix_kernel_core::ProcessSpawn`] seam the boot pipeline installs into
-//! the [`tairix_kernel_core::BootInfo`] hand-off
+//! [`tairix_kernel_core::ArchImageBuilder`] seam the boot pipeline installs
+//! into the [`tairix_kernel_core::BootInfo`] hand-off
 //! (`boot_aarch64::enter_kernel_core` → `BootInfo::with_spawn`). When a task
-//! that holds `CAP_PROC_SPAWN` issues the `spawn` syscall, the kernel
-//! resolves the requested path against the shared
-//! [`crate::spawn_layout::PROGRAM_REGISTRY`] and hands
-//! the matching embedded program to [`ProcessSpawn::spawn`], which builds the
-//! child a *fresh, hardware-isolated* stage-1 address space, populates it
-//! through the production capability-checked, audited spawn caller
-//! ([`spawn_image`], gated on `CAP_PROC_SPAWN`), and admits it **Ready**
-//! through [`SpawnCtx::admit_process`]. Unlike the PID-1 [`InitSpawn`] seam
-//! (`init_spawn.rs`) it does **not** switch the active translation regime or
-//! enter user mode: the spawning caller keeps running under its own
-//! `TTBR0_EL1`, and the child runs when the scheduler next steps it (a true
-//! concurrent spawn, not an `exec`-style hand-off).
+//! that holds `CAP_PROC_SPAWN` issues the `spawn` syscall, the kernel resolves
+//! the requested path against the shared
+//! [`crate::spawn_layout::PROGRAM_REGISTRY`], admits a parked **loading**
+//! child, and returns its PID at once. On the child's own first scheduled
+//! slice this producer's
+//! [`build`](tairix_kernel_core::ArchImageBuilder::build) builds it a *fresh,
+//! hardware-isolated* stage-1 address space and populates it through the
+//! production capability-checked, audited spawn caller ([`spawn_image`], gated
+//! on `CAP_PROC_SPAWN`). Unlike the PID-1 [`tairix_kernel_core::InitSpawn`]
+//! seam (`init_spawn.rs`) it does **not** switch the active translation regime
+//! or enter user mode from the caller: the spawning caller keeps running under
+//! its own `TTBR0_EL1`, and the child enters user mode from its own loading
+//! body when the scheduler next steps it (a true concurrent, non-blocking
+//! spawn, not an `exec`-style hand-off).
 //!
 //! The child's `rxe`, its relocation bias ([`CHILD_USER_BIAS`]), and the
 //! kernel's syscall CFI tag are baked at build time (`build.rs` →
@@ -37,10 +39,9 @@ use tairix_arch_aarch64::paging::{
 use tairix_arch_aarch64::userentry::UserMode;
 use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use tairix_arch_api::EnterUser;
-use tairix_caps::CapabilitySet;
 use tairix_kernel_core::{
-    refuse_admit, refuse_spawn, spawn_caller_errno, spawn_image, BoxStack, KernelStack,
-    ProcessSpawn, SpawnCtx, SpawnRequest,
+    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
+    ImageBuildCtx, KernelStack, SpawnRequest,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -54,11 +55,12 @@ use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
 /// The user virtual base every child image this producer builds is mapped
 /// at — the build-time [`CHILD_USER_BIAS`] (64 GiB) `build.rs` bakes the
-/// embedded programs' relocations for. Exported so a consumer handing
-/// [`Aarch64ProcessSpawn::spawn_with`] an *externally* converted `rxe`
-/// (the Stage 4.HW driver-spawn vertical) can verify its image was
-/// relocated for the same bias and fail closed on a mismatch rather than
-/// admit a child whose pointers do not match where it is mapped.
+/// embedded programs' relocations for. Exported so a consumer handing this
+/// producer's [`build`](tairix_kernel_core::ArchImageBuilder::build) an
+/// *externally* converted `rxe` (the Stage 4.HW driver-spawn vertical) can
+/// verify its image was relocated for the same bias and fail closed on a
+/// mismatch rather than admit a child whose pointers do not match where it
+/// is mapped.
 pub const USER_IMAGE_BIAS: u64 = CHILD_USER_BIAS;
 
 /// Base of a spawned child's device-window virtual region
@@ -183,136 +185,113 @@ pub struct Aarch64ProcessSpawn;
 /// The single, `'static` [`Aarch64ProcessSpawn`] the boot path borrows.
 pub static AARCH64_PROCESS_SPAWN: Aarch64ProcessSpawn = Aarch64ProcessSpawn;
 
-impl ProcessSpawn for Aarch64ProcessSpawn {
-    /// Build and admit one child process from `rxe`, granting it exactly
-    /// `caps` and handing it `args` and `env` as its startup argument
-    /// vector and environment.
-    ///
-    /// This is the aarch64 spawn producer's single entry point (`PLAN.md`
-    /// Stage 4.HW): the `spawn` syscall handler passes the registered
-    /// program's image and declared capability set with the effective
-    /// startup strings it resolved, while a kernel-side driver spawn
-    /// passes the verified driver image's granted set plus the
-    /// reply-endpoint argument the spawned driver reads through
-    /// `tairix_rt::arg`. `caps` is the manifest∩user-grant set the caller
-    /// already derived; this seam never widens it (no ambient authority).
-    ///
-    /// # Errors
-    ///
-    /// A stable [`Errno`] for every failure: `NoSpace` on frame/page-table
-    /// exhaustion or a failed build, `BadMagic` on an `rxe` that does not
-    /// parse against the kernel's syscall CFI tag, `AlreadyExists` on an
-    /// address-space registration conflict (fail
-    /// closed, never a panic).
-    fn spawn_with(
+impl ArchImageBuilder for Aarch64ProcessSpawn {
+    fn alloc_kernel_stack(
+        &self,
+        frames: &FrameAllocator,
+        pt_frames: Option<&'static FrameAllocator>,
+    ) -> (Box<dyn KernelStack + Send>, Option<u64>) {
+        // Allocate the loading child's kernel stack synchronously at admit,
+        // before its address space exists, so the child's own loading body
+        // runs on it. An arena-backed guard-paged stack when a region is
+        // available (its guard VA returned for [`build`] to unmap in the
+        // child root), else the software-canary [`BoxStack`] fallback.
+        //
+        // Publish the reclaim allocator so idle chained arena blocks return
+        // to it when a spawned task later exits (capacity shrinks as well as
+        // grows). A build with no `'static` allocator wired cannot use the
+        // arena, and neither can an unconfigured identity window; both fall
+        // back to the software-canary `BoxStack`.
+        let Some(pt_frames) = pt_frames else {
+            return (Box::new(BoxStack::new()), None);
+        };
+        crate::stack_arena::publish_reclaim_frames(pt_frames);
+        let identity_gib = configured_identity_gigapages();
+        if identity_gib == 0 {
+            return (Box::new(BoxStack::new()), None);
+        }
+        let grow = FrameArenaGrow::new(frames, (identity_gib as u64) << 30);
+        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
+            Some(stack) => {
+                let guard = stack.guard_page();
+                (Box::new(stack), Some(guard))
+            }
+            None => (Box::new(BoxStack::new()), None),
+        }
+    }
+
+    fn build(
         &self,
         rxe: &[u8],
-        ctx: &dyn SpawnCtx,
-        caps: CapabilitySet,
+        ctx: &dyn ImageBuildCtx,
         args: &[&[u8]],
         env: &[&[u8]],
-    ) -> Result<u64, Errno> {
+    ) -> Result<BuiltImage, Errno> {
         // The child's stage-1 hierarchy is drawn from the kernel's live
-        // frame allocator: there is no fixed page-table
-        // reserve and so no hard cap on how many processes can be spawned —
-        // the capacity scales with discovered RAM and grows on demand.
-        // A build with no `'static` allocator wired fails closed, as does genuine RAM exhaustion below.
+        // frame allocator: there is no fixed page-table reserve and so no
+        // hard cap on how many processes can be spawned — the capacity
+        // scales with discovered RAM and grows on demand. A build with no
+        // `'static` allocator wired fails closed, as does genuine RAM
+        // exhaustion below.
         let pt_frames = ctx
             .page_table_allocator()
-            .ok_or_else(|| refuse_spawn(ctx, "page_table_allocator_unwired"))?;
+            .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
-        // Publish the same `'static` allocator the kthread-stack arena
-        // returns idle chained blocks to when a spawned task later exits and
-        // its `ArenaStack` is dropped (the capacity
-        // shrinks as well as grows). Idempotent (set-once); the boot path
-        // threads one allocator, so every spawn publishes the same handle.
-        crate::stack_arena::publish_reclaim_frames(pt_frames);
 
         // Build a stage-1 address space identity-mapping the kernel + MMIO,
-        // and capture its root *without* switching to it: the spawning caller
-        // stays active under its own `TTBR0_EL1`, so the running parent is
-        // never moved out from under itself. The child's mappings below are
-        // written through the identity `physmap` (physical frame addresses
-        // the caller's active identity space already maps), so the build
-        // does not require the child space to be active. The child's
-        // own root is reactivated by its `pre_resume` hook before the
-        // scheduler first resumes it (`plans/SPAWN.md` SP2). An allocator
-        // exhausted of even the root table fails closed with `NoSpace`.
+        // and capture its root *without* switching to it: the loading child
+        // runs on its own kernel stack under the kernel's identity regime,
+        // so the running task is never moved out from under itself. The
+        // child's mappings below are written through the identity `physmap`.
+        // The child's own root is reactivated by its `pre_resume` hook
+        // before the scheduler first resumes it as a user task
+        // (`plans/SPAWN.md` SP2).
         //
         // The window length is derived from the Device/RAM gigapage masks
-        // boot discovery installed (`virt`: 2 GiB; Pi 4: 4 GiB — its
-        // UART/GIC live in gigapage 3), never a board constant: a window
+        // boot discovery installed (never a board constant): a window
         // truncated short of the MMIO gigapage would drop the console and
-        // interrupt controller from the active map the moment the
-        // scheduler resumes the child. An empty window or one reaching
-        // the user region at `CHILD_USER_BIAS` fails closed.
+        // interrupt controller from the active map the moment the scheduler
+        // resumes the child. An empty window or one reaching the user region
+        // at `CHILD_USER_BIAS` fails closed.
         let identity_gib = configured_identity_gigapages();
         if identity_gib == 0 || ((identity_gib as u64) << 30) > CHILD_USER_BIAS {
-            return Err(refuse_spawn(ctx, "identity_window_invalid"));
+            return Err(refuse_build(ctx, "identity_window_invalid"));
         }
         let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gib)
-            .ok_or_else(|| refuse_spawn(ctx, "page_table_frames_exhausted"))?;
+            .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.root_phys();
 
-        // Build the child's kernel stack (`plans/PI.md` G3b-2-ii, mirroring
-        // the PID-1 `init_spawn` seam). The boot path published the reserved
-        // guard arena to the kthread-stack allocator; if a region is
-        // available, re-express the coarse identity block covering its guard
-        // page at 4 KiB granularity in the *child's own* root and unmap that
-        // single page, so an overrun of the child's kernel stack takes a
-        // synchronous data abort under the child's `TTBR0_EL1` rather than
-        // corrupting the lower-addressed neighbour (the real guard-page
-        // fault-form). Doing it on `arch` — which is
-        // *never switched to* here (the spawning caller keeps its own
-        // `TTBR0_EL1`) — disturbs no live access: the child pool is in the
-        // caller's identity window, so `split_block` only reads/writes the
-        // child's tables through identity addresses, only adds table levels
-        // reproducing the existing translation, and needs no TLB maintenance
-        // (the child's root is not active). If no arena region is available,
-        // or the split/unmap could not be applied, fall back to a heap-backed
-        // software-canary `BoxStack` rather than ever running on an unguarded
-        // stack (fail closed).
-        // The arena grows on demand by chaining fresh 2 MiB blocks out of
-        // the kernel's live frame allocator when its boot-carved block is
-        // exhausted, so the number of hardware-guarded
-        // child stacks scales with discovered RAM rather than capping at
-        // the boot block. A chained block is bounded to the identity window
-        // so the stack stays mapped in the child's own root.
-        let grow = FrameArenaGrow::new(ctx.frames(), (identity_gib as u64) << 30);
-        let kernel_stack: Box<dyn KernelStack + Send> =
-            match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
-                Some(stack) => {
-                    let guard = stack.guard_page();
-                    match arch
-                        .split_block(guard)
-                        .and_then(|()| arch.unmap(guard).map(|_| ()))
-                    {
-                        Ok(()) => Box::new(stack),
-                        Err(_) => Box::new(BoxStack::new()),
-                    }
-                }
-                None => Box::new(BoxStack::new()),
-            };
+        // Re-express the loading kthread's kernel-stack guard page in the
+        // *child's own* (inactive) root: split the coarse identity block
+        // covering it to 4 KiB granularity and unmap the single guard page,
+        // so an overrun of the child's kernel stack takes a synchronous data
+        // abort under the child's `TTBR0_EL1` rather than corrupting the
+        // lower-addressed neighbour. Doing it on `arch` — which is never
+        // switched to here — disturbs no live access and needs no TLB
+        // maintenance (the child's root is not active). A `Some(guard)`
+        // whose split+unmap fails fails the build closed rather than running
+        // on an unguarded stack; `None` is the software-canary `BoxStack`
+        // (self-guarded, nothing to unmap).
+        if let Some(guard) = ctx.kernel_stack_guard() {
+            arch.split_block(guard)
+                .and_then(|()| arch.unmap(guard).map(|_| ()))
+                .map_err(|_| refuse_build(ctx, "kernel_stack_guard_unmap_failed"))?;
+        }
 
         let mut space = AddressSpace::new(arch);
         let physmap = DirectPhysMap::identity((identity_gib as u64) << 30);
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
-        // syscall CFI tag. A mismatch fails closed; the registry
-        // holds bytes that already parsed once at build time, so reaching this
-        // is a kernel build defect, surfaced as a stable errno.
+        // syscall CFI tag. A mismatch fails closed.
         let image = LoadImage::parse(rxe, &SYSCALL_TABLE_HASH).map_err(|_| Errno::BadMagic)?;
 
         // Place the stack and startup block above the image's mapped top
         // through the shared per-spawn derivation (one definition across
         // the ports); an image too large for the user region fails closed.
         let layout = spawn_layout::user_layout(&image, CHILD_USER_BIAS)
-            .ok_or_else(|| refuse_spawn(ctx, "user_layout_unfit"))?;
-        // The span record the admission path stores so the stack-growth
-        // fault path can back pages inside it (one shared derivation
-        // across the ports; a malformed span refuses the spawn closed).
+            .ok_or_else(|| refuse_build(ctx, "user_layout_unfit"))?;
         let stack_span = spawn_layout::stack_span(&layout)
-            .ok_or_else(|| refuse_spawn(ctx, "stack_span_malformed"))?;
+            .ok_or_else(|| refuse_build(ctx, "stack_span_malformed"))?;
 
         let request = SpawnRequest {
             image: &image,
@@ -334,9 +313,9 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // `pre_resume` hook has made `space` active (the `spawn_image`
         // contract). The frame source draws identity-mapped RAM frames from
         // the kernel's live allocator; the retained live space below owns
-        // the whole footprint and returns it (frames zeroed, tables freed)
-        // when the task exits. A returning `Err` maps to a stable errno;
-        // the cause is already audited by `spawn_image`.
+        // the whole footprint and returns it when the task exits. A
+        // returning `Err` maps to a stable errno; the cause is already
+        // audited by `spawn_image`.
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(
@@ -353,11 +332,8 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
         // The child's user-address-space reactivation hook (`plans/SPAWN.md`
         // SP2): the core runs it on the dispatcher's context immediately
         // before every switch into the child, so it `eret`s into EL0 under
-        // its own `TTBR0_EL1` root and stays hardware-isolated from the
-        // spawning parent and every sibling. It captures only
-        // the `u64` root, so it is `Send`. It is handed the task's kernel-
-        // stack top (the x86_64 port uses it to repoint its per-CPU syscall
-        // entry stack); aarch64 reuses `SP_EL1` and ignores it (§X).
+        // its own `TTBR0_EL1` root. It captures only the `u64` root, so it is
+        // `Send`. aarch64 reuses `SP_EL1` and ignores the stack-top argument.
         let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |_stack_top: u64| {
             // SAFETY: the MMU is already enabled and `child_root_phys` is the
             // L1 root of the child's space, which identity-maps the low
@@ -366,47 +342,28 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
             unsafe { activate_user_root(child_root_phys) };
         });
 
-        // The user-mode transition, boxed for the scheduler task body the
-        // core wraps the child in. `enter_user` diverges into EL0, so the
-        // closure never truly returns (its `!` coerces to `()`).
+        // The user-mode transition, boxed for the loading body to invoke
+        // once `become_user` has installed the hook. `enter_user` diverges
+        // into EL0, so its `!` coerces to `()`.
         let user_mode = UserMode::new();
         let enter: Box<dyn FnMut() + Send> = Box::new(move || {
             // SAFETY: by the time this body runs the child has been
             // dispatched, so its `pre_resume` hook has activated `space` and
             // the EL1 trap vector + production dispatch callback are
             // installed; the child's first `svc` is handled.
-            // `build_process_image` mapped the entry/stack as user pages.
             unsafe { user_mode.enter_user(entry) }
         });
 
         // Freeze the just-built mappings into the registry-storable,
-        // `Send + Sync` snapshot the kernel-wide address-space registry holds
-        // (the live arch `space` is not `Sync`), and box the direct map that
-        // backs it, so the child's `stream_write` can copy its banner out of
-        // its own user memory. Freezing *after* `spawn_image` captures every
-        // mapped page — segments, stack, and the startup-vector block.
+        // `Send + Sync` snapshot the address-space registry holds, then
+        // retain the live, mutable arch space (the same one frozen above)
+        // behind `LiveUserSpace` so the child's `mem_map` / `mmio_map`
+        // mutate its own space. A build context with no `'static` allocator,
+        // or a window the allocator rejects, retains no live space and those
+        // syscalls fail closed. The live space's `PhysMap` must be
+        // [`ConfiguredIdentityPhysMap`] so the child's `dma_alloc`
+        // post-zero `clean_invalidate` is the real dcache clean+invalidate.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
-
-        // Retain the live, mutable arch space behind the object-safe
-        // `LiveUserSpace` boundary so the child's `mem_map` / `mmio_map`
-        // syscalls mutate *its own* address space (`plans/PI.md`
-        // 5d-0-ii (b′)). The `LiveSpace` composes the audited anonymous-map
-        // mechanism (over the kernel's `'static` frame allocator) and the
-        // guarded device-window allocator (over the `[MMIO_WINDOW_BASE, …)`
-        // region); it carries the *same* arch space the snapshot above was
-        // frozen from. A build context with no `'static` allocator, or a
-        // window the allocator rejects, retains no live space and the child's
-        // `mem_map` / `mmio_map` fail closed.
-        //
-        // The live space's `PhysMap` must be [`ConfiguredIdentityPhysMap`]:
-        // the child's `dma_alloc` carves are mapped Normal-Non-Cacheable for
-        // the driver while the kernel zeroes them through the cacheable
-        // identity alias, so the post-zero `clean_invalidate` must be the
-        // real dcache clean+invalidate. A no-op physmap here left dirty zero
-        // lines behind that the cache wrote back over the driver's live
-        // xHCI rings at an arbitrary later time — on the Pi 4 the second
-        // USB device's larger carve triggered exactly that eviction and the
-        // controller's command ring went silent mid-enumeration.
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
@@ -437,26 +394,13 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
-        // Register the child's caps + frozen address space and admit it Ready,
-        // returning its PID. The spawning caller keeps running.
-        // SAFETY: `frozen` faithfully describes the mappings just built into
-        // `space`, `physmap` backs them, `pre_resume` activates the child's
-        // root before it is first entered, and `kernel_stack` is a region
-        // exclusive to this child that stays mapped (its unmapped guard page
-        // aside) for the task's lifetime — the `admit_process` contract.
-        // `live` retains the same arch space `frozen` was taken from.
-        unsafe {
-            ctx.admit_process(
-                caps,
-                frozen,
-                physmap,
-                stack_span,
-                kernel_stack,
-                pre_resume,
-                live,
-                enter,
-            )
-        }
-        .map_err(|err| refuse_admit(ctx, err))
+        Ok(BuiltImage {
+            frozen,
+            physmap,
+            stack_span,
+            live,
+            pre_resume,
+            enter,
+        })
     }
 }

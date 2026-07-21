@@ -12,7 +12,7 @@
 //! endpoint binding and its well-known port name — installs
 //! the production `KernelDispatchHook` through a `DispatchCallbackSlot`, and
 //! spawns the stub through the production parameterised
-//! `Aarch64ProcessSpawn::spawn_with` via the exported `KernelSpawnCtx` admit
+//! `Aarch64ProcessSpawn` image builder via the exported `KernelSpawnCtx` admit
 //! path — driver-class caps plus the reply endpoint id in `arg(1)`, exactly
 //! the hand-off the driver host gives a spawned driver process.
 //!

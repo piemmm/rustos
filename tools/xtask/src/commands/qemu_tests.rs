@@ -2235,7 +2235,7 @@ const TESTS: &[QemuTest] = &[
     // a driver-class capability) into a live `RwLock<PortRegistry>`,
     // installs the production `KernelDispatchHook` through a
     // `DispatchCallbackSlot`, and spawns the stub through the production
-    // parameterised `Aarch64ProcessSpawn::spawn_with` via the exported
+    // parameterised `Aarch64ProcessSpawn` image builder via the exported
     // `KernelSpawnCtx` admit path — driver-class caps plus the reply
     // endpoint id in `arg(1)`, exactly the hand-off the driver host gives a
     // spawned driver. The host side drives the cooperative `step` loop,
@@ -2268,7 +2268,7 @@ const TESTS: &[QemuTest] = &[
     // driver-stub fixture and the production devmgr-driven autoload/spawn path
     // (discover the `virt` board, build the live registries, `DeviceManager::
     // autoload` through `SpawnDriverLoader` + `InitCtxDriverProcessSpawn` over
-    // `Aarch64ProcessSpawn::spawn_with`), so the driver is admitted Ready with
+    // `Aarch64ProcessSpawn` image builder), so the driver is admitted Ready with
     // its capability record + address-space-registry entry minted. It then
     // drives the production unload mechanism `InitSpawnCtx::
     // terminate_driver_process` (the seam the driver-store server runs for
