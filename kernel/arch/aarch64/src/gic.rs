@@ -285,48 +285,84 @@ pub const fn icenabler_offset(intid: u32) -> usize {
 }
 
 /// Scan the SPI range `[MIN_SPI_INTID, max_intid]` for the lowest
-/// interrupt id currently stuck in the distributor, reading each 32-bit
-/// status word through `read` (`read(off)` returns the word at byte
-/// offset `off`).
+/// interrupt id currently stuck in the distributor *and able to reach a
+/// CPU*, reading each 32-bit status word through `read` (`read(off)`
+/// returns the word at byte offset `off`).
 ///
-/// **Active is checked before pending.** A line stuck *active*
-/// (acknowledged but never completed — a handler that never returns, or a
-/// line re-firing faster than it is serviced) is the stronger signature
-/// of a hard lockup than one merely pending, so it wins. Within a bank the
-/// lowest set bit (`trailing_zeros`) is the lowest id. Only SPIs
-/// (`>= MIN_SPI_INTID`) are scanned: SGI/PPI status is banked per CPU, so
-/// an observer reading it would see its *own* lines, not the wedged CPU's.
+/// **Only a deliverable line can wedge a CPU, so only a deliverable line
+/// is reported.** A masked line cannot be signalled to any CPU, so an
+/// asserted-but-masked line is contained noise that can never be the
+/// cause of a lockup — reporting it blames an innocent line (the recurring
+/// spurious `stuck_irq=111`). Two banks are therefore weighed:
+/// - **active** (`GICD_ISACTIVER`): a handler is in flight (or the line is
+///   re-firing faster than it is serviced). A line only becomes active by
+///   being delivered, so an active line is a genuine suspect regardless of
+///   its current mask, and this the stronger signature — it wins.
+/// - **pending** (`GICD_ISPENDR`): merely asserted. Reported *only* when
+///   the line is still **enabled** at `GICD_ISENABLER`; a masked-pending
+///   line is skipped and the scan continues to the next set bit.
 ///
-/// Returns the lowest stuck SPI as a [`StuckInterrupt`] — its id, whether
-/// it is `active` (which bank matched) and whether it is `enabled`
-/// (unmasked, read live from `GICD_ISENABLER`) — or `None` when no SPI is
-/// active or pending. The `active`/`enabled` pair is what tells a live
-/// storm (active, enabled) apart from a masked-but-asserted line the
-/// kernel already contained (pending, masked). Pure over `read`, so it is
-/// host-tested against the mock distributor without any MMIO.
+/// Within a bank the lowest qualifying id wins (`trailing_zeros` gives the
+/// lowest set bit; masked bits are cleared and the search continues). Only
+/// SPIs (`>= MIN_SPI_INTID`) are scanned: SGI/PPI status is banked per CPU,
+/// so an observer reading it would see its *own* lines, not the wedged
+/// CPU's.
+///
+/// Returns the lowest deliverable stuck SPI as a [`StuckInterrupt`] — its
+/// id and whether it is `active` (a live storm) or merely `pending` — or
+/// `None` when no SPI is active or enabled-and-pending. Pure over `read`,
+/// so it is host-tested against the mock distributor without any MMIO.
 #[must_use]
 fn first_stuck_spi(max_intid: u32, read: impl Fn(usize) -> u32) -> Option<StuckInterrupt> {
-    for (base, active) in [(GICD_ISACTIVER, true), (GICD_ISPENDR, false)] {
-        let mut intid = MIN_SPI_INTID;
-        while intid <= max_intid {
-            let word = read(gicd_bit_word_offset(base, intid));
-            if word != 0 {
-                let candidate = intid + word.trailing_zeros();
-                // The lowest set bit is the lowest id in this word; if it
-                // already exceeds the valid range, every higher word does
-                // too, so give this bank up rather than scan on.
-                if candidate <= max_intid {
-                    let enabled = read(isenabler_offset(candidate)) & isenabler_bit(candidate) != 0;
-                    return Some(StuckInterrupt {
-                        intid: candidate,
-                        active,
-                        enabled,
-                    });
-                }
-                break;
+    // Active first: a line with a handler in flight is the stronger
+    // hard-lockup signal, and being active proves it was delivered.
+    if let Some(intid) = first_matching_spi(GICD_ISACTIVER, max_intid, &read, |_| true) {
+        return Some(StuckInterrupt {
+            intid,
+            active: true,
+        });
+    }
+    // Pending only when still enabled: a masked-pending line cannot reach a
+    // CPU, so it can never be the wedge — skip it rather than blame it.
+    let enabled = |id: u32| read(isenabler_offset(id)) & isenabler_bit(id) != 0;
+    if let Some(intid) = first_matching_spi(GICD_ISPENDR, max_intid, &read, enabled) {
+        return Some(StuckInterrupt {
+            intid,
+            active: false,
+        });
+    }
+    None
+}
+
+/// The lowest SPI in `[MIN_SPI_INTID, max_intid]` whose bit is set in the
+/// one-bit-per-interrupt register bank at `base` **and** which `accept`
+/// admits, reading each 32-bit word through `read`.
+///
+/// Iterates every set bit in ascending id order (clearing the lowest set
+/// bit each step) so a rejected candidate — e.g. a masked-pending line —
+/// does not stop the search; the next qualifying line is found instead. A
+/// candidate beyond `max_intid` ends the scan (every higher bit and word
+/// exceeds the range too). Pure over `read`, so it is host-tested.
+fn first_matching_spi(
+    base: usize,
+    max_intid: u32,
+    read: &impl Fn(usize) -> u32,
+    accept: impl Fn(u32) -> bool,
+) -> Option<u32> {
+    let mut intid = MIN_SPI_INTID;
+    while intid <= max_intid {
+        let mut word = read(gicd_bit_word_offset(base, intid));
+        while word != 0 {
+            let candidate = intid + word.trailing_zeros();
+            if candidate > max_intid {
+                return None;
             }
-            intid += 32;
+            if accept(candidate) {
+                return Some(candidate);
+            }
+            word &= word - 1;
         }
+        intid += 32;
     }
     None
 }
@@ -434,11 +470,12 @@ impl<M: GicMmio> Gicv2<M> {
     }
 
     /// The lowest shared-peripheral interrupt (SPI) currently stuck in the
-    /// distributor — active (handler in flight and not completed) in
-    /// preference to merely pending — scanning up to `max_intid`, or `None`
-    /// when no SPI is stuck. The returned [`StuckInterrupt`] also carries
-    /// whether the line is active-vs-pending and enabled-vs-masked, which
-    /// distinguishes a live storm from a masked-but-asserted line.
+    /// distributor **and still able to reach a CPU** — active (handler in
+    /// flight and not completed) in preference to merely pending-and-
+    /// enabled — scanning up to `max_intid`, or `None` when no such SPI is
+    /// stuck. The returned [`StuckInterrupt`] carries whether the line is
+    /// active (a live storm) or pending. A masked line is skipped: it
+    /// cannot reach a CPU, so it can never be the wedge.
     ///
     /// A pure read of the distributor's globally-shared status, safe to
     /// call from any CPU (the watchdog observer uses it to name the line
@@ -673,13 +710,15 @@ pub fn send_sgi(target: CpuId) {
     unsafe { volatile_gic() }.send_sgi(target);
 }
 
-/// The lowest shared-peripheral interrupt currently stuck (active in
-/// preference to pending) in the distributor, or `None` when none is.
+/// The lowest shared-peripheral interrupt currently stuck **and still able
+/// to reach a CPU** (active in preference to enabled-and-pending) in the
+/// distributor, or `None` when none is.
 ///
 /// The watchdog observer calls this when it detects a hard lockup on
 /// another CPU: the wedged core's own last-known sample is stale, so this
 /// globally-visible read names the device line actually wedging it (an
-/// interrupt storm, or a line whose handler never completes).
+/// interrupt storm, or a line whose handler never completes). A masked line
+/// is never reported — it cannot be delivered, so it cannot be the wedge.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn stuck_spi() -> Option<StuckInterrupt> {
@@ -889,37 +928,57 @@ mod tests {
     }
 
     #[test]
-    fn stuck_spi_names_the_lowest_active_line_with_its_enabled_state() {
+    fn stuck_spi_names_the_lowest_active_line() {
         let gic = Gicv2::new(MockGicMmio::new());
-        // SPI 37 active: word covering 32..64 with bit (37-32)=5 set, and
-        // still enabled at the distributor — a live storm.
+        // SPI 37 active: word covering 32..64 with bit (37-32)=5 set — a
+        // handler in flight, a genuine hard-lockup suspect.
         gic.mmio
             .gicd_write(gicd_bit_word_offset(GICD_ISACTIVER, 37), 1 << 5);
-        gic.mmio.gicd_write(isenabler_offset(37), isenabler_bit(37));
         assert_eq!(
             gic.stuck_spi(MAX_INTID),
             Some(StuckInterrupt {
                 intid: 37,
                 active: true,
-                enabled: true,
             })
         );
     }
 
     #[test]
-    fn stuck_spi_falls_back_to_a_masked_pending_line_when_none_is_active() {
+    fn stuck_spi_reports_an_enabled_pending_line_when_none_is_active() {
         let gic = Gicv2::new(MockGicMmio::new());
-        // SPI 50 pending only (bit 50-32=18 in the 32..64 pending word),
-        // with no enable bit set: a masked-but-asserted line the kernel
-        // already contained, not a live storm.
+        // SPI 50 pending (bit 50-32=18 in the 32..64 pending word) and
+        // still enabled: asserted, deliverable, and so a real suspect.
         gic.mmio
             .gicd_write(gicd_bit_word_offset(GICD_ISPENDR, 50), 1 << 18);
+        gic.mmio.gicd_write(isenabler_offset(50), isenabler_bit(50));
         assert_eq!(
             gic.stuck_spi(MAX_INTID),
             Some(StuckInterrupt {
                 intid: 50,
                 active: false,
-                enabled: false,
+            })
+        );
+    }
+
+    #[test]
+    fn stuck_spi_skips_a_masked_pending_line() {
+        let gic = Gicv2::new(MockGicMmio::new());
+        // SPI 50 pending but with no enable bit set: masked, so it cannot
+        // reach a CPU and can never be the wedge. It must not be reported
+        // (the recurring spurious `stuck_irq=111` this fix closes).
+        gic.mmio
+            .gicd_write(gicd_bit_word_offset(GICD_ISPENDR, 50), 1 << 18);
+        assert_eq!(gic.stuck_spi(MAX_INTID), None);
+        // A higher pending line that *is* enabled is still found, skipping
+        // the lower masked one rather than stopping at it.
+        gic.mmio
+            .gicd_write(gicd_bit_word_offset(GICD_ISPENDR, 55), 1 << 23);
+        gic.mmio.gicd_write(isenabler_offset(55), isenabler_bit(55));
+        assert_eq!(
+            gic.stuck_spi(MAX_INTID),
+            Some(StuckInterrupt {
+                intid: 55,
+                active: false,
             })
         );
     }
@@ -931,15 +990,14 @@ mod tests {
         // than a lower one merely pending, so active wins outright.
         gic.mmio
             .gicd_write(gicd_bit_word_offset(GICD_ISACTIVER, 96), 1 << 0);
-        gic.mmio.gicd_write(isenabler_offset(96), isenabler_bit(96));
         gic.mmio
             .gicd_write(gicd_bit_word_offset(GICD_ISPENDR, 40), 1 << 8);
+        gic.mmio.gicd_write(isenabler_offset(40), isenabler_bit(40));
         assert_eq!(
             gic.stuck_spi(MAX_INTID),
             Some(StuckInterrupt {
                 intid: 96,
                 active: true,
-                enabled: true,
             })
         );
     }
@@ -961,7 +1019,6 @@ mod tests {
             Some(StuckInterrupt {
                 intid: 40,
                 active: true,
-                enabled: false,
             })
         );
     }

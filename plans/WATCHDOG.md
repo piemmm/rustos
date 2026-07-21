@@ -60,23 +60,33 @@ such marker). Because that stale sample cannot name what is wedging the core
 live and reports `stuck_irq=<id>` together with `stuck_state`: the lowest
 shared line stuck **active** (handler in flight, never completed) in
 preference to merely **pending**. The read is a new Arch-HAL query,
-`WatchdogArch::stuck_interrupt`, returning a `StuckInterrupt {intid, active,
-enabled}` (default `None`; a port with no globally-observable controller
-state reports nothing rather than guessing). The id alone is ambiguous, so
-`stuck_state=<active|pending>,<enabled|masked>` records both whether a
-handler is in flight (`active`) and whether the line is still unmasked
-(`enabled`): a live storm reads `active,enabled`, while a line the kernel
-already masked after one delivery whose source never deasserted reads
-`pending,masked` (asserted but contained, so the wedge is elsewhere).
-Only shared lines are observable this way — aarch64 GICv2 SPIs (id ≥ 32);
-per-CPU banked SGIs/PPIs are not, since the observer cannot read another CPU's
-banked state. `stuck_irq` is omitted when no line is stuck (a pure in-kernel
-spin with IRQs masked, not a storm).
+`WatchdogArch::stuck_interrupt`, returning a `StuckInterrupt {intid, active}`
+(default `None`; a port with no globally-observable controller state reports
+nothing rather than guessing).
 
-The raw id still does not say *whose* device the line is (a recurring source
-of confusion: a reported `stuck_irq=111` was neither the PCIe-MSI line nor any
-device in the pinned Pi 4 DTB). So the report attributes the line against the
-live kernel IRQ table: the observer resolves the stuck id through
+Crucially, **only a line that could actually be delivered is ever reported**:
+a masked line cannot be signalled to any CPU, so it can never be the cause of
+a lockup, and the observer skips it rather than blaming an innocent line. The
+scan reports a line only when it is **active** (which is only possible on a
+line that was delivered) or **pending _and_ still enabled**; a masked-pending
+line is passed over and the scan continues to the next candidate. So
+`stuck_state=<active|pending>` distinguishes a live storm (`active`) from an
+enabled line asserted but not yet taken (`pending`) — both genuine, deliverable
+suspects. Only shared lines are observable this way — aarch64 GICv2 SPIs
+(id ≥ 32); per-CPU banked SGIs/PPIs are not, since the observer cannot read
+another CPU's banked state. `stuck_irq` is omitted when no deliverable line is
+stuck (a pure in-kernel spin with IRQs masked, not a storm).
+
+Reporting undeliverable lines was a real defect, not a cosmetic one: before
+this, the fallback returned *any* pending line regardless of its enable bit,
+so a masked, unowned, contained line (the recurring `stuck_irq=111` that was
+neither the PCIe-MSI line nor any device in the pinned Pi 4 DTB — the lowest
+latched-but-masked SPI on the QEMU `virt` / Pi 4 GICv2) was blamed for a hard
+lockup it physically could not have caused. Skipping masked lines removes that
+false lead at the source; the `enabled`/`masked` state no longer needs
+recording because a reported line is always deliverable. The report still
+attributes the (now always deliverable) id against the live kernel IRQ table
+to say *whose* device the line is: the observer resolves the stuck id through
 `IrqTable::owner_of_line` (a read-only, owner-agnostic lookup) via the
 arch-neutral `watchdog::StuckOwnerResolver` seam the boot path installs over
 `&KernelState.irq`. It renders `stuck_owner=<task>` for a line a driver bound,
@@ -144,13 +154,18 @@ neutral `WatchdogSample`) and arms the cadence on every online CPU.
 
 `WatchdogArch::stuck_interrupt` (aarch64) is `gic::stuck_spi()`: the observer
 scans the distributor's `GICD_ISACTIVER` then `GICD_ISPENDR` over the SPI
-range for the lowest stuck line and reads its `GICD_ISENABLER` bit, returning
-its id plus `active` (which bank matched) and `enabled` (unmasked). A pure
-read of globally-shared state, safe from any CPU, so a core hard-wedged on a
-device SPI is named in the report even though its own sample is stale, and the
-`active`/`enabled` pair tells a live storm apart from a masked-but-asserted
-line the kernel already contained. The scan logic is host-tested against the
-mock distributor; the live MMIO read is metal-only (`None` off metal).
+range for the lowest **deliverable** stuck line, returning its id plus
+`active` (which bank matched). An active line is reported unconditionally
+(being active proves it was delivered); a pending line is reported only when
+its `GICD_ISENABLER` bit is set, and a masked-pending line is skipped so the
+scan continues to the next candidate rather than blaming a line that cannot
+reach a CPU. A pure read of globally-shared state, safe from any CPU, so a
+core hard-wedged on a device SPI is named in the report even though its own
+sample is stale, and the `active` flag tells a live storm apart from an
+enabled line asserted but not yet taken. The scan logic is host-tested
+against the mock distributor (including that a masked-pending line is skipped
+in favour of a higher enabled one); the live MMIO read is metal-only (`None`
+off metal).
 
 Limitation (hardware, not a defect): on GICv2 non-secure there is no
 non-maskable channel, so a CPU wedged with IRQs masked cannot be *interrupted*

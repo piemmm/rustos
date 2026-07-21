@@ -266,9 +266,10 @@ impl WatchdogArch for Watchdog {
         // device SPI stuck active (its handler never completing, or the
         // line storming) is the "why" the hard-locked CPU's own stale
         // sample cannot give. SGIs/PPIs are banked per CPU and so are not
-        // observable from here — only shared SPIs. The reply carries the
-        // line's active/enabled state so a live storm is told apart from a
-        // masked-but-asserted line.
+        // observable from here — only shared SPIs. Only a line that can
+        // still reach a CPU is reported (active, or enabled-and-pending); a
+        // masked line is skipped, since it cannot be the wedge. The reply's
+        // active flag tells a live storm from an asserted-but-untaken line.
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
             crate::gic::stuck_spi()

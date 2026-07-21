@@ -2017,15 +2017,19 @@ order (one fully-gated increment each):
                    lockup's recorded sample is stale (taken before the CPU went
                    silent), so it is marked `sampled=pre_silence` and the
                    observer names the live stuck controller line as
-                   `stuck_irq=<id>` plus `stuck_state=<active|pending>,<enabled|
-                   masked>` via the Arch-HAL query `WatchdogArch::stuck_interrupt`
-                   returning a `StuckInterrupt {intid, active, enabled}` (default
-                   `None`; aarch64 reads the lowest active/pending GICv2 SPI and
-                   its `GICD_ISENABLER` bit through `gic::stuck_spi`, host-tested
-                   against the mock distributor). `stuck_state` distinguishes a
-                   live storm (`active,enabled`) from a masked-but-asserted line
-                   the kernel already contained (`pending,masked`), so the pin is
-                   unambiguous. The observer also attributes the stuck id against
+                   `stuck_irq=<id>` plus `stuck_state=<active|pending>` via the
+                   Arch-HAL query `WatchdogArch::stuck_interrupt` returning a
+                   `StuckInterrupt {intid, active}` (default `None`; aarch64 reads
+                   the lowest *deliverable* GICv2 SPI through `gic::stuck_spi` —
+                   active unconditionally, pending only when its `GICD_ISENABLER`
+                   bit is set — host-tested against the mock distributor). Only a
+                   line that can still reach a CPU is ever reported: a masked line
+                   cannot be the wedge, so it is skipped rather than blamed (the
+                   fix for the spurious `stuck_irq=111` — a masked, unowned line
+                   the old any-pending fallback reported). `stuck_state`
+                   distinguishes a live storm (`active`) from an enabled line
+                   asserted but not yet taken (`pending`). The observer also
+                   attributes the stuck id against
                    the live kernel IRQ table (`IrqTable::owner_of_line` via the
                    arch-neutral `watchdog::StuckOwnerResolver` seam installed over
                    `&KernelState.irq`), rendering `stuck_owner=<task>` for a line
