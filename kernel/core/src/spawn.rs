@@ -982,6 +982,152 @@ impl ProcessSpawn for NullProcessSpawn {}
 /// [`KernelSyscallHandlers::with_spawn`](crate::KernelSyscallHandlers::with_spawn).
 pub static NULL_PROCESS_SPAWN: NullProcessSpawn = NullProcessSpawn;
 
+/// A freshly built, not-yet-admitted user image an [`ArchImageBuilder`]
+/// hands the core after materialising a program into a hardware-isolated
+/// address space (`plans/FIX-DESKTOP.md` §5 item 1).
+///
+/// This is the deferred-load counterpart of the eager `admit_process`
+/// hand-off: the arch seam still owns the irreducibly architecture-specific
+/// work (spelling the port's concrete page table, [`EnterUser`] primitive,
+/// and direct physical map), but it now runs on the **loading child's own
+/// kernel stack** and returns the built image *as a value* for the core to
+/// register, rather than admitting the task itself. Keeping admission in the
+/// core (one definition, all ports) is what lets the load run off the
+/// spawning caller's task so an interactive loop never freezes behind it.
+///
+/// It carries **no** kernel stack: the loading kthread already owns the
+/// stack it runs on (allocated at admit through
+/// [`ArchImageBuilder::alloc_kernel_stack`]), and [`ArchImageBuilder::build`]
+/// only re-expresses that stack's guard page in the child's own (inactive)
+/// root ([`ImageBuildCtx::kernel_stack_guard`]).
+pub struct BuiltImage {
+    /// The registry-storable, `Send + Sync` frozen snapshot of the child's
+    /// user mappings (an arch port's *live* address space is not `Sync`),
+    /// registered under the child's id so its first user-memory copy
+    /// resolves its own mappings.
+    pub frozen: Box<dyn UserAddressSpace + Send + Sync>,
+    /// The kernel direct map backing `frozen`, so the copy path reads
+    /// exactly the memory the program sees.
+    pub physmap: Box<dyn PhysMap + Send + Sync>,
+    /// The user-stack span the seam's layout placed in `frozen`; the fault
+    /// path backs growth pages inside it.
+    pub stack_span: StackSpan,
+    /// The retained live, mutable address space (`plans/PI.md`
+    /// 5d-0-ii (b′)) built from the *same* arch space `frozen` was frozen
+    /// from, so the child's `mem_map` / `mmio_map` mutate its own space.
+    /// [`None`] retains no live space and those syscalls fail closed.
+    pub live: Option<Box<dyn LiveUserSpace + Send>>,
+    /// The child's page-table-root reactivation hook, run on the
+    /// dispatcher's context before every switch into the child so it enters
+    /// user mode under its own isolated root. Handed the task's kernel-stack
+    /// top (x86_64 repoints its per-CPU entry stack; aarch64/riscv64 ignore
+    /// it).
+    pub pre_resume: Box<dyn FnMut(u64) + Send>,
+    /// The arch-specific user-mode transition; it diverges, so its `!`
+    /// coerces to `()`. The loading body invokes it once, after
+    /// [`crate::kthread::Yielder::become_user`] has installed `pre_resume`
+    /// and `live`.
+    pub enter: Box<dyn FnMut() + Send>,
+}
+
+/// The build-only subset of the spawn context an [`ArchImageBuilder`] reads
+/// to materialise a child image (`plans/FIX-DESKTOP.md` §5 item 1).
+///
+/// It exposes exactly the frame sources and audit sink the build path
+/// needs, plus the loading kthread's kernel-stack guard VA so
+/// [`ArchImageBuilder::build`] can re-express that guard page in the child's
+/// own root — the same split+unmap the eager producer did at admit, now on
+/// the child's own (inactive) space. Admission is **not** part of this
+/// boundary: the core owns it.
+pub trait ImageBuildCtx {
+    /// The kernel's live physical-frame allocator — the source of the
+    /// frames the image's pages are mapped to.
+    fn frames(&self) -> &FrameAllocator;
+
+    /// The live physical-frame allocator as a `'static` borrow, when one is
+    /// wired, so the seam can build the child's page tables out of
+    /// reclaimable RAM that scales with the machine. [`None`] makes the
+    /// producer fail closed rather than over-spawn.
+    fn page_table_allocator(&self) -> Option<&'static FrameAllocator>;
+
+    /// The audit sink the build path records `ProcessSpawn*` events through.
+    fn audit(&self) -> &(dyn Sink + Sync);
+
+    /// The guard virtual address of the kernel stack the loading kthread
+    /// runs on (from [`ArchImageBuilder::alloc_kernel_stack`]), so
+    /// [`ArchImageBuilder::build`] can split the coarse identity block
+    /// covering it and unmap the single guard page in the *child's own*
+    /// root — turning an overrun of the child's kernel stack into a
+    /// synchronous fault under the child's translation regime rather than
+    /// corrupting a neighbour.
+    ///
+    /// [`None`] when the stack is the heap-backed software-canary
+    /// [`crate::BoxStack`] fallback (which guards itself with a poison
+    /// canary and needs no page unmapped in the child root).
+    fn kernel_stack_guard(&self) -> Option<u64>;
+}
+
+/// The architecture-specific seam that builds a fresh, hardware-isolated
+/// user image from a validated `rxe` **without admitting it**
+/// (`plans/FIX-DESKTOP.md` §5 item 1), the deferred-load replacement for
+/// [`ProcessSpawn`].
+///
+/// Installed into the syscall handler exactly as [`ProcessSpawn`] was, and
+/// captured by the boot-installed [`crate::SpawnServices`] so the child's
+/// loading body — running on its own kernel stack, off the spawning
+/// caller's task — can drive the build. Splitting the old `spawn_with` into
+/// [`alloc_kernel_stack`](Self::alloc_kernel_stack) (run synchronously at
+/// admit, before the child exists) and [`build`](Self::build) (run in the
+/// loading body) is what moves the disk read + verification + image build
+/// off the caller's task.
+///
+/// `Sync` because the installed builder is shared, immutably, by every
+/// CPU's dispatch path and captured in the `'static` [`crate::SpawnServices`].
+pub trait ArchImageBuilder: Send + Sync {
+    /// Allocate the loading child's kernel stack, returning it boxed behind
+    /// the object-safe [`crate::kthread::KernelStack`] boundary together
+    /// with its guard VA (`Some` for an arena-backed stack whose guard page
+    /// [`build`](Self::build) will unmap in the child root, `None` for the
+    /// heap-backed software-canary [`crate::BoxStack`] fallback).
+    ///
+    /// Run **synchronously at admit**, before the child's address space
+    /// exists, so the loading kthread has a stack to run its own build on.
+    /// The runtime stores the stack in the child's control block and frees
+    /// it when the task exits.
+    fn alloc_kernel_stack(
+        &self,
+        frames: &FrameAllocator,
+        pt_frames: Option<&'static FrameAllocator>,
+    ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>);
+
+    /// Build `rxe` into a fresh, hardware-isolated address space and return
+    /// it as a [`BuiltImage`] for the core to admit — never admitting it
+    /// here.
+    ///
+    /// Runs in the loading child's body, on the stack
+    /// [`alloc_kernel_stack`](Self::alloc_kernel_stack) allocated. It builds
+    /// the image through the production, capability-checked, audited
+    /// [`spawn_image`] caller (spawning is *not* a privileged bypass), then
+    /// re-expresses the loading stack's guard page
+    /// ([`ImageBuildCtx::kernel_stack_guard`]) in the child's own inactive
+    /// root. A `Some(guard)` whose split+unmap fails in the child root fails
+    /// the build **closed** rather than silently downgrading to an unguarded
+    /// stack.
+    ///
+    /// # Errors
+    ///
+    /// A stable [`Errno`] on any failure — a malformed `rxe`, a build or
+    /// page-table-frame exhaustion, or a guard-unmap failure — never a panic
+    /// or a half-built image.
+    fn build(
+        &self,
+        rxe: &[u8],
+        ctx: &dyn ImageBuildCtx,
+        args: &[&[u8]],
+        env: &[&[u8]],
+    ) -> Result<BuiltImage, Errno>;
+}
+
 /// Emit one structured audit record for `event` with `fields`.
 fn emit(audit: &dyn Sink, event: AuditEvent, level: Level, fields: &[Field<'_>]) {
     tairix_log::log(

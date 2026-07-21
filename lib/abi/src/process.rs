@@ -1081,6 +1081,103 @@ impl WaitStatusRecord {
     }
 }
 
+/// Base of the reserved load-failure exit-status band
+/// (`plans/FIX-DESKTOP.md` §2.3).
+///
+/// Because a `spawn` now returns as soon as the child is *admitted* — not
+/// once it is *loaded* — the heavy, I/O-dependent load failures (missing
+/// bundle bytes, tampered signature, malformed rxe, OOM during the image
+/// build) are discovered by the child on its own task and surface through
+/// the child's **exit**, not the `spawn` return value. Those causes are
+/// reported as exit statuses in this high, reserved band, which sits far
+/// above the small codes a normal program passes to `exit` (the shells and
+/// tools use `0` for success and small positive codes for failure), so a
+/// parent reaping a child can tell "the program ran and chose this code"
+/// apart from "the loader refused to start the program".
+///
+/// A value in `[LOAD_FAILURE_STATUS_BASE, LOAD_FAILURE_STATUS_BASE + 0xFF]`
+/// is reserved for the loader; [`load_failure_reason`] recognises exactly
+/// the four defined causes below and returns [`None`] for everything else,
+/// so an ordinary exit code is never mistaken for a load failure.
+pub const LOAD_FAILURE_STATUS_BASE: i32 = 0x7F5A_0000;
+
+/// Reserved exit status: the bundle could not be found or its bytes could
+/// not be read under the child's own credential (a missing `<Name>.app/Run`
+/// or a VFS read the child's authority does not permit). Fail closed — the
+/// child never runs a byte it could not read.
+pub const LOAD_NOT_FOUND: i32 = LOAD_FAILURE_STATUS_BASE + 0x01;
+
+/// Reserved exit status: the bundle was found and read but failed
+/// verification — a bad signature, a content-hash mismatch, or an
+/// interface-hash mismatch against the kernel's syscall table. No
+/// unverified byte was mapped.
+pub const LOAD_UNVERIFIED: i32 = LOAD_FAILURE_STATUS_BASE + 0x02;
+
+/// Reserved exit status: the verified image is structurally unusable — an
+/// un-parseable `rxe`, a CFI-tag mismatch, or a segment layout that does
+/// not fit the child's user address region.
+pub const LOAD_MALFORMED: i32 = LOAD_FAILURE_STATUS_BASE + 0x03;
+
+/// Reserved exit status: the image could not be materialised because the
+/// kernel ran out of frames or page-table memory while building the
+/// child's address space. Deterministic OOM, never a panic.
+pub const LOAD_OOM: i32 = LOAD_FAILURE_STATUS_BASE + 0x04;
+
+/// Map a load-path [`Errno`] onto exactly one reserved load-failure exit
+/// status (`plans/FIX-DESKTOP.md` §2.3).
+///
+/// This is the single definition both sides depend on: the child's
+/// deferred load path calls it to choose the status it exits with when the
+/// load refuses, and the round-trip test in this crate pins it against
+/// [`load_failure_reason`]. Keeping it here — not in the kernel — is what
+/// lets the parent that reaps the child turn the reaped code back into a
+/// human-readable reason without the two sides ever disagreeing.
+///
+/// The mapping is total: the causes the load and build path actually
+/// produce are classified precisely, and any other error fails closed to
+/// [`LOAD_MALFORMED`] (the image could not be turned into a runnable
+/// program for a reason the loader does not classify more finely) rather
+/// than being dropped.
+#[must_use]
+pub const fn load_failure_status(errno: Errno) -> i32 {
+    match errno {
+        // Missing bundle bytes, or a read the child's own credential is not
+        // allowed to perform — both are "could not obtain the program".
+        Errno::NotFound | Errno::PermissionDenied | Errno::BadAddress => LOAD_NOT_FOUND,
+        // A bad signature / content-hash (SignatureInvalid) or an
+        // interface-hash mismatch (AbiVersionUnsupported): the bytes were
+        // read but did not verify.
+        Errno::SignatureInvalid | Errno::AbiVersionUnsupported => LOAD_UNVERIFIED,
+        // Frame / page-table exhaustion while building the address space.
+        Errno::NoSpace | Errno::OutOfMemory => LOAD_OOM,
+        // An un-parseable rxe (BadMagic), an over-range field, a truncated
+        // buffer, a misaligned structure, or any other structural refusal:
+        // the image is malformed or unfit. Fail closed here rather than
+        // inventing a fifth status.
+        _ => LOAD_MALFORMED,
+    }
+}
+
+/// Turn a reaped exit status back into the terse, human-readable reason a
+/// parent prints on `stderr` when a launch it started failed to load
+/// (`plans/FIX-DESKTOP.md` §2.3).
+///
+/// Returns [`Some`] only for the four reserved load-failure statuses
+/// [`load_failure_status`] produces; every other exit code — including the
+/// small codes a program passes to `exit` — returns [`None`], so an
+/// ordinary exit is never reported as a load failure. The reasons carry no
+/// secrets and no capability tokens: they name the failure class only.
+#[must_use]
+pub const fn load_failure_reason(code: i32) -> Option<&'static str> {
+    match code {
+        LOAD_NOT_FOUND => Some("program not found or not readable"),
+        LOAD_UNVERIFIED => Some("signature or hash verification failed"),
+        LOAD_MALFORMED => Some("executable is malformed or incompatible"),
+        LOAD_OOM => Some("out of memory while loading"),
+        _ => None,
+    }
+}
+
 /// The access a single inherited descriptor grants its process.
 ///
 /// A descriptor is established at spawn and points at a kernel *stream
@@ -1263,11 +1360,13 @@ impl Default for DescriptorTable {
 mod tests {
     extern crate alloc;
     use super::{
-        DescriptorTable, FdWire, ProcessStart, ProcessStartHeader, Signal, SignalIntakeOp,
-        SpawnAttach, StreamMode, StringSlot, WaitStatus, WaitStatusRecord, PROCESS_START_MAGIC,
-        PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-        SPAWN_ATTACH_LEN, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX, STDERR, STDIN,
-        STDINFO, STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+        load_failure_reason, load_failure_status, DescriptorTable, FdWire, ProcessStart,
+        ProcessStartHeader, Signal, SignalIntakeOp, SpawnAttach, StreamMode, StringSlot,
+        WaitStatus, WaitStatusRecord, LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND,
+        LOAD_OOM, LOAD_UNVERIFIED, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+        PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN,
+        SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX, STDERR, STDIN, STDINFO, STDOUT,
+        STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
     use crate::{Errno, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
@@ -1885,5 +1984,91 @@ mod tests {
         let big = alloc::vec![b'a'; PROCESS_START_MAX_STRING_LEN as usize + 1];
         let args: &[&[u8]] = &[&big];
         assert_eq!(super::encoded_len(args, &[]), Err(Errno::LengthOutOfRange));
+    }
+
+    /// The four reserved load-failure statuses are distinct, ordered within
+    /// the reserved band, and sit well above the small codes a normal
+    /// program passes to `exit` — so a parent can never confuse an ordinary
+    /// exit with a loader refusal.
+    #[test]
+    fn load_failure_statuses_are_distinct_and_in_the_reserved_band() {
+        let all = [LOAD_NOT_FOUND, LOAD_UNVERIFIED, LOAD_MALFORMED, LOAD_OOM];
+        for (i, a) in all.iter().enumerate() {
+            // Inside the reserved band.
+            assert!(*a > LOAD_FAILURE_STATUS_BASE);
+            assert!(*a <= LOAD_FAILURE_STATUS_BASE + 0xFF);
+            // Far above an ordinary small exit code.
+            assert!(*a > 0xFFFF);
+            // Pairwise distinct.
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    /// Every load-path errno maps onto exactly one reserved status, and the
+    /// mapping is total (an unclassified error fails closed to
+    /// `LOAD_MALFORMED` rather than being dropped).
+    #[test]
+    fn load_failure_status_classifies_every_load_path_errno() {
+        // Missing bundle / refused read.
+        assert_eq!(load_failure_status(Errno::NotFound), LOAD_NOT_FOUND);
+        assert_eq!(load_failure_status(Errno::PermissionDenied), LOAD_NOT_FOUND);
+        assert_eq!(load_failure_status(Errno::BadAddress), LOAD_NOT_FOUND);
+        // Verification failure (signature/content hash, interface hash).
+        assert_eq!(
+            load_failure_status(Errno::SignatureInvalid),
+            LOAD_UNVERIFIED
+        );
+        assert_eq!(
+            load_failure_status(Errno::AbiVersionUnsupported),
+            LOAD_UNVERIFIED
+        );
+        // Frame / page-table exhaustion.
+        assert_eq!(load_failure_status(Errno::NoSpace), LOAD_OOM);
+        assert_eq!(load_failure_status(Errno::OutOfMemory), LOAD_OOM);
+        // Malformed / unfit image (parse, layout).
+        assert_eq!(load_failure_status(Errno::BadMagic), LOAD_MALFORMED);
+        assert_eq!(load_failure_status(Errno::LengthOutOfRange), LOAD_MALFORMED);
+        // Fail-closed default for an unclassified error.
+        assert_eq!(load_failure_status(Errno::WouldBlock), LOAD_MALFORMED);
+    }
+
+    /// A reserved status round-trips back to a terse reason; every reserved
+    /// cause has one, and a non-load exit code has none.
+    #[test]
+    fn load_failure_reason_round_trips_and_declines_ordinary_codes() {
+        for status in [LOAD_NOT_FOUND, LOAD_UNVERIFIED, LOAD_MALFORMED, LOAD_OOM] {
+            let reason = load_failure_reason(status).expect("reserved status has a reason");
+            assert!(!reason.is_empty());
+        }
+        // The mapping composes: every classified errno yields a status that
+        // has a human-readable reason.
+        for errno in [
+            Errno::NotFound,
+            Errno::PermissionDenied,
+            Errno::BadAddress,
+            Errno::SignatureInvalid,
+            Errno::AbiVersionUnsupported,
+            Errno::NoSpace,
+            Errno::OutOfMemory,
+            Errno::BadMagic,
+            Errno::WouldBlock,
+        ] {
+            assert!(load_failure_reason(load_failure_status(errno)).is_some());
+        }
+        // Ordinary exit codes are never mistaken for a load failure.
+        for code in [
+            0,
+            1,
+            2,
+            42,
+            255,
+            LOAD_FAILURE_STATUS_BASE,
+            i32::MIN,
+            i32::MAX,
+        ] {
+            assert!(load_failure_reason(code).is_none());
+        }
     }
 }

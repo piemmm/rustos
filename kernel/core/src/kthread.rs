@@ -333,6 +333,10 @@ pub struct Yielder<C: ContextSwitch + Copy> {
     task_ctx: *mut TaskContext,
     dispatch_ctx: *mut TaskContext,
     action: *mut TaskAction,
+    /// Raw pointer to this task's [`ThreadControl::pending_upgrade`] slot,
+    /// written by [`Self::become_user`] so the dispatcher can install the
+    /// task's freshly built user address space before the next switch-in.
+    pending_upgrade: *mut Option<UserUpgrade>,
 }
 
 impl<C: ContextSwitch + Copy> Yielder<C> {
@@ -346,6 +350,37 @@ impl<C: ContextSwitch + Copy> Yielder<C> {
     /// wakes it, then resume here.
     pub fn park(&mut self) {
         self.suspend(TaskAction::Park);
+    }
+
+    /// Upgrade this **loading** kthread into a user kthread: deposit the
+    /// task's freshly built page-table-root reactivation hook and retained
+    /// live address space for the dispatcher to install, then yield so the
+    /// next dispatch resumes the task as a fully-formed user kthread
+    /// (`plans/FIX-DESKTOP.md` §2.6.5, the asynchronous process launch).
+    ///
+    /// Returns when the task is next dispatched — by which point the
+    /// dispatcher's per-step logic has moved the deposited hook + live
+    /// space into the control block, activated the task's user root, and
+    /// published its
+    /// syscall resume handle and live-space pointer — so the caller may then
+    /// enter user mode. It **yields** (re-enqueue) rather than parking:
+    /// nothing external wakes a loading task, so it must stay runnable to
+    /// reach the install step.
+    pub fn become_user(
+        &mut self,
+        pre_resume: PreResume,
+        live: Option<Box<dyn LiveUserSpace + Send>>,
+    ) {
+        // SAFETY: `pending_upgrade` points at the live `pending_upgrade`
+        // field of this task's `ThreadControl`, which outlives the running
+        // work. The dispatcher side is suspended inside `switch` while the
+        // work runs (cooperative hand-off), so this write does not alias a
+        // live reference; the dispatcher takes the slot on its next step,
+        // before it switches back in.
+        unsafe {
+            *self.pending_upgrade = Some(UserUpgrade { pre_resume, live });
+        }
+        self.suspend(TaskAction::Yield);
     }
 
     /// Record `action` and switch back to the dispatcher's saved context.
@@ -465,6 +500,7 @@ where
             task_ctx: addr_of_mut!((*ctl).task_ctx),
             dispatch_ctx: addr_of_mut!((*ctl).dispatch_ctx),
             action: addr_of_mut!((*ctl).action),
+            pending_upgrade: addr_of_mut!((*ctl).pending_upgrade),
         };
         (cs, yielder)
     };
@@ -622,6 +658,12 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     /// (and its page-table frames) are reclaimed when the control block is
     /// dropped on exit.
     live: Option<Box<dyn LiveUserSpace + Send>>,
+    /// A pending user-space upgrade a **loading** task's own body deposited
+    /// through [`Yielder::become_user`], installed dispatcher-side by
+    /// [`dispatch_step`] before the next switch-in (`plans/FIX-DESKTOP.md`
+    /// §2.6.5). `None` for every task not mid-upgrade — a plain kernel or
+    /// already-formed user kthread never carries one.
+    pending_upgrade: Option<UserUpgrade>,
 }
 
 /// A user kthread's pre-resume hook: see [`ThreadControl::pre_resume`].
@@ -633,6 +675,23 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
 /// aarch64 reuses `SP_EL1` implicitly and ignores the argument; x86_64
 /// uses it to set the per-CPU `SyscallTls.kernel_rsp0` (`plans/PI.md` §X).
 type PreResume = Box<dyn FnMut(u64) + Send + 'static>;
+
+/// A deposited request to upgrade a currently kernel-form **loading** task
+/// into a user task on its next dispatch step (`plans/FIX-DESKTOP.md`
+/// §2.6.5).
+///
+/// A child spawned through the asynchronous launch path is admitted as a
+/// plain kernel kthread and builds its own user image on its first slice.
+/// When the build completes its body deposits the built page-table-root
+/// reactivation hook and retained live space here through
+/// [`Yielder::become_user`] and yields; [`dispatch_step`] moves them into
+/// the control block's `pre_resume`/`live` fields — the side that already
+/// owns those fields — before the next switch-in, so the task resumes as a
+/// fully-formed user kthread. `None` for every task not mid-upgrade.
+struct UserUpgrade {
+    pre_resume: PreResume,
+    live: Option<Box<dyn LiveUserSpace + Send>>,
+}
 
 /// The entry point a freshly prepared kthread first runs.
 ///
@@ -672,6 +731,7 @@ where
             task_ctx: unsafe { addr_of_mut!((*ctl).task_ctx) },
             dispatch_ctx: unsafe { addr_of_mut!((*ctl).dispatch_ctx) },
             action: unsafe { addr_of_mut!((*ctl).action) },
+            pending_upgrade: unsafe { addr_of_mut!((*ctl).pending_upgrade) },
         };
         work(&mut yielder);
     }
@@ -952,6 +1012,7 @@ where
         work: Some(Box::new(work)),
         pre_resume,
         live,
+        pending_upgrade: None,
     });
 
     // The `move` closure owns the boxed control block, so its heap address
@@ -1027,6 +1088,19 @@ where
             }
         }
         RunState::Running => {}
+    }
+
+    // A loading task that finished building its user image deposited the
+    // upgrade through `become_user`; install it here, dispatcher-side —
+    // the side that owns `pre_resume`/`live` — before deciding user-ness,
+    // so the task resumes below as a fully-formed user kthread
+    // (`plans/FIX-DESKTOP.md` §2.6.5). SAFETY: exclusive dispatcher-side
+    // access to `*ctl` (see above).
+    if let Some(up) = unsafe { (*ctl).pending_upgrade.take() } {
+        unsafe {
+            (*ctl).pre_resume = Some(up.pre_resume);
+            (*ctl).live = up.live;
+        }
     }
 
     let cs = unsafe { (*ctl).cs };
@@ -1404,6 +1478,7 @@ mod tests {
             work: Some(Box::new(|_y: &mut Yielder<C>| {})),
             pre_resume: None,
             live: None,
+            pending_upgrade: None,
         })
     }
 
@@ -1428,6 +1503,7 @@ mod tests {
                 hits.fetch_add(1, Ordering::SeqCst);
             })),
             live: None,
+            pending_upgrade: None,
         })
     }
 
@@ -1534,6 +1610,7 @@ mod tests {
             task_ctx: unsafe { addr_of_mut!((*ctl).task_ctx) },
             dispatch_ctx: unsafe { addr_of_mut!((*ctl).dispatch_ctx) },
             action: unsafe { addr_of_mut!((*ctl).action) },
+            pending_upgrade: unsafe { addr_of_mut!((*ctl).pending_upgrade) },
         };
 
         yielder.yield_now();
@@ -1738,6 +1815,45 @@ mod tests {
         // `pre_resume` runs again on the next switch-in (every step
         // reactivates the user address space).
         let _ = dispatch_step(&mut control, cpu);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn dispatch_step_installs_a_pending_user_upgrade_then_treats_the_task_as_user() {
+        // A loading task's body deposits a `UserUpgrade` through
+        // `become_user`; the next dispatch must move the built root-
+        // activation hook + live space into the control block, consume the
+        // pending slot, and resume the task as a fully-formed user kthread
+        // (its `pre_resume` fires) — `plans/FIX-DESKTOP.md` §2.6.5.
+        let rec = recorder();
+        let hits = leak_counter();
+        let cpu: CpuId = 44;
+        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+
+        // Before the upgrade the task is a plain kernel kthread.
+        assert!(control.pre_resume.is_none());
+
+        // Deposit the upgrade exactly as `Yielder::become_user` would.
+        control.pending_upgrade = Some(UserUpgrade {
+            pre_resume: Box::new(move |_stack_top: u64| {
+                hits.fetch_add(1, Ordering::SeqCst);
+            }),
+            live: None,
+        });
+
+        let _ = dispatch_step(&mut control, cpu);
+
+        // The deposited hook is now the task's own `pre_resume`, the pending
+        // slot is drained, and the dispatcher ran the hook this very step
+        // (treated the task as a user kthread).
+        assert!(control.pending_upgrade.is_none());
+        assert!(control.pre_resume.is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // The upgrade is one-shot: a later step runs the installed hook
+        // again (an ordinary user step) but installs nothing new.
+        let _ = dispatch_step(&mut control, cpu);
+        assert!(control.pending_upgrade.is_none());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
