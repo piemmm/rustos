@@ -90,6 +90,36 @@ fn unpremultiply_transparent_is_transparent() {
 }
 
 #[test]
+fn unpremultiply_opaque_is_the_channels_verbatim() {
+    // An opaque pixel is already straight-alpha, so the fast path returns its
+    // channels with no per-channel divide — the value a whole-surface present
+    // of an opaque window relies on.
+    let opaque = Pixel {
+        r: 3,
+        g: 200,
+        b: 255,
+        a: 255,
+    };
+    assert_eq!(
+        opaque.unpremultiply(),
+        Color {
+            r: 3,
+            g: 200,
+            b: 255,
+            a: 255
+        }
+    );
+}
+
+#[test]
+fn unpremultiply_partial_alpha_still_recovers_the_colour() {
+    // The divide path is still exercised for a translucent pixel: half-alpha
+    // red round-trips back to opaque-strength red at alpha 128.
+    let c = Color::rgba(255, 0, 0, 128);
+    assert_eq!(c.premultiply().unpremultiply(), c);
+}
+
+#[test]
 fn theme_rgba_converts_to_color_by_field_move() {
     let rgba = tairix_theme::Rgba::new(10, 20, 30, 40);
     assert_eq!(

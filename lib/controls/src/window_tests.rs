@@ -17,8 +17,8 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Contrast, Rgba, Theme};
 
 use crate::state::{
-    AuthorityState, ControlState, SizeAction, WindowActivationState, WindowControlKind,
-    WindowFurnitureState, WindowSizeState,
+    AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
+    WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 use crate::window::{
     ControlPlacement, FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
@@ -189,6 +189,49 @@ fn keyboard_activates_focused_control() {
     assert_eq!(
         control.on_key(Key::Char(' ')),
         Some(WindowControlAction::Invoked(WindowControlKind::Minimize))
+    );
+}
+
+#[test]
+fn pointer_activation_returns_the_control_to_rest() {
+    // A completed click clears the hover/press highlight so the button loses
+    // its border once the command fires (a genuine hover returns on the next
+    // pointer move), rather than leaving a stale highlight when activation
+    // relocates the control (a size toggle) or takes the frame away.
+    let mut control = WindowControl::new(WindowControlKind::SizeToggle);
+    let bounds = Rect::new(0, 0, 40, 40);
+    let _ = control.on_pointer(&moved(10, 10), bounds);
+    let _ = control.on_pointer(&PRESS, bounds);
+    assert_eq!(control.state().pointer, PointerState::Pressed);
+    assert_eq!(
+        control.on_pointer(&RELEASE, bounds),
+        Some(WindowControlAction::Invoked(WindowControlKind::SizeToggle))
+    );
+    assert_eq!(
+        control.state().pointer,
+        PointerState::None,
+        "activation drops the hover/press highlight"
+    );
+    assert!(
+        !control.state().focus.focused,
+        "activation leaves no focus ring"
+    );
+}
+
+#[test]
+fn keyboard_activation_clears_the_focus_ring() {
+    // Navigating with the keyboard shows the focus border, but activating the
+    // control drops it — the border only shows while navigating, not after
+    // the command has fired.
+    let mut control = WindowControl::new(WindowControlKind::Minimize);
+    control.set_focused(true);
+    assert_eq!(
+        control.on_key(Key::Named(NamedKey::Enter)),
+        Some(WindowControlAction::Invoked(WindowControlKind::Minimize))
+    );
+    assert!(
+        !control.state().focus.focused,
+        "activation clears the keyboard focus ring"
     );
 }
 
