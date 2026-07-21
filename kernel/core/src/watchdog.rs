@@ -645,12 +645,12 @@ struct Diag {
     sample_stale: bool,
     /// The device interrupt the **observer** read live as stuck in the
     /// shared controller (active over pending), or `None`. Rendered as
-    /// `stuck_irq=<id>` plus `stuck_state=<active|pending>,<enabled|masked>`
-    /// — the "why" the stale sample cannot give, with enough state to tell
-    /// a live storm (active, enabled) from a masked-but-asserted line the
-    /// kernel already contained (pending, masked). Filled only on the
-    /// hard-lockup path (the observer's cross-CPU read); a snapshot of the
-    /// CPU's own context leaves it `None`.
+    /// `stuck_irq=<id>` plus `stuck_state=<active|pending>` — the "why" the
+    /// stale sample cannot give. Only a line that could still be delivered
+    /// is reported (active, or enabled-and-pending); a masked line cannot
+    /// reach a CPU, so it is never blamed. Filled only on the hard-lockup
+    /// path (the observer's cross-CPU read); a snapshot of the CPU's own
+    /// context leaves it `None`.
     stuck: Option<StuckInterrupt>,
     /// Who owns the [`Self::stuck`] line, resolved against the kernel IRQ
     /// table on the hard-lockup path. It disambiguates the raw `stuck_irq`
@@ -744,16 +744,15 @@ fn resolve_stuck_owner_with(
 }
 
 /// A short, stable tag for a stuck line's state: whether it is actively
-/// storming (`active`) or merely `pending`, and whether it is still
-/// `enabled` (free to keep firing) or `masked` (contained). This is what
-/// separates a live wedge (`active,enabled`) from a masked-but-asserted
-/// line the kernel already contained (`pending,masked`).
+/// storming (`active`) — a handler in flight, the signature of a live
+/// wedge — or merely `pending` (enabled and asserted, but not yet taken).
+/// Only deliverable lines are ever reported, so a masked line never
+/// reaches this tag.
 fn stuck_state_tag(stuck: StuckInterrupt) -> &'static str {
-    match (stuck.active, stuck.enabled) {
-        (true, true) => "active,enabled",
-        (true, false) => "active,masked",
-        (false, true) => "pending,enabled",
-        (false, false) => "pending,masked",
+    if stuck.active {
+        "active"
+    } else {
+        "pending"
     }
 }
 
@@ -865,10 +864,10 @@ fn report_to(
         }
     }
     // The device interrupt currently stuck in the shared controller, read
-    // live by the observer — the "why" the stale sample cannot give. The
-    // id alone is ambiguous, so `stuck_state` says whether it is a live
-    // storm (`active,enabled`) or a masked-but-asserted line the kernel
-    // already contained (`pending,masked`).
+    // live by the observer — the "why" the stale sample cannot give. Only
+    // a line that can still reach a CPU is reported, so `stuck_state` just
+    // says whether it is a live storm (`active`) or an enabled line
+    // asserted but not yet taken (`pending`).
     if let Some(stuck) = diag.stuck {
         fields[n] = tairix_log::Field {
             key: "stuck_irq",
@@ -1308,7 +1307,6 @@ mod tests {
             stuck: Some(StuckInterrupt {
                 intid: 37,
                 active: true,
-                enabled: true,
             }),
             stuck_owner: StuckOwner::Task(13),
         };
@@ -1339,8 +1337,9 @@ mod tests {
         // silent, and the observer read the live stuck controller line.
         assert_eq!(field(ev, "sampled"), Some("pre_silence"));
         assert_eq!(field(ev, "stuck_irq"), Some("37"));
-        // The state pins whether it is a live storm or a contained line.
-        assert_eq!(field(ev, "stuck_state"), Some("active,enabled"));
+        // The state pins whether the line is a live storm (`active`) or an
+        // enabled-but-not-yet-taken line (`pending`).
+        assert_eq!(field(ev, "stuck_state"), Some("active"));
         // A bound line names the driver that owns it, so a reader knows
         // whose device is asserting it rather than a bare interrupt id.
         assert_eq!(field(ev, "stuck_owner"), Some("0x000000000000000d"));
@@ -1380,25 +1379,19 @@ mod tests {
     }
 
     #[test]
-    fn stuck_state_tag_names_every_active_enabled_combination() {
-        let tag = |active, enabled| {
-            stuck_state_tag(StuckInterrupt {
-                intid: 111,
-                active,
-                enabled,
-            })
-        };
-        assert_eq!(tag(true, true), "active,enabled");
-        assert_eq!(tag(true, false), "active,masked");
-        assert_eq!(tag(false, true), "pending,enabled");
-        assert_eq!(tag(false, false), "pending,masked");
+    fn stuck_state_tag_names_active_and_pending() {
+        let tag = |active| stuck_state_tag(StuckInterrupt { intid: 37, active });
+        assert_eq!(tag(true), "active");
+        assert_eq!(tag(false), "pending");
     }
 
     #[test]
-    fn a_masked_pending_stuck_line_reports_it_as_contained() {
-        // The decisive case: a line asserted but already masked by the
-        // kernel is contained, not a live storm. The report says so
-        // (`pending,masked`) so a reader looks elsewhere for the wedge.
+    fn a_pending_unbound_stuck_line_renders_pending_and_unbound() {
+        // Only deliverable lines reach a report, so a `pending` line is an
+        // enabled, asserted-but-not-yet-taken line — a real suspect. When no
+        // driver owns it (`unbound`), that says the wedge is elsewhere; the
+        // masked, undeliverable line the observer used to blame is never
+        // reported at all now.
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let diag = Diag {
             pc: 0x0021_d524,
@@ -1407,9 +1400,8 @@ mod tests {
             in_kernel: true,
             sample_stale: true,
             stuck: Some(StuckInterrupt {
-                intid: 111,
+                intid: 50,
                 active: false,
-                enabled: false,
             }),
             stuck_owner: StuckOwner::Unbound,
         };
@@ -1423,10 +1415,8 @@ mod tests {
             &diag,
         );
         let ev = &sink.snapshot()[0];
-        assert_eq!(field(ev, "stuck_irq"), Some("111"));
-        assert_eq!(field(ev, "stuck_state"), Some("pending,masked"));
-        // Bound to no driver: the pinned real-hardware case. `unbound` tells
-        // a reader this contained line is not the wedge — look elsewhere.
+        assert_eq!(field(ev, "stuck_irq"), Some("50"));
+        assert_eq!(field(ev, "stuck_state"), Some("pending"));
         assert_eq!(field(ev, "stuck_owner"), Some("unbound"));
     }
 
@@ -1504,7 +1494,6 @@ mod tests {
             Some(StuckInterrupt {
                 intid,
                 active: false,
-                enabled: false,
             })
         };
         // No stuck line: nothing to attribute (renders no owner).

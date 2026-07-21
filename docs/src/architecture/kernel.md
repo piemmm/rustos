@@ -281,12 +281,15 @@ last returned to rather than the wedge: the record marks it
 globally-shared state live to name the device line actually stuck —
 `stuck_irq=<id>`, the lowest shared line stuck active over merely pending —
 through the Arch-HAL query `WatchdogArch::stuck_interrupt` (aarch64: the
-lowest active/pending GICv2 SPI). Because the id alone cannot say whether
-that line is a live storm or a line already masked-and-contained, the record
-adds `stuck_state=<active|pending>,<enabled|masked>`: `active,enabled` is a
-handler in flight on an unmasked line (a real storm), while `pending,masked`
-is a line asserted but already contained by the kernel (the wedge is
-elsewhere). The raw id still does not say *whose* device the line is, so the
+lowest *deliverable* GICv2 SPI). Only a line that could still reach a CPU is
+ever reported: a masked line cannot be delivered, so it can never be the
+wedge, and the observer skips it rather than blaming an innocent line — an
+active line is reported unconditionally (being active proves it was
+delivered), while a pending line is reported only when it is still enabled.
+The `stuck_state=<active|pending>` flag then distinguishes a live storm
+(`active`, a handler in flight) from an enabled line asserted but not yet
+taken (`pending`) — both genuine, deliverable suspects. The raw id still
+does not say *whose* device the line is, so the
 record also attributes it against the live kernel IRQ table
 (`IrqTable::owner_of_line`): `stuck_owner=<task>` names the driver that bound
 the line, while `stuck_owner=unbound` marks a line no driver owns — a

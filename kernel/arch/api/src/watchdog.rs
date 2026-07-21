@@ -139,19 +139,19 @@ impl WatchdogSample {
     };
 }
 
-/// A device interrupt found *stuck* in the shared interrupt controller by
-/// the watchdog observer, with the two facts that turn a bare line id into
-/// a verdict: whether it is **active** (a live storm) or merely
-/// **pending**, and whether it is **enabled** (free to keep delivering) or
-/// **masked** (asserted but contained).
+/// A device interrupt found *stuck* — and still able to reach a CPU — in
+/// the shared interrupt controller by the watchdog observer, with the fact
+/// that turns a bare line id into a verdict: whether it is **active** (a
+/// live storm) or merely **pending**.
 ///
 /// A hard lockup's own sample is stale, so the observer reads the
-/// controller's globally-shared state live to name the offending line. The
-/// bare id alone is ambiguous — an `intid` could be a core wedged mid-
-/// handler (active, enabled) *or* an asserted line the kernel already
-/// masked and contained (pending, masked), which point at entirely
-/// different causes. Carrying `active`/`enabled` alongside the id makes the
-/// diagnosis decisive without a second boot to guess.
+/// controller's globally-shared state live to name the offending line. Only
+/// a line that could actually be delivered is reported: a masked line
+/// cannot reach a CPU, so it can never be the wedge, and the observer skips
+/// it rather than blaming an innocent line. That leaves two cases the
+/// `active` flag distinguishes — a core wedged mid-handler (`active`) or an
+/// enabled line asserted but not yet taken (`pending`) — so the diagnosis
+/// is decisive without a second boot to guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StuckInterrupt {
     /// The shared interrupt id (aarch64 GICv2 SPI, id >= 32).
@@ -159,14 +159,10 @@ pub struct StuckInterrupt {
     /// `true` when the line is **active** — acknowledged but not yet
     /// completed, i.e. a handler is in flight (or re-firing faster than it
     /// completes): the signature of a live storm. `false` when the line is
-    /// only **pending** (asserted but no handler running), e.g. a line the
-    /// kernel masked after one delivery whose source never deasserted.
+    /// only **pending** — enabled and asserted, but no handler yet running.
+    /// A masked line is never reported at all (it cannot reach a CPU), so
+    /// this is only ever a live, deliverable suspect.
     pub active: bool,
-    /// `true` when the line is **enabled** (unmasked) at the distributor —
-    /// free to be delivered again and storm a CPU. `false` when it is
-    /// **masked**: the assertion is contained and cannot reach a CPU, so a
-    /// masked-pending line is almost certainly not the live wedge.
-    pub enabled: bool,
 }
 
 /// The per-architecture non-maskable-recovery handle the watchdog reaches
@@ -213,10 +209,12 @@ pub trait WatchdogArch: Send + Sync {
     /// closed), exactly as one without a recovery channel simply never
     /// installs a handle.
     ///
-    /// The returned [`StuckInterrupt`] carries not just the line id but
-    /// whether it is actively storming (`active`) and still enabled
-    /// (`enabled`), so a reader can tell a live wedge (active, enabled)
-    /// from a contained masked-pending line without a second boot.
+    /// Only a line that can still be *delivered* is reported — a masked
+    /// line cannot reach a CPU, so it can never be the wedge and is skipped
+    /// rather than blamed. The returned [`StuckInterrupt`] carries the line
+    /// id and whether it is actively storming (`active`) or merely
+    /// enabled-and-pending, so a reader can tell a live wedge from an
+    /// asserted-but-untaken line without a second boot.
     fn stuck_interrupt(&self) -> Option<StuckInterrupt> {
         None
     }
@@ -308,7 +306,6 @@ pub mod conformance {
                     Some(StuckInterrupt {
                         intid: 37,
                         active: true,
-                        enabled: true,
                     })
                 }
             }
@@ -318,7 +315,6 @@ pub mod conformance {
                 Some(StuckInterrupt {
                     intid: 37,
                     active: true,
-                    enabled: true,
                 })
             );
         }
