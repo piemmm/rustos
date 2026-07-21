@@ -140,6 +140,26 @@
 //! the MMU off, where the ring's lock is unusable, and must trace a hang
 //! *immediately*. This is the design `lib/log` always documented ("sinks copy
 //! the event into a ring buffer consumed by an async drainer").
+//!
+//! # Whole-line integrity
+//!
+//! Every producer — a log line or a console chunk — is copied into the ring
+//! under `RingLock::with_producer`, which masks IRQ+FIQ on the current CPU
+//! and spin-acquires the lock, so the whole line lands as one indivisible
+//! unit. That closes both ways two writers used to interleave and corrupt a
+//! line on the wire: a second CPU logging concurrently now waits its turn
+//! rather than racing the ring drain, and an interrupt handler that logs on
+//! the *same* CPU can no longer re-enter mid-line (it is masked out for the
+//! bounded hold). The earlier try-lock design instead dropped a contended or
+//! re-entrant producer onto a direct-to-UART fallback that bypassed the ring,
+//! and those bytes interleaved with the line still draining from the ring —
+//! the observed corruption (e.g. a watchdog stall record spliced into the
+//! middle of a driver's log line). The direct fallback now survives only for
+//! a CPU that dies while holding the ring, where the buffered bytes could
+//! never drain anyway, so a diagnostic about that dead CPU still reaches the
+//! wire. The critical section never waits on the UART (it is a byte copy plus
+//! a non-blocking drain), so masking interrupts and spinning for it costs a
+//! bounded, tiny window and never starves an interrupt-driven path.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -239,7 +259,7 @@ impl SerialRing {
     }
 }
 
-/// A minimal try-lock guarding a [`SerialRing`].
+/// An interrupt-masking spinlock guarding a [`SerialRing`].
 ///
 /// `lib/sync::SpinLock` is the workspace lock primitive, but `lib/sync`
 /// also carries the `epoch` reclamation module, which pulls in `alloc`
@@ -248,21 +268,33 @@ impl SerialRing {
 /// force a global allocator onto this port's minimal, deliberately
 /// allocator-less QEMU test bins (they link only this crate). This tiny
 /// guard avoids that. It is the one place the serial ring needs mutual
-/// exclusion and is **try-lock only** (no blocking acquire), so it does
-/// not re-create the general lock library's surface — the carve-out
-/// for a constrained primitive the shared crate cannot supply here.
+/// exclusion — the same DAIF-masking carve-out the video render lock
+/// makes for the same reason (`crate::video`).
+///
+/// Two acquire disciplines share the one lock:
+///
+/// * [`with_producer`](Self::with_producer) — the log/console **producer**
+///   path — masks IRQ+FIQ on the current CPU and *spin-acquires*, so a
+///   whole log line lands in the ring as one indivisible unit. Masking
+///   makes same-CPU re-entrancy impossible (an interrupt cannot log while
+///   this CPU holds the lock), which is what lets it spin safely instead
+///   of falling back to a ring-bypassing direct write — the old fallback
+///   that reordered bytes on the wire and corrupted lines. The critical
+///   section never waits on the UART, so the hold, and thus the spin, is
+///   bounded and short.
+/// * [`try_with`](Self::try_with) — the non-blocking **drainer** path
+///   (transmit ISR, dispatch-loop pump, panic flush) — takes the lock only
+///   if free right now and otherwise skips this round. It never writes the
+///   UART except through the ring it holds, so skipping only defers a
+///   drain; it can never reorder output.
 struct RingLock {
     /// The lock word *and* owner record in one atomic: [`NO_HOLDER`]
     /// when free, else the id of the CPU inside the critical section.
-    /// A single word (taken with `CAS(NO_HOLDER → cpu)`) leaves no
-    /// window in which the lock is held but the owner unknown, so a
-    /// contended producer can always tell a *cross-CPU* hold (safe to
-    /// spin for — the critical section is a bounded memcpy +
-    /// non-blocking drain, never a UART wait) apart from *same-CPU
-    /// re-entrancy* (an interrupt that logged while this CPU held the
-    /// lock — spinning would deadlock). That distinction is what keeps
-    /// multi-core output whole-line without re-introducing the deadlock
-    /// the try-lock design exists to prevent.
+    /// A single word (taken with `CAS(NO_HOLDER → cpu)`) leaves no window
+    /// in which the lock is held but the owner unknown. The producer path
+    /// masks interrupts before acquiring, so a hold is never re-entered on
+    /// its own CPU; the recorded owner lets the `#[cfg(test)]` observer and
+    /// the presumed-dead-holder bound reason about who holds it.
     holder: AtomicU32,
     ring: UnsafeCell<SerialRing>,
 }
@@ -270,11 +302,79 @@ struct RingLock {
 /// [`RingLock::holder`] sentinel for "no CPU holds the lock".
 const NO_HOLDER: u32 = u32::MAX;
 
-/// Maximum non-blocking acquisition probes a producer makes before using
-/// the direct UART fallback. The ring holder's critical section should be
-/// short, but logging must still make bounded progress if another CPU stops
-/// while holding it.
-const PRODUCER_LOCK_PROBES: usize = 256;
+/// Maximum spin-acquire probes a producer makes before concluding the
+/// holder is genuinely dead and taking the last-resort direct UART
+/// fallback.
+///
+/// A producer masks its own IRQ+FIQ before acquiring
+/// ([`RingLock::with_producer`]), and every holder does the same, so a
+/// holder can neither be preempted nor take an interrupt inside the
+/// critical section — which is a bounded byte copy plus a *non-blocking*
+/// drain (it never waits on the UART FIFO). A live holder therefore
+/// releases in a bounded, tiny window and a spinning producer always wins
+/// the lock. Only a holder whose CPU has genuinely died mid-section keeps
+/// the lock, and this large budget bounds how long the diagnostic (very
+/// likely a watchdog stall or panic record about that dead CPU) waits
+/// before it bypasses the wedged ring to reach the wire. The budget is
+/// large enough that no *live* contention ever reaches it, so the
+/// bypass — the only path that can interleave with buffered bytes — is
+/// confined to a dying system, never a merely-busy one.
+const PRODUCER_LOCK_PROBES: usize = 1 << 20;
+
+/// Mask IRQ+FIQ on the current PE and return the prior `DAIF` so it can be
+/// restored by [`irq_restore`]. Masking *before* acquiring the ring makes
+/// the whole critical section interrupt-free on the holding CPU, so an
+/// interrupt handler that logs can never re-enter the lock this CPU holds
+/// (the same-CPU deadlock the old try-lock avoided with a ring-bypassing
+/// fallback, which reordered bytes on the wire). The same DAIF-masking
+/// discipline the video render lock uses (`crate::video`).
+///
+/// Freestanding-only: `DAIF` exists solely on the target. The host build
+/// (which unit-tests the pure ring discipline) is a no-op.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn irq_save() -> u64 {
+    let daif: u64;
+    // SAFETY: reading `DAIF` and setting its I/F mask bits
+    // (`msr daifset, #3`) is always permitted at EL1, touches no memory,
+    // and an already-masked state round-trips unchanged.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, daif",
+            "msr daifset, #3",
+            out(reg) daif,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    daif
+}
+
+/// Restore the `DAIF` captured by [`irq_save`] on this PE, re-enabling
+/// whatever interrupts were unmasked before the hold.
+///
+/// Freestanding-only, like [`irq_save`]; the host build is a no-op.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn irq_restore(daif: u64) {
+    // SAFETY: writes back the exact `DAIF` value captured by `irq_save` on
+    // this CPU, restoring the prior interrupt mask and nothing else.
+    unsafe {
+        core::arch::asm!(
+            "msr daif, {0}",
+            in(reg) daif,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+}
+
+/// Host stub: no `DAIF` off-target. The pure ring discipline the host
+/// tests exercise needs no interrupt masking.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+fn irq_save() -> u64 {
+    0
+}
+
+/// Host stub counterpart to [`irq_save`].
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+fn irq_restore(_daif: u64) {}
 
 // SAFETY: every path to the inner `SerialRing` goes through `try_with`, which
 // hands out the `&mut SerialRing` only after a successful `compare_exchange`
@@ -293,11 +393,20 @@ impl RingLock {
         }
     }
 
-    /// Run `f` with exclusive access to the ring **if** the lock is free,
-    /// returning `Some(f(...))`; returns `None` without blocking when the
-    /// lock is contended (another CPU) or re-entrant (an interrupt that
-    /// logged while a producer held it), so the caller falls back to a
-    /// direct, bounded write rather than risking a deadlock.
+    /// Run `f` with exclusive access to the ring **if** the lock is free
+    /// *right now*, returning `Some(f(...))`; returns `None` without ever
+    /// blocking or spinning when any CPU holds it.
+    ///
+    /// This is the non-blocking drainer path — the transmit ISR
+    /// ([`service_uart_tx_irq`]), the dispatch-loop pump ([`pump_tx`]) and
+    /// the panic flush ([`flush_serial_blocking`]) — which may run while a
+    /// producer holds the ring and must simply skip this round rather than
+    /// wait. It never writes the UART except through the ring it holds, so a
+    /// missed round only defers a drain; it can never reorder bytes on the
+    /// wire. It therefore needs no interrupt masking: a same-CPU interrupt
+    /// that also drains (e.g. the TX ISR firing while `pump_tx` holds the
+    /// lock) finds the `compare_exchange` already taken and skips, leaving
+    /// the ring consistent.
     fn try_with<R>(&self, f: impl FnOnce(&mut SerialRing) -> R) -> Option<R> {
         // The CPU's masked affinity is at most 24 bits, so it can never
         // collide with the `NO_HOLDER` sentinel.
@@ -318,23 +427,57 @@ impl RingLock {
         Some(result)
     }
 
-    /// Run `f` with exclusive access to the ring, probing a bounded number
-    /// of times through a *cross-CPU* hold so concurrent producers normally
-    /// emit whole lines instead of interleaving bytes on the wire. Returns
-    /// `None` for same-CPU re-entrancy or when the bounded probe budget is
-    /// exhausted; the caller then uses the direct, bounded UART fallback.
-    /// A stopped CPU can therefore never strand every other logger.
-    fn with_producer<R>(&self, mut f: impl FnMut(&mut SerialRing) -> R) -> Option<R> {
-        for _ in 0..PRODUCER_LOCK_PROBES {
-            if let Some(result) = self.try_with(&mut f) {
+    /// Run `f` with exclusive access to the ring for the **producer** path
+    /// (a whole log line or a console-output chunk), returning `Some(...)`.
+    ///
+    /// Masks IRQ+FIQ on this CPU for the whole hold ([`irq_save`]) and
+    /// spin-acquires the lock, so an entire log line is copied into the ring
+    /// as one indivisible unit: no other CPU can interleave (they wait), and
+    /// no interrupt handler on *this* CPU can re-enter mid-line (they are
+    /// masked). The critical section is a bounded byte copy plus a
+    /// non-blocking drain — it never waits on the UART FIFO — so a holder
+    /// releases in a tiny bounded window and the spin is short even under
+    /// multi-core contention. This is what keeps every log line whole on the
+    /// wire, the defect this design fixes.
+    ///
+    /// Returns `None` only after [`PRODUCER_LOCK_PROBES`] spins fail to
+    /// acquire, which on a live system cannot happen (a holder cannot stall
+    /// with IRQs masked inside a non-blocking section); it means the holding
+    /// CPU has genuinely died mid-section. The caller then bypasses the
+    /// wedged ring with a direct UART write to get its diagnostic — almost
+    /// always a watchdog/panic record about that dead CPU — onto the wire.
+    /// That bypass is the *only* path that can reorder bytes, and it is
+    /// confined to this dying-system case; the ring would never drain again
+    /// anyway, so nothing whole is sacrificed.
+    fn with_producer<R>(&self, f: impl FnOnce(&mut SerialRing) -> R) -> Option<R> {
+        let daif = irq_save();
+        let me = crate::smp::current_cpu_index();
+        let mut probes = 0usize;
+        loop {
+            if self
+                .holder
+                .compare_exchange(NO_HOLDER, me, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                // SAFETY: the `compare_exchange` succeeded, so this CPU holds
+                // the lock and no other reference to `ring` can exist; IRQs
+                // are masked on this CPU, so no same-CPU handler can take it
+                // either. The store below releases it before we restore IRQs.
+                let ring = unsafe { &mut *self.ring.get() };
+                let result = f(ring);
+                self.holder.store(NO_HOLDER, Ordering::Release);
+                irq_restore(daif);
                 return Some(result);
             }
-            if self.holder.load(Ordering::Relaxed) == crate::smp::current_cpu_index() {
+            probes += 1;
+            if probes >= PRODUCER_LOCK_PROBES {
+                // The holder's CPU is presumed dead: unmask and let the
+                // caller take the direct, ring-bypassing fallback.
+                irq_restore(daif);
                 return None;
             }
             core::hint::spin_loop();
         }
-        None
     }
 
     /// Test observer: `true` while some CPU is inside the critical
@@ -349,8 +492,10 @@ impl RingLock {
 /// diagnostic log [`SerialSink`] and raw console output
 /// ([`write_console_bytes`]) alike — so the two share one ordered stream
 /// on the wire. Producers never interleave a line because
-/// [`RingLock::with_producer`] serialises access across CPUs; only a
-/// re-entrant same-CPU caller falls back to a direct, bounded write.
+/// [`RingLock::with_producer`] masks interrupts and spin-acquires the
+/// lock, serialising the whole line across CPUs *and* against same-CPU
+/// interrupt handlers; the ring-bypassing direct write is reached only if
+/// a CPU dies mid-hold.
 static SERIAL_RING: RingLock = RingLock::new();
 
 /// Whether the console transmitter was declared wedged by a budget
@@ -515,9 +660,10 @@ fn enqueue_byte(ring: &mut SerialRing, byte: u8) {
 
 /// Append `bytes` **verbatim** to the buffered serial ring and push out
 /// whatever the FIFO will accept now — the non-blocking console-output
-/// path. A cross-CPU hold is waited out (whole chunks never interleave
-/// on the wire); the direct, bounded [`putchar`] fallback remains only
-/// for same-CPU re-entrancy, where waiting would deadlock.
+/// path. [`RingLock::with_producer`] masks interrupts and spin-acquires,
+/// so a chunk lands as one indivisible unit (whole chunks never interleave
+/// on the wire); the direct, bounded [`putchar`] fallback is reached only
+/// if a CPU dies holding the ring.
 fn buffered_uart_write(bytes: &[u8]) {
     let buffered = SERIAL_RING.with_producer(|ring| {
         for &byte in bytes {
@@ -1088,12 +1234,17 @@ impl Sink for SerialSink {
         // blocked spinning on the slow UART transmit — the defect that let
         // logging starve the keyboard report pump (
         // `lib/log`: "sinks copy the event into a ring buffer consumed by
-        // an async drainer"). `RingLock::with_producer` waits out a
-        // cross-CPU hold (bounded: the holder's critical section is a
-        // memcpy + non-blocking drain) so concurrent CPUs emit whole
-        // lines; only same-CPU re-entrancy (an interrupt that logged
-        // while a task held the ring) falls back to the direct, bounded
-        // `ConsoleWriter` UART path, where waiting would deadlock.
+        // an async drainer"). `RingLock::with_producer` masks IRQ+FIQ on
+        // this CPU and spin-acquires the ring, so the whole formatted line
+        // is copied in as one indivisible unit: another CPU logging
+        // concurrently waits its turn, and an interrupt that logs on this
+        // CPU cannot re-enter mid-line (it is masked). Both used to be able
+        // to interleave a line — the cross-CPU case by racing the ring
+        // drain, the same-CPU case via the old direct-write fallback — and
+        // that is the corruption this design fixes. The direct
+        // `ConsoleWriter` UART path is now reached only if a CPU dies while
+        // holding the ring, where the buffered bytes could never drain
+        // anyway.
         let buffered = SERIAL_RING.with_producer(|ring| {
             let mut w = RingWriter { ring };
             write_formatted(&mut w, event);
@@ -1124,28 +1275,39 @@ mod tests {
     use core::fmt::Write as _;
 
     #[test]
-    fn producer_lock_refuses_same_cpu_reentrancy_and_recovers() {
+    fn producer_lock_holds_exclusively_then_releases() {
         let lock = RingLock::new();
-        let outer = lock.with_producer(|_ring| {
-            // The host reports every caller as CPU 0, so this nested
-            // acquire is exactly the same-CPU re-entrancy case (an
-            // interrupt logging mid-line): it must refuse — never spin —
-            // so the caller takes the bounded direct fallback.
+        let held = lock.with_producer(|_ring| {
+            // The lock is recorded held for the whole critical section, so
+            // the whole line is copied into the ring as one indivisible
+            // unit. A concurrent non-blocking drainer (the TX ISR / pump)
+            // running while the producer holds the ring must skip this
+            // round rather than touch the ring — it never bypasses to the
+            // UART, so a skipped drain can only defer output, never reorder
+            // it.
             assert!(lock.is_locked());
-            lock.with_producer(|_r| ()).is_none()
+            lock.try_with(|_r| ()).is_none()
         });
-        assert_eq!(outer, Some(true));
+        assert_eq!(held, Some(true));
         // Released cleanly: a fresh acquire succeeds again.
         assert!(!lock.is_locked());
-        assert!(lock.try_with(|_r| ()).is_some());
+        assert!(lock.with_producer(|_r| ()).is_some());
     }
 
     #[test]
-    fn producer_lock_bounds_a_foreign_cpu_hold() {
+    fn producer_lock_bypasses_only_a_dead_holder_and_leaves_it_intact() {
+        // A foreign CPU that never releases (a CPU that died mid-hold) is
+        // the *only* case the producer bypasses the ring for: after a
+        // bounded spin budget `with_producer` returns `None` so the caller
+        // can take the direct UART fallback to get its (watchdog/panic)
+        // diagnostic out. It must not clobber the dead holder's owner word
+        // (that CPU may still be referencing the ring), and a live system —
+        // where the holder always releases — never reaches this path.
         let lock = RingLock::new();
         lock.holder.store(1, Ordering::Relaxed);
         assert!(lock.with_producer(|_ring| ()).is_none());
         assert_eq!(lock.holder.load(Ordering::Relaxed), 1);
+        // Once the holder releases, the next producer acquires normally.
         lock.holder.store(NO_HOLDER, Ordering::Relaxed);
         assert!(lock.with_producer(|_ring| ()).is_some());
     }
