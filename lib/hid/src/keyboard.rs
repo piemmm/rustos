@@ -19,10 +19,26 @@ use tairix_abi::DriverError;
 
 use crate::{poll_source, PendingEvents, ReportDecode, ReportSource};
 
-/// Byte length of a boot keyboard input report.
+/// Byte length of a *standard* boot keyboard input report (HID 1.11
+/// §B.1): one modifier byte, one reserved byte, and six key-array
+/// slots. Real hardware is not obliged to fill all six slots — see
+/// [`BOOT_KEYBOARD_REPORT_MIN`].
 pub const BOOT_KEYBOARD_REPORT_LEN: usize = 8;
 
-/// Key-array slots in a boot keyboard report (bytes 2..8).
+/// Smallest boot keyboard report the decoder accepts: the modifier byte
+/// plus the reserved byte, with zero key-array slots present.
+///
+/// The standard report is [`BOOT_KEYBOARD_REPORT_LEN`] (8) bytes, but
+/// real keyboards — especially composite devices that ignore
+/// `SET_PROTOCOL(boot)` — deliver a native interrupt-IN report shorter
+/// than that (a 6-byte report carrying only four key-array slots is
+/// common). Refusing such a report kills the whole keyboard; instead the
+/// decoder reads whatever key-array slots are present, exactly as the
+/// mouse decoder reads whatever axes a short mouse report carries.
+pub const BOOT_KEYBOARD_REPORT_MIN: usize = 2;
+
+/// Maximum key-array slots in a boot keyboard report (bytes 2..8). A
+/// shorter report carries fewer; a longer one is read only up to here.
 const KEY_SLOTS: usize = 6;
 
 /// HID usage ID of the first modifier (`LeftControl`); modifier bit `n`
@@ -77,10 +93,14 @@ impl KeyboardState {
 impl ReportDecode<MAX_EVENTS> for KeyboardState {
     /// Validate and diff one boot keyboard report.
     ///
-    /// Rejects any report that is not exactly
-    /// [`BOOT_KEYBOARD_REPORT_LEN`] bytes
-    /// ([`DriverError::LengthOutOfRange`]) without touching the held
-    /// state. Byte 1 is reserved/OEM by the spec and deliberately not
+    /// Rejects only a report shorter than [`BOOT_KEYBOARD_REPORT_MIN`]
+    /// bytes ([`DriverError::LengthOutOfRange`]) without touching the
+    /// held state; a report that is longer than the buffer never
+    /// reaches the decoder (the source contract caps it). The key array
+    /// is bytes `2..len` capped at [`KEY_SLOTS`], so a keyboard that
+    /// delivers fewer than six slots (a short native report from a
+    /// device that ignores `SET_PROTOCOL(boot)`) is decoded rather than
+    /// refused. Byte 1 is reserved/OEM by the spec and deliberately not
     /// interpreted — real keyboards put vendor data there, so enforcing
     /// zero would refuse conforming hardware.
     ///
@@ -94,12 +114,13 @@ impl ReportDecode<MAX_EVENTS> for KeyboardState {
         report: &[u8],
         pending: &mut PendingEvents<MAX_EVENTS>,
     ) -> Result<(), DriverError> {
-        if report.len() != BOOT_KEYBOARD_REPORT_LEN {
+        if report.len() < BOOT_KEYBOARD_REPORT_MIN {
             return Err(DriverError::LengthOutOfRange);
         }
         let modifiers = report[0];
+        let present = (report.len() - BOOT_KEYBOARD_REPORT_MIN).min(KEY_SLOTS);
         let mut keys = [USAGE_NONE; KEY_SLOTS];
-        keys.copy_from_slice(&report[2..2 + KEY_SLOTS]);
+        keys[..present].copy_from_slice(&report[2..2 + present]);
         let array_valid = !keys
             .iter()
             .any(|&k| k != USAGE_NONE && k <= ERROR_USAGE_MAX);

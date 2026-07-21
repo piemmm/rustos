@@ -556,33 +556,68 @@ the live controller behaviour is host- and CI-proven first.
     `a_permanently_stalled_consumer_bounds_the_buffer_and_counts_dropped_reports`,
     `a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost`,
     `a_burst_of_reports_before_the_class_driver_drains_any_is_kept_up_to_depth`.
-  - **A halting interrupt-IN completion resets the endpoint in place; it
-    neither storms the controller nor kills the class driver.** An error
-    completion code (a STALL, babble, data-buffer or TRB error — anything but
-    a device-*unreachable* code) leaves the endpoint **halted**: the xHCI
-    controller runs no further transfers on it until it is reset (§4.8.3), so
-    re-arming a halted endpoint re-faults every transfer. Left unhandled this
-    was two on-metal defects: pressing a key *during* USB bring-up babbled the
-    keyboard's interrupt endpoint and the surfaced fault killed the class
-    driver after a few consecutive pump errors, and a transient transaction
-    error on the mouse re-armed the halted endpoint into a controller
-    interrupt storm that pegged a core forever. `capture_report_event` now
-    recovers a halted endpoint the same way the bulk path recovers a STALL
-    (`UsbDevice::recover_interrupt_endpoint`: Reset Endpoint → rebuild the
-    transfer ring at its base → Set TR Dequeue Pointer → device-side
-    `CLEAR_FEATURE(ENDPOINT_HALT)`), re-arms it, and holds the URB parked
-    (`Ok(None)`), so a transient fault never reaches — and kills — the class
-    driver and the endpoint keeps serving. A device-*unreachable* completion
-    code (`UsbTransactionError` / `SplitTransactionError`,
-    `CompletionCode::indicates_device_unreachable`) is a probable hot-removal
-    and is still surfaced for the confirm-and-detach path (a gone endpoint is
-    not reset). A malformed mapping over a *successful* completion (a forged
-    residual or TRB pointer) still fails closed — the endpoint is not halted,
-    so it is not recovered. Regressions:
+  - **A halting interrupt-IN completion is only *flagged* where it is observed;
+    the endpoint is recovered later, at a top-level, non-re-entrant point. A
+    *failed* recovery — not the completion code — is what confirms a
+    hot-removal.** Any error completion code — a STALL, babble, data-buffer or
+    TRB error, **and a USB or split transaction error** — leaves the endpoint
+    **halted**: the xHCI controller runs no further transfers on it until it is
+    reset (§4.8.3), so re-arming a halted endpoint re-faults every transfer. A
+    transaction error (`UsbTransactionError` / `SplitTransactionError`) is *not*
+    conclusive of a hot-removal on its own: CRC / timeout / bad-PID is exactly
+    what a device that is present but momentarily disturbed produces — for
+    instance a keyboard or mouse hammered with input *while its endpoint is
+    still being brought up*, the reported on-metal defect (typing during boot
+    killed the keyboard, and a transient mouse fault stormed a core).
+    - **Recovery must not run from `capture_report_event`.** Report capture
+      runs from the shared drain *and re-entrantly from inside a synchronous
+      EP0/command wait* (`await_event_for` stashes an asynchronous report and
+      keeps waiting). Recovery
+      (`UsbDevice::recover_interrupt_endpoint`: Reset Endpoint → rebuild the
+      transfer ring at its base → Set TR Dequeue Pointer → device-side
+      `CLEAR_FEATURE(ENDPOINT_HALT)`) *itself* waits on the shared event ring,
+      during which another interrupt fault for the same endpoint (a held key,
+      a moving mouse) lands back in capture — so recovering there recurses into
+      recovery and scrambles the ring recovery is rebuilding. On metal that
+      recursion made recovery fault, which recorded a fatal report fault, which
+      killed the class driver after a few consecutive pump errors (the
+      "type during boot and the keyboard stops working" symptom), leaving the
+      halted endpoint's later recovered reports with no consumer — the
+      dropped-report storm.
+    - **So capture only flags** (`DeviceState::int_recovery_pending`); the
+      real recovery is performed by
+      `UsbDevice::recover_report_endpoint_if_pending`, called at top level from
+      `next_report` and `pump_reports` (the HCD's URB service and per-interrupt
+      pump), never from inside a synchronous wait. A guard
+      (`DeviceState::int_recovering`) makes any interrupt completion arriving
+      during recovery's own waits re-flag the endpoint instead of touching the
+      ring, so recovery can never re-enter itself. Recovered, the endpoint is
+      re-armed and the URB stays parked (`Ok(None)`), so a transient fault
+      never reaches — and kills — the class driver.
+    - **The recovery is the authoritative liveness test.** A present device
+      answers its own `CLEAR_FEATURE` handshake and keeps serving (the captured
+      fault code is cleared); a genuinely vanished device cannot, so recovery
+      faults — and *that* failure records the fatal report fault surfaced
+      through `next_report` (as `Errno::DeviceFault`, the reply the HCD's
+      `retract_after_fault_if_gone` acts on), so the HCD confirms the port and
+      detaches. The rejected completion code stays captured in
+      `last_report_fault_code`, so when it is a device-unreachable
+      transaction/split error `detach_if_device_gone` still frees a gone
+      low/full-speed device behind a hub whose downstream port (unreliably)
+      still reads connected — without a hub `GET_PORT_STATUS` confirmation. A
+      malformed mapping over a *successful* completion (a forged residual or
+      TRB pointer) still fails closed without recovery — the endpoint is not
+      halted. Regressions:
     `report_source_recovers_a_halted_endpoint_without_faulting_the_class_driver`,
     `report_source_recovers_a_babble_halt_the_same_way`,
+    `a_transient_transaction_error_during_bringup_recovers_and_keeps_the_keyboard`,
+    `a_keystroke_landing_during_recovery_is_deferred_and_never_recurses`,
+    `split_transaction_fault_detaches_without_a_hub_status_confirmation`,
     `live_downstream_report_fault_recovers_the_endpoint_and_keeps_the_device`,
-    `forged_report_residual_fails_closed`.
+    `forged_report_residual_fails_closed`. (QEMU models no Pi USB, so the exact
+    on-metal ring corruption from the old recursion is not host-reproducible;
+    the mock exercises the deferred-recovery contract, and the non-re-entrant
+    structure removes the recursion by construction.)
   - **Interrupt moderation is left at the 1 ms xHCI reset default, never
     disabled.** `enable_interrupter` programs `IR_IMOD` to
     `regs::IMODI_DEFAULT` (4000 × 250 ns = 1 ms). Disabling moderation
@@ -1117,6 +1152,35 @@ the live controller behaviour is host- and CI-proven first.
   keystroke ever reaches the log). Coverage:
   `a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses`,
   `a_report_protocol_mouse_is_configured_and_normalizes_reports`.
+
+- **The boot-keyboard decoder tolerates a short native report.** A real
+  Raspberry Pi 4B composite keyboard that ignores `SET_PROTOCOL(boot)`
+  delivers a **6-byte** interrupt-IN report (four key-array slots), not the
+  standard 8. `tairix_hid::keyboard::KeyboardState::decode` previously required
+  *exactly* `BOOT_KEYBOARD_REPORT_LEN` (8) bytes and returned
+  `LengthOutOfRange` for anything else, so the first keypress during boot
+  faulted the pump four times and the class driver exited fail-closed (code
+  81); with no consumer draining, the HCD then stormed `usb-hcd: interrupt
+  reports dropped; class driver stalled` (event id 4154). The decoder now
+  rejects only a report shorter than `BOOT_KEYBOARD_REPORT_MIN` (2 bytes:
+  modifier + reserved) and reads whatever key-array slots are present
+  (`min(len - 2, KEY_SLOTS)`), mirroring the mouse decoder's tolerance of a
+  short report. Byte 1 stays reserved/OEM and uninterpreted, and the standard
+  8-byte report is unchanged. Regressions:
+  `keyboard_decodes_short_native_report` (the 6-byte metal case),
+  `keyboard_decodes_two_byte_modifier_only_report`,
+  `keyboard_rejects_report_below_minimum`.
+
+- **The class driver's pump failure is logged with its cause, for metal.**
+  When `pump_once` returns an error the keyboard driver's fail-closed path
+  (`usb-keyboard: pump_once returned an error`, event id 4148) carries the
+  concrete `DriverError` code (`err_hex`) and the raw byte count the last
+  interrupt-IN URB claimed to transfer (`transferred_hex`) alongside the
+  consecutive-error count — this is the diagnostic that pinned the short-report
+  fault above on metal (`err_hex=4` `LengthOutOfRange`, `transferred_hex=6`).
+  The report *content* is never logged — an interrupt-IN body is keystrokes;
+  only its length reaches the log (`UrbReportSource::last_transferred`, no
+  `last_head`).
 
 - **A mouse's poll rate is capped at ~100 Hz.** A mouse interface's
   endpoint-context Interval is raised to at least `pointer_min_interval`

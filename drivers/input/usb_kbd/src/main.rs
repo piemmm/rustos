@@ -158,6 +158,46 @@ mod program {
         );
     }
 
+    /// Emit the pump-failure diagnostic: the concrete driver-error code, the
+    /// raw byte count the last interrupt-IN URB claimed to transfer, and the
+    /// consecutive-error count. This is the metal window on *why* the report
+    /// pump faulted (QEMU models no Pi USB), so a boot-time failure is
+    /// diagnosable from the log rather than guessed. The report *content* is
+    /// never logged — an interrupt-IN body is keystrokes; only its length is.
+    fn log_pump_error(err_code: u64, transferred: u64, consecutive: u64) {
+        let mut err_buf = [0u8; 16];
+        let mut transferred_buf = [0u8; 16];
+        let mut consecutive_buf = [0u8; 16];
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: USB_KBD_PUMP_ERROR,
+                message: "usb-keyboard: pump_once returned an error",
+                fields: &[
+                    tairix_log::Field {
+                        key: "err_hex",
+                        value: tairix_log::FieldValue::Str(format_hex_u64(err_code, &mut err_buf)),
+                    },
+                    tairix_log::Field {
+                        key: "transferred_hex",
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            transferred,
+                            &mut transferred_buf,
+                        )),
+                    },
+                    tairix_log::Field {
+                        key: "consecutive_hex",
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            consecutive,
+                            &mut consecutive_buf,
+                        )),
+                    },
+                ],
+            },
+        );
+    }
+
     impl UrbCall for IpcUrbCall {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             // The call blocks in the kernel until the HCD replies (when the
@@ -205,6 +245,22 @@ mod program {
         /// data buffer (`RtDriverHost::map_shared`). The host-controller driver
         /// maps the same frames and writes each report here before replying.
         shm_base: u64,
+        /// Diagnostic: the raw byte count the most recent interrupt-IN URB
+        /// reported as transferred, *before* it is clamped to the shared
+        /// buffer. Captured so the pump-error path can report the exact
+        /// delivered length that a downstream decode rejected — a boot
+        /// keyboard report is 8 bytes, so any other value localises the
+        /// fault to a short/oversized completion rather than a guess. Only the
+        /// length is retained, never the report *content*: an interrupt-IN
+        /// report body is keystrokes, which must not reach the log.
+        last_transferred: u32,
+    }
+
+    impl UrbReportSource {
+        /// Raw transferred byte count of the most recent interrupt-IN URB.
+        const fn last_transferred(&self) -> u32 {
+            self.last_transferred
+        }
     }
 
     impl ReportSource for UrbReportSource {
@@ -242,6 +298,7 @@ mod program {
                 core::slice::from_raw_parts(self.shm_base as usize as *const u8, REPORT_BUF_LEN)
             };
             buf[..n].copy_from_slice(&shm[..n]);
+            self.last_transferred = transferred;
             log_hex_event(
                 USB_KBD_REPORT,
                 Level::Debug,
@@ -337,6 +394,7 @@ mod program {
         let source = UrbReportSource {
             client: UrbClient::new(IpcUrbCall { endpoint }),
             shm_base,
+            last_transferred: 0,
         };
         let mut keyboard = BootKeyboard::new(source);
         let mut console = KeyboardConsole::new();
@@ -372,16 +430,20 @@ mod program {
                     );
                     return 0;
                 }
-                Err(_) => {
+                Err(err) => {
                     let exhausted = pump_error_limit_reached(
                         &mut consecutive_pump_errors,
                         MAX_CONSECUTIVE_PUMP_ERRORS,
                     );
-                    log_hex_event(
-                        USB_KBD_PUMP_ERROR,
-                        Level::Warn,
-                        "usb-keyboard: pump_once returned an error",
-                        "consecutive_hex",
+                    // Report the concrete failure so the metal boot log is
+                    // conclusive, not another guess: the driver-error code and
+                    // the raw byte count the last interrupt-IN URB claimed to
+                    // transfer (a boot report is 8 bytes; any other value is a
+                    // short/oversized completion the decoder then rejects).
+                    let source = keyboard.source_mut();
+                    log_pump_error(
+                        u64::try_from(err.as_i32()).unwrap_or(u64::MAX),
+                        u64::from(source.last_transferred()),
                         u64::from(consecutive_pump_errors),
                     );
                     if exhausted {

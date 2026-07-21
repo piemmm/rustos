@@ -482,6 +482,15 @@ mod program {
     /// already carry the re-attach). `true` when the device was detached
     /// (the reply has then been answered); `false` leaves the reply for the
     /// caller to send.
+    ///
+    /// The engine surfaces a faulted transfer as [`Errno::DeviceFault`] (a
+    /// report endpoint that could not be recovered, a bulk endpoint fault);
+    /// only such a reply is a candidate for a disconnect confirmation, so any
+    /// other error (a class-driver protocol violation, a malformed URB) is
+    /// passed straight back to the class driver and never triggers a port
+    /// read. `detach_if_device_gone` itself fails safe — a device whose port
+    /// still reads connected is left live and its fault returned to the class
+    /// driver unchanged.
     fn retract_after_fault_if_gone(
         device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
@@ -491,7 +500,7 @@ mod program {
         reply: UrbReply,
         delay: &ClockDelay,
     ) -> bool {
-        if urb_reply_errno(&reply) != Some(Errno::NotImplemented) {
+        if urb_reply_errno(&reply) != Some(Errno::DeviceFault) {
             return false;
         }
         match device.detach_if_device_gone(index) {
