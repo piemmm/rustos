@@ -149,7 +149,7 @@ host-gate-green first, then boot-confirmed). Done-state:
 - `IoApicController::rearm` now unmasks the line (the riscv64-class
   re-arm fix), so a user-space INTx `irq_wait` re-arm re-enables its pin.
 
-The first live boot vertical has now landed: **`root_unlock_login_qemu_x86_64`
+Two live boot verticals have now landed. **`root_unlock_login_qemu_x86_64`
 passes a real guest boot** — the first live-boot exercise of the x86_64
 root-mount->login *policy* over the virtio-**PCI** bus. It is a thin bin over
 the shared virtio-PCI bring-up (`run_virtio_pci_scenario`) and the shared
@@ -163,23 +163,47 @@ content (`system_sectors_for`, never below the 32 MiB floor) and derives the
 root LBA / total from the produced image, so one fixture serves every arch
 (§24.1) and `qemu_tests.rs` reads each image's true sector count.
 
-Remaining for A2: the A1 image builder, the remaining live verticals
-(`root_unlock_admission_qemu_x86_64` — the production kthread-admission path —
-and `users_db_qemu_x86_64`, as thin bins over the shared scenarios), and —
-once A1 lands for both remaining disk-booting ports — deleting
-`SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1 `init`),
-`spawn_paths.rs`, and `program_manifests.rs` (§2.14).
+**`users_db_qemu_x86_64` passes a real guest boot too** — the first live-boot
+exercise of the x86_64 boot-time users-database read path over virtio-**PCI**.
+It is the thin-bin x86_64 sibling of `users_db_qemu_aarch64`: the same shared
+virtio-PCI bring-up plus the transport-generic `users_db_load` scenario tail
+(one definition, §2.2), over a planted plaintext users-root ARXFS volume
+(`FsDisk::UsersRoot`); it mounts the volume, runs
+`tairix_kernel_core::load_users_db`, and proves the parsed database
+authenticates the planted account while a wrong password is refused. No
+production code changed — the whole x86_64 users-database path was already in
+place. Being plaintext it needs no passphrase, so unlike the admission
+vertical below it does not depend on interactive console input.
+
+Remaining for A2: the A1 image builder, and — once A1 lands for both remaining
+disk-booting ports — deleting `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all
+but PID 1 `init`), `spawn_paths.rs`, and `program_manifests.rs` (§2.14).
+**`root_unlock_admission_qemu_x86_64` (the production kthread-admission path)
+is deferred to A3**, not A2: the production unlock kthread reads the passphrase
+from the fail-closed `NULL_CONSOLE_READ` this slice, so an interactive
+passphrase prompt — and hence the `USERS_DB_INSTALLED_MESSAGE` witness the
+aarch64 admission vertical keys on — is impossible until A3 wires
+interrupt-driven COM1 input. It is therefore *not* a thin bin over the shared
+scenario; it is a live exercise of the A3 console and belongs with A3.
 
 ### A3 — Interrupt-driven console + login/session supervision (`planned`)
 
 COM1 console input moves from the polled cooperative shim to
 interrupt-driven wake-ups through `kernel/irq` (the `PLAN.md`
 "interrupt-driven ps2/virtio wake-ups" note), so a parked reader wakes on
-the IRQ, never a poll loop (§2.23). The production boot then supervises the
-same arch-neutral `login` → session pipeline off the disk store (the
-binaries are the same bundles A2 mounts). Verticals:
-`uart_console_qemu_x86_64` (COM1 sibling of the aarch64 UART scenario),
-`pipeline_qemu_x86_64`.
+the IRQ, never a poll loop (§2.23). This also unblocks the production
+root-unlock passphrase prompt (today the port's unlock kthread reads the
+fail-closed `NULL_CONSOLE_READ`, so it cannot accept a typed passphrase). The
+production boot then supervises the same arch-neutral `login` → session
+pipeline off the disk store (the binaries are the same bundles A2 mounts).
+Verticals: `uart_console_qemu_x86_64` (COM1 sibling of the aarch64 UART
+scenario), `pipeline_qemu_x86_64`, and
+`root_unlock_admission_qemu_x86_64` (the production kthread-admission path —
+the x86_64 sibling of `root_unlock_admission_qemu_aarch64`; it boots
+`tairix_kernel::boot` verbatim, types the passphrase over the now-interactive
+COM1, and keys PASS on the `unlock_service::USERS_DB_INSTALLED_MESSAGE`
+witness), which A2 deferred here because it depends on this interactive
+console.
 
 ### A4 — `devmgr` autoload over the ACPI/PCI tree (`planned`)
 
@@ -243,10 +267,13 @@ because its blocker is not an aarch64-parity item.
 ## 4. Status
 
 - **A2 `in progress`**: the production boot composition + `root_unlock`
-  admission is landed and host-gate-green, and the first live-boot vertical
-  (`root_unlock_login_qemu_x86_64`) now passes a real guest boot (see A2
-  above); its A1 image builder, the remaining live QEMU verticals
-  (`root_unlock_admission_qemu_x86_64`, `users_db_qemu_x86_64`), and the
-  registry deletion remain.
+  admission is landed and host-gate-green, and two live-boot verticals now
+  pass a real guest boot — `root_unlock_login_qemu_x86_64` (the unlock
+  *policy*) and `users_db_qemu_x86_64` (the boot-time users-database read
+  path), both thin bins over the shared virtio-PCI scenarios (see A2 above).
+  Its A1 image builder and the registry deletion remain.
+  `root_unlock_admission_qemu_x86_64` moved to **A3**: the production unlock
+  kthread reads `NULL_CONSOLE_READ`, so the interactive passphrase prompt it
+  needs is an A3 (interrupt-driven COM1) deliverable, not an A2 thin bin.
 - **A1, A3, A4, A5, A6 `planned`**; **A7 `blocked`** on the Stage 6
   user/kernel page-table boundary.

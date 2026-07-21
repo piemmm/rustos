@@ -3333,6 +3333,40 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the users-database
+    // vertical above — the first *live-boot* exercise of the x86_64
+    // boot-time users-database read path over the virtio-**PCI** bus. It
+    // reuses the exact shared virtio-PCI bring-up the `root_unlock_login`
+    // /`netstack_pci_x86_64` verticals use (PCI walk to the modern
+    // virtio-blk function, `PciTransport` provisioning through the
+    // capability-gated `KernelMmioMapper`, MSI-X routing) and then drives
+    // the *same* shared `users_db_load` tail the aarch64 vertical runs (one
+    // definition, generic over the transport, `AGENTS.md` §2.2) over the
+    // same planted users-root arxfs volume (`FsDisk::UsersRoot` — authored
+    // by the real arxfs driver): it mounts the plaintext users-root volume,
+    // runs `tairix_kernel_core::load_users_db` (/System/Security/Users read
+    // off the volume through the capability-checked VFS delegation), and
+    // proves the parsed database authenticates the planted account while a
+    // wrong password is refused — before the QEMU debug-exit PASS. Unlike the
+    // encrypted-root verticals it needs no passphrase (the users-root volume
+    // is plaintext), so there is no scripted console dialogue. Single CPU
+    // and a 60-second budget match the aarch64 vertical.
+    QemuTest {
+        package: "tairix-test-users-db-qemu-x86-64",
+        binary: "tairix-test-users-db-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::UsersRoot,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/PI.md` P11 Chunk B-2 (root-mount->login): the
     // `tairix-test-root-unlock-login-qemu-aarch64` vertical reuses the
     // exact virtio-blk-mmio bring-up above, then drives the *production*

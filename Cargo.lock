@@ -3802,6 +3802,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-users-db-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "tairix-abi",
+ "tairix-drv-storage-virtio-blk",
+ "tairix-itest-harness",
+ "tairix-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "tairix-test-vesa-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
