@@ -2,21 +2,23 @@
 //! `SP3b`.
 //!
 //! [`Aarch64ProcessSpawn`] implements the architecture-neutral
-//! [`tairix_kernel_core::ProcessSpawn`] seam the boot pipeline installs into
-//! the [`tairix_kernel_core::BootInfo`] hand-off
+//! [`tairix_kernel_core::ArchImageBuilder`] seam the boot pipeline installs
+//! into the [`tairix_kernel_core::BootInfo`] hand-off
 //! (`boot_aarch64::enter_kernel_core` → `BootInfo::with_spawn`). When a task
-//! that holds `CAP_PROC_SPAWN` issues the `spawn` syscall, the kernel
-//! resolves the requested path against the shared
-//! [`crate::spawn_layout::PROGRAM_REGISTRY`] and hands
-//! the matching embedded program to [`ProcessSpawn::spawn`], which builds the
-//! child a *fresh, hardware-isolated* stage-1 address space, populates it
-//! through the production capability-checked, audited spawn caller
-//! ([`spawn_image`], gated on `CAP_PROC_SPAWN`), and admits it **Ready**
-//! through [`SpawnCtx::admit_process`]. Unlike the PID-1 [`InitSpawn`] seam
-//! (`init_spawn.rs`) it does **not** switch the active translation regime or
-//! enter user mode: the spawning caller keeps running under its own
-//! `TTBR0_EL1`, and the child runs when the scheduler next steps it (a true
-//! concurrent spawn, not an `exec`-style hand-off).
+//! that holds `CAP_PROC_SPAWN` issues the `spawn` syscall, the kernel resolves
+//! the requested path against the shared
+//! [`crate::spawn_layout::PROGRAM_REGISTRY`], admits a parked **loading**
+//! child, and returns its PID at once. On the child's own first scheduled
+//! slice this producer's
+//! [`build`](tairix_kernel_core::ArchImageBuilder::build) builds it a *fresh,
+//! hardware-isolated* stage-1 address space and populates it through the
+//! production capability-checked, audited spawn caller ([`spawn_image`], gated
+//! on `CAP_PROC_SPAWN`). Unlike the PID-1 [`tairix_kernel_core::InitSpawn`]
+//! seam (`init_spawn.rs`) it does **not** switch the active translation regime
+//! or enter user mode from the caller: the spawning caller keeps running under
+//! its own `TTBR0_EL1`, and the child enters user mode from its own loading
+//! body when the scheduler next steps it (a true concurrent, non-blocking
+//! spawn, not an `exec`-style hand-off).
 //!
 //! The child's `rxe`, its relocation bias ([`CHILD_USER_BIAS`]), and the
 //! kernel's syscall CFI tag are baked at build time (`build.rs` →
@@ -53,11 +55,12 @@ use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
 /// The user virtual base every child image this producer builds is mapped
 /// at — the build-time [`CHILD_USER_BIAS`] (64 GiB) `build.rs` bakes the
-/// embedded programs' relocations for. Exported so a consumer handing
-/// [`Aarch64ProcessSpawn::spawn_with`] an *externally* converted `rxe`
-/// (the Stage 4.HW driver-spawn vertical) can verify its image was
-/// relocated for the same bias and fail closed on a mismatch rather than
-/// admit a child whose pointers do not match where it is mapped.
+/// embedded programs' relocations for. Exported so a consumer handing this
+/// producer's [`build`](tairix_kernel_core::ArchImageBuilder::build) an
+/// *externally* converted `rxe` (the Stage 4.HW driver-spawn vertical) can
+/// verify its image was relocated for the same bias and fail closed on a
+/// mismatch rather than admit a child whose pointers do not match where it
+/// is mapped.
 pub const USER_IMAGE_BIAS: u64 = CHILD_USER_BIAS;
 
 /// Base of a spawned child's device-window virtual region

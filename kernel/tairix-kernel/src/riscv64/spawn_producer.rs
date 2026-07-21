@@ -2,22 +2,25 @@
 //! `plans/PI.md` RV-P3 / `plans/SPAWN.md` `SP3b`.
 //!
 //! [`RiscvProcessSpawn`] implements the architecture-neutral
-//! [`tairix_kernel_core::ProcessSpawn`] seam the boot pipeline installs into
-//! the [`tairix_kernel_core::BootInfo`] hand-off
+//! [`tairix_kernel_core::ArchImageBuilder`] seam the boot pipeline installs
+//! into the [`tairix_kernel_core::BootInfo`] hand-off
 //! (`boot_riscv64::try_boot` → `BootInfo::with_spawn`). When a task that
 //! holds `CAP_PROC_SPAWN` issues the `spawn` syscall, the kernel resolves
 //! the requested path against the shared
-//! [`crate::spawn_layout::PROGRAM_REGISTRY`] and hands the
-//! matching `rxe` bytes to [`ProcessSpawn::spawn`], which builds the child a
-//! *fresh, hardware-isolated* Sv39 address space, populates it through the
+//! [`crate::spawn_layout::PROGRAM_REGISTRY`], admits a parked **loading**
+//! child, and returns its PID at once. On the child's own first scheduled
+//! slice this producer's
+//! [`build`](tairix_kernel_core::ArchImageBuilder::build) builds it a *fresh,
+//! hardware-isolated* Sv39 address space and populates it through the
 //! production capability-checked, audited spawn caller ([`spawn_image`],
-//! gated on `CAP_PROC_SPAWN`), and admits it **Ready** through
-//! [`SpawnCtx::admit_process`]. Unlike the PID-1 [`tairix_kernel_core::InitSpawn`]
-//! seam (`init_spawn_riscv64.rs`) it does **not** switch the active
-//! translation regime (`satp`) or enter user mode: the spawning caller keeps
-//! running under its own root, and the child runs when the scheduler next
-//! steps it (a true concurrent spawn, not an `exec`-style hand-off) — the riscv64 sibling of the `Aarch64ProcessSpawn` /
-//! x86_64 producers.
+//! gated on `CAP_PROC_SPAWN`). Unlike the PID-1
+//! [`tairix_kernel_core::InitSpawn`] seam (`init_spawn_riscv64.rs`) it does
+//! **not** switch the active translation regime (`satp`) or enter user mode
+//! from the caller: the spawning caller keeps running under its own root, and
+//! the child enters user mode from its own loading body when the scheduler
+//! next steps it (a true concurrent, non-blocking spawn, not an `exec`-style
+//! hand-off) — the riscv64 sibling of the `Aarch64ProcessSpawn` / x86_64
+//! producers.
 //!
 //! The child's `rxe`, its relocation bias ([`CHILD_USER_BIAS`]), and the
 //! kernel's syscall CFI tag are baked at build time (`build.rs` →

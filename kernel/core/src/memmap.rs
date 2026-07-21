@@ -7,7 +7,7 @@
 //! zeroed frames into it and unmapping them with the necessary TLB
 //! shootdown. Naming a port's concrete page table and direct physical map is
 //! irreducibly architecture-specific, so — like
-//! the [`ProcessSpawn`](crate::spawn::ProcessSpawn) producer — the concrete
+//! the [`ArchImageBuilder`](crate::spawn::ArchImageBuilder) producer — the concrete
 //! implementation is installed at boot through a `with_*` builder and the
 //! handler reaches it through this trait.
 //!
@@ -17,7 +17,7 @@
 //! before `plans/SPAWN.md` `SP5b` lands a real producer) therefore announces
 //! an intentionally inert interface rather than pretending a mapping
 //! succeeded — exactly as [`NULL_CONSOLE`](crate::console::NULL_CONSOLE) and
-//! [`NULL_PROCESS_SPAWN`](crate::spawn::NULL_PROCESS_SPAWN) do for their
+//! [`NULL_ARCH_IMAGE_BUILDER`](crate::spawn::NULL_ARCH_IMAGE_BUILDER) do for their
 //! syscalls.
 
 use tairix_abi::{Errno, MapFlags};

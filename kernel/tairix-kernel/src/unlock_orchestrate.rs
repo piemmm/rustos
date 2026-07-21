@@ -19,8 +19,8 @@
 //!   interrupt-driven receive arm, and the console-0 ownership gate are all
 //!   the port's business; the orchestration only asks for a console and to
 //!   release it.
-//! * [`tairix_kernel_core::ProcessSpawn`] — the architecture's process
-//!   producer, bridged through the arch-neutral
+//! * [`tairix_kernel_core::ArchImageBuilder`] — the architecture's process
+//!   image producer, bridged through the arch-neutral
 //!   [`crate::driver_spawn_loader::InitCtxDriverProcessSpawn`] so a matched
 //!   user-space driver is spawned into its own hardware-isolated process
 //!   granted exactly its matched node's resources (no ambient authority).
@@ -67,7 +67,7 @@ use crate::unlock_service::{
 /// prompt and to release the console to `login` once the unlock resolves.
 ///
 /// `Sync` so a `'static` seam reference can be captured by the `Send` unlock
-/// kthread body ([`tairix_kernel_core::ProcessSpawn`]-spawned service).
+/// kthread body (a spawned, admit-then-load service).
 pub trait UnlockConsole: Sync {
     /// Acquire the primary-console (index 0) write half and raw read half for
     /// the passphrase prompt, arming any interrupt-driven receive the port

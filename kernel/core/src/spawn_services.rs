@@ -36,14 +36,15 @@
 //! Rust's ban on generic statics without making the whole launch path
 //! generic.
 //!
-//! # Reserved contract
+//! # How it is wired
 //!
-//! This is the reserved contract the deferred-load flip
-//! (`plans/FIX-DESKTOP.md` DESK-1) builds on, landed ahead of the wiring
-//! exactly as the task-model primitive ([`crate::kthread::Yielder::become_user`])
-//! and the reserved `LOAD_*` exit-status ABI were. The bundle is complete
-//! and independently tested; the live `spawn` handler and the child
-//! loading body read it when the flip lands.
+//! The bundle is the live launch contract (`plans/FIX-DESKTOP.md` DESK-1):
+//! the `spawn` handler's [`crate::KernelSpawnCtx::admit_loading`] admits the
+//! child against it, and the child's loading body reads it back through
+//! [`installed_spawn_services`] to build its image. The boot path builds and
+//! publishes exactly one bundle through [`install_over`] — the single
+//! definition a manually-assembled boot (a QEMU integration kernel) shares,
+//! so the launch path is wired identically everywhere.
 
 use tairix_kernel_mem::FrameAllocator;
 use tairix_kernel_sched_api::{CpuId, SchedulerArch};
@@ -321,6 +322,54 @@ pub fn installed_spawn_services() -> Option<&'static SpawnServices> {
     }
 }
 
+/// Build the launch-services bundle over `arch` and the live kernel-state
+/// handles and publish it as the process-global set-once bundle, returning
+/// the installed bundle.
+///
+/// This is the one definition both the production boot path (`run_phases`)
+/// and a manually-assembled boot (a QEMU integration-test kernel) build the
+/// bundle through, so the launch path is
+/// wired identically everywhere and the construction is never duplicated.
+/// The page-table frame source is the same `frames` allocator as a `'static`
+/// borrow, matching the production wiring.
+///
+/// Idempotent: if a bundle is already installed (a host binary that drives
+/// boot more than once in one process), the first live bundle is left in
+/// place and returned — a re-install is a benign skip, never a silent
+/// overwrite.
+#[allow(clippy::too_many_arguments)]
+pub fn install_over<A: KernelArch + 'static>(
+    arch: &'static A,
+    frames: &'static FrameAllocator,
+    audit: &'static (dyn Sink + Sync),
+    filesystem: &'static (dyn FilesystemService + 'static),
+    app_store: Option<&'static AppStore>,
+    aspaces: &'static RwLock<AddressSpaceRegistry>,
+    caps: &'static RwLock<CapTable>,
+    process_wait: &'static (dyn ProcessWait + 'static),
+    image_builder: &'static (dyn ArchImageBuilder + 'static),
+) -> &'static SpawnServices {
+    let runtime: &'static (dyn SpawnRuntime + 'static) =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(ArchSpawnRuntime::new(arch)));
+    let services: &'static SpawnServices =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(SpawnServices::new(
+            frames,
+            Some(frames),
+            audit,
+            filesystem,
+            app_store,
+            aspaces,
+            caps,
+            process_wait,
+            image_builder,
+            runtime,
+        )));
+    // Set-once: publish this bundle only if none is installed yet, then
+    // return whichever bundle is live (this one, or an earlier winner).
+    let _ = install_spawn_services(services);
+    installed_spawn_services().unwrap_or(services)
+}
+
 /// [`install_spawn_services`] rejected a second publish.
 ///
 /// The bundle is set-once per boot; a second call indicates a programmer
@@ -469,24 +518,38 @@ mod tests {
 
     #[test]
     fn install_is_set_once_and_get_returns_the_installed_bundle() {
-        // The module static is process-global; this test owns the single
-        // install in the crate's test binary so it can assert the
-        // set-once contract end to end.
-        let runtime: &'static FixtureRuntime = Box::leak(Box::new(FixtureRuntime {
+        // The module static is process-global and other tests in this crate's
+        // binary (the syscall spawn-admit tests, and `init::run_phases`) may
+        // legitimately install the production bundle first, in any order. So
+        // this test proves the set-once contract *order-independently*: it
+        // never assumes it owns the single install.
+        let first = leak_services(Box::leak(Box::new(FixtureRuntime {
             cpu: 1,
             ticks: 7,
             ns: 700,
-        }));
-        let first = leak_services(runtime);
+        })));
 
-        // Empty before any install.
-        assert!(installed_spawn_services().is_none());
+        match install_spawn_services(first) {
+            Ok(()) => {
+                // We won the race: our bundle is the installed one.
+                let got = installed_spawn_services().expect("bundle visible after install");
+                assert_eq!(got.runtime().ticks_now(), 7);
+            }
+            Err(SpawnServicesAlreadyInstalled) => {
+                // Another test installed first; the cell is still populated.
+                assert!(
+                    installed_spawn_services().is_some(),
+                    "an already-installed cell still resolves a bundle",
+                );
+            }
+        }
 
-        install_spawn_services(first).expect("first install succeeds");
-        let got = installed_spawn_services().expect("bundle visible after install");
-        assert_eq!(got.runtime().ticks_now(), 7);
-
-        // A second publish is refused; the first bundle stays installed.
+        // Regardless of who won, a further publish is always refused and never
+        // overwrites the installed bundle.
+        let installed_ticks = installed_spawn_services()
+            .expect("some bundle is installed by now")
+            .runtime()
+            .ticks_now();
         let second = leak_services(Box::leak(Box::new(FixtureRuntime {
             cpu: 2,
             ticks: 99,
@@ -501,8 +564,8 @@ mod tests {
                 .expect("still installed")
                 .runtime()
                 .ticks_now(),
-            7,
-            "the first bundle is never overwritten",
+            installed_ticks,
+            "the installed bundle is never overwritten",
         );
     }
 }

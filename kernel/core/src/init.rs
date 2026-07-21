@@ -2142,43 +2142,31 @@ fn run_phases<A: KernelArch>(
     phase_started(log_sink, Phase::Ipc);
     phase_ready(log_sink, Phase::Ipc);
 
-    // Publish the boot-installed launch-services bundle the asynchronous
-    // process-launch path captures (`plans/FIX-DESKTOP.md` §2.6.5): a
-    // `spawn` admits its child at once and the child materialises its own
-    // image on its first slice, off the spawning caller's task, through the
-    // `'static` handles bundled here. Every handle is the *same* leaked
-    // `KernelState` / boot-handover object the syscall dispatcher resolves a
-    // caller against, so the loading child's re-derived capability record and
-    // registered address space land in exactly the registries the dispatcher
-    // reads. The architecture scalar operations the child body needs (CPU,
-    // tick, monotonic ns) are type-erased behind the leaked
-    // `ArchSpawnRuntime` so the bundle stays non-generic.
-    let spawn_runtime: &'static (dyn crate::spawn_services::SpawnRuntime + 'static) = Box::leak(
-        Box::new(crate::spawn_services::ArchSpawnRuntime::new(state.arch.as_ref())),
+    // Publish the launch-services bundle the asynchronous process-launch
+    // path captures (`plans/FIX-DESKTOP.md` §2.6.5): a `spawn` admits its
+    // child at once and the child materialises its own image on its first
+    // slice, off the spawning caller's task, through the `'static` handles
+    // bundled here. Every handle is the *same* leaked `KernelState` /
+    // boot-handover object the syscall dispatcher resolves a caller against,
+    // so the loading child's re-derived capability record and registered
+    // address space land in exactly the registries the dispatcher reads.
+    // `install_over` is the one shared build+publish both this boot path and
+    // a manually-assembled boot (a QEMU integration kernel) use, so the
+    // launch bundle is wired identically everywhere; it is set-once and
+    // idempotent, so a host binary that drives `run_phases` twice in one
+    // process leaves the first live bundle in place rather than overwriting
+    // it.
+    let _ = crate::spawn_services::install_over(
+        state.arch.as_ref(),
+        state.frame_allocator,
+        audit_sink,
+        filesystem,
+        app_store,
+        &state.aspaces,
+        &state.caps,
+        process_wait,
+        image_builder,
     );
-    let spawn_services: &'static crate::spawn_services::SpawnServices =
-        Box::leak(Box::new(crate::spawn_services::SpawnServices::new(
-            state.frame_allocator,
-            // The same leaked `'static` allocator as the page-table frame
-            // source the arch image builder draws the child's tables from.
-            Some(state.frame_allocator),
-            audit_sink,
-            filesystem,
-            app_store,
-            &state.aspaces,
-            &state.caps,
-            process_wait,
-            image_builder,
-            spawn_runtime,
-        )));
-    // Set-once: the boot path installs exactly one bundle. A host test binary
-    // that drives `run_phases` more than once in the same process re-enters
-    // with the OnceCell already set; the guard leaves the first (live) bundle
-    // in place rather than failing the whole boot, and never silently
-    // overwrites it.
-    if crate::spawn_services::installed_spawn_services().is_none() {
-        let _ = crate::spawn_services::install_spawn_services(spawn_services);
-    }
 
     Ok((state, process_wait))
 }

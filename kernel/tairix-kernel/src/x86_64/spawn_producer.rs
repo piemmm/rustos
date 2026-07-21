@@ -1,22 +1,23 @@
 //! x86_64 runtime `spawn` producer — `plans/PI.md` `X3b`.
 //!
 //! [`X86_64ProcessSpawn`] implements the architecture-neutral
-//! [`tairix_kernel_core::ProcessSpawn`] seam the boot pipeline installs into
-//! the [`tairix_kernel_core::BootInfo`] hand-off (`boot::try_boot` →
+//! [`tairix_kernel_core::ArchImageBuilder`] seam the boot pipeline installs
+//! into the [`tairix_kernel_core::BootInfo`] hand-off (`boot::try_boot` →
 //! `BootInfo::with_spawn`). It is the cross-port sibling of the aarch64
 //! `spawn_producer` (`plans/SPAWN.md` `SP3b`): when a task that holds
 //! `CAP_PROC_SPAWN` issues the `spawn` syscall, the kernel resolves the
 //! requested path against the shared
-//! [`crate::spawn_layout::PROGRAM_REGISTRY`] and hands the matching
-//! `rxe` bytes to [`ProcessSpawn::spawn`], which builds the child a *fresh,
-//! hardware-isolated* PML4 hierarchy, populates it through the production
+//! [`crate::spawn_layout::PROGRAM_REGISTRY`], admits a parked **loading**
+//! child, and returns its PID at once. On the child's own first scheduled
+//! slice this producer's
+//! [`build`](tairix_kernel_core::ArchImageBuilder::build) builds it a *fresh,
+//! hardware-isolated* PML4 hierarchy and populates it through the production
 //! capability-checked, audited spawn caller ([`spawn_image`], gated on
-//! `CAP_PROC_SPAWN`), and admits it **Ready** through
-//! [`SpawnCtx::admit_process`]. Unlike the PID-1 [`InitSpawn`] seam
-//! (`init_spawn_x86_64.rs`) it does **not** switch CR3 or enter ring 3: the
-//! spawning caller keeps running under its own root, and the child runs when
-//! the scheduler next steps it (a true concurrent spawn, not an `exec`-style
-//! hand-off).
+//! `CAP_PROC_SPAWN`). Unlike the PID-1 [`tairix_kernel_core::InitSpawn`] seam
+//! (`init_spawn_x86_64.rs`) it does **not** switch CR3 or enter ring 3 from
+//! the caller: the spawning caller keeps running under its own root, and the
+//! child enters ring 3 from its own loading body when the scheduler next steps
+//! it (a true concurrent, non-blocking spawn, not an `exec`-style hand-off).
 //!
 //! # Building the child without switching CR3
 //!

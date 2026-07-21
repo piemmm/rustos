@@ -1054,7 +1054,7 @@ where
     /// Called by an arch port's boot pipeline once it can build a child
     /// address space and has embedded programs to launch. Until this is
     /// called the handover holds [`EMPTY_PROGRAM_REGISTRY`] and
-    /// [`NULL_PROCESS_SPAWN`], so `spawn` fails closed
+    /// [`NULL_ARCH_IMAGE_BUILDER`], so `spawn` fails closed
     /// ([`tairix_abi::Errno::NotFound`] / [`tairix_abi::Errno::NotImplemented`]).
     /// Both must be `'static`: the program bytes and the producer live for
     /// the lifetime of the running kernel, exactly like the console device

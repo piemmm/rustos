@@ -244,7 +244,7 @@ pub trait InitSpawnCtx {
     /// kernel (a device's DMA mapping lives for the driver
     /// load), so it needs a `'static` allocator, not the call-scoped borrow
     /// [`frames`](Self::frames) hands out. Mirrors
-    /// [`SpawnCtx::page_table_allocator`].
+    /// [`ImageBuildCtx::page_table_allocator`].
     ///
     /// The default returns [`None`] — a context with no `'static` allocator
     /// (a host test double) makes a service spawner fall back / fail closed rather than allocating from a borrow it cannot
@@ -722,7 +722,7 @@ impl EmbeddedProgram {
 /// console seam: it boots [`EMPTY`](Self::EMPTY), so a `spawn` of any path
 /// fails closed with [`Errno::NotFound`] until the kernel binary registers
 /// its embedded programs (the host-only `elf2rxe` build glue). It is pure data with no ambient authority and no audit sink of
-/// its own — the `spawn` handler and the [`ProcessSpawn`] producer own the
+/// its own — the `spawn` handler and the [`ArchImageBuilder`] producer own the
 /// security-relevant logging, exactly as the dispatcher audits IPC
 /// endpoint lookups rather than the registry doing so internally.
 pub struct ProgramRegistry {
@@ -871,10 +871,10 @@ pub trait ImageBuildCtx {
 
 /// The architecture-specific seam that builds a fresh, hardware-isolated
 /// user image from a validated `rxe` **without admitting it**
-/// (`plans/FIX-DESKTOP.md` §5 item 1), the deferred-load replacement for
-/// [`ProcessSpawn`].
+/// (`plans/FIX-DESKTOP.md` §5 item 1), the deferred-load replacement for the
+/// former synchronous process producer.
 ///
-/// Installed into the syscall handler exactly as [`ProcessSpawn`] was, and
+/// Installed into the syscall handler exactly as that producer was, and
 /// captured by the boot-installed `SpawnServices` handle so the child's
 /// loading body — running on its own kernel stack, off the spawning
 /// caller's task — can drive the build. Splitting the old `spawn_with` into
@@ -1203,11 +1203,11 @@ mod tests {
         assert!(!ids.contains(&AuditEvent::ProcessSpawned.id().0));
     }
 
-    /// A minimal [`SpawnCtx`] for exercising the [`ProcessSpawn::spawn_with`]
-    /// default: the default returns before touching the context, so
-    /// [`admit_process`](SpawnCtx::admit_process) is unreachable. It owns a
-    /// one-region [`FrameAllocator`] so [`frames`](SpawnCtx::frames) can hand
-    /// out a reference, and audits through a leaked [`TestSink`].
+    /// A minimal [`ImageBuildCtx`] for exercising the [`ArchImageBuilder::build`]
+    /// default: the default returns [`Errno::NotImplemented`] before touching
+    /// the context. It owns a one-region [`FrameAllocator`] so
+    /// [`frames`](ImageBuildCtx::frames) can hand out a reference, and audits
+    /// through a leaked [`TestSink`].
     struct StubCtx {
         frames: FrameAllocator,
         sink: &'static TestSink,
@@ -1258,8 +1258,13 @@ mod tests {
         // `&dyn ArchImageBuilder`, the path the boot handover default uses.
         let ctx = StubCtx::new();
         let builder: &dyn ArchImageBuilder = &NULL_ARCH_IMAGE_BUILDER;
-        let result = builder.build(b"unused-rxe", &ctx, &[], &[]);
-        assert_eq!(result, Err(Errno::NotImplemented));
+        // `BuiltImage` is neither `Debug` nor `PartialEq` (it holds boxed
+        // closures and address-space handles), so match rather than
+        // `assert_eq!`.
+        assert!(matches!(
+            builder.build(b"unused-rxe", &ctx, &[], &[]),
+            Err(Errno::NotImplemented)
+        ));
         // Its kernel-stack allocation hands back the software-canary
         // `BoxStack` with no guard page to unmap in the child root.
         let (_stack, guard) = builder.alloc_kernel_stack(&ctx.frames, None);
@@ -1384,7 +1389,10 @@ mod tests {
     #[test]
     fn admit_errno_maps_stable_codes() {
         assert_eq!(admit_errno(AdmitError::SchedulerFull), Errno::NoSpace);
-        assert_eq!(admit_errno(AdmitError::AspaceConflict), Errno::AlreadyExists);
+        assert_eq!(
+            admit_errno(AdmitError::AspaceConflict),
+            Errno::AlreadyExists
+        );
     }
 
     /// The shared caller-errno mapping keeps the stable codes: a denied

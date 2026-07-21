@@ -638,317 +638,56 @@ Each stage is independently reviewable and must leave the whole-project
   §1.2) and every affected interactive loop identified; the design is
   fully specified through demand-paged, CoW-shared, verified images
   (§2.6) — no "future work" left implicit (§2.6.4).
-- **DESK-1 — production flip landed; host spawn-test suite + QEMU + docs
-  outstanding.** The kernel-side deferred load is complete and every
-  Tier-1 kernel binary (`x86_64`, `aarch64`, `riscv64`) plus `kernel-core`
-  (lib) compile clean. What is live:
-  - `SPAWN` and the driver spawn are **admit-then-load**: the handler does
-    only the synchronous §2.1 work (cap check, path copy-in + `SPAWN_SELF`,
-    attach/streams, `resolve_spawn_credential`, `proc_id`/name/spawn_path,
-    program-vs-bundle **syntax**), builds a `LoadPlan`
-    (`Prebuilt{Cow<'static,[u8]>,requested}` for an embedded/driver image,
-    `Bundle{bundle,command}` for a store bundle), and calls
-    `KernelSpawnCtx::admit_loading`, returning the minted PID at once.
-  - `admit_loading` (`kernel/core/src/syscalls.rs`) admits a **parked plain
-    kernel kthread** (`spawn_kthread_with_stack_parked`), installs the
+- **DESK-1 — done.** Process launch is asynchronous: `SPAWN` and the driver
+  spawn are **admit-then-load**. The handler does only the synchronous §2.1
+  work (cap check, path copy-in + `SPAWN_SELF`, attach/streams,
+  `resolve_spawn_credential`, `proc_id`/name/spawn_path, program-vs-bundle
+  **syntax** → `NotFound` synchronously), builds a `LoadPlan`
+  (`Prebuilt{Cow<'static,[u8]>, requested}` for an embedded/driver image,
+  `Bundle{bundle,command}` for a store bundle), and calls
+  `KernelSpawnCtx::admit_loading`, returning the minted PID at once — the
+  caller never blocks on the read/verify/build.
+  - `admit_loading` admits a parked plain kernel kthread and installs the
     manifest-independent admit state (placeholder empty-set caps record via
     the shared `ChildRecordSeed`/`derive_task_record`, streams + wired std
     entries, inherited limits, cwd, device grants + loaded node, parent/child
-    wait link), then `unpark`s. Its loading body (captures the boot-installed
-    `&'static SpawnServices` + `LoadPlan` + seed) runs on the child's own
-    task: `body_wait_app_store` (park via `reschedule_current`, no scheduler
-    borrow) → obtain rxe+requested (prebuilt directly; bundle via
-    `body_load_bundle` under `(uid=credential.uid, effective=ceiling)`) →
-    derive+replace the effective record → `ArchImageBuilder::build` →
-    register frozen aspace + `stack_span` → `become_user` → `enter`; on any
-    failure it audits (`emit_load_refusal`) + `record_exit(load_failure_status)`
-    + `reclaim_process_bookkeeping` (the shared teardown subset).
-  - `ProcessSpawn` / `SpawnCtx` / `admit_process` / `NullProcessSpawn` /
-    `refuse_spawn` / `refuse_admit` / `SpawnCtxBuild` are **deleted**; a pure
-    `admit_errno` + a fail-closed `NullArchImageBuilder`/`NULL_ARCH_IMAGE_BUILDER`
-    replace them. The three producers now only `impl ArchImageBuilder`.
-    `BootInfo` carries `image_builder: &dyn ArchImageBuilder` (was
-    `spawn_service`); `kernel_main`/`run_phases` builds + installs the
-    production `SpawnServices` (`ArchSpawnRuntime` over the leaked state) after
-    the state is leaked. `driver_spawn_loader` + `unlock_orchestrate` +
-    per-arch `root_unlock` drop the producer arg; `InitSpawnCtx::spawn_driver_process`
-    lost its `spawn` param and drives `admit_loading` with a prebuilt plan.
-  - **Outstanding (the remaining DESK-1 test/doc work):**
-    1. The `kernel/core/src/syscalls.rs` **host spawn-test suite** still uses
-       the old synchronous-build doubles (`RecordingSpawn`/`SpawnCtx` admit).
-       Rewriting it to the deferred model needs a test-isolation decision: the
-       loading body reads the **process-global** `SpawnServices` `OnceCell`,
-       so the many independent per-test handlers cannot each inject their own
-       leaked registries + a recording `ArchImageBuilder` and then drive the
-       parked loading kthread to completion. Resolve by consolidating the
-       spawn tests onto one shared leaked kernel state (single global install)
-       or adding a test-injectable services seam, then assert admit-returns-PID
-       + placeholder record synchronously and the effective record/aspace/
-       `LOAD_*` exit after driving the body. `spawn.rs` + `init.rs` host test
-       modules are already converted.
-    2. The DESK-1 **host tests** enumerated below (admit touches no bundle
-       bytes; missing/tampered/malformed/OOM → reserved `LOAD_*` + audit;
-       valid embedded + bundle reach `enter`) and the **per-arch QEMU
-       verticals**, plus the DESK-1 **docs/C-header** updates.
-    3. The QEMU integration test kernels that call `spawn_driver_process` /
-       `InitCtxDriverProcessSpawn::new` with a producer arg need the arg
-       dropped (mechanical).
-  - **Landed — task-model primitive.** The arch-neutral primitive in
-    `kernel/core/src/kthread.rs`: `UserUpgrade`, the
-    `ThreadControl::pending_upgrade` slot, `Yielder::become_user`, and the
-    dispatcher-side install in `dispatch_step`, with host tests.
-  - **Landed — the arch-neutral image-build seam *and its three producer
-    implementations* (Remaining items 1 + 3's build split).** `BuiltImage`,
-    `ImageBuildCtx`, and `ArchImageBuilder` in `kernel/core/src/spawn.rs`,
-    exported from `lib.rs`, plus the shared `SpawnCtxBuild` `ImageBuildCtx`
-    adapter and the `refuse_build` counterpart (sharing `emit_refuse` with
-    `refuse_spawn`, `§2.2`). All three arch producers
-    (`kernel/tairix-kernel/src/{x86_64,aarch64,riscv64}/spawn_producer.rs`)
-    now implement `ArchImageBuilder::{alloc_kernel_stack, build}` — the
-    kernel-stack allocation hoisted to `alloc_kernel_stack`, the guard-page
-    split/unmap moved into `build` (gated on `kernel_stack_guard`, and now
-    **fail-closed** rather than the former `BoxStack` downgrade, `§2.17`).
-    Each producer's `ProcessSpawn::spawn_with` **delegates** to
-    `alloc_kernel_stack` → `build` → `admit_process`, so the image-build
-    logic has one definition shared with the deferred-load path (`§2.2`).
-    Verified green: all four targets build, `tairix-kernel-core` host tests,
-    `cargo fmt --all --check`, `cargo xtask clippy`, `cfg-check`,
-    `deps-check`. `ProcessSpawn`/`admit_process` stay live until the flip
-    (items 2 + 4–5) rewires the handler onto the deferred-load `build`.
-  - **Landed — the reserved `LOAD_*` exit-status ABI (the child→parent
-    contract).** `lib/abi` (`process.rs`) defines the reserved band
-    (`LOAD_FAILURE_STATUS_BASE` + `LOAD_NOT_FOUND` / `LOAD_UNVERIFIED` /
-    `LOAD_MALFORMED` / `LOAD_OOM`), the total `load_failure_status(Errno)
-    -> i32` map the child-load path exits through, and the reverse
-    `load_failure_reason(i32) -> Option<&str>` the parent reap turns into
-    a `stderr` diagnosis — one definition both sides depend on, with
-    round-trip unit tests. The C view (`TAIRIX_LOAD_*` in
-    `include/tairix/tairix_syscall.h`) is generated from these by
-    `cargo xtask c-header` (drift-guarded); `abi-check` clean. The
-    producer (child load path) and consumer (parent reap) are wired when
-    the mechanism below lands — until then these are the reserved contract
-    the remaining work targets, not a live code path.
-  - **Landed — the `(uid, effective, task)` bundle-read authority split
-    (Remaining item 2's `load_store_bundle` signature change).**
-    `KernelSyscallHandlers::load_store_bundle` and `wait_app_store`
-    (`kernel/core/src/syscalls.rs`) no longer borrow a `CallerContext`:
-    the bundle read takes its authority as an explicit `(uid: u32,
-    effective: &dyn CapabilityQuery)` pair and the app-store park takes an
-    explicit `task: u64`. This is the one definition that serves both the
-    current caller-side read and the deferred child-side read under the
-    child's own credential (`§2.2`), landed live ahead of the flip: the
-    sole caller (the synchronous `spawn` handler) passes the caller's own
-    `owner()`/`effective()`/`task_id`, so behaviour is unchanged and the
-    whole `tairix-kernel-core` suite (1097 host tests) stays green. It is a
-    live, in-place refactor, not reserved scaffolding: the child-side call
-    site is added by the atomic flip.
-  - **Landed — the `SpawnServices` / `SpawnRuntime` boot-installed
-    launch-services bundle (Remaining item 2's `'static` load context).**
-    `kernel/core/src/spawn_services.rs` defines the non-generic, set-once
-    `'static` `SpawnServices` handle the child loading body will capture —
-    `frames`, `page_table_frames`, `audit`, `filesystem`, `app_store`,
-    `aspaces`, `caps`, `process_wait`, the `&'static dyn ArchImageBuilder`,
-    and the type-erased `&'static dyn SpawnRuntime` — over the established
-    `devres` / `dispatch_slot` `install_*()` / `installed_*()` idiom (a
-    `tairix_sync::OnceCell`-guarded read-only handle, not a mutable global).
-    The three architecture-`A` operations the body needs (`current_cpu`,
-    `ticks_now`, `now_ns`) are type-erased behind `SpawnRuntime`, with the
-    production `ArchSpawnRuntime<A: KernelArch>` forwarding to the arch HAL
-    and leaked at boot; everything else the bundle holds is already
-    non-generic, so `SpawnServices` is a plain struct in a plain `OnceCell`
-    (sidestepping Rust's generic-static ban). `install_spawn_services` is
-    fail-loud set-once (`SpawnServicesAlreadyInstalled`);
-    `installed_spawn_services` fails closed to `None`. Host tests cover the
-    getters, the production `ArchSpawnRuntime` forwarding, and the set-once
-    install/lookup contract. It is the reserved contract the core
-    loading-body orchestration (item 2 below) reads, landed ahead of the
-    flip exactly as the task-model primitive and the `LOAD_*` ABI were; the
-    boot path installs the production bundle and the child body reads it
-    when the flip lands.
-  - **Remaining (in dependency order), the atomic mechanism.** The design
-    below is validated against the live code (`syscalls.rs` `spawn`
-    handler, `KernelSpawnCtx`, `admit_process`, `kthread.rs`, the arch
-    producers) and is the contract to build to. The `ProcessSpawn`/admit
-    contract ripples to all arch producers + the driver-spawn loader at
-    once, so the tree does not build until the whole set lands. Item 1 (the
-    arch-neutral seam types) is **landed** — the reserved contract items
-    2–7 build on, wired when the deletion of `ProcessSpawn` and the producer
-    rewrite land together, exactly as the task-model primitive and the
-    `LOAD_*` ABI above are landed ahead of their live use.
-
-    1. **Landed — `BuiltImage` + `ArchImageBuilder` + `ImageBuildCtx` seam
-       (`kernel/core/src/spawn.rs`, exported from `lib.rs`) *and its three
-       producer implementations*.** All three producers implement
-       `ArchImageBuilder::{alloc_kernel_stack, build}` and their
-       `spawn_with` delegates to it (see the summary bullet above); the
-       shared `SpawnCtxBuild` adapter + `refuse_build` live in
-       `kernel/core/src/spawn.rs`. Verified green (4 targets, host tests,
-       `fmt --all --check`, `cargo xtask clippy`, `cfg-check`, `deps-check`).
-       - `struct BuiltImage { frozen: Box<dyn UserAddressSpace + Send +
-         Sync>, physmap: Box<dyn PhysMap + Send + Sync>, stack_span:
-         StackSpan, live: Option<Box<dyn LiveUserSpace + Send>>,
-         pre_resume: Box<dyn FnMut(u64) + Send>, enter: Box<dyn FnMut() +
-         Send> }`. Carries **no** kernel stack: the loading kthread already
-         owns the stack it runs on (see 3), and the build only re-expresses
-         that stack's guard page in the child's own (inactive) root.
-       - `trait ImageBuildCtx` = the build-only subset of `SpawnCtx`:
-         `frames() -> &FrameAllocator`, `page_table_allocator() ->
-         Option<&'static FrameAllocator>`, `audit() -> &(dyn Sink + Sync)`,
-         plus `kernel_stack_guard() -> Option<u64>`. **Refined during
-         implementation:** the guard VA is a raw `u64` (the arena stack's
-         `guard_page()` returns `u64` and aarch64 `split_block`/`unmap` take
-         `u64`), not a `Page`; `None` is the `BoxStack` fallback (self-guards
-         with a poison canary, nothing to unmap in the child root).
-       - `trait ArchImageBuilder: Send + Sync { fn alloc_kernel_stack(&self,
-         frames: &FrameAllocator, pt_frames: Option<&'static
-         FrameAllocator>) -> (Box<dyn KernelStack + Send>, Option<u64>); fn
-         build(&self, rxe: &[u8], ctx: &dyn ImageBuildCtx, args: &[&[u8]],
-         env: &[&[u8]]) -> Result<BuiltImage, Errno>; }`. The arch installs
-         one `&'static dyn ArchImageBuilder` (replacing the `ProcessSpawn`
-         producer). `alloc_kernel_stack` is the arena/`BoxStack` allocation
-         the producer does today, hoisted so the stack exists at admit; it
-         returns the stack **and** its guard VA (`Some` arena, `None`
-         `BoxStack`), threaded into `ImageBuildCtx::kernel_stack_guard`.
-         **Refined during implementation:** `build` drops the `caps`
-         parameter — the arch build authorises through the fixed
-         `spawn_layout::SpawnAuthority` (holding `CAP_PROC_SPAWN`), never the
-         child's own set, and the loading body installs the child's effective
-         set directly (item 2), so passing `caps` to `build` would be an
-         unused parameter.
-       - **Validated:** because the stack is chosen at admit (before the
-         child arch space exists), `build` can no longer retroactively fall
-         back to `BoxStack` when the guard split/unmap fails — a
-         `Some(guard)` whose split+unmap fails in the child root fails the
-         `build` **closed** (a stronger guarantee than today's fallback, on
-         a path the freshly built identity space makes unreachable in
-         practice), never a silent downgrade to an unguarded stack (`§2.17`).
-    2. **Core loading-body orchestration (`kernel/core`).** The
-       boot-installed set-once `'static` `SpawnServices` / `SpawnRuntime`
-       handle this orchestration captures is **landed** (see the summary
-       bullet above): `kernel/core/src/spawn_services.rs` carries the
-       `'static` load services the child body captures — `frames`,
-       `page_table_frames`, `audit`, `filesystem`, `app_store`, `aspaces`,
-       `caps`, `process_wait`, the `&'static dyn ArchImageBuilder`, and the
-       type-erased `&'static dyn SpawnRuntime`. Production backs every one
-       from the `Box::leak`'d `KernelState`; tests install a leaked fixture
-       (leak permitted in tests). This is preferred over converting
-       `KernelSyscallHandlers`'s `'a` fields to `'static`, which would ripple
-       through the ~26k-line test suite for no security gain. **Remaining:**
-       the boot install of the production bundle, and the core admit-loading
-       entry + child loading body that read it.
-       - **Validated: `SpawnServices` is *non-generic*.** The child body's
-         only architecture-`A` dependencies are `SchedulerArch::current_cpu`
-         (to park on the app-store latch), `ticks_now` (the caps record's
-         start time), and the `Clock` the bundle read uses. Type-erase those
-         three behind a tiny non-generic `SpawnRuntime: Sync` trait object
-         (`current_cpu()`, `ticks_now()`, `now_ns()`), leaked at boot over
-         the `KernelState<A>` arch handle. Everything else the body touches
-         (`aspaces`/`caps`/`filesystem`/`app_store`/`process_wait`/audit/
-         frames/`ArchImageBuilder`) is already non-generic, so `SpawnServices`
-         is a plain struct in a plain `OnceCell` — sidestepping Rust's ban on
-         generic statics. The one genuinely `A`-generic step, admitting the
-         loading kthread (`spawn_kthread_with_stack::<A::Cs, A, …>`), stays in
-         `KernelSpawnCtx<A>` where `A` is concrete; the loading body it hands
-         the scheduler is `FnMut(&mut Yielder<A::Cs>)` capturing only the
-         `&'static SpawnServices`.
-       - **Validated: the loading child is a plain kernel kthread**
-         (`pre_resume = None`, no live space) until `become_user`, so
-         `dispatch_step` publishes it a *body* resume handle and
-         `reschedule_current(Park)` suspends it — `wait_app_store` parks
-         correctly with no scheduler-fallback dependence in the body.
-       - **Validated: a failed loading child's teardown is a complete,
-         well-defined subset**, not a partial hack. A child that fails before
-         `become_user` provably holds only the admit-time state (caps record,
-         aspace entry = streams/limits/cwd/grants, the wait link, procsignal
-         gates) — it never bound an IRQ, IPC port, shared-memory region, or
-         wait-set. Its teardown is therefore exactly `process_wait.record_exit`
-         + caps `remove` + aspaces `withdraw` + `process_wait.parent_exited` +
-         the `procsignal` clears, then a plain return from the work body (the
-         `kthread` trampoline reports `Exit` and the scheduler reaps it).
-         Factor the shared subset out of `reclaim_task_resources` into one
-         helper both the full reclaim and the loading-child teardown call
-         (`§2.2`), rather than duplicating it or over-tearing subsystems the
-         child never touched.
-       - The `spawn` handler keeps doing **all** of §2.1 synchronously
-         (cap check, path copy-in + `SPAWN_SELF`, attach/streams wiring,
-         `resolve_spawn_credential`, `proc_id`/`ProcName`/`spawn_path`,
-         program-vs-bundle **syntax** resolution → `NotFound` synchronously).
-         It then calls the core admit-loading entry with a `LoadPlan`
-         (embedded program bytes+caps, or the parsed bundle path) + the
-         per-child data, and returns the minted PID.
-       - **Admit-time (synchronous, caller):** allocate the child's kernel
-         stack via `ArchImageBuilder::alloc_kernel_stack`; admit a **loading
-         kthread** (`spawn_kthread_with_stack`, parked) whose work body
-         captures the `'static` `SpawnServices` + `LoadPlan` + per-child
-         data. Under the minted `sec_id` install everything that does not
-         depend on the manifest: a **loading** caps record (identity =
-         proc_id/name/spawn_path/parent/credential/sandbox, **empty**
-         capability set), streams + wired std entries, `stack_span` (from the
-         validated layout — but see note), inherited limits, cwd, device
-         grants + loaded node, and the parent/child wait link; then `unpark`.
-         The **user address space is not registered here** (none exists yet)
-         — `set_streams`/`set_stack_span`/`install_std_entry` operate on the
-         aspaces registry keyed by `sec_id` independently of a registered
-         address space, so the streams/limits/cwd install stands. `stack_span`
-         is manifest-independent (derived from the layout the build will use)
-         — resolve it in the body after the image is built and register it
-         there, alongside the frozen aspace, so the caller installs only
-         truly manifest-independent state.
-       - **Loading body (child task, on its own kernel stack):** in order —
-         `wait_app_store` (park, event-woken) → obtain rxe+requested-caps
-         (embedded `LoadPlan` yields them directly; bundle `LoadPlan` runs
-         `load_store_bundle` under the **child's own** credential = `(uid =
-         credential.uid, effective = credential.ceiling)`, the `LaunchCache`
-         still hoisting verification off re-launches) → derive effective set
-         = `credential.ceiling ∩ requested` and **replace** the loading
-         record's empty set under `sec_id` → `ArchImageBuilder::build` →
-         register `frozen`+`physmap` and `stack_span` under `sec_id` →
-         `yielder.become_user(pre_resume, live)` → `enter()`; caps and aspace
-         are installed strictly **before** `become_user`, so the child is
-         never dispatchable as a user task under the wrong authority.
-       - **`load_store_bundle` signature change — landed.** It now takes an
-         explicit `(uid: u32, effective: &dyn CapabilityQuery, task: u64)`
-         instead of a borrowed `CallerContext` (`wait_app_store` likewise
-         takes an explicit `task: u64`), so the one definition serves the
-         child-side read under the child's credential (`§2.2`). The child
-         body passes `(uid = credential.uid, effective = credential.ceiling,
-         task = child_task_id)`; its `ArchClock`/`audit` come from
-         `SpawnServices`. Only the child-side *call site* remains for the
-         flip.
-    3. **Arch producers + `driver_spawn_loader`
-       (`kernel/tairix-kernel/src/{aarch64,riscv64,x86_64}/`).** The build
-       split is **landed** (item 1 above): each producer's `spawn_with`
-       body was split into `ArchImageBuilder::build` (parse rxe,
-       `user_layout`/`stack_span`, `spawn_image`, freeze, retain `LiveSpace`,
-       `pre_resume`, `enter` → `BuiltImage`) and `alloc_kernel_stack`
-       (arena/`BoxStack` + guard VA), with the guard-page split+unmap moved
-       into `build` driven by `ImageBuildCtx::kernel_stack_guard`;
-       `spawn_with` now delegates to both then `admit_process`. The three
-       producers were structurally identical up to the final
-       `ctx.admit_process(...)`, so the split was a mechanical extraction.
-       **Remaining in the flip:** `admit_process` and the `ProcessSpawn`
-       trait are **deleted** (the core owns admit now, `§2.14`) and each
-       producer's residual `spawn_with` is dropped once the handler calls the
-       core admit-loading entry directly; `driver_spawn_loader` calls that
-       same entry with an embedded `LoadPlan` (verified driver image +
-       granted caps + node grants) so a driver spawn defers identically.
-    4. **`LOAD_*` wiring.** Child body: on any pre-`become_user` failure,
-       audit the load refusal through `SpawnServices.audit` (attributed to
-       the child) and `exit(load_failure_status(errno))`. Parent side: the
-       kernel reap path (`ProcessWait` / the desktop `CHILD_TOKEN` reap in
-       DESK-2) reads the reaped status; the reserved-status → `stderr`
-       diagnosis via `load_failure_reason` is DESK-2/DESK-3 (userland) — the
-       kernel-side contract (child exits with the reserved status + audit) is
-       DESK-1.
-    5. **Tests (host).** admit returns a PID while the bundle bytes are
-       untouched (an instrumented FS records zero reads until the child
-       runs); missing/tampered/malformed/OOM each admit then exit with the
-       matching reserved `LOAD_*` status + audit event; a valid embedded and
-       a valid bundle load and reach `enter`; credential is resolved
-       synchronously and the child reads under it. Per-arch QEMU verticals:
-       a session-spawned app loads and runs; a bad path admits then exits
-       observably; existing spawn/session verticals still pass.
-    6. The full `§7` whole-project gate green.
+    wait link), then `unpark`s. The child's loading body — capturing the
+    boot-installed `&'static SpawnServices` + `LoadPlan` + seed — runs on the
+    child's own task: `body_wait_app_store` (park via `reschedule_current`) →
+    obtain rxe+requested (prebuilt directly; bundle via `body_load_bundle`
+    under `(uid, effective = credential.ceiling)`) → derive+install the
+    effective set (`ceiling ∩ requested`) replacing the placeholder →
+    `ArchImageBuilder::build` → register frozen aspace + `stack_span` →
+    `become_user` → `enter`. The effective record and frozen space are
+    installed strictly before `become_user`, so no child is dispatchable
+    under the placeholder authority and no unverified byte is mapped.
+  - On any pre-`become_user` failure the child exits with the reserved
+    `load_failure_status(errno)` and the refusal is audited
+    (`emit_load_refusal`, attributed to the child) + `reclaim_process_bookkeeping`
+    (the shared teardown subset a loading child provably holds). The reserved
+    `LOAD_*` band + `load_failure_status` / `load_failure_reason` live in
+    `lib/abi` (`process.rs`) with round-trip tests; the C view is generated
+    (`cargo xtask c-header`, drift-guarded).
+  - The old `ProcessSpawn` / `SpawnCtx` / `admit_process` / `NullProcessSpawn`
+    / `refuse_spawn` / `SpawnCtxBuild` are deleted; the arch producers only
+    `impl ArchImageBuilder` (`alloc_kernel_stack` + `build`). `BootInfo`
+    carries `image_builder: &dyn ArchImageBuilder`. The one shared
+    build+publish of the boot-installed `SpawnServices` bundle is
+    `spawn_services::install_over`, used by `run_phases` and every
+    manually-assembled QEMU test kernel alike (`§2.2`). The task-model
+    primitive (`Yielder::become_user`, `UserUpgrade`,
+    `ThreadControl::pending_upgrade`, the `dispatch_step` install) and the
+    `(uid, effective, task)` bundle-read authority split back it.
+  - Tests: the `kernel/core` host spawn suite drives the deferred body
+    directly — admit returns a PID with no bundle read; effective-set
+    derivation (inherit / spawn-as-user / service-account / system-principal);
+    missing / unavailable / tampered / malformed / OOM → the matching reserved
+    `LOAD_*` status + audit; a valid prebuilt and a valid bundle reach
+    `enter`; `resolve_spawn_args` + `emit_load_refusal` units. Per-arch QEMU
+    verticals (stack_grow ×3, mem_pin, file_map, sandbox, service_ceiling,
+    driver_spawn, driver_unload) exercise the admit-then-load path end to end.
+    Docs: `docs/src/architecture/multitasking.md` documents the asynchronous
+    launch and the reserved statuses.
 - **DESK-2 … DESK-7 — planned.**
 
 ---

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-driver-register-program"
-description = "PLAN.md Stage 4.HW fixture: a minimal, separately-linked pure-Rust EL0 driver-stub program. Spawned by the consuming vertical (tests/integration/driver_spawn_qemu_aarch64) through the production parameterised spawn path (Aarch64ProcessSpawn::spawn_with), it reads the reply endpoint id its spawner placed in arg(1) of the validated startup vector, sends a DriverRegisterReply::registered record over the production ipc_send syscall, and exits 0 — completing the spawned-driver register handshake. Built PIE for the freestanding aarch64 target and converted to an rxe blob by the consuming test's build script."
+description = "PLAN.md Stage 4.HW fixture: a minimal, separately-linked pure-Rust EL0 driver-stub program. Spawned by the consuming vertical (tests/integration/driver_spawn_qemu_aarch64) through the production parameterised spawn path (the Aarch64ProcessSpawn image builder), it reads the reply endpoint id its spawner placed in arg(1) of the validated startup vector, sends a DriverRegisterReply::registered record over the production ipc_send syscall, and exits 0 — completing the spawned-driver register handshake. Built PIE for the freestanding aarch64 target and converted to an rxe blob by the consuming test's build script."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

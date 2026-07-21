@@ -9,8 +9,9 @@
 //! (frame allocator, scheduler, capability table, address-space registry, IRQ
 //! table), and autoloads the stub through the production
 //! `DeviceManager::autoload` + `SpawnDriverLoader` + `InitCtxDriverProcessSpawn`
-//! over `Aarch64ProcessSpawn::spawn_with` — the driver is admitted **Ready**
-//! and its capability record + address-space-registry entry minted.
+//! over the `Aarch64ProcessSpawn` image builder — the driver is admitted as a
+//! parked **loading** task with its placeholder capability record minted (its
+//! address space is built on the driver's own first slice, never run here).
 //!
 //! It then drives the production driver-unload seam,
 //! `InitSpawnCtx::terminate_driver_process` (the mechanism the driver-store
