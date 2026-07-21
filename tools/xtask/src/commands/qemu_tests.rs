@@ -3368,6 +3368,44 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the root-mount->login
+    // vertical above — the first *live-boot* exercise of the x86_64 unlock
+    // policy over the virtio-**PCI** bus. It reuses the exact shared
+    // virtio-PCI bring-up the `netstack_pci_x86_64` vertical uses (PCI walk
+    // to the modern virtio-blk function, `PciTransport` provisioning through
+    // the capability-gated `KernelMmioMapper`, MSI-X routing) and then drives
+    // the *same* shared `root_unlock_login` tail the aarch64 vertical runs
+    // (one definition, generic over the transport, `AGENTS.md` §2.2) over the
+    // same planted whole-disk encrypted-root image (`FsDisk::EncryptedRootDisk`
+    // — MBR + FAT boot carrying `root.unlock` + a passphrase-derived encrypted
+    // ARXFS root): it reads the descriptor off the FAT boot partition, types
+    // the fixture passphrase over a scripted console, mounts the encrypted
+    // root, installs the loaded users database into a `LateUsersDb` cell, and
+    // proves the planted account authenticates through the installed cell
+    // while a wrong password is refused — before the QEMU debug-exit PASS.
+    // Like the aarch64 vertical this drives the unlock *policy* directly (a
+    // scripted console, not the production NULL-console read half), so it is
+    // independent of the A2 kthread-admission console work. The `/System`
+    // bundles the image plants are cross-compiled for x86_64 (`stores_for`);
+    // the root volume uses the format-floor PBKDF2 cost so the per-boot key
+    // derivation stays bounded under QEMU TCG; single CPU and a 60-second
+    // budget match the aarch64 vertical.
+    QemuTest {
+        package: "tairix-test-root-unlock-login-qemu-x86-64",
+        binary: "tairix-test-root-unlock-login-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/PI.md` P11 Chunk B-2 INCREMENT (2): the
     // `tairix-test-root-unlock-admission-qemu-aarch64` vertical boots the
     // *production* aarch64 `tairix-kernel` pipeline (`boot_aarch64::boot`)
@@ -5269,6 +5307,15 @@ struct FsImage {
     total_sectors: u64,
 }
 
+/// Sector count of a produced whole-disk image. A built encrypted-root
+/// image describes its own size through its byte length — the fixture sizes
+/// its `/System` partition to the planted content, so the total is derived
+/// from the produced image, never a fixed constant that a larger arch's
+/// store would outgrow.
+fn image_total_sectors(bytes: &[u8]) -> u64 {
+    u64::try_from(bytes.len() / tairix_test_encrypted_root_image::SECTOR_BYTES).unwrap_or(0)
+}
+
 /// The filesystem volume `t` plants on its virtio-blk backing image, or
 /// `None` for an enrolment with no filesystem disk. The bytes come from a
 /// single-source-of-truth image fixture the kernel-side tail also names, so
@@ -5301,13 +5348,16 @@ fn fs_disk_image(
             })?,
             total_sectors: tairix_test_arxfs_image::TOTAL_SECTORS,
         }),
-        FsDisk::EncryptedRootDisk => Some(FsImage {
-            extension: "encrypted-root.img",
-            bytes: encrypted_root_disk_bytes(t, apps)?,
-            total_sectors: tairix_test_encrypted_root_image::TOTAL_SECTORS,
-        }),
-        FsDisk::AutoloadRootDisk => Some(FsImage {
-            extension: "autoload-root.img",
+        FsDisk::EncryptedRootDisk => {
+            let bytes = encrypted_root_disk_bytes(t, apps)?;
+            let total_sectors = image_total_sectors(&bytes);
+            Some(FsImage {
+                extension: "encrypted-root.img",
+                bytes,
+                total_sectors,
+            })
+        }
+        FsDisk::AutoloadRootDisk => {
             // The whole-disk encrypted-root image with the autoload driver
             // bundles planted in its read-only `/System/Drivers/` store
             // alongside the app/service bundles. The driver bundles are the
@@ -5315,7 +5365,7 @@ fn fs_disk_image(
             // (`autoload_driver_store_files`), each paired with its store
             // path; the generic encrypted-root fixture plants both stores
             // (`AGENTS.md` §2.2 — one whole-disk author, no per-fixture copy).
-            bytes: super::image_apps::with_plant_refs(autoload_drivers, |driver_files| {
+            let bytes = super::image_apps::with_plant_refs(autoload_drivers, |driver_files| {
                 super::image_apps::with_plant_refs(apps, |app_files| {
                     tairix_test_encrypted_root_image::build_image_with_contents(
                         driver_files,
@@ -5329,17 +5379,26 @@ fn fs_disk_image(
                     "test --qemu ({}): build autoload-root image: {e:?}",
                     t.package
                 )
-            })?,
-            total_sectors: tairix_test_encrypted_root_image::TOTAL_SECTORS,
-        }),
+            })?;
+            let total_sectors = image_total_sectors(&bytes);
+            Some(FsImage {
+                extension: "autoload-root.img",
+                bytes,
+                total_sectors,
+            })
+        }
         // The encrypted-root layout with the memsoak-augmented bundle set:
         // the same builder, planting the same store plus the one test-only
         // fixture bundle.
-        FsDisk::MemsoakRootDisk => Some(FsImage {
-            extension: "memsoak-root.img",
-            bytes: encrypted_root_disk_bytes(t, apps_with_memsoak)?,
-            total_sectors: tairix_test_encrypted_root_image::TOTAL_SECTORS,
-        }),
+        FsDisk::MemsoakRootDisk => {
+            let bytes = encrypted_root_disk_bytes(t, apps_with_memsoak)?;
+            let total_sectors = image_total_sectors(&bytes);
+            Some(FsImage {
+                extension: "memsoak-root.img",
+                bytes,
+                total_sectors,
+            })
+        }
     })
 }
 

@@ -149,13 +149,26 @@ host-gate-green first, then boot-confirmed). Done-state:
 - `IoApicController::rearm` now unmasks the line (the riscv64-class
   re-arm fix), so a user-space INTx `irq_wait` re-arm re-enables its pin.
 
-Remaining for A2 (this increment did **not** land): the A1 image builder,
-the live verticals (`root_unlock_login_qemu_x86_64`,
-`root_unlock_admission_qemu_x86_64`, `users_db_qemu_x86_64` as thin bins
-over the shared scenarios), and — once A1 lands for both remaining
-disk-booting ports — deleting `SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s
-(all but PID 1 `init`), `spawn_paths.rs`, and `program_manifests.rs`
-(§2.14).
+The first live boot vertical has now landed: **`root_unlock_login_qemu_x86_64`
+passes a real guest boot** — the first live-boot exercise of the x86_64
+root-mount->login *policy* over the virtio-**PCI** bus. It is a thin bin over
+the shared virtio-PCI bring-up (`run_virtio_pci_scenario`) and the shared
+`root_unlock_login` scenario tail — the same tail the aarch64 vertical runs,
+hoisted into `tests/integration/virtio_qemu_support` and made generic over the
+transport so both ports drive one definition (§2.2). Authoring it surfaced and
+fixed a fixture scaling defect: the encrypted-root fixture's `/System` `ARXFS`
+partition was a fixed 32 MiB that the (larger) x86_64 bundle set overflowed;
+`tairix_test_encrypted_root_image` now sizes that partition from the planted
+content (`system_sectors_for`, never below the 32 MiB floor) and derives the
+root LBA / total from the produced image, so one fixture serves every arch
+(§24.1) and `qemu_tests.rs` reads each image's true sector count.
+
+Remaining for A2: the A1 image builder, the remaining live verticals
+(`root_unlock_admission_qemu_x86_64` — the production kthread-admission path —
+and `users_db_qemu_x86_64`, as thin bins over the shared scenarios), and —
+once A1 lands for both remaining disk-booting ports — deleting
+`SPAWN_PROGRAMS`, the `*_rxe.rs` `include!`s (all but PID 1 `init`),
+`spawn_paths.rs`, and `program_manifests.rs` (§2.14).
 
 ### A3 — Interrupt-driven console + login/session supervision (`planned`)
 
@@ -230,7 +243,10 @@ because its blocker is not an aarch64-parity item.
 ## 4. Status
 
 - **A2 `in progress`**: the production boot composition + `root_unlock`
-  admission is landed and host-gate-green (see A2 above); its A1 image
-  builder, live QEMU verticals, and the registry deletion remain.
+  admission is landed and host-gate-green, and the first live-boot vertical
+  (`root_unlock_login_qemu_x86_64`) now passes a real guest boot (see A2
+  above); its A1 image builder, the remaining live QEMU verticals
+  (`root_unlock_admission_qemu_x86_64`, `users_db_qemu_x86_64`), and the
+  registry deletion remain.
 - **A1, A3, A4, A5, A6 `planned`**; **A7 `blocked`** on the Stage 6
   user/kernel page-table boundary.

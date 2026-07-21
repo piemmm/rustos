@@ -3129,11 +3129,18 @@ dependencies = [
  "tairix-abi",
  "tairix-drv-storage-virtio-blk",
  "tairix-itest-harness",
- "tairix-kernel",
- "tairix-kernel-core",
- "tairix-test-encrypted-root-image",
  "tairix-test-virtio-qemu-support",
- "tairix-users",
+]
+
+[[package]]
+name = "tairix-test-root-unlock-login-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "tairix-abi",
+ "tairix-drv-storage-virtio-blk",
+ "tairix-itest-harness",
+ "tairix-test-virtio-qemu-support",
 ]
 
 [[package]]
@@ -3880,6 +3887,7 @@ dependencies = [
  "tairix-netstack",
  "tairix-pci",
  "tairix-test-arxfs-image",
+ "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
  "tairix-test-netstack-wire",
  "tairix-test-riscv64-boot",
