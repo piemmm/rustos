@@ -119,9 +119,11 @@ impl CallerIdentity for MockIdentity {
 struct RecordingHost {
     opened: Vec<(u64, DisplayMode, String)>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
+    resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<u64>,
     refuse_open: bool,
+    refuse_resize: Option<Errno>,
     refuse_pick: Option<Errno>,
 }
 
@@ -147,6 +149,14 @@ impl WindowHost for RecordingHost {
         damage: DamageRect,
     ) -> Result<(), Errno> {
         self.presented.push((window_id, frame.to_vec(), damage));
+        Ok(())
+    }
+
+    fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_resize {
+            return Err(err);
+        }
+        self.resized.push((window_id, *surface));
         Ok(())
     }
 
@@ -298,6 +308,83 @@ fn create_present_close_round_trips_through_the_loopback() {
     }
     // The window is gone: a second close finds nothing.
     assert_eq!(client.close(window), Err(Errno::NotFound));
+}
+
+#[test]
+fn resize_remaps_the_window_and_presents_at_the_new_size() {
+    // A larger surface the window is resized onto.
+    const BIG: DisplayMode = DisplayMode {
+        width_px: 8,
+        height_px: 3,
+        stride_bytes: 32,
+        format: DisplayFormat::Bgra8888,
+    };
+    const BIG_FRAME_LEN: usize = 96;
+
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (20, 2 * BIG_FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "Files").expect("create succeeds");
+
+    // Re-map the window onto the larger region: the host is told the new
+    // geometry, the id and count are unchanged.
+    client.resize(window, 20, 2, &BIG).expect("resize succeeds");
+    {
+        let inner = loopback.borrow();
+        assert_eq!(inner.server.window_count(), 1);
+        assert_eq!(inner.host.resized, alloc::vec![(window, BIG)]);
+    }
+
+    // A present now shapes its frame against the new surface: full damage
+    // of the *larger* surface is accepted (it would have been out of
+    // bounds against the old one).
+    let damage = DamageRect::full(&BIG);
+    client
+        .present(window, 1, damage)
+        .expect("present at new size");
+    {
+        let inner = loopback.borrow();
+        let (id, frame, seen) = inner.host.presented.last().expect("a present");
+        assert_eq!(*id, window);
+        assert_eq!(*seen, damage);
+        assert_eq!(frame.len(), BIG_FRAME_LEN);
+    }
+}
+
+#[test]
+fn resize_is_refused_fail_closed() {
+    const BIG: DisplayMode = DisplayMode {
+        width_px: 8,
+        height_px: 3,
+        stride_bytes: 32,
+        format: DisplayFormat::Bgra8888,
+    };
+
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (20, 2 * 96)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "Files").expect("create succeeds");
+
+    // A window the caller does not own answers like one that never
+    // existed, and the host is never told.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.resize(window, 20, 2, &BIG), Err(Errno::NotFound));
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // A host that refuses the resize leaves the old geometry intact: the
+    // window still presents at its original size, not the (refused) new one.
+    loopback.borrow_mut().host.refuse_resize = Some(Errno::WouldBlock);
+    assert_eq!(client.resize(window, 20, 2, &BIG), Err(Errno::WouldBlock));
+    loopback.borrow_mut().host.refuse_resize = None;
+    client
+        .present(window, 0, full_damage())
+        .expect("still presents at the original size");
+    // Full damage of the larger surface is still out of bounds — the
+    // window was never actually resized.
+    assert_eq!(
+        client.present(window, 0, DamageRect::full(&BIG)),
+        Err(Errno::LengthOutOfRange)
+    );
 }
 
 #[test]

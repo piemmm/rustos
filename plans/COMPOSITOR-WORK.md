@@ -53,11 +53,19 @@ to the outer frame.
   split is exactly the deferral the charter forbids. If a stage genuinely
   depends on prerequisite work, that prerequisite is part of the same change or
   the conflict is raised with the User (§15.7).
-- **Wire it once, in the WM; touch no app crate.** Because decorations are
-  server-side, every app (Files, Terminal, Viewer, and any future Switchboard)
-  gets decorated by the WM composing the furniture around each window. Adding a
-  per-app decoration path, or letting an app draw its own title bar, is a
-  design violation (`plans/GUI-CONTROLS-DESIGN.md` §1, §424).
+- **Wire decoration *rendering and input* once, in the WM; no app draws its own
+  chrome.** Because decorations are server-side, every app (Files, Terminal,
+  Viewer, and any future Switchboard) gets decorated by the WM composing the
+  furniture around each window. Adding a per-app decoration path, or letting an
+  app draw its own title bar, is a design violation
+  (`plans/GUI-CONTROLS-DESIGN.md` §1, §424). This is a rule about *chrome*, not
+  about the window channel: an app crate **may** be changed to *react* to a
+  typed lifecycle event the WM delivers over the existing window path (a close
+  request it already honours, a minimize notice, a new client size on a
+  resize/maximize) — that is cooperative lifecycle handling, not a decoration
+  path. Such app-crate changes are permitted provided they are first-class,
+  correct, and well-reasoned; the ban is only on an app painting or
+  intercepting window-manager furniture.
 - **No second visual recipe or constant (§2.2).** Frame/title metrics, palette
   roles, and motion come from `lib/theme`; drawing goes through the one
   `lib/raster` path already used for rounded corners; the rounded-corner math
@@ -79,7 +87,7 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stages A–C are **done**; Stages D–E are **planned** (not started).
+**Status:** Stages A–D are **done**; Stage E is **planned** (not started).
 Per the User's direction, one full stage lands per change.
 
 Each stage lands complete — its rendering for **both** dark and light themes,
@@ -184,28 +192,56 @@ Stages A–B — there is no behavioural change in the live session; wiring the
 typed outcomes to the window lifecycle over the channel is Stage D, and turning
 decorations on is Stage E.
 
-### Stage D — Typed control actions → window lifecycle
+### Stage D — Typed control actions → window lifecycle — DONE
 
-- Map `WindowControlAction` to lifecycle:
-  - **Close** → deliver `WindowEvent::CloseRequested { window_id }` (already in
-    the ABI) to the owning client over the existing window path; the client
-    tears down cooperatively (§1039 — no new syscall). The WM validates the
-    window is live and owned by the addressed client (§955).
-  - **Minimize** → the WM minimizes (hide + taskbar `TaskVisibility`), delivered
-    as a typed `WindowEvent` so the client can react; add the ABI event variant
-    if one is not already present, under the ABI discipline (versioned/hashed —
-    the ABI is unfrozen pre-release, §2.13/§9).
-  - **PutToBack** → WM restacks (z-order), a WM-local action.
-  - **SizeToggle** → WM size-state transition (normal ↔ maximized), delivered as
-    a typed resize/size-state `WindowEvent` so the client re-lays-out.
-- Force-quit is **not** a title-bar control — it remains the separate
+Every title-bar command control now maps to a real window-lifecycle action,
+wired through the existing window path with no new privileged syscall. What it
+guarantees:
+
+- **One shared mapping.** `tairix_desktop_session::window_control_event` is the
+  single place the four `WindowControlKind`s become lifecycle, so the live serve
+  loop (`run.rs`) and the host tests drive the same rule:
+  - **Close** → returns `WindowEvent::CloseRequested { window_id }`; the WM never
+    destroys the window behind the app's back — the app tears down cooperatively.
+    Ownership/liveness is enforced by the engine's `deliver_event`, which routes
+    only to the window's own registered endpoint (its attested owner).
+  - **Minimize** → `DesktopShell::minimize_window` hides the window and marks its
+    taskbar entry minimised (`TaskList::minimise` / `TaskBridge::minimize`) and
+    drops focus; returns `WindowEvent::Minimized { window_id }` so the app may
+    pause non-essential work.
+  - **PutToBack** → `Compositor::lower` restacks to the bottom of the z-order — a
+    window-manager-local action with no app-ward event.
+  - **SizeToggle** → `Compositor::toggle_window_size` maximizes to the session
+    **work area** (screen minus the taskbar band, `DesktopShell::work_area`) or
+    restores the pre-maximize geometry, flips the frame furniture size state, and
+    returns `WindowEvent::Resized { window_id, width_px, height_px }` carrying the
+    new client size. A window that cannot maximize (undecorated or non-resizable)
+    yields nothing.
+- **The resize protocol is complete.** The ABI gained `WindowEvent::Minimized`,
+  `WindowEvent::Resized`, and `WindowRequest::Resize` (a resizable app re-maps its
+  frame region at the new size, keeping the window id/owner/endpoint/taskbar
+  entry); the engine's `WindowHost::window_resized` reallocates the compositor's
+  content surface (`Compositor::resize_window_client`). An interactive
+  resize-grab (`ResizeEnded`) forwards the settled client size to the app the
+  same way, once, at the end of the drag.
+- **Force-quit** is **not** a title-bar control — it remains the separate
   capability-checked recovery path.
-- Session glue (`userland/gui/session`): `SessionWindows`/`WindowServer` present
-  decorated windows exactly as today; confirm minimize/restack/size-toggle flow
-  through the session's present path.
-- Tests: Close delivers `CloseRequested` only to the owning client; a control
-  action targeting a foreign/dead window is rejected; minimize/put-to-back/
-  size-toggle change WM state and emit the right typed events.
+- **Resizability is per-window, and decorations are still off in the running
+  desktop.** The mechanism (grabber, size-toggle, resize protocol) is complete
+  and tested, but no served window opts into a frame yet, so — as with Stages
+  A–C — there is no behavioural change in the live session. Turning decorations
+  on (and deciding which apps present as resizable, re-rendering on `Resized`) is
+  Stage E. The default apps present fixed-size windows today and treat
+  `Minimized`/`Resized` as honest no-ops (a fixed-size window the WM decorates
+  non-resizable never receives a size change); a future resizable app handles
+  `Resized` by re-mapping its region via `WindowClient::resize`.
+- **Tests** cover: Close yields `CloseRequested` for the owning window and
+  nothing for a non-served window; a resize/close/present against a foreign or
+  dead window is refused fail-closed (`lib/window`); minimize hides the window +
+  marks the taskbar entry + emits `Minimized`; put-to-back restacks with no
+  event; size-toggle maximizes to the work area then restores and emits
+  `Resized`; and the engine `Resize` re-maps the region and the host reallocates
+  the surface.
 
 ### Stage E — Complete, documented, gated
 
@@ -226,7 +262,10 @@ decorations on is Stage E.
 
 - Files — and every other windowed app — is drawn with a title bar
   (title + Close/Minimize/PutToBack/SizeToggle), an active/inactive frame rim,
-  and a resize grabber, **without any change to an app crate**.
+  and a resize grabber, **without any app drawing its own chrome**. An app crate
+  may be changed only to *react* to the WM's typed lifecycle events over the
+  existing window path (a minimize notice, a new client size on resize/maximize)
+  — never to paint or intercept furniture.
 - All furniture is rendered and hit-tested by the WM via `lib/controls::window`;
   the client can neither draw over nor receive input from it.
 - Close/Minimize/PutToBack/SizeToggle work cooperatively over the existing

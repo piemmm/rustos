@@ -19,8 +19,9 @@
 use alloc::collections::BTreeMap;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::Errno;
-use tairix_wm::{Color, Compositor, Point, Surface, WindowId};
+use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
 
 use crate::picker::PickerSlot;
 use crate::shell::DesktopShell;
@@ -114,6 +115,63 @@ pub fn cascade_origin_for(opened: u64) -> Point {
     )
 }
 
+/// Apply a title-bar window-control command to `wm`'s lifecycle and return
+/// the app-ward [`WindowEvent`] the session must deliver to the owning
+/// client (or `None` when the command is purely window-manager-local, or
+/// `wm` is not a served window, or the command does not apply).
+///
+/// This is the one place the four [`WindowControlKind`]s map to lifecycle,
+/// so the live serve loop and the host tests drive the same rule:
+///
+/// * [`Close`](WindowControlKind::Close) never destroys the window behind
+///   the app's back — it returns a [`WindowEvent::CloseRequested`] so the
+///   app tears down cooperatively (it decides when, having saved).
+/// * [`Minimize`](WindowControlKind::Minimize) hides the window and marks
+///   its taskbar entry minimised (window-manager-side), and returns a
+///   [`WindowEvent::Minimized`] so the app may pause non-essential work.
+/// * [`PutToBack`](WindowControlKind::PutToBack) restacks the window to the
+///   bottom — a window-manager-local action with no app-ward event.
+/// * [`SizeToggle`](WindowControlKind::SizeToggle) maximizes or restores
+///   the window against `work_area` and returns a [`WindowEvent::Resized`]
+///   carrying the new client size so the app re-lays-out; it yields `None`
+///   (nothing changes) for a window that cannot maximize.
+///
+/// The caller delivers the returned event over the existing window path
+/// (owner-validated by the engine); no new syscall and no ambient
+/// authority are involved.
+#[must_use]
+pub fn window_control_event(
+    control: WindowControlKind,
+    wm: WindowId,
+    work_area: Rect,
+    shell: &mut DesktopShell,
+    compositor: &mut Compositor,
+    windows: &SessionWindows,
+) -> Option<WindowEvent> {
+    // Only a served window has a window-channel id and an owning app; a
+    // press on any other decorated surface has nothing to route.
+    let window_id = windows.ipc_id(wm)?;
+    match control {
+        WindowControlKind::Close => Some(WindowEvent::CloseRequested { window_id }),
+        WindowControlKind::Minimize => {
+            shell.minimize_window(compositor, wm);
+            Some(WindowEvent::Minimized { window_id })
+        }
+        WindowControlKind::PutToBack => {
+            compositor.lower(wm);
+            None
+        }
+        WindowControlKind::SizeToggle => {
+            let (_, client) = compositor.toggle_window_size(wm, work_area)?;
+            Some(WindowEvent::Resized {
+                window_id,
+                width_px: client.width,
+                height_px: client.height,
+            })
+        }
+    }
+}
+
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,
 /// the compositor, the session's window table, and the trusted picker
 /// slot a validated `PickFile` opens.
@@ -188,6 +246,27 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             return Err(Errno::NotFound);
         };
         result
+    }
+
+    fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno> {
+        // The engine validated the new geometry and re-mapped the frame
+        // region; bring the compositor's own content surface to the new
+        // client size so the next present shapes into it. The window id →
+        // compositor id mapping is unchanged by a resize.
+        let Some(record) = self.windows.records.get(&window_id) else {
+            return Err(Errno::NotFound);
+        };
+        if self
+            .compositor
+            .resize_window_client(record.wm, surface.width_px, surface.height_px)
+        {
+            Ok(())
+        } else {
+            // A surface too large to allocate, or a window the compositor no
+            // longer knows: refuse the resize (fail closed), leaving the old
+            // geometry the engine will keep in step.
+            Err(Errno::LengthOutOfRange)
+        }
     }
 
     fn window_closed(&mut self, window_id: u64) {
@@ -474,6 +553,232 @@ mod tests {
         assert!(host.compositor.window(wm).is_none());
         host.window_closed(1);
         assert!(host.windows.is_empty());
+    }
+
+    /// Open one served window and return its window-channel id → compositor id.
+    fn open_one(host: &mut ShellWindowHost<'_>, window_id: u64) -> WindowId {
+        host.window_opened(window_id, &mode(120, 80, DisplayFormat::Rgba8888), "app")
+            .expect("opens");
+        host.windows.records.get(&window_id).expect("live").wm
+    }
+
+    /// A resizable, active decoration furniture for a maximizable test window.
+    fn resizable_frame() -> tairix_wm::WindowFrame {
+        tairix_wm::WindowFrame::new(tairix_wm::WindowFurnitureState {
+            activation: tairix_wm::WindowActivationState::Active,
+            size: tairix_wm::WindowSizeState::Restored,
+            movable: true,
+            resizable: true,
+        })
+    }
+
+    #[test]
+    fn close_control_yields_a_close_request_for_the_owning_window() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let (wm, stray) = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+            };
+            let wm = open_one(&mut host, 7);
+            // A compositor window the session does not track (e.g. the taskbar
+            // surface): a control press on it routes nowhere.
+            let stray = host
+                .compositor
+                .add_window(Point::new(0, 0), Surface::new(4, 4).expect("surface"));
+            (wm, stray)
+        };
+        let work_area = shell.work_area(&compositor);
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::Close,
+                wm,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            Some(WindowEvent::CloseRequested { window_id: 7 })
+        );
+        // A non-served window yields nothing to route.
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::Close,
+                stray,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn minimize_control_hides_the_window_and_notifies_the_app() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+            };
+            open_one(&mut host, 7)
+        };
+        let work_area = shell.work_area(&compositor);
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::Minimize,
+                wm,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            Some(WindowEvent::Minimized { window_id: 7 })
+        );
+        // The window is hidden and its taskbar entry marked minimised.
+        assert!(!compositor.window(wm).expect("live").is_visible());
+        let task = shell.tasks().task_for(wm).expect("tracked task");
+        assert!(shell.session().taskbar().tasks().is_minimised(task));
+    }
+
+    #[test]
+    fn put_to_back_restacks_without_an_app_event() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let (front, _back) = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+            };
+            let back = open_one(&mut host, 7);
+            let front = open_one(&mut host, 9);
+            (front, back)
+        };
+        // The two cascaded windows overlap; the later one is on top.
+        let overlap = Point::new(90, 88);
+        assert_eq!(compositor.window_at(overlap), Some(front));
+        let work_area = shell.work_area(&compositor);
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::PutToBack,
+                front,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            None,
+            "put-to-back is window-manager-local: no app-ward event"
+        );
+        assert_ne!(
+            compositor.window_at(overlap),
+            Some(front),
+            "the window was sent to the back"
+        );
+    }
+
+    #[test]
+    fn size_toggle_maximizes_then_restores_and_reports_the_new_client_size() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+            };
+            open_one(&mut host, 7)
+        };
+        assert!(compositor.set_window_frame(wm, resizable_frame()));
+        let work_area = shell.work_area(&compositor);
+
+        // Maximize: the reported client size matches the compositor's, the
+        // window records the maximized state, and it never covers the taskbar
+        // (its outer bounds fill the work area, not the whole screen).
+        let event = window_control_event(
+            WindowControlKind::SizeToggle,
+            wm,
+            work_area,
+            &mut shell,
+            &mut compositor,
+            &windows,
+        );
+        let client = compositor.window_client_rect(wm).expect("client");
+        assert_eq!(
+            event,
+            Some(WindowEvent::Resized {
+                window_id: 7,
+                width_px: client.width,
+                height_px: client.height,
+            })
+        );
+        assert_eq!(
+            compositor.window(wm).expect("live").size_state(),
+            tairix_wm::WindowSizeState::Maximized
+        );
+        assert_eq!(compositor.window(wm).expect("live").bounds(), work_area);
+        assert!(work_area.height < compositor.screen_rect().height);
+
+        // Restore: a second toggle reports the restored client size.
+        let event = window_control_event(
+            WindowControlKind::SizeToggle,
+            wm,
+            work_area,
+            &mut shell,
+            &mut compositor,
+            &windows,
+        );
+        let restored = compositor.window_client_rect(wm).expect("client");
+        assert_eq!(
+            event,
+            Some(WindowEvent::Resized {
+                window_id: 7,
+                width_px: restored.width,
+                height_px: restored.height,
+            })
+        );
+        assert_eq!(
+            compositor.window(wm).expect("live").size_state(),
+            tairix_wm::WindowSizeState::Restored
+        );
+    }
+
+    #[test]
+    fn window_resized_reallocates_the_compositor_surface() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+        };
+        let wm = open_one(&mut host, 7);
+        // A resize re-maps the compositor's content surface to the new size.
+        host.window_resized(7, &mode(200, 150, DisplayFormat::Rgba8888))
+            .expect("resizes");
+        let surface = host.compositor.window(wm).expect("live").surface();
+        assert_eq!((surface.width(), surface.height()), (200, 150));
+        // An unknown window is refused.
+        assert_eq!(
+            host.window_resized(99, &mode(10, 10, DisplayFormat::Rgba8888)),
+            Err(Errno::NotFound)
+        );
     }
 
     /// The bridge forwards a validated pick request to the slot and

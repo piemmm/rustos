@@ -161,4 +161,4 @@ pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::{DesktopSession, SessionEvent};
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use tasks::TaskBridge;
-pub use windows::{SessionWindows, ShellWindowHost};
+pub use windows::{window_control_event, SessionWindows, ShellWindowHost};

@@ -325,6 +325,50 @@ impl Compositor {
         true
     }
 
+    /// Send a window to the bottom of the z-order (put-to-back), keeping it
+    /// visible; its bounds are marked dirty so whatever it was covering
+    /// recomposites. Returns `false` for an unknown id.
+    pub fn lower(&mut self, id: WindowId) -> bool {
+        let Some(index) = self.windows.iter().position(|w| w.id() == id) else {
+            return false;
+        };
+        if index == 0 {
+            // Already at the back: nothing to restack, nothing to repaint.
+            return true;
+        }
+        let window = self.windows.remove(index);
+        self.damage.add(window.bounds());
+        self.windows.insert(0, window);
+        true
+    }
+
+    /// Toggle the decorated, resizable window named by `id` between restored
+    /// and maximized, sizing it to `work_area` on maximize and back to its
+    /// pre-maximize geometry on restore. Returns the new size state and the
+    /// resulting client rectangle (so the session can tell the app its new
+    /// content size), or `None` for an unknown, undecorated, or non-resizable
+    /// window, or a resize that failed closed. The union of the old and new
+    /// outer bounds is marked dirty.
+    pub fn toggle_window_size(
+        &mut self,
+        id: WindowId,
+        work_area: Rect,
+    ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
+        let scale = self.scale;
+        let (result, before, after) = {
+            let theme = &self.theme;
+            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+            let before = window.bounds();
+            let result = window.toggle_size(work_area, scale, theme);
+            (result, before, window.bounds())
+        };
+        if result.is_some() {
+            self.damage.add(before);
+            self.damage.add(after);
+        }
+        result
+    }
+
     /// Remove a window; its last bounds are marked dirty.
     pub fn remove(&mut self, id: WindowId) -> bool {
         let Some(index) = self.windows.iter().position(|w| w.id() == id) else {
@@ -561,6 +605,35 @@ impl Compositor {
             };
             let before = window.bounds();
             let changed = window.resize_to_outer(new_outer, scale, theme);
+            (changed, before, window.bounds())
+        };
+        if changed {
+            self.damage.add(before);
+            self.damage.add(after);
+        }
+        changed
+    }
+
+    /// Reallocate the content surface of the window named by `id` to the new
+    /// client size `client_w` × `client_h`, keeping its origin, preserving the
+    /// existing pixels where they still fit, and repainting the decoration at
+    /// the new size. Returns `false` for an unknown window or an empty/failed
+    /// allocation (fail closed). The union of the old and new outer bounds is
+    /// marked dirty.
+    ///
+    /// This is the window-channel `Resize` path: the app hands the session a
+    /// new *client* content size, so the compositor sizes the content directly
+    /// (unlike [`resize_window`](Self::resize_window), which sizes from an
+    /// outer rectangle and moves the origin for an interactive edge drag).
+    pub fn resize_window_client(&mut self, id: WindowId, client_w: u32, client_h: u32) -> bool {
+        let scale = self.scale;
+        let (changed, before, after) = {
+            let theme = &self.theme;
+            let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+                return false;
+            };
+            let before = window.bounds();
+            let changed = window.resize_client(client_w, client_h, scale, theme);
             (changed, before, window.bounds())
         };
         if changed {

@@ -79,11 +79,11 @@ mod program {
     use tairix_browse::{DirectorySource, VfsDirectorySource};
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        parse, CliError, Command, ConcludedPick, DesktopShell, DeviceInputSource,
-        KeyboardInputSource, PickConclusion, SeatEventReader, SeatInputChannel, SessionPicker,
-        SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL, FILES_LAUNCHER,
-        FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH, USAGE, VIEWER_LABEL,
-        VIEWER_LAUNCHER, VIEWER_RUN_PATH,
+        parse, window_control_event, CliError, Command, ConcludedPick, DesktopShell,
+        DeviceInputSource, KeyboardInputSource, PickConclusion, SeatEventReader, SeatInputChannel,
+        SessionPicker, SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL,
+        FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH,
+        USAGE, VIEWER_LABEL, VIEWER_LAUNCHER, VIEWER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -800,26 +800,55 @@ mod program {
                         }
                     }
                 }
+                // A title-bar command control was activated: map it to the
+                // window's lifecycle in the one shared place
+                // (`window_control_event`) — Close/Minimize/PutToBack/
+                // SizeToggle — and deliver the app-ward event it yields
+                // (Close→CloseRequested, Minimize→Minimized, SizeToggle→
+                // Resized; PutToBack is window-manager-local and yields none)
+                // over the existing window path.
+                InputResponse::WindowControl { window, control } => {
+                    let work_area = shell.work_area(compositor);
+                    if let Some(event) =
+                        window_control_event(control, window, work_area, shell, compositor, windows)
+                    {
+                        deliver(server, sink, shell, compositor, windows, picker, &event);
+                    }
+                }
+                // An interactive edge resize-grab settled: tell the owning app
+                // its new client content size once, at the end of the drag, so
+                // it re-lays-out and re-maps its frame region. The per-frame
+                // `Resized` ticks during the drag are the window manager's own
+                // live geometry and are not forwarded (the app is told once,
+                // here).
+                InputResponse::ResizeEnded { window } => {
+                    if let (Some(window_id), Some(client)) = (
+                        windows.ipc_id(window),
+                        compositor.window_client_rect(window),
+                    ) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &WindowEvent::Resized {
+                                window_id,
+                                width_px: client.width,
+                                height_px: client.height,
+                            },
+                        );
+                    }
+                }
                 // Window-manager-local outcomes the session does not forward
-                // app-ward. A move-grab and a resize-grab have already updated
-                // the compositor's own geometry; a scrollbar interaction has
-                // updated the window manager's scroll model. The remaining
-                // decoration outcomes — a command-control activation
-                // (`WindowControl`) and a resize (`Resized`/`ResizeEnded`) —
-                // arise only once the session decorates its served windows,
-                // which it does not do yet (turning decorations on, and the
-                // window-channel messages that forward a close request, a
-                // size-state change, and a new client size so the client
-                // re-renders, are a later stage). They are matched explicitly
-                // here for completeness rather than left to a wildcard, so the
-                // day decorations are enabled the compiler points at this arm.
+                // app-ward: a scrollbar press, a move-grab, and the per-frame
+                // resize ticks (the app is told once, at `ResizeEnded`, above).
                 InputResponse::Scrolled { .. }
                 | InputResponse::FurniturePressed { .. }
                 | InputResponse::Moved { .. }
                 | InputResponse::MoveEnded { .. }
-                | InputResponse::WindowControl { .. }
                 | InputResponse::Resized { .. }
-                | InputResponse::ResizeEnded { .. }
                 | InputResponse::Ignored => {}
             },
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {

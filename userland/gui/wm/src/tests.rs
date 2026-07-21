@@ -2101,3 +2101,89 @@ fn the_resize_corner_never_overlaps_a_scrollbar_thumb() {
         "the resize corner never intrudes into the horizontal scrollbar track"
     );
 }
+
+// ---- server-side window decorations (Stage D lifecycle) --------------
+
+#[test]
+fn put_to_back_sends_a_window_to_the_bottom_of_the_stack() {
+    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let back = c.add_window(Point::new(0, 0), opaque(120, 120, RED));
+    let front = c.add_window(Point::new(60, 60), opaque(120, 120, RED));
+    // The overlap belongs to the most-recently-added (topmost) window.
+    let overlap = Point::new(80, 80);
+    assert_eq!(c.window_at(overlap), Some(front));
+
+    // Lowering the front window puts it under the other one.
+    assert!(c.lower(front));
+    assert_eq!(c.window_at(overlap), Some(back));
+
+    // Lowering the now-bottom window again is a no-op that still succeeds
+    // (it stays at the back); an unknown id is refused.
+    assert!(c.lower(front));
+    assert_eq!(c.window_at(overlap), Some(back));
+    assert!(!c.lower(WindowId(9_999)));
+}
+
+#[test]
+fn maximize_and_restore_toggles_size_state_and_geometry() {
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    let restored_bounds = c.window(id).unwrap().bounds();
+    assert_eq!(
+        c.window(id).unwrap().size_state(),
+        WindowSizeState::Restored
+    );
+
+    // Maximize: the outer bounds fill the work area, the size state flips, and
+    // the frame's furniture reports the maximized state (so the control now
+    // offers Restore). The returned client is the inset content rectangle.
+    let (state, client) = c.toggle_window_size(id, work_area).expect("maximize");
+    assert_eq!(state, WindowSizeState::Maximized);
+    assert_eq!(c.window(id).unwrap().bounds(), work_area);
+    assert_eq!(
+        c.window(id).unwrap().size_state(),
+        WindowSizeState::Maximized
+    );
+    assert_eq!(
+        c.window_frame(id).unwrap().furniture().size,
+        WindowSizeState::Maximized
+    );
+    assert_eq!(c.window_client_rect(id), Some(client));
+    assert!(client.width < work_area.width && client.height < work_area.height);
+
+    // Restore: back to exactly the pre-maximize geometry and state.
+    let (state, _) = c.toggle_window_size(id, work_area).expect("restore");
+    assert_eq!(state, WindowSizeState::Restored);
+    assert_eq!(c.window(id).unwrap().bounds(), restored_bounds);
+    assert_eq!(
+        c.window_frame(id).unwrap().furniture().size,
+        WindowSizeState::Restored
+    );
+}
+
+#[test]
+fn size_toggle_is_refused_for_windows_that_cannot_maximize() {
+    let mut c = Compositor::new(mode(320, 240), BLUE).expect("compositor");
+    let work_area = c.screen_rect();
+
+    // An unknown window.
+    assert!(c.toggle_window_size(WindowId(9_999), work_area).is_none());
+
+    // An undecorated window has no frame to size-toggle.
+    let plain = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c.toggle_window_size(plain, work_area).is_none());
+
+    // A decorated but non-resizable window declines: maximize is disabled, so
+    // its geometry never changes.
+    let fixed = c.add_window(Point::new(10, 10), opaque(120, 90, RED));
+    let furniture = WindowFurnitureState {
+        activation: WindowActivationState::Active,
+        size: WindowSizeState::Restored,
+        movable: true,
+        resizable: false,
+    };
+    assert!(c.set_window_frame(fixed, WindowFrame::new(furniture)));
+    let before = c.window(fixed).unwrap().bounds();
+    assert!(c.toggle_window_size(fixed, work_area).is_none());
+    assert_eq!(c.window(fixed).unwrap().bounds(), before);
+}

@@ -139,6 +139,43 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&request)
     }
 
+    /// Re-map window `window_id` onto a fresh frame region: `frame_count`
+    /// frames shaped as `surface`, laid out back-to-back in the region
+    /// granted as `shm_handle`, keeping the same window id, title, and
+    /// event endpoint.
+    ///
+    /// A resizable app calls this after the window manager tells it a new
+    /// client size ([`WindowEvent::Resized`]): it renders into the new
+    /// region and re-maps the existing window onto it, so the resize keeps
+    /// the window identity rather than opening a new window.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal (e.g. [`Errno::NotFound`] for a window
+    /// the caller does not own), a transport failure, or a corrupt status
+    /// frame.
+    ///
+    /// [`WindowEvent::Resized`]: tairix_abi::window_ipc::WindowEvent::Resized
+    pub fn resize(
+        &mut self,
+        window_id: u64,
+        shm_handle: u64,
+        frame_count: u32,
+        surface: &DisplayMode,
+    ) -> Result<(), Errno> {
+        let request = WindowRequest::Resize {
+            window_id,
+            shm_handle,
+            frame_count,
+            width_px: surface.width_px,
+            height_px: surface.height_px,
+            stride_bytes: surface.stride_bytes,
+            format: surface.format,
+        }
+        .to_le_bytes();
+        self.status_call(&request)
+    }
+
     /// Ask the session to run its trusted file picker for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6).
     ///

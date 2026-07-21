@@ -187,6 +187,30 @@ fn task_activate_unknown_is_fail_closed() {
 }
 
 #[test]
+fn task_minimise_is_unconditional_and_drops_focus() {
+    let mut tasks = TaskList::new();
+    tasks.add(TaskId(1), "Editor");
+    tasks.add(TaskId(2), "Browser");
+    tasks.activate(TaskId(1));
+    assert_eq!(tasks.focused(), Some(TaskId(1)));
+
+    // Minimising the focused task hides it and drops the highlight — unlike
+    // `activate`, it does not toggle.
+    assert!(tasks.minimise(TaskId(1)));
+    assert!(tasks.is_minimised(TaskId(1)));
+    assert_eq!(tasks.focused(), None);
+    // Minimising again leaves it minimised.
+    assert!(tasks.minimise(TaskId(1)));
+    assert!(tasks.is_minimised(TaskId(1)));
+    // A window that never held focus minimises without touching the highlight.
+    tasks.set_focused(Some(TaskId(2)));
+    assert!(tasks.minimise(TaskId(1)));
+    assert_eq!(tasks.focused(), Some(TaskId(2)));
+    // Unknown ids fail closed.
+    assert!(!tasks.minimise(TaskId(99)));
+}
+
+#[test]
 fn task_remove_clears_focus() {
     let mut tasks = TaskList::new();
     tasks.add(TaskId(1), "Editor");

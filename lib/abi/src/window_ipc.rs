@@ -190,6 +190,33 @@ pub enum WindowRequest {
         /// The window being closed.
         window_id: u64,
     },
+    /// Re-map window `window_id`'s frame region at a new geometry, keeping
+    /// the same window id, owner, event endpoint, and taskbar entry.
+    ///
+    /// A resizable app issues this after the window manager tells it a new
+    /// client size (`WindowEvent::Resized`): it allocates a fresh frame
+    /// region of the new geometry, grants it to the session, and re-maps
+    /// the *existing* window onto it, so a resize/maximize keeps the window
+    /// identity rather than opening a new window. The session drops the old
+    /// mapping and adopts the new one; the frame layout is validated
+    /// exactly as [`Self::Create`].
+    Resize {
+        /// The window being resized (from the `Create` reply).
+        window_id: u64,
+        /// The `shm_grant` handle for the new frame region.
+        shm_handle: u64,
+        /// Frames laid out back-to-back in the new region
+        /// (`1..=WINDOW_MAX_FRAMES`).
+        frame_count: u32,
+        /// New window width in pixels; never zero.
+        width_px: u32,
+        /// New window height in pixels; never zero.
+        height_px: u32,
+        /// Bytes between consecutive scanlines; at least one scanline.
+        stride_bytes: u32,
+        /// Pixel encoding of the new frames.
+        format: DisplayFormat,
+    },
     /// Ask the session to run its **trusted file picker** for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6). The reply is only the
     /// acceptance: the pick is asynchronous — the user browses in the
@@ -213,6 +240,8 @@ const OP_PRESENT: u16 = 2;
 const OP_CLOSE: u16 = 3;
 /// Wire operation discriminant of [`WindowRequest::PickFile`].
 const OP_PICK_FILE: u16 = 4;
+/// Wire operation discriminant of [`WindowRequest::Resize`].
+const OP_RESIZE: u16 = 5;
 
 impl WindowRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -269,6 +298,24 @@ impl WindowRequest {
                 put_u16(&mut out, 6, OP_PICK_FILE);
                 put_u64(&mut out, 8, window_id);
             }
+            Self::Resize {
+                window_id,
+                shm_handle,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            } => {
+                put_u16(&mut out, 6, OP_RESIZE);
+                put_u64(&mut out, 8, window_id);
+                put_u64(&mut out, 16, shm_handle);
+                put_u32(&mut out, 24, frame_count);
+                put_u32(&mut out, 28, width_px);
+                put_u32(&mut out, 32, height_px);
+                put_u32(&mut out, 36, stride_bytes);
+                out[40] = format.as_u8();
+            }
         }
         out
     }
@@ -316,32 +363,18 @@ impl WindowRequest {
                 if crate::ipc::is_reserved_endpoint(event_endpoint) {
                     return Err(Errno::OutOfRange);
                 }
-                let frame_count = read_u32(bytes, 24);
-                if frame_count == 0 || frame_count > WINDOW_MAX_FRAMES {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                let width_px = read_u32(bytes, 28);
-                let height_px = read_u32(bytes, 32);
-                let stride_bytes = read_u32(bytes, 36);
-                let format = DisplayFormat::from_u8(bytes[40])?;
-                if width_px == 0 || height_px == 0 {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                let min_stride = u64::from(width_px) * u64::from(format.bytes_per_pixel());
-                if u64::from(stride_bytes) < min_stride {
-                    return Err(Errno::LengthOutOfRange);
-                }
+                let layout = read_frame_layout(bytes)?;
                 let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
                 title_bytes.copy_from_slice(&bytes[42..42 + WINDOW_TITLE_MAX]);
                 let title = WindowTitle::from_wire(bytes[41], &title_bytes)?;
                 Ok(Self::Create {
                     shm_handle,
                     event_endpoint,
-                    frame_count,
-                    width_px,
-                    height_px,
-                    stride_bytes,
-                    format,
+                    frame_count: layout.frame_count,
+                    width_px: layout.width_px,
+                    height_px: layout.height_px,
+                    stride_bytes: layout.stride_bytes,
+                    format: layout.format,
                     title,
                 })
             }
@@ -374,9 +407,64 @@ impl WindowRequest {
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
                 Ok(Self::PickFile { window_id })
             }
+            OP_RESIZE => {
+                reserved_zero(bytes, 41)?;
+                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                let shm_handle = read_u64(bytes, 16);
+                let layout = read_frame_layout(bytes)?;
+                Ok(Self::Resize {
+                    window_id,
+                    shm_handle,
+                    frame_count: layout.frame_count,
+                    width_px: layout.width_px,
+                    height_px: layout.height_px,
+                    stride_bytes: layout.stride_bytes,
+                    format: layout.format,
+                })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// The frame-layout fields `Create` and `Resize` share verbatim at the same
+/// wire offsets: the frame count, geometry, stride, and pixel format.
+struct FrameLayout {
+    frame_count: u32,
+    width_px: u32,
+    height_px: u32,
+    stride_bytes: u32,
+    format: DisplayFormat,
+}
+
+/// Decode and validate the frame layout `Create` and `Resize` both carry at
+/// bytes 24..=40 — the frame count within `1..=WINDOW_MAX_FRAMES`, a non-zero
+/// geometry, a known pixel format, and a stride that holds at least one
+/// scanline. The one definition both request arms share, so the geometry
+/// bounds can never diverge between opening and resizing a window.
+fn read_frame_layout(bytes: &[u8]) -> Result<FrameLayout, Errno> {
+    let frame_count = read_u32(bytes, 24);
+    if frame_count == 0 || frame_count > WINDOW_MAX_FRAMES {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let width_px = read_u32(bytes, 28);
+    let height_px = read_u32(bytes, 32);
+    let stride_bytes = read_u32(bytes, 36);
+    let format = DisplayFormat::from_u8(bytes[40])?;
+    if width_px == 0 || height_px == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let min_stride = u64::from(width_px) * u64::from(format.bytes_per_pixel());
+    if u64::from(stride_bytes) < min_stride {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(FrameLayout {
+        frame_count,
+        width_px,
+        height_px,
+        stride_bytes,
+        format,
+    })
 }
 
 /// Refuse a request whose reserved tail (from `from` to the end of the
@@ -466,6 +554,10 @@ const EV_FILE_PICKED: u16 = 5;
 const EV_PICK_CANCELLED: u16 = 6;
 /// Wire event discriminant of [`WindowEvent::Scrolled`].
 const EV_SCROLLED: u16 = 7;
+/// Wire event discriminant of [`WindowEvent::Minimized`].
+const EV_MINIMIZED: u16 = 8;
+/// Wire event discriminant of [`WindowEvent::Resized`].
+const EV_RESIZED: u16 = 9;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -552,6 +644,31 @@ pub enum WindowEvent {
         /// The window whose pick was dismissed.
         window_id: u64,
     },
+    /// The window manager minimized the window (the user pressed the
+    /// title-bar minimize control, or clicked the taskbar entry): it is
+    /// hidden from the workspace but still alive and still listed on the
+    /// taskbar. The app may pause non-essential rendering until it is
+    /// restored (a later focus/resize event); it need not, and the window
+    /// manager destroys nothing behind its back.
+    Minimized {
+        /// The window that was minimized.
+        window_id: u64,
+    },
+    /// The window manager changed the window's client content size — a
+    /// resize-grab that concluded, or a maximize/restore size toggle. The
+    /// app re-lays-out to the new size: it allocates a fresh frame region
+    /// of `width_px` × `height_px`, re-maps the window onto it
+    /// ([`WindowRequest::Resize`]), and presents. The size is the client
+    /// content area in pixels (the window-manager furniture is not the
+    /// app's to size); it is never zero.
+    Resized {
+        /// The window whose client size changed.
+        window_id: u64,
+        /// New client width in pixels; never zero.
+        width_px: u32,
+        /// New client height in pixels; never zero.
+        height_px: u32,
+    },
     /// The scroll wheel turned over the window while the window owns its
     /// own content scrolling (it exposes no window-manager root viewport,
     /// so the session forwards the ticks to the app instead of consuming
@@ -586,6 +703,8 @@ impl WindowEvent {
             | Self::CloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::PickCancelled { window_id }
+            | Self::Minimized { window_id }
+            | Self::Resized { window_id, .. }
             | Self::Scrolled { window_id, .. } => window_id,
         }
     }
@@ -632,6 +751,18 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_SCROLLED);
                 put_i32(&mut out, 16, dx);
                 put_i32(&mut out, 20, dy);
+            }
+            Self::Minimized { .. } => {
+                put_u16(&mut out, 6, EV_MINIMIZED);
+            }
+            Self::Resized {
+                width_px,
+                height_px,
+                ..
+            } => {
+                put_u16(&mut out, 6, EV_RESIZED);
+                put_u32(&mut out, 16, width_px);
+                put_u32(&mut out, 20, height_px);
             }
         }
         out
@@ -722,6 +853,23 @@ impl WindowEvent {
                 let dx = read_i32(bytes, 16);
                 let dy = read_i32(bytes, 20);
                 Ok(Self::Scrolled { window_id, dx, dy })
+            }
+            EV_MINIMIZED => {
+                event_reserved_zero(bytes, 16)?;
+                Ok(Self::Minimized { window_id })
+            }
+            EV_RESIZED => {
+                event_reserved_zero(bytes, 24)?;
+                let width_px = read_u32(bytes, 16);
+                let height_px = read_u32(bytes, 20);
+                if width_px == 0 || height_px == 0 {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                Ok(Self::Resized {
+                    window_id,
+                    width_px,
+                    height_px,
+                })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -815,10 +963,88 @@ mod tests {
             sample_present(),
             WindowRequest::Close { window_id: 9 },
             WindowRequest::PickFile { window_id: 9 },
+            WindowRequest::Resize {
+                window_id: 3,
+                shm_handle: 11,
+                frame_count: 2,
+                width_px: 640,
+                height_px: 480,
+                stride_bytes: 2560,
+                format: DisplayFormat::Bgra8888,
+            },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn resize_request_enforces_bounds_and_a_clean_tail() {
+        let base = WindowRequest::Resize {
+            window_id: 3,
+            shm_handle: 11,
+            frame_count: 2,
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: DisplayFormat::Bgra8888,
+        };
+        // A zero window id is refused.
+        let mut zero_id = base.to_le_bytes();
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        // A zero / over-large frame count.
+        let mut zero_frames = base.to_le_bytes();
+        zero_frames[24..28].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_frames),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A zero extent, and a stride too small for one scanline.
+        let mut zero_w = base.to_le_bytes();
+        zero_w[28..32].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_w),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut short_stride = base.to_le_bytes();
+        short_stride[36..40].copy_from_slice(&2559u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&short_stride),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A dirty reserved tail (past the format byte at offset 40).
+        let mut dirty = base.to_le_bytes();
+        dirty[41] = 1;
+        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn resized_event_refuses_a_zero_extent_and_a_dirty_tail() {
+        let base = WindowEvent::Resized {
+            window_id: 4,
+            width_px: 800,
+            height_px: 600,
+        };
+        let mut zero_w = base.to_le_bytes();
+        zero_w[16..20].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            WindowEvent::from_bytes(&zero_w),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut zero_h = base.to_le_bytes();
+        zero_h[20..24].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            WindowEvent::from_bytes(&zero_h),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut dirty = base.to_le_bytes();
+        dirty[24] = 1;
+        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        // Minimized carries no payload past the window id; its tail is dirty-checked.
+        let mut minimized = WindowEvent::Minimized { window_id: 4 }.to_le_bytes();
+        minimized[16] = 1;
+        assert_eq!(WindowEvent::from_bytes(&minimized), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -1042,6 +1268,12 @@ mod tests {
                 handle: 7,
             },
             WindowEvent::PickCancelled { window_id: 4 },
+            WindowEvent::Minimized { window_id: 4 },
+            WindowEvent::Resized {
+                window_id: 4,
+                width_px: 800,
+                height_px: 600,
+            },
             WindowEvent::Scrolled {
                 window_id: 4,
                 dx: 0,
@@ -1118,7 +1350,7 @@ mod tests {
             Err(Errno::AbiVersionUnsupported)
         );
         let mut bad_kind = good;
-        bad_kind[6] = 9;
+        bad_kind[6] = 99;
         assert_eq!(WindowEvent::from_bytes(&bad_kind), Err(Errno::OutOfRange));
         let mut zero_id = good;
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());

@@ -428,9 +428,20 @@ mod program {
                         // never requests a pick, so a pick conclusion is a
                         // session bug and is ignored (an unredeemed
                         // delegation is reclaimed by the kernel at exit).
+                        //
+                        // Minimized needs no action (the window is hidden and
+                        // kept on the taskbar; the screen is redrawn from the
+                        // shell on demand). Resized cannot reach this window:
+                        // the terminal renders a fixed character grid and does
+                        // not request resizable decoration, so the window
+                        // manager offers it neither maximize nor a resize
+                        // grabber and never sends it a new client size. Both
+                        // are honest no-ops, not deferred work.
                         WindowEvent::Focus { .. }
                         | WindowEvent::Pointer { .. }
                         | WindowEvent::Scrolled { .. }
+                        | WindowEvent::Minimized { .. }
+                        | WindowEvent::Resized { .. }
                         | WindowEvent::FilePicked { .. }
                         | WindowEvent::PickCancelled { .. } => {}
                     }

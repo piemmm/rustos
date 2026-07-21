@@ -109,6 +109,21 @@ pub trait WindowHost {
         damage: DamageRect,
     ) -> Result<(), Errno>;
 
+    /// A validated `Resize` re-mapped live `window_id` onto a fresh frame
+    /// region of `surface` geometry, keeping the same window id, owner,
+    /// event route, and taskbar entry. The host resizes the window's
+    /// presented surface to match; the next `Present` shapes its frame
+    /// against the new `surface`. An error refuses the resize: the engine
+    /// keeps the previous mapping and replies the refusal, so engine and
+    /// host never disagree about a window's geometry.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot resize a window for (a surface it
+    /// cannot reallocate, the desktop is tearing down); the refusal is
+    /// relayed to the client and the old geometry stands.
+    fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno>;
+
     /// `window_id` is gone — closed by its owner or torn down after the
     /// owner exited. Infallible: the window is already unmapped and
     /// forgotten by the engine, and the host must not resurrect it.
@@ -154,6 +169,16 @@ struct CreateSpec {
     frame_count: u32,
     surface: DisplayMode,
     title: WindowTitle,
+}
+
+/// Everything one validated `Resize` asks for, in one place, so the
+/// engine's resize path takes the request as a unit.
+#[derive(Copy, Clone)]
+struct ResizeSpec {
+    window_id: u64,
+    shm_handle: u64,
+    frame_count: u32,
+    surface: DisplayMode,
 }
 
 /// One live window: its attested owner, its event route, its
@@ -284,6 +309,28 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::PickFile { window_id } => {
                 status(reply, self.pick_file(host, caller, window_id))
             }
+            WindowRequest::Resize {
+                window_id,
+                shm_handle,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            } => {
+                let spec = ResizeSpec {
+                    window_id,
+                    shm_handle,
+                    frame_count,
+                    surface: DisplayMode {
+                        width_px,
+                        height_px,
+                        stride_bytes,
+                        format,
+                    },
+                };
+                status(reply, self.resize(host, caller, spec))
+            }
         }
     }
 
@@ -336,6 +383,43 @@ impl<M: ShmMapper> WindowServer<M> {
             },
         );
         Ok(window_id)
+    }
+
+    /// Re-map `caller`'s window `window_id` onto a fresh frame region of
+    /// the new geometry, keeping its id, owner, event route, and pending
+    /// pick state.
+    ///
+    /// The new region is mapped and validated to hold every frame before
+    /// anything is committed; the host is told before the swap, so a
+    /// refused resize leaves the old mapping intact (fail closed). On
+    /// success the old region is dropped (the mapper's cue to unmap) as
+    /// the record adopts the new one.
+    fn resize(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        spec: ResizeSpec,
+    ) -> Result<(), Errno> {
+        // Ownership first: a window the caller does not own answers
+        // exactly like one that never existed, leaking nothing.
+        owned_window(&self.windows, caller, spec.window_id)?;
+        let frame_len = frame_bytes(&spec.surface)?;
+        let total = frame_len
+            .checked_mul(spec.frame_count as usize)
+            .ok_or(Errno::LengthOutOfRange)?;
+        let region = self.mapper.map(spec.shm_handle, total)?;
+        // Tell the host before committing: a refused resize drops the
+        // freshly mapped region and leaves the record's old geometry.
+        host.window_resized(spec.window_id, &spec.surface)?;
+        // `owned_window` proved the record exists and the borrow above is
+        // released, so this re-lookup cannot miss.
+        if let Some(record) = self.windows.get_mut(&spec.window_id) {
+            record.surface = spec.surface;
+            record.frame_count = spec.frame_count;
+            record.frame_len = frame_len;
+            record.region = region;
+        }
+        Ok(())
     }
 
     /// Present one frame of `caller`'s window `window_id`.

@@ -1,7 +1,7 @@
 //! Windows: a placed surface with compositing attributes.
 
 use tairix_controls::{
-    FrameInsets, ResizeGrabber, TitleBarEvent, WindowActivationState, WindowFrame,
+    FrameInsets, ResizeGrabber, TitleBarEvent, WindowActivationState, WindowFrame, WindowSizeState,
 };
 use tairix_font::BitmapFont;
 use tairix_input::{InputEvent, Key};
@@ -38,6 +38,13 @@ pub struct Window {
     frame: Option<WindowFrame>,
     band: Option<FrameInsets>,
     decoration: Option<Surface>,
+    /// Whether the window is restored or maximized. Meaningful only for a
+    /// decorated, resizable window; a plain window is always `Restored`.
+    size_state: WindowSizeState,
+    /// The outer rectangle to return to when a maximized window is
+    /// restored — captured at the moment it was maximized, so a
+    /// maximize/restore round-trip lands back exactly where it started.
+    restore_outer: Option<Rect>,
 }
 
 impl Window {
@@ -61,6 +68,8 @@ impl Window {
             frame: None,
             band: None,
             decoration: None,
+            size_state: WindowSizeState::Restored,
+            restore_outer: None,
         }
     }
 
@@ -101,6 +110,12 @@ impl Window {
     #[must_use]
     pub const fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    /// Whether the window is restored or maximized.
+    #[must_use]
+    pub const fn size_state(&self) -> WindowSizeState {
+        self.size_state
     }
 
     /// This window's window-manager-owned root-viewport scrollbars, if any.
@@ -389,6 +404,57 @@ impl Window {
         event
     }
 
+    /// Toggle a decorated, resizable window between restored and maximized,
+    /// resizing it to `work_area` (the session work rectangle) on maximize
+    /// and back to the geometry it had when maximized on restore. Returns
+    /// the new size state and the resulting client rectangle, or `None`
+    /// (changing nothing) for an undecorated window, a non-resizable one,
+    /// or when the resize itself fails closed.
+    ///
+    /// The frame's furniture size is updated in step, so the size-toggle
+    /// control shows the *next* action (Restore while maximized, Maximize
+    /// while restored) and the decoration is repainted.
+    pub(crate) fn toggle_size(
+        &mut self,
+        work_area: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(WindowSizeState, Rect)> {
+        let furniture = self.frame.as_ref()?.furniture();
+        if !furniture.resizable {
+            return None;
+        }
+        let (target, next_state) = match self.size_state {
+            WindowSizeState::Restored => (work_area, WindowSizeState::Maximized),
+            WindowSizeState::Maximized => (
+                self.restore_outer.unwrap_or_else(|| self.bounds()),
+                WindowSizeState::Restored,
+            ),
+        };
+        if self.size_state == WindowSizeState::Restored {
+            self.restore_outer = Some(self.bounds());
+        }
+        if !self.resize_to_outer(target, scale, theme) {
+            // Fail closed: nothing moved, so do not record a state change or
+            // strand the saved restore geometry.
+            if next_state == WindowSizeState::Maximized {
+                self.restore_outer = None;
+            }
+            return None;
+        }
+        self.size_state = next_state;
+        if next_state == WindowSizeState::Restored {
+            self.restore_outer = None;
+        }
+        if let Some(frame) = self.frame.as_mut() {
+            let mut furniture = frame.furniture();
+            furniture.size = next_state;
+            frame.set_furniture(furniture);
+            self.render_decoration(scale, theme);
+        }
+        Some((next_state, self.client_rect()))
+    }
+
     /// Resize this window so its outer rectangle becomes `new_outer`: the
     /// content surface is reallocated to the implied client size (the outer
     /// extent minus the reserved frame band), the existing pixels are
@@ -407,6 +473,45 @@ impl Window {
         };
         let client_w = new_outer.width.saturating_sub(band_w);
         let client_h = new_outer.height.saturating_sub(band_h);
+        if !self.resize_surface_preserving(client_w, client_h) {
+            return false;
+        }
+        self.origin = new_outer.origin;
+        self.refresh_band(scale, theme);
+        true
+    }
+
+    /// Reallocate this window's content surface to the given client size in
+    /// place — the origin unchanged — preserving existing pixels where they
+    /// still fit and repainting the decoration at the new size. This is the
+    /// client-driven counterpart to [`resize_to_outer`](Self::resize_to_outer)
+    /// (which sizes from an outer rectangle and moves the origin): the window
+    /// channel's `Resize` hands the session a new *client* content size, so
+    /// the compositor sizes the content directly. Returns `false` (changing
+    /// nothing) when the size is empty or its buffer cannot be allocated.
+    pub(crate) fn resize_client(
+        &mut self,
+        client_w: u32,
+        client_h: u32,
+        scale: Scale,
+        theme: &Theme,
+    ) -> bool {
+        if !self.resize_surface_preserving(client_w, client_h) {
+            return false;
+        }
+        self.refresh_band(scale, theme);
+        true
+    }
+
+    /// Replace the content surface with one of `client_w` × `client_h`,
+    /// copying the existing pixels that still fit (a raw copy, not an alpha
+    /// blend, so a live resize keeps the current content until the client
+    /// re-renders). Returns `false` (leaving the surface untouched) for an
+    /// empty size or an allocation failure — the one definition both
+    /// [`resize_to_outer`](Self::resize_to_outer) and
+    /// [`resize_client`](Self::resize_client) share, so the resize copy is
+    /// never restated.
+    fn resize_surface_preserving(&mut self, client_w: u32, client_h: u32) -> bool {
         if client_w == 0 || client_h == 0 {
             return false;
         }
@@ -423,8 +528,6 @@ impl Window {
             }
         }
         self.surface = resized;
-        self.origin = new_outer.origin;
-        self.refresh_band(scale, theme);
         true
     }
 

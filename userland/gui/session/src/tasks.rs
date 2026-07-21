@@ -170,6 +170,32 @@ impl TaskBridge {
         }
     }
 
+    /// Minimise `window`: mark its taskbar entry minimised, hide it in the
+    /// compositor, and drop focus if it held it.
+    ///
+    /// This is the title-bar minimize control's counterpart to a taskbar
+    /// click landing on [`ActivateOutcome::Minimised`]: it minimises
+    /// unconditionally (the window manager decided to minimise), where a
+    /// taskbar click toggles. Returns `false`, changing nothing, for a
+    /// window the bridge does not track.
+    pub fn minimize(
+        &self,
+        compositor: &mut Compositor,
+        router: &mut SessionInputRouter,
+        taskbar: &mut Taskbar,
+        window: WindowId,
+    ) -> bool {
+        let Some(task) = self.task_for(window) else {
+            return false;
+        };
+        taskbar.tasks_mut().minimise(task);
+        compositor.set_visible(window, false);
+        if router.focused() == Some(window) {
+            router.unfocus();
+        }
+        true
+    }
+
     /// Mirror a window-manager focus change into the taskbar's highlight,
     /// returning whether the highlight actually moved.
     ///

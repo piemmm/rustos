@@ -42,7 +42,8 @@ use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_icon::IconSet;
 use tairix_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
 use tairix_wm::{
-    Color, Compositor, CursorController, InputEvent, InputResponse, Point, Scale, Surface, WindowId,
+    Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect, Scale, Surface,
+    WindowId,
 };
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
@@ -253,6 +254,39 @@ impl DesktopShell {
         true
     }
 
+    /// Minimise `window`: mark its taskbar entry minimised, hide it in the
+    /// compositor, drop focus if it held it, and re-present the bar so the
+    /// entry shows its minimised state.
+    ///
+    /// Returns `false`, changing nothing, when `window` is not a tracked task.
+    /// This is the title-bar minimize control's path — it minimises
+    /// unconditionally, where a taskbar click toggles.
+    pub fn minimize_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
+        if !self.tasks.minimize(
+            compositor,
+            &mut self.router,
+            self.session.taskbar_mut(),
+            window,
+        ) {
+            return false;
+        }
+        self.present(compositor);
+        true
+    }
+
+    /// The session work area: the screen with the taskbar's band removed, in
+    /// physical pixels at the output's density.
+    ///
+    /// A maximized window fills this rectangle, not the whole physical display
+    /// (spec §5), so it never covers the taskbar. The bar hugs one full screen
+    /// edge, so the work area is the screen minus that edge band.
+    #[must_use]
+    pub fn work_area(&self, compositor: &Compositor) -> Rect {
+        let screen = compositor.screen_rect();
+        let bar = self.session.taskbar().layout(compositor.scale()).bar;
+        work_area_excluding(screen, bar)
+    }
+
     /// Install a loaded notification-icon set on the renderer, replacing the
     /// one in use. The next [`present`](Self::present) re-rasterises the
     /// notification glyphs from the new set.
@@ -438,5 +472,32 @@ impl DesktopShell {
     /// leaves no orphaned windows behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presenter.teardown(compositor);
+    }
+}
+
+/// The screen rectangle with the taskbar's edge band removed.
+///
+/// The taskbar hugs one full screen edge (top, bottom, left, or right), so the
+/// work area is the screen minus that band. A bar that does not span a full
+/// edge (it never should) leaves the whole screen usable rather than guessing.
+fn work_area_excluding(screen: Rect, bar: Rect) -> Rect {
+    if bar.width >= screen.width && bar.height < screen.height {
+        // A horizontal bar on the top or bottom edge.
+        let height = screen.height.saturating_sub(bar.height);
+        if bar.top() <= screen.top() {
+            Rect::new(screen.left(), bar.bottom(), screen.width, height)
+        } else {
+            Rect::new(screen.left(), screen.top(), screen.width, height)
+        }
+    } else if bar.height >= screen.height && bar.width < screen.width {
+        // A vertical bar on the left or right edge.
+        let width = screen.width.saturating_sub(bar.width);
+        if bar.left() <= screen.left() {
+            Rect::new(bar.right(), screen.top(), width, screen.height)
+        } else {
+            Rect::new(screen.left(), screen.top(), width, screen.height)
+        }
+    } else {
+        screen
     }
 }

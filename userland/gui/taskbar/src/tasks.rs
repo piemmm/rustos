@@ -150,6 +150,28 @@ impl TaskList {
         }
     }
 
+    /// Minimise the task with `id` unconditionally, dropping focus if it
+    /// held it.
+    ///
+    /// This is the window-manager-driven counterpart to [`activate`]'s
+    /// toggle: the title-bar minimize control (and any other direct
+    /// "minimise this window" request) minimises regardless of the current
+    /// focus/minimised state, where [`activate`] toggles. An already
+    /// minimised task stays minimised. Returns `false`, changing nothing,
+    /// for an unknown id (fail closed).
+    ///
+    /// [`activate`]: Self::activate
+    pub fn minimise(&mut self, id: TaskId) -> bool {
+        let Some(index) = self.position(id) else {
+            return false;
+        };
+        self.entries[index].minimised = true;
+        if self.focused == Some(id) {
+            self.focused = None;
+        }
+        true
+    }
+
     /// `true` when the task with `id` is minimised. Unknown ids are not
     /// minimised.
     #[must_use]

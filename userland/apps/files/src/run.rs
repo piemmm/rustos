@@ -254,9 +254,20 @@ mod program {
             // browser never requests a pick, so a pick conclusion is a
             // session bug and is ignored rather than acted on (an
             // unredeemed delegation is reclaimed by the kernel at exit).
+            //
+            // Minimized needs no action: the window manager hides the
+            // window and keeps its taskbar entry; the browser renders on
+            // demand, so there is nothing to pause. Resized cannot reach
+            // this window: the browser presents a single fixed-size window
+            // and does not request resizable decoration, so the window
+            // manager offers it neither a maximize nor a resize grabber
+            // (the size controls render disabled) and never sends it a new
+            // client size. Both are honest no-ops, not deferred work.
             WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Pointer { .. }
+            | WindowEvent::Minimized { .. }
+            | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
         }
