@@ -59,6 +59,12 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-arch-api = { path = "../api", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 
+# The Multiboot2 information-structure wire layout is defined once in
+# `lib/multiboot2` (the shared home the kernel parser and the first-party
+# loader builder both depend on, so they can never drift — AGENTS.md §2.2).
+# The `multiboot2` module here is a thin re-export of that crate's parser.
+tairix-multiboot2 = { path = "../../../lib/multiboot2", version = "=0.0.0" }
+
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical
 # `tairix_kernel_mem::RegionKind` and refuse to compile if the two

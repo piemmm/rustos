@@ -305,6 +305,16 @@ pub const TARGETS: &[Target] = &[
         description: "lib/binfmt wasm module-structure view (untrusted executable-file bytes)",
     },
     Target {
+        package: "tairix-bootload",
+        test: "fuzz_plan",
+        description: "boot-chain loader core (untrusted kernel-image ELF -> LoadPlan validation)",
+    },
+    Target {
+        package: "tairix-multiboot2",
+        test: "fuzz_info",
+        description: "Multiboot2 information-structure parse + builder round-trip (untrusted boot-info bytes)",
+    },
+    Target {
         package: "tairix-disasm",
         test: "fuzz_riscv64",
         description: "lib/disasm RV64GC decoder (untrusted executable-file bytes: never panics, always makes forward progress)",

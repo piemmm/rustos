@@ -608,6 +608,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-kernel-mem",
+ "tairix-multiboot2",
  "tairix-rng",
 ]
 
@@ -625,6 +626,14 @@ name = "tairix-binfmt"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-bootload"
+version = "0.0.0"
+dependencies = [
+ "tairix-binfmt",
  "tairix-fuzzseed",
 ]
 
@@ -1733,6 +1742,13 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-procinfo",
+]
+
+[[package]]
+name = "tairix-multiboot2"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
 ]
 
 [[package]]

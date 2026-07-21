@@ -1,0 +1,18 @@
+[package]
+name = "tairix-multiboot2"
+description = "TAIRiX shared Multiboot2 information-structure wire layout: the one no_std definition of the boot-loader-to-kernel tag stream (rev 2.0) that both halves of the boot handoff depend on. The kernel *parses* the structure a loader hands it (borrow-only, allocation-free, fail-closed) and the TAIRiX first-party loader *builds* it into a caller-provided buffer (basic memory, memory map, command line, ACPI RSDP, framebuffer tags), so the producer and consumer can never drift on what a tag means (plans/BOOTLOADER.md B2). Pure computation: it touches no hardware, allocates nothing, and validates every field before trusting it — a malformed stream is a typed error, never a panic."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its per-run seed and wall-clock budget
+# through the shared seed/budget seam: one place picks the seed, logs it,
+# and bounds the smoke/soak loop. Test scaffolding only; never in a build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -92,21 +92,30 @@ in all of them applies here without exception.
 
 ## 2. Increments (dependency order; each fully gated per §7)
 
-### A1 — `tools/mkimage` x86_64 image builder (`planned`)
+### A1 — `tools/mkimage` x86_64 image builder (`planned`; now on `plans/BOOTLOADER.md`)
 
 The Stage 8 deliverable `images/tairix-x86_64.iso` / bootable disk image
-(§12): GPT layout (hybrid BIOS/UEFI boot is the §12 target; the increment
-lands whatever QEMU boots the kernel from today, complete for that path —
-if genuine BIOS+UEFI hybrid boot needs boot-loader work beyond this plan,
-that is surfaced under §15.7 before A1 is scoped, never stubbed), a FAT
-boot partition carrying the kernel and the `root.unlock` descriptor, and
-an encrypted ARXFS root with the §16 skeleton — reusing the existing
-pure-Rust rootfs/partition/appload planting code (`build_system_partition`,
-the `image_apps`/`image_drivers` pipelines) unchanged. Deliverables: the
-`--target x86_64` builder in `tools/mkimage` with `installer`/`debug`
-profiles matching the Pi builder's semantics, host tests over the produced
-layout, and the QEMU whole-disk fixture able to serve the same image shape
-the verticals mount.
+(§12): GPT layout, a FAT/ESP boot partition carrying the loader + kernel +
+the `root.unlock` descriptor, and an encrypted ARXFS root with the §16
+skeleton — reusing the existing pure-Rust rootfs/partition/appload planting
+code (`build_system_partition`, the `image_apps`/`image_drivers` pipelines)
+unchanged.
+
+**The §15.7 question this plan flagged is answered: genuine BIOS/UEFI boot
+needs a boot loader, and TAIRiX ships a first-party, Rust-only one rather
+than GRUB (forbidden C / external code). That work is its own binding plan,
+`plans/BOOTLOADER.md`** — the pure loader core `lib/bootload` (ELF →
+`LoadPlan`, landed as B1) plus the per-firmware `boot/*` shells, handing off
+through the kernel's existing multiboot2 entry. The GPT + ESP whole-disk
+builder this A1 describes is **`plans/BOOTLOADER.md` B4** (it needs GPT
+encode in `lib/partition` and the UEFI shell that boots from the ESP);
+A1 is delivered *by* B4, so this row tracks it there rather than duplicating
+the design. Deliverables (at B4): the `--target x86_64` builder in
+`tools/mkimage` with `installer`/`debug` profiles matching the Pi builder's
+semantics, host tests over the produced layout, and the whole-disk OVMF
+fixture that boots the produced image with no `-kernel`. QEMU's `-kernel`
+PVH path remains the fast, firmware-free test path the existing x86_64
+verticals use.
 
 ### A2 — Production boot storage floor + registry deletion (`in progress`)
 
