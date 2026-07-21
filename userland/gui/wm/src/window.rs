@@ -550,8 +550,8 @@ impl Window {
         };
         let outer = Rect::new(0, 0, ow, oh);
         // The title-bar text renders at the theme's logical font size scaled to
-        // physical pixels, like every other desktop length — not the native
-        // atlas cell.
+        // physical pixels, like every other desktop length, rather than a size
+        // hard-coded here.
         let font =
             BitmapFont::with_pixel_height(scale.scale_length(u32::from(theme.fonts().ui.size_px)));
         frame.render(&mut surface, outer, scale, theme, font);

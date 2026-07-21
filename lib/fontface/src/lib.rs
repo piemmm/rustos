@@ -21,7 +21,7 @@
 //! `Vec<u8>` of coverage) and contains no `unsafe`. It fails closed: any
 //! malformed or unsupported table yields a [`FontError`] rather than a wrong
 //! glyph or a panic. Floating-point rounding uses the crate's own bounded
-//! [`mathf`] helpers so it needs no `std` libm.
+//! `mathf` helpers so it needs no `std` libm.
 
 #![no_std]
 #![forbid(unsafe_code)]

@@ -159,7 +159,7 @@ impl TaskbarRenderer {
 /// The theme authors its font size in *logical* pixels; the scale converts it
 /// to the panel's physical pixels, exactly as it does every other desktop
 /// length. This is where the taskbar's text picks up its comfortable
-/// (sub-native) size.
+/// size.
 fn ui_font(theme: &Theme, scale: Scale) -> BitmapFont {
     BitmapFont::with_pixel_height(scale.scale_length(u32::from(theme.fonts().ui.size_px)))
 }

@@ -547,11 +547,11 @@ fn region_has_pixel(surface: &Surface, bar: Rect, region: Rect, want: Pixel) -> 
 
 /// Whether `region` shows anti-aliased text of the `want` role composited
 /// over `background`: some pixel is a coverage blend of the role over the
-/// background (partial *or* full coverage). Desktop text now renders at the
-/// theme's sub-native size, where a downscaled thin stroke may never reach
-/// full coverage, so an exact-role match ([`region_has_pixel`]) is too strict
-/// for "a label was drawn here"; a blend on the `background`→role segment is
-/// the faithful check.
+/// background (partial *or* full coverage). An anti-aliased glyph edge — or
+/// any thin stroke resampled for a non-native DPI scale — may never reach
+/// full role coverage, so an exact-role match ([`region_has_pixel`]) is too
+/// strict for "a label was drawn here"; a blend on the `background`→role
+/// segment is the faithful check.
 fn region_has_role_ink(
     surface: &Surface,
     bar: Rect,

@@ -35,7 +35,7 @@ use crate::glyph::{lookup_or_fallback, Glyph};
 /// other cell — the desktop resolves a comfortable physical size from the
 /// theme's logical font size and the DPI scale. A non-native cell rasterises
 /// each glyph **directly from the TrueType outline** at that exact size
-/// (cached, see [`crate::cache`]), so text is crisp whether tiny or very
+/// (cached per `(face, glyph, size)`), so text is crisp whether tiny or very
 /// large — never a stretched bitmap. At the native size the atlas is used
 /// verbatim, so console rendering is byte-for-byte what it always was. Every
 /// derived metric (advance, cell width, baseline, line height) scales with the

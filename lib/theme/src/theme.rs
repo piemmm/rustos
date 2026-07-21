@@ -285,8 +285,8 @@ fn common_motion() -> MotionTheme {
 /// The fonts shared by both built-in themes.
 fn common_fonts() -> Fonts {
     Fonts {
-        ui: FontSpec::new("TAIRiX Sans", 14, FontWeight::Regular),
-        monospace: FontSpec::new("TAIRiX Mono", 14, FontWeight::Regular),
+        ui: FontSpec::new("TAIRiX Sans", 28, FontWeight::Regular),
+        monospace: FontSpec::new("TAIRiX Mono", 28, FontWeight::Regular),
     }
 }
 

@@ -186,7 +186,7 @@ mod program {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         // Render the listing at the theme's logical UI font size (the browser
         // window is not DPI-scaled today, so the logical size is the physical
-        // size), not the larger native atlas cell.
+        // size), rather than a size hard-coded here.
         let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
         let surface = render(browser, theme, font, viewport).ok_or(Errno::LengthOutOfRange)?;
         for (i, pixel) in surface.pixels().iter().enumerate() {
