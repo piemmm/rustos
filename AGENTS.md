@@ -556,6 +556,14 @@ tairix/
 │   │                    #   fstree disassembly viewer and objdump-class
 │   │                    #   tools. Never executes or loads; fuzzed (§19.6);
 │   │                    #   decode runs in the §19.5 parser sandbox.
+│   ├── bootload/        # Firmware-neutral boot-chain loader core
+│   │                    #   (plans/BOOTLOADER.md B1): the one pure, no_std,
+│   │                    #   alloc-free computation that turns the kernel ELF64
+│   │                    #   into a validated LoadPlan (PT_LOAD segments, entry,
+│   │                    #   physical span, W^X flags) over lib/binfmt, shared by
+│   │                    #   the per-firmware boot/* shells so two loaders never
+│   │                    #   disagree on the layout (§2.2). Places nothing,
+│   │                    #   touches no hardware; bounded + fail-closed (§5.4).
 │   ├── browse/          # Shared directory-browser engine (plans/APPWIN.md
 │   │                    #   AW5): the one transactional navigation model
 │   │                    #   (Browser over the DirectorySource seam), themed
@@ -715,8 +723,21 @@ tairix/
 │   │                    #   §17.4, §24.1).
 │   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
 │   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
-│   ├── font/            # Shared text rasterisation: monospace bitmap font +
-│   │                    #   glyph blitter onto a raster Surface (§16.4, §17.4).
+│   ├── font/            # Shared text rasterisation: monospace font + glyph
+│   │                    #   blitter onto a raster Surface. The text console
+│   │                    #   draws the generated native atlas; the desktop
+│   │                    #   rasterises resized glyphs from the outlines at the
+│   │                    #   requested size via lib/fontface, cached, so text is
+│   │                    #   crisp at any size, not a stretched bitmap (§16.4,
+│   │                    #   §17.4, §2.16).
+│   ├── fontface/        # Shared TrueType glyph-outline engine: the one parser
+│   │                    #   + anti-aliased non-zero-winding rasteriser turning a
+│   │                    #   committed face into 4-bit coverage at ANY requested
+│   │                    #   pixel size, plus the merged-family (repertoire +
+│   │                    #   earliest-face-wins) codepoint resolution. Shared by
+│   │                    #   the `cargo xtask font-atlas` generator and the
+│   │                    #   runtime lib/font, so the atlas and live resized text
+│   │                    #   can never diverge (§2.2). no_std+alloc, fail-closed.
 │   ├── fsmeta/          # Shared extended-file-metadata model: the namespaced
 │   │                    #   attribute-key grammar, the bounded AttrSet/AttrEntry
 │   │                    #   store + self-identifying encoding, and the closed
@@ -768,6 +789,15 @@ tairix/
 │   │                    #   console (tty) byte encoder a keyboard driver's
 │   │                    #   console_input producer uses, over lib/vt (§2.2).
 │   ├── log/             # Structured logging.
+│   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout
+│   │                    #   (plans/BOOTLOADER.md B2): the one no_std definition
+│   │                    #   of the boot-loader→kernel tag stream both halves of
+│   │                    #   the boot handoff depend on — the kernel BootInfo
+│   │                    #   parser (borrow-only, fail-closed) and the loader's
+│   │                    #   InfoBuilder (assembles basic memory / memory map /
+│   │                    #   command line / RSDP / framebuffer tags into a
+│   │                    #   caller buffer) — so producer and consumer can never
+│   │                    #   drift (§2.2). Round-trip host-tested + fuzzed.
 │   ├── net/             # Network protocol engine (plans/NETWORK.md): the
 │   │                    #   pure, no_std, host-testable definition of the
 │   │                    #   wire protocols the user-space stack speaks —
@@ -1422,6 +1452,13 @@ an update to this section.
   to `mkfs`, `parted`, `xorriso`, etc., except via `tools/mkimage`'s
   audited wrappers in `tools/mkimage/src/extern_tools.rs`. Every external
   invocation is checksummed and version-pinned.
+- The boot chain that starts the kernel from a shipped image on real
+  firmware — the `images/tairix-x86_64.iso` hybrid BIOS/UEFI target above —
+  is a first-party, Rust-only loader (no GRUB, no C): the pure loader core
+  (`lib/bootload`) plus the per-firmware `boot/*` shells, handing the kernel
+  off through its existing multiboot2 entry. The staged design is
+  `plans/BOOTLOADER.md`; QEMU's `-kernel` PVH shortcut stays the fast,
+  firmware-free test path.
 
 ---
 
@@ -1648,10 +1685,13 @@ You are not exempt from any rule above. In addition:
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/ARXFS-METADATA.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md`; `plans/SPARSE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md` |
+    | Kernel-heap growth: fragmentation-immune growth, the frame-backed heap source, the heap-allocation-size vs `MAX_ORDER` decoupling | `plans/FIX-KHEAP.md` |
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
     | CPU-lockup watchdog (soft/hard lockup detection, diagnostics, recovery, the Arch-HAL watchdog slice) | `plans/WATCHDOG.md` |
+    | Kernel-panic diagnostics (register dump + stack backtrace, the Arch-HAL backtrace slice, unified panic path) | `plans/FIX-PANICS.md` |
     | Syscall interruptibility / IRQ-on-entry (interruptible syscall bodies, non-preemptible kernel, reschedule-at-return) | `plans/FIX-SYSCALL.md` |
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
+    | Boot chain / bootloader (Rust-only UEFI/BIOS loader, kernel ELF load + multiboot2 handoff, GPT/ESP whole-disk image) | `plans/BOOTLOADER.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md`; `plans/ARCHSUPPORT.md` (x86_64 product parity: image, storage floor, unlock/login, autoload, verticals) |
     | Raspberry Pi bring-up | `plans/PI.md` |
     | USB stack and hot-removal | `plans/USB.md` |

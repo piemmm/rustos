@@ -28,6 +28,18 @@
 //! stays `alloc`-free; the `lib/raster`-backed blitter rides the default-on
 //! `render` feature (one font definition either way).
 //!
+//! A [`BitmapFont`] renders at a chosen cell height in physical pixels.
+//! [`BitmapFont::inconsolata`] keeps the atlas's native size (what the text
+//! console draws, straight from the atlas), while
+//! [`BitmapFont::with_pixel_height`] renders at any other size: the desktop
+//! resolves a comfortable size from the theme's logical font size and the DPI
+//! scale. A non-native cell rasterises each glyph **directly from the
+//! TrueType outline** at that exact size through the shared `lib/fontface`
+//! engine — the same rasteriser the atlas is generated with — cached per
+//! `(face, glyph, size)` (see the `cache` module). Text is therefore crisp at
+//! any size, small or large, never a stretched bitmap. Every metric scales
+//! with the cell height, so the font stays monospaced.
+//!
 //! There is no installed-font machinery yet: a `tairix-theme` font role
 //! selects a font by family name under `/System/Fonts`, but no faces are
 //! installed, so everything draws with the built-in
@@ -38,10 +50,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(feature = "render")]
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 
 pub mod atlas;
+#[cfg(feature = "render")]
+mod cache;
 #[cfg(feature = "render")]
 pub mod font;
 pub mod glyph;

@@ -42,12 +42,10 @@ const ROW_PADDING: u32 = 2;
 pub fn render<S: DirectorySource>(
     browser: &Browser<S>,
     theme: &Theme,
+    font: BitmapFont,
     viewport: Rect,
 ) -> Option<Surface> {
-    let font = BitmapFont::inconsolata();
-    let row_height = font
-        .glyph_height()
-        .saturating_add(ROW_PADDING.saturating_mul(2));
+    let row_height = row_height(font);
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
 
@@ -151,12 +149,14 @@ fn first_visible(selected: Option<usize>, visible_rows: usize) -> usize {
 }
 
 /// Height in pixels of one rendered row — the path bar and every entry
-/// row alike, derived from the shared font exactly as [`render`] draws
-/// them, so hit-testing and painting can never disagree.
+/// row alike, derived from `font` exactly as [`render`] draws them, so
+/// hit-testing and painting can never disagree.
+///
+/// The caller passes the same `font` it renders with (the desktop resolves it
+/// from the theme's font size); the browser never assumes a size of its own.
 #[must_use]
-pub fn row_height() -> u32 {
-    BitmapFont::inconsolata()
-        .glyph_height()
+pub fn row_height(font: BitmapFont) -> u32 {
+    font.glyph_height()
         .saturating_add(ROW_PADDING.saturating_mul(2))
 }
 
@@ -172,10 +172,11 @@ pub fn row_height() -> u32 {
 #[must_use]
 pub fn entry_index_at<S: DirectorySource>(
     browser: &Browser<S>,
+    font: BitmapFont,
     viewport_height: u32,
     y: u32,
 ) -> Option<usize> {
-    let row = row_height();
+    let row = row_height(font);
     if row == 0 || y < row || y >= viewport_height {
         return None;
     }

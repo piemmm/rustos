@@ -608,6 +608,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-kernel-mem",
+ "tairix-multiboot2",
  "tairix-rng",
 ]
 
@@ -625,6 +626,14 @@ name = "tairix-binfmt"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-bootload"
+version = "0.0.0"
+dependencies = [
+ "tairix-binfmt",
  "tairix-fuzzseed",
 ]
 
@@ -797,6 +806,7 @@ dependencies = [
  "tairix-caps",
  "tairix-cursor",
  "tairix-display",
+ "tairix-font",
  "tairix-help",
  "tairix-icon",
  "tairix-rt",
@@ -1213,6 +1223,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-browse",
+ "tairix-font",
  "tairix-geometry",
  "tairix-rt",
  "tairix-theme",
@@ -1223,9 +1234,15 @@ dependencies = [
 name = "tairix-font"
 version = "0.0.0"
 dependencies = [
+ "tairix-fontface",
  "tairix-raster",
+ "tairix-sync",
  "tairix-vt",
 ]
+
+[[package]]
+name = "tairix-fontface"
+version = "0.0.0"
 
 [[package]]
 name = "tairix-fsmeta"
@@ -1725,6 +1742,13 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-procinfo",
+]
+
+[[package]]
+name = "tairix-multiboot2"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
 ]
 
 [[package]]
@@ -3105,11 +3129,18 @@ dependencies = [
  "tairix-abi",
  "tairix-drv-storage-virtio-blk",
  "tairix-itest-harness",
- "tairix-kernel",
- "tairix-kernel-core",
- "tairix-test-encrypted-root-image",
  "tairix-test-virtio-qemu-support",
- "tairix-users",
+]
+
+[[package]]
+name = "tairix-test-root-unlock-login-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "tairix-abi",
+ "tairix-drv-storage-virtio-blk",
+ "tairix-itest-harness",
+ "tairix-test-virtio-qemu-support",
 ]
 
 [[package]]
@@ -3771,6 +3802,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-users-db-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "tairix-abi",
+ "tairix-drv-storage-virtio-blk",
+ "tairix-itest-harness",
+ "tairix-test-virtio-qemu-support",
+]
+
+[[package]]
 name = "tairix-test-vesa-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
@@ -3856,6 +3898,7 @@ dependencies = [
  "tairix-netstack",
  "tairix-pci",
  "tairix-test-arxfs-image",
+ "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
  "tairix-test-netstack-wire",
  "tairix-test-riscv64-boot",
@@ -4136,6 +4179,7 @@ dependencies = [
  "tairix-drv-storage-usb-msd",
  "tairix-drv-storage-volmgr",
  "tairix-drvhost",
+ "tairix-fontface",
  "tairix-fsmeta",
  "tairix-fuzzseed",
  "tairix-fwcfg",

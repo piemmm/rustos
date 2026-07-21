@@ -443,6 +443,12 @@ pub struct BspBringUp {
     pub installed_memory_bytes: u64,
     /// The MADT-discovered IO-APIC routing, every pin programmed masked.
     pub irq_routing: IrqRouting,
+    /// The discovered hardware tree published to the authoritative
+    /// [`crate::hwtree_store::HW_TREE`] and leaked to `'static`: the ACPI
+    /// platform inventory plus the enumerated virtio-PCI block/network
+    /// nodes. The production [`try_boot`] resolves the bootstrap root block
+    /// binding from it; a QEMU chassis that composes its own boot ignores it.
+    pub tree: &'static [tairix_abi::HwNode],
 }
 
 /// Bring the BSP and its board up: per-CPU tables, the dedicated `#PF`
@@ -624,7 +630,7 @@ pub fn bring_up_bsp(
     // (`boot.s` SAFETY-INVARIANT 4). The ECAM configuration-space window
     // the PCI probe reads is likewise identity-mapped (the seed rejects an
     // ECAM base outside that window).
-    unsafe { seed_hardware_tree(madt_bytes, &rsdp, log_sink) };
+    let tree = unsafe { seed_hardware_tree(madt_bytes, &rsdp, log_sink) };
 
     // 6. Build the `cpu_to_lapic` map with **only** the BSP populated.
     //    Production `tairix-kernel` runs single-CPU (it never calls the
@@ -753,6 +759,7 @@ pub fn bring_up_bsp(
         memory_map,
         installed_memory_bytes,
         irq_routing,
+        tree,
     })
 }
 
@@ -767,6 +774,20 @@ fn try_boot(
     // arena, MADT, dispatch callback + user-fault resolver, `syscall`/TSS
     // entry, IO-APIC routing.
     let board = bring_up_bsp(boot_info, log_sink)?;
+
+    // Resolve + audit which discovered node carries the bootstrap root block
+    // device, and which floor block driver binds it, through the same shared
+    // `lib/devmatch` policy the user-space `devmgr` uses, then stash the
+    // binding for the init seam where the in-kernel root-unlock kthread reads
+    // it once (`plans/ARCHSUPPORT.md` A2, the riscv64/aarch64 buffered-tree
+    // analogue). Unlike those ports there is no firmware device tree to carry
+    // — the x86_64 bring-up re-resolves the transport from PCI configuration
+    // space — so the stashed DTB pointer is `0`. A `None` binding (no /
+    // ambiguous disk) leaves the unlock a no-op and `login` fails closed; the
+    // tree is still stashed (re-seeded, identically) so an input driver can
+    // still autoload once the store is reachable.
+    let binding = crate::root_storage::resolve_root_block_driver(board.tree, log_sink);
+    crate::unlock_service::record_boot(binding, 0, board.tree);
 
     // The arch handle borrows its per-CPU bookkeeping from this
     // process-static backing; `boot` runs once, so a
@@ -854,7 +875,36 @@ fn try_boot(
     // `hw_tree_read` / `hw_tree_wait` syscalls read the one authoritative
     // `HW_TREE`, so the user-space device manager observes the same
     // inventory the kernel discovered (Design D).
-    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE);
+    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE)
+    // Install the on-disk application store (`plans/APPS.md` deliverable 8):
+    // this port embeds no program rows, so every command app and service is
+    // spawned from its verified `/System` store bundle. The storage bring-up
+    // resolves the store's readiness latch on every outcome (mount installed
+    // or given up), so a spawn racing the mount parks and always wakes.
+    .with_app_store(&crate::app_store::APP_STORE)
+    // Hand the syscall dispatch hook the shared set-once credential cell: the
+    // in-kernel root-unlock kthread publishes the mounted root volume's
+    // database into it once the operator's passphrase unlocks the encrypted
+    // root. Until that install the cell fails every `users_db_read` closed, so
+    // login refuses every attempt until a root is mounted.
+    .with_users_db(&crate::root_mount::LATE_USERS_DB)
+    .with_users_admin(&crate::root_mount::LATE_USERS_ADMIN)
+    // Serve the `fs_*` syscalls through the production filesystem service: it
+    // routes each operation through the secured VFS against the late-installed
+    // read-only `/System` mount. The cell fails closed until the disk-owning
+    // task publishes the `/System` window
+    // (`system_mount::install_system_mount`), so wiring the hook here changes
+    // no boot behaviour until that install lands.
+    .with_filesystem(&crate::system_mount::FS_SERVICE)
+    // Resolve `id::<volume-id>/…` paths against the volume forest the
+    // mount/unlock tasks publish each mounted volume's stable identity into
+    // (`plans/DEVICES.md` D3a). Fails closed `NotFound` until a volume is
+    // published, so wiring it here changes no boot behaviour.
+    .with_volumes(&crate::system_mount::VOLUME_FOREST)
+    // Delegate runtime volume attach/detach (`plans/DEVICES.md` D3b) to the
+    // production service; it fails closed `NotImplemented` until the mount
+    // task wires its audit sink and pressure gauge.
+    .with_volume_service(&crate::volume_service::VOLUME_SERVICE);
     boot_info
         .validate()
         .map_err(|_| BootError::BootInfoInvalid)?;
@@ -885,10 +935,15 @@ fn try_boot(
 ///    identity-mapped ECAM window, and emit every virtio-net function as a
 ///    role-tagged network node
 ///    ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]) the
-///    two-process user-space driver autoloads against. The interrupt line
-///    each node carries is the function's firmware-assigned PCI interrupt
-///    line (a *discovered* value, read from configuration space, never a
-///    board constant).
+///    two-process user-space driver autoloads against, plus every
+///    virtio-blk function as a match-key-only storage node
+///    ([`crate::hwdiscovery::observe_virtio_pci_block_devices`]) the
+///    root-mount autoload binds the bootstrap-floor block driver from. The
+///    interrupt line each network node carries is the function's
+///    firmware-assigned PCI interrupt line (a *discovered* value, read from
+///    configuration space, never a board constant); the block node carries
+///    only its bind key, as its in-kernel bring-up re-resolves the
+///    transport from configuration space itself.
 ///
 /// Fail closed at every step: a malformed ACPI table, an absent MCFG, an
 /// ECAM base outside the identity-mapped window, or an enumeration error
@@ -908,7 +963,7 @@ unsafe fn seed_hardware_tree(
     madt_bytes: &[u8],
     rsdp: &acpi::Rsdp,
     log: &'static (dyn Sink + Sync),
-) {
+) -> &'static [tairix_abi::HwNode] {
     use tairix_arch_api::PlatformDiscovery;
     use tairix_arch_x86_64::platform::AcpiDiscovery;
 
@@ -918,17 +973,24 @@ unsafe fn seed_hardware_tree(
     // SAFETY: forwarded — the caller's contract pins the firmware tables
     // into the identity-mapped window.
     unsafe { seed_virtio_pci(rsdp, &mut sink, log) };
-    crate::hwtree_store::HW_TREE.seed(sink.leak());
+    // Leak the buffered tree to `'static` (a one-shot boot publish, never a
+    // mutable global) so the `hw_tree_read` / `hw_tree_wait` syscalls and the
+    // root-storage bind resolution can borrow the same nodes for the kernel's
+    // lifetime — the sibling of the riscv64/aarch64 seed.
+    let tree: &'static [tairix_abi::HwNode] = sink.leak();
+    crate::hwtree_store::HW_TREE.seed(tree);
+    tree
 }
 
 /// Enumerate the virtio-PCI bus over the firmware-described ECAM window and
-/// emit every virtio-net function into `sink`.
+/// emit every virtio-net function (with its resolved config windows) and
+/// every virtio-blk function (match-key-only) into `sink`.
 ///
 /// Split from [`seed_hardware_tree`] so the ACPI seed stays a pure
 /// byte-slice normalisation and the (MMIO-reading) PCI walk is isolated
 /// behind its own SAFETY contract. A missing MCFG, an ECAM window outside
-/// the identity map, or an enumeration error leaves the NIC undiscovered
-/// (fail closed) rather than faulting the boot.
+/// the identity map, or an enumeration error leaves the affected devices
+/// undiscovered (fail closed) rather than faulting the boot.
 ///
 /// # Safety
 ///
@@ -1001,6 +1063,17 @@ unsafe fn seed_virtio_pci(
     // An enumeration error leaves the NIC undiscovered; the ACPI nodes
     // already collected are seeded regardless.
     let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(&pci, &dev_irq, sink, log);
+
+    // Emit every virtio-blk function as a match-key-only storage node the
+    // root-mount autoload resolves the bootstrap-floor block driver from —
+    // the x86_64 storage-discovery sibling of the aarch64/riscv64
+    // device-tree block probe. The block bring-up re-resolves the transport
+    // from PCI configuration space itself, so the node carries only its
+    // bind key (no register-window grant): it needs neither the ECAM window
+    // resolution the net probe does nor an interrupt line. An enumeration
+    // error leaves the disk undiscovered; whatever was collected is seeded
+    // regardless (fail closed).
+    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(&pci, sink);
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.

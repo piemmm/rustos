@@ -70,26 +70,44 @@ pub const FAT_BOOT_SECTORS: u64 = 131_072;
 /// design-B pre-unlock signed-driver store (`plans/PI.md` B1).
 pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 
-/// Sectors in the read-only `ARXFS` `/System` partition: 32 MiB. Large
-/// enough to carry the skeleton, the design-B signed driver bundle(s) the
-/// pre-unlock autoload reads from its `Drivers/` store (`plans/PI.md`
-/// design B / B2), **and** the full set of self-contained application
-/// bundles — every discovered program's signed `AppInfo` + `Run` rxe beside
-/// its `Help/` tree (`plans/APPS.md` deliverable 8) — with headroom, while
-/// staying trivial against the whole-disk image (only non-zero sectors are
-/// planted on the backing file).
+/// **Minimum** sectors in the read-only `ARXFS` `/System` partition:
+/// 32 MiB. The partition is *not* a fixed size — the builder grows it to fit
+/// the content it must actually carry (the skeleton, the
+/// design-B signed driver bundle(s) the pre-unlock autoload reads from its
+/// `Drivers/` store, and the full set of self-contained application bundles
+/// — every discovered program's signed `AppInfo` + `Run` rxe beside its
+/// `Help/` tree). A fixed ceiling would fit one architecture's store and
+/// overflow another's (the x86_64 bundle set is materially larger than the
+/// aarch64/riscv64 one), so the size is derived from the content and this
+/// constant is only the floor it never drops below. Only non-zero sectors
+/// are planted on the backing file, so an over-large volume stays trivial
+/// against the whole-disk image.
 pub const SYSTEM_SECTORS: u64 = 65_536;
 
-/// First sector of the encrypted `ARXFS` root partition: directly after
-/// the `/System` partition.
+/// First sector of the encrypted `ARXFS` root partition for the
+/// **minimum-content** layout (directly after a floor-sized `/System`
+/// partition). When the `/System` partition grows to fit a larger store the
+/// real root LBA is derived from the produced partition length in
+/// [`build_image_with_contents`]; this constant is the empty/floor-image
+/// value the self-describing image's own partition table always carries.
 pub const ROOT_LBA: u64 = SYSTEM_LBA + SYSTEM_SECTORS;
 
 /// Sectors in the encrypted `ARXFS` root partition — the shared
 /// [`tairix_test_arxfs_image`] users-root volume's footprint.
 pub const ROOT_SECTORS: u64 = root_image::TOTAL_SECTORS;
 
-/// Total sectors in the assembled whole-disk image.
+/// Total sectors in the assembled whole-disk image for the
+/// **minimum-content** layout. A built image describes its own true size
+/// through its partition table and byte length (consumers plant exactly
+/// `bytes.len() / SECTOR_BYTES` sectors); this constant is the floor-image
+/// value.
 pub const TOTAL_SECTORS: u64 = ROOT_LBA + ROOT_SECTORS;
+
+/// Upper bound the `/System` partition may grow to (256 MiB). A fixture
+/// volume this large already dwarfs any realistic bundle set on any
+/// architecture; exceeding it means the caller planted something absurd, so
+/// the builder fails closed rather than growing without limit.
+const SYSTEM_MAX_SECTORS: u64 = 524_288;
 
 /// The passphrase the test "operator" types at the unlock prompt. The root
 /// volume's key is derived from it through the on-disk descriptor; the
@@ -245,8 +263,39 @@ fn build_system_partition(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, DriverError> {
+    // Grow to fit the content, never a fixed ceiling a larger architecture's
+    // (bigger) bundle set overflows: the x86_64 store is materially larger
+    // than the aarch64/riscv64 one, so a hand-picked size that fits one arch
+    // runs another out of space. Start at the 32 MiB floor and double only on
+    // a genuine out-of-space, so the common case (a store that fits the
+    // floor, e.g. aarch64/riscv64) formats at exactly the default size and is
+    // byte-identical to before, while a larger store (x86_64) grows to the
+    // smallest power-of-two multiple of the floor that holds it. `ARXFS`'s own
+    // metadata/copy-on-write overhead is thereby accounted for by measurement
+    // rather than a guessed multiplier.
+    let mut sectors = SYSTEM_SECTORS;
+    loop {
+        match try_build_system_partition(sectors, drivers, apps) {
+            Ok(bytes) => return Ok(bytes),
+            Err(DriverError::NoSpace) if sectors < SYSTEM_MAX_SECTORS => {
+                sectors = sectors.saturating_mul(2).min(SYSTEM_MAX_SECTORS);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Author the `/System` partition into an `ARXFS` volume of exactly
+/// `sectors` sectors, returning [`DriverError::NoSpace`] if the content does
+/// not fit (the signal [`build_system_partition`] grows on). See that
+/// wrapper for the parameter contract.
+fn try_build_system_partition(
+    sectors: u64,
+    drivers: &[(&[&[u8]], &[u8])],
+    apps: &[(&[&[u8]], &[u8])],
+) -> Result<Vec<u8>, DriverError> {
     let mut fs = ARXFS::format(
-        MemDisk::new(SYSTEM_SECTORS),
+        MemDisk::new(sectors),
         64,
         &SYSTEM_VOLUME_KEY,
         &mut FixtureEntropy { next: 3 },
@@ -386,6 +435,19 @@ pub fn build_image_with_contents(
     let system = build_system_partition(drivers, apps)?;
     let root = root_image::build_users_root_image_with_key(&key)?;
 
+    // The `/System` partition sizes itself to the content it holds
+    // (`build_system_partition`), so the root partition's start and the
+    // total image size are derived from the produced partition length rather
+    // than a fixed constant — the layout follows the content, on every arch.
+    let system_sectors =
+        u64::try_from(system.len() / SECTOR_BYTES).map_err(|_| DriverError::LengthOutOfRange)?;
+    let root_lba = SYSTEM_LBA
+        .checked_add(system_sectors)
+        .ok_or(DriverError::LengthOutOfRange)?;
+    let total_sectors = root_lba
+        .checked_add(ROOT_SECTORS)
+        .ok_or(DriverError::LengthOutOfRange)?;
+
     let table = mbr::encode(&[
         Partition {
             ty: PartitionType::FatBoot,
@@ -395,23 +457,23 @@ pub fn build_image_with_contents(
         Partition {
             ty: PartitionType::ARXFSSystem,
             start_lba: SYSTEM_LBA,
-            block_count: SYSTEM_SECTORS,
+            block_count: system_sectors,
         },
         Partition {
             ty: PartitionType::ARXFSRoot,
-            start_lba: ROOT_LBA,
+            start_lba: root_lba,
             block_count: ROOT_SECTORS,
         },
     ])
     .map_err(|_| DriverError::DeviceFault)?;
 
-    let mut image = vec![0u8; usize::try_from(TOTAL_SECTORS).unwrap_or(0) * SECTOR_BYTES];
+    let mut image = vec![0u8; usize::try_from(total_sectors).unwrap_or(0) * SECTOR_BYTES];
     image[..table.len()].copy_from_slice(&table);
     let boot_at = usize::try_from(BOOT_LBA).unwrap_or(0) * SECTOR_BYTES;
     image[boot_at..boot_at + boot.len()].copy_from_slice(&boot);
     let system_at = usize::try_from(SYSTEM_LBA).unwrap_or(0) * SECTOR_BYTES;
     image[system_at..system_at + system.len()].copy_from_slice(&system);
-    let root_at = usize::try_from(ROOT_LBA).unwrap_or(0) * SECTOR_BYTES;
+    let root_at = usize::try_from(root_lba).unwrap_or(0) * SECTOR_BYTES;
     image[root_at..root_at + root.len()].copy_from_slice(&root);
     Ok(image)
 }

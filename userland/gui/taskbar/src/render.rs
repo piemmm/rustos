@@ -125,6 +125,7 @@ impl TaskbarRenderer {
             taskbar.notifications(),
             taskbar.clock().label(),
             theme.palette(),
+            ui_font(theme, scale),
             &mut icons,
         )
     }
@@ -144,23 +145,39 @@ impl TaskbarRenderer {
             return None;
         }
         let layout = taskbar.menu_layout(scale);
-        paint_menu(&layout, taskbar.start_menu(), theme.palette())
+        paint_menu(
+            &layout,
+            taskbar.start_menu(),
+            theme.palette(),
+            ui_font(theme, scale),
+        )
     }
+}
+
+/// The desktop UI font resolved from the active theme and DPI scale.
+///
+/// The theme authors its font size in *logical* pixels; the scale converts it
+/// to the panel's physical pixels, exactly as it does every other desktop
+/// length. This is where the taskbar's text picks up its comfortable
+/// size.
+fn ui_font(theme: &Theme, scale: Scale) -> BitmapFont {
+    BitmapFont::with_pixel_height(scale.scale_length(u32::from(theme.fonts().ui.size_px)))
 }
 
 /// Fill every region, then draw the clock and task titles into a fresh
 /// surface.
+#[allow(clippy::too_many_arguments)]
 fn paint(
     layout: &BarLayout,
     tasks: &TaskList,
     notifications: &NotificationArea,
     clock_label: &str,
     palette: &Palette,
+    font: BitmapFont,
     icons: &mut IconContext<'_>,
 ) -> Option<Surface> {
     let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
     let origin = layout.bar.origin;
-    let font = BitmapFont::inconsolata();
 
     surface.fill(palette.surface_raised.into());
     fill_region(
@@ -214,13 +231,17 @@ fn paint(
 }
 
 /// Fill the popup panel, then draw each entry's label into a fresh surface.
-fn paint_menu(layout: &MenuLayout, menu: &StartMenu, palette: &Palette) -> Option<Surface> {
+fn paint_menu(
+    layout: &MenuLayout,
+    menu: &StartMenu,
+    palette: &Palette,
+    font: BitmapFont,
+) -> Option<Surface> {
     if layout.panel.is_empty() {
         return None;
     }
     let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
     let origin = layout.panel.origin;
-    let font = BitmapFont::inconsolata();
 
     surface.fill(palette.surface_raised.into());
     for (row, entry) in layout.entries.iter().zip(menu.entries()) {

@@ -42,6 +42,10 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # files app drives, so the picker and the file manager can never diverge in
 # navigation semantics, listing policy, or look (§2.2, §6).
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The shared text rasteriser: the trusted file picker renders (and hit-tests)
+# its listing at the theme's font size, so it resolves the `BitmapFont` it
+# hands to `tairix_browse::render` (§2.2).
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared help engine's required-locale registry: the `cli` module's

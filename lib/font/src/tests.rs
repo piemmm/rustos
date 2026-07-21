@@ -269,4 +269,139 @@ mod render {
         assert_eq!(crab.pixels(), replacement.pixels());
         assert!(crab.pixels().iter().any(|p| p.a > 0));
     }
+
+    #[test]
+    fn native_height_is_the_default_font() {
+        // Exactly the native cell height is the console font, drawn straight
+        // from the atlas, so nothing about console rendering changes.
+        assert_eq!(
+            BitmapFont::with_pixel_height(atlas::CELL_HEIGHT),
+            BitmapFont::inconsolata()
+        );
+    }
+
+    #[test]
+    fn oversized_height_is_clamped_to_the_maximum() {
+        // A larger-than-native size is honoured (no longer clamped to native),
+        // but a pathologically huge request clamps to the bound.
+        assert_eq!(
+            BitmapFont::with_pixel_height(atlas::CELL_HEIGHT + 100).glyph_height(),
+            atlas::CELL_HEIGHT + 100
+        );
+        assert_eq!(
+            BitmapFont::with_pixel_height(10_000).glyph_height(),
+            BitmapFont::MAX_PIXEL_HEIGHT
+        );
+    }
+
+    #[test]
+    fn a_large_font_rasterises_bigger_crisp_glyphs_from_the_outline() {
+        // The core fix: a size well above native rasterises a large glyph
+        // straight from the outline (never an upscaled 28px bitmap). Metrics
+        // and ink both scale up, and the tall cell is filled with real ink.
+        let big = BitmapFont::with_pixel_height(200);
+        assert_eq!(big.glyph_height(), 200);
+        assert!(big.advance() > BitmapFont::inconsolata().advance());
+
+        let ink = |font: BitmapFont| {
+            let mut surface =
+                Surface::new(font.advance() * 2, font.glyph_height()).expect("surface");
+            font.draw_text(&mut surface, 0, 0, "R", WHITE);
+            surface.pixels().iter().filter(|p| p.a > 0).count()
+        };
+        let large_ink = ink(big);
+        let small_ink = ink(BitmapFont::with_pixel_height(14));
+        assert!(
+            large_ink > 1000,
+            "200px glyph has too little ink: {large_ink}"
+        );
+        assert!(
+            large_ink > small_ink,
+            "large glyph did not scale up ({large_ink} vs {small_ink})"
+        );
+    }
+
+    #[test]
+    fn pixel_height_clamps_to_the_legible_range() {
+        let tiny = BitmapFont::with_pixel_height(1);
+        assert_eq!(tiny.glyph_height(), BitmapFont::MIN_PIXEL_HEIGHT);
+    }
+
+    #[test]
+    fn scaled_metrics_track_the_cell_height() {
+        // Half the native height renders roughly half-size text while keeping
+        // the width-to-height ratio: advance = round(15 * 14 / 28) = 8.
+        let font = BitmapFont::with_pixel_height(14);
+        assert_eq!(font.glyph_height(), 14);
+        assert_eq!(font.line_height(), 14);
+        assert_eq!(font.advance(), 8);
+        assert_eq!(font.glyph_width(), 8);
+        assert_eq!(font.text_width("abc"), 3 * font.advance());
+        assert_eq!(font.text_width("日"), 2 * font.advance());
+        assert_eq!(font.advance() * 2, font.text_width("ab"));
+        // Every non-native cell height stays strictly smaller than native.
+        assert!(font.advance() < BitmapFont::inconsolata().advance());
+    }
+
+    #[test]
+    fn scaled_text_advances_by_the_scaled_metric_and_leaves_ink() {
+        let font = BitmapFont::with_pixel_height(14);
+        let mut surface = surface();
+        let pen = font.draw_text(&mut surface, 0, 0, "Hi", WHITE);
+        assert_eq!(pen, i32::try_from(2 * font.advance()).expect("fits"));
+        assert!(surface.pixels().iter().any(|p| p.a > 0), "no ink was drawn");
+        // Ink stays within the scaled cell box: nothing is drawn at or below
+        // the scaled cell height, so a smaller font really is smaller.
+        assert!(
+            (font.glyph_height()..64)
+                .all(|y| (0..64).all(|x| surface.get(x, y).is_none_or(|p| p.a == 0))),
+            "ink spilled past the scaled cell height"
+        );
+    }
+
+    #[test]
+    fn scaled_full_block_is_opaque() {
+        // The full-block outline fills the whole cell, so an interior pixel is
+        // fully covered and stays the caller's exact colour at a non-native
+        // size too.
+        let font = BitmapFont::with_pixel_height(14);
+        let mut surface = surface();
+        font.draw_text(&mut surface, 0, 0, "█", WHITE);
+        let px = surface.get(1, 1).expect("in bounds");
+        assert_eq!((px.r, px.g, px.b, px.a), (255, 255, 255, 255));
+    }
+
+    #[test]
+    fn scaled_rendering_is_deterministic_across_the_cache() {
+        // Drawing the same text at the same size twice must be identical:
+        // a cache miss then a cache hit resolve to the same bytes.
+        let font = BitmapFont::with_pixel_height(13);
+        let mut first = surface();
+        let mut second = surface();
+        font.draw_text(&mut first, 0, 0, "cache me", WHITE);
+        font.draw_text(&mut second, 0, 0, "cache me", WHITE);
+        assert_eq!(first.pixels(), second.pixels());
+    }
+
+    #[test]
+    fn scaled_wide_glyph_paints_its_continuation_cell() {
+        let font = BitmapFont::with_pixel_height(16);
+        let mut surface = surface();
+        font.draw_text(&mut surface, 0, 0, "日", WHITE);
+        assert!(
+            (font.advance()..2 * font.advance()).any(|x| {
+                (0..font.glyph_height()).any(|y| surface.get(x, y).is_some_and(|p| p.a > 0))
+            }),
+            "wide glyph has no ink in its continuation cell when scaled"
+        );
+    }
+
+    #[test]
+    fn scaled_offscreen_text_clips_without_panicking() {
+        let font = BitmapFont::with_pixel_height(12);
+        let mut surface = surface();
+        font.draw_text(&mut surface, -1000, -1000, "clip", WHITE);
+        font.draw_text(&mut surface, i32::MAX - 3, i32::MAX - 3, "clip", WHITE);
+        assert!(surface.pixels().iter().all(|p| p.a == 0));
+    }
 }

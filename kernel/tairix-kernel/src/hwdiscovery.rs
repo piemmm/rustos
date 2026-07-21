@@ -36,7 +36,8 @@ use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 use crate::hwtree_node_ids::{
     VIRTIO_BLOCK_PROBE_NODE_BASE_ID, VIRTIO_INPUT_PROBE_NODE_BASE_ID,
-    VIRTIO_NET_PROBE_NODE_BASE_ID, VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
+    VIRTIO_NET_PROBE_NODE_BASE_ID, VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
+    VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
 };
 
 /// PCI device-ID base of a **modern** virtio function: the device ID is
@@ -46,6 +47,16 @@ use crate::hwtree_node_ids::{
 /// so it emits the *same* [`HwMatchKey::virtio`]`(type)` node the
 /// MMIO probe does — one signed driver bundle binds on either bus.
 const VIRTIO_PCI_MODERN_DEVICE_ID_BASE: u32 = 0x1040;
+
+/// The PCI device id a **modern** virtio function of virtio *type*
+/// `virtio_type` reports: `0x1040 + virtio_type` (virtio 1.1 §4.1.2). The
+/// one definition the PCI probes and the in-kernel bootstrap-floor bring-up
+/// (`crate::x86_64::root_unlock`) share, so the `0x1040 + type` encoding is
+/// never respelled.
+#[must_use]
+pub fn virtio_pci_modern_device_id(virtio_type: u32) -> u32 {
+    VIRTIO_PCI_MODERN_DEVICE_ID_BASE + virtio_type
+}
 
 /// Enumerate the virtio-MMIO `bus` and emit each populated **block** slot
 /// into `sink` as a probed child node.
@@ -100,26 +111,99 @@ pub fn observe_virtio_mmio_block_devices(
         if device.device != VIRTIO_BLK_DEVICE_ID {
             continue;
         }
-        // Parent the probed device to the tree root ([`HW_NODE_ROOT_ID`]),
-        // not the `HW_NODE_ROOT` *parent sentinel*: a node whose parent is
-        // the sentinel is the root itself and is skipped by the autoload
-        // walk (`HwNode::is_root`), so a top-level discovered device must
-        // name the root's id as its parent.
-        let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
+        emit_virtio_block_node(sink, next_id)?;
         next_id = next_id.wrapping_add(1);
-        // One bind key always fits a fresh node; the capacity bound is the
-        // ABI's, so a node that somehow could not hold it is dropped rather
-        // than bound on a partial identity.
-        if node
-            .push_match_key(HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID))
-            .is_ok()
-        {
-            // A full sink (`DiscoveryError::SinkFull`) is the only emit
-            // failure a buffering sink raises; surface it as the same
-            // bounded-capacity refusal an over-full bus does (fail closed).
-            sink.emit(node)
-                .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
+    }
+    Ok(())
+}
+
+/// Emit one match-key-only virtio-block [`HwDeviceClass::Storage`] node
+/// (id `node_id`, parented to the tree root) into `sink`.
+///
+/// The bootstrap-floor block bring-up re-derives the device's register
+/// window and interrupt line from the platform source at bind time (the
+/// firmware device tree on a virtio-MMIO port, PCI configuration space on
+/// the virtio-PCI port), so a discovered block node carries only its bind
+/// identity — no register-window or DMA grant, unlike a
+/// user-space-autoloaded interrupt device whose driver needs those grants.
+/// Shared by the MMIO ([`observe_virtio_mmio_block_devices`]) and PCI
+/// ([`observe_virtio_pci_block_devices`]) block probes so the discovered
+/// block-node shape has exactly one definition.
+///
+/// The node parents to the tree root id ([`HW_NODE_ROOT_ID`]), not the
+/// `HW_NODE_ROOT` *parent sentinel*: a node whose parent is the sentinel is
+/// the root itself and is skipped by the autoload walk
+/// ([`HwNode::is_root`]), so a top-level discovered device must name the
+/// root's id as its parent. One bind key always fits a fresh node; a node
+/// that somehow could not hold it is dropped rather than bound on a partial
+/// identity. A full sink ([`DiscoveryError::SinkFull`]) is surfaced as the
+/// same bounded-capacity [`DriverError::BufferTooSmall`] an over-full bus
+/// raises (fail closed).
+fn emit_virtio_block_node(sink: &mut dyn HwNodeSink, node_id: u32) -> Result<(), DriverError> {
+    let mut node = HwNode::new(node_id, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
+    if node
+        .push_match_key(HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID))
+        .is_ok()
+    {
+        sink.emit(node)
+            .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
+    }
+    Ok(())
+}
+
+/// Enumerate the virtio-**PCI** `bus` and emit each modern virtio-blk
+/// function as a match-key-only [`HwDeviceClass::Storage`] node — the
+/// PCI-bus analogue of [`observe_virtio_mmio_block_devices`] and the
+/// storage-discovery step the x86_64 root-mount autoload resolves the
+/// bootstrap-floor block driver from (`plans/ARCHSUPPORT.md` A2).
+///
+/// A modern virtio-blk PCI function reports vendor [`VIRTIO_PCI_VENDOR_ID`]
+/// and device id `0x1040 + `[`VIRTIO_BLK_DEVICE_ID`]. Like the MMIO block
+/// probe — and unlike the user-space-autoloaded PCI *network* probe
+/// ([`observe_virtio_pci_network_devices`], which grants the driver its
+/// scattered config windows) — the emitted node carries only its virtio
+/// bind key: the block device is an in-kernel bootstrap floor whose
+/// bring-up re-resolves the transport from PCI configuration space at bind
+/// time, so no register-window or DMA grant belongs on the discovered node
+/// (that resolution is the kernel's, never the driver's). The node is keyed
+/// by the shared [`HwMatchKey::virtio`]`(`[`VIRTIO_BLK_DEVICE_ID`]`)` — the
+/// virtio *type*, not the PCI device id — so the one signed virtio-blk
+/// bundle binds on the MMIO and PCI buses alike.
+///
+/// Driver-agnostic: it reaches the bus only through the frozen [`Bus`] ABI
+/// seam, so the boot path never names a concrete `drivers/bus/*` type. The
+/// enumeration is bounded by [`MAX_SLOTS`]; an over-full bus fails closed
+/// rather than under-enumerating.
+///
+/// # Errors
+///
+/// Propagates the bus enumeration error verbatim — [`DriverError::BufferTooSmall`]
+/// when more than [`MAX_SLOTS`] slots respond, or a malformed-tree
+/// [`DriverError::DeviceFault`]. A [`DiscoveryError::SinkFull`] from a full
+/// sink is surfaced as [`DriverError::BufferTooSmall`]. The caller leaves
+/// the root unbound on any error (fail closed).
+pub fn observe_virtio_pci_block_devices(
+    bus: &dyn Bus,
+    sink: &mut dyn HwNodeSink,
+) -> Result<(), DriverError> {
+    let blank = BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    };
+    let mut table = [blank; MAX_SLOTS];
+    let count = bus.enumerate(&mut table)?;
+    // The PCI device id a modern virtio-blk function reports.
+    let want_device_id = virtio_pci_modern_device_id(VIRTIO_BLK_DEVICE_ID);
+    let mut next_id = VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID;
+    for device in &table[..count] {
+        if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) || device.device != want_device_id {
+            continue;
         }
+        emit_virtio_block_node(sink, next_id)?;
+        next_id = next_id.wrapping_add(1);
     }
     Ok(())
 }
@@ -437,7 +521,7 @@ fn observe_virtio_pci_devices(
     let mut table = [blank; MAX_SLOTS];
     let count = bus.enumerate(&mut table)?;
     // The PCI device ID a modern virtio function of this type reports.
-    let want_device_id = VIRTIO_PCI_MODERN_DEVICE_ID_BASE + virtio_type;
+    let want_device_id = virtio_pci_modern_device_id(virtio_type);
     let mut next_id = node_base_id;
     for device in &table[..count] {
         // Only modern virtio functions are candidates.
@@ -1025,5 +1109,93 @@ mod tests {
         observe_virtio_pci_network_devices(&bus, &|_| None, &mut sink, &DiscardLog)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
+    }
+
+    // --- virtio-PCI block probe ------------------------------------------
+
+    /// The modern virtio-blk PCI device id (`0x1040 + 2`).
+    const VIRTIO_BLK_PCI_DEVICE_ID: u16 = 0x1042;
+
+    #[test]
+    fn a_virtio_blk_pci_function_is_discovered_match_key_only() {
+        // A modern virtio-blk PCI function is emitted as a `Storage` node
+        // keyed by the shared virtio *type* (the same key the MMIO block
+        // probe uses, so one signed virtio-blk bundle binds on either bus),
+        // and — being an in-kernel bootstrap floor whose bring-up
+        // re-resolves the transport from config space — carries **no**
+        // resource grants, unlike the user-space PCI network node.
+        let bus = FakePciBus::with(&[(VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800)]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1);
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Storage));
+        assert_eq!(node.id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID)]
+        );
+        assert!(
+            node.resources().is_empty(),
+            "a bootstrap-floor block node carries only its bind key, no grants"
+        );
+        // A probed device node is parented to the tree root id, not the
+        // parent sentinel, so the autoload walk treats it as a device.
+        assert_eq!(node.parent(), HW_NODE_ROOT_ID);
+        assert!(!node.is_root());
+        // Its region is disjoint from the PCI network base, so a machine
+        // with a NIC and a disk never aliases the two node ids.
+        assert_ne!(node.id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
+    }
+
+    #[test]
+    fn a_non_block_virtio_pci_function_emits_no_block_node() {
+        // A virtio-net PCI function (0x1041) and a non-block virtio device
+        // id are not virtio-blk, so the block probe emits nothing.
+        let bus = FakePciBus::with(&[
+            (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800),
+            (0x1050, 0x0000_0900),
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        assert!(sink.nodes.is_empty());
+    }
+
+    #[test]
+    fn a_non_virtio_vendor_function_with_the_blk_device_id_emits_no_block_node() {
+        // The vendor guard is load-bearing: a function that happens to
+        // report the virtio-blk *device id* but a foreign vendor is not a
+        // virtio device and must not be bound as the root disk (fail
+        // closed). `FakePciBus::with` pins the virtio vendor, so build the
+        // function directly with a non-virtio vendor.
+        let bus = FakePciBus {
+            functions: alloc::vec![BusDevice {
+                vendor: 0x1234,
+                device: u32::from(VIRTIO_BLK_PCI_DEVICE_ID),
+                class: 0x0100,
+                reserved0: 0,
+                address: 0x0000_0800,
+            }],
+        };
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        assert!(sink.nodes.is_empty());
+    }
+
+    #[test]
+    fn two_virtio_blk_pci_functions_get_distinct_ids() {
+        // Two virtio-blk functions each become a distinct node from the PCI
+        // block base, so a machine with two disks never merges them (the
+        // root selection then fails closed on the ambiguity, but discovery
+        // must still surface both).
+        let bus = FakePciBus::with(&[
+            (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800),
+            (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_1000),
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        assert_eq!(sink.nodes.len(), 2);
+        assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
+        assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID + 1);
     }
 }

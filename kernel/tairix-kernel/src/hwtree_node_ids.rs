@@ -73,6 +73,13 @@ pub const VIRTIO_NET_PROBE_NODE_BASE_ID: u32 = region(3);
 /// node id unambiguous.
 pub const VIRTIO_PCI_NET_PROBE_NODE_BASE_ID: u32 = region(4);
 
+/// First synthetic id for a probed virtio-**PCI** block child node
+/// ([`crate::hwdiscovery::observe_virtio_pci_block_devices`]). One id per
+/// enumerated virtio-blk PCI function; a distinct region from the MMIO
+/// block base so a port that probes the PCI storage bus (x86_64) keeps
+/// every disk node id unambiguous and never aliases an MMIO-probed disk.
+pub const VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID: u32 = region(5);
+
 // A single probe walk emits at most one id per enumerated bus slot
 // (`bus.enumerate` fills at most `MAX_SLOTS`; an overfull bus fails closed),
 // so the highest id a walk can reach in its region is
@@ -89,12 +96,13 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 5] = [
+    const BASES: [u32; 6] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
         VIRTIO_NET_PROBE_NODE_BASE_ID,
         VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
+        VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
     ];
 
     #[test]

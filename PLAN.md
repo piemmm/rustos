@@ -3029,9 +3029,15 @@ Shipped (headless-testable, model + renderer over injected seams):
   tracking, window ops; fails closed on bad modes.
 - Shared desktop libs (§2.2, one path each): `lib/raster` (incl. the
   `RasterCache` SVG→scale cache), `lib/theme`, `lib/geometry` (DPI/`Scale`),
-  `lib/font` (the system Inconsolata face: a generated 12×26 4-bit-coverage
+  `lib/font` (the system Inconsolata face: a generated 15×28 4-bit-coverage
   atlas of every codepoint the face maps — `cargo xtask font-atlas`, drift
-  gated in `ci` — with binary-search Unicode lookup and a U+FFFD fallback),
+  gated in `ci` — with binary-search Unicode lookup and a U+FFFD fallback;
+  the text console draws the atlas verbatim, while the desktop rasterises
+  resized glyphs from the outlines at the requested size via `lib/fontface`,
+  cached, so UI text is crisp at any size and never a stretched bitmap),
+  `lib/fontface` (the shared TrueType parser + anti-aliased rasteriser and
+  merged-family resolution, used by both the `font-atlas` generator and the
+  runtime `lib/font` so the atlas and live text share one rasteriser, §2.2),
   `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
 - `userland/gui/taskbar` (start menu + running-task list + clock/notification
   area) and `userland/gui/session` glue (theme registry, taskbar model,
@@ -3583,7 +3589,12 @@ per-app recipes (§2.2).
     (`.junie/PREREQUISITES.md` P-0) to the ephemeral swap key, the swap-device
     backend driver, and the `CAP`-gated activation syscall — all Stage 8.
 - `tools/mkimage` producing:
-  - `images/tairix-x86_64.iso` (hybrid BIOS/UEFI).
+  - `images/tairix-x86_64.iso` (hybrid BIOS/UEFI). Booting this on real
+    firmware needs the first-party, Rust-only boot chain (no GRUB, no C):
+    the pure loader core `lib/bootload` (ELF→`LoadPlan`, landed) plus the
+    per-firmware `boot/*` shells, handing off through the kernel's existing
+    multiboot2 entry. Staged in `plans/BOOTLOADER.md`; the GPT/ESP whole-disk
+    builder is B4 there, and `plans/ARCHSUPPORT.md` A1 depends on it.
   - `images/tairix-aarch64-rpi.img` — **DONE (landed ahead of Stage 8 as
     `plans/PI.md` P9).** `tairix-mkimage` (lib + bin) authors the image
     in pure Rust via the one-step `cargo xtask image --target aarch64-rpi`
@@ -5909,6 +5920,17 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-07-21 — First-party Rust boot chain.** Amended §3 (added `lib/bootload`,
+  `lib/multiboot2`, and the planned `boot/` per-firmware shells), §12 (a
+  boot-chain note), and the §15.18 jump-sheet (a `plans/BOOTLOADER.md` row),
+  after the x86_64 product image
+  was found to have no way to boot on real firmware without GRUB (forbidden C /
+  external code). The decision: a first-party, Rust-only loader — the pure
+  `lib/bootload` core plus per-firmware `boot/*` shells — handing off through the
+  kernel's existing multiboot2 entry, so no third boot protocol is invented.
+  `plans/BOOTLOADER.md` is the staged design; `plans/ARCHSUPPORT.md` A1 depends
+  on its GPT/ESP whole-disk builder (B4).
 
 - **2026-07-20 — "Machine load" is never an excuse for a flaky test.**
   Strengthened §7's "No flaky tests" clause and added a §23.4 gate bullet

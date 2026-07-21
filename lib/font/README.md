@@ -17,9 +17,11 @@ Greek, and Cyrillic, uses **M PLUS 1 Code Regular** as its Japanese companion,
 **D2Coding Regular** as its Korean companion, and **Noto Sans Hebrew
 ExtraCondensed** for Hebrew and Yiddish. All four are licensed under SIL Open
 Font License 1.1. The TrueType sources and licence notices are committed under
-`assets/`; nothing parses TrueType at runtime. Faces have precedence in that
-order, so each companion fills only codepoints the earlier faces do not map and
-existing glyphs remain unchanged.
+`assets/`. The text console draws from the pre-generated atlas and never parses
+TrueType; the desktop's resized text rasterises glyphs from these same outlines
+at runtime through the shared `lib/fontface` engine (see *Rendering at a chosen
+size*). Faces have precedence in that order, so each companion fills only
+codepoints the earlier faces do not map and existing glyphs remain unchanged.
 
 The M PLUS source is the static Regular TTF from upstream commit
 `4bf69824e45a175b9121b248c46abff103569051`, SHA-256
@@ -42,9 +44,11 @@ is `assets/NotoSansHebrew-OFL.txt`.
 the generated atlas (`src/atlas.rs` + `src/atlas_coverage.bin`), and
 `cargo xtask font-atlas` (run by `ci`) fails closed if the committed atlas
 drifts from a fresh generation — the same generated-view discipline as the C
-ABI headers. The generator is first-party and deterministic: a minimal
-TrueType reader and an anti-aliasing scanline rasteriser in
-`tools/xtask/src/commands/font_atlas.rs`. The 3.54 MiB coverage payload starts
+ABI headers. The generator is first-party and deterministic: it rasterises
+each outline through the shared `lib/fontface` engine (a minimal TrueType
+reader and an anti-aliasing scanline rasteriser) — the *same* engine the
+runtime uses to resize glyphs, so the atlas and live text can never diverge
+(`AGENTS.md` §2.2). The 3.54 MiB coverage payload starts
 with a little-endian glyph-offset table and stores each glyph as an independent
 bounded LZ block. Lookup therefore decodes exactly one glyph into its fixed
 420-byte value, with no allocation or whole-atlas startup pass. Exact
@@ -75,6 +79,38 @@ the payload exceeds the pre-Korean size ceiling.
   blend correctly with no colour arithmetic duplicated here (`AGENTS.md`
   §2.2). `text_width` and `truncate_to_width` give the shared layout
   arithmetic.
+- `cache` — the on-demand outline rasteriser (over embedded faces + the shared
+  `lib/fontface` engine) and its bounded, process-global cache (behind
+  `render`). See *Rendering at a chosen size* below.
+
+## Rendering at a chosen size
+
+A `BitmapFont` renders at a chosen **cell height in physical pixels**.
+`BitmapFont::inconsolata()` keeps the atlas's native height and is what the
+text console (`lib/fbcon`) draws at — its glyphs come straight from the atlas
+with no resampling, so console rendering is byte-for-byte unchanged.
+`BitmapFont::with_pixel_height(px)` asks for any other cell: the desktop
+resolves a comfortable physical size from the theme's logical font size and
+the DPI scale (`tairix_geometry::Scale`), so window titles, the taskbar, the
+start menu, and the file browser render at that size. Every derived metric
+(advance, cell width, baseline, line height) scales with the cell height,
+keeping the font monospaced and its aspect ratio fixed.
+
+A non-native cell rasterises each glyph **directly from the TrueType outline**
+at that exact size, through the shared `lib/fontface` engine over the embedded
+faces — the very engine the atlas is generated with. Sampling the curve at the
+target resolution keeps text crisp whether tiny or very large, so a 200-pixel
+heading is as sharp as 14-pixel body text and neither is a stretched bitmap.
+Because the desktop redraws the same glyphs at the same size every frame, each
+rasterised glyph is memoised in a bounded, spinlock-guarded process-global
+cache keyed by `(face, glyph, cell height)`; a hit copies into the caller's
+reusable buffer with no rasterisation and the cache evicts its oldest entry
+when full, so its footprint stays bounded (`AGENTS.md` §2.16, §24.1). The
+faces are parsed once, lazily, and a scalar the faces do not cover falls back
+to the same U+FFFD glyph the atlas shows; if the (trusted) faces ever fail to
+parse, rasterisation fails closed to blank rather than panicking. The cache
+and rasteriser ride the `render` feature; the allocator-free `atlas`/`glyph`
+view never touches them.
 
 The cell model is **one scalar per grid entry** — the deliberate simplification
 `lib/vt` and `lib/curses` document. A zero-advance combining mark renders in

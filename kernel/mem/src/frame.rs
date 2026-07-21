@@ -66,11 +66,19 @@ pub const PAGE_SHIFT: u32 = 12;
 /// Maximum buddy order supported by this allocator.
 ///
 /// Order `n` blocks span `2^n` frames, i.e. `4 KiB * 2^n` bytes.
-/// `MAX_ORDER = 11` ⇒ the largest atomically-allocatable block is
-/// `4 KiB << 11 = 8 MiB`. Picked to comfortably exceed any current
-/// huge-page or DMA-coherent allocation while keeping the per-order
-/// metadata fixed-size.
-pub const MAX_ORDER: u32 = 11;
+/// `MAX_ORDER = 13` ⇒ the largest atomically-allocatable block is
+/// `4 KiB << 13 = 32 MiB`. This is the ceiling on a single contiguous
+/// physical allocation, and — crucially — on the region the kernel heap's
+/// frame-backed growth source can draw in one go (`crate` `kheap`), so it
+/// must comfortably exceed the largest single contiguous allocation the
+/// kernel ever makes. The binding case is a bundle `Run` image, read whole
+/// into one heap buffer up to `BUNDLE_FILE_MAX` (16 MiB): the allocator's
+/// per-block header and power-of-two growth granule round a full 16 MiB
+/// request up to the next power of two (32 MiB), so 32 MiB is the smallest
+/// order that guarantees such a load is served from — or grown to — the
+/// heap rather than failing once the bootstrap arena fragments. A
+/// compile-time assertion in `kernel/core` keeps this coupling honest.
+pub const MAX_ORDER: u32 = 13;
 
 /// Fraction of usable RAM held back as a kernel reserve: `usable_frames /
 /// RESERVE_DIVISOR` frames a *user* commit may never draw into, so the
@@ -154,7 +162,7 @@ const NIL: usize = usize::MAX;
 
 /// Sentinel for "this frame is not a registered free-block head" in
 /// [`FrameAllocatorState::blk_order`]. A real order is `0..=MAX_ORDER`
-/// (≤ 11), so `0xFF` never collides.
+/// (≤ 13), so `0xFF` never collides.
 const NOT_A_HEAD: u8 = 0xFF;
 
 /// One entry of the intrusive per-order free list, indexed by the free
@@ -327,7 +335,7 @@ impl FrameAllocatorState {
             self.nodes[h].prev = start;
         }
         self.free_heads[order as usize] = start;
-        // `order <= MAX_ORDER` (11) by construction, so it fits a `u8`.
+        // `order <= MAX_ORDER` (13) by construction, so it fits a `u8`.
         #[allow(clippy::cast_possible_truncation)]
         {
             self.blk_order[s] = order as u8;
@@ -751,7 +759,7 @@ impl FrameAllocator {
     /// that fits the remainder so a large request costs few chunks.
     ///
     /// This is the path a cross-process shared-memory region draws its
-    /// backing from: a region larger than the 8 MiB single-block ceiling
+    /// backing from: a region larger than the single-block ceiling
     /// ([`MAX_ORDER`]) is satisfied by several blocks the caller then maps
     /// into one contiguous virtual window, so the region size is bounded by
     /// available RAM rather than a fixed order. A region that fits one block
@@ -1018,21 +1026,26 @@ mod tests {
 
     #[test]
     fn alloc_chunks_spans_more_than_one_max_order_block() {
-        // A request larger than a single order-`MAX_ORDER` block (8 MiB) must
-        // be satisfied by several blocks — the whole point of the chunked
-        // backing that removes the shared-region ceiling.
-        let m = small_map(5000);
+        // A request larger than a single order-`MAX_ORDER` block must be
+        // satisfied by several blocks — the whole point of the chunked
+        // backing that removes the shared-region ceiling. Sized relative to
+        // `MAX_ORDER` so it stays a genuine multi-block request whatever the
+        // order ceiling is: one-and-a-half of the largest block.
+        let max_block: usize = 1 << MAX_ORDER;
+        let want_pages = max_block + max_block / 2;
+        let total = want_pages + 100;
+        let m = small_map(total);
         let a = FrameAllocator::new(&m).unwrap();
-        let want = 4096; // 16 MiB, twice the 8 MiB single-block ceiling.
+        let want = want_pages as u64;
         let chunks = a.alloc_chunks(want).unwrap();
         assert!(chunks.len() >= 2, "must span multiple blocks");
         assert!(chunks.iter().all(|&(_, o)| o <= MAX_ORDER));
         assert_eq!(chunk_frames(&chunks), want);
-        assert_eq!(a.free_frames(), 5000 - usize::try_from(want).unwrap());
+        assert_eq!(a.free_frames(), total - want_pages);
         for (f, o) in chunks {
             a.free_order(f, o).unwrap();
         }
-        assert_eq!(a.free_frames(), 5000);
+        assert_eq!(a.free_frames(), total);
     }
 
     #[test]

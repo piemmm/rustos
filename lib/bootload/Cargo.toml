@@ -1,0 +1,26 @@
+[package]
+name = "tairix-bootload"
+description = "TAIRiX first-party boot-chain loader core: the pure, no_std, firmware-neutral computation that turns a kernel ELF64 image into a validated LoadPlan (the PT_LOAD segments to place in physical memory, the entry point, the required physical span, and each segment's W^X permission flags), decoded through lib/binfmt so the loader and the executable-inspection view share one ELF definition. It places nothing and touches no hardware — every offset, size, and destination is bounds-checked and fail-closed with fixed validation caps, so a malformed or hostile image is a typed error, never a panic or a partial trust. The per-firmware boot/* shells (UEFI, BIOS) consume this to decide what to load; they decide how (plans/BOOTLOADER.md B1)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The loader core decodes the kernel image *through* the shared ELF64 view
+# so the load path and the executable-inspection path can never drift on
+# what an ELF field means. Only the fail-closed header/program-header decode
+# is used here — no allocation happens on that path, so the loader core
+# stays alloc-free for a firmware environment with no heap.
+tairix-binfmt = { path = "../binfmt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its per-run seed and wall-clock budget
+# through the shared seed/budget seam: one place picks the seed, logs it,
+# and bounds the smoke/soak loop. Test scaffolding only; never in a build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

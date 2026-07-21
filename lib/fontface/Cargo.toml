@@ -1,0 +1,12 @@
+[package]
+name = "tairix-fontface"
+description = "TAIRiX shared TrueType glyph-outline engine: the one parser + anti-aliased non-zero-winding rasteriser that turns a committed TrueType face into 4-bit coverage bitmaps at any requested pixel size, plus the merged-family codepoint resolution the atlas generator and the runtime font both build on (§6, §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
