@@ -110,6 +110,15 @@ the verticals mount.
 
 ### A2 — Production boot storage floor + registry deletion (`planned`)
 
+Foundation in place: the x86_64 boot hardware-tree seed
+(`boot_x86_64::seed_virtio_pci`) emits the discovered virtio-blk-PCI disk
+as a match-key-only `Storage` node, via the arch-neutral
+`hwdiscovery::observe_virtio_pci_block_devices` probe (its node-id region
+claimed in `hwtree_node_ids.rs`, the shared `emit_virtio_block_node` body
+also backing the MMIO block probe). The node the `root_storage` gate binds
+the bootstrap-floor block driver from is therefore discovered; what remains
+is the boot composition that consumes it.
+
 The `PLAN.md` increment-5 end state. Bind the virtio-blk-PCI root through
 the shared `root_storage` gate in the x86_64 production boot; add the
 port's `root_unlock` admission (the unlock kthread composing the shared

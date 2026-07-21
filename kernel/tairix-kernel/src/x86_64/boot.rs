@@ -885,10 +885,15 @@ fn try_boot(
 ///    identity-mapped ECAM window, and emit every virtio-net function as a
 ///    role-tagged network node
 ///    ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]) the
-///    two-process user-space driver autoloads against. The interrupt line
-///    each node carries is the function's firmware-assigned PCI interrupt
-///    line (a *discovered* value, read from configuration space, never a
-///    board constant).
+///    two-process user-space driver autoloads against, plus every
+///    virtio-blk function as a match-key-only storage node
+///    ([`crate::hwdiscovery::observe_virtio_pci_block_devices`]) the
+///    root-mount autoload binds the bootstrap-floor block driver from. The
+///    interrupt line each network node carries is the function's
+///    firmware-assigned PCI interrupt line (a *discovered* value, read from
+///    configuration space, never a board constant); the block node carries
+///    only its bind key, as its in-kernel bring-up re-resolves the
+///    transport from configuration space itself.
 ///
 /// Fail closed at every step: a malformed ACPI table, an absent MCFG, an
 /// ECAM base outside the identity-mapped window, or an enumeration error
@@ -922,13 +927,14 @@ unsafe fn seed_hardware_tree(
 }
 
 /// Enumerate the virtio-PCI bus over the firmware-described ECAM window and
-/// emit every virtio-net function into `sink`.
+/// emit every virtio-net function (with its resolved config windows) and
+/// every virtio-blk function (match-key-only) into `sink`.
 ///
 /// Split from [`seed_hardware_tree`] so the ACPI seed stays a pure
 /// byte-slice normalisation and the (MMIO-reading) PCI walk is isolated
 /// behind its own SAFETY contract. A missing MCFG, an ECAM window outside
-/// the identity map, or an enumeration error leaves the NIC undiscovered
-/// (fail closed) rather than faulting the boot.
+/// the identity map, or an enumeration error leaves the affected devices
+/// undiscovered (fail closed) rather than faulting the boot.
 ///
 /// # Safety
 ///
@@ -1001,6 +1007,17 @@ unsafe fn seed_virtio_pci(
     // An enumeration error leaves the NIC undiscovered; the ACPI nodes
     // already collected are seeded regardless.
     let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(&pci, &dev_irq, sink, log);
+
+    // Emit every virtio-blk function as a match-key-only storage node the
+    // root-mount autoload resolves the bootstrap-floor block driver from —
+    // the x86_64 storage-discovery sibling of the aarch64/riscv64
+    // device-tree block probe. The block bring-up re-resolves the transport
+    // from PCI configuration space itself, so the node carries only its
+    // bind key (no register-window grant): it needs neither the ECAM window
+    // resolution the net probe does nor an interrupt line. An enumeration
+    // error leaves the disk undiscovered; whatever was collected is seeded
+    // regardless (fail closed).
+    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(&pci, sink);
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.
