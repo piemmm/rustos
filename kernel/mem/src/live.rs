@@ -357,7 +357,7 @@ pub trait LiveUserSpace: Send {
     /// user virtual address.
     ///
     /// The chunked form of [`Self::map_shared`]: a region larger than the
-    /// frame allocator's single-block ceiling (8 MiB) is backed by several
+    /// frame allocator's single-block ceiling is backed by several
     /// blocks the shared-region registry allocated, and this maps them
     /// back-to-back in virtual space so the process sees one flat buffer (the
     /// display frame ring). As with [`Self::map_shared`] the frames belong to

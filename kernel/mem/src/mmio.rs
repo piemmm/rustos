@@ -376,7 +376,7 @@ impl MmioWindowMap {
     ///
     /// This is [`Self::map_cacheable_into`] generalised from a single block
     /// to several: a region larger than the frame allocator's single-block
-    /// ceiling ([`crate::frame::MAX_ORDER`], 8 MiB) is backed by several
+    /// ceiling ([`crate::frame::MAX_ORDER`]) is backed by several
     /// blocks (the display frame ring), and this maps them **contiguously in
     /// virtual address space** so the process still sees one flat buffer.
     /// Each `(phys_base, pages)` chunk is page-aligned kernel RAM owned by the

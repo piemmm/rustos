@@ -220,4 +220,61 @@ mod tests {
         // A request larger than the largest contiguous block fails closed.
         assert_eq!(order_for((1usize << (MAX_ORDER + 1)) * PAGE_SIZE), None);
     }
+
+    /// Regression: a single allocation larger than one order-`MAX_ORDER`
+    /// block's *predecessor* must still be satisfied by growth. Before
+    /// `MAX_ORDER` was raised, a bundle `Run` image between 8 and 16 MiB
+    /// could not be grown to (the old 8 MiB granule capped growth), so a
+    /// second large app load aborted the kernel once the bootstrap arena
+    /// fragmented. A 12 MiB allocation now grows a fresh region, is served,
+    /// and shrinks back.
+    #[test]
+    fn grows_for_an_allocation_larger_than_eight_mib() {
+        use core::alloc::{GlobalAlloc, Layout};
+
+        // A generous, order-aligned window so a 16 MiB (order-12) growth
+        // block is available: 64 MiB at a 64 MiB-aligned base.
+        let base = PhysAddr::new(64 * 1024 * 1024);
+        let win_bytes = 64 * 1024 * 1024;
+        let sim: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(base, win_bytes)));
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: base,
+            length: win_bytes as u64,
+            kind: RegionKind::Usable,
+        });
+        let frames: &'static FrameAllocator =
+            Box::leak(Box::new(FrameAllocator::new(&map).unwrap()));
+        let free_before = frames.free_frames();
+
+        let boot: &'static mut u64 = Box::leak(Box::new(0u64));
+        // SAFETY: unique `'static` 8-byte-aligned pointer, zero length so it
+        // is never dereferenced; the heap owns its grown regions. Host test.
+        let heap: &'static FreeListAllocator = Box::leak(Box::new(unsafe {
+            FreeListAllocator::new((boot as *mut u64).cast::<u8>(), 0)
+        }));
+        let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
+            frames,
+            physmap: sim,
+        }));
+        heap.install_source(source);
+
+        // 12 MiB: strictly larger than the old 8 MiB single-block ceiling,
+        // so it can only be served if growth can draw a larger region.
+        let big = 12 * 1024 * 1024;
+        assert!(big > (1usize << 11) * PAGE_SIZE, "must exceed the old cap");
+        let layout = Layout::from_size_align(big, 16).unwrap();
+        // SAFETY: valid layout; the heap solely owns its regions.
+        let ptr = unsafe { heap.alloc(layout) };
+        assert!(!ptr.is_null(), "growth satisfied the >8 MiB allocation");
+        assert!(frames.free_frames() < free_before, "growth drew frames");
+
+        // SAFETY: same pointer/layout the alloc returned.
+        unsafe { heap.dealloc(ptr, layout) };
+        assert_eq!(
+            frames.free_frames(),
+            free_before,
+            "shrink returned every drawn frame"
+        );
+    }
 }

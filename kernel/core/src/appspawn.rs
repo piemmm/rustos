@@ -53,7 +53,7 @@ use tairix_abi::{
 };
 use tairix_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
-use tairix_kernel_mem::{CacheBudget, MemoryPressure};
+use tairix_kernel_mem::{CacheBudget, MemoryPressure, MAX_ORDER, PAGE_SIZE};
 use tairix_log::Sink;
 use tairix_sync::RwLock;
 
@@ -220,6 +220,23 @@ impl AppStore {
 /// the whole load fails closed.
 const BUNDLE_FILE_MAX: usize = 16 << 20;
 
+/// A bundle file is read whole into one contiguous heap buffer
+/// ([`FsBundleStore::read_file`]), so the kernel heap must be able to grow
+/// a region large enough to hold the largest one. The heap's frame-backed
+/// growth draws a single power-of-two frame block capped at
+/// [`MAX_ORDER`]; a `BUNDLE_FILE_MAX` request rounds up to the next power
+/// of two (allocator header + alignment push a full 16 MiB just over
+/// 4096 pages), so the largest growable block must be at least twice
+/// `BUNDLE_FILE_MAX`. This ties the two constants together at compile time
+/// so raising `BUNDLE_FILE_MAX` without a matching `MAX_ORDER` — which
+/// would silently reintroduce the load-fails-once-fragmented defect — does
+/// not build.
+const _: () = assert!(
+    (1usize << MAX_ORDER) * PAGE_SIZE >= 2 * BUNDLE_FILE_MAX,
+    "MAX_ORDER too small: the kernel heap cannot grow a region large enough \
+     to read a BUNDLE_FILE_MAX bundle file",
+);
+
 /// Largest total byte count of one bundle's hashed contents (32 MiB, the
 /// size of the whole `/System` store volume today). Bounds the kernel
 /// memory one verification may hold; exceeding it fails the load closed.
@@ -241,12 +258,6 @@ const WALK_DEPTH_MAX: usize = 8;
 /// Most files one bundle may carry. Bounds the walk's bookkeeping; a tree
 /// beyond it is refused closed.
 const WALK_FILES_MAX: usize = 4096;
-
-/// Read chunk size for bundle files. Every `FilesystemService::read` is a
-/// full path resolution, permission walk, and per-mount lock round trip,
-/// so bundle bytes are staged through a heap buffer big enough to amortise
-/// that per-call work across a `Run` image instead of paying it per page.
-const READ_CHUNK: usize = 128 << 10;
 
 /// The [`BundleStore`] over the kernel's mounted, secured VFS.
 ///
@@ -270,21 +281,46 @@ impl<'a> FsBundleStore<'a> {
 
     /// Read the whole regular file at `path`, refusing one longer than
     /// `max_len` rather than allocating without bound.
+    ///
+    /// The exact size is learned from `stat` first, so the destination is
+    /// reserved **once, to the exact length**, through the fallible
+    /// [`Vec::try_reserve_exact`] — never grown by the infallible
+    /// doubling `extend_from_slice` uses, which both wastes up to a whole
+    /// second copy of a large image (a `Run` binary near `max_len` would
+    /// double a heap request to the next power of two) and aborts the
+    /// kernel on exhaustion instead of failing closed. Bytes are read
+    /// straight into that buffer, so a `max_len`-sized bundle file is one
+    /// allocation of its own length and no bounce copy. A read that is
+    /// short of the stated size (a file truncated under us) is honoured by
+    /// returning only what was read; one that runs past it (a file that
+    /// grew) stops at the stated size and the extra is refused closed by
+    /// the caller's own length checks.
     fn read_file(&self, path: &str, max_len: usize) -> Result<Vec<u8>, Errno> {
-        let mut out = Vec::new();
-        let mut chunk = alloc::vec![0u8; READ_CHUNK.min(max_len)];
-        loop {
-            let read = self
-                .fs
-                .read(self.uid, self.caps, path, out.len() as u64, &mut chunk)?;
-            if read == 0 {
-                return Ok(out);
-            }
-            if out.len() + read > max_len {
-                return Err(Errno::LengthOutOfRange);
-            }
-            out.extend_from_slice(&chunk[..read]);
+        let stat = self.fs.stat(self.uid, self.caps, path)?;
+        let size = usize::try_from(stat.size).map_err(|_| Errno::LengthOutOfRange)?;
+        if size > max_len {
+            return Err(Errno::LengthOutOfRange);
         }
+        let mut out = Vec::new();
+        // Fail closed on exhaustion rather than aborting the kernel: the
+        // one heap request for the whole file is the largest a bundle load
+        // makes, and it must be a `Result`, never a panic.
+        out.try_reserve_exact(size)
+            .map_err(|_| Errno::OutOfMemory)?;
+        // `resize` cannot reallocate: capacity is already `>= size`.
+        out.resize(size, 0);
+        let mut filled = 0usize;
+        while filled < size {
+            let read =
+                self.fs
+                    .read(self.uid, self.caps, path, filled as u64, &mut out[filled..])?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        out.truncate(filled);
+        Ok(out)
     }
 
     /// Walk the bundle tree under `root`, appending every regular file's

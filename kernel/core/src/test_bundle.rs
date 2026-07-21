@@ -11,8 +11,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
 use tairix_abi::{
-    BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags,
-    UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
+    BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileId, FileKind, FileStat, NodeTimes,
+    OpenFlags, UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
 use tairix_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
 use tairix_caps::CapabilitySet;
@@ -162,8 +162,40 @@ impl FilesystemService for MemFs {
         Ok(children)
     }
 
-    fn stat(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<FileStat, Errno> {
-        Err(Errno::NotImplemented)
+    fn stat(&self, _uid: u32, _caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno> {
+        // A regular file present in the flat map reports its real byte
+        // length, so the bundle store's `read_file` reserves exactly it.
+        if let Some(body) = self.files.get(path) {
+            return Ok(FileStat {
+                kind: FileKind::Regular,
+                size: body.len() as u64,
+                allocated: body.len() as u64,
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                id: FileId::NONE,
+                times: NodeTimes::default(),
+            });
+        }
+        // Otherwise a directory iff any file lives beneath it.
+        let prefix = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        if self.files.keys().any(|p| p.starts_with(&prefix)) {
+            return Ok(FileStat {
+                kind: FileKind::Directory,
+                size: 0,
+                allocated: 0,
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                id: FileId::NONE,
+                times: NodeTimes::default(),
+            });
+        }
+        Err(Errno::NotFound)
     }
 
     fn truncate(
