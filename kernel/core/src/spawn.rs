@@ -1162,7 +1162,8 @@ impl<'a> SpawnCtxBuild<'a> {
     /// Adapt `ctx` into an [`ImageBuildCtx`] carrying the loading child's
     /// kernel-stack guard VA (`Some` for an arena stack whose guard page
     /// [`build`](ArchImageBuilder::build) unmaps in the child root, `None`
-    /// for the software-canary [`BoxStack`] fallback).
+    /// for the software-canary [`BoxStack`](crate::kthread::BoxStack)
+    /// fallback).
     #[must_use]
     pub fn new(ctx: &'a dyn SpawnCtx, guard: Option<u64>) -> Self {
         Self { ctx, guard }

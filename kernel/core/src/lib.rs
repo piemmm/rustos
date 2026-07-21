@@ -116,6 +116,7 @@ pub mod sleeplock;
 pub(crate) mod sched;
 pub mod smp;
 pub mod spawn;
+pub mod spawn_services;
 pub mod syscalls;
 pub mod useradmin;
 pub mod users;
@@ -236,6 +237,10 @@ pub use spawn::{
     AdmitError, ArchImageBuilder, BuiltImage, EmbeddedProgram, ImageBuildCtx, InitSpawn,
     InitSpawnCtx, NullProcessSpawn, ProcessSpawn, ProgramRegistry, SpawnCallerError, SpawnCtx,
     SpawnCtxBuild, SpawnRequest, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
+};
+pub use spawn_services::{
+    install_spawn_services, installed_spawn_services, ArchSpawnRuntime, SpawnRuntime,
+    SpawnServices, SpawnServicesAlreadyInstalled,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
 pub use useradmin::{

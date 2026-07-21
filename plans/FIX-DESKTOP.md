@@ -715,6 +715,29 @@ Each stage is independently reviewable and must leave the whole-project
     whole `tairix-kernel-core` suite (1097 host tests) stays green. It is a
     live, in-place refactor, not reserved scaffolding: the child-side call
     site is added by the atomic flip.
+  - **Landed — the `SpawnServices` / `SpawnRuntime` boot-installed
+    launch-services bundle (Remaining item 2's `'static` load context).**
+    `kernel/core/src/spawn_services.rs` defines the non-generic, set-once
+    `'static` `SpawnServices` handle the child loading body will capture —
+    `frames`, `page_table_frames`, `audit`, `filesystem`, `app_store`,
+    `aspaces`, `caps`, `process_wait`, the `&'static dyn ArchImageBuilder`,
+    and the type-erased `&'static dyn SpawnRuntime` — over the established
+    `devres` / `dispatch_slot` `install_*()` / `installed_*()` idiom (a
+    `tairix_sync::OnceCell`-guarded read-only handle, not a mutable global).
+    The three architecture-`A` operations the body needs (`current_cpu`,
+    `ticks_now`, `now_ns`) are type-erased behind `SpawnRuntime`, with the
+    production `ArchSpawnRuntime<A: KernelArch>` forwarding to the arch HAL
+    and leaked at boot; everything else the bundle holds is already
+    non-generic, so `SpawnServices` is a plain struct in a plain `OnceCell`
+    (sidestepping Rust's generic-static ban). `install_spawn_services` is
+    fail-loud set-once (`SpawnServicesAlreadyInstalled`);
+    `installed_spawn_services` fails closed to `None`. Host tests cover the
+    getters, the production `ArchSpawnRuntime` forwarding, and the set-once
+    install/lookup contract. It is the reserved contract the core
+    loading-body orchestration (item 2 below) reads, landed ahead of the
+    flip exactly as the task-model primitive and the `LOAD_*` ABI were; the
+    boot path installs the production bundle and the child body reads it
+    when the flip lands.
   - **Remaining (in dependency order), the atomic mechanism.** The design
     below is validated against the live code (`syscalls.rs` `spawn`
     handler, `KernelSpawnCtx`, `admit_process`, `kthread.rs`, the arch
@@ -772,19 +795,20 @@ Each stage is independently reviewable and must leave the whole-project
          `build` **closed** (a stronger guarantee than today's fallback, on
          a path the freshly built identity space makes unreachable in
          practice), never a silent downgrade to an unguarded stack (`§2.17`).
-    2. **Owned, `'static` load context + core loading-body orchestration
-       (`kernel/core`).** A boot-installed set-once `'static`
-       `SpawnServices` handle (the established `devres` / `dispatch_slot`
-       / `callreg` `install_*()` / `installed_*()` idiom — a `Once`-guarded
-       read-only handle, **not** a mutable global, so it does not offend the
-       no-global-mutable-static rule) carries the `'static` load services
-       the child body captures: `frames`, `page_table_frames`, `audit`,
-       `filesystem`, `app_store`, `aspaces`, `caps`, `process_wait`, and the
-       `&'static dyn ArchImageBuilder`. Production backs every one from the
-       `Box::leak`'d `KernelState`; tests install a leaked fixture (leak
-       permitted in tests). This is preferred over converting
+    2. **Core loading-body orchestration (`kernel/core`).** The
+       boot-installed set-once `'static` `SpawnServices` / `SpawnRuntime`
+       handle this orchestration captures is **landed** (see the summary
+       bullet above): `kernel/core/src/spawn_services.rs` carries the
+       `'static` load services the child body captures — `frames`,
+       `page_table_frames`, `audit`, `filesystem`, `app_store`, `aspaces`,
+       `caps`, `process_wait`, the `&'static dyn ArchImageBuilder`, and the
+       type-erased `&'static dyn SpawnRuntime`. Production backs every one
+       from the `Box::leak`'d `KernelState`; tests install a leaked fixture
+       (leak permitted in tests). This is preferred over converting
        `KernelSyscallHandlers`'s `'a` fields to `'static`, which would ripple
-       through the ~26k-line test suite for no security gain.
+       through the ~26k-line test suite for no security gain. **Remaining:**
+       the boot install of the production bundle, and the core admit-loading
+       entry + child loading body that read it.
        - **Validated: `SpawnServices` is *non-generic*.** The child body's
          only architecture-`A` dependencies are `SchedulerArch::current_cpu`
          (to park on the app-store latch), `ticks_now` (the caps record's
