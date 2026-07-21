@@ -87,7 +87,9 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stages A–D are **done**; Stage E is **planned** (not started).
+**Status:** Stages A–E are **done**. Server-side window decorations are live:
+every served application window is decorated by the window manager, and the
+whole-project validation gate is green.
 Per the User's direction, one full stage lands per change.
 
 Each stage lands complete — its rendering for **both** dark and light themes,
@@ -243,20 +245,43 @@ guarantees:
   `Resized`; and the engine `Resize` re-maps the region and the host reallocates
   the surface.
 
-### Stage E — Complete, documented, gated
+### Stage E — Decorations live, documented, gated — DONE
 
-- Rustdoc on every new public item; add/update the `docs/src/desktop/` page
-  describing server-side decorations (who owns furniture, the hit map, the
-  typed lifecycle events) (§13).
-- QEMU app vertical: extend an existing desktop/app vertical (as in
-  `plans/APPWIN.md`) to assert a presented window is decorated and that Close/
-  Minimize/PutToBack/SizeToggle behave end to end.
-- Update `PLAN.md` Stage 7 to record decorations as done, and this plan's
-  status. Register this plan in the `AGENTS.md` §15.18 jump-sheet (done in the
-  same change that creates it).
-- The whole validation gate is green before "done" (`AGENTS.md` §2.15, §7):
-  `cargo fmt --all` (+ `--check`), `cargo xtask ci` (once), `cargo xtask fuzz
-  --secs 5`, and `tools/ci/soak.sh both --secs 20`.
+Decorations are turned on in the running desktop, and the whole feature is
+complete. What it now guarantees:
+
+- **Served application windows are decorated; the picker is not.**
+  `DesktopShell::decorate_window` attaches a movable, fixed-size `WindowFrame`
+  (no resize grabber; the size-toggle is disabled and inert) and labels its
+  title bar with the channel `WindowTitle`. `ShellWindowHost::window_opened`
+  calls it for every served window, so Files, the terminal, and any future
+  windowed app are decorated with **no per-app decoration code**. The session's
+  own trusted file picker is session chrome, dismissed by its own keys, so it
+  opens *undecorated* — no inert title bar.
+- **Exactly one active frame follows focus.** `DesktopShell::sync_active_frame`
+  reconciles the compositor's active-frame decoration with the window manager's
+  focused window on every focus change (click-to-activate, taskbar activation,
+  open, close, minimize). It is a no-op for an undecorated focus, so focusing
+  the picker still correctly deactivates the app window it drew focus from.
+- **The controls drive the lifecycle end to end.** A click on a real title-bar
+  control routes through the input router to `InputResponse::WindowControl` and
+  is mapped by the one shared `window_control_event` to Close→`CloseRequested`,
+  Minimize→hide+taskbar-minimised+`Minimized`, PutToBack→restack (no event),
+  SizeToggle→`Resized` (nothing for a fixed-size window). No new syscall, no
+  ambient authority; the app tears itself down on close.
+- **Docs.** `docs/src/desktop/wm.md` documents furniture ownership, the hit
+  map, pointer/keyboard routing, the typed lifecycle, and the live-session
+  decoration (served apps decorated, picker not).
+- **Tests.** `userland/gui/wm` covers rendering/hit-map/routing/resize;
+  `userland/gui/session` covers decorate-on-open (both the shell `open`+
+  `decorate` path and the real `window_opened` serve path), the active frame
+  following focus across open/click/close/minimize, and an end-to-end vertical
+  clicking every command control and mapping it through the lifecycle; the AW3
+  click-through vertical asserts the presented window is decorated.
+
+Client-driven resizability (an app opting in and re-rendering on `Resized`)
+remains a future, per-app opt-in over the existing `WindowRequest::Resize`
+protocol (Stage D); the default apps present fixed size by design.
 
 ## 3. Definition of done
 

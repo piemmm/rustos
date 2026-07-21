@@ -160,9 +160,60 @@ the chrome. The furniture family itself lives once in
   carries. Both confine their damage to the furniture bands — a focus flip
   or title edit never recomposites the client (`AGENTS.md` §2.16).
 
-Furniture hit testing, pointer/keyboard routing, and the typed
-close/minimize/put-to-back/size-toggle lifecycle are the next stages of
-`plans/COMPOSITOR-WORK.md`.
+- **Furniture hit map.** `Compositor::frame_hit` classifies a screen point
+  against a decorated window's `WindowFrame::hit`, returning a typed
+  `FurniturePart` (title bar, a command control, a resize edge, the inert
+  rim, or the client). The `InputRouter` consults it *before* the client and
+  before the root-viewport scrollbar hit map, so a press on the frame is never
+  reported to the app as `Activated` and an app look-alike inside the client
+  can never impersonate a real frame control (`plans/GUI-CONTROLS-DESIGN.md`
+  §1, §11.17–§11.18). A non-resizable window classifies its border as inert
+  `Frame`, never a resize edge, so a fixed-size window cannot be dragged
+  larger. The client-press position the app receives is reported relative to
+  the inset **client** rectangle, so decorating a window never shifts its
+  content coordinates.
+- **Pointer and keyboard routing.** A title-bar press begins the cooperative
+  move-grab; a command-control press captures the frame, feeds the click to
+  `TitleBar::on_pointer`, and emits `WindowControl { window, control }` on the
+  completed release; a resize-edge press (resizable windows only) drives the
+  shared `ResizeGrabber`. When the frame furniture holds the keyboard, arrows
+  move focus between the controls and Space/Enter activate one
+  (`Compositor::frame_key` → `TitleBar::on_key`); a client press returns the
+  keyboard to the app.
+- **Typed lifecycle (no new syscall).** Each command control maps to a window
+  lifecycle action in one shared place
+  (`tairix_desktop_session::window_control_event`), so the live serve loop and
+  the tests drive the same rule: **Close** returns
+  `WindowEvent::CloseRequested` (the app tears down cooperatively — the window
+  manager never destroys a window behind the app's back); **Minimize** hides
+  the window, marks its taskbar entry minimised, drops focus, and returns
+  `WindowEvent::Minimized`; **PutToBack** restacks to the bottom of the
+  z-order with no app-ward event; **SizeToggle** maximizes to the session work
+  area (screen minus the taskbar) or restores, returning `WindowEvent::Resized`
+  with the new client size (nothing for a non-resizable window). These ride the
+  existing window path, owner-validated by the engine; there is no ambient
+  authority and no privileged force-quit button (`AGENTS.md` §4, §5.4).
+
+## Decorated windows in the live session
+
+The desktop session (`userland/gui/session`) turns decorations on for every
+**served application window**. When a window opens over the channel,
+`ShellWindowHost::window_opened` opens the bare window through the shell and
+then calls `DesktopShell::decorate_window`, which attaches a `WindowFrame`
+(movable, presenting a fixed size — the default apps render at one size, so no
+resize grabber is drawn and the size-toggle reports no change) and labels its
+title bar with the channel's `WindowTitle`. Files, the terminal, and any future
+windowed app are decorated this way with **no per-app decoration code** — the
+one place a served window is dressed is the window manager.
+
+`DesktopShell::sync_active_frame` keeps exactly one window showing its active
+frame: on every focus change — a click-to-activate press, a taskbar activation,
+an open, a close, a minimize — the newly focused decorated window is activated
+and the previously active one reverts to inactive. It is a no-op for an
+undecorated focus, so the session's own **trusted file picker** — session
+chrome dismissed by its own keys, not an app the window manager dresses — opens
+undecorated and never gains an inert title bar, while still correctly
+deactivating whatever app window it drew focus away from.
 
 ## Failing closed
 

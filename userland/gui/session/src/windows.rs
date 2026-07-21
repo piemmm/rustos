@@ -215,6 +215,12 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         else {
             return Err(Errno::LengthOutOfRange);
         };
+        // A served application window is decorated by the window manager: the
+        // title bar (with the Close / Minimize / PutToBack / SizeToggle
+        // controls), the frame rim, and the resize edges are composed around
+        // the app's content. The app never draws its own chrome; it reacts to
+        // the typed lifecycle events the controls raise over the window path.
+        self.shell.decorate_window(self.compositor, wm, title);
         self.windows.opened += 1;
         self.windows.records.insert(window_id, WindowRecord { wm });
         self.windows.by_wm.insert(wm, window_id);
@@ -553,6 +559,216 @@ mod tests {
         assert!(host.compositor.window(wm).is_none());
         host.window_closed(1);
         assert!(host.windows.is_empty());
+    }
+
+    #[test]
+    fn window_opened_decorates_the_served_window_with_its_title() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+            };
+            host.window_opened(3, &mode(120, 80, DisplayFormat::Rgba8888), "Files")
+                .expect("opens");
+            host.windows.records.get(&3).expect("live").wm
+        };
+        // The window manager decorated the served window with its channel
+        // title; the app itself drew no chrome.
+        let frame = compositor
+            .window_frame(wm)
+            .expect("the served window is decorated");
+        assert_eq!(frame.title_bar().title(), "Files");
+        assert!(frame.furniture().movable, "movable by its title bar");
+        assert!(
+            !frame.furniture().resizable,
+            "the served window presents a fixed size"
+        );
+        // The reserved frame band grows the outer bounds; the client keeps the
+        // app's requested content size and never covers the furniture.
+        let client = compositor.window_client_rect(wm).expect("client");
+        assert_eq!((client.width, client.height), (120, 80));
+        let outer = compositor.window(wm).expect("live").bounds();
+        assert!(outer.width > client.width && outer.height > client.height);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One linear end-to-end drive of all four command controls.
+    fn clicking_each_title_bar_control_drives_the_window_lifecycle_end_to_end() {
+        use tairix_wm::{InputEvent, InputResponse, PointerButton};
+
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+
+        // Open a served, decorated window exactly as the serve loop does.
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+            };
+            host.window_opened(7, &mode(480, 320, DisplayFormat::Rgba8888), "Files")
+                .expect("opens");
+            host.windows.records.get(&7).expect("live").wm
+        };
+
+        // The screen centre of each command control, read from the same frame
+        // and title-bar layout the compositor renders and hit-tests through, so
+        // the click lands on the real furniture, never a guessed position.
+        let scale = compositor.scale();
+        let control_point = |compositor: &Compositor, kind: WindowControlKind| -> Point {
+            let bounds = compositor.window(wm).expect("live").bounds();
+            let frame = compositor.window_frame(wm).expect("decorated");
+            let title_rect = frame.layout(bounds, scale, compositor.theme()).title_bar;
+            let layout = frame
+                .title_bar()
+                .layout(title_rect, scale, compositor.theme());
+            let rect = layout
+                .controls
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .expect("the control has a slot")
+                .1;
+            #[allow(clippy::cast_possible_wrap)]
+            Point::new(
+                rect.left() + (rect.width / 2) as i32,
+                rect.top() + (rect.height / 2) as i32,
+            )
+        };
+
+        // A full primary click at `at`, returning the release outcome — a
+        // command control fires on release, exactly as the input router routes
+        // it live.
+        let click = |shell: &mut DesktopShell,
+                     compositor: &mut Compositor,
+                     at: Point|
+         -> crate::ShellOutcome {
+            shell.handle(InputEvent::PointerMoved { to: at }, compositor);
+            shell.handle(
+                InputEvent::PointerPressed {
+                    button: PointerButton::Primary,
+                },
+                compositor,
+            );
+            shell.handle(
+                InputEvent::PointerReleased {
+                    button: PointerButton::Primary,
+                },
+                compositor,
+            )
+        };
+
+        let work_area = shell.work_area(&compositor);
+
+        // PutToBack: the router classifies the control, and the shared mapping
+        // makes it a window-manager-local restack with no app-ward event.
+        let at = control_point(&compositor, WindowControlKind::PutToBack);
+        let outcome = click(&mut shell, &mut compositor, at);
+        assert!(
+            matches!(
+                outcome,
+                crate::ShellOutcome::WindowManager(InputResponse::WindowControl {
+                    window,
+                    control: WindowControlKind::PutToBack,
+                }) if window == wm
+            ),
+            "the put-to-back control click routes to the window manager: {outcome:?}"
+        );
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::PutToBack,
+                wm,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            None
+        );
+
+        // SizeToggle: on a fixed-size window the control is disabled (rendered
+        // with a reason, never vanished), so pressing it activates nothing —
+        // the frame consumes the press but raises no command. Even routed
+        // directly, the mapping is a no-op for a non-resizable window.
+        let at = control_point(&compositor, WindowControlKind::SizeToggle);
+        let outcome = click(&mut shell, &mut compositor, at);
+        assert!(
+            matches!(
+                outcome,
+                crate::ShellOutcome::WindowManager(InputResponse::FurniturePressed { window })
+                    if window == wm
+            ),
+            "the disabled size-toggle raises no command: {outcome:?}"
+        );
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::SizeToggle,
+                wm,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            None,
+            "a fixed-size window does not maximize"
+        );
+
+        // Close: the app tears down cooperatively — a CloseRequested event, the
+        // window still alive until the app acts.
+        let at = control_point(&compositor, WindowControlKind::Close);
+        let outcome = click(&mut shell, &mut compositor, at);
+        assert!(matches!(
+            outcome,
+            crate::ShellOutcome::WindowManager(InputResponse::WindowControl {
+                control: WindowControlKind::Close,
+                ..
+            })
+        ));
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::Close,
+                wm,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            Some(WindowEvent::CloseRequested { window_id: 7 })
+        );
+        assert!(
+            compositor.window(wm).is_some(),
+            "close is cooperative: the window manager never destroys it"
+        );
+
+        // Minimize (last, since it hides the window): the taskbar entry is
+        // marked minimised and the app is told to pause.
+        let at = control_point(&compositor, WindowControlKind::Minimize);
+        let outcome = click(&mut shell, &mut compositor, at);
+        assert!(matches!(
+            outcome,
+            crate::ShellOutcome::WindowManager(InputResponse::WindowControl {
+                control: WindowControlKind::Minimize,
+                ..
+            })
+        ));
+        assert_eq!(
+            window_control_event(
+                WindowControlKind::Minimize,
+                wm,
+                work_area,
+                &mut shell,
+                &mut compositor,
+                &windows,
+            ),
+            Some(WindowEvent::Minimized { window_id: 7 })
+        );
+        assert!(!compositor.window(wm).expect("live").is_visible());
     }
 
     /// Open one served window and return its window-channel id → compositor id.

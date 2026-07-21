@@ -15,7 +15,7 @@ use tairix_taskbar::{
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
     Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Scale, Surface,
-    WindowId,
+    WindowActivationState, WindowId,
 };
 
 use crate::{
@@ -1346,6 +1346,111 @@ fn close_window_removes_the_task_and_unfocuses() {
     assert!(!shell.close_window(&mut comp, window));
 }
 
+/// The activation state of `window`'s decoration frame.
+fn activation(comp: &Compositor, window: WindowId) -> WindowActivationState {
+    comp.window_frame(window)
+        .expect("the window is decorated")
+        .furniture()
+        .activation
+}
+
+/// Open and decorate a served application window, exactly as
+/// `ShellWindowHost::window_opened` does in the live serve loop: the shell
+/// opens the bare window, then the window manager dresses it with frame
+/// furniture.
+fn open_app(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    origin: Point,
+    title: &str,
+) -> WindowId {
+    let window = shell
+        .open_window(comp, origin, app_surface(), title)
+        .expect("opens");
+    assert!(
+        shell.decorate_window(comp, window, title),
+        "a served application window is decorated"
+    );
+    window
+}
+
+#[test]
+fn open_window_decorates_the_window_with_a_titled_frame() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+
+    // The window manager owns the frame; the channel title labels its title bar.
+    let frame = comp.window_frame(window).expect("the window is decorated");
+    assert_eq!(frame.title_bar().title(), "Editor");
+    let furniture = frame.furniture();
+    assert!(furniture.movable, "the title bar can move the window");
+    assert!(
+        !furniture.resizable,
+        "the default app presents a fixed-size window"
+    );
+    // Freshly opened and focused, so its frame shows active.
+    assert_eq!(furniture.activation, WindowActivationState::Active);
+
+    // The decoration reserves a band *around* the content: the outer bounds
+    // grow, the client insets, and the client never covers the furniture.
+    let client = comp.window_client_rect(window).expect("client");
+    let outer = comp.window(window).expect("live").bounds();
+    assert!(
+        outer.width > client.width && outer.height > client.height,
+        "the reserved frame band grows the outer bounds"
+    );
+    assert_eq!(
+        (client.width, client.height),
+        (app_surface().width(), app_surface().height()),
+        "the client keeps the app's requested content size"
+    );
+}
+
+#[test]
+fn the_active_frame_follows_the_focused_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let first = open_app(&mut shell, &mut comp, Point::new(100, 100), "First");
+    let second = open_app(&mut shell, &mut comp, Point::new(900, 100), "Second");
+
+    // The most-recently opened window holds focus and shows the active frame;
+    // the other is inactive. Exactly one active frame at a time.
+    assert_eq!(activation(&comp, second), WindowActivationState::Active);
+    assert_eq!(activation(&comp, first), WindowActivationState::Inactive);
+
+    // A direct click on the first window's content moves focus, and the active
+    // frame follows it.
+    shell.handle(moved(150, 150), &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp);
+    assert_eq!(shell.router().focused(), Some(first));
+    assert_eq!(activation(&comp, first), WindowActivationState::Active);
+    assert_eq!(activation(&comp, second), WindowActivationState::Inactive);
+}
+
+#[test]
+fn minimizing_or_closing_the_focused_window_leaves_no_active_frame() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let a = open_app(&mut shell, &mut comp, Point::new(100, 100), "A");
+    let b = open_app(&mut shell, &mut comp, Point::new(900, 100), "B");
+
+    // Minimizing the focused window drops focus and deactivates its frame; no
+    // other window becomes active.
+    assert!(shell.minimize_window(&mut comp, b));
+    assert_eq!(shell.router().focused(), None);
+    assert_eq!(activation(&comp, b), WindowActivationState::Inactive);
+    assert_eq!(activation(&comp, a), WindowActivationState::Inactive);
+
+    // Focusing then closing a window likewise leaves no active frame.
+    shell.handle(moved(150, 150), &mut comp);
+    shell.handle(PRIMARY_PRESS, &mut comp);
+    assert_eq!(activation(&comp, a), WindowActivationState::Active);
+    assert!(shell.close_window(&mut comp, a));
+    assert_eq!(shell.router().focused(), None);
+    assert_eq!(activation(&comp, b), WindowActivationState::Inactive);
+}
+
 #[test]
 fn clicking_a_task_minimises_then_restores_its_window() {
     let mut shell = shell();
@@ -1607,6 +1712,17 @@ fn aw3_click_through_produces_the_staged_outcomes() {
     let window = shell
         .open_window(&mut comp, origin, surface, "Files")
         .expect("the served window opens");
+    // The window manager decorates the served window, exactly as
+    // `ShellWindowHost::window_opened` does in the live serve loop — the app
+    // itself draws no chrome.
+    assert!(shell.decorate_window(&mut comp, window, "Files"));
+    assert_eq!(
+        comp.window_frame(window)
+            .expect("the presented window is decorated")
+            .title_bar()
+            .title(),
+        "Files"
+    );
     let in_window = Point::new(origin.x + 240, origin.y + 160);
 
     // Clicking the window activates it (the session delivers Focus +

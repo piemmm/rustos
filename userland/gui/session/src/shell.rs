@@ -43,7 +43,7 @@ use tairix_icon::IconSet;
 use tairix_taskbar::{TaskbarConfig, TaskbarRenderer, TaskbarResponse};
 use tairix_wm::{
     Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect, Scale, Surface,
-    WindowId,
+    WindowActivationState, WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
 };
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
@@ -110,6 +110,11 @@ pub struct DesktopShell {
     renderer: TaskbarRenderer,
     tasks: TaskBridge,
     cursor: CursorController,
+    /// The decorated window currently shown with its active frame rim, kept
+    /// in step with the window manager's focused window by
+    /// [`sync_active_frame`](Self::sync_active_frame). `None` when focus rests
+    /// on the desktop or an undecorated window.
+    active_frame: Option<WindowId>,
 }
 
 impl DesktopShell {
@@ -130,6 +135,7 @@ impl DesktopShell {
             renderer: TaskbarRenderer::new(),
             tasks: TaskBridge::new(),
             cursor: CursorController::new(),
+            active_frame: None,
         }
     }
 
@@ -211,13 +217,20 @@ impl DesktopShell {
             .set_registry(registry, self.router.wm(), compositor);
     }
 
-    /// Open `surface` as a top-level application window at `origin`, list it on
-    /// the taskbar titled `title`, and focus it, re-presenting the bar so the
-    /// new task appears.
+    /// Open `surface` as a top-level window at `origin`, list it on the taskbar
+    /// titled `title`, and focus it, re-presenting the bar so the new task
+    /// appears.
     ///
     /// Returns the new [`WindowId`]. Returns `None`, opening nothing, only if
     /// the task-id space is exhausted. The compositor is the
     /// embedder's, passed in here; the shell holds no framebuffer.
+    ///
+    /// This opens the bare window; a served application window is additionally
+    /// decorated with the window-manager frame furniture through
+    /// [`decorate_window`](Self::decorate_window). The session's own trusted
+    /// modal surfaces (the file picker) open undecorated — they are session
+    /// chrome, dismissed by their own keys, not app windows the window manager
+    /// dresses with a title bar.
     pub fn open_window(
         &mut self,
         compositor: &mut Compositor,
@@ -233,8 +246,74 @@ impl DesktopShell {
             surface,
             title,
         )?;
+        // Focus moved to the new window; keep the decorated active frame in
+        // step (a no-op for this bare window, but it deactivates whatever
+        // decorated window previously held focus).
+        self.sync_active_frame(compositor);
         self.present(compositor);
         Some(window)
+    }
+
+    /// Decorate the already-open window `window` with the window-manager frame
+    /// furniture — the title bar (with the Close / Minimize / `PutToBack` /
+    /// `SizeToggle` command controls), the frame rim, and the resize edges —
+    /// labelled `title`, and bring its active frame in step with focus.
+    /// Returns `false`, changing nothing, for a window the compositor does not
+    /// know.
+    ///
+    /// The decoration is server-side: the window manager composes the furniture
+    /// *around* the app's content surface (the window's origin becomes the
+    /// outer top-left and the content insets to the client rectangle), so the
+    /// app never draws its own chrome and its content never overlaps the
+    /// furniture. Served application windows are decorated (the serve loop
+    /// calls this when a window opens); the window is movable by its title bar
+    /// but presents a fixed size (`resizable: false`) — the default apps render
+    /// at one size, so no resize grabber is drawn and the size-toggle reports
+    /// no change. A future resizable app opts in through its own window request.
+    pub fn decorate_window(
+        &mut self,
+        compositor: &mut Compositor,
+        window: WindowId,
+        title: &str,
+    ) -> bool {
+        let frame = WindowFrame::new(WindowFurnitureState {
+            activation: WindowActivationState::Active,
+            size: WindowSizeState::Restored,
+            movable: true,
+            resizable: false,
+        });
+        if !compositor.set_window_frame(window, frame) {
+            return false;
+        }
+        compositor.set_window_title(window, title);
+        self.sync_active_frame(compositor);
+        true
+    }
+
+    /// Bring the compositor's decorated-window activation in step with the
+    /// window manager's focused window: the newly focused decorated window
+    /// shows its active frame rim, title, and controls, and the
+    /// previously-active one reverts to inactive. Focus onto the desktop or an
+    /// undecorated window leaves no window active.
+    ///
+    /// This is the single place activation follows focus, so every focus
+    /// change — a click-to-activate press, a taskbar activation, an
+    /// open/close/minimize — keeps exactly one active frame. It early-returns
+    /// when focus has not moved and is a no-op for an undecorated focus
+    /// ([`set_active_frame`](Compositor::set_active_frame) returns `false`), so
+    /// it costs nothing when no decorated window is involved.
+    fn sync_active_frame(&mut self, compositor: &mut Compositor) {
+        let focus = self.router.focused();
+        if self.active_frame == focus {
+            return;
+        }
+        if let Some(old) = self.active_frame {
+            compositor.set_active_frame(old, false);
+        }
+        self.active_frame = match focus {
+            Some(window) if compositor.set_active_frame(window, true) => Some(window),
+            _ => None,
+        };
     }
 
     /// Close `window`: remove it from the compositor and the taskbar, dropping
@@ -250,6 +329,7 @@ impl DesktopShell {
         ) {
             return false;
         }
+        self.sync_active_frame(compositor);
         self.present(compositor);
         true
     }
@@ -270,6 +350,7 @@ impl DesktopShell {
         ) {
             return false;
         }
+        self.sync_active_frame(compositor);
         self.present(compositor);
         true
     }
@@ -396,6 +477,10 @@ impl DesktopShell {
                 ShellOutcome::Session(event)
             }
         };
+        // Whatever the event did to focus — a click-to-activate, a taskbar
+        // activate/minimise, a desktop press — keep the decorated active frame
+        // in step, so exactly the focused window shows its active title bar.
+        self.sync_active_frame(compositor);
         self.refresh_cursor(compositor);
         outcome
     }

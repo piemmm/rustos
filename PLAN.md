@@ -3315,6 +3315,20 @@ per-app recipes (§2.2).
   the same `ScrollModel`. The pointer record carries a `Scrolled` tick
   (`lib/abi`), delivered as `lib/input::PointerScrolled` and a new theme
   `scrollbar_breadth`/`min_thumb_length` metric sizes the furniture.
+- **Server-side window decorations — DONE** (`plans/COMPOSITOR-WORK.md`). The
+  window manager composes the `lib/controls::window` furniture family
+  (`WindowFrame`/`TitleBar`/the four command controls/`ResizeGrabber`) around
+  every served application window: the compositor reserves the frame band,
+  renders the chrome, keeps a furniture hit map (a frame press is never a
+  client press), and routes pointer/keyboard to typed control actions. The
+  desktop session turns it on — `ShellWindowHost::window_opened` decorates each
+  served window via `DesktopShell::decorate_window` (movable, fixed size, titled
+  from the channel `WindowTitle`), `sync_active_frame` keeps exactly one active
+  frame following focus, and each command control maps through the one shared
+  `window_control_event` to the window lifecycle over the existing window path
+  (Close→`CloseRequested`, Minimize→hide+`Minimized`, PutToBack→restack,
+  SizeToggle→`Resized`) — no new syscall, no ambient authority. The trusted
+  file picker stays undecorated session chrome. No app draws its own chrome.
 - **Typed control-state vocabulary — DONE.** `lib/controls::state` is the §5
   model as composed typed Rust: `ControlKind`/`ControlRole`, a `ControlState`
   built from `FocusState`/`PointerState`/`SelectionState`/`ValidationState`/
