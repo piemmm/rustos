@@ -1637,6 +1637,7 @@ You are not exempt from any rule above. In addition:
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
+    | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
     | Userland I/O library layer | `plans/IO.md` |

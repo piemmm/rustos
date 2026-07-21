@@ -3125,6 +3125,25 @@ transfer, landed in increments:
   unit tests (slot semantics, window containment, walk propagation).
 
 **Remaining this stage:**
+- **Non-blocking app launch — the desktop must not freeze while an app
+  loads (`plans/FIX-DESKTOP.md`).** `SyscallNumber::SPAWN` today runs the
+  whole app load (VFS read + signature/hash verify + eager address-space
+  image build) synchronously on the *caller's* task, so the desktop
+  compositor task cannot return to its present/input loop until the
+  launch finishes — the reported freeze. The fix (staged DESK-1…DESK-7)
+  makes launch asynchronous: `SPAWN` admits the child immediately and
+  returns its PID; the child loads its own image on its first scheduled
+  slice (the `pre_resume`/`work` seam), so the parent keeps running and
+  load failures surface via the child's exit + audit. The same principle
+  fixes the file picker's synchronous directory listing on the compositor
+  thread. It then goes **strictly ahead of Linux**: the eager per-child
+  image copy is replaced by a demand-paged, copy-on-write image backed by
+  a per-boot **verified shared image cache** keyed on the signed content
+  hash — read-only text/rodata is one physical frame set shared across
+  every instance, writable pages are COW, cost tracks the working set not
+  the whole binary, and no unverified byte is ever mapped (the page-cache
+  sharing Linux has, plus verification it does not). Audit done; no
+  implementation has landed.
 - **The display-client present path (`plans/DISPLAY.md` D7) — the
   graphical session goes live.** The binding design is fixed there
   (zero-copy shm double-buffer frames, per-present kernel lease check,
