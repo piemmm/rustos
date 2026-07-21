@@ -79,7 +79,7 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stages A–B are **done**; Stages C–E are **planned** (not started).
+**Status:** Stages A–C are **done**; Stages D–E are **planned** (not started).
 Per the User's direction, one full stage lands per change.
 
 Each stage lands complete — its rendering for **both** dark and light themes,
@@ -147,24 +147,42 @@ guarantees:
 No furniture is hit-tested or wired to a lifecycle action yet, and no ABI was
 touched — that is Stage C onward.
 
-### Stage C — Furniture hit map + pointer/keyboard routing
+### Stage C — Furniture hit map + pointer/keyboard routing — DONE
 
-- Extend the WM furniture hit testing so a press on the title bar, a control,
-  or the grabber is classified by `WindowFrame::hit` (→ `FurniturePart`) and is
-  never `FurnitureHit::Client`. Fold this into the existing `input.rs`
-  `press_primary` furniture branch alongside the root-viewport `hit_test`, so
-  frame furniture and scrollbar furniture share one classification step.
-- A title-bar drag continues the existing move-grab (`begin_move`/`Moved`/
-  `MoveEnded`); a grabber drag drives resize (new `InputResponse` variant,
-  e.g. `Resized`/`ResizeEnded`, mirroring the move-grab lifecycle) via
-  `ResizeGrabber::on_pointer` → `ResizeEvent`.
-- The `WindowControl` buttons emit `WindowControlAction`; keyboard activation
-  routes through `TitleBar::on_key`/`WindowControl::on_key`.
-- The resize corner must never overlap either scrollbar thumb — assert it, as
-  the design requires (`plans/GUI-CONTROLS-DESIGN.md` §1218).
-- Tests: each furniture region hit-tests correctly and is excluded from the
-  client; title-bar drag moves, grabber drag resizes; resize corner ∩ scrollbar
-  = ∅; keyboard reaches the controls.
+The window manager classifies and routes every frame-furniture interaction to
+typed outcomes, entirely inside `userland/gui/wm`. What it now guarantees:
+
+- `Compositor::frame_hit` classifies a screen point against a decorated
+  window's `WindowFrame::hit` (→ `FurniturePart`); `input.rs` `press_primary`
+  consults it first (then the root-viewport `hit_test`), so frame furniture and
+  scrollbar furniture share one press-classification step and a frame press is
+  never `Activated`/delivered to the client.
+- A title-bar press begins the existing move-grab (`begin_move` → `Moved`/
+  `MoveEnded`); a resize-edge press begins a resize-grab that drives the shared
+  `ResizeGrabber` (`ResizeEvent`), recomputes the clamped outer rectangle per
+  edge (minimum-client floor `MIN_CLIENT_W`/`H`), and applies it through
+  `Compositor::resize_window` (content surface reallocated, pixels preserved,
+  origin + decoration following), reporting `Resized`/`ResizeEnded`; Escape
+  cancels and restores the pre-drag geometry exactly.
+- A command-control press captures the frame (`control_grab`), feeds the click
+  to `TitleBar::on_pointer`, and emits `InputResponse::WindowControl { window,
+  control }` on the completed release. Keyboard control activation routes
+  through `Compositor::frame_key` → `TitleBar::on_key` (arrows move focus,
+  Space/Enter activate) when the frame furniture holds the keyboard; a control
+  press claims that focus and a client press returns it, so a decorated
+  window's content keeps its keys until the user reaches for the furniture.
+- The furniture press/keyboard repaint marks only the furniture bands dirty
+  (never the client), and the resize corner is reserved clear of the scrollbar
+  tracks/thumbs (`plans/GUI-CONTROLS-DESIGN.md` §1218) — asserted.
+- Tests cover each furniture region hit-test and its exclusion from the client,
+  title-bar drag→move, corner resize grow, resize clamp-to-minimum + Escape
+  restore, pointer and keyboard control activation, client-press keyboard
+  return, and resize corner ∩ scrollbar track = ∅.
+
+No served window opts into a frame in the running desktop yet, so — as with
+Stages A–B — there is no behavioural change in the live session; wiring the
+typed outcomes to the window lifecycle over the channel is Stage D, and turning
+decorations on is Stage E.
 
 ### Stage D — Typed control actions → window lifecycle
 

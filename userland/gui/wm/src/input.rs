@@ -26,9 +26,12 @@
 //! (focus on the desktop, or the focused window since gone) is ignored
 //! rather than misdelivered.
 
-use tairix_controls::{ScrollOrientation, TrackHit};
+use tairix_controls::{
+    FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollOrientation, TitleBarEvent,
+    TrackHit, WindowControlKind,
+};
 
-use crate::geometry::Point;
+use crate::geometry::{Point, Rect};
 use crate::viewport::FurnitureHit;
 use crate::window::{Window, WindowId};
 use crate::Compositor;
@@ -114,6 +117,33 @@ pub enum InputResponse {
         /// Signed vertical scroll ticks.
         dy: i32,
     },
+    /// A window-command control on the decorated frame (close, minimize,
+    /// put-to-back, size-toggle) was activated — by a completed primary
+    /// click on the button, or by Space/Enter on the keyboard-focused
+    /// control. The window manager owns the frame furniture, so the
+    /// activation is never delivered to the client; the embedder maps the
+    /// typed command to the window lifecycle (a cooperative close request, a
+    /// restack, a size-state change) over the existing window path.
+    WindowControl {
+        /// The decorated window whose frame control was activated.
+        window: WindowId,
+        /// Which window command the control represents.
+        control: WindowControlKind,
+    },
+    /// An active resize-grab dragged a decorated window's frame edge, so the
+    /// window manager resized the window to a new outer geometry (its client
+    /// content surface grew or shrank to match). The embedder forwards the
+    /// new client size to the owning client so it re-renders at that size.
+    Resized {
+        /// The window being resized.
+        window: WindowId,
+    },
+    /// An active resize-grab ended (primary released, the gesture was
+    /// cancelled, or the resized window vanished).
+    ResizeEnded {
+        /// The window whose resize-grab ended.
+        window: WindowId,
+    },
 }
 
 /// An in-flight interactive move: the grabbed window and the offset
@@ -136,6 +166,34 @@ struct ScrollGrab {
     anchor: i32,
 }
 
+/// The smallest client (application content) width a resize-grab will shrink a
+/// window to, in physical pixels. A floor, not a capacity: it keeps a window
+/// from collapsing to an unusable sliver (and its title bar and controls from
+/// overlapping), never a ceiling on how large a window may grow.
+const MIN_CLIENT_W: u32 = 96;
+
+/// The smallest client height a resize-grab will shrink a window to, in
+/// physical pixels (companion to [`MIN_CLIENT_W`]).
+const MIN_CLIENT_H: u32 = 64;
+
+/// An in-flight interactive resize: the decorated window, which frame edge is
+/// being dragged, the shared [`ResizeGrabber`] driving the gesture lifecycle,
+/// and the outer geometry and pointer position captured when the drag began —
+/// held constant so each motion recomputes the new geometry from the original
+/// (no drift) and an Escape restores the pre-drag rectangle exactly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResizeGrab {
+    window: WindowId,
+    edge: ResizeEdge,
+    grabber: ResizeGrabber,
+    start_outer: Rect,
+    start_pointer: Point,
+    /// The frame band thickness `(left, right, top, bottom)` in physical
+    /// pixels, captured at grab start so the outer→client conversion and the
+    /// minimum-outer clamp never re-derive the frame metrics mid-drag.
+    insets: (u32, u32, u32, u32),
+}
+
 /// Routes pointer input into [`Compositor`] actions.
 ///
 /// The router is the desktop's input-policy state: the current pointer
@@ -149,6 +207,18 @@ pub struct InputRouter {
     focused: Option<WindowId>,
     grab: Option<MoveGrab>,
     scroll_grab: Option<ScrollGrab>,
+    /// The decorated window whose title-bar command controls have captured
+    /// the current primary press, so the release completes the click on the
+    /// same frame (and can never leak to the client).
+    control_grab: Option<WindowId>,
+    /// The in-flight interactive resize, if any.
+    resize_grab: Option<ResizeGrab>,
+    /// Whether the focused decorated window's frame furniture holds the
+    /// keyboard. A press on a title-bar command control claims it (so Space,
+    /// Enter, and the arrow keys drive the controls); a press on the client
+    /// returns it, so a decorated window's content keeps its keys until the
+    /// user reaches for the furniture.
+    furniture_key_focus: bool,
 }
 
 impl InputRouter {
@@ -182,6 +252,12 @@ impl InputRouter {
     #[must_use]
     pub const fn is_scrolling(&self) -> bool {
         self.scroll_grab.is_some()
+    }
+
+    /// `true` while an interactive window resize-grab is in progress.
+    #[must_use]
+    pub const fn is_resizing(&self) -> bool {
+        self.resize_grab.is_some()
     }
 
     /// Give keyboard focus to `window`, validated against `compositor`.
@@ -220,6 +296,10 @@ impl InputRouter {
                 self.pointer = to;
                 if self.scroll_grab.is_some() {
                     self.scroll_drag_to(to, compositor)
+                } else if self.resize_grab.is_some() {
+                    self.resize_drag_to(to, compositor)
+                } else if self.control_grab.is_some() {
+                    self.control_drag_to(&event, compositor)
                 } else {
                     self.drag_to(to, compositor)
                 }
@@ -230,7 +310,7 @@ impl InputRouter {
             } => self.press_primary(compositor),
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => self.release_primary(),
+            } => self.release_primary(compositor),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 InputResponse::Ignored
             }
@@ -254,13 +334,39 @@ impl InputRouter {
         key: Key,
         modifiers: Modifiers,
         pressed: bool,
-        compositor: &Compositor,
+        compositor: &mut Compositor,
     ) -> InputResponse {
+        // Escape cancels an in-flight resize, restoring the pre-drag geometry
+        // exactly — the shared grabber owns that cancel semantics.
+        if pressed {
+            if let Some(grab) = self.resize_grab.as_mut() {
+                if let Some(ResizeEvent::Cancel) = grab.grabber.on_key(key) {
+                    let window = grab.window;
+                    let start_outer = grab.start_outer;
+                    self.resize_grab = None;
+                    compositor.resize_window(window, start_outer);
+                    return InputResponse::ResizeEnded { window };
+                }
+            }
+        }
         let Some(window) = self.focused else {
             return InputResponse::Ignored;
         };
         if compositor.window(window).is_none() {
             self.focused = None;
+            self.furniture_key_focus = false;
+            return InputResponse::Ignored;
+        }
+        // When the focused decorated window's frame furniture holds the
+        // keyboard, keys drive its command controls (Space/Enter activate the
+        // focused control; the arrows move focus between them) and never reach
+        // the client — the furniture owns those keys.
+        if self.furniture_key_focus && compositor.window_frame(window).is_some() {
+            if pressed {
+                if let Some(TitleBarEvent::Control(control)) = compositor.frame_key(window, key) {
+                    return InputResponse::WindowControl { window, control };
+                }
+            }
             return InputResponse::Ignored;
         }
         InputResponse::Key {
@@ -304,6 +410,31 @@ impl InputRouter {
         };
         compositor.raise(window);
         self.focused = Some(window);
+
+        // A press on the outer decoration frame is the window manager's, kept
+        // off the client by the frame's furniture hit map: the title bar
+        // begins a cooperative move, a command control latches for its click,
+        // a resize edge begins a resize, and the inert rim is consumed. Only a
+        // press classified as the client falls through to the client paths.
+        if let Some(part) = compositor.frame_hit(window, self.pointer) {
+            match part {
+                FurniturePart::TitleBar => {
+                    self.begin_move(compositor);
+                    return InputResponse::FurniturePressed { window };
+                }
+                FurniturePart::WindowControl(_) => {
+                    return self.begin_control_grab(window, compositor);
+                }
+                FurniturePart::ResizeEdge(edge) => {
+                    return self.begin_resize_grab(window, edge, compositor);
+                }
+                FurniturePart::Frame => {
+                    return InputResponse::FurniturePressed { window };
+                }
+                FurniturePart::Client | FurniturePart::Outside => {}
+            }
+        }
+
         // A press on the root-viewport furniture is the window manager's, not
         // the client's: the furniture hit map keeps it away from the surface.
         if let Some(hit) = compositor.furniture_hit(window, self.pointer) {
@@ -311,14 +442,20 @@ impl InputRouter {
                 return self.press_furniture(window, hit, compositor);
             }
         }
-        let origin = compositor
-            .window(window)
-            .map_or(Point::ORIGIN, Window::origin);
+
+        // A client press returns the keyboard to the client (a decorated
+        // window's furniture no longer holds it) and activates the window. The
+        // press position is reported relative to the client viewport, so a
+        // decorated window's client sees content-local coordinates.
+        self.furniture_key_focus = false;
+        let client = compositor
+            .window_client_rect(window)
+            .map_or(Point::ORIGIN, |rect| rect.origin);
         InputResponse::Activated {
             window,
             local: Point::new(
-                self.pointer.x.saturating_sub(origin.x),
-                self.pointer.y.saturating_sub(origin.y),
+                self.pointer.x.saturating_sub(client.x),
+                self.pointer.y.saturating_sub(client.y),
             ),
         }
     }
@@ -440,12 +577,149 @@ impl InputRouter {
         }
     }
 
-    /// Handle a primary-button release: end any active move-grab or scrollbar
-    /// thumb drag. A released thumb has already committed its offset, so
-    /// ending the capture reports nothing further.
-    fn release_primary(&mut self) -> InputResponse {
+    /// Begin a command-control interaction: the press latched a title-bar
+    /// button, so the release must complete the click on the same frame. The
+    /// control's own press-state is set by feeding the press to the frame (a
+    /// synthetic move first, so the control knows the pointer is over it), and
+    /// the furniture takes keyboard focus so Space/Enter can also drive it.
+    /// The press itself is consumed by the window manager, never the client.
+    fn begin_control_grab(
+        &mut self,
+        window: WindowId,
+        compositor: &mut Compositor,
+    ) -> InputResponse {
+        self.control_grab = Some(window);
+        self.furniture_key_focus = true;
+        let moved = InputEvent::PointerMoved { to: self.pointer };
+        compositor.frame_pointer(window, &moved);
+        let press = InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        };
+        // A control that fired on the press itself (not the usual click, which
+        // completes on release) is dispatched immediately and ends the grab.
+        if let Some(TitleBarEvent::Control(control)) = compositor.frame_pointer(window, &press) {
+            self.control_grab = None;
+            return InputResponse::WindowControl { window, control };
+        }
+        InputResponse::FurniturePressed { window }
+    }
+
+    /// Continue a command-control interaction: feed the motion to the frame so
+    /// the latched control tracks hover, and keep the press consumed. The
+    /// window vanishing mid-interaction ends the grab (fail closed).
+    fn control_drag_to(
+        &mut self,
+        event: &InputEvent,
+        compositor: &mut Compositor,
+    ) -> InputResponse {
+        let Some(window) = self.control_grab else {
+            return InputResponse::Ignored;
+        };
+        if compositor.window_frame(window).is_none() {
+            self.control_grab = None;
+            return InputResponse::Ignored;
+        }
+        compositor.frame_pointer(window, event);
+        InputResponse::FurniturePressed { window }
+    }
+
+    /// Begin an interactive resize on `window` at frame `edge`, capturing the
+    /// outer geometry and pointer so each motion recomputes the new rectangle
+    /// from the original. Falls back to consuming the press when the window is
+    /// not a resizable decorated window (fail closed — no grab is started).
+    fn begin_resize_grab(
+        &mut self,
+        window: WindowId,
+        edge: ResizeEdge,
+        compositor: &Compositor,
+    ) -> InputResponse {
+        let (Some(start_outer), Some(client)) = (
+            compositor.window(window).map(Window::bounds),
+            compositor.window_client_rect(window),
+        ) else {
+            return InputResponse::FurniturePressed { window };
+        };
+        let insets = (
+            u32::try_from(client.left() - start_outer.left()).unwrap_or(0),
+            u32::try_from(start_outer.right() - client.right()).unwrap_or(0),
+            u32::try_from(client.top() - start_outer.top()).unwrap_or(0),
+            u32::try_from(start_outer.bottom() - client.bottom()).unwrap_or(0),
+        );
+        let mut grabber = ResizeGrabber::new();
+        let press = InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        };
+        // Prime the grabber's pointer, then begin its gesture over the whole
+        // outer rectangle (the pointer is inside it): the shared control owns
+        // the gesture lifecycle and the Escape cancel.
+        grabber.on_pointer(&InputEvent::PointerMoved { to: self.pointer }, start_outer);
+        grabber.on_pointer(&press, start_outer);
+        self.resize_grab = Some(ResizeGrab {
+            window,
+            edge,
+            grabber,
+            start_outer,
+            start_pointer: self.pointer,
+            insets,
+        });
+        InputResponse::FurniturePressed { window }
+    }
+
+    /// Apply pointer motion to an active resize-grab: drive the shared grabber,
+    /// recompute the clamped outer rectangle for the grabbed edge, and resize
+    /// the window to it. The window vanishing ends the grab (fail closed).
+    fn resize_drag_to(&mut self, to: Point, compositor: &mut Compositor) -> InputResponse {
+        let Some(grab) = self.resize_grab.as_mut() else {
+            return InputResponse::Ignored;
+        };
+        let moved = InputEvent::PointerMoved { to };
+        if !matches!(
+            grab.grabber.on_pointer(&moved, grab.start_outer),
+            Some(ResizeEvent::Moved { .. })
+        ) {
+            return InputResponse::FurniturePressed {
+                window: grab.window,
+            };
+        }
+        let window = grab.window;
+        let new_outer = compute_resized_outer(grab, to);
+        if compositor.resize_window(window, new_outer) {
+            InputResponse::Resized { window }
+        } else {
+            self.resize_grab = None;
+            InputResponse::ResizeEnded { window }
+        }
+    }
+
+    /// Handle a primary-button release: end any active scrollbar thumb drag,
+    /// resize-grab, command-control interaction, or move-grab. A released
+    /// thumb or resized window has already committed its geometry, and a
+    /// completed control click is dispatched here (the release is what
+    /// activates a button).
+    fn release_primary(&mut self, compositor: &mut Compositor) -> InputResponse {
         if self.scroll_grab.take().is_some() {
             return InputResponse::Ignored;
+        }
+        if let Some(grab) = self.resize_grab.take() {
+            let released = InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            };
+            let mut grabber = grab.grabber;
+            grabber.on_pointer(&released, grab.start_outer);
+            return InputResponse::ResizeEnded {
+                window: grab.window,
+            };
+        }
+        if let Some(window) = self.control_grab.take() {
+            let released = InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            };
+            if let Some(TitleBarEvent::Control(control)) =
+                compositor.frame_pointer(window, &released)
+            {
+                return InputResponse::WindowControl { window, control };
+            }
+            return InputResponse::FurniturePressed { window };
         }
         match self.grab.take() {
             Some(grab) => InputResponse::MoveEnded {
@@ -476,4 +750,63 @@ impl InputRouter {
             }
         }
     }
+}
+
+/// The new outer rectangle a resize-grab produces when the pointer is at `to`:
+/// the grabbed edge(s) of the captured `start_outer` move by the pointer
+/// delta, the un-grabbed edges stay put, and the result is clamped so the
+/// client never shrinks below [`MIN_CLIENT_W`] × [`MIN_CLIENT_H`]. The top
+/// edge is never a resize edge (the title bar lives there), so it is fixed.
+fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
+    let start = grab.start_outer;
+    let dx = to.x - grab.start_pointer.x;
+    let dy = to.y - grab.start_pointer.y;
+    let (left_edge, right_edge, bottom_edge) = match grab.edge {
+        ResizeEdge::Left => (true, false, false),
+        ResizeEdge::Right => (false, true, false),
+        ResizeEdge::Bottom => (false, false, true),
+        ResizeEdge::BottomLeft => (true, false, true),
+        ResizeEdge::BottomRight => (false, true, true),
+    };
+    // Minimum outer extent = the fixed frame band plus the minimum client.
+    let min_w = i32::try_from(
+        grab.insets
+            .0
+            .saturating_add(grab.insets.1)
+            .saturating_add(MIN_CLIENT_W),
+    )
+    .unwrap_or(i32::MAX);
+    let min_h = i32::try_from(
+        grab.insets
+            .2
+            .saturating_add(grab.insets.3)
+            .saturating_add(MIN_CLIENT_H),
+    )
+    .unwrap_or(i32::MAX);
+
+    let top = start.top();
+    let mut left = start.left();
+    let mut right = start.right();
+    let mut bottom = start.bottom();
+    if left_edge {
+        left = start.left() + dx;
+        if right - left < min_w {
+            left = right - min_w;
+        }
+    }
+    if right_edge {
+        right = start.right() + dx;
+        if right - left < min_w {
+            right = left + min_w;
+        }
+    }
+    if bottom_edge {
+        bottom = start.bottom() + dy;
+        if bottom - top < min_h {
+            bottom = top + min_h;
+        }
+    }
+    let width = u32::try_from(right - left).unwrap_or(0);
+    let height = u32::try_from(bottom - top).unwrap_or(0);
+    Rect::new(left, top, width, height)
 }

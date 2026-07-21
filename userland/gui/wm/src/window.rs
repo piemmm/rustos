@@ -1,7 +1,10 @@
 //! Windows: a placed surface with compositing attributes.
 
-use tairix_controls::{FrameInsets, ResizeGrabber, WindowActivationState, WindowFrame};
+use tairix_controls::{
+    FrameInsets, ResizeGrabber, TitleBarEvent, WindowActivationState, WindowFrame,
+};
 use tairix_font::BitmapFont;
+use tairix_input::{InputEvent, Key};
 use tairix_theme::{CursorKind, Theme};
 
 use crate::color::{div255, Pixel};
@@ -345,6 +348,83 @@ impl Window {
         };
         frame.title_bar_mut().set_title(title);
         self.render_decoration(scale, theme);
+        true
+    }
+
+    /// Feed a pointer `event` to this window's decoration furniture (the title
+    /// bar and its command controls), repainting the furniture chrome so hover
+    /// and press states show, and return the typed [`TitleBarEvent`] it
+    /// produced. Returns `None` (and repaints nothing) for an undecorated
+    /// window — it has no furniture to receive the event.
+    pub(crate) fn on_frame_pointer(
+        &mut self,
+        event: &InputEvent,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<TitleBarEvent> {
+        let bounds = self.bounds();
+        let event = {
+            let frame = self.frame.as_mut()?;
+            let title_rect = frame.layout(bounds, scale, theme).title_bar;
+            frame
+                .title_bar_mut()
+                .on_pointer(event, title_rect, scale, theme)
+        };
+        self.render_decoration(scale, theme);
+        event
+    }
+
+    /// Feed a key `key` to this window's decoration furniture (the title bar's
+    /// command controls: Space/Enter activate the focused control, the arrows
+    /// move focus between them), repainting the chrome, and return the typed
+    /// [`TitleBarEvent`] it produced. Returns `None` for an undecorated window.
+    pub(crate) fn on_frame_key(
+        &mut self,
+        key: Key,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<TitleBarEvent> {
+        let event = self.frame.as_mut()?.title_bar_mut().on_key(key);
+        self.render_decoration(scale, theme);
+        event
+    }
+
+    /// Resize this window so its outer rectangle becomes `new_outer`: the
+    /// content surface is reallocated to the implied client size (the outer
+    /// extent minus the reserved frame band), the existing pixels are
+    /// preserved where they still fit (a raw copy, not an alpha blend, so a
+    /// live resize keeps the current content until the client re-renders), the
+    /// origin follows the new top-left, and the decoration is repainted at the
+    /// new size. Returns `false` (changing nothing) when the implied client
+    /// size is empty or its buffer cannot be allocated (fail closed).
+    pub(crate) fn resize_to_outer(&mut self, new_outer: Rect, scale: Scale, theme: &Theme) -> bool {
+        let (band_w, band_h) = match self.band {
+            Some(insets) => (
+                insets.left.saturating_add(insets.right),
+                insets.top.saturating_add(insets.bottom),
+            ),
+            None => (0, 0),
+        };
+        let client_w = new_outer.width.saturating_sub(band_w);
+        let client_h = new_outer.height.saturating_sub(band_h);
+        if client_w == 0 || client_h == 0 {
+            return false;
+        }
+        let Some(mut resized) = Surface::new(client_w, client_h) else {
+            return false;
+        };
+        let keep_w = client_w.min(self.surface.width());
+        let keep_h = client_h.min(self.surface.height());
+        for y in 0..keep_h {
+            for x in 0..keep_w {
+                if let Some(pixel) = self.surface.get(x, y) {
+                    resized.set(x, y, pixel);
+                }
+            }
+        }
+        self.surface = resized;
+        self.origin = new_outer.origin;
+        self.refresh_band(scale, theme);
         true
     }
 

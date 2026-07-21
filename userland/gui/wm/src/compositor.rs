@@ -23,8 +23,9 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::DriverError;
 
-use tairix_controls::WindowFrame;
+use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::CursorImage;
+use tairix_input::{InputEvent, Key};
 use tairix_theme::{CursorKind, Theme};
 
 use crate::color::{Color, Pixel};
@@ -491,6 +492,82 @@ impl Compositor {
         let window = self.window(id)?;
         let viewport = window.viewport()?;
         Some(viewport.hit_test(window.bounds(), point))
+    }
+
+    /// Classify the screen `point` against the decoration frame of the window
+    /// named by `id`, or `None` when the id is unknown or the window is
+    /// undecorated. This is the outer-frame furniture hit map: the title bar,
+    /// the command controls, the resize edges, and the inert rim each classify
+    /// distinctly, and the inset client viewport reads as
+    /// [`FurniturePart::Client`] — the client can never receive a point the
+    /// frame owns.
+    #[must_use]
+    pub fn frame_hit(&self, id: WindowId, point: Point) -> Option<FurniturePart> {
+        let window = self.window(id)?;
+        let frame = window.frame()?;
+        Some(frame.hit(window.bounds(), self.scale, &self.theme, point))
+    }
+
+    /// Feed a pointer `event` to the decoration furniture of the window named
+    /// by `id`, repainting only its furniture bands, and return the typed
+    /// [`TitleBarEvent`] it produced (a completed command-control click, or a
+    /// title-bar activation/drag gesture). Returns `None` for an unknown or
+    /// undecorated window.
+    ///
+    /// The window manager owns this furniture, so the event is never delivered
+    /// to the client; only the furniture bands are marked dirty, so a hover or
+    /// press repaint never touches the client area.
+    pub fn frame_pointer(&mut self, id: WindowId, event: &InputEvent) -> Option<TitleBarEvent> {
+        let scale = self.scale;
+        let (result, bands) = {
+            let theme = &self.theme;
+            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+            let result = window.on_frame_pointer(event, scale, theme);
+            (result, window.furniture_bands())
+        };
+        for band in bands {
+            self.damage.add(band);
+        }
+        result
+    }
+
+    /// Feed a key `key` to the decoration furniture of the window named by
+    /// `id` (the title bar's command controls), repainting the title band, and
+    /// return the typed [`TitleBarEvent`] it produced. Returns `None` for an
+    /// unknown or undecorated window.
+    pub fn frame_key(&mut self, id: WindowId, key: Key) -> Option<TitleBarEvent> {
+        let scale = self.scale;
+        let (result, band) = {
+            let theme = &self.theme;
+            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+            let result = window.on_frame_key(key, scale, theme);
+            (result, window.title_band())
+        };
+        self.damage.add(band);
+        result
+    }
+
+    /// Resize the window named by `id` so its outer rectangle becomes
+    /// `new_outer` (its content surface reallocated to the implied client
+    /// size, existing pixels preserved, origin and decoration following).
+    /// Returns `false` for an unknown window or when the implied client size
+    /// is empty. The union of the old and new outer bounds is marked dirty.
+    pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
+        let scale = self.scale;
+        let (changed, before, after) = {
+            let theme = &self.theme;
+            let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+                return false;
+            };
+            let before = window.bounds();
+            let changed = window.resize_to_outer(new_outer, scale, theme);
+            (changed, before, window.bounds())
+        };
+        if changed {
+            self.damage.add(before);
+            self.damage.add(after);
+        }
+        changed
     }
 
     /// Mutate the root viewport of the window named by `id` through `change`,

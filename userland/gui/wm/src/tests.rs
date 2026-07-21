@@ -1836,3 +1836,268 @@ fn high_contrast_thickens_the_furniture_glyphs() {
         heavy.theme().palette().frame_active.to_array()
     );
 }
+
+// ---- server-side window decorations (Stage C input) ------------------
+
+use tairix_controls::{FurniturePart, ResizeEdge};
+
+/// The mid-height of the title band of decorated window `id`, in screen
+/// coordinates — a y that lands inside the title bar (above the client).
+fn title_y(c: &Compositor, id: WindowId) -> i32 {
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    (bounds.top() + client.top()) / 2
+}
+
+/// The first screen point on the title band (scanning left→right at
+/// [`title_y`]) whose [`Compositor::frame_hit`] satisfies `pred`.
+fn scan_title(c: &Compositor, id: WindowId, pred: impl Fn(FurniturePart) -> bool) -> Option<Point> {
+    let bounds = c.window(id).unwrap().bounds();
+    let y = title_y(c, id);
+    (bounds.left()..bounds.right()).find_map(|x| {
+        let point = Point::new(x, y);
+        match c.frame_hit(id, point) {
+            Some(part) if pred(part) => Some(point),
+            _ => None,
+        }
+    })
+}
+
+#[test]
+fn frame_hit_classifies_furniture_and_never_the_client() {
+    let (c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+
+    // A client interior point is the client; a point beyond the window is
+    // outside; the bottom-right corner is a resize edge on a resizable window.
+    assert_eq!(c.frame_hit(id, centre(client)), Some(FurniturePart::Client));
+    assert_eq!(
+        c.frame_hit(id, Point::new(bounds.right() + 5, bounds.bottom() + 5)),
+        Some(FurniturePart::Outside)
+    );
+    assert_eq!(
+        c.frame_hit(id, Point::new(bounds.right() - 1, bounds.bottom() - 1)),
+        Some(FurniturePart::ResizeEdge(ResizeEdge::BottomRight))
+    );
+
+    // The title band carries both a draggable region and command controls, and
+    // no point on it ever classifies as the client — the frame hit map keeps
+    // furniture strictly separate from the application surface.
+    assert!(
+        scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).is_some(),
+        "the title bar has a draggable region"
+    );
+    assert!(
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).is_some(),
+        "the title bar has command controls"
+    );
+    let y = title_y(&c, id);
+    for x in bounds.left()..bounds.right() {
+        assert_ne!(
+            c.frame_hit(id, Point::new(x, y)),
+            Some(FurniturePart::Client),
+            "no point on the title band is the client"
+        );
+    }
+
+    // An unknown window has no frame hit map (fail closed).
+    assert_eq!(c.frame_hit(WindowId(9_999), centre(client)), None);
+}
+
+#[test]
+fn a_title_bar_drag_moves_the_window() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let start = c.window(id).unwrap().origin();
+    let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("drag region");
+
+    router.handle(moved(drag.x, drag.y), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert!(router.is_moving(), "a title-bar press begins a move-grab");
+
+    // Motion drags the window's outer origin; the press is never the client's.
+    let response = router.handle(moved(drag.x + 15, drag.y + 10), &mut c);
+    assert!(matches!(response, InputResponse::Moved { window, .. } if window == id));
+    assert_eq!(
+        c.window(id).unwrap().origin(),
+        Point::new(start.x + 15, start.y + 10)
+    );
+
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::MoveEnded { window: id }
+    );
+    assert!(!router.is_moving());
+}
+
+#[test]
+fn a_resize_grab_resizes_the_window_from_the_corner() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let before = c.window(id).unwrap().bounds();
+    let corner = Point::new(before.right() - 1, before.bottom() - 1);
+
+    router.handle(moved(corner.x, corner.y), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert!(router.is_resizing(), "a corner press begins a resize-grab");
+
+    // Dragging out grows the window's outer bounds by the pointer delta.
+    let response = router.handle(moved(corner.x + 40, corner.y + 30), &mut c);
+    assert!(matches!(response, InputResponse::Resized { window } if window == id));
+    let grown = c.window(id).unwrap().bounds();
+    assert_eq!(grown.width, before.width + 40);
+    assert_eq!(grown.height, before.height + 30);
+
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::ResizeEnded { window: id }
+    );
+    assert!(!router.is_resizing());
+}
+
+#[test]
+fn a_resize_grab_clamps_to_a_minimum_and_escape_restores() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let before = c.window(id).unwrap().bounds();
+    let corner = Point::new(before.right() - 1, before.bottom() - 1);
+
+    router.handle(moved(corner.x, corner.y), &mut c);
+    router.handle(press_primary(), &mut c);
+
+    // Dragging far past the top-left cannot shrink the client below the floor.
+    router.handle(moved(before.left(), before.top()), &mut c);
+    let shrunk = c.window(id).unwrap().bounds();
+    assert!(shrunk.width < before.width && shrunk.height < before.height);
+    let client = c.window_client_rect(id).unwrap();
+    assert!(
+        client.width >= 96 && client.height >= 64,
+        "the client is clamped to its minimum size"
+    );
+
+    // Escape cancels the gesture and restores the exact pre-drag geometry.
+    assert_eq!(
+        router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c),
+        InputResponse::ResizeEnded { window: id }
+    );
+    assert_eq!(c.window(id).unwrap().bounds(), before);
+    assert!(!router.is_resizing());
+}
+
+#[test]
+fn a_command_control_click_emits_its_typed_action() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+    let kind = match c.frame_hit(id, control) {
+        Some(FurniturePart::WindowControl(kind)) => kind,
+        other => panic!("expected a control, found {other:?}"),
+    };
+
+    router.handle(moved(control.x, control.y), &mut c);
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
+    );
+    // Releasing over the same control completes the click (a click activates on
+    // release), emitting the typed command — never delivered to the client.
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::WindowControl {
+            window: id,
+            control: kind,
+        }
+    );
+}
+
+#[test]
+fn the_keyboard_reaches_the_command_controls() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+
+    // A control press hands the frame furniture the keyboard.
+    router.handle(moved(control.x, control.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    router.handle(release_primary(), &mut c);
+
+    // The arrow keys move focus between the controls and Enter activates the
+    // focused one, so the group is fully usable without a pointer.
+    assert_eq!(
+        router.handle(key_pressed(Key::Named(NamedKey::Right)), &mut c),
+        InputResponse::Ignored,
+        "the arrow moves furniture focus and is consumed, not sent to the client"
+    );
+    let response = router.handle(key_pressed(Key::Named(NamedKey::Enter)), &mut c);
+    assert!(matches!(
+        response,
+        InputResponse::WindowControl { window, .. } if window == id
+    ));
+}
+
+#[test]
+fn a_client_press_returns_the_keyboard_to_the_client() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+    let client_point = centre(c.window_client_rect(id).unwrap());
+
+    // Take furniture keyboard focus via a control, then press the client.
+    router.handle(moved(control.x, control.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    router.handle(release_primary(), &mut c);
+    router.handle(moved(client_point.x, client_point.y), &mut c);
+    assert!(matches!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::Activated { window, .. } if window == id
+    ));
+
+    // Keys now reach the client again — the furniture released the keyboard.
+    assert!(matches!(
+        router.handle(key_pressed(Key::Char('x')), &mut c),
+        InputResponse::Key { window, .. } if window == id
+    ));
+}
+
+#[test]
+fn the_resize_corner_never_overlaps_a_scrollbar_thumb() {
+    // A resizable window reserves its client's bottom-right corner for the
+    // resize grabber, sized to hold it, so the scrollbar tracks (and the
+    // thumbs that live inside them) stop short of the corner and the grabber
+    // can never cover a thumb.
+    let (c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    let extent = c.theme().metrics().resize_grabber_extent;
+
+    // Both scrollbars present, their reserved corner sized to the grabber.
+    let viewport = RootViewport::new(ScrollPolicy::ReservedGutter, extent, 12)
+        .with_vertical(ScrollModel::new(ScrollRange::new(1000, 100, 0), 10, 100))
+        .with_horizontal(ScrollModel::new(ScrollRange::new(1000, 100, 0), 10, 100));
+    let layout = viewport.layout(client);
+    let vtrack = layout.vertical_track.expect("vertical track");
+    let htrack = layout.horizontal_track.expect("horizontal track");
+
+    // The grabber occupies the outer frame's bottom-right extent square.
+    let e = i32::try_from(extent).unwrap();
+    let grabber = Rect::new(bounds.right() - e, bounds.bottom() - e, extent, extent);
+
+    assert!(
+        grabber.intersection(&vtrack).is_empty(),
+        "the resize corner never intrudes into the vertical scrollbar track"
+    );
+    assert!(
+        grabber.intersection(&htrack).is_empty(),
+        "the resize corner never intrudes into the horizontal scrollbar track"
+    );
+}
