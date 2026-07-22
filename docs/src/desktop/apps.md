@@ -120,6 +120,35 @@ were. The fail-closed outcomes are the `BrowseError` variants: `Source`
 (the wrapped boundary `Errno`, e.g. `PermissionDenied`), `NoSuchEntry`, and
 `NotADirectory`.
 
+### Activating an entry
+
+Opening an entry — a double-click, or `Enter` on the selection — is one
+dispatch-by-kind decision, `Browser::activate_selected` / `activate_index`,
+returning an `Activation` (`plans/NEW-FILEMANAGER.md` FM6). It lives in the
+engine, not the app, so the file manager and the trusted picker act
+identically (`AGENTS.md` §2.2). It is exhaustive over the three entry kinds:
+
+- a **directory** is *descended into* by the engine itself (its own
+  transactional, fail-closed navigation) and returns `Descended` — there is
+  nothing for the caller to launch;
+- an **application bundle** (`<Name>.app`) returns `LaunchBundle { path }`,
+  naming the bundle for the caller to launch through the ordinary signed
+  app-load gate;
+- a **regular file** returns `OpenFile { path }`, naming the file for the
+  caller to open in the associated viewer.
+
+The target's absolute path is spelled through the one shared `absolute_path`,
+so a launch or open can never name a different node than the browser shows;
+a name that cannot be spelled as a valid, bounded absolute path fails closed
+as `BrowseError::Source`, exactly as descending into it already does. The
+engine holds **no** launch or open authority of its own: it decides *what* the
+target is and *what should happen*, never performing the spawn or the
+`fs_open` — those stay in the app's own capability-checked tail under the
+launching user's identity (so the read-only picker composes the same
+`Browser` and simply never launches). Acting on the launch/open decisions in
+the `files.app` `Run` binary — the spawn, the CU6 `fd_grant` hand-off of a
+file to its viewer, and "Open With…" — is FM6b.
+
 ### Rendering
 
 `render(browser, theme, font, viewport)` paints a path bar plus the current

@@ -19,7 +19,8 @@ use core::mem;
 
 use tairix_abi::Errno;
 
-use crate::entry::Entry;
+use crate::activate::Activation;
+use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::rename::{validate_new_name, RenameError};
@@ -322,6 +323,65 @@ impl<S: DirectorySource> Browser<S> {
         let mut child = self.components.clone();
         child.push(String::from(entry.name()));
         self.navigate_recording(child)
+    }
+
+    /// Activate the selected entry — the double-click / `Enter` decision.
+    ///
+    /// Dispatches by kind through the shared [`Activation`] decision so the
+    /// file manager and the trusted picker act identically: a directory is
+    /// descended into (as [`open_selected`](Self::open_selected) does) and a
+    /// bundle or file is *named* for the caller to launch or open (the engine
+    /// performs neither — it holds no such authority).
+    ///
+    /// # Errors
+    ///
+    /// * [`BrowseError::NoSuchEntry`] if there is no selection (an empty
+    ///   directory).
+    /// * [`BrowseError::Source`] if a descended directory cannot be listed, or
+    ///   a bundle/file target cannot be named as a valid absolute path; the
+    ///   browser stays on the current directory in either case.
+    pub fn activate_selected(&mut self) -> Result<Activation, BrowseError> {
+        let index = self.selected_index().ok_or(BrowseError::NoSuchEntry)?;
+        self.activate_index(index)
+    }
+
+    /// Activate the entry at `index` — the pointer-hit form of
+    /// [`activate_selected`](Self::activate_selected).
+    ///
+    /// # Errors
+    ///
+    /// * [`BrowseError::NoSuchEntry`] if `index` is out of range.
+    /// * [`BrowseError::Source`] as for [`activate_selected`](Self::activate_selected).
+    pub fn activate_index(&mut self, index: usize) -> Result<Activation, BrowseError> {
+        let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
+        let kind = entry.kind();
+        let name = String::from(entry.name());
+        match kind {
+            EntryKind::Directory => {
+                self.open_index(index)?;
+                Ok(Activation::Descended)
+            }
+            EntryKind::Bundle => Ok(Activation::LaunchBundle {
+                path: self.child_target_path(&name)?,
+            }),
+            EntryKind::File => Ok(Activation::OpenFile {
+                path: self.child_target_path(&name)?,
+            }),
+        }
+    }
+
+    /// Spell the validated absolute path of a child named `name` in the current
+    /// directory — the target a launch or open acts on.
+    ///
+    /// Uses the one shared path spelling ([`crate::vfs::absolute_path`]) so the
+    /// named target can never differ from what the VFS fetch would read, and a
+    /// name that cannot be spelled as a valid, bounded absolute path is a
+    /// fail-closed [`BrowseError::Source`] — the same outcome descending into
+    /// such a name already produces.
+    fn child_target_path(&self, name: &str) -> Result<String, BrowseError> {
+        let mut components = self.components.clone();
+        components.push(String::from(name));
+        crate::vfs::absolute_path(&components).map_err(BrowseError::Source)
     }
 
     /// Climb to the parent directory, listing it.

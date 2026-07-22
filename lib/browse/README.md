@@ -58,6 +58,19 @@ can never diverge in navigation semantics, listing policy, or look.
   follows the entry to its new name. The engine adds no authority (the write
   is the caller's own permission-checked `fs_rename`, no new capability), so
   the read-only picker composes the same `Browser` and never calls it.
+- **Activation** (`activate`, `Browser::activate_selected` /
+  `activate_index`): the one dispatch-by-kind decision behind a double-click
+  or `Enter` (`plans/NEW-FILEMANAGER.md` FM6), so the file manager and the
+  picker act identically. Exhaustive over the three kinds: a directory is
+  *descended into* by the engine itself (its own fail-closed navigation); a
+  bundle is named as `Activation::LaunchBundle` for the caller to launch
+  through the ordinary signed app-load gate; a file is named as
+  `Activation::OpenFile` for the caller to open in the associated viewer. The
+  target's absolute path is spelled through the one shared `absolute_path`, so
+  a launch or open can never name a different node than the browser shows, and
+  a name that cannot be spelled fails closed. The engine holds no launch or
+  open authority of its own — it decides *what* and *what should happen*, never
+  performs the spawn or the `fs_open` (so the read-only picker never launches).
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the

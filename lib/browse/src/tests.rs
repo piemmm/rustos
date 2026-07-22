@@ -1320,3 +1320,127 @@ mod rename_model {
         );
     }
 }
+
+// --- FM6a: activating an entry (descend / launch a bundle / open a file) --
+
+use crate::activate::Activation;
+
+/// A tree source whose root holds a plain subdirectory, an application
+/// bundle, and a regular file — the three activation kinds side by side.
+fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>> {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[
+            (b"Docs", FileKind::Directory),
+            (b"Editor.app", FileKind::Directory),
+            (b"notes.txt", FileKind::Regular),
+        ]),
+    );
+    dirs.insert("/Docs".to_string(), encoded_stream(&[]));
+    tree_source(dirs)
+}
+
+#[test]
+fn activating_a_directory_descends_into_it() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    // Default order: the directory first, then the bundle and the file.
+    assert_eq!(browser.selected_name(), Some("Docs"));
+    assert_eq!(browser.activate_selected(), Ok(Activation::Descended));
+    // The engine performed the navigation itself: the listing changed.
+    assert_eq!(browser.path(), "/Docs");
+    assert!(!browser.is_root());
+}
+
+#[test]
+fn activating_a_bundle_names_it_for_launch_without_descending() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(1).expect("select Editor.app");
+    assert_eq!(browser.selected_name(), Some("Editor.app"));
+    // A bundle is a sealed unit: the engine names it for the launcher and does
+    // not descend — the browser stays exactly where it was.
+    assert_eq!(
+        browser.activate_selected(),
+        Ok(Activation::LaunchBundle {
+            path: "/Editor.app".to_string()
+        })
+    );
+    assert!(browser.is_root());
+    assert_eq!(browser.selected_name(), Some("Editor.app"));
+}
+
+#[test]
+fn activating_a_file_names_it_for_open_without_descending() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    assert_eq!(
+        browser.activate_selected(),
+        Ok(Activation::OpenFile {
+            path: "/notes.txt".to_string()
+        })
+    );
+    assert!(browser.is_root());
+    assert_eq!(browser.selected_name(), Some("notes.txt"));
+}
+
+#[test]
+fn activate_index_spells_a_nested_target_path() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[(b"System", FileKind::Directory)]),
+    );
+    dirs.insert(
+        "/System".to_string(),
+        encoded_stream(&[(b"motd.txt", FileKind::Regular)]),
+    );
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    browser.open_index(0).expect("enter /System");
+    // The named target is spelled through the one shared path spelling, so it
+    // reflects the current directory, not just the leaf name.
+    assert_eq!(
+        browser.activate_index(0),
+        Ok(Activation::OpenFile {
+            path: "/System/motd.txt".to_string()
+        })
+    );
+}
+
+#[test]
+fn activating_with_no_selection_is_refused() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    // Descend into the empty /System/Fonts, which has no selection.
+    browser.open_index(2).expect("enter System");
+    browser.open_index(0).expect("enter the empty Fonts");
+    assert_eq!(browser.selected_name(), None);
+    assert_eq!(browser.activate_selected(), Err(BrowseError::NoSuchEntry));
+}
+
+#[test]
+fn activating_an_out_of_range_index_is_refused() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    assert_eq!(browser.activate_index(99), Err(BrowseError::NoSuchEntry));
+    // The browser is untouched by the refused activation.
+    assert!(browser.is_root());
+}
+
+#[test]
+fn activating_an_unreadable_directory_fails_closed_and_stays_put() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    // /System/Security exists but is capability-gated (unreadable).
+    let names_before: Vec<String> = names(&browser).iter().map(ToString::to_string).collect();
+    let security = browser
+        .entries()
+        .iter()
+        .position(|e| e.name() == "Security")
+        .expect("Security is listed");
+    assert_eq!(
+        browser.activate_index(security),
+        Err(BrowseError::Source(Errno::PermissionDenied))
+    );
+    // The descent failed before any state changed: the browser is still on
+    // /System, showing the same entries.
+    assert_eq!(browser.path(), "/System");
+    assert_eq!(names(&browser), names_before);
+}

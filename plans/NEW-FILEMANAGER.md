@@ -27,8 +27,8 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, and FM5 are done**; FM4b and
-FM6–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, and FM6a are done**; FM4b,
+FM6b, and FM7–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -42,6 +42,13 @@ history + breadcrumb navigation) is done; **FM4b** (the drawn toolbar/breadcrumb
 chrome and the context menu) is deferred to land *with* the actions its entries
 gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so the menu is not
 built as speculative surface ahead of the behaviours it invokes (§2.4).
+
+FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
+decision — descend / launch a bundle / open a file, host-proven) is done; **FM6b**
+(the app-side spawn of a launched bundle, the CU6 `fd_grant` hand-off of a file to
+its associated viewer, the type→bundle "open with" association model, and the async
+non-blocking launch) is `planned`, since it needs the `CAP_PROC_SPAWN` manifest
+grant and the spawn/delegation wiring that the pure engine model does not.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -313,13 +320,41 @@ binary supplies the inline text editor and the `fs_rename` seam.
   `selection_rect`. Docs: `docs/src/desktop/apps.md`, `lib/browse`/`lib/path`
   README + rustdoc.
 
-### FM6 — opening: double-click, launch `.app`, "Open With…" `[ ]`
+### FM6a — the engine activation decision `[x]`
 
-Make items *do* something — the defining first-class behaviour.
+Done. The pure dispatch-by-kind decision behind a double-click / `Enter`, the
+one primitive both the file manager and the trusted picker act on (§2.2). Added
+to `lib/browse` as the `activate` module (`Activation`) + `Browser::activate_selected`
+/ `activate_index`:
 
-- **Double-click / Enter dispatches by kind** through one engine
-  `activate(entry)` decision (§2.2): a directory descends (as today); a
-  `.app` bundle launches; a regular file opens in the associated viewer.
+- **`Activation`** is exhaustive over the three entry kinds: `Descended` (the
+  entry was a directory and the engine descended into it, transactionally, via
+  its own fail-closed navigation — nothing to launch), `LaunchBundle { path }`
+  (a `<Name>.app` bundle, named for the caller to launch through the signed
+  load gate), and `OpenFile { path }` (a regular file, named for the caller to
+  open in the associated viewer).
+- **The engine holds no launch or open authority.** It decides *what* the
+  target is and *what should happen*; the spawn and the `fs_open` stay in the
+  app's own capability-checked tail under the user's identity, so the read-only
+  picker composes the same `Browser` and simply never launches.
+- **The target path is spelled through the one shared `vfs::absolute_path`**,
+  so a launch/open can never name a different node than the browser shows; a
+  name that cannot be spelled as a valid bounded absolute path fails closed as
+  `BrowseError::Source` — the same outcome descending into it already produces.
+- Host tests (`lib/browse`): directory→descend (listing changes), bundle→
+  `LaunchBundle` without descending, file→`OpenFile` without descending, a
+  nested target's path spelling, no-selection and out-of-range refusal, and a
+  descent into an unreadable directory failing closed and staying put. Docs:
+  `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+### FM6b — the app: launch `.app`, open a file, "Open With…" `[ ]`
+
+Make items *do* something end-to-end — the defining first-class behaviour. The
+`files.app` `Run` binary acts on the FM6a decision; this stage needs the spawn
+and delegation wiring the pure engine model does not.
+
+- **The app dispatches Enter/double-click through `Browser::activate_selected`**:
+  `Descended` repaints; `LaunchBundle`/`OpenFile` drive the launch below.
 - **Launch via the app loader, never a private path (§16.5, §18).** The
   manager requests `CAP_PROC_SPAWN` (added to `AppInfo.toml` in *this*
   stage, §2.4) and spawns through the ordinary load gate — for a `.app`
@@ -335,11 +370,12 @@ Make items *do* something — the defining first-class behaviour.
   gated concern (not built speculatively, §2.4).
 - **"Open With…"** lists the bundles whose `AppInfo` claims the type (from
   the same lookup) — a `Menu`, no invented registry. No match ⇒ an honest
-  "no application" answer, never a crash (§2.24).
+  "no application" answer, never a crash (§2.24). The type→bundle association
+  is a pure `lib/browse` model over an injected bundle-enumeration seam
+  (mirroring `DirectorySource`), host-tested (match / bundle / none).
 - **Async, non-blocking launch (`plans/FIX-DESKTOP.md`).** The spawn must
   not freeze the manager's window; it stays responsive and parked while
-  the child starts. Host tests: the `activate` decision per kind, the
-  association lookup (match / bundle / none), the grant-to-child seam.
+  the child starts. Host tests: the association lookup, the grant-to-child seam.
 
 ### FM7 — clipboard operations: cut, copy, paste, delete, new folder `[ ]`
 
@@ -405,8 +441,9 @@ FM2a repaints the list, FM2b adds the icon grid). FM4a adds the engine
 navigation model (history + breadcrumb); FM4b paints the chrome and grows the
 context menu alongside the actions it invokes (FM5–FM8), so no menu entry is
 built ahead of its behaviour (§2.4). FM5 is the first write and the template for
-FM7. FM6 (launch/open) depends on FM3 (bundle/file kinds) and reuses AW5
-delegation. FM7 depends on FM4b's selection/menu. FM8 and FM9 close out. Each
+FM7. FM6a models the activation decision (host-proven); FM6b (launch/open) acts
+on it, depends on FM3 (bundle/file kinds), and reuses AW5 delegation. FM7
+depends on FM4b's selection/menu. FM8 and FM9 close out. Each
 lands fully gated; a stage that turns out larger than one clean increment is
 split and staged here, never shipped half-done "for now" (§2.19).
 

@@ -30,6 +30,8 @@
 //! # Module map
 //!
 //! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary.
+//! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
+//!   (descend / launch a bundle / open a file) the manager and picker share.
 //! * [`icon`](mod@icon) — the one file-type [`IconKind`](tairix_icon::IconKind)
 //!   classifier the manager and picker share (a display hint, never authority).
 //! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
@@ -58,6 +60,7 @@
 
 extern crate alloc;
 
+pub mod activate;
 pub mod browser;
 pub mod entry;
 pub mod error;
@@ -70,6 +73,7 @@ pub mod sort;
 pub mod source;
 pub mod vfs;
 
+pub use activate::Activation;
 pub use browser::Browser;
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
