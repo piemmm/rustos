@@ -285,14 +285,39 @@ needed), and `in_window` for the RFC 9293 §3.4 acceptance test. It
 deliberately has **no** `Ord`/`PartialOrd`, so a linear comparison on a
 cyclic value cannot compile.
 
-The connection state machine (the TCB, RFC 6298 RTO, retransmission,
-flow control, PAWS, RFC 5961 challenge ACKs) is a later increment
-(`plans/NETWORK.md` N5b) built on this segment layer.
+### `tcp::conn` — the connection state machine
+
+The RFC 9293 transmission control block (`Tcb`), built on the segment
+codec and `SeqNumber`. It is pure and event-driven exactly as `neigh`
+and `mcast` are: the caller feeds parsed inbound segments and explicit
+`now`, drives the application side (`connect`/`listen`/`send`/`recv`/
+`close`/`abort`), drains outbound segments through a `poll_transmit`
+`emit` closure, fires timers with `advance`, and re-arms one one-shot
+timer from `next_deadline` (never a poll loop). The initial sequence
+number is a **caller-supplied CSPRNG draw** (§22): the engine generates
+no randomness itself, so it is deterministic and replayable — the
+property tests and the `fuzz_net_tcp` state-machine driver exercise the
+exact code the live service runs.
+
+It implements the full state machine — active, passive, and simultaneous
+open; the complete teardown lattice through TIME-WAIT (2·MSL) — plus the
+send and receive windows over `SeqNumber`, RFC 7323 window scaling and
+timestamps with PAWS, RFC 2018 SACK generation from a bounded
+out-of-order reassembly set, RFC 6298 retransmission (SRTT/RTTVAR/RTO)
+with Karn's algorithm and go-back-N recovery, fast retransmit on three
+duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
+handling with rate-limited challenge ACKs (so a hostile peer cannot
+induce an ACK storm), delayed ACKs, and the RFC 9293 user timeout. Every
+buffer and the reassembly set are capacity-bounded and fail closed;
+addresses never enter the TCB (the caller folds the pseudo-header
+checksum through `tcp::write`), so it is address-family agnostic.
+Congestion control (a pluggable policy), listeners with an accept queue,
+and SYN cookies are the next increment (N6).
 
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place —
-chiefly the TCP connection state machine (N5b — RFC 9293 transitions,
-RTO, flow control), then listeners + congestion control (N6) and the
-hardware offloads (N7). Each is added with its callers, tests, and fuzz
-harnesses per increment.
+the stream-socket surface and the QEMU connect/bulk-transfer vertical
+(N5c), then listeners + congestion control (N6) and the hardware
+offloads (N7). Each is added with its callers, tests, and fuzz harnesses
+per increment.

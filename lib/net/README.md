@@ -97,11 +97,25 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
   checksum form). `SeqNumber` is the checked modulo-2³² sequence-space
   type — wrapping arithmetic and the RFC 1982 windowed ordering, with no
   total `Ord` so a linear comparison on a cyclic value cannot slip in.
-  Total, bounded (fixed option and header ceilings), and fail-closed. The
-  connection state machine is a later increment (`plans/NETWORK.md` N5b).
+  Total, bounded (fixed option and header ceilings), and fail-closed.
+- `tcp::conn` — the RFC 9293 connection state machine (`Tcb`) built on the
+  segment codec: pure and event-driven like `neigh`/`mcast` (methods take
+  `now`, output is drained through an `emit` closure, timers re-arm from
+  `next_deadline`). It carries active/passive/simultaneous open, teardown
+  (incl. TIME-WAIT), the send/receive windows with RFC 7323 window scaling
+  and timestamps (PAWS), RFC 2018 SACK generation, RFC 6298 retransmission
+  with Karn's algorithm and go-back-N recovery, fast retransmit on triple
+  duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
+  handling with rate-limited challenge ACKs, delayed ACKs, and the RFC 9293
+  user timeout. The initial sequence number is a caller-supplied CSPRNG
+  draw (§22) so the engine stays deterministic and replayable; every buffer
+  and the reassembly set are bounded (fail closed, never attacker-sized).
+  Congestion control, listeners with an accept queue, and SYN cookies are
+  the next increment (`plans/NETWORK.md` N6).
 
-Later increments evolve this crate in place with the TCP connection
-state machine (`plans/NETWORK.md` N5b) built on this segment layer.
+Later increments evolve this crate in place: stream sockets and the QEMU
+vertical (`plans/NETWORK.md` N5c), then congestion control and listeners
+(N6).
 
 ## Security
 

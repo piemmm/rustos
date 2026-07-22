@@ -871,15 +871,36 @@ the whole is too large for one change and each leaves the tree working.
   registered in `cargo xtask fuzz`. Docs: `docs/src/lib/net.md`,
   `lib/net/README.md`.
 
-#### N5b — the TCP connection state machine `[ ]`
-- Connection establishment/teardown (full RFC 9293 state machine,
-  simultaneous open/close), send/recv windows over `SeqNumber`, RFC 6298
-  RTO with Karn's algorithm, fast retransmit, zero-window probing,
-  RFC 7323 window scaling + timestamps (PAWS), CSPRNG ISNs, RFC 5961
-  challenge ACKs, user timeout — pure and event-driven (`next_deadline`).
-- Deterministic-engine property tests (the state machine never regresses
-  sequence invariants; every segment corpus replayable) and a
-  state-machine-driver arm added to `fuzz_net_tcp`.
+#### N5b — the TCP connection state machine `[x]`
+- `lib/net::tcp::conn` is the pure, event-driven RFC 9293 transmission
+  control block (`Tcb`), built on the N5a segment codec + `SeqNumber`.
+  It carries the full state machine (active/passive/simultaneous open,
+  the complete teardown lattice through TIME-WAIT), send/receive windows
+  over `SeqNumber`, RFC 7323 window scaling + timestamps with PAWS,
+  RFC 2018 SACK generation from a bounded out-of-order reassembly set,
+  RFC 6298 retransmission (SRTT/RTTVAR/RTO) with Karn's algorithm and
+  go-back-N recovery, fast retransmit on three duplicate ACKs,
+  zero-window persist probing, RFC 5961 in-window RST/SYN handling with
+  rate-limited challenge ACKs, delayed ACKs, and the RFC 9293 user
+  timeout. It is deterministic like `neigh`/`mcast`: the ISN is a
+  caller-supplied CSPRNG draw, `now` is explicit, output is drained via a
+  `poll_transmit(emit)` closure, and one timer re-arms from
+  `next_deadline`. Addresses never enter the TCB (the caller folds the
+  pseudo-header checksum through `tcp::write`), so it is family-agnostic;
+  every buffer + the reassembly set are capacity-bounded and fail closed.
+- Design decisions carried forward: congestion control is deliberately
+  **not** here — the send path is flow-control-bounded only, and a
+  pluggable `CongestionControl` policy plus listeners/accept-queue and
+  SYN cookies are N6. Retransmission recovery is go-back-N (reset
+  `snd_nxt` to `snd_una`); fast retransmit re-sends the oldest segment
+  without a cwnd change (N6 adds RFC 6675 loss recovery).
+- Tests (`tcp::conn::tests`): handshake, bidirectional data, orderly and
+  simultaneous close, out-of-order reassembly with SACK advertisement,
+  RTO retransmit, peer RST, sequence-space wrap at 2³²−1, connect
+  timeout, and a 16-seed byte-exact bulk-transfer-under-loss/reorder
+  property test. `fuzz_net_tcp` gained the `state_machine_driver` arm
+  (two live TCBs + a hostile parseable-segment injector; asserts no panic
+  and that every emitted segment re-parses).
 
 #### N5c — the stream socket surface + QEMU vertical `[ ]`
 - `SocketType::Stream` wired through the socket ABI + `netstack`

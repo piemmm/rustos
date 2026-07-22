@@ -58,9 +58,14 @@
 //!   control flags, the recognised options (MSS, window scale,
 //!   timestamps, SACK-permitted, SACK), the mandatory pseudo-header
 //!   checksum, and the modulo-2³² sequence-space arithmetic
-//!   ([`tcp::SeqNumber`]) the state machine's window comparisons use.
-//!   The connection state machine itself is a later increment
-//!   (`plans/NETWORK.md` N5b); none of that surface is speculated here.
+//!   ([`tcp::SeqNumber`]) the connection layer's window comparisons use.
+//!   [`tcp::conn`] is the pure, event-driven RFC 9293 connection state
+//!   machine built on top of it: active/passive/simultaneous open,
+//!   teardown, send/receive windows, RFC 7323 scaling + timestamps
+//!   (PAWS), RFC 2018 SACK, RFC 6298 retransmission with Karn's
+//!   algorithm, fast retransmit, zero-window probing, RFC 5961
+//!   challenge ACKs, and the user timeout — driven by injected time and
+//!   a caller-supplied CSPRNG initial sequence number.
 //!
 //! # Security
 //!

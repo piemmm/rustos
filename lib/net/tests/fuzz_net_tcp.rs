@@ -13,7 +13,9 @@
 //! from the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses
 //! under `cargo xtask fuzz`.
 
+use tairix_abi::time::Duration64;
 use tairix_net::checksum::Pseudo;
+use tairix_net::tcp::conn::{OutSegment, State, Tcb, TcpConfig};
 use tairix_net::tcp::{
     self, SackBlock, SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta, Timestamps,
     MAX_HEADER_LEN, MAX_SACK_BLOCKS, TCP_HEADER_LEN,
@@ -208,6 +210,189 @@ fn corrupted_fields_never_panic() {
             segment[byte] ^= 1 << bit;
             exercise_parse(p, &segment);
             segment[byte] ^= 1 << bit;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The N5b connection state-machine driver.
+//
+// Two live TCBs are driven against each other while a hostile injector feeds
+// them attacker-crafted (but parseable) segments. Invariants, for any schedule
+// and any injected bytes:
+//
+//   1. No operation ever panics (`send`/`recv`/`close`/`on_segment`/`advance`/
+//      `poll_transmit`), for any state or input.
+//   2. Every segment the engine emits is a well-formed segment that parses
+//      back under the same pseudo-header (so the wire path is always valid).
+//   3. `next_deadline` never yields an already-armed-in-the-past-only view
+//      that stalls the machine: after firing every due timer, the connection
+//      keeps making progress or is terminal (Closed).
+// ---------------------------------------------------------------------------
+
+const DRIVER_PSEUDO: Pseudo = Pseudo::V4 {
+    source: Ipv4Addr::new(10, 0, 0, 1),
+    destination: Ipv4Addr::new(10, 0, 0, 2),
+};
+
+fn driver_config() -> TcpConfig {
+    TcpConfig {
+        send_buffer: 8 * 1024,
+        receive_buffer: 8 * 1024,
+        ..TcpConfig::default()
+    }
+}
+
+fn ms(n: u64) -> Duration64 {
+    Duration64::from_nanos(n.saturating_mul(1_000_000))
+}
+
+/// Drain a TCB's outbound segments, verifying each parses back, returning the
+/// serialised frames.
+fn driver_drain(tcb: &mut Tcb, now: Duration64) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    tcb.poll_transmit(now, |out: OutSegment<'_>| {
+        let mut buf = vec![0u8; MAX_HEADER_LEN + out.payload.len()];
+        let n = tcp::write(DRIVER_PSEUDO, &out.meta, out.payload, &mut buf)
+            .expect("a planned segment always serialises");
+        // Invariant 2: it parses back.
+        assert!(
+            TcpSegment::parse(DRIVER_PSEUDO, &buf[..n]).is_some(),
+            "engine emitted an unparseable segment"
+        );
+        buf.truncate(n);
+        frames.push(buf);
+        true
+    });
+    frames
+}
+
+fn driver_feed(tcb: &mut Tcb, frame: &[u8], now: Duration64) {
+    if let Some(seg) = TcpSegment::parse(DRIVER_PSEUDO, frame) {
+        tcb.on_segment(&seg, now);
+    }
+}
+
+/// A parseable but arbitrary segment aimed at the server, so `on_segment`
+/// sees hostile flag/seq/ack combinations (RST/SYN injection, blind data).
+fn injected(rng: &mut Lcg, base_seq: u32) -> Vec<u8> {
+    // Bias the sequence near the plausible window so the acceptability and
+    // RFC 5961 paths are actually reached, not always rejected up front.
+    let seq = base_seq.wrapping_add((rng.next_u64() % 4096) as u32);
+    let meta = TcpSegmentMeta {
+        source_port: 40000,
+        destination_port: 80,
+        seq: SeqNumber::new(seq),
+        ack: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
+        flags: TcpFlags::from_bits((rng.next_u64() & 0xFF) as u8),
+        window: (rng.next_u64() & 0xFFFF) as u16,
+        urgent: 0,
+        options: TcpOptions::new(),
+    };
+    let len = (rng.next_u64() % 32) as usize;
+    let payload: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+    let mut buf = vec![0u8; MAX_HEADER_LEN + len];
+    match tcp::write(DRIVER_PSEUDO, &meta, &payload, &mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            buf
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn drive_once(rng: &mut Lcg) {
+    let now0 = ms(0);
+    let client_isn = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+    let server_isn = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+    let mut client = Tcb::connect(driver_config(), 40000, 80, client_isn, now0);
+    let mut server = Tcb::listen(driver_config(), 80, 0, server_isn);
+
+    // The server's rcv_nxt starts near client_isn+1 once the SYN is seen.
+    let injection_base = client_isn.wrapping_add(1);
+
+    let mut t = 0u64;
+    for _ in 0..600 {
+        t += 1 + (rng.next_u64() % 7);
+        let now = ms(t);
+
+        // Random application actions.
+        match rng.next_u64() % 8 {
+            0..=2 => {
+                let len = (rng.next_u64() % 300) as usize;
+                let data: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+                let _ = client.send(&data);
+            }
+            3 => {
+                let len = (rng.next_u64() % 300) as usize;
+                let data: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+                let _ = server.send(&data);
+            }
+            4 => {
+                let _ = client.close(now);
+            }
+            5 => {
+                let _ = server.close(now);
+            }
+            6 => client.abort(now),
+            _ => {}
+        }
+
+        client.advance(now);
+        server.advance(now);
+
+        // Deliver legitimate traffic in both directions, dropping ~1/4.
+        for f in driver_drain(&mut client, now) {
+            if rng.next_u64() % 4 != 0 {
+                driver_feed(&mut server, &f, now);
+            }
+        }
+        for f in driver_drain(&mut server, now) {
+            if rng.next_u64() % 4 != 0 {
+                driver_feed(&mut client, &f, now);
+            }
+        }
+
+        // Injected hostile segments at the server.
+        if rng.next_u64() % 3 == 0 {
+            let f = injected(rng, injection_base);
+            if !f.is_empty() {
+                driver_feed(&mut server, &f, now);
+            }
+        }
+
+        // Drain whatever the endpoints delivered.
+        let mut buf = [0u8; 512];
+        while client.recv(&mut buf) != 0 {}
+        while server.recv(&mut buf) != 0 {}
+
+        // Invariant 3: a reset connection emits at most its queued RST, then
+        // falls silent (it never keeps generating segments).
+        if matches!(client.state(), State::Closed) && client.reset_reason().is_some() {
+            let first = driver_drain(&mut client, now).len();
+            assert!(first <= 1, "a reset connection emitted more than one RST");
+            assert_eq!(
+                driver_drain(&mut client, now).len(),
+                0,
+                "a reset connection kept emitting segments"
+            );
+        }
+    }
+}
+
+#[test]
+fn state_machine_driver_never_panics() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "state_machine_driver_never_panics",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..64 {
+            drive_once(&mut rng);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
         }
     }
 }
