@@ -3345,10 +3345,14 @@ transfer, landed in increments:
   toggle, and the drawn `ScrollBar`), **FM3** (the file-type icon classifier +
   drawn grid-tile glyphs), and **FM4a** (the engine navigation model — bounded
   back/forward history + breadcrumb `navigate_to_depth`, all transactional and
-  fail-closed) are **done**. FM2 and FM4 were each split (§2.19): **FM4b** (the
-  drawn toolbar/breadcrumb chrome and the context menu) is deferred to land with
-  the actions it invokes (FM5–FM8, avoiding speculative surface §2.4); FM4b and
-  FM5–FM9 remain.
+  fail-closed) are **done**, as are **FM5** (in-place rename — the first write),
+  **FM6a** (the activation decision), **FM6b's** and **FM7a's**/**FM7b's** pure
+  engine models, and now **FM4b's pure chrome model** (`lib/browse::chrome`: the
+  `ToolbarModel` command enable/pressed state and the `breadcrumbs` path bar,
+  host-proven ahead of the drawn widgets, §2.19). FM2/FM4/FM6/FM7 were each
+  split (§2.19); the remaining work is the **drawn** FM4b toolbar/breadcrumb/menu
+  (landing with the verbs it invokes, §2.4), the FM6b/FM7b app-side spawn/
+  delegation/move-copy-delete verbs, and FM8–FM9.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

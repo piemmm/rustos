@@ -47,6 +47,19 @@ can never diverge in navigation semantics, listing policy, or look.
   listed before any state or history changes, a fresh navigation clears the
   forward branch, and the history is a bounded ring that drops the oldest
   location rather than growing without bound.
+- **Frame model** (`chrome`, `plans/NEW-FILEMANAGER.md` FM4b): the pure
+  model behind the drawn toolbar and breadcrumb path bar, host-proven ahead
+  of the chrome it drives. `ToolbarModel::for_browser` snapshots which
+  `ToolbarCommand` is actionable — Back / Forward / Up reflect the navigation
+  history and depth (`can_go_back` / `can_go_forward` / `!is_root`); Refresh,
+  the view toggle, and sort are always available — plus the active view and
+  sort so a tool renders disabled (never hidden) when it cannot apply.
+  `breadcrumbs` turns the root-first components into the ordered `Crumb`s of
+  the path bar, each carrying the ancestor `depth` the drawn crumb binds to
+  `navigate_to_depth` (`0` is the root); the terminal crumb is the current
+  directory (`is_current`), whose jump is a no-op. Only the surfaces whose
+  actions already exist are modelled — the context menu lands with the verbs
+  it invokes, never as speculative surface.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name

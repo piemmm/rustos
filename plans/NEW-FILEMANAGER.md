@@ -27,10 +27,11 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, FM6a, FM6b's pure
-association model, FM7a's selection + clipboard model, and FM7b's pure
-paste-execution model are done**; the FM6b app-side spawn/delegation, FM4b, the
-FM7b app-side move/copy/delete verbs, and FM8–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM5,
+FM6a, FM6b's pure association model, FM7a's selection + clipboard model, and
+FM7b's pure paste-execution model are done**; the FM4b drawn chrome, the FM6b
+app-side spawn/delegation, the FM7b app-side move/copy/delete verbs, and FM8–FM9
+are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -271,25 +272,42 @@ Done. The host-testable navigation *model* the FM4b chrome will drive, added to
   test-only source accessor. Docs: `docs/src/desktop/apps.md`,
   `lib/browse/README.md`.
 
-### FM4b — the drawn chrome: toolbar, breadcrumb bar, context menu `[ ]`
+### FM4b — the drawn chrome: toolbar, breadcrumb bar, context menu `[~]`
 
 The app frame, entirely `lib/controls` widgets over the theme, painting the
-FM4a model. **Deferred to land with the actions its surfaces invoke** so no
-menu/toolbar entry is built ahead of the behaviour it calls (§2.4):
+FM4a model. **The drawn chrome is deferred to land with the actions its
+surfaces invoke** so no menu/toolbar entry is built ahead of the behaviour it
+calls (§2.4).
 
-- **Toolbar** (`lib/controls::Toolbar`): Back/Forward/Up/Refresh (over the FM4a
-  history + `go_up`/`refresh`), view-toggle (list/grid), and sort — the tools
-  whose actions already exist — each an `IconButton` with a keyboard
-  equivalent, rendering disabled (not hidden) when unavailable. New Folder
-  arrives with FM7 (`fs_mkdir`).
-- **Breadcrumb path bar**: the current path as clickable components (root-first,
-  from `Browser::components`), each bound to `navigate_to_depth`.
+**The pure chrome model is done** (§2.19 — host-proven ahead of the drawn
+widgets, exactly as FM6a/FM6b/FM7a/FM7b's pure models landed): the
+`lib/browse::chrome` module. `ToolbarModel::for_browser` snapshots which
+`ToolbarCommand` (Back/Forward/Up/Refresh/ToggleView/Sort) is actionable —
+Back/Forward/Up over `can_go_back`/`can_go_forward`/`!is_root`, the rest always
+available — plus the active view/sort so a tool renders disabled, not hidden,
+when it cannot apply; `TOOLBAR_COMMANDS` is the one command order the chrome
+iterates. `breadcrumbs` turns the root-first `Browser::components` into the
+ordered `Crumb`s of the path bar, each carrying the ancestor `depth` the drawn
+crumb binds to `navigate_to_depth` (`0` = root); the terminal crumb is the
+current directory (`is_current`), whose jump is the documented no-op. Only the
+surfaces whose actions already exist are modelled — the context menu is *not*,
+so it lands with the verbs it invokes rather than as speculative surface (§2.4).
+Host-tested in `lib/browse` (toolbar enable/disable at root / after descend /
+after go-back, the active-view/sort report, the `TOOLBAR_COMMANDS` order, the
+breadcrumb crumb list + depth + `is_current`, and a crumb depth climbing to its
+ancestor). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+The remaining drawn chrome (still `planned`):
+
+- **Toolbar** (`lib/controls::Toolbar`): the `TOOLBAR_COMMANDS` painted as
+  `IconButton`s over `ToolbarModel`, each with a keyboard equivalent and the
+  disabled state the model reports. New Folder arrives with FM7 (`fs_mkdir`).
+- **Breadcrumb path bar**: the `breadcrumbs` `Crumb`s drawn as clickable
+  components, each click routed through `navigate_to_depth`.
 - **Context menu** (`lib/controls::Menu`): one menu definition whose entries
   land as their stages do — Open/Open With… (FM6), Rename (FM5), Cut/Copy/
   Paste/Delete (FM7), Properties (FM8) — each disabling when inapplicable.
 - **`Alt+←/→`** bound to Back/Forward.
-- Host tests: toolbar enable/disable logic (over `can_go_back`/`can_go_forward`/
-  `is_root`), breadcrumb hit→component, menu-entry applicability.
 
 ### FM5 — in-place rename `[x]`
 

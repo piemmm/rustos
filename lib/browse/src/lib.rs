@@ -32,6 +32,9 @@
 //! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary.
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
+//! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
+//!   command enable/pressed state and the [`breadcrumbs`] path bar
+//!   (`plans/NEW-FILEMANAGER.md` `FM4b`).
 //! * [`select`](mod@select) — the [`Selection`] multi-entry set (single /
 //!   toggle / range / select-all) the management verbs act on.
 //! * [`clipboard`](mod@clipboard) — the cut/copy [`Clipboard`] and
@@ -71,6 +74,7 @@ extern crate alloc;
 
 pub mod activate;
 pub mod browser;
+pub mod chrome;
 pub mod clipboard;
 pub mod entry;
 pub mod error;
@@ -88,6 +92,7 @@ pub mod vfs;
 
 pub use activate::Activation;
 pub use browser::Browser;
+pub use chrome::{breadcrumbs, Crumb, ToolbarCommand, ToolbarModel, TOOLBAR_COMMANDS};
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;

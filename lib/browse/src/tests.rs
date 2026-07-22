@@ -1988,3 +1988,148 @@ fn advancing_past_the_source_length_fails_closed() {
 fn copy_error_message_is_non_empty() {
     assert!(!CopyError::Overrun.to_string().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// FM4b — the toolbar + breadcrumb frame model (pure chrome model).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_toolbar_disables_back_forward_and_up_at_the_root() {
+    use crate::chrome::{ToolbarCommand, ToolbarModel};
+
+    // At the root, fresh: no history either way and no parent to climb to, so
+    // the three navigation tools render disabled; refresh, view, and sort are
+    // always actionable.
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let toolbar = ToolbarModel::for_browser(&browser);
+    assert!(!toolbar.is_enabled(ToolbarCommand::Back));
+    assert!(!toolbar.is_enabled(ToolbarCommand::Forward));
+    assert!(!toolbar.is_enabled(ToolbarCommand::Up));
+    assert!(toolbar.is_enabled(ToolbarCommand::Refresh));
+    assert!(toolbar.is_enabled(ToolbarCommand::ToggleView));
+    assert!(toolbar.is_enabled(ToolbarCommand::Sort));
+}
+
+#[test]
+fn the_toolbar_enables_back_and_up_after_descending() {
+    use crate::chrome::{ToolbarCommand, ToolbarModel};
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    let toolbar = ToolbarModel::for_browser(&browser);
+    // We can climb to the parent and go back to the root, but there is nothing
+    // ahead of us yet.
+    assert!(toolbar.is_enabled(ToolbarCommand::Up));
+    assert!(toolbar.is_enabled(ToolbarCommand::Back));
+    assert!(!toolbar.is_enabled(ToolbarCommand::Forward));
+}
+
+#[test]
+fn the_toolbar_enables_forward_only_after_going_back() {
+    use crate::chrome::{ToolbarCommand, ToolbarModel};
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    assert_eq!(browser.go_back(), Ok(true));
+    let toolbar = ToolbarModel::for_browser(&browser);
+    // Back to the root: Forward is now available, Back and Up are not.
+    assert!(toolbar.is_enabled(ToolbarCommand::Forward));
+    assert!(!toolbar.is_enabled(ToolbarCommand::Back));
+    assert!(!toolbar.is_enabled(ToolbarCommand::Up));
+}
+
+#[test]
+fn the_toolbar_reports_the_active_view_and_sort() {
+    use crate::chrome::ToolbarModel;
+    use crate::layout::ViewMode;
+    use crate::sort::{SortDirection, SortKey, SortMode};
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let toolbar = ToolbarModel::for_browser(&browser);
+    assert_eq!(toolbar.view_mode(), ViewMode::List);
+    assert_eq!(toolbar.sort_mode(), SortMode::default_order());
+
+    browser.set_view_mode(ViewMode::Grid);
+    let by_size_desc = SortMode {
+        key: SortKey::Size,
+        direction: SortDirection::Descending,
+    };
+    browser.set_sort_mode(by_size_desc);
+    let toolbar = ToolbarModel::for_browser(&browser);
+    assert_eq!(toolbar.view_mode(), ViewMode::Grid);
+    assert_eq!(toolbar.sort_mode(), by_size_desc);
+}
+
+#[test]
+fn toolbar_commands_list_covers_every_variant_once() {
+    use crate::chrome::{ToolbarCommand, TOOLBAR_COMMANDS};
+
+    // The drawn chrome iterates TOOLBAR_COMMANDS, so it must hold each command
+    // exactly once, in a stable order.
+    assert_eq!(
+        TOOLBAR_COMMANDS,
+        &[
+            ToolbarCommand::Back,
+            ToolbarCommand::Forward,
+            ToolbarCommand::Up,
+            ToolbarCommand::Refresh,
+            ToolbarCommand::ToggleView,
+            ToolbarCommand::Sort,
+        ]
+    );
+}
+
+#[test]
+fn the_breadcrumbs_at_the_root_are_a_single_current_root_crumb() {
+    use crate::chrome::breadcrumbs;
+
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let crumbs = breadcrumbs(&browser);
+    assert_eq!(crumbs.len(), 1);
+    assert_eq!(crumbs[0].label(), "/");
+    assert_eq!(crumbs[0].depth(), 0);
+    assert!(crumbs[0].is_current());
+}
+
+#[test]
+fn the_breadcrumbs_track_the_components_and_bind_each_to_its_depth() {
+    use crate::chrome::breadcrumbs;
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    browser.open_index(0).expect("enter Fonts");
+    assert_eq!(browser.path(), "/System/Fonts");
+
+    let crumbs = breadcrumbs(&browser);
+    // Root crumb + one per component, root-first.
+    assert_eq!(crumbs.len(), 3);
+    assert_eq!(crumbs[0].label(), "/");
+    assert_eq!(crumbs[0].depth(), 0);
+    assert!(!crumbs[0].is_current());
+    assert_eq!(crumbs[1].label(), "System");
+    assert_eq!(crumbs[1].depth(), 1);
+    assert!(!crumbs[1].is_current());
+    // The terminal crumb is the directory being shown: it is current and its
+    // depth equals the number of components (a navigate_to_depth no-op).
+    assert_eq!(crumbs[2].label(), "Fonts");
+    assert_eq!(crumbs[2].depth(), 2);
+    assert!(crumbs[2].is_current());
+    assert_eq!(crumbs[2].depth(), browser.components().len());
+}
+
+#[test]
+fn a_breadcrumb_depth_climbs_to_exactly_the_ancestor_it_names() {
+    use crate::chrome::breadcrumbs;
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    browser.open_index(0).expect("enter Fonts");
+
+    // Binding the "System" crumb (depth 1) to navigate_to_depth climbs to it.
+    let system_depth = {
+        let crumbs = breadcrumbs(&browser);
+        crumbs[1].depth()
+    };
+    assert_eq!(browser.navigate_to_depth(system_depth), Ok(true));
+    assert_eq!(browser.path(), "/System");
+}

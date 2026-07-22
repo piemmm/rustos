@@ -120,6 +120,38 @@ were. The fail-closed outcomes are the `BrowseError` variants: `Source`
 (the wrapped boundary `Errno`, e.g. `PermissionDenied`), `NoSuchEntry`, and
 `NotADirectory`.
 
+### The frame model — toolbar and breadcrumb
+
+The drawn window chrome — the `lib/controls` toolbar and the breadcrumb
+path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
+`chrome` model, host-proven ahead of the widgets it drives, exactly as the
+`Activation` and `open_with` decisions are:
+
+- `ToolbarModel::for_browser(browser)` snapshots which `ToolbarCommand` is
+  currently actionable. **Back / Forward / Up** reflect the navigation
+  history and depth (`can_go_back` / `can_go_forward` / `!is_root`);
+  **Refresh**, the **view toggle**, and **Sort** are always available.
+  `is_enabled(command)` gives the drawn button its enabled state — an
+  unavailable tool renders *disabled*, never hidden, so the toolbar's shape
+  stays stable — and `view_mode()` / `sort_mode()` give the view toggle and
+  sort control their current (pressed) state. `TOOLBAR_COMMANDS` is the one
+  left-to-right command order the chrome iterates.
+- `breadcrumbs(browser)` turns the current directory's root-first
+  components into the ordered `Crumb`s of the path bar: the root crumb
+  (`depth` `0`) followed by one crumb per component (component `i` is depth
+  `i + 1`). Each crumb's `depth()` is what the drawn crumb binds to
+  `navigate_to_depth`, so a click climbs to exactly the ancestor it names.
+  The terminal crumb — the directory being shown — is flagged
+  `is_current()` and the bar renders it inactive, because a jump to it is
+  the documented no-op.
+
+The model decides *what is offered* and *where a crumb leads*; it performs
+no navigation or I/O itself, so composing it grants nothing (the read-only
+picker builds the same model). Only the surfaces whose actions already
+exist are modelled — the context menu is built with the verbs it invokes
+(rename, open, the clipboard verbs, new folder), never ahead of them
+(`AGENTS.md` §2.4).
+
 ### Activating an entry
 
 Opening an entry — a double-click, or `Enter` on the selection — is one
