@@ -91,10 +91,32 @@ cursor:
 - `select`, `select_next`, and `select_previous` move the selection, clamping
   at both ends.
 
+`Browser` also keeps a bounded **navigation history** and the breadcrumb
+jump both the toolbar and the path bar drive:
+
+- `go_back` / `go_forward` walk a back / forward stack; `can_go_back` /
+  `can_go_forward` report whether each move is available, which is exactly
+  the enable state of the Back / Forward toolbar controls. Any fresh
+  navigation (descend, climb, or a breadcrumb jump) records the directory
+  it left on the back stack and clears the forward branch, as a web
+  browser's forward history is discarded on a new turn.
+- `navigate_to_depth(depth)` is the breadcrumb-click primitive: it jumps to
+  the ancestor `depth` path components deep (`0` is the filesystem root,
+  `components().len()` is the directory already shown — a no-op, as is a
+  depth past the end).
+
+The history is a bounded ring: once it reaches its cap it drops the
+*oldest* location rather than growing without bound. It is a UX
+convenience, not a hardware-scaled resource, so the bound is a deliberate
+defensive cap (§24), and reaching it never fails a navigation — it simply
+forgets the least-recent step.
+
 Every directory-listing move is **transactional and fails closed**
 (`AGENTS.md` §5.4): the target is listed *before* any state changes, so a
 refused or failing read leaves the browser on the directory it was already
-showing. The fail-closed outcomes are the `BrowseError` variants: `Source`
+showing — a `go_back` / `go_forward` / breadcrumb jump to a directory that
+has become unreadable leaves the browser *and its history* exactly as they
+were. The fail-closed outcomes are the `BrowseError` variants: `Source`
 (the wrapped boundary `Errno`, e.g. `PermissionDenied`), `NoSuchEntry`, and
 `NotADirectory`.
 

@@ -12,14 +12,27 @@
 //! the new path *and* its entries if that read succeeds. A refused or failing
 //! read leaves the browser exactly where it was.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::mem;
 
 use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::sort::{sort_entries, SortMode};
 use crate::source::DirectorySource;
+
+/// The most directories the back and forward navigation stacks each retain.
+///
+/// Navigation history is a UX convenience, not a hardware-scaled resource, so
+/// this is a deliberate defensive cap rather than a discovered capacity: it
+/// bounds the memory a long browsing session can accumulate from the user's
+/// own back/forward moves. When the cap is reached the *oldest* location is
+/// dropped, so history always retains the most recent moves and never grows
+/// without bound. A generous limit keeps the ceiling well clear of any
+/// realistic session, so it is never a surprising "tiny" cut-off.
+pub(crate) const HISTORY_MAX: usize = 256;
 
 /// A live view of one directory, with a selection cursor.
 ///
@@ -34,6 +47,13 @@ pub struct Browser<S: DirectorySource> {
     sort_mode: SortMode,
     view_mode: ViewMode,
     scroll_offset: u64,
+    /// Directories visited before the current one, oldest first; the last is
+    /// where [`go_back`](Self::go_back) returns to.
+    back: VecDeque<Vec<String>>,
+    /// Directories stepped away from by [`go_back`](Self::go_back), oldest
+    /// first; the last is where [`go_forward`](Self::go_forward) returns to.
+    /// Cleared by any fresh navigation, as a browser's forward history is.
+    forward: VecDeque<Vec<String>>,
 }
 
 impl<S: DirectorySource> Browser<S> {
@@ -54,6 +74,8 @@ impl<S: DirectorySource> Browser<S> {
             sort_mode,
             view_mode: ViewMode::default(),
             scroll_offset: 0,
+            back: VecDeque::new(),
+            forward: VecDeque::new(),
         })
     }
 
@@ -233,11 +255,7 @@ impl<S: DirectorySource> Browser<S> {
         // failed read leaves the browser exactly where it was.
         let mut child = self.components.clone();
         child.push(String::from(entry.name()));
-        let entries = self.source.list(&child).map_err(BrowseError::Source)?;
-
-        self.components = child;
-        self.adopt_entries(entries);
-        Ok(())
+        self.navigate_recording(child)
     }
 
     /// Climb to the parent directory, listing it.
@@ -256,11 +274,119 @@ impl<S: DirectorySource> Browser<S> {
 
         let mut parent = self.components.clone();
         parent.pop();
-        let entries = self.source.list(&parent).map_err(BrowseError::Source)?;
+        self.navigate_recording(parent)?;
+        Ok(true)
+    }
 
-        self.components = parent;
+    /// Navigate to the ancestor `depth` path components deep (root-first) — the
+    /// breadcrumb-click primitive. `depth == 0` is the filesystem root and
+    /// `depth == components().len()` is the directory already shown.
+    ///
+    /// Records the move on the back history like any other navigation, and
+    /// stays transactional and fail closed: the ancestor is listed before any
+    /// state changes, so a refused read leaves the browser exactly where it
+    /// was.
+    ///
+    /// Returns `Ok(true)` after moving and `Ok(false)` when `depth` already
+    /// names the current directory or is past its end (no such ancestor) — a
+    /// no-op, not an error, exactly as clicking the current-directory crumb is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::Source`] if the ancestor cannot be listed; the
+    /// browser stays on the current directory.
+    pub fn navigate_to_depth(&mut self, depth: usize) -> Result<bool, BrowseError> {
+        if depth >= self.components.len() {
+            return Ok(false);
+        }
+        let target = self.components[..depth].to_vec();
+        self.navigate_recording(target)?;
+        Ok(true)
+    }
+
+    /// Whether there is a previous directory [`go_back`](Self::go_back) can
+    /// return to — the enable state of a Back toolbar control.
+    #[must_use]
+    pub fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    /// Whether there is a directory [`go_forward`](Self::go_forward) can step
+    /// to — the enable state of a Forward toolbar control.
+    #[must_use]
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+
+    /// Return to the previously visited directory, listing it and pushing the
+    /// current directory onto the forward history.
+    ///
+    /// Returns `Ok(true)` after moving and `Ok(false)` when there is no back
+    /// history (not an error). Transactional and fail closed: the target is
+    /// listed before any state or history changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::Source`] if the previous directory can no longer
+    /// be listed; the browser and its history stay exactly as they were.
+    pub fn go_back(&mut self) -> Result<bool, BrowseError> {
+        let Some(target) = self.back.back().cloned() else {
+            return Ok(false);
+        };
+        let entries = self.source.list(&target).map_err(BrowseError::Source)?;
+        self.back.pop_back();
+        let previous = mem::replace(&mut self.components, target);
+        Self::push_bounded(&mut self.forward, previous);
         self.adopt_entries(entries);
         Ok(true)
+    }
+
+    /// Step to the directory most recently left by [`go_back`](Self::go_back),
+    /// listing it and pushing the current directory back onto the back history.
+    ///
+    /// Returns `Ok(true)` after moving and `Ok(false)` when there is no forward
+    /// history (not an error). Transactional and fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::Source`] if the forward directory can no longer
+    /// be listed; the browser and its history stay exactly as they were.
+    pub fn go_forward(&mut self) -> Result<bool, BrowseError> {
+        let Some(target) = self.forward.back().cloned() else {
+            return Ok(false);
+        };
+        let entries = self.source.list(&target).map_err(BrowseError::Source)?;
+        self.forward.pop_back();
+        let previous = mem::replace(&mut self.components, target);
+        Self::push_bounded(&mut self.back, previous);
+        self.adopt_entries(entries);
+        Ok(true)
+    }
+
+    /// List `target` and adopt it as the current directory, recording the
+    /// directory being left on the back history and clearing the forward
+    /// history (a fresh navigation, as in any browser).
+    ///
+    /// Transactional: `target` is listed *before* any state or history
+    /// changes, so a refused or failing read leaves the browser — and its
+    /// history — exactly where they were.
+    fn navigate_recording(&mut self, target: Vec<String>) -> Result<(), BrowseError> {
+        let entries = self.source.list(&target).map_err(BrowseError::Source)?;
+        let previous = mem::replace(&mut self.components, target);
+        Self::push_bounded(&mut self.back, previous);
+        self.forward.clear();
+        self.adopt_entries(entries);
+        Ok(())
+    }
+
+    /// Push `location` onto `stack`, dropping the oldest entries to keep the
+    /// stack within [`HISTORY_MAX`] so navigation history cannot grow without
+    /// bound.
+    fn push_bounded(stack: &mut VecDeque<Vec<String>>, location: Vec<String>) {
+        stack.push_back(location);
+        while stack.len() > HISTORY_MAX {
+            stack.pop_front();
+        }
     }
 
     /// Replace the loaded entries — ordered by the current sort mode — and

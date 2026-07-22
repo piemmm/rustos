@@ -30,7 +30,13 @@ fn key(components: &[String]) -> String {
 struct MockFs {
     dirs: BTreeMap<String, Vec<Entry>>,
     denied: BTreeSet<String>,
-    root_reads: usize,
+    /// Paths that list successfully once and then fail closed on every later
+    /// read, modelling a directory that becomes unreadable underneath the
+    /// browser (e.g. its capability is revoked between visits).
+    deny_after_first: BTreeSet<String>,
+    /// How many times each path has been listed, so the read-count-dependent
+    /// behaviours below can trigger.
+    reads: BTreeMap<String, usize>,
     root_after_refresh: Option<Vec<Entry>>,
 }
 
@@ -66,7 +72,8 @@ impl MockFs {
         Self {
             dirs,
             denied,
-            root_reads: 0,
+            deny_after_first: BTreeSet::new(),
+            reads: BTreeMap::new(),
             root_after_refresh: None,
         }
     }
@@ -78,12 +85,15 @@ impl DirectorySource for MockFs {
         if self.denied.contains(&path) {
             return Err(Errno::PermissionDenied);
         }
-        if path == "/" {
-            self.root_reads += 1;
-            if self.root_reads > 1 {
-                if let Some(after) = &self.root_after_refresh {
-                    return Ok(after.clone());
-                }
+        let reads = self.reads.entry(path.clone()).or_insert(0);
+        *reads += 1;
+        let count = *reads;
+        if count > 1 && self.deny_after_first.contains(&path) {
+            return Err(Errno::PermissionDenied);
+        }
+        if path == "/" && count > 1 {
+            if let Some(after) = &self.root_after_refresh {
+                return Ok(after.clone());
             }
         }
         self.dirs.get(&path).cloned().ok_or(Errno::NotFound)
@@ -771,7 +781,8 @@ fn many_files(n: usize) -> Browser<MockFs> {
     let fs = MockFs {
         dirs,
         denied: BTreeSet::new(),
-        root_reads: 0,
+        deny_after_first: BTreeSet::new(),
+        reads: BTreeMap::new(),
         root_after_refresh: None,
     };
     Browser::open_root(fs).expect("root opens")
@@ -899,6 +910,165 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
         entry_index_at(&browser, font, &theme, vp, Point::new(4, 0)),
         None
     );
+}
+
+// --- FM4: navigation history and breadcrumb navigation -----------------
+
+#[test]
+fn descending_records_back_history_and_go_back_returns() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    assert!(!browser.can_go_back());
+    assert!(!browser.can_go_forward());
+
+    // Sorted root order is [Apps, Storage, System, Users]; System is index 2.
+    browser.open_index(2).expect("enter System");
+    assert_eq!(browser.path(), "/System");
+    // The directory left behind is now on the back history.
+    assert!(browser.can_go_back());
+    assert!(!browser.can_go_forward());
+
+    // Back returns to the root and offers the visited directory forward again.
+    assert_eq!(browser.go_back(), Ok(true));
+    assert_eq!(browser.path(), "/");
+    assert!(browser.is_root());
+    assert!(!browser.can_go_back());
+    assert!(browser.can_go_forward());
+    // The listing came back in the shared sorted order.
+    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+
+    // Forward steps back into the directory we came from.
+    assert_eq!(browser.go_forward(), Ok(true));
+    assert_eq!(browser.path(), "/System");
+    assert!(browser.can_go_back());
+    assert!(!browser.can_go_forward());
+}
+
+#[test]
+fn go_back_and_go_forward_are_no_ops_with_empty_history() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    assert_eq!(browser.go_back(), Ok(false));
+    assert_eq!(browser.go_forward(), Ok(false));
+    assert!(browser.is_root());
+    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+}
+
+#[test]
+fn go_up_records_history_like_any_navigation() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    // Climbing up records /System so Back can return into it.
+    assert_eq!(browser.go_up(), Ok(true));
+    assert_eq!(browser.path(), "/");
+    assert!(browser.can_go_back());
+    assert_eq!(browser.go_back(), Ok(true));
+    assert_eq!(browser.path(), "/System");
+}
+
+#[test]
+fn a_fresh_navigation_clears_the_forward_history() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    assert_eq!(browser.go_back(), Ok(true));
+    assert!(browser.can_go_forward());
+
+    // A new descent (root → Users) abandons the forward branch, exactly as a
+    // web browser's forward history is discarded when you take a new turn.
+    browser.open_index(3).expect("enter Users");
+    assert_eq!(browser.path(), "/Users");
+    assert!(!browser.can_go_forward());
+    assert!(browser.can_go_back());
+    assert_eq!(browser.go_back(), Ok(true));
+    assert_eq!(browser.path(), "/");
+}
+
+#[test]
+fn navigate_to_depth_climbs_to_a_breadcrumb_ancestor() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[(b"System", FileKind::Directory)]),
+    );
+    dirs.insert(
+        "/System".to_string(),
+        encoded_stream(&[(b"Fonts", FileKind::Directory)]),
+    );
+    dirs.insert("/System/Fonts".to_string(), encoded_stream(&[]));
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+
+    browser.open_index(0).expect("into /System");
+    browser.open_index(0).expect("into /System/Fonts");
+    assert_eq!(browser.path(), "/System/Fonts");
+    assert_eq!(browser.components().len(), 2);
+
+    // Clicking the current-directory crumb (depth == len) is a no-op; clicking
+    // past the end (no such ancestor) is likewise a no-op, not an error.
+    assert_eq!(browser.navigate_to_depth(2), Ok(false));
+    assert_eq!(browser.navigate_to_depth(99), Ok(false));
+    assert_eq!(browser.path(), "/System/Fonts");
+
+    // Clicking the "System" crumb (depth 1) climbs to that ancestor and
+    // records the move so Back returns to where we were.
+    assert_eq!(browser.navigate_to_depth(1), Ok(true));
+    assert_eq!(browser.path(), "/System");
+    assert!(browser.can_go_back());
+
+    // Clicking the root crumb (depth 0) goes all the way to the root.
+    assert_eq!(browser.navigate_to_depth(0), Ok(true));
+    assert_eq!(browser.path(), "/");
+    assert!(browser.is_root());
+
+    assert_eq!(browser.go_back(), Ok(true));
+    assert_eq!(browser.path(), "/System");
+}
+
+#[test]
+fn go_back_is_transactional_when_the_previous_directory_becomes_unreadable() {
+    // /System lists once (on the way in) and is refused on every later read,
+    // modelling its capability being revoked while we are inside /System/Fonts.
+    let mut fs = MockFs::fixture();
+    fs.deny_after_first.insert("/System".to_string());
+    let mut browser = Browser::open_root(fs).expect("root");
+    browser.open_index(2).expect("enter System");
+    browser.open_index(0).expect("enter Fonts");
+    assert_eq!(browser.path(), "/System/Fonts");
+
+    // Back to the now-unreadable /System fails closed: the browser and its
+    // history are left exactly as they were, so Back can still be retried.
+    assert_eq!(
+        browser.go_back(),
+        Err(BrowseError::Source(Errno::PermissionDenied))
+    );
+    assert_eq!(browser.path(), "/System/Fonts");
+    assert!(browser.can_go_back());
+    assert!(!browser.can_go_forward());
+}
+
+#[test]
+fn navigation_history_is_bounded_and_drops_the_oldest() {
+    use crate::browser::HISTORY_MAX;
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    // Alternate root → /System → root … more times than the history bound, so
+    // the back stack is driven well past its cap. Each move records exactly
+    // one location on the back stack (and clears forward, so forward stays
+    // empty throughout the building phase).
+    for _ in 0..(HISTORY_MAX + 50) {
+        if browser.is_root() {
+            browser.open_index(2).expect("enter System");
+        } else {
+            assert_eq!(browser.go_up(), Ok(true));
+        }
+    }
+
+    // However far we drove it, the retained history is capped at HISTORY_MAX:
+    // exactly that many Back steps succeed before it is exhausted, proving the
+    // oldest locations were dropped rather than the stack growing unbounded.
+    let mut steps = 0usize;
+    while browser.go_back().expect("readable both ways") {
+        steps += 1;
+    }
+    assert_eq!(steps, HISTORY_MAX);
+    assert!(!browser.can_go_back());
 }
 
 // --- File-type icon classification (FM3) -------------------------------

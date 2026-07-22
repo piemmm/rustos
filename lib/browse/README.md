@@ -37,6 +37,16 @@ can never diverge in navigation semantics, listing policy, or look.
   engine never fabricates an entry: it shows exactly what its source
   returns, with every permission decision staying in the VFS behind the
   source under the composing process's own identity.
+- **Navigation history and breadcrumbs** (`Browser`): a bounded back /
+  forward stack (`go_back` / `go_forward`, with `can_go_back` /
+  `can_go_forward` supplying the enable state of the Back / Forward toolbar
+  controls) and `navigate_to_depth`, the breadcrumb-click primitive that
+  jumps to an ancestor by path depth (`0` is the root, `components().len()`
+  is the current directory — a no-op). Every one of these is the same
+  transactional, fail-closed navigation as descend / climb: the target is
+  listed before any state or history changes, a fresh navigation clears the
+  forward branch, and the history is a bounded ring that drops the oldest
+  location rather than growing without bound.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the

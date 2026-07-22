@@ -27,16 +27,21 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, and FM3 are done**; FM4–FM9 are `planned`.
-The starting point is `plans/APPWIN.md` AW3/AW5 (done): the `files.app` `Run`
-binary composes the shared `lib/browse` `Browser` model + `render` renderer
-over the AW2 window channel, parks on its event mailbox, and navigates by
-keyboard; the renderer-mirroring point hit-test (`render::entry_index_at`) and
-the kernel one-shot read delegation (`fd_grant`/`fd_redeem`) the viewer
-consumes are in place.
+`in progress` — **FM1, FM2a, FM2b, FM3, and FM4a are done**; FM4b and FM5–FM9
+are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
+`render` renderer over the AW2 window channel, parks on its event mailbox, and
+navigates by keyboard; the renderer-mirroring point hit-test
+(`render::entry_index_at`) and the kernel one-shot read delegation
+(`fd_grant`/`fd_redeem`) the viewer consumes are in place.
 
 FM2 was split (§2.19) into FM2a (the list item view) and FM2b (the icon-grid
-view, the runtime view toggle, and the drawn `ScrollBar`); both are done.
+view, the runtime view toggle, and the drawn `ScrollBar`); both are done. FM4 is
+split the same way: **FM4a** (the engine navigation model — bounded back/forward
+history + breadcrumb navigation) is done; **FM4b** (the drawn toolbar/breadcrumb
+chrome and the context menu) is deferred to land *with* the actions its entries
+gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so the menu is not
+built as speculative surface ahead of the behaviours it invokes (§2.4).
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -221,27 +226,57 @@ case-insensitivity, unknown/extensionless/dotfile/trailing-dot → generic,
 last-extension-wins). Docs: `docs/src/desktop/apps.md`,
 `plans/GUI-CONTROLS-DESIGN.md` §11.15, `lib/icon`/`lib/browse` README + rustdoc.
 
-### FM4 — the chrome: toolbar, breadcrumb path bar, context menu `[ ]`
+### FM4a — the engine navigation model: history + breadcrumb `[x]`
 
-The app frame, entirely `lib/controls` widgets over the theme.
+Done. The host-testable navigation *model* the FM4b chrome will drive, added to
+`lib/browse::Browser` (§2.2 — the picker gets it for free):
 
-- **Toolbar** (`lib/controls::Toolbar`): Back, Up, Refresh, New Folder,
-  view-toggle (list/grid), and sort. Each tool is an `IconButton` with a
-  keyboard equivalent; a tool whose action is unavailable renders
-  disabled (Back at history start), never hidden-then-surprising.
-- **Breadcrumb path bar**: the current path as clickable components
-  (root-first, from `Browser::components`), each a click target that
-  navigates to that ancestor. Honours the storage-forest model — the
-  root view shows the four `System:`/`Users:`/`Apps:`/`Storage:` view
-  bindings, not a fake POSIX `/` tree (`docs/src/filesystem/drives.md`).
-- **Navigation history**: a bounded back/forward stack in the engine
-  (§24.1 — bounded, not a fixed tiny ceiling), Back/Forward + `Alt+←/→`.
-- **Context menu** (`lib/controls::Menu`): right-click (or the menu key)
-  on an item → Open, Open With… (FM6), Rename (FM5), Cut/Copy/Paste
-  (FM7), Delete (FM7), Properties; on empty space → New Folder, Paste,
-  view/sort. One menu definition; entries disable when inapplicable.
-- Host tests: toolbar enable/disable logic, breadcrumb hit→component,
-  history bounds and back/forward, menu-entry applicability.
+- **Navigation history**: a bounded back/forward stack (`go_back`/`go_forward`,
+  with `can_go_back`/`can_go_forward` supplying the Back/Forward toolbar enable
+  state). Every fresh navigation — descend, climb, or a breadcrumb jump —
+  records the directory it left on the back stack and clears the forward branch
+  (standard browser semantics). The history is a bounded ring (`HISTORY_MAX`)
+  that drops the *oldest* location rather than growing without bound: it is a
+  UX convenience, not a hardware-scaled resource, so a deliberate defensive cap
+  is the right shape (§24 — a bound, not a discovered capacity), and reaching
+  it never fails a navigation.
+- **Breadcrumb navigation**: `navigate_to_depth(depth)` jumps to the ancestor
+  `depth` path components deep (`0` = root, `components().len()` = current = a
+  no-op, as is a depth past the end), the primitive the FM4b breadcrumb bar
+  will bind each clickable component to. Honours the storage-forest model — the
+  root view is whatever the source lists (the four view bindings), never a
+  fabricated POSIX tree (`docs/src/filesystem/drives.md`).
+- Every one of these is the same transactional, fail-closed navigation as
+  descend/climb: the target is listed *before* any state *or history* changes,
+  so a move to a directory that has become unreadable leaves the browser and
+  its history exactly where they were (§5.4).
+- Host-tested in `lib/browse/src/tests.rs` (descend→back→forward, no-op on empty
+  history, `go_up` records history, fresh-navigation clears forward, breadcrumb
+  climb + current/past-end no-op, `go_back` transactional when the target
+  becomes unreadable, and the bounded drop-oldest cap); `MockFs` gained a
+  read-count-driven `deny_after_first` to model a revoked directory without a
+  test-only source accessor. Docs: `docs/src/desktop/apps.md`,
+  `lib/browse/README.md`.
+
+### FM4b — the drawn chrome: toolbar, breadcrumb bar, context menu `[ ]`
+
+The app frame, entirely `lib/controls` widgets over the theme, painting the
+FM4a model. **Deferred to land with the actions its surfaces invoke** so no
+menu/toolbar entry is built ahead of the behaviour it calls (§2.4):
+
+- **Toolbar** (`lib/controls::Toolbar`): Back/Forward/Up/Refresh (over the FM4a
+  history + `go_up`/`refresh`), view-toggle (list/grid), and sort — the tools
+  whose actions already exist — each an `IconButton` with a keyboard
+  equivalent, rendering disabled (not hidden) when unavailable. New Folder
+  arrives with FM7 (`fs_mkdir`).
+- **Breadcrumb path bar**: the current path as clickable components (root-first,
+  from `Browser::components`), each bound to `navigate_to_depth`.
+- **Context menu** (`lib/controls::Menu`): one menu definition whose entries
+  land as their stages do — Open/Open With… (FM6), Rename (FM5), Cut/Copy/
+  Paste/Delete (FM7), Properties (FM8) — each disabling when inapplicable.
+- **`Alt+←/→`** bound to Back/Forward.
+- Host tests: toolbar enable/disable logic (over `can_go_back`/`can_go_forward`/
+  `is_root`), breadcrumb hit→component, menu-entry applicability.
 
 ### FM5 — in-place rename `[ ]`
 
@@ -348,12 +383,14 @@ The core management verbs, modelled in the engine and executed in the app.
 ## 2. Sequencing and dependencies
 
 FM1→FM2a→FM2b→FM3 build the shared engine + views + icons (host-proven;
-FM2a repaints the list, FM2b adds the icon grid). FM4 adds the chrome. FM5 is the
-first write and the template for FM7. FM6 (launch/open) depends on FM3
-(bundle/file kinds) and reuses AW5 delegation. FM7 depends on FM4's
-selection/menu. FM8 and FM9 close out. Each lands fully gated; a stage
-that turns out larger than one clean increment is split and staged here,
-never shipped half-done "for now" (§2.19).
+FM2a repaints the list, FM2b adds the icon grid). FM4a adds the engine
+navigation model (history + breadcrumb); FM4b paints the chrome and grows the
+context menu alongside the actions it invokes (FM5–FM8), so no menu entry is
+built ahead of its behaviour (§2.4). FM5 is the first write and the template for
+FM7. FM6 (launch/open) depends on FM3 (bundle/file kinds) and reuses AW5
+delegation. FM7 depends on FM4b's selection/menu. FM8 and FM9 close out. Each
+lands fully gated; a stage that turns out larger than one clean increment is
+split and staged here, never shipped half-done "for now" (§2.19).
 
 ## 3. What this explicitly refuses to become
 

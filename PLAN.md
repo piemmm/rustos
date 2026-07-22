@@ -3341,8 +3341,14 @@ transfer, landed in increments:
   `lib/controls::TableRow` with name/size/modified columns over the one pure
   `lib/browse::layout::ListView` visible-window/row-rect/hit-test geometry —
   built on the shared `scroll::ScrollRange` clamp — plus the `format`
-  size/date column formatting) are **done**; FM2 was split (§2.19) so **FM2b**
-  (icon-grid view, runtime view toggle, drawn `ScrollBar`) and FM3–FM9 remain.
+  size/date column formatting), **FM2b** (the icon-grid view, the runtime view
+  toggle, and the drawn `ScrollBar`), **FM3** (the file-type icon classifier +
+  drawn grid-tile glyphs), and **FM4a** (the engine navigation model — bounded
+  back/forward history + breadcrumb `navigate_to_depth`, all transactional and
+  fail-closed) are **done**. FM2 and FM4 were each split (§2.19): **FM4b** (the
+  drawn toolbar/breadcrumb chrome and the context menu) is deferred to land with
+  the actions it invokes (FM5–FM8, avoiding speculative surface §2.4); FM4b and
+  FM5–FM9 remain.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /
