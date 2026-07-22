@@ -2167,6 +2167,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-autoload-input-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-c-program-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -2937,6 +2948,18 @@ dependencies = [
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
+ "tairix-log",
+ "tairix-netstack",
+]
+
+[[package]]
+name = "tairix-test-netstack-autoload-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-devmgr",
+ "tairix-itest-harness",
+ "tairix-kernel",
  "tairix-log",
  "tairix-netstack",
 ]

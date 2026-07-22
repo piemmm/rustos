@@ -649,15 +649,27 @@ improvement, not test scaffolding):
   `tairix_test_netstack_wire::GUEST_MAC`; the QEMU `NetDevice` gained a
   `mac` field threaded through the shared `net_device_arg` on all three arches.
 
-**Follow-up increments (not this change).**
-- **N4e-x86_64**: build the driver-autoload-into-user-process production
-  vertical on x86_64 (pioneering its autoload QEMU path over the virtio-**PCI**
-  bus), then the same two-process netstack vertical. (aarch64 and riscv64 are
-  both landed two-process, so only x86_64 remains.) Scope reality: x86_64
-  currently carries *none* of the autoload subsystem (no root mount, no unlock
-  kthread, no `devmgr`, no `driver_spawn_loader`) — pioneering it is the
-  `plans/WIRING.md` / `plans/ARCHSUPPORT.md` parity port, not a small
-  extension. Foundation in place: the synthetic node-id bases the probes emit
+**Follow-up increments.**
+- **N4e-x86_64 `[x]` DONE** — x86_64 is now fully two-process over
+  virtio-**PCI**, so all three Tier-1 targets match. Both live verticals pass a
+  real guest boot: `autoload_input_qemu_x86_64` (autoloaded user-space
+  `virtio_kbd` delivering an injected keypress, PASS on
+  `AuditEvent::InputDelivered kind=key`) and `netstack_autoload_qemu_x86_64`
+  (the two-process netstack path, PASS on the three log witnesses + the peer
+  echo verdict). The live exercise surfaced + fixed the one gap: **the x86_64
+  enumerator now routes each interrupt-driven virtio-PCI function's MSI-X**
+  (`boot_x86_64::probe_virtio_pci` MSI-allocates a kernel vector, programs the
+  function's MSI-X table entry 0 via `MsixBus::route_msix` through a
+  `CAP_MMIO_MAP` `KernelMmioMapper`, and grants the driver the routed MSI line
+  instead of the legacy INTx GSI — the user-space driver only `enable_msix(0)`
+  + `irq_bind`s the line, never touching PCI config or the MSI-X BAR, so the
+  kernel owns interrupt routing like Linux). To make `msi::allocate` available
+  at probe time, `seed_hardware_tree` was reordered to run after
+  `discover_and_program_io_apics` (`install_msi_lines`);
+  `root_unlock_admission_qemu_x86_64` re-confirmed no regression. The QEMU
+  harness (`tools/qemu/src/x86_64.rs`) gained `virtio-keyboard-pci` /
+  `virtio-mouse-pci` attachment (the PCI form of the aarch64
+  `virtio-keyboard-device`). Foundations that were in place: the synthetic node-id bases the probes emit
   from now live in one shared, disjoint-by-construction, compile-time-guarded
   map (`kernel/tairix-kernel/src/hwtree_node_ids.rs`) — a new arch's NIC-probe
   region is claimed as the next index there, never a fresh literal, so the
@@ -759,9 +771,9 @@ improvement, not test scaffolding):
   auto-configures the EUI-64 link-local, and answers the peer's echo. PASS keys
   on the same three log witnesses (`NETSTACK_BOUND`, `DRIVER_BOUND`,
   `INBOUND_ECHO_SERVED`) plus the peer's own v6 echo verdict, at the 240 s
-  budget its aarch64 sibling uses. What remains: x86_64 repeats the whole
-  sequence over its virtio-**PCI** bus (its `irq_routing` / IO-APIC path already
-  exists). **First x86_64 foundation landed:** `boot_x86_64::bring_up_bsp` now
+  budget its aarch64 sibling uses. x86_64 then repeated the whole sequence over
+  its virtio-**PCI** bus (its `irq_routing` / IO-APIC path already existed); the
+  x86_64 foundations that led there were: `boot_x86_64::bring_up_bsp`
   **seeds the hardware tree**. It runs the already-built-but-unconsumed port
   discovery seam `tairix_arch_x86_64::platform::AcpiDiscovery` (root, every
   enabled Local APIC as a `Cpu` node, and each I/O APIC as an
@@ -804,12 +816,10 @@ improvement, not test scaffolding):
   same grant-shape-keyed transport (`virtio_pci_windows` ⇒ `PciTransport` +
   `enable_msix`, else `sole_register_window` ⇒ `MmioTransport`) over one
   generic `run<T: Transport>` bring-up/pump, so one signed input bundle binds
-  on both buses. Host-test-validated only — the A2/A3 x86_64 autoload
-  production path is composed and boot-confirmed, but no *live* boot exercises
-  the PCI *input* path yet. The next x86_64 tranche is the verticals
-  themselves (`autoload_input_qemu_x86_64`, then the two-process
-  `netstack_autoload_qemu_x86_64`) — the first live exercise of these
-  contracts.
+  on both buses. Both verticals (`autoload_input_qemu_x86_64` and the
+  two-process `netstack_autoload_qemu_x86_64`) now live-exercise these
+  contracts and pass a real guest boot (see the DONE summary above), which is
+  where the kernel-routed MSI-X fix landed.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

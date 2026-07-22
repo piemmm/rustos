@@ -1,0 +1,47 @@
+[package]
+name = "tairix-test-netstack-autoload-qemu-x86-64"
+description = "QEMU integration test (plans/NETWORK.md N4e / plans/ARCHSUPPORT.md A4): boot the production x86_64 tairix-kernel pipeline (boot_x86_64::boot) against the shared whole-disk autoload-root image — whose always-readable /System store carries the kernel-signed virtio-net driver bundle (cross-compiled for x86_64) beside the input and display bundles — with a virtio-net-pci device attached on the PCI bus and the harness-side netstack_peer link peer on the QEMU dgram netdev, and prove the full two-process network path end to end over the x86_64 virtio-PCI + MSI-X device-IRQ path. The bootstrap-floor virtio-PCI enumeration discovers the virtio-net node (its MSI-X routed by the kernel enumerator), devmgr autoloads the virtio_net driver into its own user process, netstack binds the published netchan node and answers the peer's v6 link-local echo. PASS via QEMU isa-debug-exit once the log sink has seen devmgr's NETSTACK_BOUND, netstack's DRIVER_BOUND, and netstack's INBOUND_ECHO_SERVED — a frame crossed the two-process boundary over virtio-PCI and was answered."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the production x86_64 kernel pipeline with a planted
+# encrypted-root virtio-blk-pci disk carrying a signed virtio-net driver bundle
+# on its always-readable /System volume, plus an attached virtio-net-pci device,
+# and prove the full two-process network path (devmgr autoloads the driver into
+# its own process, netstack binds the netchan node, and a frame crosses the
+# boundary and is answered)" integration test. It reuses the entire production
+# x86_64 boot pipeline through `tairix-kernel`'s library half
+# (`boot_x86_64::boot`) — the bootstrap-floor virtio-PCI enumeration (block +
+# network discovery, with the kernel enumerator routing the NIC's MSI-X), the
+# `InitSpawn` seam, the runtime `ProcessSpawn` producer, the MSI-X device-IRQ
+# wiring, `unlock_service::spawn_if_present`, and the launched netstack service —
+# and only swaps the log sink to report PASS on the three two-process witnesses
+# (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on a production crate) prevents feature
+# unification from leaking it into any production build (fail closed).
+
+[[bin]]
+name = "tairix-test-netstack-autoload-qemu-x86-64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The devmgr and netstack audit vocabularies: the `NETSTACK_BOUND`,
+# `DRIVER_BOUND`, and `INBOUND_ECHO_SERVED` event ids the witnesses key on —
+# the shared definitions, never magic numbers (`AGENTS.md` §2.2). netstack is
+# pulled `default-features = false` so its `program` feature (the `tairix-rt`
+# freestanding runtime) never enters this bin's graph.
+tairix-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0" }
+tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

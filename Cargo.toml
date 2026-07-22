@@ -363,6 +363,8 @@ members = [
     "tests/integration/cross_cpu_tlb_shootdown_qemu_aarch64",
     "tests/integration/cross_cpu_tlb_shootdown_qemu_x86_64",
     "tests/integration/vesa_display_qemu_x86_64",
+    "tests/integration/autoload_input_qemu_x86_64",
+    "tests/integration/netstack_autoload_qemu_x86_64",
 ]
 
 # Settings that apply to every crate in the workspace.

@@ -4085,6 +4085,51 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/ARCHSUPPORT.md` A4: the x86_64 driver-loading-by-discovery
+    // autoload vertical — the virtio-**PCI** analogue of the aarch64 /
+    // riscv64 `autoload_input` verticals, reduced to the input-autoload path
+    // (no display world, no desktop). It boots the *production* x86_64
+    // pipeline on the `q35`/`pc` machine against the shared
+    // `FsDisk::AutoloadRootDisk` whole-disk image — whose always-readable
+    // `/System` store carries the kernel-signed virtio-input keyboard driver
+    // bundle (cross-compiled for x86_64 by `image_drivers`) — with a
+    // `virtio-keyboard-pci` device attached. The boot binds the virtio-blk-pci
+    // root and discovers the virtio-input-PCI node; the in-kernel unlock
+    // kthread mounts `/System` and serves its signed store **independently of**
+    // the encrypted-root passphrase, and the user-space `devmgr` matches the
+    // signed bundle to the discovered node and asks the kernel to spawn it into
+    // its own process with the node's four role-tagged config windows + DMA +
+    // routed MSI-X line. Once the autoloaded driver arms its granted interrupt
+    // (the audited `irq_bind` syscall — the `sc=irq_bind` serial marker), the
+    // runner sends one key through the QEMU monitor; the eventq IRQ fires and
+    // the driver decodes+injects it. PASS via QEMU `isa-debug-exit` once the
+    // kernel-side audit sink has seen `AuditEvent::InputDelivered` with
+    // `kind=key` — an autoloaded *user-space* driver instance delivered over
+    // virtio-PCI. Single CPU (PID 1, the unlock/store kthread, the autoloaded
+    // driver, and `devmgr` share the boot CPU). A 60-second budget matches the
+    // other boot-then-do-fixed-work verticals: boot + `/System` mount +
+    // autoload + driver bring-up + the injected key complete in a few seconds
+    // on QEMU TCG, with ample headroom.
+    QemuTest {
+        package: "tairix-test-autoload-input-qemu-x86-64",
+        binary: "tairix-test-autoload-input-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        // One virtio-input node → one autoloaded driver instance → one
+        // `irq_bind`, so the injection gates on the marker's first appearance
+        // (`with_virtio_keyboard`); the injected key is the whole observable
+        // effect the `kind=key` witness proves.
+        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/NETWORK.md` N3c: `tairix-test-netstack-mmio-aarch64` is the
     // aarch64 `virt`-board MMIO analogue of the riscv64 netstack-mmio
     // vertical — same bring-up as the blk MMIO vertical, then drive the
@@ -4194,6 +4239,47 @@ const TESTS: &[QemuTest] = &[
         package: "tairix-test-netstack-autoload-qemu-riscv64",
         binary: "tairix-test-netstack-autoload-qemu-riscv64",
         target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(240),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6LinkLocal,
+        ramfb: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // `plans/NETWORK.md` N4e / `plans/ARCHSUPPORT.md` A4: the x86_64
+    // **two-process** live-boot netstack vertical — the virtio-**PCI**
+    // analogue of the aarch64/riscv64 `netstack_autoload` verticals and the
+    // production-boot replacement for the single-process `netstack_pci_x86_64`
+    // scaffold. It boots the *production* x86_64 `tairix-kernel` pipeline on
+    // the `q35`/`pc` machine against the shared `FsDisk::AutoloadRootDisk`
+    // whole-disk image — whose always-readable `/System` store carries the
+    // kernel-signed virtio-net driver bundle (cross-compiled for x86_64 by
+    // `image_drivers`) beside the input and display bundles — with a
+    // `virtio-net-pci` device attached (its MAC pinned to the wire constant so
+    // the guest's EUI-64 link-local is deterministic) and the harness-side
+    // `netpeer` link peer in its v6-link-local-only campaign mode. The
+    // bootstrap-floor virtio-PCI enumeration discovers the NIC node with the
+    // kernel enumerator routing its MSI-X; the production autoload path spawns
+    // the virtio-net driver into its own user process (it publishes a
+    // `netchan` node), the user-space `devmgr` calls `netstack` `BindDriver`,
+    // and `netstack` provisions the channel and auto-configures the interface's
+    // EUI-64 link-local (no IPv4). PASS once the log sink has seen `devmgr`'s
+    // `NETSTACK_BOUND`, `netstack`'s `DRIVER_BOUND`, and `netstack`'s
+    // `INBOUND_ECHO_SERVED` — the last gating exit so the guest stays alive
+    // until a frame has crossed the two-process boundary and been answered; the
+    // peer's own v6 echo verdict is required too, so neither side can pass
+    // alone. Single CPU, with the same 240-second budget as its siblings
+    // covering boot + autoload + service bring-up + the bind + the paced echo
+    // campaign on QEMU TCG.
+    QemuTest {
+        package: "tairix-test-netstack-autoload-qemu-x86-64",
+        binary: "tairix-test-netstack-autoload-qemu-x86-64",
+        target: "x86_64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(240),
         disk_sectors: None,
