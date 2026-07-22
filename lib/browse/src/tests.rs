@@ -256,14 +256,16 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     // index 1 is two rows down. The selected row lifts to the raised surface
     // and shows the accent *selection rail* in its leading gutter (not a full
     // accent fill), and an unselected row stays the base surface — the one
-    // selection look every collection view shares.
+    // selection look every collection view shares. We sample inside the
+    // content column (x = 100), clear of the leading rail gutter and of the
+    // reserved right-edge scrollbar gutter.
     let row_height = tairix_font::BitmapFont::inconsolata().glyph_height() + 4;
     let unselected_y = row_height + 1;
     let selected_y = row_height * 2 + 1;
-    // The unselected row's trailing edge is the base surface.
-    assert_eq!(surface.get(199, unselected_y), Some(base));
-    // The selected row's trailing edge lifts to the raised surface.
-    assert_eq!(surface.get(199, selected_y), Some(raised));
+    // The unselected row's body is the base surface.
+    assert_eq!(surface.get(100, unselected_y), Some(base));
+    // The selected row's body lifts to the raised surface.
+    assert_eq!(surface.get(100, selected_y), Some(raised));
     // The accent selection rail sits in the selected row's leading gutter.
     let has_accent_rail = (0..20).any(|x| surface.get(x, selected_y) == Some(accent));
     assert!(
@@ -420,60 +422,87 @@ fn a_browser_navigates_the_vfs_source_end_to_end() {
 #[test]
 fn entry_index_at_mirrors_the_rendered_rows() {
     use crate::render::{entry_index_at, row_height};
+    use tairix_geometry::Point;
 
     let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
     let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(font);
-    let viewport_height = row * 4; // the path bar plus three entry rows
+    // A window wide enough for content beside the scrollbar gutter, the path
+    // bar plus three entry rows tall. Clicks land in the content column (x=4).
+    let vp = |h: u32| Rect::new(0, 0, 200, h);
+    let at = |b: &Browser<MockFs>, h: u32, y: u32| {
+        entry_index_at(
+            b,
+            font,
+            &theme,
+            vp(h),
+            Point::new(4, i32::try_from(y).unwrap()),
+        )
+    };
+    let viewport_height = row * 4;
 
     // The path bar resolves to no entry; the first list row is entry 0.
-    assert_eq!(entry_index_at(&browser, font, viewport_height, 0), None);
-    assert_eq!(
-        entry_index_at(&browser, font, viewport_height, row - 1),
-        None
-    );
-    assert_eq!(
-        entry_index_at(&browser, font, viewport_height, row),
-        Some(0)
-    );
-    assert_eq!(
-        entry_index_at(&browser, font, viewport_height, row * 2 + row / 2),
-        Some(1)
-    );
+    assert_eq!(at(&browser, viewport_height, 0), None);
+    assert_eq!(at(&browser, viewport_height, row - 1), None);
+    assert_eq!(at(&browser, viewport_height, row), Some(0));
+    assert_eq!(at(&browser, viewport_height, row * 2 + row / 2), Some(1));
     // A row past the listing's end and a coordinate outside the viewport
     // resolve to nothing rather than a clamped guess.
     let last = u32::try_from(browser.entries().len()).expect("a tiny fixture listing");
-    assert_eq!(
-        entry_index_at(&browser, font, row * (last + 2), row * (last + 1)),
-        None
-    );
-    assert_eq!(
-        entry_index_at(&browser, font, viewport_height, viewport_height),
-        None
-    );
+    assert_eq!(at(&browser, row * (last + 2), row * (last + 1)), None);
+    assert_eq!(at(&browser, viewport_height, viewport_height), None);
     // A degenerate viewport (path bar only) has no clickable rows.
-    assert_eq!(entry_index_at(&browser, font, row, row), None);
+    assert_eq!(at(&browser, row, row), None);
+    // A click in the reserved scrollbar gutter resolves to no row.
+    assert_eq!(
+        entry_index_at(
+            &browser,
+            font,
+            &theme,
+            vp(viewport_height),
+            Point::new(199, i32::try_from(row).unwrap())
+        ),
+        None
+    );
 }
 
 #[test]
 fn entry_index_at_accounts_for_the_scroll_anchor() {
-    use crate::render::{entry_index_at, row_height};
+    use crate::render::{entry_index_at, reveal_selection, row_height};
+    use tairix_geometry::Point;
 
     let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(font);
-    // Two visible entry rows; select the last entry so the list scrolls.
+    // Two visible entry rows; select the last entry and reveal it so the list
+    // scrolls to keep it on the bottom row — exactly what the app does.
     let viewport_height = row * 3;
+    let vp = Rect::new(0, 0, 200, viewport_height);
     let last = browser.entries().len() - 1;
     browser.select(last).expect("selectable");
+    reveal_selection(&mut browser, font, &theme, vp);
     // The bottom visible row is the selected (last) entry; the row above
     // it is its predecessor — exactly what `render` draws.
     assert_eq!(
-        entry_index_at(&browser, font, viewport_height, row * 2),
+        entry_index_at(
+            &browser,
+            font,
+            &theme,
+            vp,
+            Point::new(4, i32::try_from(row * 2).unwrap())
+        ),
         Some(last)
     );
     assert_eq!(
-        entry_index_at(&browser, font, viewport_height, row),
+        entry_index_at(
+            &browser,
+            font,
+            &theme,
+            vp,
+            Point::new(4, i32::try_from(row).unwrap())
+        ),
         Some(last - 1)
     );
 }
@@ -723,4 +752,151 @@ fn set_sort_mode_is_a_no_op_when_the_mode_is_unchanged() {
         .collect();
     assert_eq!(before, after);
     assert_eq!(browser.selected_index(), Some(2));
+}
+
+// --- FM2b: the view toggle, the icon grid, and the drawn scrollbar -------
+
+use crate::layout::ViewMode;
+
+/// A browser over a root of `n` regular files (`f0`, `f1`, …), enough to
+/// scroll a modest window.
+fn many_files(n: usize) -> Browser<MockFs> {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        (0..n)
+            .map(|i| Entry::file(alloc::format!("f{i:03}")))
+            .collect(),
+    );
+    let fs = MockFs {
+        dirs,
+        denied: BTreeSet::new(),
+        root_reads: 0,
+        root_after_refresh: None,
+    };
+    Browser::open_root(fs).expect("root opens")
+}
+
+#[test]
+fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
+    let mut browser = many_files(20);
+    assert_eq!(browser.view_mode(), ViewMode::List);
+    browser.select(7).expect("selectable");
+    let names_before: Vec<String> = browser
+        .entries()
+        .iter()
+        .map(|e| e.name().to_string())
+        .collect();
+
+    browser.set_view_mode(ViewMode::Grid);
+    assert_eq!(browser.view_mode(), ViewMode::Grid);
+    // The selection stays on the same entry and the listing is untouched.
+    assert_eq!(browser.selected_index(), Some(7));
+    let names_after: Vec<String> = browser
+        .entries()
+        .iter()
+        .map(|e| e.name().to_string())
+        .collect();
+    assert_eq!(names_before, names_after);
+    // Switching unit resets the scroll to the top.
+    assert_eq!(browser.scroll_offset(), 0);
+    // Toggling back is symmetric.
+    browser.set_view_mode(ViewMode::List);
+    assert_eq!(browser.view_mode(), ViewMode::List);
+    assert_eq!(browser.selected_index(), Some(7));
+}
+
+#[test]
+fn wheel_scroll_moves_the_offset_and_clamps_at_the_ends() {
+    use crate::render::{row_height, scroll_lines};
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let mut browser = many_files(20);
+    let row = row_height(font);
+    // The path bar plus four visible rows.
+    let vp = Rect::new(0, 0, 200, row * 5);
+
+    // Scrolling up at the top does nothing (already clamped).
+    assert!(!scroll_lines(&mut browser, font, &theme, vp, -1));
+    assert_eq!(browser.scroll_offset(), 0);
+    // Scrolling down moves one line per tick.
+    assert!(scroll_lines(&mut browser, font, &theme, vp, 3));
+    assert_eq!(browser.scroll_offset(), 3);
+    // Scrolling far past the end clamps to the last full page (20 rows, four
+    // visible → max offset 16) and reports no further movement beyond it.
+    assert!(scroll_lines(&mut browser, font, &theme, vp, 1000));
+    assert_eq!(browser.scroll_offset(), 16);
+    assert!(!scroll_lines(&mut browser, font, &theme, vp, 5));
+    assert_eq!(browser.scroll_offset(), 16);
+}
+
+#[test]
+fn the_drawn_scrollbar_reflects_the_scroll_offset() {
+    use crate::render::{row_height, scroll_lines, scroll_model};
+    use tairix_controls::{ScrollBar, ScrollOrientation};
+    use tairix_geometry::Scale;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let mut browser = many_files(40);
+    let row = row_height(font);
+    let vp = Rect::new(0, 0, 200, row * 6);
+    // Twenty times more content than the viewport shows: the bar is a real,
+    // draggable thumb, not a full-track placeholder.
+    let model = scroll_model(&browser, font, &theme, vp);
+    assert!(model.range().is_scrollable());
+
+    let bar_bounds = Rect::new(184, i32::try_from(row).unwrap(), 16, row * 5);
+    let bar = ScrollBar::new(ScrollOrientation::Vertical, model);
+    let geometry = bar
+        .geometry(bar_bounds, Scale::ONE, &theme)
+        .expect("a live bar");
+    assert!(geometry.draggable());
+    let top_thumb = geometry.thumb().start;
+
+    // Scroll to the end; the drawn thumb moves to the bottom of its travel.
+    scroll_lines(&mut browser, font, &theme, vp, 1000);
+    let bar = ScrollBar::new(
+        ScrollOrientation::Vertical,
+        scroll_model(&browser, font, &theme, vp),
+    );
+    let end_geometry = bar
+        .geometry(bar_bounds, Scale::ONE, &theme)
+        .expect("a live bar");
+    assert!(end_geometry.thumb().start > top_thumb);
+    assert_eq!(end_geometry.thumb().start, end_geometry.travel());
+}
+
+#[test]
+fn the_grid_view_renders_and_hit_tests_the_first_tile() {
+    use crate::render::{entry_index_at, row_height};
+    use tairix_geometry::Point;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let mut browser = many_files(20);
+    browser.set_view_mode(ViewMode::Grid);
+    let header = row_height(font);
+    // A window wide and tall enough for several tiles.
+    let vp = Rect::new(0, 0, 400, 400);
+    let surface = crate::render(&browser, &theme, font, vp).expect("grid surface");
+    assert_eq!(surface.width(), 400);
+
+    // A click just inside the first tile (past the header) resolves to entry 0.
+    assert_eq!(
+        entry_index_at(
+            &browser,
+            font,
+            &theme,
+            vp,
+            Point::new(4, i32::try_from(header + 4).unwrap())
+        ),
+        Some(0)
+    );
+    // A click on the header resolves to nothing.
+    assert_eq!(
+        entry_index_at(&browser, font, &theme, vp, Point::new(4, 0)),
+        None
+    );
 }

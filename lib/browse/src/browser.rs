@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use crate::entry::Entry;
 use crate::error::BrowseError;
+use crate::layout::ViewMode;
 use crate::sort::{sort_entries, SortMode};
 use crate::source::DirectorySource;
 
@@ -31,6 +32,8 @@ pub struct Browser<S: DirectorySource> {
     entries: Vec<Entry>,
     selected: usize,
     sort_mode: SortMode,
+    view_mode: ViewMode,
+    scroll_offset: u64,
 }
 
 impl<S: DirectorySource> Browser<S> {
@@ -49,7 +52,44 @@ impl<S: DirectorySource> Browser<S> {
             entries,
             selected: 0,
             sort_mode,
+            view_mode: ViewMode::default(),
+            scroll_offset: 0,
         })
+    }
+
+    /// Which item view the browser is showing.
+    #[must_use]
+    pub const fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    /// Switch the item view between list and grid.
+    ///
+    /// A pure toggle: the selection stays on the same entry and the listing is
+    /// untouched. The scroll offset resets to the top because its unit differs
+    /// between the two views (list rows vs. grid rows); a caller reveals the
+    /// selection again through [`reveal_selection`](crate::render::reveal_selection).
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        if mode != self.view_mode {
+            self.view_mode = mode;
+            self.scroll_offset = 0;
+        }
+    }
+
+    /// The desired first-visible line (list rows or grid rows, depending on
+    /// the [`view_mode`](Self::view_mode)). It is clamped against the live
+    /// geometry when the view is painted or hit-tested, so it is only ever a
+    /// *request* the layout normalises — never an out-of-range value.
+    #[must_use]
+    pub const fn scroll_offset(&self) -> u64 {
+        self.scroll_offset
+    }
+
+    /// Set the desired first-visible line. The value is stored verbatim and
+    /// clamped lazily by the layout; callers that know the geometry use the
+    /// [`render`](mod@crate::render) scroll helpers instead of poking this raw.
+    pub fn set_scroll_offset(&mut self, offset: u64) {
+        self.scroll_offset = offset;
     }
 
     /// The order the current listing is shown in.
@@ -229,6 +269,9 @@ impl<S: DirectorySource> Browser<S> {
         sort_entries(&mut entries, self.sort_mode);
         self.entries = entries;
         self.clamp_selection();
+        // A freshly listed directory is shown from the top; a caller reveals
+        // the (clamped) selection again once it knows the live geometry.
+        self.scroll_offset = 0;
     }
 
     /// Clamp the selection cursor into the current entry range (to the last

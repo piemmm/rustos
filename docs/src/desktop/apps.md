@@ -100,31 +100,40 @@ showing. The fail-closed outcomes are the `BrowseError` variants: `Source`
 
 ### Rendering
 
-`render(browser, theme, font, viewport)` paints a path bar plus a scrolling
-entry list into a `tairix-raster` `Surface` sized to the viewport. The path
-bar takes the theme's raised role; each entry below it is drawn as a shared
-`lib/controls` `TableRow` with an aligned **name / size / modified** column
-layout — the same collection control (and the same one column-width
+`render(browser, theme, font, viewport)` paints a path bar plus the current
+directory into a `tairix-raster` `Surface` sized to the viewport, in whichever
+of the two views the browser holds (`ViewMode::List` or `ViewMode::Grid`). The
+path bar takes the theme's raised role. In the **list** view each entry is a
+shared `lib/controls` `TableRow` with an aligned **name / size / modified**
+column layout — the same collection control (and the same one column-width
 definition) the trusted picker uses, so the file manager and the picker are
 one coherent themed surface rather than a browser-private row painter
 (`AGENTS.md` §2.2). A directory's name carries a trailing `/`; the size column
 is blank for a directory or bundle and otherwise the binary-unit `format_size`
 (`1.5 MiB`); the modified column is `format_date` (an ISO `YYYY-MM-DD`, blank
-at the epoch so a stampless file is never given a fabricated date, §21). The
-selected row carries the row chrome's selection state — the raised surface plus
-the accent selection rail every collection view shares — not a bespoke accent
-fill.
+at the epoch so a stampless file is never given a fabricated date, §21). In the
+**grid** view each entry is a shared `lib/controls` `Card` tile carrying that
+same label, wrapped into as many columns as fit the width; the two views share
+one selection model, so toggling never moves the selection or re-reads the
+directory (the file-type icon that will sit above each tile's label is a later
+stage, `plans/NEW-FILEMANAGER.md` FM3). The selected item carries the shared
+selection state — the raised surface plus the accent selection rail every
+collection view shares — not a bespoke accent fill.
 
-Where each row is drawn, which rows are visible for the current selection, and
-the pixel-to-index pointer hit-test (`entry_index_at`) all come from the one
-shared `layout::ListView` geometry, which clamps its scroll window through the
-`lib/controls` `scroll::ScrollRange` rather than a re-derived anchor — so the
-paint and the hit-test can never disagree (`AGENTS.md` §2.2). The surface is
-rectangular; the compositor places and rounds it through its single
-anti-aliased rounded-corner path, so there is no rounding in the app. The list
-scrolls so the selected entry stays visible, and every length saturates so a
-degenerate viewport paints what it can rather than panicking (`AGENTS.md`
-§2.9).
+Where each item is drawn, which items are visible for the current scroll
+offset, and the pixel-to-index pointer hit-test (`entry_index_at`) all come
+from the one shared `layout` geometry — `ListView` and `GridView` behind the
+`ViewLayout` dispatch — which clamps its scroll window through the
+`lib/controls` `scroll::ScrollRange` rather than a re-derived anchor, so the
+paint and the hit-test can never disagree (`AGENTS.md` §2.2). A vertical
+`lib/controls` `ScrollBar` is drawn in a reserved right-edge gutter over that
+same `ScrollRange`; the wheel is routed through the shared `scroll::ScrollModel`
+(`scroll_lines`), and a selection-moving key reveals the selection the least it
+can (`reveal_selection`) — the browser owns the one scroll offset both consume.
+The surface is rectangular; the compositor places and rounds it through its
+single anti-aliased rounded-corner path, so there is no rounding in the app.
+Every length saturates so a degenerate viewport paints what it can rather than
+panicking (`AGENTS.md` §2.9).
 
 ### The `Run` bundle
 

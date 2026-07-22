@@ -203,10 +203,18 @@ mod program {
     /// Apply one delivered event to the browser, reporting whether the
     /// listing changed (and must re-present) and whether the app should
     /// end (the desktop asked the window to close).
+    ///
+    /// `theme` and `mode` give the reveal/scroll helpers the same font and
+    /// content viewport the renderer uses, so the drawn view, the selection
+    /// reveal, and the wheel scroll all agree on the geometry.
     fn apply_event<S: tairix_browse::DirectorySource>(
         browser: &mut Browser<S>,
+        theme: &tairix_theme::Theme,
+        mode: &DisplayMode,
         event: &WindowEvent,
     ) -> (bool, bool) {
+        let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         match event {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, .. },
@@ -214,10 +222,12 @@ mod program {
             } => match key {
                 KeyValue::Named(NamedKeyCode::Down) => {
                     browser.select_next();
+                    tairix_browse::render::reveal_selection(browser, font, theme, viewport);
                     (true, false)
                 }
                 KeyValue::Named(NamedKeyCode::Up) => {
                     browser.select_previous();
+                    tairix_browse::render::reveal_selection(browser, font, theme, viewport);
                     (true, false)
                 }
                 KeyValue::Named(NamedKeyCode::Enter) => {
@@ -233,26 +243,19 @@ mod program {
             },
             WindowEvent::CloseRequested { .. } => (false, true),
             // A wheel gesture the desktop forwarded (this window owns its own
-            // content scrolling): move the selection one entry per tick,
-            // exactly as Up/Down do, stopping at the ends so a large or
-            // hostile tick count cannot spin. Repaint only when it moved.
+            // content scrolling): scroll the view one line per tick through
+            // the shared scroll model, which clamps at both ends so a large or
+            // hostile tick count cannot run past the content or spin. The
+            // selection is untouched; repaint only when the offset moved.
             WindowEvent::Scrolled { dy, .. } => {
-                let before = browser.selected_index();
-                let mut remaining = *dy;
-                while remaining != 0 {
-                    let prev = browser.selected_index();
-                    if remaining > 0 {
-                        browser.select_next();
-                        remaining -= 1;
-                    } else {
-                        browser.select_previous();
-                        remaining += 1;
-                    }
-                    if browser.selected_index() == prev {
-                        break;
-                    }
-                }
-                (browser.selected_index() != before, false)
+                let moved = tairix_browse::render::scroll_lines(
+                    browser,
+                    font,
+                    theme,
+                    viewport,
+                    i64::from(*dy),
+                );
+                (moved, false)
             }
             // Focus changes, key releases, and pointer events repaint
             // nothing today; the selection model is keyboard-driven. The
@@ -388,7 +391,7 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
-            let (changed, close) = apply_event(&mut browser, &event);
+            let (changed, close) = apply_event(&mut browser, theme, &mode, &event);
             if close {
                 // The desktop asked; close the window and end cleanly.
                 let _ = client.close(window);

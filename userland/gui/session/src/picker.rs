@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::Errno;
-use tairix_browse::render::{entry_index_at, render};
+use tairix_browse::render::{entry_index_at, render, reveal_selection};
 use tairix_browse::{vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_font::BitmapFont;
 use tairix_theme::Theme;
@@ -193,17 +193,19 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<ConcludedPick> {
-        // A served click is window-local and non-negative; refuse rather
-        // than wrap if the router ever handed anything else.
-        let y = u32::try_from(local.y).ok()?;
-        // Hit-test with the same font the picker renders with, so a click
-        // resolves to exactly the row the user saw.
-        let font = picker_font(shell.session().active_theme());
+        // Hit-test with the same font and theme the picker renders with, so a
+        // click resolves to exactly the item the user saw (list row or grid
+        // tile), and a click on the path bar or the scrollbar gutter resolves
+        // to nothing.
+        let theme = shell.session().active_theme();
+        let font = picker_font(theme);
+        let viewport = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
+        let index = self
+            .active
+            .as_ref()
+            .and_then(|active| entry_index_at(&active.browser, font, theme, viewport, local))?;
         self.navigate(shell, compositor, move |browser| {
-            match entry_index_at(browser, font, WIN_HEIGHT, y) {
-                Some(index) => open_or_choose(browser, index),
-                None => NavOutcome::None,
-            }
+            open_or_choose(browser, index)
         })
     }
 
@@ -219,6 +221,17 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         match step(&mut active.browser) {
             NavOutcome::None => None,
             NavOutcome::Redraw => {
+                // Keep the (possibly moved) selection on screen before the
+                // repaint, scrolling the shared view the least it can.
+                {
+                    let theme = shell.session().active_theme();
+                    reveal_selection(
+                        &mut active.browser,
+                        picker_font(theme),
+                        theme,
+                        Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
+                    );
+                }
                 redraw(&active.browser, active.wm, shell, compositor);
                 None
             }

@@ -27,17 +27,16 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1 and FM2a are done**; FM2b and FM3–FM9 are `planned`.
+`in progress` — **FM1, FM2a, and FM2b are done**; FM3–FM9 are `planned`.
 The starting point is `plans/APPWIN.md` AW3/AW5 (done): the `files.app` `Run`
 binary composes the shared `lib/browse` `Browser` model + `render` renderer
 over the AW2 window channel, parks on its event mailbox, and navigates by
-keyboard; AW5 already added the renderer-mirroring row hit-test
-(`render::entry_index_at`) and the kernel one-shot read delegation
-(`fd_grant`/`fd_redeem`) the viewer consumes.
+keyboard; the renderer-mirroring point hit-test (`render::entry_index_at`) and
+the kernel one-shot read delegation (`fd_grant`/`fd_redeem`) the viewer
+consumes are in place.
 
-FM2 turned out larger than one clean increment, so it is split (§2.19): **FM2a
-(the list item view over `lib/controls`) is done**; **FM2b (the icon-grid view,
-the runtime view toggle, and the drawn `ScrollBar` widget) is `planned`**.
+FM2 was split (§2.19) into FM2a (the list item view) and FM2b (the icon-grid
+view, the runtime view toggle, and the drawn `ScrollBar`); both are done.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -161,23 +160,32 @@ signatures are unchanged, so both get the new look for free.
   the mirroring hit-test at normal sizes, selection-anchored scroll, the
   `ScrollRange` offset clamp); the updated render selection-chrome assertion.
 
-### FM2b — the icon-grid view, the view toggle, and the drawn `ScrollBar` `[ ]`
+### FM2b — the icon-grid view, the view toggle, and the drawn `ScrollBar` `[x]`
 
-The remaining half of the original FM2, staged on top of FM2a's `ListView`.
+Done. The engine now owns a `ViewMode` (`List`/`Grid`) and a single scroll
+offset, and both views land complete (§27) behind one `layout::ViewLayout`
+dispatch that the renderer and the pointer hit-test share (§2.2):
 
-- **Icon-grid view**: a wrapped grid of `Card`-framed items (icon + label)
-  over the same selection model — a `ViewMode` *toggle*, one model, **not** a
-  second code path (§2.2). Introducing `ViewMode` means *both* variants land
-  complete in this increment (§27), not a list-only enum. The toolbar toggle
-  itself is FM4; the engine models the mode here.
-- **Scrolling** is the drawn `lib/controls` `ScrollBar` widget over the same
-  `ScrollRange`/`ScrollModel` geometry `ListView` already uses (§2.2), with
-  wheel handling routed through it.
-- **Hit-testing** generalises `ListView`'s pixel→index definition to the grid
-  so a click resolves to exactly the item the user saw (§2.2). The picker
-  adopts the same view.
-- Host tests: grid layout/hit-test at degenerate and normal sizes, view-toggle
-  invariants (selection preserved), the drawn scrollbar geometry.
+- **Two views, one model.** `layout::ListView` (full-width rows) and
+  `layout::GridView` (a wrapped grid of `lib/controls` `Card` tiles) take an
+  explicit scroll offset and share one `reveal` rule + the `scroll::ScrollRange`
+  clamp. `Browser::set_view_mode` toggles the view keeping the selection on the
+  same entry and re-reading nothing; the icon glyph above each grid tile's
+  label is FM3 (the tile is complete without it here).
+- **Scrolling** is the drawn `lib/controls` `ScrollBar` in a reserved
+  right-edge gutter over that same `ScrollRange`; the wheel routes through the
+  shared `scroll::ScrollModel` (`render::scroll_lines`), and a selection-moving
+  key reveals the selection the least it can (`render::reveal_selection`).
+  Interactive thumb-drag arrives with the FM4 pointer routing; the browser owns
+  the one offset both the bar and the views read.
+- **Hit-testing** is `render::entry_index_at`, a point (x, y) test through
+  `ViewLayout` that resolves list rows and grid tiles alike (rejecting the
+  header, inter-tile gaps, and the scrollbar gutter). The picker adopts it.
+- Host-tested in `lib/browse` (list + grid layout/hit-test at degenerate and
+  normal sizes, `reveal` in both units, the view-toggle selection-preserve, the
+  wheel-scroll clamp, and the drawn scrollbar thumb tracking the offset); the
+  FM2a `ListView` tests were updated to the explicit-offset API. Docs:
+  `docs/src/desktop/apps.md`, `lib/browse/README.md`.
 
 ### FM3 — file-type icons `[ ]`
 

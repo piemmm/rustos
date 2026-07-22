@@ -34,9 +34,9 @@
 //! * [`error`] — [`BrowseError`], the fail-closed navigation outcomes.
 //! * [`source`] — the [`DirectorySource`] seam.
 //! * [`browser`] — the [`Browser`] navigation model.
-//! * [`layout`](mod@layout) — the [`ListView`] item-view geometry (the one
-//!   visible-window/row-rect/hit-test definition the renderer and the
-//!   pointer hit-test share).
+//! * [`layout`](mod@layout) — the [`ListView`]/[`GridView`] item-view geometry
+//!   and the [`ViewLayout`] dispatch (the one visible-window/item-rect/hit-test
+//!   definition the renderer and the pointer hit-test share), plus [`ViewMode`].
 //! * [`format`](mod@format) — the size/date column formatting.
 //! * [`render`](mod@render) — painting the current directory into a
 //!   `Surface`.
@@ -68,7 +68,7 @@ pub use browser::Browser;
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
 pub use format::{format_date, format_size};
-pub use layout::ListView;
+pub use layout::{GridView, ListView, ViewLayout, ViewMode};
 pub use render::render;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;

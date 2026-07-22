@@ -30,22 +30,31 @@ can never diverge in navigation semantics, listing policy, or look.
   engine never fabricates an entry: it shows exactly what its source
   returns, with every permission decision staying in the VFS behind the
   source under the composing process's own identity.
-- **Item-view geometry** (`layout::ListView`): the one definition of
-  which entry rows are visible for a given selection, the rectangle each
-  occupies, and the pixel-to-index hit-test — built on the shared
-  `lib/controls` `scroll::ScrollRange` clamp rather than a re-derived
-  anchor, so the renderer and the pointer hit-test can never disagree.
+- **Item-view geometry** (`layout`): two views over one selection and one
+  scroll offset — `ListView` (a column of full-width rows) and `GridView`
+  (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the
+  one definition of which items are visible for a given scroll offset, the
+  rectangle each occupies, and the pixel-to-index hit-test. Both clamp
+  their scroll window through the shared `lib/controls` `scroll::ScrollRange`
+  rather than a re-derived anchor, and share one `reveal` rule that keeps
+  the selection on screen, so the renderer and the pointer hit-test can
+  never disagree. `ViewMode` selects the view; toggling preserves the
+  selection and re-reads nothing.
 - **Column formatting** (`format`): `format_size` (binary units — `1.5
   MiB`) and `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
   epoch so a stampless file is never given a fabricated date), the
   file-listing convention shared by both views.
-- **Renderer** (`render`): paints the path bar and the scrolling entry
-  list into a `lib/raster` `Surface`; each entry is a shared
-  `lib/controls` `TableRow` (name/size/modified columns) so the file
-  manager and the trusted picker render one coherent themed surface, the
-  selected row carrying the row chrome's selection state. `WIN_WIDTH`/
-  `WIN_HEIGHT` are the one browser-view geometry the files app, the
-  picker, and the QEMU vertical's host-side assertions share.
+- **Renderer** (`render`): paints the path bar and the current directory
+  into a `lib/raster` `Surface` in the browser's `ViewMode` — list entries
+  as shared `lib/controls` `TableRow`s (name/size/modified columns), grid
+  entries as shared `Card` tiles — so the file manager and the trusted
+  picker render one coherent themed surface, the selected item carrying the
+  shared selection state. A vertical `lib/controls` `ScrollBar` is drawn in
+  a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
+  routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`
+  keeps the selection visible, and `entry_index_at` is the shared point
+  hit-test. `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the
+  files app, the picker, and the QEMU vertical's host-side assertions share.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into
   a bounded, validated absolute path — refusing an empty, `/`-bearing,
   or NUL-bearing component before any syscall) and `VfsDirectorySource`,
