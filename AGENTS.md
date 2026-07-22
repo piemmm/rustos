@@ -1691,6 +1691,7 @@ You are not exempt from any rule above. In addition:
     | Stress testing, load generation, live kernel/memory monitoring (`sysmon`, `stress`, memory pinning, signal observation) | `plans/STRESSTEST.md` |
     | CPU-lockup watchdog (soft/hard lockup detection, diagnostics, recovery, the Arch-HAL watchdog slice) | `plans/WATCHDOG.md` |
     | Kernel-panic diagnostics (register dump + stack backtrace, the Arch-HAL backtrace slice, unified panic path) | `plans/FIX-PANICS.md` |
+    | User-fault kill diagnostics (faulting process identity, read/write + coarse non-leaking fault offset, user-stack backtrace, capability-gated crash record, prod/debug gating) | `plans/FIX-WILD.md` |
     | Syscall interruptibility / IRQ-on-entry (interruptible syscall bodies, non-preemptible kernel, reschedule-at-return) | `plans/FIX-SYSCALL.md` |
     | C-callable ABI (headers, stubs, crt0) | `plans/CCOMPAT.md` |
     | Boot chain / bootloader (Rust-only UEFI/BIOS loader, kernel ELF load + multiboot2 handoff, GPT/ESP whole-disk image) | `plans/BOOTLOADER.md` |
