@@ -42,7 +42,13 @@ than being invented speculatively here.
 - `parse(input) -> Result<Path, PathError>` — the only fallible step.
 - `Path::root() / components() / alias() / is_absolute()` and a `Display` that
   renders the canonical human spelling.
-- `PathError` — why a string was rejected.
+- `validate_file_name(name) -> Result<(), PathError>` — the one shared rule for
+  a single **leaf name** (one file or directory name, not a path): non-empty,
+  not `.`/`..`, no `/`, no control character or `:`, within `MAX_COMPONENT_LEN`
+  (the kernel's `FS_NAME_MAX`). A tool that lets the user *name* something (the
+  file manager's rename) judges the typed name against this so every consumer
+  agrees on what a legal name is.
+- `PathError` — why a string or name was rejected.
 - `MAX_PATH_LEN` / `MAX_COMPONENTS` / `MAX_COMPONENT_LEN` / `MAX_ALIAS_LEN` — the
   fixed security bounds on an untrusted path string.
 

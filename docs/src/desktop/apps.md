@@ -169,10 +169,39 @@ panicking (`AGENTS.md` §2.9).
 over `tairix_rt::read_dir_all`, creates and grants the zero-copy window
 frame region, parks on its window-event mailbox, and drives the browser
 with the keyboard (`Down`/`Up` select, `Enter` opens a directory,
-`Backspace` climbs); a `CloseRequested` from the desktop ends it cleanly,
-and every bring-up refusal exits fail-loud with its reason on `stderr`. The
-desktop session's start menu carries a `Files` entry that spawns the
-bundle.
+`Backspace` climbs, `F2` renames the selected item); a `CloseRequested`
+from the desktop ends it cleanly, and every bring-up refusal exits
+fail-loud with its reason on `stderr`. The desktop session's start menu
+carries a `Files` entry that spawns the bundle.
+
+### In-place rename
+
+`F2` renames the selected item in place. The *edit* is modelled in
+`lib/browse` (`plans/NEW-FILEMANAGER.md` FM5) so it is host-tested without a
+kernel; the `Run` binary supplies only the text editor and the `fs_rename`
+seam. Pressing `F2` opens the one shared `lib/controls` `TextField`
+(`AGENTS.md` §2.2 — never a browser-private text box) directly over the
+selected row, pre-filled with the current name and bounded by the kernel's
+`FS_NAME_MAX`. Typing edits the name and live-validates it: a name that
+breaks a rule or clashes with an existing sibling shows the reason in the
+field as you type. `Enter` commits and `Escape` abandons the edit.
+
+The typed name is spelled through the one shared `tairix_path::validate_file_name`
+rule (the same rule the browser's path components go through, `AGENTS.md`
+§2.2): non-empty, not `.`/`..`, no `/`, no control character or `:`, within
+the name bound. A rename to the current name is a no-op that touches neither
+the VFS nor the view. A commit that survives validation is applied by
+`Browser::rename_selected`, which builds the two absolute paths and calls
+`fs_rename` **under the launching user's own identity — no new capability**:
+the per-inode owner/mode/ACL model gates the write exactly as it would from
+the shell. The whole operation is transactional and fail-closed — the name
+is validated before any syscall, and a VFS refusal (a permission denial, a
+read-only mount, a lost race) leaves the listing untouched and states the
+kernel's reason in the field (`AGENTS.md` §2.24, §5.4), never a silent or
+fabricated success. On success the directory is re-listed and the selection
+follows the entry to its new name. The trusted file picker composes the same
+`Browser` and simply never calls the write path, so it stays read-only
+(`plans/CAPABILITY_USE.md` CU6).
 
 ## Terminal emulator (`tairix-terminal`)
 

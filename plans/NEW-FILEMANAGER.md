@@ -27,8 +27,8 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, and FM4a are done**; FM4b and FM5–FM9
-are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, and FM5 are done**; FM4b and
+FM6–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -278,22 +278,40 @@ menu/toolbar entry is built ahead of the behaviour it calls (§2.4):
 - Host tests: toolbar enable/disable logic (over `can_go_back`/`can_go_forward`/
   `is_root`), breadcrumb hit→component, menu-entry applicability.
 
-### FM5 — in-place rename `[ ]`
+### FM5 — in-place rename `[x]`
 
-The first write operation, and the model for the rest.
+Done — the first write operation, and the model for the rest. The edit is
+modelled in `lib/browse` (host-tested without a kernel); the `files.app` `Run`
+binary supplies the inline text editor and the `fs_rename` seam.
 
-- **Rename** = a `lib/controls::TextField` inline editor over the selected
-  item's label (F2 or menu), committing via `fs_rename` under the user's
-  own identity — an ordinary §5.3-checked VFS call, **no new capability**.
-- **Validation before syscall** (§5.4): the new name is spelled through
-  the shared `lib/path` component rules (no separator, no NUL, within
-  `FS_NAME_MAX`); an invalid name refuses in-UI without touching the VFS.
-- **Fail closed, honest**: a refused rename (permission, name clash,
-  read-only mount) leaves the item unchanged and shows the refusal reason
-  in-UI (§2.24); the view refreshes transactionally on success.
-- **Engine models the edit** (begin/commit/cancel + validation) so it is
-  host-tested; the app supplies the `fs_rename` seam. Host tests: valid/
-  invalid names, clash, cancel, commit-then-refresh, refusal surfaced.
+- **Shared name rule**: the typed name is spelled through the new
+  `lib/path::validate_file_name` — the *one* leaf-name rule (non-empty, not
+  `.`/`..`, no `/`, no control/NUL, no `:`, within `FS_NAME_MAX`), also now
+  the per-component check inside `lib/browse::vfs::absolute_path`, so the
+  rename target and every path component obey one definition (§2.2). Two new
+  `PathError` variants (`ReservedName`, `SeparatorInName`) name the leaf-only
+  failures.
+- **Engine** (`lib/browse::rename` + `Browser::rename_selected`): `RenameError`
+  (with a terse in-UI `message()`) and the pure `validate_new_name`
+  (spelling + clash-with-a-different-sibling + no-op `Unchanged`).
+  `rename_selected` is transactional and fail-closed — validate before any
+  syscall, apply through an injected `fs_rename` seam under the user's own
+  identity (**no new capability**), then re-list and follow the selection to
+  the new name; a VFS refusal leaves the listing untouched and is surfaced as
+  `RenameError::Refused(errno)` (§2.24, §5.4). The read-only picker composes
+  the same `Browser` and never calls the write path.
+- **App** (`files.app`): `F2` opens the one shared `lib/controls::TextField`
+  over the selected row (via the new `render::selection_rect` / `ViewLayout::item_rect`
+  overlay geometry), pre-filled and bounded by `FS_NAME_MAX`; keys route to
+  the editor, edits live-validate (a clash/bad char shows in the field),
+  `Enter` commits and `Escape` cancels. The window-channel wire key is mapped
+  onto the `lib/input` vocabulary locally.
+- Host tests (`lib/browse`, `lib/path`): valid commit-then-refresh with the
+  selection following, each invalid-name class refused before any syscall,
+  clash, no-op unchanged, VFS refusal surfaced, empty-directory no-selection,
+  `validate_new_name` purity, every `RenameError` message non-empty, and
+  `selection_rect`. Docs: `docs/src/desktop/apps.md`, `lib/browse`/`lib/path`
+  README + rustdoc.
 
 ### FM6 — opening: double-click, launch `.app`, "Open With…" `[ ]`
 

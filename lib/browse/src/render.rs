@@ -394,6 +394,27 @@ pub fn entry_index_at<S: DirectorySource>(
     view.index_at(browser.scroll_offset(), x, y)
 }
 
+/// The window-local pixel rectangle the browser's currently selected item is
+/// drawn in, or `None` when nothing is selected or the selection is scrolled
+/// out of view.
+///
+/// This is [`render`]'s own layout for the selected entry, through the shared
+/// [`ViewLayout`], so an overlay drawn there — the in-place rename editor —
+/// sits exactly over the item the renderer painted (§2.2). A caller reveals
+/// the selection first (via [`reveal_selection`]) if it needs the rect to be
+/// on screen.
+#[must_use]
+pub fn selection_rect<S: DirectorySource>(
+    browser: &Browser<S>,
+    font: BitmapFont,
+    theme: &Theme,
+    viewport: Rect,
+) -> Option<Rect> {
+    let selected = browser.selected_index()?;
+    let view = view_layout_for(browser, font, theme, viewport);
+    view.item_rect(browser.scroll_offset(), selected)
+}
+
 /// The resolved view layout for `browser` at `viewport` — the one dispatch the
 /// scroll helpers and the pointer hit-test share, laid out within the same
 /// content viewport (window minus the scrollbar gutter) the renderer uses.

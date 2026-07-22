@@ -311,6 +311,14 @@ pub enum PathError {
     /// path grammar, so it is never a literal filename character; a name that
     /// needs one is escaped by the filesystem driver, not spelled here.
     ColonInComponent,
+    /// A single leaf name (a rename target, a new-folder name) was `.` or
+    /// `..`: the navigation names, never a real file or directory name.
+    /// Only reported by [`validate_file_name`]; the path parser normalises
+    /// `.`/`..` rather than rejecting them.
+    ReservedName,
+    /// A single leaf name contained a `/`: it names a path, not one file or
+    /// directory. Only reported by [`validate_file_name`].
+    SeparatorInName,
     /// A `..` component tried to climb above a view, alias, or volume-id
     /// root.
     EscapesRoot,
@@ -346,6 +354,8 @@ impl fmt::Display for PathError {
             PathError::EmptyComponent => "path has an empty component",
             PathError::ControlCharacter => "path component contains a control character",
             PathError::ColonInComponent => "path component contains a `:` (a reserved delimiter)",
+            PathError::ReservedName => "`.` and `..` are not valid file or directory names",
+            PathError::SeparatorInName => "a file or directory name may not contain `/`",
             PathError::EscapesRoot => "path climbs above its root",
             PathError::AliasEmpty => "alias name is empty",
             PathError::AliasTooLong => "alias name exceeds the maximum length",
@@ -619,6 +629,45 @@ fn validate_component(component: &str) -> Result<(), PathError> {
         return Err(PathError::ColonInComponent);
     }
     Ok(())
+}
+
+/// Validate a single filesystem **leaf name** — one file or directory name,
+/// not a path.
+///
+/// A valid leaf name is exactly one ordinary path component: it is non-empty,
+/// is neither `.` nor `..`, contains no `/` separator, no control character
+/// (so no NUL), and no `:` (the structural delimiter), and is within
+/// [`MAX_COMPONENT_LEN`] bytes — which is the kernel's `FS_NAME_MAX`. This is
+/// the one definition a tool that lets the user *name* something (the file
+/// manager's rename and new-folder, a save-as field) judges a typed name
+/// against before it reaches the VFS, so a name a tool accepts always spells
+/// to the same single component and can never widen a path.
+///
+/// It is spelling only: like [`parse`], it opens nothing and performs no
+/// capability check. A name that survives this may still be refused at the VFS
+/// (an existing sibling, a read-only mount, a permission denial); that is the
+/// kernel's decision, not this layer's.
+///
+/// # Errors
+///
+/// Returns the [`PathError`] naming the first rule the name breaks:
+/// [`EmptyComponent`](PathError::EmptyComponent) for an empty name,
+/// [`ReservedName`](PathError::ReservedName) for `.`/`..`,
+/// [`SeparatorInName`](PathError::SeparatorInName) for a `/`,
+/// [`ComponentTooLong`](PathError::ComponentTooLong) past
+/// [`MAX_COMPONENT_LEN`], [`ControlCharacter`](PathError::ControlCharacter),
+/// or [`ColonInComponent`](PathError::ColonInComponent).
+pub fn validate_file_name(name: &str) -> Result<(), PathError> {
+    if name.is_empty() {
+        return Err(PathError::EmptyComponent);
+    }
+    if name == "." || name == ".." {
+        return Err(PathError::ReservedName);
+    }
+    if name.contains('/') {
+        return Err(PathError::SeparatorInName);
+    }
+    validate_component(name)
 }
 
 #[cfg(test)]
@@ -971,6 +1020,8 @@ mod tests {
             PathError::EmptyComponent,
             PathError::ControlCharacter,
             PathError::ColonInComponent,
+            PathError::ReservedName,
+            PathError::SeparatorInName,
             PathError::EscapesRoot,
             PathError::AliasEmpty,
             PathError::AliasTooLong,
@@ -991,6 +1042,38 @@ mod tests {
         // The remainder is untouched lexical text: a spelling `parse` would
         // reject still reports its prefix.
         assert_eq!(alias_root_len("Home:/a//b"), Some(6));
+    }
+
+    #[test]
+    fn validate_file_name_accepts_an_ordinary_name() {
+        assert_eq!(validate_file_name("report.md"), Ok(()));
+        assert_eq!(validate_file_name("café"), Ok(()));
+        assert_eq!(validate_file_name("Example.app"), Ok(()));
+        // A leading dot is a hidden file, not the `.` navigation name.
+        assert_eq!(validate_file_name(".config"), Ok(()));
+        // The full-length boundary is accepted.
+        assert_eq!(validate_file_name(&"a".repeat(MAX_COMPONENT_LEN)), Ok(()));
+    }
+
+    #[test]
+    fn validate_file_name_rejects_each_broken_rule() {
+        assert_eq!(validate_file_name(""), Err(PathError::EmptyComponent));
+        assert_eq!(validate_file_name("."), Err(PathError::ReservedName));
+        assert_eq!(validate_file_name(".."), Err(PathError::ReservedName));
+        assert_eq!(validate_file_name("a/b"), Err(PathError::SeparatorInName));
+        assert_eq!(validate_file_name("/"), Err(PathError::SeparatorInName));
+        assert_eq!(
+            validate_file_name("a\u{0}b"),
+            Err(PathError::ControlCharacter)
+        );
+        assert_eq!(
+            validate_file_name("Backup:x"),
+            Err(PathError::ColonInComponent)
+        );
+        assert_eq!(
+            validate_file_name(&"a".repeat(MAX_COMPONENT_LEN + 1)),
+            Err(PathError::ComponentTooLong)
+        );
     }
 
     #[test]

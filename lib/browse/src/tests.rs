@@ -361,12 +361,26 @@ fn absolute_path_refuses_malformed_components() {
 
 #[test]
 fn absolute_path_enforces_the_kernel_path_bound() {
-    let long = "a".repeat(FS_PATH_MAX);
+    // Each component is a valid single name (well within the per-name bound),
+    // so the *whole-path* FS_PATH_MAX bound is what trips: enough 250-byte
+    // components that the spelled path runs past FS_PATH_MAX.
+    let component = "a".repeat(250);
+    let deep: Vec<String> = core::iter::repeat(component)
+        .take(FS_PATH_MAX / 250 + 1)
+        .collect();
     assert_eq!(
-        absolute_path(&[long]),
+        absolute_path(&deep),
         Err(Errno::LengthOutOfRange),
         "a spelled path over FS_PATH_MAX must never reach the kernel"
     );
+}
+
+#[test]
+fn absolute_path_refuses_an_over_long_component() {
+    // A single component past the per-name bound is refused as a malformed
+    // component, before the whole-path length is even considered.
+    let huge = "a".repeat(300);
+    assert_eq!(absolute_path(&[huge]), Err(Errno::OutOfRange));
 }
 
 #[test]
@@ -1121,5 +1135,188 @@ mod icon_classifier {
         assert_eq!(icon_for_name("archive."), IconKind::File);
         // The last extension wins for a multi-part name.
         assert_eq!(icon_for_name("a.txt.zip"), IconKind::Archive);
+    }
+}
+
+// --- In-place rename (FM5) ---------------------------------------------
+//
+// The rename model is host-proven end to end over `MockFs`: the injected
+// `rename` seam records the two paths it is asked to move between (or refuses),
+// and `MockFs::root_after_refresh` supplies the post-rename listing the commit
+// re-reads — so validation, the transactional VFS call, and the refresh all run
+// without a kernel.
+
+mod rename_model {
+    use core::cell::RefCell;
+
+    use alloc::string::ToString;
+
+    use tairix_abi::Errno;
+    use tairix_geometry::Rect;
+    use tairix_theme::Theme;
+
+    use super::{names, MockFs};
+    use crate::browser::Browser;
+    use crate::entry::Entry;
+    use crate::rename::{validate_new_name, RenameError};
+
+    /// A `MockFs` whose root re-reads as `after` once a commit refreshes it.
+    fn fs_with_refreshed_root(after: alloc::vec::Vec<Entry>) -> MockFs {
+        let mut fs = MockFs::fixture();
+        fs.root_after_refresh = Some(after);
+        fs
+    }
+
+    #[test]
+    fn commit_moves_the_selected_item_and_refreshes_onto_the_new_name() {
+        // Root sorts to [Apps, Storage, System, Users]; rename Apps -> Downloads.
+        let fs = fs_with_refreshed_root(alloc::vec![
+            Entry::directory("Downloads"),
+            Entry::directory("Storage"),
+            Entry::directory("System"),
+            Entry::directory("Users"),
+        ]);
+        let mut browser = Browser::open_root(fs).expect("root");
+        browser.select(0).expect("select Apps");
+        assert_eq!(browser.selected_name(), Some("Apps"));
+
+        let seen = RefCell::new(None);
+        let result = browser.rename_selected("Downloads", |from, to| {
+            *seen.borrow_mut() = Some((from.to_string(), to.to_string()));
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *seen.borrow(),
+            Some(("/Apps".to_string(), "/Downloads".to_string()))
+        );
+        // The listing refreshed and the selection followed the entry.
+        assert_eq!(names(&browser), ["Downloads", "Storage", "System", "Users"]);
+        assert_eq!(browser.selected_name(), Some("Downloads"));
+    }
+
+    #[test]
+    fn an_invalid_name_is_refused_before_any_syscall() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+
+        for (name, expected) in [
+            ("", RenameError::Empty),
+            (".", RenameError::Reserved),
+            ("..", RenameError::Reserved),
+            ("a/b", RenameError::Separator),
+            ("bad:name", RenameError::Invalid),
+        ] {
+            let result = browser.rename_selected(name, |_, _| {
+                panic!("the VFS must not be touched for an invalid name");
+            });
+            assert_eq!(result, Err(expected));
+        }
+        // The listing is untouched.
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(browser.selected_name(), Some("Apps"));
+    }
+
+    #[test]
+    fn a_clash_with_an_existing_sibling_is_refused_before_any_syscall() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let result = browser.rename_selected("System", |_, _| {
+            panic!("a clashing rename must not reach the VFS");
+        });
+        assert_eq!(result, Err(RenameError::Clash));
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    }
+
+    #[test]
+    fn renaming_to_the_same_name_is_a_no_op() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let result = browser.rename_selected("Apps", |_, _| {
+            panic!("an unchanged rename must not reach the VFS");
+        });
+        assert_eq!(result, Err(RenameError::Unchanged));
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    }
+
+    #[test]
+    fn a_vfs_refusal_is_surfaced_and_leaves_the_listing_unchanged() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let result = browser.rename_selected("Downloads", |_, _| Err(Errno::PermissionDenied));
+        assert_eq!(result, Err(RenameError::Refused(Errno::PermissionDenied)));
+        // No refresh happened: the original listing and selection stand.
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(browser.selected_name(), Some("Apps"));
+    }
+
+    #[test]
+    fn an_empty_directory_reports_no_selection() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        // Enter the empty /System/Fonts.
+        browser.open_index(2).expect("enter System");
+        browser
+            .open_index(0)
+            .expect("enter the empty Fonts directory");
+        assert_eq!(browser.selected_name(), None);
+        let result = browser.rename_selected("x", |_, _| panic!("nothing to rename"));
+        assert_eq!(result, Err(RenameError::NoSelection));
+    }
+
+    #[test]
+    fn validate_new_name_is_pure_and_covers_the_model_rules() {
+        let siblings = alloc::vec![Entry::directory("Apps"), Entry::file("notes.txt")];
+        assert_eq!(validate_new_name("Documents", "Apps", &siblings), Ok(()));
+        assert_eq!(
+            validate_new_name("Apps", "Apps", &siblings),
+            Err(RenameError::Unchanged)
+        );
+        assert_eq!(
+            validate_new_name("notes.txt", "Apps", &siblings),
+            Err(RenameError::Clash)
+        );
+    }
+
+    #[test]
+    fn every_rename_error_has_a_nonempty_message() {
+        for err in [
+            RenameError::NoSelection,
+            RenameError::Empty,
+            RenameError::Reserved,
+            RenameError::Separator,
+            RenameError::Invalid,
+            RenameError::TooLong,
+            RenameError::Clash,
+            RenameError::Unchanged,
+            RenameError::Refused(Errno::PermissionDenied),
+            RenameError::Source(Errno::NotFound),
+        ] {
+            assert!(!err.message().is_empty());
+        }
+    }
+
+    #[test]
+    fn selection_rect_locates_the_selected_row_and_is_none_when_empty() {
+        let font = tairix_font::BitmapFont::inconsolata();
+        let theme = Theme::dark();
+        let viewport = Rect::new(0, 0, 200, 200);
+
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(1).expect("select second entry");
+        let rect = crate::render::selection_rect(&browser, font, &theme, viewport)
+            .expect("a selected row has a rectangle");
+        // It lies within the window and below the one-row path-bar header.
+        let header = crate::render::row_height(font);
+        assert!(rect.origin.y >= i32::try_from(header).unwrap());
+        assert!(rect.width > 0 && rect.height > 0);
+
+        // The empty /System/Fonts has no selection, hence no rectangle.
+        browser.open_index(2).expect("enter System");
+        browser.open_index(0).expect("enter Fonts");
+        assert_eq!(
+            crate::render::selection_rect(&browser, font, &theme, viewport),
+            None
+        );
     }
 }

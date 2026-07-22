@@ -647,6 +647,7 @@ dependencies = [
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
+ "tairix-path",
  "tairix-raster",
  "tairix-theme",
 ]
@@ -1226,8 +1227,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-browse",
+ "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-input",
  "tairix-rt",
  "tairix-theme",
  "tairix-window",

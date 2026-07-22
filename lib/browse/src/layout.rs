@@ -459,6 +459,20 @@ impl ViewLayout {
         }
     }
 
+    /// The view-local pixel rectangle of the item at `index` for the desired
+    /// scroll `offset`, or `None` when the item is out of range or scrolled
+    /// out of the visible window. The exact inverse of
+    /// [`index_at`](Self::index_at) — the same rect the renderer draws that
+    /// item in — so an overlay (the in-place rename editor) sits precisely over
+    /// the item the user selected (§2.2).
+    #[must_use]
+    pub fn item_rect(&self, offset: u64, index: usize) -> Option<Rect> {
+        match self {
+            Self::List(v) => v.row_rect(offset, index),
+            Self::Grid(v) => v.cell_rect(offset, index),
+        }
+    }
+
     /// How many whole lines (list rows or grid rows) are visible at once — the
     /// natural page step for wheel and scrollbar paging.
     #[must_use]

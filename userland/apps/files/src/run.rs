@@ -22,10 +22,13 @@
 //!   and the `WindowEvents` typed wait over the parked source.
 //!
 //! Keyboard navigation drives the browser (`Down`/`Up` select, `Enter`
-//! opens a directory, `Backspace` goes up); a `CloseRequested` from the
-//! desktop closes the window and ends the program cleanly. Every
-//! bring-up refusal exits fail-loud with a reserved code and a stated
-//! reason on `stderr`.
+//! opens a directory, `Backspace` goes up); `F2` renames the selected
+//! item through an inline `lib/controls` text field, committing over
+//! `fs_rename` under the user's own identity (a refusal is stated in the
+//! field, never a silent failure or a fabricated success); a
+//! `CloseRequested` from the desktop closes the window and ends the
+//! program cleanly. Every bring-up refusal exits fail-loud with a
+//! reserved code and a stated reason on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -34,19 +37,30 @@
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
+#[cfg(freestanding)]
+extern crate alloc;
+
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
 
+    use alloc::string::{String, ToString};
+
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+    use tairix_abi::fs::FS_NAME_MAX;
+    use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
     use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_browse::render::render;
-    use tairix_browse::{Browser, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH};
+    use tairix_browse::{
+        validate_new_name, Browser, DirectorySource, RenameError, VfsDirectorySource, WIN_HEIGHT,
+        WIN_WIDTH,
+    };
+    use tairix_controls::text::{TextAction, TextField};
     use tairix_font::BitmapFont;
-    use tairix_geometry::Rect;
-    use tairix_theme::ThemeRegistry;
+    use tairix_geometry::{Rect, Scale};
+    use tairix_input::{Key, Modifiers, NamedKey};
+    use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
     /// Exit code when the initial directory listing was refused (no
@@ -173,14 +187,15 @@ mod program {
     /// the surface is one window — not a screen — so the copy is small.
     fn present_frame<S, T>(
         browser: &Browser<S>,
-        theme: &tairix_theme::Theme,
+        rename: Option<&TextField>,
+        theme: &Theme,
         client: &mut WindowClient<T>,
         window: u64,
         frame: &mut [u8],
         mode: &DisplayMode,
     ) -> Result<(), Errno>
     where
-        S: tairix_browse::DirectorySource,
+        S: DirectorySource,
         T: WindowTransport,
     {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
@@ -188,7 +203,17 @@ mod program {
         // window is not DPI-scaled today, so the logical size is the physical
         // size), rather than a size hard-coded here.
         let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
-        let surface = render(browser, theme, font, viewport).ok_or(Errno::LengthOutOfRange)?;
+        let mut surface = render(browser, theme, font, viewport).ok_or(Errno::LengthOutOfRange)?;
+        // In rename mode, overlay the inline editor exactly over the selected
+        // item's row through the shared selection geometry, so the field sits
+        // on the item the user is renaming (§2.2).
+        if let Some(field) = rename {
+            if let Some(bounds) =
+                tairix_browse::render::selection_rect(browser, font, theme, viewport)
+            {
+                field.render(&mut surface, bounds, Scale::ONE, theme, font);
+            }
+        }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -207,14 +232,34 @@ mod program {
     /// `theme` and `mode` give the reveal/scroll helpers the same font and
     /// content viewport the renderer uses, so the drawn view, the selection
     /// reveal, and the wheel scroll all agree on the geometry.
-    fn apply_event<S: tairix_browse::DirectorySource>(
+    fn apply_event<S: DirectorySource>(
         browser: &mut Browser<S>,
-        theme: &tairix_theme::Theme,
+        rename: &mut Option<TextField>,
+        theme: &Theme,
         mode: &DisplayMode,
         event: &WindowEvent,
     ) -> (bool, bool) {
         let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+
+        // A close request ends the app whatever mode it is in; an open rename
+        // edit is simply abandoned (nothing was written).
+        if let WindowEvent::CloseRequested { .. } = event {
+            return (false, true);
+        }
+
+        // Rename mode: the inline editor owns the keyboard. Its keys never
+        // navigate the listing, and non-key events leave the edit untouched.
+        if rename.is_some() {
+            return match event {
+                WindowEvent::Key {
+                    key: KeyInput::Pressed { key, modifiers },
+                    ..
+                } => apply_rename_key(browser, rename, font, theme, viewport, *key, *modifiers),
+                _ => (false, false),
+            };
+        }
+
         match event {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, .. },
@@ -239,9 +284,13 @@ mod program {
                 KeyValue::Named(NamedKeyCode::Backspace) => {
                     (browser.go_up().unwrap_or(false), false)
                 }
+                // F2 begins an in-place rename of the selected item; with
+                // nothing selected (an empty directory) it is a no-op.
+                KeyValue::Named(NamedKeyCode::F2) => {
+                    begin_rename(browser, rename, font, theme, viewport)
+                }
                 _ => (false, false),
             },
-            WindowEvent::CloseRequested { .. } => (false, true),
             // A wheel gesture the desktop forwarded (this window owns its own
             // content scrolling): scroll the view one line per tick through
             // the shared scroll model, which clamps at both ends so a large or
@@ -272,12 +321,154 @@ mod program {
             // (the size controls render disabled) and never sends it a new
             // client size. Both are honest no-ops, not deferred work.
             WindowEvent::Key { .. }
+            | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Pointer { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
+        }
+    }
+
+    /// Begin an in-place rename of the selected item: reveal the row so the
+    /// editor is on screen, then open a focused [`TextField`] pre-filled with
+    /// the current name (bounded by the kernel's own `FS_NAME_MAX`). With
+    /// nothing selected it is a no-op.
+    fn begin_rename<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        rename: &mut Option<TextField>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+    ) -> (bool, bool) {
+        let Some(name) = browser.selected_name().map(ToString::to_string) else {
+            return (false, false);
+        };
+        tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+        let mut field = TextField::new().with_text(&name).with_max_len(FS_NAME_MAX);
+        field.set_focused(true);
+        *rename = Some(field);
+        (true, false)
+    }
+
+    /// Feed one key to the open rename editor. A submit commits the new name
+    /// through `fs_rename` (closing the editor and following the selection on
+    /// success, or stating the refusal reason in the field and staying open);
+    /// a cancel abandons the edit; an edit repaints and live-validates the
+    /// typed name so a clash or bad character is flagged as the user types.
+    fn apply_rename_key<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        rename: &mut Option<TextField>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        key: KeyValue,
+        modifiers: AbiModifiers,
+    ) -> (bool, bool) {
+        let (editor_key, mods) = to_editor_key(key, modifiers);
+        let action = match rename.as_mut() {
+            Some(field) => field.on_key(editor_key, mods),
+            None => return (false, false),
+        };
+        match action {
+            Some(TextAction::Submitted) => {
+                let Some(new_name) = rename.as_ref().map(|f| f.text().to_string()) else {
+                    return (false, false);
+                };
+                match browser.rename_selected(&new_name, |from, to| {
+                    let ret = tairix_rt::fs_rename(from.as_bytes(), to.as_bytes());
+                    if ret == 0 {
+                        Ok(())
+                    } else {
+                        Err(errno_from(ret))
+                    }
+                }) {
+                    // A committed rename (or a no-op rename to the same name)
+                    // closes the editor; the selection follows the entry.
+                    Ok(()) | Err(RenameError::Unchanged) => {
+                        *rename = None;
+                        tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                        (true, false)
+                    }
+                    // A refused rename stays open with the honest reason shown
+                    // in the field (§2.24 — never a silent or fabricated
+                    // result); the listing is untouched.
+                    Err(err) => {
+                        if let Some(field) = rename.as_mut() {
+                            field.set_message(Some(String::from(err.message())));
+                        }
+                        (true, false)
+                    }
+                }
+            }
+            Some(TextAction::Cancelled) => {
+                *rename = None;
+                (true, false)
+            }
+            Some(TextAction::Edited) => {
+                let current = browser.selected_name().map(ToString::to_string);
+                if let (Some(field), Some(current)) = (rename.as_mut(), current) {
+                    let text = field.text().to_string();
+                    let message = match validate_new_name(&text, &current, browser.entries()) {
+                        Ok(()) | Err(RenameError::Unchanged) => None,
+                        Err(err) => Some(String::from(err.message())),
+                    };
+                    field.set_message(message);
+                }
+                (true, false)
+            }
+            None => (false, false),
+        }
+    }
+
+    /// Map the window channel's wire key event onto the desktop control
+    /// vocabulary the shared [`TextField`] consumes.
+    fn to_editor_key(key: KeyValue, mods: AbiModifiers) -> (Key, Modifiers) {
+        let modifiers = Modifiers {
+            shift: mods.shift,
+            ctrl: mods.ctrl,
+            alt: mods.alt,
+            meta: mods.meta,
+        };
+        let key = match key {
+            KeyValue::Char(ch) => Key::Char(ch),
+            KeyValue::Named(named) => Key::Named(named_to_editor(named)),
+        };
+        (key, modifiers)
+    }
+
+    /// Map a wire [`NamedKeyCode`] onto the desktop [`NamedKey`]. The two sets
+    /// are the producer/consumer halves of one keyboard vocabulary, so this is
+    /// a total mapping with no guessing.
+    fn named_to_editor(named: NamedKeyCode) -> NamedKey {
+        match named {
+            NamedKeyCode::Enter => NamedKey::Enter,
+            NamedKeyCode::Escape => NamedKey::Escape,
+            NamedKeyCode::Backspace => NamedKey::Backspace,
+            NamedKeyCode::Tab => NamedKey::Tab,
+            NamedKeyCode::Delete => NamedKey::Delete,
+            NamedKeyCode::Insert => NamedKey::Insert,
+            NamedKeyCode::Home => NamedKey::Home,
+            NamedKeyCode::End => NamedKey::End,
+            NamedKeyCode::PageUp => NamedKey::PageUp,
+            NamedKeyCode::PageDown => NamedKey::PageDown,
+            NamedKeyCode::Left => NamedKey::Left,
+            NamedKeyCode::Right => NamedKey::Right,
+            NamedKeyCode::Up => NamedKey::Up,
+            NamedKeyCode::Down => NamedKey::Down,
+            NamedKeyCode::F1 => NamedKey::Function { number: 1 },
+            NamedKeyCode::F2 => NamedKey::Function { number: 2 },
+            NamedKeyCode::F3 => NamedKey::Function { number: 3 },
+            NamedKeyCode::F4 => NamedKey::Function { number: 4 },
+            NamedKeyCode::F5 => NamedKey::Function { number: 5 },
+            NamedKeyCode::F6 => NamedKey::Function { number: 6 },
+            NamedKeyCode::F7 => NamedKey::Function { number: 7 },
+            NamedKeyCode::F8 => NamedKey::Function { number: 8 },
+            NamedKeyCode::F9 => NamedKey::Function { number: 9 },
+            NamedKeyCode::F10 => NamedKey::Function { number: 10 },
+            NamedKeyCode::F11 => NamedKey::Function { number: 11 },
+            NamedKeyCode::F12 => NamedKey::Function { number: 12 },
         }
     }
 
@@ -372,7 +563,21 @@ mod program {
         };
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
-        if present_frame(&browser, theme, &mut client, window, frames, &mode).is_err() {
+        // The in-place rename editor, when open (`F2`). `None` in navigation
+        // mode; the event loop threads it so the editor state and the painted
+        // overlay stay in step.
+        let mut rename: Option<TextField> = None;
+        if present_frame(
+            &browser,
+            rename.as_ref(),
+            theme,
+            &mut client,
+            window,
+            frames,
+            &mode,
+        )
+        .is_err()
+        {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
@@ -391,14 +596,23 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
-            let (changed, close) = apply_event(&mut browser, theme, &mode, &event);
+            let (changed, close) = apply_event(&mut browser, &mut rename, theme, &mode, &event);
             if close {
                 // The desktop asked; close the window and end cleanly.
                 let _ = client.close(window);
                 return 0;
             }
             if changed
-                && present_frame(&browser, theme, &mut client, window, frames, &mode).is_err()
+                && present_frame(
+                    &browser,
+                    rename.as_ref(),
+                    theme,
+                    &mut client,
+                    window,
+                    frames,
+                    &mode,
+                )
+                .is_err()
             {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }

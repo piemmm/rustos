@@ -32,8 +32,17 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # `render`, the `VfsDirectorySource` composition, and the canonical
 # browser-view geometry (§2.2, §6).
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
-# Shared integer screen geometry (`Rect`) for the render viewport (§2.2).
+# Shared integer screen geometry (`Rect`/`Scale`) for the render viewport
+# and the inline rename editor's overlay (§2.2).
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The shared Reactive Alloy GUI controls: the in-place rename editor is the
+# one shared `TextField` (its caret/selection editor and validation-message
+# surface), never a browser-private text box (§2.2, §17.4).
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The desktop input vocabulary (`Key`/`NamedKey`/`Modifiers`) the shared
+# controls consume; the binary maps the window channel's wire `KeyInput`
+# onto it to drive the rename editor.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # The shared text rasteriser: the browser renders its labels at the theme's
 # font size, so the binary resolves the `BitmapFont` it passes to `render`.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }

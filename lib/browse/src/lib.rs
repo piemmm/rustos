@@ -40,6 +40,8 @@
 //!   and the [`ViewLayout`] dispatch (the one visible-window/item-rect/hit-test
 //!   definition the renderer and the pointer hit-test share), plus [`ViewMode`].
 //! * [`format`](mod@format) — the size/date column formatting.
+//! * [`rename`](mod@rename) — the in-place [`RenameError`]/[`validate_new_name`]
+//!   rename model the file manager's first write operation is built on.
 //! * [`render`](mod@render) — painting the current directory into a
 //!   `Surface`.
 //!
@@ -62,6 +64,7 @@ pub mod error;
 pub mod format;
 pub mod icon;
 pub mod layout;
+pub mod rename;
 pub mod render;
 pub mod sort;
 pub mod source;
@@ -73,6 +76,7 @@ pub use error::BrowseError;
 pub use format::{format_date, format_size};
 pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};
+pub use rename::{validate_new_name, RenameError};
 pub use render::render;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;

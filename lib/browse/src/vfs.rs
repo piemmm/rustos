@@ -54,10 +54,12 @@ pub fn spell_absolute_path(components: &[String]) -> String {
 /// Validate `components` and spell them as the absolute path handed to the
 /// kernel.
 ///
-/// Every component must be a real single path element: non-empty, not `.`
-/// or `..`, and free of `/` and NUL — anything else could name a different
-/// directory than the browser shows, so it is refused *before* any syscall.
-/// The spelled path is bounded by the kernel's own [`FS_PATH_MAX`].
+/// Every component must be a real single filesystem leaf name — the shared
+/// [`tairix_path::validate_file_name`] rule (non-empty, not `.` or `..`, no
+/// `/`, no control character or NUL, no `:`, within the name bound) — so a
+/// component can never name a different directory than the browser shows and
+/// the check is the *same* one the rename editor spells a new name through
+/// (§2.2). The spelled path is bounded by the kernel's own [`FS_PATH_MAX`].
 ///
 /// # Errors
 ///
@@ -65,13 +67,7 @@ pub fn spell_absolute_path(components: &[String]) -> String {
 /// * [`Errno::LengthOutOfRange`] for a path longer than [`FS_PATH_MAX`].
 pub fn absolute_path(components: &[String]) -> Result<String, Errno> {
     for component in components {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.bytes().any(|b| b == b'/' || b == 0)
-        {
-            return Err(Errno::OutOfRange);
-        }
+        tairix_path::validate_file_name(component).map_err(|_| Errno::OutOfRange)?;
     }
     let path = spell_absolute_path(components);
     if path.len() > FS_PATH_MAX {

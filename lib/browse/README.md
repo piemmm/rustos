@@ -47,6 +47,17 @@ can never diverge in navigation semantics, listing policy, or look.
   listed before any state or history changes, a fresh navigation clears the
   forward branch, and the history is a bounded ring that drops the oldest
   location rather than growing without bound.
+- **In-place rename** (`rename`, `Browser::rename_selected`): the model of
+  the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
+  host-tested without a kernel. `validate_new_name` spells the typed name
+  through the one shared `tairix_path::validate_file_name` rule and rejects a
+  clash with an existing sibling or a no-op rename to the same name;
+  `Browser::rename_selected` then applies it through an injected `fs_rename`
+  seam and re-lists, transactional and fail-closed — validated before any
+  syscall, a VFS refusal leaves the listing untouched, and the selection
+  follows the entry to its new name. The engine adds no authority (the write
+  is the caller's own permission-checked `fs_rename`, no new capability), so
+  the read-only picker composes the same `Browser` and never calls it.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the
@@ -71,14 +82,17 @@ can never diverge in navigation semantics, listing policy, or look.
   a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
   routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`
   keeps the selection visible, and `entry_index_at` is the shared point
-  hit-test. `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the
+  hit-test. `selection_rect` is its inverse — the rectangle the selected
+  item is drawn in, so an overlay (the in-place rename editor) sits exactly
+  over it. `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the
   files app, the picker, and the QEMU vertical's host-side assertions share.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into
-  a bounded, validated absolute path — refusing an empty, `/`-bearing,
-  or NUL-bearing component before any syscall) and `VfsDirectorySource`,
+  a bounded, validated absolute path — each component checked by the shared
+  `tairix_path::validate_file_name` rule, the same rule the rename editor
+  spells a new name through, before any syscall) and `VfsDirectorySource`,
   the composition over an injected `fetch(path) -> stream` primitive so
   the engine is host-proven end to end without a kernel.
 
-`no_std` (with `alloc`); depends only on `lib/abi`, `lib/geometry`,
-`lib/theme`, `lib/raster`, `lib/font`, `lib/controls`, and `lib/icon` —
-never a kernel, driver, or window-manager crate. No `unsafe`.
+`no_std` (with `alloc`); depends only on `lib/abi`, `lib/path`,
+`lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, `lib/controls`, and
+`lib/icon` — never a kernel, driver, or window-manager crate. No `unsafe`.

@@ -13,6 +13,10 @@ publish.workspace = true
 # invents no parallel error set for the kernel boundary (§2.2) and never links
 # a kernel or driver crate (§17.4).
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one shared filesystem-name spelling: the browser validates a path
+# component and a rename target through `tairix_path` rather than growing a
+# second copy of the "is this a legal name" rule (§2.2).
+tairix-path = { path = "../path", version = "=0.0.0" }
 # Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
 # window manager and taskbar use (§17.4, §2.2).
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }

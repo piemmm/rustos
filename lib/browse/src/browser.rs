@@ -17,9 +17,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
 
+use tairix_abi::Errno;
+
 use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
+use crate::rename::{validate_new_name, RenameError};
 use crate::sort::{sort_entries, SortMode};
 use crate::source::DirectorySource;
 
@@ -181,6 +184,13 @@ impl<S: DirectorySource> Browser<S> {
         self.selected_index().map(|i| &self.entries[i])
     }
 
+    /// The selected entry's name, or `None` when the directory is empty — the
+    /// name the in-place rename editor starts from.
+    #[must_use]
+    pub fn selected_name(&self) -> Option<&str> {
+        self.selected_entry().map(Entry::name)
+    }
+
     /// Move the selection to `index`.
     ///
     /// # Errors
@@ -222,6 +232,62 @@ impl<S: DirectorySource> Browser<S> {
             .map_err(BrowseError::Source)?;
         self.adopt_entries(entries);
         Ok(())
+    }
+
+    /// Rename the selected entry to `new_name`, applying the change through the
+    /// injected `rename` seam and re-reading the directory on success.
+    ///
+    /// `rename` receives the absolute source and destination paths and
+    /// performs the capability-checked `fs_rename` under the caller's own
+    /// identity — the engine adds no authority of its own (the trusted picker
+    /// composes the same [`Browser`] and never calls this). The seam returns
+    /// the kernel boundary's [`Errno`] on refusal.
+    ///
+    /// Transactional and fail closed: the name is validated
+    /// ([`validate_new_name`]) *before* any syscall, and a VFS refusal leaves
+    /// the listing exactly as it was. On success the directory is re-listed
+    /// and the selection follows the entry to its new name; a rename that
+    /// equals the current name is a no-op ([`RenameError::Unchanged`]) that
+    /// touches neither the VFS nor the view.
+    ///
+    /// # Errors
+    ///
+    /// A [`RenameError`]: a spelling/clash/unchanged failure decided before the
+    /// syscall, [`RenameError::Refused`] when the VFS refuses the move, or
+    /// [`RenameError::Source`] when the post-rename re-list fails.
+    pub fn rename_selected<R>(&mut self, new_name: &str, rename: R) -> Result<(), RenameError>
+    where
+        R: FnOnce(&str, &str) -> Result<(), Errno>,
+    {
+        let current = self
+            .selected_name()
+            .ok_or(RenameError::NoSelection)
+            .map(String::from)?;
+        validate_new_name(new_name, &current, &self.entries)?;
+
+        let from = self.child_path(&current)?;
+        let to = self.child_path(new_name)?;
+        rename(&from, &to).map_err(RenameError::Refused)?;
+
+        self.refresh()
+            .map_err(|err| RenameError::Source(err.source_errno().unwrap_or(Errno::NotFound)))?;
+        if let Some(index) = self.entries.iter().position(|e| e.name() == new_name) {
+            self.selected = index;
+        }
+        Ok(())
+    }
+
+    /// Spell the absolute path of a child named `name` in the current
+    /// directory, mapping a spelling failure onto the matching
+    /// [`RenameError`]. A `name` that already passed [`validate_new_name`] can
+    /// only fail here if the *whole* path exceeds the kernel's limit.
+    fn child_path(&self, name: &str) -> Result<String, RenameError> {
+        let mut components = self.components.clone();
+        components.push(String::from(name));
+        crate::vfs::absolute_path(&components).map_err(|errno| match errno {
+            Errno::LengthOutOfRange => RenameError::TooLong,
+            _ => RenameError::Invalid,
+        })
     }
 
     /// Descend into the selected entry, which must be a directory.
