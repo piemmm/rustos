@@ -1838,6 +1838,18 @@ Redirection state:
   `NotFound` moves to the next, any other refusal is final). The interpreter
   maps a launch `NotFound` onto `127` "command not found" and every other
   launch refusal onto `126`, on the foreground and background paths alike.
+  Because process launch is asynchronous (`plans/FIX-DESKTOP.md` DESK-1),
+  `spawn` now only *admits* the child and its image is read/verified/built on
+  the child's own task; an I/O or verification failure therefore surfaces as a
+  reserved `LOAD_*` child-exit status, not a synchronous `spawn` `-errno`. The
+  interpreter recognises that reserved status on reap and reports the failure
+  loudly with the one shared human reason (`tairix_abi::load_failure_reason`)
+  — `shell: <cmd>: <reason>` — mapping `$?` to `127` for a
+  missing/unreadable program (`LOAD_NOT_FOUND`) and `126` for every other load
+  refusal (verification, malformed image, out of memory). The foreground path
+  reports on the terminal exit; a background job's refusal is stated on stderr
+  as its `[N] Done` line is drained, so no launch failure is ever silent
+  (`§24.1`).
 - **Recognised and failing closed** (tracked here): process substitution —
   `<(…)`/`>(…)` await the pipe/launch plumbing and `=(…)` is permanently
   unsupported (no scratch filesystem, §16.1) — and the compound commands

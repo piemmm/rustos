@@ -523,7 +523,17 @@ impl<'a> Shell<'a> {
             }
             Ok(outcome) => {
                 let status = outcome.terminal().map_or(0, ExitStatus::code);
-                self.env.set_last_status(status);
+                // A child admitted by `spawn` but then refused by its own
+                // asynchronous image load exits with a reserved `LOAD_*`
+                // status: turn that into a loud, named diagnosis instead of a
+                // silent, opaque `$?`.
+                if let Some((reason, shell_status)) = async_load_failure(status) {
+                    self.console
+                        .write_stderr(&format!("shell: {}: {reason}\n", program_name(commands)));
+                    self.env.set_last_status(shell_status);
+                } else {
+                    self.env.set_last_status(status);
+                }
             }
             Err(err) => {
                 self.console.write_stderr(&format!("shell: {err}\n"));
@@ -571,6 +581,15 @@ impl<'a> Shell<'a> {
         for job in self.jobs.drain_done() {
             self.console
                 .write_stdout(&format!("[{}] Done {}\n", job.id.as_u32(), job.command));
+            // A background child whose asynchronous load was refused finished
+            // with a reserved `LOAD_*` status; state its reason on stderr so
+            // the failure is never silent (fail loud).
+            if let JobState::Done(ExitStatus::Exited(code)) = job.state {
+                if let Some((reason, _)) = async_load_failure(code) {
+                    self.console
+                        .write_stderr(&format!("shell: {}: {reason}\n", job.command));
+                }
+            }
         }
     }
 }
@@ -585,6 +604,27 @@ fn launch_failure(err: tairix_abi::Errno) -> (i32, String) {
     } else {
         (NOT_EXECUTABLE_STATUS, err.to_string())
     }
+}
+
+/// If `code` is one of the reserved asynchronous-load-failure exit statuses
+/// (a child that `spawn` admitted but that then refused to load its own image
+/// — the async-launch semantics of `plans/FIX-DESKTOP.md` DESK-1), returns
+/// the terse human reason to print and the coreutils-conventional `$?` for
+/// it: a missing or unreadable program is "command not found" (127); every
+/// other load refusal (verification, malformed image, out of memory) is
+/// "found but not executable" (126). Returns `None` for an ordinary exit,
+/// which is reported by its own code. The reason text is the single shared
+/// [`tairix_abi::load_failure_reason`] mapping, so the shell and every other
+/// launcher word a cause identically.
+fn async_load_failure(code: i32) -> Option<(&'static str, i32)> {
+    tairix_abi::load_failure_reason(code).map(|reason| {
+        let status = if code == tairix_abi::LOAD_NOT_FOUND {
+            NOT_FOUND_STATUS
+        } else {
+            NOT_EXECUTABLE_STATUS
+        };
+        (reason, status)
+    })
 }
 
 /// Negate an exit status when `negated` (the `!` pipeline prefix): 0 becomes
@@ -743,6 +783,92 @@ mod tests {
         // The background launch path reports through the same mapping.
         shell.run_line("secret-tool &").unwrap();
         assert_eq!(shell.environment().last_status(), 126);
+    }
+
+    #[test]
+    fn foreground_async_load_failure_is_reported_with_its_reason() {
+        // A child that `spawn` admits but whose own asynchronous image load is
+        // then refused (signature/hash mismatch) exits with a reserved
+        // `LOAD_*` status. The shell must turn that into a loud, named
+        // diagnosis, never a silent, opaque `$?`.
+        let host = ScriptedHost::new();
+        host.set_wait(
+            Pid::new(100),
+            WaitOutcome::Exited(tairix_abi::LOAD_UNVERIFIED),
+        );
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("badapp").unwrap();
+
+        assert!(console
+            .stderr()
+            .contains("shell: badapp: signature or hash verification failed"));
+        // A verification/build refusal is the POSIX 126 "found but not
+        // executable" case.
+        assert_eq!(shell.environment().last_status(), 126);
+    }
+
+    #[test]
+    fn foreground_missing_program_load_failure_maps_to_127() {
+        // A missing/unreadable bundle surfaces (asynchronously) as
+        // `LOAD_NOT_FOUND`, the POSIX 127 "command not found" case.
+        let host = ScriptedHost::new();
+        host.set_wait(
+            Pid::new(100),
+            WaitOutcome::Exited(tairix_abi::LOAD_NOT_FOUND),
+        );
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("ghost").unwrap();
+
+        assert!(console
+            .stderr()
+            .contains("shell: ghost: program not found or not readable"));
+        assert_eq!(shell.environment().last_status(), 127);
+    }
+
+    #[test]
+    fn ordinary_nonzero_exit_is_not_treated_as_a_load_failure() {
+        // A program that runs and exits non-zero on its own is reported by its
+        // own code with nothing on stderr — only the reserved `LOAD_*` band is
+        // diagnosed as a load failure.
+        let host = ScriptedHost::new();
+        host.set_wait(Pid::new(100), WaitOutcome::Exited(3));
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("tool").unwrap();
+
+        assert_eq!(shell.environment().last_status(), 3);
+        assert!(console.stderr().is_empty());
+    }
+
+    #[test]
+    fn background_async_load_failure_is_reported_loudly() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+
+        shell.run_line("badapp &").unwrap();
+        assert_eq!(shell.jobs().len(), 1);
+        console.clear();
+
+        // The background child finished with a reserved load-failure status;
+        // the next line drains it, prints its `[1] Done` line, and states the
+        // reason on stderr so the failure is never silent.
+        host.queue_poll(
+            Pid::new(100),
+            WaitOutcome::Exited(tairix_abi::LOAD_MALFORMED),
+        );
+        shell.run_line("echo hi").unwrap();
+
+        assert!(console.stdout().contains("[1] Done badapp\n"));
+        assert!(console
+            .stderr()
+            .contains("shell: badapp: executable is malformed or incompatible"));
+        assert!(shell.jobs().is_empty());
     }
 
     #[test]

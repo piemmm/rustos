@@ -155,7 +155,20 @@ impl<'a> Login<'a> {
         self.cfg.view.session_handoff();
         match self.cfg.launcher.launch(user, kind) {
             Ok(outcome) => {
-                self.audit_session_ended(username, user, outcome);
+                // `spawn` admits the session immediately and it loads its own
+                // image on its first slice (the asynchronous-launch
+                // semantics of `plans/FIX-DESKTOP.md`), so a session that
+                // could not be read, verified, or built no longer refuses the
+                // launcher's `spawn_with` synchronously — it is admitted and
+                // then exits with a reserved `LOAD_*` status. That is a launch
+                // failure, not a normal session end: record it loudly with
+                // its reason, then degrade gracefully by returning to the
+                // login prompt (the supervise loop re-prompts on `Ok`).
+                if let Some(reason) = tairix_abi::load_failure_reason(outcome.exit_code) {
+                    self.audit_session_load_failed(username, user, outcome.kind, reason);
+                } else {
+                    self.audit_session_ended(username, user, outcome);
+                }
                 Ok(outcome)
             }
             Err(err) => {
@@ -295,6 +308,38 @@ impl<'a> Login<'a> {
                 Field {
                     key: "session",
                     value: tairix_log::FieldValue::Str(kind.label()),
+                },
+            ],
+        );
+    }
+
+    fn audit_session_load_failed(
+        &self,
+        username: &str,
+        user: &AuthenticatedUser,
+        kind: SessionKind,
+        reason: &str,
+    ) {
+        let mut uid = DecBuf::new();
+        self.emit(
+            Level::Error,
+            events::SESSION_LAUNCH_FAILED,
+            &[
+                Field {
+                    key: "user",
+                    value: tairix_log::FieldValue::Str(username),
+                },
+                Field {
+                    key: "uid",
+                    value: tairix_log::FieldValue::Str(uid.format(i128::from(user.uid.0))),
+                },
+                Field {
+                    key: "session",
+                    value: tairix_log::FieldValue::Str(kind.label()),
+                },
+                Field {
+                    key: "reason",
+                    value: tairix_log::FieldValue::Str(reason),
                 },
             ],
         );
@@ -445,6 +490,18 @@ mod tests {
         fn failing() -> Self {
             Self {
                 result: Err(Errno::NotFound),
+                launched: RefCell::new(Vec::new()),
+            }
+        }
+        /// A launcher whose (admitted) session exits with `code` — used to
+        /// model a session that `spawn` admitted but that then failed its
+        /// own asynchronous image load (a reserved `LOAD_*` exit).
+        fn exiting(kind: SessionKind, code: i32) -> Self {
+            Self {
+                result: Ok(SessionOutcome {
+                    kind,
+                    exit_code: code,
+                }),
                 launched: RefCell::new(Vec::new()),
             }
         }
@@ -749,6 +806,37 @@ mod tests {
         assert_eq!(sink.count(events::SESSION_STARTED), 1);
         assert_eq!(sink.count(events::SESSION_LAUNCH_FAILED), 1);
         assert_eq!(sink.count(events::SESSION_ENDED), 0);
+    }
+
+    #[test]
+    fn session_that_fails_its_async_load_is_reported_as_a_launch_failure() {
+        // With asynchronous launch, a session `spawn` admits but that then
+        // fails its own image load no longer refuses `spawn_with`
+        // synchronously — it exits with a reserved `LOAD_*` status. Login
+        // must record that as a launch failure (loud, correctly categorised,
+        // with its reason), not as a normal session end, and degrade
+        // gracefully by returning to the prompt (the supervisor re-prompts on
+        // `Ok`).
+        let view = MockView::new(&["ada"], &["byron"]);
+        let auth = auth();
+        let launcher = MockLauncher::exiting(SessionKind::Text, tairix_abi::LOAD_UNVERIFIED);
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            session_default: SessionKind::Text,
+            view: &view,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        let outcome = login.run().unwrap();
+        assert_eq!(outcome.exit_code, tairix_abi::LOAD_UNVERIFIED);
+        assert_eq!(sink.count(events::SESSION_STARTED), 1);
+        assert_eq!(sink.count(events::SESSION_LAUNCH_FAILED), 1);
+        assert_eq!(sink.count(events::SESSION_ENDED), 0);
+        assert_eq!(launcher.launched.borrow().len(), 1);
     }
 
     #[test]

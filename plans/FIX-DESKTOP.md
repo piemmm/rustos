@@ -717,7 +717,38 @@ Each stage is independently reviewable and must leave the whole-project
   bespoke display QEMU vertical is needed; the reap-and-report logic is
   covered by `launch::tests`. Docs: the "parent reports the refusal"
   subsection in `docs/src/architecture/multitasking.md`.
-- **DESK-3 … DESK-7 — planned.**
+- **DESK-3 — done.** The other interactive launch loops now diagnose an
+  asynchronous load failure loudly where they once relied on a synchronous
+  `spawn` `-errno`. All three report the cause through the one shared
+  `lib/abi::load_failure_reason` mapping, so a refusal is worded identically
+  everywhere:
+  - **Shell (`elsh`).** `Shell::launch_foreground` recognises a reserved
+    `LOAD_*` terminal exit on reap and writes `shell: <cmd>: <reason>` to
+    stderr, setting `$?` to the coreutils-conventional `127` for a
+    missing/unreadable program (`LOAD_NOT_FOUND`) or `126` for every other
+    load refusal (`async_load_failure`, `userland/shell/elsh/src/shell.rs`); a
+    background job's refusal is stated on stderr as its `[N] Done` line drains
+    (`report_finished_jobs`). An ordinary non-zero exit is untouched. Job
+    control stays responsive: the shell parks in `wait` while the child loads
+    on its own task (DESK-1), so `^C`/`^Z` routing is unaffected.
+  - **Terminal (`terminal.app`).** The startup shell is reaped through the one
+    `reap_shell` on both the output-stream end-of-stream and child-exit arms
+    (the wait-set may wake on either first), and a reserved `LOAD_*` status is
+    turned into a fail-loud `terminal: shell failed to launch: <reason>` on
+    stderr with a reserved exit code — restoring the diagnosis the old
+    synchronous `spawn_attached < 0` gave. The classification is the
+    host-tested `tairix_terminal::shell_load_failure`.
+  - **Login (`login`).** A session that `spawn` admits but that then fails its
+    own image load exits with a reserved `LOAD_*` status; `start_session`
+    records it as a `SESSION_LAUNCH_FAILED` audit event *with its reason*
+    (not a normal `SESSION_ENDED`) and degrades gracefully by returning to the
+    login prompt — strictly better than the old terminate-on-synchronous-errno.
+  - Tests: elsh (`shell::tests`) covers each reserved status → named stderr +
+    `126`/`127`, an ordinary non-zero exit left undiagnosed, and the background
+    reap report; the terminal (`shell_load_failure_classifies_reserved_statuses`)
+    and login (`session_that_fails_its_async_load_is_reported_as_a_launch_failure`)
+    cover their classifications.
+- **DESK-4 … DESK-7 — planned.**
 
 ---
 
