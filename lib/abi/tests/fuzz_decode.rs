@@ -31,7 +31,10 @@ use tairix_abi::driver::net_channel::{
 use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
 use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use tairix_abi::input::{KeyInput, PointerInput};
-use tairix_abi::net::{decode_bind_reply, decode_socket_reply, SocketDatagram, SocketRequest};
+use tairix_abi::net::{
+    decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketRequest,
+    SocketStreamEvent,
+};
 use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::rlimit::ResourceLimit;
@@ -216,8 +219,18 @@ fn exercise_net_socket(bytes: &[u8]) {
             .expect("round-trip of an accepted datagram must succeed");
         assert_eq!(datagram, reparsed);
     }
+    if let Ok(event) = SocketStreamEvent::parse(bytes) {
+        let mut buf = vec![0u8; SocketStreamEvent::MAX_WIRE_LEN];
+        let len = event
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted stream event must succeed");
+        let reparsed = SocketStreamEvent::parse(&buf[..len])
+            .expect("round-trip of an accepted stream event must succeed");
+        assert_eq!(event, reparsed);
+    }
     let _ = decode_socket_reply(bytes);
     let _ = decode_bind_reply(bytes);
+    let _ = decode_send_reply(bytes);
 }
 
 /// Drive the cross-process NIC device-channel decoders on `bytes` (one arm

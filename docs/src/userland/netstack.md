@@ -73,6 +73,25 @@ per-client narrowing lives in that audited broker (`sysinfod` gates
 facts on `CAP_SYSINFO_HW` — the record carries the MAC, stable
 hardware identity — and state on `CAP_SYSINFO_GLOBAL`).
 
+## Sockets (the data plane)
+
+Alongside the admin endpoint the service binds a second reserved
+rendezvous, `NETSTACK_SOCKET_ENDPOINT`, and serves the `netsock-v1`
+contract (`docs/src/abi/net-sockets.md`) from the same event-driven loop.
+`tairix_netstack::SocketService` is the origin-keyed socket table — one id
+space for **datagram** (UDP) and **stream** (TCP) sockets alike, as a POSIX
+fd table holds every kind — gating every call on `CAP_NET` before any state
+is touched. A datagram socket demultiplexes each inbound
+`StackEvent::UdpDatagram` to its bound socket and delivers a
+`SocketDatagram`. A stream socket owns one pure `tairix_net::tcp::conn::Tcb`
+per connection: `Connect` actively opens it (CSPRNG ISN, egress interface
+chosen once), inbound `StackEvent::TcpSegment`s drive it, and the service
+turns the results into segment egress (through `Stack::send_tcp`) and
+client-visible `SocketStreamEvent`s (`Connected`/`Data`/`Closed`). Stream
+timers (retransmit, delayed ACK, persist, user timeout, TIME-WAIT) fold
+into the wait-set deadline and run on the timer wake, so the stream path is
+event-driven with no polling.
+
 ## Observability
 
 `info:net/<iface>/{mac,mtu,kind}` and
@@ -104,8 +123,10 @@ supervises and relaunches the service.
 
 `cargo test -p tairix-netstack` drives the engine end-to-end over a
 loopback fake whose "device" is a full peer `Stack` (v4 ARP + echo
-and v6 DAD + ND + echo round-trips through the real ring pump) and
-exercises the dispatcher's capability-refusal/audit matrix.
+and v6 DAD + ND + echo round-trips through the real ring pump), a TCP
+stream connect-and-echo through the real socket-service pump against a
+passive-peer echo server, and the dispatcher's capability-refusal/audit
+matrix.
 
 The `netstack_autoload_qemu_aarch64` and `netstack_autoload_qemu_riscv64`
 QEMU verticals (`plans/NETWORK.md` N4e-β / N4e-riscv64) prove the service

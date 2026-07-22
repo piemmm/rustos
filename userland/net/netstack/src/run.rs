@@ -63,8 +63,8 @@ mod program {
     use tairix_net::iface::eui64_interface_id;
     use tairix_net::stack::StackEvent;
     use tairix_netstack::{
-        events, queue_tx, serve, Caller, FrameBatch, NetChannelClient, NetChannelTransport,
-        Netstack, SocketService,
+        events, queue_tx, serve, Caller, Delivery, FrameBatch, NetChannelClient,
+        NetChannelTransport, Netstack, SocketService, StreamIo,
     };
     use tairix_rt::LogSink;
 
@@ -157,11 +157,20 @@ mod program {
         .unwrap_or_default()
     }
 
-    /// Nanoseconds from `now` until the engines' earliest deadline;
-    /// `u64::MAX` (park indefinitely) when nothing is armed.
-    fn timeout_ns(stack: &Netstack) -> u64 {
-        let Some(deadline) = stack.next_deadline() else {
-            return u64::MAX;
+    /// Nanoseconds from `now` until the engines' earliest deadline —
+    /// folding the per-interface deadlines and every connected stream's
+    /// TCP timer — or `u64::MAX` (park indefinitely) when nothing is armed.
+    fn timeout_ns(stack: &Netstack, sockets: &SocketService) -> u64 {
+        let deadline = match (stack.next_deadline(), sockets.stream_next_deadline()) {
+            (Some(a), Some(b)) => {
+                if (a.secs(), a.subsec_nanos()) <= (b.secs(), b.subsec_nanos()) {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(d), None) | (None, Some(d)) => d,
+            (None, None) => return u64::MAX,
         };
         let current = now();
         let deadline_ns =
@@ -261,9 +270,9 @@ mod program {
             // their timer-due frames (DAD, SLAAC RS, IGMP, retransmits),
             // then re-arms below against the new `now`.
             let mut token = 0u64;
-            let woke = tairix_rt::waitset_wait(set, timeout_ns(&stack), &mut token);
+            let woke = tairix_rt::waitset_wait(set, timeout_ns(&stack, &sockets), &mut token);
             if woke != 0 {
-                pump_all(&mut stack, &sockets, &mut channels, now());
+                pump_all(&mut stack, &mut sockets, &mut channels, now());
                 continue;
             }
             match token {
@@ -284,7 +293,7 @@ mod program {
                     &mut origin_buf,
                     &mut socket_reply,
                 ),
-                other => serve_notify(&mut stack, &sockets, &mut channels, other),
+                other => serve_notify(&mut stack, &mut sockets, &mut channels, other),
             }
         }
     }
@@ -295,7 +304,7 @@ mod program {
     /// a stale wake for a channel that is gone is harmless.
     fn serve_notify(
         stack: &mut Netstack,
-        sockets: &SocketService,
+        sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
         token: u64,
     ) {
@@ -656,12 +665,19 @@ mod program {
         u16::from_le_bytes(bytes)
     }
 
+    /// Bounded pump rounds per channel: a doorbell can leave inbound
+    /// frames the current `service_interface` did not re-harvest (a
+    /// SYN-ACK on the RX ring), and driving a segment can produce egress
+    /// frames that need another doorbell, so the pump iterates until the
+    /// interface is quiet — never unbounded (a hostile flood cannot pin it).
+    const PUMP_ROUNDS: usize = 32;
+
     /// Stage each interface's outbound frame batch onto its channel's TX
     /// ring and pump it, so the driver doorbell transmits it. A batch for
     /// an interface with no bound channel is dropped — its link is gone.
     fn transmit_batch(
         stack: &mut Netstack,
-        sockets: &SocketService,
+        sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
         batch: &FrameBatch,
     ) {
@@ -674,29 +690,91 @@ mod program {
         }
     }
 
-    /// Pump one channel-backed interface once — the single interface pump
-    /// (transmit staged frames, doorbell the driver, harvest received
-    /// frames) — and deliver every received datagram to its socket. A ring
-    /// or device fault leaves the interface in place; the next wake retries.
-    fn pump_channel(
+    /// Emit the stream events a connection produced to their clients'
+    /// async ports, and stage its egress frames onto their bound channels,
+    /// pumping each so the driver transmits them.
+    fn distribute(
         stack: &mut Netstack,
-        sockets: &SocketService,
-        channel: &mut Channel,
-        now: Duration64,
+        sockets: &mut SocketService,
+        channels: &mut [Option<Channel>],
+        io: &StreamIo,
     ) {
-        if let Ok(events) = stack.service_interface(channel.iface, &mut channel.client, now) {
-            deliver(sockets, &events);
+        emit_deliveries(&io.deliveries);
+        transmit_batch(stack, sockets, channels, &io.tx);
+    }
+
+    /// `ipc_send` each stream/datagram delivery to its socket's async port
+    /// (best-effort: a client that is gone simply drops it).
+    fn emit_deliveries(deliveries: &[Delivery]) {
+        for delivery in deliveries {
+            let _ = tairix_rt::ipc_send(delivery.deliver_port, &delivery.datagram);
         }
     }
 
-    /// Pump every bound channel (a deadline lapse: each interface's engine
-    /// may have timer-due work — DAD, SLAAC RS, IGMP/MLD, retransmits).
+    /// Pump one channel-backed interface to quiescence: transmit staged
+    /// frames, doorbell the driver, harvest received frames, and route each
+    /// engine event to the socket layer — a datagram to its bound socket, a
+    /// TCP segment to its connection (whose response frames are re-queued
+    /// onto this channel and re-transmitted in the same pump). A ring or
+    /// device fault leaves the interface in place; the next wake retries.
+    fn pump_channel(
+        stack: &mut Netstack,
+        sockets: &mut SocketService,
+        channel: &mut Channel,
+        now: Duration64,
+    ) {
+        for _ in 0..PUMP_ROUNDS {
+            let Ok(events) = stack.service_interface(channel.iface, &mut channel.client, now)
+            else {
+                return;
+            };
+            let mut staged = false;
+            let mut saw_event = false;
+            for event in &events {
+                saw_event = true;
+                match event {
+                    StackEvent::EchoRequestServed { .. } => audit(
+                        events::INBOUND_ECHO_SERVED,
+                        Level::Info,
+                        "netstack: inbound echo request served (reply queued)",
+                    ),
+                    StackEvent::UdpDatagram { .. } => emit_deliveries(&sockets.deliver(event)),
+                    StackEvent::TcpSegment {
+                        source,
+                        destination,
+                        segment,
+                    } => {
+                        let io = sockets.on_tcp_segment(stack, *source, *destination, segment, now);
+                        emit_deliveries(&io.deliveries);
+                        for (name, frames) in &io.tx {
+                            if *name == channel.iface && !frames.is_empty() {
+                                let _ = queue_tx(&mut channel.client, frames);
+                                staged = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !saw_event && !staged {
+                break;
+            }
+        }
+    }
+
+    /// Pump every bound channel (a deadline lapse): first advance every
+    /// connected stream's TCP timers (retransmit, delayed ACK, persist,
+    /// user timeout, TIME-WAIT) and distribute their frames/events, then
+    /// pump each channel so each interface's engine emits its own timer-due
+    /// work (DAD, SLAAC RS, IGMP/MLD, neighbour retransmits).
     fn pump_all(
         stack: &mut Netstack,
-        sockets: &SocketService,
+        sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
         now: Duration64,
     ) {
+        let io = sockets.advance_streams(stack, now);
+        distribute(stack, sockets, channels, &io);
         for channel in channels.iter_mut().flatten() {
             pump_channel(stack, sockets, channel, now);
         }
@@ -709,29 +787,6 @@ mod program {
         let mut frame = [0u8; NET_CHANNEL_NOTIFY_LEN];
         let mut sender = [0u8; ORIGIN_WIRE_LEN];
         while tairix_rt::ipc_recv(notify, &mut frame, &mut sender).is_ok() {}
-    }
-
-    /// Route each engine event to the sockets that should receive it and
-    /// deliver the encoded datagram to each socket's async delivery port.
-    ///
-    /// An inbound echo request that the engine answered is additionally
-    /// recorded through the audit log (`EventId` `INBOUND_ECHO_SERVED`):
-    /// the reply is already queued on the interface, so the record is the
-    /// witness that a frame crossed the stack ↔ driver boundary and was
-    /// handled end to end.
-    fn deliver(sockets: &SocketService, events: &[StackEvent]) {
-        for event in events {
-            if matches!(event, StackEvent::EchoRequestServed { .. }) {
-                audit(
-                    events::INBOUND_ECHO_SERVED,
-                    Level::Info,
-                    "netstack: inbound echo request served (reply queued)",
-                );
-            }
-            for delivery in sockets.deliver(event) {
-                let _ = tairix_rt::ipc_send(delivery.deliver_port, &delivery.datagram);
-            }
-        }
     }
 
     tairix_rt::entry!(main);

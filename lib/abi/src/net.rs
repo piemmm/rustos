@@ -57,6 +57,11 @@ pub const SOCKET_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"NSKR");
 /// Magic number identifying a delivered datagram (`"NSKD"` little-endian).
 pub const SOCKET_DATAGRAM_MAGIC: u32 = u32::from_le_bytes(*b"NSKD");
 
+/// Magic number identifying a delivered stream event (`"NSKS"`
+/// little-endian) — the connection-oriented (TCP) analogue of a
+/// [`SocketDatagram`].
+pub const SOCKET_STREAM_MAGIC: u32 = u32::from_le_bytes(*b"NSKS");
+
 /// The `netsock-v1` protocol version.
 pub const SOCKET_VERSION_V1: u16 = 1;
 
@@ -70,14 +75,15 @@ pub const SOCKET_MAX_DATAGRAM: usize = 8192;
 
 /// The transport type of a socket.
 ///
-/// N4 serves datagram (UDP) sockets only. Stream (TCP) and raw sockets
-/// arrive with their own increments and take the reserved wire values
-/// (`1` = stream, `3` = raw, mirroring the POSIX `SOCK_*` conventions); the
-/// decoder fails closed on them today, so no unserved type is silently
-/// accepted.
+/// Datagram (UDP) and stream (TCP) sockets are served. The raw socket type
+/// takes the reserved wire value (`3`, mirroring the POSIX `SOCK_*`
+/// conventions) and the decoder fails closed on it, so no unserved type is
+/// silently accepted.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SocketType {
+    /// A connection-oriented TCP stream socket.
+    Stream = 1,
     /// A connectionless UDP datagram socket.
     Datagram = 2,
 }
@@ -94,10 +100,11 @@ impl SocketType {
     /// # Errors
     ///
     /// [`Errno::OutOfRange`] for any value this increment does not serve —
-    /// including the reserved stream (`1`) and raw (`3`) values — so an
-    /// unimplemented socket type is refused, never guessed.
+    /// including the reserved raw (`3`) value — so an unimplemented socket
+    /// type is refused, never guessed.
     pub const fn from_u8(value: u8) -> Result<Self, Errno> {
         match value {
+            1 => Ok(Self::Stream),
             2 => Ok(Self::Datagram),
             _ => Err(Errno::OutOfRange),
         }
@@ -651,6 +658,255 @@ impl<'a> SocketDatagram<'a> {
     }
 }
 
+/// Byte length of a stream `send` reply: the status word then the count
+/// of payload bytes the stack accepted into the connection's send buffer.
+///
+/// A stream `send` is flow-controlled: the stack may accept fewer bytes
+/// than offered when the send buffer is momentarily full, so the reply
+/// reports the accepted count (never larger than the offered payload, so
+/// it fits [`SOCKET_MAX_DATAGRAM`] and thus a `u32`). A datagram `send`
+/// uses the plain status reply — a datagram is all-or-nothing.
+pub const SOCKET_SEND_REPLY_LEN: usize = STATUS_REPLY_LEN + 4;
+
+/// Encode a stream-`send` outcome: the status frame, and on success the
+/// number of payload bytes accepted.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] — `out` cannot hold the reply.
+pub fn encode_send_reply(result: Result<u32, Errno>, out: &mut [u8]) -> Result<usize, Errno> {
+    match result {
+        Ok(accepted) => {
+            if out.len() < SOCKET_SEND_REPLY_LEN {
+                return Err(Errno::BufferTooSmall);
+            }
+            out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(Ok(())));
+            put_u32(out, STATUS_REPLY_LEN, accepted);
+            Ok(SOCKET_SEND_REPLY_LEN)
+        }
+        Err(err) => encode_status_only(err, out),
+    }
+}
+
+/// Decode a stream-`send` reply, returning the accepted byte count.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the reply.
+/// * The decoded [`Errno`] — the service refused the request.
+pub fn decode_send_reply(bytes: &[u8]) -> Result<u32, Errno> {
+    decode_status_reply(&bytes[..bytes.len().min(STATUS_REPLY_LEN)])?;
+    if bytes.len() < SOCKET_SEND_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    Ok(read_u32(bytes, STATUS_REPLY_LEN))
+}
+
+/// Why a stream connection ended, delivered in a [`SocketStreamEvent::Closed`].
+///
+/// The receive half of a stream never fails silently (`AGENTS.md` §2.24):
+/// a connection always ends with exactly one `Closed` event stating the
+/// reason, so a client `recv` that returns end-of-stream can distinguish an
+/// orderly peer close from an abortive reset.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StreamCloseReason {
+    /// The peer closed its send direction (a FIN): an orderly end of
+    /// stream. Any data delivered before this event is complete and
+    /// correct; `recv` now returns end-of-stream.
+    PeerClosed = 1,
+    /// The connection was aborted by a RST (RFC 9293): data in flight may
+    /// have been lost.
+    Reset = 2,
+    /// The retransmission budget or user timeout elapsed with data
+    /// unacknowledged: the peer became unreachable.
+    TimedOut = 3,
+    /// A connection-establishment attempt was refused (a RST answered our
+    /// SYN).
+    Refused = 4,
+}
+
+impl StreamCloseReason {
+    /// The wire value.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a reason from its wire value, failing closed on any
+    /// unknown value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] — not a defined reason.
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::PeerClosed),
+            2 => Ok(Self::Reset),
+            3 => Ok(Self::TimedOut),
+            4 => Ok(Self::Refused),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// An event the stack delivers to a stream socket's async port.
+///
+/// A connection-oriented socket has no per-message peer (the peer is fixed
+/// at [`SocketRequest::Connect`]), so unlike a [`SocketDatagram`] a stream
+/// event carries no source address — only the socket it concerns and, for
+/// received data, the stream bytes. The stack `ipc_send`s these frames to
+/// the port the client named in [`SocketRequest::Socket`]; the client
+/// authenticates the stack's kernel-attested sender origin, then decodes.
+///
+/// The three events form the client-visible connection lifecycle:
+/// [`Connected`](Self::Connected) once (the handshake completed),
+/// [`Data`](Self::Data) zero or more times (received in order), and
+/// [`Closed`](Self::Closed) exactly once at the end (stating why).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SocketStreamEvent<'a> {
+    /// The three-way handshake completed; the socket is established and
+    /// may send and receive.
+    Connected {
+        /// The socket the event concerns.
+        socket: SocketId,
+    },
+    /// Received stream bytes, delivered in sequence order.
+    Data {
+        /// The socket the bytes belong to.
+        socket: SocketId,
+        /// The received payload (at most [`SOCKET_MAX_DATAGRAM`] bytes;
+        /// the stack fragments a larger receive across several events).
+        payload: &'a [u8],
+    },
+    /// The connection ended; no further events follow for this socket.
+    Closed {
+        /// The socket that closed.
+        socket: SocketId,
+        /// Why it closed.
+        reason: StreamCloseReason,
+    },
+}
+
+/// Wire event discriminant of [`SocketStreamEvent::Connected`].
+const STREAM_EV_CONNECTED: u16 = 1;
+/// Wire event discriminant of [`SocketStreamEvent::Data`].
+const STREAM_EV_DATA: u16 = 2;
+/// Wire event discriminant of [`SocketStreamEvent::Closed`].
+const STREAM_EV_CLOSED: u16 = 3;
+
+impl<'a> SocketStreamEvent<'a> {
+    /// Byte length of the fixed event header preceding any payload.
+    pub const HEADER_LEN: usize = 20;
+
+    /// Largest delivery message: the header plus a maximum-size data
+    /// payload.
+    pub const MAX_WIRE_LEN: usize = Self::HEADER_LEN + SOCKET_MAX_DATAGRAM;
+
+    /// Encode `self` little-endian into `out`, returning the byte length.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] — a [`Data`](Self::Data) payload
+    ///   exceeds [`SOCKET_MAX_DATAGRAM`].
+    /// * [`Errno::BufferTooSmall`] — `out` cannot hold the message.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        let payload: &[u8] = match self {
+            Self::Data { payload, .. } => payload,
+            _ => &[],
+        };
+        if payload.len() > SOCKET_MAX_DATAGRAM {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let total = Self::HEADER_LEN + payload.len();
+        if out.len() < total {
+            return Err(Errno::BufferTooSmall);
+        }
+        for byte in &mut out[..Self::HEADER_LEN] {
+            *byte = 0;
+        }
+        put_u32(out, 0, SOCKET_STREAM_MAGIC);
+        put_u16(out, 4, SOCKET_VERSION_V1);
+        match *self {
+            Self::Connected { socket } => {
+                put_u16(out, 6, STREAM_EV_CONNECTED);
+                put_u32(out, 8, socket);
+            }
+            Self::Data { socket, payload } => {
+                put_u16(out, 6, STREAM_EV_DATA);
+                put_u32(out, 8, socket);
+                // Payload length fits u32: bounded by SOCKET_MAX_DATAGRAM.
+                put_u32(
+                    out,
+                    16,
+                    u32::try_from(payload.len()).map_err(|_| Errno::LengthOutOfRange)?,
+                );
+                out[Self::HEADER_LEN..total].copy_from_slice(payload);
+            }
+            Self::Closed { socket, reason } => {
+                put_u16(out, 6, STREAM_EV_CLOSED);
+                put_u32(out, 8, socket);
+                out[12] = reason.as_u8();
+            }
+        }
+        Ok(total)
+    }
+
+    /// Decode a stream event from `bytes`, failing closed.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than the header or
+    ///   the declared payload.
+    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved field.
+    /// * [`Errno::AbiVersionUnsupported`] — not `netsock-v1`.
+    /// * [`Errno::OutOfRange`] — an unknown event kind or close reason.
+    /// * [`Errno::LengthOutOfRange`] — a declared payload beyond
+    ///   [`SOCKET_MAX_DATAGRAM`].
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::HEADER_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if read_u32(bytes, 0) != SOCKET_STREAM_MAGIC {
+            return Err(Errno::BadMagic);
+        }
+        if read_u16(bytes, 4) != SOCKET_VERSION_V1 {
+            return Err(Errno::AbiVersionUnsupported);
+        }
+        let kind = read_u16(bytes, 6);
+        let socket = read_u32(bytes, 8);
+        match kind {
+            STREAM_EV_CONNECTED => {
+                if bytes[12] != 0 || bytes[13..Self::HEADER_LEN].iter().any(|&b| b != 0) {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Connected { socket })
+            }
+            STREAM_EV_DATA => {
+                if bytes[12] != 0 || bytes[13] != 0 || bytes[14] != 0 || bytes[15] != 0 {
+                    return Err(Errno::BadMagic);
+                }
+                let payload_len = read_u32(bytes, 16) as usize;
+                if payload_len > SOCKET_MAX_DATAGRAM {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                let payload = bytes
+                    .get(Self::HEADER_LEN..Self::HEADER_LEN + payload_len)
+                    .ok_or(Errno::BufferTooSmall)?;
+                Ok(Self::Data { socket, payload })
+            }
+            STREAM_EV_CLOSED => {
+                let reason = StreamCloseReason::from_u8(bytes[12])?;
+                if bytes[13..Self::HEADER_LEN].iter().any(|&b| b != 0) {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Closed { socket, reason })
+            }
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,11 +949,99 @@ mod tests {
 
     #[test]
     fn socket_type_round_trips_and_fails_closed() {
+        assert_eq!(SocketType::from_u8(1), Ok(SocketType::Stream));
         assert_eq!(SocketType::from_u8(2), Ok(SocketType::Datagram));
-        // Reserved stream/raw values and everything else are refused.
-        assert_eq!(SocketType::from_u8(1), Err(Errno::OutOfRange));
+        // The reserved raw value and everything else are refused.
         assert_eq!(SocketType::from_u8(3), Err(Errno::OutOfRange));
         assert_eq!(SocketType::from_u8(0), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn stream_socket_open_round_trips() {
+        round_trip(SocketRequest::Socket {
+            family: NetAddrFamily::V4,
+            sock_type: SocketType::Stream,
+            deliver_port: 0x99,
+        });
+    }
+
+    #[test]
+    fn send_reply_round_trips_ok_and_error() {
+        let mut out = [0u8; SOCKET_SEND_REPLY_LEN];
+        let n = encode_send_reply(Ok(4096), &mut out).expect("encode");
+        assert_eq!(decode_send_reply(&out[..n]), Ok(4096));
+        let n = encode_send_reply(Err(Errno::NotConnected), &mut out).expect("encode");
+        assert_eq!(decode_send_reply(&out[..n]), Err(Errno::NotConnected));
+    }
+
+    #[test]
+    fn stream_close_reason_round_trips_and_fails_closed() {
+        for reason in [
+            StreamCloseReason::PeerClosed,
+            StreamCloseReason::Reset,
+            StreamCloseReason::TimedOut,
+            StreamCloseReason::Refused,
+        ] {
+            assert_eq!(StreamCloseReason::from_u8(reason.as_u8()), Ok(reason));
+        }
+        assert_eq!(StreamCloseReason::from_u8(0), Err(Errno::OutOfRange));
+        assert_eq!(StreamCloseReason::from_u8(5), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn stream_event_round_trips_and_fails_closed() {
+        let events = [
+            SocketStreamEvent::Connected { socket: 7 },
+            SocketStreamEvent::Data {
+                socket: 7,
+                payload: b"stream bytes",
+            },
+            SocketStreamEvent::Closed {
+                socket: 7,
+                reason: StreamCloseReason::PeerClosed,
+            },
+        ];
+        for event in events {
+            let mut out = [0u8; SocketStreamEvent::MAX_WIRE_LEN];
+            let n = event.encode(&mut out).expect("encode");
+            assert_eq!(SocketStreamEvent::parse(&out[..n]), Ok(event));
+        }
+        // A Data event truncated past its declared payload fails closed.
+        let data = SocketStreamEvent::Data {
+            socket: 1,
+            payload: b"abcd",
+        };
+        let mut out = [0u8; SocketStreamEvent::MAX_WIRE_LEN];
+        let n = data.encode(&mut out).expect("encode");
+        assert_eq!(
+            SocketStreamEvent::parse(&out[..n - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut bad_magic = out;
+        bad_magic[0] ^= 0xFF;
+        assert_eq!(
+            SocketStreamEvent::parse(&bad_magic[..n]),
+            Err(Errno::BadMagic)
+        );
+        // An unknown event kind fails closed.
+        let mut bad_kind = out;
+        bad_kind[6] = 9;
+        assert_eq!(
+            SocketStreamEvent::parse(&bad_kind[..n]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn empty_stream_data_event_round_trips() {
+        let event = SocketStreamEvent::Data {
+            socket: 3,
+            payload: &[],
+        };
+        let mut out = [0u8; SocketStreamEvent::HEADER_LEN];
+        let n = event.encode(&mut out).expect("encode");
+        assert_eq!(n, SocketStreamEvent::HEADER_LEN);
+        assert_eq!(SocketStreamEvent::parse(&out[..n]), Ok(event));
     }
 
     #[test]

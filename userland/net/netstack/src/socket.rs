@@ -1,15 +1,17 @@
-//! The datagram-socket service: the origin-keyed socket table and the
+//! The socket service: the origin-keyed socket table and the
 //! capability-checked dispatcher that serves the `netsock-v1` control
-//! plane (`plans/NETWORK.md` N4b).
+//! plane (`plans/NETWORK.md` N4b datagrams, N5c streams).
 //!
 //! Sockets are entirely stack/userland state — the kernel owns no socket
 //! object. This module is the pure engine of that service: it owns the
-//! socket table, decides port assignment and delivery, and drives the
-//! [`Netstack`] interface table to originate datagrams. All I/O (the
-//! endpoint recv/reply, the delivery `ipc_send`, the CSPRNG draw) is the
-//! thin `Run`-binary glue's job; the engine takes its entropy through an
-//! injected closure and returns the frames and deliveries for the glue to
-//! move, so it stays host-testable.
+//! socket table (datagram *and* stream sockets in one id space, exactly as
+//! a POSIX file-descriptor table holds every kind), decides port
+//! assignment and delivery, drives the [`Netstack`] interface table to
+//! originate datagrams and TCP segments, and owns each connection's
+//! [`Tcb`]. All I/O (the endpoint recv/reply, the delivery `ipc_send`, the
+//! CSPRNG draw) is the thin `Run`-binary glue's job; the engine takes its
+//! entropy through an injected closure and returns the frames and
+//! deliveries for the glue to move, so it stays host-testable.
 //!
 //! # Security
 //!
@@ -21,29 +23,26 @@
 //! globally uniquely (no silent reuse), ephemeral ports are drawn from
 //! the kernel CSPRNG, and both the per-principal and global socket tables
 //! are bounded, failing closed with [`Errno::LimitExceeded`] at capacity.
-//!
-//! # Lifecycle
-//!
-//! A socket is released by an explicit [`SocketRequest::Close`]. Reclaim
-//! on process exit rides on the process-exit notification the service
-//! consumes once the NIC-autobind data path is wired (a later increment);
-//! until then the bounded, fail-closed global table is the backstop, so a
-//! principal that never closes cannot exhaust memory — it exhausts only
-//! its own quota.
+//! A stream's per-connection send/receive/reassembly buffers are the
+//! bounded [`TcpConfig`] capacities, so a hostile peer cannot grow memory.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::net::{
-    encode_bind_reply, encode_socket_reply, SocketAddr, SocketDatagram, SocketId, SocketRequest,
-    SocketType,
+    encode_bind_reply, encode_send_reply, encode_socket_reply, SocketAddr, SocketDatagram,
+    SocketId, SocketRequest, SocketStreamEvent, SocketType, StreamCloseReason, SOCKET_MAX_DATAGRAM,
 };
-use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, Duration64, Errno};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::checksum::Pseudo;
 use tairix_net::stack::StackEvent;
+use tairix_net::tcp::conn::{ResetReason, State, Tcb, TcpConfig};
+use tairix_net::tcp::{TcpSegment, TcpSegmentMeta};
 
 use crate::events;
 use crate::iface::{FrameBatch, Netstack};
@@ -72,13 +71,51 @@ const EPHEMERAL_MAX: u16 = 65_535;
 /// before failing closed with [`Errno::AddressInUse`].
 const EPHEMERAL_TRIES: u32 = 128;
 
-/// One open datagram socket, owned by exactly one principal.
+/// Per-socket state of a connectionless datagram socket.
+struct DatagramState {
+    /// Connected default peer, if [`SocketRequest::Connect`] was called.
+    peer: Option<SocketAddr>,
+    /// Multicast groups this socket joined (for leave-on-close).
+    groups: Vec<[u8; 16]>,
+}
+
+/// Per-socket state of a connection-oriented stream socket, once
+/// [`SocketRequest::Connect`] has established a connection. Before that a
+/// stream socket carries no connection (`Proto::Stream(None)`).
+struct StreamConn {
+    /// The connection's transmission control block (the RFC 9293 engine).
+    tcb: Tcb,
+    /// The fixed peer of the connection.
+    peer: SocketAddr,
+    /// The egress interface the connection is bound to for its life.
+    iface: [u8; IF_NAME_LEN],
+    /// Whether the client has been told the handshake completed.
+    connected_notified: bool,
+    /// Whether the client has been told the connection ended.
+    closed_notified: bool,
+    /// Whether the client has issued `close`: the connection is being
+    /// torn down in the background and is reaped once fully closed. No
+    /// further events are delivered (the client is gone).
+    client_closed: bool,
+}
+
+/// The transport-specific state of one socket.
+enum Proto {
+    /// A connectionless UDP datagram socket.
+    Datagram(DatagramState),
+    /// A connection-oriented TCP stream socket; `None` until connected.
+    /// The connection (which carries the sizeable [`Tcb`]) is boxed so a
+    /// datagram socket's table entry stays small.
+    Stream(Option<Box<StreamConn>>),
+}
+
+/// One open socket, owned by exactly one principal.
 struct SocketEntry {
     /// Server-assigned handle, unique among all live sockets.
     id: SocketId,
     /// The unforgeable process instance that opened it.
     owner: ProcId,
-    /// The client async port inbound datagrams are delivered to.
+    /// The client async port inbound datagrams/stream events go to.
     deliver_port: u64,
     /// Address family of the socket.
     family: NetAddrFamily,
@@ -86,10 +123,8 @@ struct SocketEntry {
     local_addr: [u8; 16],
     /// Bound local port; `0` means unbound.
     local_port: u16,
-    /// Connected default peer, if [`SocketRequest::Connect`] was called.
-    peer: Option<SocketAddr>,
-    /// Multicast groups this socket joined (for leave-on-close).
-    groups: Vec<[u8; 16]>,
+    /// The transport-specific state.
+    proto: Proto,
 }
 
 /// The outcome of serving one control-plane request: the encoded reply
@@ -104,14 +139,25 @@ pub struct SocketReply {
     pub tx: FrameBatch,
 }
 
-/// One inbound datagram to deliver to a socket's client: the async port to
-/// `ipc_send` it to, and the encoded [`SocketDatagram`] payload.
+/// One message to deliver to a socket's client: the async port to
+/// `ipc_send` it to, and the encoded [`SocketDatagram`] or
+/// [`SocketStreamEvent`] payload.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Delivery {
-    /// The client async port the datagram is sent to.
+    /// The client async port the message is sent to.
     pub deliver_port: u64,
-    /// The encoded [`SocketDatagram`] frame.
+    /// The encoded delivery frame.
     pub datagram: Vec<u8>,
+}
+
+/// Frames to transmit and messages to deliver from driving a connection —
+/// the outcome of an inbound TCP segment or a stream timer tick.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StreamIo {
+    /// Frames to queue onto each named interface's TX ring.
+    pub tx: FrameBatch,
+    /// Stream events to deliver to clients' async ports.
+    pub deliveries: Vec<Delivery>,
 }
 
 /// The socket table and its dispatcher.
@@ -119,7 +165,7 @@ pub struct Delivery {
 pub struct SocketService {
     sockets: Vec<SocketEntry>,
     /// Rolling handle allocator; the next candidate id, advanced past any
-    /// live collision so a delivered datagram can never alias a reused id.
+    /// live collision so a delivered message can never alias a reused id.
     next_id: SocketId,
 }
 
@@ -144,29 +190,17 @@ impl SocketService {
 
     /// Serve one `netsock-v1` control-plane request on behalf of `caller`.
     ///
-    /// Decodes the [`SocketRequest`] from `request`, enforces `CAP_NET`
-    /// against the caller's attested origin **before any state is
-    /// touched**, applies it against the socket table and `interfaces`,
-    /// writes the encoded reply into `response`, and returns the reply
-    /// length plus any frames to transmit. `entropy` yields CSPRNG words
-    /// for ephemeral-port selection (injected so the engine stays pure).
-    ///
-    /// Fails closed: a malformed frame, a missing capability, an unknown
-    /// or unowned handle, a full quota, or a refused send each return a
-    /// typed [`Errno`] and leave `response` unspecified — the transport
-    /// loop frames the error as a status reply.
+    /// Enforces `CAP_NET` against the caller's attested origin **before
+    /// any state is touched**, decodes the [`SocketRequest`], routes it by
+    /// the target socket's transport, writes the encoded reply into
+    /// `response`, and returns the reply length plus any frames to
+    /// transmit. Fails closed with a typed [`Errno`] on any malformed
+    /// frame, missing capability, unowned handle, full quota, or refused
+    /// operation.
     ///
     /// # Errors
     ///
-    /// * [`Errno::PermissionDenied`] — the caller lacks `CAP_NET`.
-    /// * [`Errno::LimitExceeded`] — a bounded per-principal or global
-    ///   table is full.
-    /// * [`Errno::NotFound`] — the request named a handle the caller does
-    ///   not own (existence is not leaked across principals).
-    /// * [`Errno::AddressInUse`] / [`Errno::AddressUnavailable`] /
-    ///   [`Errno::NetworkUnreachable`] / [`Errno::NotConnected`] — a bind,
-    ///   address, or send refusal.
-    /// * A frame-decode [`Errno`] — the request failed to decode.
+    /// See the per-operation helpers; every refusal is typed and audited.
     #[allow(clippy::too_many_arguments)]
     pub fn serve(
         &mut self,
@@ -191,8 +225,6 @@ impl SocketService {
                 return Err(err);
             }
         };
-
-        // Capability check before any state is read or mutated.
         if !caller.capabilities().holds(CapabilityId::NET) {
             emit(
                 audit,
@@ -203,7 +235,6 @@ impl SocketService {
             );
             return Err(Errno::PermissionDenied);
         }
-
         let owner = caller.origin().proc_id();
         match decoded {
             SocketRequest::Socket {
@@ -215,7 +246,7 @@ impl SocketService {
                 self.bind(interfaces, entropy, owner, socket, local, response)
             }
             SocketRequest::Connect { socket, peer } => {
-                self.connect(entropy, owner, socket, peer, response)
+                self.connect(interfaces, entropy, owner, socket, peer, now, response)
             }
             SocketRequest::Send {
                 socket,
@@ -234,8 +265,8 @@ impl SocketService {
         }
     }
 
-    /// Open a socket: account it against the caller's quota and the global
-    /// table, then record its delivery port.
+    /// Open a socket of the requested transport, accounting it against the
+    /// caller's quota and the global table.
     fn open(
         &mut self,
         audit: &dyn Sink,
@@ -245,11 +276,6 @@ impl SocketService {
         deliver_port: u64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
-        // N4 serves datagram sockets only; the decoder already rejects
-        // other types, but re-check so an ABI change cannot silently
-        // admit an unserved type.
-        let SocketType::Datagram = sock_type;
-        // A zero delivery port could never receive a datagram.
         if deliver_port == 0 {
             return refuse(
                 audit,
@@ -266,6 +292,13 @@ impl SocketService {
                 Errno::LimitExceeded,
             );
         }
+        let proto = match sock_type {
+            SocketType::Datagram => Proto::Datagram(DatagramState {
+                peer: None,
+                groups: Vec::new(),
+            }),
+            SocketType::Stream => Proto::Stream(None),
+        };
         let id = self.alloc_id();
         self.sockets.push(SocketEntry {
             id,
@@ -274,8 +307,7 @@ impl SocketService {
             family,
             local_addr: [0u8; 16],
             local_port: 0,
-            peer: None,
-            groups: Vec::new(),
+            proto,
         });
         emit(
             audit,
@@ -292,7 +324,7 @@ impl SocketService {
     }
 
     /// Bind a socket to a local address and port, drawing an ephemeral
-    /// port when the request asks for `0`.
+    /// port when the request asks for `0`. Applies to both transports.
     fn bind(
         &mut self,
         interfaces: &Netstack,
@@ -306,7 +338,6 @@ impl SocketService {
         if local.family != self.sockets[index].family {
             return Err(Errno::OutOfRange);
         }
-        // A specified local address must be owned by some interface.
         if local.addr != [0u8; 16] && !interfaces.has_local_address(local.family, local.addr) {
             return Err(Errno::AddressUnavailable);
         }
@@ -321,30 +352,42 @@ impl SocketService {
         })
     }
 
-    /// Set a socket's default peer, implicitly binding an ephemeral local
-    /// port when the socket is still unbound (POSIX `connect` semantics).
+    /// Set a datagram socket's default peer, or actively open a stream
+    /// connection to `peer`.
+    #[allow(clippy::too_many_arguments)]
     fn connect(
         &mut self,
+        interfaces: &mut Netstack,
         entropy: &mut dyn FnMut() -> u32,
         owner: ProcId,
         socket: SocketId,
         peer: SocketAddr,
+        now: Duration64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
         let index = self.owned_index(owner, socket)?;
         if peer.family != self.sockets[index].family {
             return Err(Errno::OutOfRange);
         }
-        if self.sockets[index].local_port == 0 {
-            let port = self.assign_port(entropy, 0)?;
-            self.sockets[index].local_port = port;
+        match self.sockets[index].proto {
+            Proto::Datagram(_) => {
+                if self.sockets[index].local_port == 0 {
+                    let port = self.assign_port(entropy, 0)?;
+                    self.sockets[index].local_port = port;
+                }
+                if let Proto::Datagram(dg) = &mut self.sockets[index].proto {
+                    dg.peer = Some(peer);
+                }
+                status_reply(response)
+            }
+            Proto::Stream(Some(_)) => Err(Errno::AlreadyExists),
+            Proto::Stream(None) => {
+                self.connect_stream(interfaces, entropy, index, peer, now, response)
+            }
         }
-        self.sockets[index].peer = Some(peer);
-        status_reply(response)
     }
 
-    /// Send one datagram from a socket, implicitly binding an ephemeral
-    /// local port on first send.
+    /// Send a datagram, or enqueue bytes onto a stream's send buffer.
     #[allow(clippy::too_many_arguments)]
     fn send(
         &mut self,
@@ -359,8 +402,81 @@ impl SocketService {
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
         let index = self.owned_index(owner, socket)?;
+        match self.sockets[index].proto {
+            Proto::Datagram(_) => self.send_datagram(
+                interfaces, entropy, audit, index, dest, payload, now, response,
+            ),
+            Proto::Stream(_) => {
+                // A connected stream has no per-datagram destination.
+                if dest.is_some() {
+                    return Err(Errno::OutOfRange);
+                }
+                self.send_stream(interfaces, index, payload, now, response)
+            }
+        }
+    }
+
+    /// Close a socket. A datagram socket is released at once (leaving its
+    /// groups); a connected stream begins an orderly teardown (FIN) and is
+    /// reaped in the background once fully closed.
+    fn close(
+        &mut self,
+        interfaces: &mut Netstack,
+        owner: ProcId,
+        socket: SocketId,
+        now: Duration64,
+        response: &mut [u8],
+    ) -> Result<SocketReply, Errno> {
+        let index = self.owned_index(owner, socket)?;
+        let mut tx = FrameBatch::new();
+        if matches!(self.sockets[index].proto, Proto::Stream(Some(_))) {
+            if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
+                conn.client_closed = true;
+                let _ = conn.tcb.close(now);
+            }
+            // The connection lingers until teardown completes (the FIN is
+            // retransmitted and TIME-WAIT observed in the background); it
+            // is reaped once fully closed.
+            tx = self.pump_stream(interfaces, index, now);
+            self.reap_if_done(index);
+        } else {
+            let family = self.sockets[index].family;
+            let groups = match &mut self.sockets[index].proto {
+                Proto::Datagram(dg) => core::mem::take(&mut dg.groups),
+                Proto::Stream(_) => Vec::new(),
+            };
+            for group in &groups {
+                let ip = family_addr_to_ip(family, *group);
+                tx.extend(interfaces.leave_multicast_all(ip, now));
+            }
+            self.sockets.swap_remove(index);
+        }
+        let len = status_reply(response)?.len;
+        Ok(SocketReply { len, tx })
+    }
+}
+
+impl SocketService {
+    /// Send one datagram from a datagram socket, implicitly binding an
+    /// ephemeral local port on first send.
+    #[allow(clippy::too_many_arguments)]
+    fn send_datagram(
+        &mut self,
+        interfaces: &mut Netstack,
+        entropy: &mut dyn FnMut() -> u32,
+        audit: &dyn Sink,
+        index: usize,
+        dest: Option<SocketAddr>,
+        payload: &[u8],
+        now: Duration64,
+        response: &mut [u8],
+    ) -> Result<SocketReply, Errno> {
         let family = self.sockets[index].family;
-        let Some(target) = dest.or(self.sockets[index].peer) else {
+        let peer = match &self.sockets[index].proto {
+            Proto::Datagram(dg) => dg.peer,
+            Proto::Stream(_) => None,
+        };
+        let Some(target) = dest.or(peer) else {
             return refuse(
                 audit,
                 "socket send refused: not connected",
@@ -384,27 +500,255 @@ impl SocketService {
         }
     }
 
-    /// Close a socket, leaving every multicast group it still holds.
-    fn close(
+    /// Actively open a stream connection: draw a CSPRNG ISN, build the
+    /// [`Tcb`], choose the egress interface by originating the SYN, and
+    /// record the connection. The socket stays unconnected (and the client
+    /// may retry) if no interface can reach the peer.
+    fn connect_stream(
         &mut self,
         interfaces: &mut Netstack,
-        owner: ProcId,
-        socket: SocketId,
+        entropy: &mut dyn FnMut() -> u32,
+        index: usize,
+        peer: SocketAddr,
         now: Duration64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
-        let index = self.owned_index(owner, socket)?;
-        let entry = self.sockets.swap_remove(index);
-        let mut tx = FrameBatch::new();
-        for group in &entry.groups {
-            let ip = family_addr_to_ip(entry.family, *group);
-            tx.extend(interfaces.leave_multicast_all(ip, now));
+        if self.sockets[index].local_port == 0 {
+            let port = self.assign_port(entropy, 0)?;
+            self.sockets[index].local_port = port;
         }
+        let local_port = self.sockets[index].local_port;
+        // The ISN is a CSPRNG draw (the engine makes no randomness).
+        let iss = entropy();
+        let mut tcb = Tcb::connect(TcpConfig::default(), local_port, peer.port, iss, now);
+        let segs = drain_segments(&mut tcb, now);
+        let dest = ip_of(peer);
+        let Some(((meta0, payload0), rest)) = segs.split_first() else {
+            return Err(Errno::NetworkUnreachable);
+        };
+        let (iface, mut frames) = interfaces.choose_tcp_egress(dest, meta0, payload0, now)?;
+        for (meta, payload) in rest {
+            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, now) {
+                frames.extend(more);
+            }
+        }
+        self.sockets[index].proto = Proto::Stream(Some(Box::new(StreamConn {
+            tcb,
+            peer,
+            iface,
+            connected_notified: false,
+            closed_notified: false,
+            client_closed: false,
+        })));
+        let tx = if frames.is_empty() {
+            FrameBatch::new()
+        } else {
+            alloc::vec![(iface, frames)]
+        };
         let len = status_reply(response)?.len;
         Ok(SocketReply { len, tx })
     }
 
-    /// Join a multicast group on the socket, refcounted per membership.
+    /// Enqueue bytes onto a stream's send buffer (accepting as many as the
+    /// bounded buffer holds) and pump the resulting segments.
+    fn send_stream(
+        &mut self,
+        interfaces: &mut Netstack,
+        index: usize,
+        payload: &[u8],
+        now: Duration64,
+        response: &mut [u8],
+    ) -> Result<SocketReply, Errno> {
+        let accepted = match &mut self.sockets[index].proto {
+            Proto::Stream(Some(conn)) => match conn.tcb.send(payload) {
+                Ok(n) => n,
+                // The connection has closed or reset: no more may be sent.
+                Err(_) => return Err(Errno::NotConnected),
+            },
+            _ => return Err(Errno::NotConnected),
+        };
+        let tx = self.pump_stream(interfaces, index, now);
+        let accepted = u32::try_from(accepted).unwrap_or(u32::MAX);
+        let len = encode_send_reply(Ok(accepted), response)?;
+        Ok(SocketReply { len, tx })
+    }
+
+    /// Drain a connected stream's outbound segments through its bound
+    /// interface, returning the frames tagged by that interface's alias.
+    fn pump_stream(
+        &mut self,
+        interfaces: &mut Netstack,
+        index: usize,
+        now: Duration64,
+    ) -> FrameBatch {
+        let (iface, dest) = match &self.sockets[index].proto {
+            Proto::Stream(Some(conn)) => (conn.iface, ip_of(conn.peer)),
+            _ => return FrameBatch::new(),
+        };
+        let mut segs = Vec::new();
+        if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
+            segs = drain_segments(&mut conn.tcb, now);
+        }
+        let mut frames = Vec::new();
+        for (meta, payload) in &segs {
+            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, now) {
+                frames.extend(more);
+            }
+        }
+        if frames.is_empty() {
+            FrameBatch::new()
+        } else {
+            alloc::vec![(iface, frames)]
+        }
+    }
+
+    /// Feed one inbound TCP segment (already checksum-verified by the
+    /// engine) to the connection its four-tuple names, driving the
+    /// resulting egress segments and client-visible stream events.
+    ///
+    /// A segment matching no connected stream is dropped (this increment
+    /// serves only active opens; passive listeners and stateless RSTs are
+    /// N6). It never panics and returns bounded output.
+    #[must_use]
+    pub fn on_tcp_segment(
+        &mut self,
+        interfaces: &mut Netstack,
+        source: IpAddr,
+        destination: IpAddr,
+        segment: &[u8],
+        now: Duration64,
+    ) -> StreamIo {
+        let pseudo = pseudo_for(source, destination);
+        let Some(seg) = TcpSegment::parse(pseudo, segment) else {
+            return StreamIo::default();
+        };
+        let (fam, src_bytes) = parts_of(source);
+        let (dst_port, src_port) = (seg.destination_port, seg.source_port);
+        let Some(index) = self.sockets.iter().position(|e| {
+            e.family == fam
+                && e.local_port == dst_port
+                && matches!(&e.proto, Proto::Stream(Some(c))
+                    if c.peer.port == src_port && c.peer.addr == src_bytes)
+        }) else {
+            return StreamIo::default();
+        };
+        if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
+            conn.tcb.on_segment(&seg, now);
+        }
+        let tx = self.pump_stream(interfaces, index, now);
+        let deliveries = self.collect_stream_events(index);
+        self.reap_if_done(index);
+        StreamIo { tx, deliveries }
+    }
+
+    /// Drive every connected stream's timers at `now` (retransmit, delayed
+    /// ACK, persist, user timeout, TIME-WAIT), returning the egress frames
+    /// and client events. Fully-closed client-closed connections are
+    /// reaped.
+    #[must_use]
+    pub fn advance_streams(&mut self, interfaces: &mut Netstack, now: Duration64) -> StreamIo {
+        let mut io = StreamIo::default();
+        let mut i = 0;
+        while i < self.sockets.len() {
+            if matches!(self.sockets[i].proto, Proto::Stream(Some(_))) {
+                if let Proto::Stream(Some(conn)) = &mut self.sockets[i].proto {
+                    conn.tcb.advance(now);
+                }
+                io.tx.extend(self.pump_stream(interfaces, i, now));
+                io.deliveries.extend(self.collect_stream_events(i));
+                if self.reap_if_done(i) {
+                    // A reap swap-removed this slot; re-examine it.
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        io
+    }
+
+    /// The earliest deadline across every connected stream, folded into
+    /// the service's wait-set timeout beside the per-interface deadlines.
+    #[must_use]
+    pub fn stream_next_deadline(&self) -> Option<Duration64> {
+        self.sockets
+            .iter()
+            .filter_map(|e| match &e.proto {
+                Proto::Stream(Some(c)) => c.tcb.next_deadline(),
+                _ => None,
+            })
+            .min_by_key(|d| (d.secs(), d.subsec_nanos()))
+    }
+
+    /// Collect the client-visible events a connection now owes: the
+    /// one-shot `Connected`, any received stream bytes in order, and the
+    /// one-shot `Closed` (once, stating why). No event follows `Closed`.
+    fn collect_stream_events(&mut self, index: usize) -> Vec<Delivery> {
+        let deliver_port = self.sockets[index].deliver_port;
+        let id = self.sockets[index].id;
+        let mut out = Vec::new();
+        let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto else {
+            return out;
+        };
+        if conn.closed_notified {
+            return out;
+        }
+        if conn.tcb.is_established() && !conn.connected_notified {
+            conn.connected_notified = true;
+            push_stream_event(
+                &mut out,
+                deliver_port,
+                &SocketStreamEvent::Connected { socket: id },
+            );
+        }
+        // Deliver every in-order received byte before any close, in
+        // bounded chunks. Draining the receive buffer keeps the advertised
+        // window open (§2.16 — the client's port queue is the app buffer).
+        loop {
+            let mut buf = [0u8; SOCKET_MAX_DATAGRAM];
+            let n = conn.tcb.recv(&mut buf);
+            if n == 0 {
+                break;
+            }
+            push_stream_event(
+                &mut out,
+                deliver_port,
+                &SocketStreamEvent::Data {
+                    socket: id,
+                    payload: &buf[..n],
+                },
+            );
+        }
+        let reason = if let Some(r) = conn.tcb.reset_reason() {
+            Some(map_reset(r))
+        } else if peer_closed(conn.tcb.state()) {
+            Some(StreamCloseReason::PeerClosed)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            conn.closed_notified = true;
+            push_stream_event(
+                &mut out,
+                deliver_port,
+                &SocketStreamEvent::Closed { socket: id, reason },
+            );
+        }
+        out
+    }
+
+    /// Reap a client-closed stream once its teardown has fully completed
+    /// (RFC 9293 CLOSED). Returns whether the slot was removed.
+    fn reap_if_done(&mut self, index: usize) -> bool {
+        let done = matches!(&self.sockets[index].proto,
+            Proto::Stream(Some(c)) if c.client_closed && matches!(c.tcb.state(), State::Closed));
+        if done {
+            self.sockets.swap_remove(index);
+        }
+        done
+    }
+
+    /// Join a multicast group on a datagram socket, refcounted per
+    /// membership.
     fn join(
         &mut self,
         interfaces: &mut Netstack,
@@ -415,23 +759,30 @@ impl SocketService {
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
         let index = self.owned_index(owner, socket)?;
+        // Multicast is a datagram-only concept.
+        let Proto::Datagram(_) = &self.sockets[index].proto else {
+            return Err(Errno::OutOfRange);
+        };
         if group.family != self.sockets[index].family || !is_multicast_addr(group) {
             return Err(Errno::OutOfRange);
         }
-        if self.sockets[index].groups.contains(&group.addr) {
-            // Idempotent per socket: already a member.
-            return status_reply(response);
-        }
-        if self.sockets[index].groups.len() >= MAX_GROUPS_PER_SOCKET {
-            return Err(Errno::LimitExceeded);
+        if let Proto::Datagram(dg) = &self.sockets[index].proto {
+            if dg.groups.contains(&group.addr) {
+                return status_reply(response);
+            }
+            if dg.groups.len() >= MAX_GROUPS_PER_SOCKET {
+                return Err(Errno::LimitExceeded);
+            }
         }
         let tx = interfaces.join_multicast_all(ip_of(group), now)?;
-        self.sockets[index].groups.push(group.addr);
+        if let Proto::Datagram(dg) = &mut self.sockets[index].proto {
+            dg.groups.push(group.addr);
+        }
         let len = status_reply(response)?.len;
         Ok(SocketReply { len, tx })
     }
 
-    /// Leave a multicast group the socket had joined.
+    /// Leave a multicast group a datagram socket had joined.
     fn leave(
         &mut self,
         interfaces: &mut Netstack,
@@ -442,23 +793,32 @@ impl SocketService {
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
         let index = self.owned_index(owner, socket)?;
-        let Some(pos) = self.sockets[index]
-            .groups
-            .iter()
-            .position(|g| *g == group.addr)
-        else {
+        let Proto::Datagram(_) = &self.sockets[index].proto else {
+            return Err(Errno::OutOfRange);
+        };
+        let removed = if let Proto::Datagram(dg) = &mut self.sockets[index].proto {
+            if let Some(pos) = dg.groups.iter().position(|g| *g == group.addr) {
+                dg.groups.swap_remove(pos);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !removed {
             // Leaving a group never joined is a no-op success.
             return status_reply(response);
-        };
-        self.sockets[index].groups.swap_remove(pos);
+        }
         let tx = interfaces.leave_multicast_all(ip_of(group), now);
         let len = status_reply(response)?.len;
         Ok(SocketReply { len, tx })
     }
 
-    /// Route one engine [`StackEvent`] to the sockets that should receive
-    /// it, returning an encoded [`SocketDatagram`] delivery per matching
-    /// socket. A non-datagram event yields nothing.
+    /// Route one engine [`StackEvent::UdpDatagram`] to the datagram
+    /// sockets that should receive it, returning an encoded
+    /// [`SocketDatagram`] delivery per matching socket. A non-datagram
+    /// event yields nothing.
     #[must_use]
     pub fn deliver(&self, event: &StackEvent) -> Vec<Delivery> {
         let StackEvent::UdpDatagram {
@@ -476,21 +836,21 @@ impl SocketService {
         let dest_multicast = is_multicast_ip(*destination);
         let mut out = Vec::new();
         for entry in &self.sockets {
+            let Proto::Datagram(dg) = &entry.proto else {
+                continue;
+            };
             if entry.family != dest_family || entry.local_port != *destination_port {
                 continue;
             }
-            // Destination match: a joined group for multicast, else the
-            // bound local address (or any).
             let dest_ok = if dest_multicast {
-                entry.groups.contains(&dest_bytes)
+                dg.groups.contains(&dest_bytes)
             } else {
                 entry.local_addr == [0u8; 16] || entry.local_addr == dest_bytes
             };
             if !dest_ok {
                 continue;
             }
-            // Connected sockets only receive from their peer.
-            if let Some(peer) = entry.peer {
+            if let Some(peer) = dg.peer {
                 if peer.family != src_family || peer.addr != src_bytes || peer.port != *source_port
                 {
                     continue;
@@ -571,6 +931,72 @@ impl SocketService {
             }
         }
     }
+}
+
+/// Drain every segment a connection's TCB wants transmitted into owned
+/// `(header, payload)` pairs, so the engine's `send_tcp` can be called
+/// without holding a borrow of the socket table across it.
+fn drain_segments(tcb: &mut Tcb, now: Duration64) -> Vec<(TcpSegmentMeta, Vec<u8>)> {
+    let mut segs = Vec::new();
+    tcb.poll_transmit(now, |out| {
+        segs.push((out.meta, out.payload.to_vec()));
+        true
+    });
+    segs
+}
+
+/// Encode a stream event and push it as a delivery to `deliver_port`. A
+/// bounded, valid event always encodes; an encode failure is dropped
+/// rather than delivering a malformed frame (fail closed).
+fn push_stream_event(out: &mut Vec<Delivery>, deliver_port: u64, event: &SocketStreamEvent<'_>) {
+    let mut buf = alloc::vec![0u8; SocketStreamEvent::MAX_WIRE_LEN];
+    if let Ok(len) = event.encode(&mut buf) {
+        buf.truncate(len);
+        out.push(Delivery {
+            deliver_port,
+            datagram: buf,
+        });
+    }
+}
+
+/// The pseudo-header context for a segment received from `source` to our
+/// `destination`.
+fn pseudo_for(source: IpAddr, destination: IpAddr) -> Pseudo {
+    match (source, destination) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => Pseudo::V4 {
+            source: s,
+            destination: d,
+        },
+        (IpAddr::V6(s), IpAddr::V6(d)) => Pseudo::V6 {
+            source: s,
+            destination: d,
+        },
+        // Mixed families never arrive together from one IP packet; fold a
+        // v4 context (the checksum will simply not verify).
+        _ => Pseudo::V4 {
+            source: Ipv4Addr::UNSPECIFIED,
+            destination: Ipv4Addr::UNSPECIFIED,
+        },
+    }
+}
+
+/// Map a connection's abort reason onto the client-visible close reason.
+fn map_reset(reason: ResetReason) -> StreamCloseReason {
+    match reason {
+        ResetReason::ConnectionRefused => StreamCloseReason::Refused,
+        ResetReason::TimedOut => StreamCloseReason::TimedOut,
+        ResetReason::ConnectionReset | ResetReason::Aborted => StreamCloseReason::Reset,
+    }
+}
+
+/// Whether the peer has closed its send direction (a FIN was received and
+/// every byte before it delivered): the client's `recv` now sees
+/// end-of-stream.
+fn peer_closed(state: State) -> bool {
+    matches!(
+        state,
+        State::CloseWait | State::Closing | State::LastAck | State::TimeWait | State::Closed
+    )
 }
 
 /// Write the success status frame into `response`.
