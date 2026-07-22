@@ -217,7 +217,15 @@ picker composes the same engine and never launches.
 `render(browser, theme, font, viewport)` paints a path bar plus the current
 directory into a `tairix-raster` `Surface` sized to the viewport, in whichever
 of the two views the browser holds (`ViewMode::List` or `ViewMode::Grid`). The
-path bar takes the theme's raised role. In the **list** view each entry is a
+path bar takes the theme's raised role and draws the current directory as a
+clickable **breadcrumb trail** (`plans/NEW-FILEMANAGER.md` FM4b): the root
+crumb followed by one crumb per path component. Ancestor crumbs are drawn in
+the accent colour to read as navigable and the terminal crumb (the current
+directory) is drawn solid and inert; the trail is **right-anchored**, so when
+it is wider than the window the leading ancestors scroll off the left and are
+clipped while the current directory stays visible. The placement is the shared
+`breadcrumb::layout`, so the paint and the crumb hit-test cannot disagree
+(`AGENTS.md` §2.2). In the **list** view each entry is a
 shared `lib/controls` `TableRow` with an aligned **name / size / modified**
 column layout — the same collection control (and the same one column-width
 definition) the trusted picker uses, so the file manager and the picker are
@@ -250,6 +258,10 @@ paint and the hit-test can never disagree (`AGENTS.md` §2.2). A vertical
 same `ScrollRange`; the wheel is routed through the shared `scroll::ScrollModel`
 (`scroll_lines`), and a selection-moving key reveals the selection the least it
 can (`reveal_selection`) — the browser owns the one scroll offset both consume.
+The path bar has its own mirror hit-test, `crumb_at`, which maps a click in the
+path bar row to the ancestor `depth` of the crumb under it (and to nothing for
+a separator gap, the inert current crumb, or a crumb clipped off the left) over
+that same `breadcrumb::layout`.
 The surface is rectangular; the compositor places and rounds it through its
 single anti-aliased rounded-corner path, so there is no rounding in the app.
 Every length saturates so a degenerate viewport paints what it can rather than
@@ -261,10 +273,14 @@ panicking (`AGENTS.md` §2.9).
 over `tairix_rt::read_dir_all`, creates and grants the zero-copy window
 frame region, parks on its window-event mailbox, and drives the browser
 with the keyboard (`Down`/`Up` select, `Enter` opens a directory,
-`Backspace` climbs, `F2` renames the selected item); a `CloseRequested`
-from the desktop ends it cleanly, and every bring-up refusal exits
-fail-loud with its reason on `stderr`. The desktop session's start menu
-carries a `Files` entry that spawns the bundle.
+`Backspace` climbs, `F2` renames the selected item) and the pointer: a
+primary-button press on a path-bar crumb climbs to that ancestor through the
+same transactional `Browser::navigate_to_depth` the keyboard uses, and a press
+on an item selects it (`Browser::select`) — the GUI is a spelling of the user's
+intent, never an escalation, so a refused re-listing leaves the browser exactly
+where it was. A `CloseRequested` from the desktop ends it cleanly, and every
+bring-up refusal exits fail-loud with its reason on `stderr`. The desktop
+session's start menu carries a `Files` entry that spawns the bundle.
 
 ### In-place rename
 

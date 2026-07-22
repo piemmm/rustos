@@ -35,6 +35,8 @@
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
 //!   command enable/pressed state and the [`breadcrumbs`] path bar
 //!   (`plans/NEW-FILEMANAGER.md` `FM4b`).
+//! * [`breadcrumb`](mod@breadcrumb) — the drawn path bar's placement: the one
+//!   right-anchored crumb layout the painter and the pointer hit-test share.
 //! * [`select`](mod@select) — the [`Selection`] multi-entry set (single /
 //!   toggle / range / select-all) the management verbs act on.
 //! * [`clipboard`](mod@clipboard) — the cut/copy [`Clipboard`] and
@@ -73,6 +75,7 @@
 extern crate alloc;
 
 pub mod activate;
+pub mod breadcrumb;
 pub mod browser;
 pub mod chrome;
 pub mod clipboard;

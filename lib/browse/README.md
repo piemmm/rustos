@@ -149,20 +149,31 @@ can never diverge in navigation semantics, listing policy, or look.
   MiB`) and `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
   epoch so a stampless file is never given a fabricated date), the
   file-listing convention shared by both views.
+- **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
+  the pure geometry of the drawn, clickable path bar. `layout` places each
+  `Crumb`'s label left to right from measured widths and **right-anchors** the
+  strip so the current directory stays visible, letting overflowing leading
+  ancestors scroll off the left (clipped) rather than dropping any crumb;
+  `crumb_at` is the mirror hit-test over that same placement. Font-agnostic
+  (it works in measured pixel widths), so it is host-proven with synthetic
+  widths and shared by the painter and the pointer hit-test (one definition).
 - **Renderer** (`render`): paints the path bar and the current directory
-  into a `lib/raster` `Surface` in the browser's `ViewMode` — list entries
-  as shared `lib/controls` `TableRow`s (name/size/modified columns), grid
-  entries as shared `Card` tiles, each tile carrying its `icon`-classified
+  into a `lib/raster` `Surface` in the browser's `ViewMode` — the path bar as
+  a clickable breadcrumb trail (ancestors in the accent colour, the current
+  directory drawn solid and inert) over the `breadcrumb` placement, list
+  entries as shared `lib/controls` `TableRow`s (name/size/modified columns),
+  grid entries as shared `Card` tiles, each tile carrying its `icon`-classified
   file-type glyph above the label — so the file manager and the trusted
   picker render one coherent themed surface, the selected item carrying the
   shared selection state. A vertical `lib/controls` `ScrollBar` is drawn in
   a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
   routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`
-  keeps the selection visible, and `entry_index_at` is the shared point
-  hit-test. `selection_rect` is its inverse — the rectangle the selected
-  item is drawn in, so an overlay (the in-place rename editor) sits exactly
-  over it. `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the
-  files app, the picker, and the QEMU vertical's host-side assertions share.
+  keeps the selection visible, and `entry_index_at` is the shared item point
+  hit-test (`crumb_at` its path-bar counterpart). `selection_rect` is
+  `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so
+  an overlay (the in-place rename editor) sits exactly over it.
+  `WIN_WIDTH`/`WIN_HEIGHT` are the one browser-view geometry the files app,
+  the picker, and the QEMU vertical's host-side assertions share.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into
   a bounded, validated absolute path — each component checked by the shared
   `tairix_path::validate_file_name` rule, the same rule the rename editor

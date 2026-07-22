@@ -27,11 +27,13 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM5,
-FM6a, FM6b's pure association model, FM7a's selection + clipboard model, and
-FM7b's pure paste-execution model are done**; the FM4b drawn chrome, the FM6b
-app-side spawn/delegation, the FM7b app-side move/copy/delete verbs, and FM8–FM9
-are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
+drawn breadcrumb path bar + pointer routing, FM5, FM6a, FM6b's pure association
+model, FM7a's selection + clipboard model, and FM7b's pure paste-execution model
+are done**; the rest of the FM4b drawn chrome (the toolbar, the context menu,
+`Alt+←/→`), the FM6b app-side spawn/delegation, the FM7b app-side
+move/copy/delete verbs, and FM8–FM9 are `planned`. The starting point is
+`plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -41,9 +43,13 @@ navigates by keyboard; the renderer-mirroring point hit-test
 FM2 was split (§2.19) into FM2a (the list item view) and FM2b (the icon-grid
 view, the runtime view toggle, and the drawn `ScrollBar`); both are done. FM4 is
 split the same way: **FM4a** (the engine navigation model — bounded back/forward
-history + breadcrumb navigation) is done; **FM4b** (the drawn toolbar/breadcrumb
-chrome and the context menu) is deferred to land *with* the actions its entries
-gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so the menu is not
+history + breadcrumb navigation) is done; **FM4b** paints that model as drawn
+chrome. Its **breadcrumb path bar is now drawn and clickable**, with the app's
+pointer routing wired onto it (a primary-button press climbs a crumb via
+`navigate_to_depth` or selects an item via `select`) — landed now because its
+action (breadcrumb navigation) already exists (§2.4). The remaining FM4b chrome
+(the toolbar and the context menu) still lands *with* the actions its entries
+gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so no menu/tool is
 built as speculative surface ahead of the behaviours it invokes (§2.4).
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
@@ -274,10 +280,28 @@ Done. The host-testable navigation *model* the FM4b chrome will drive, added to
 
 ### FM4b — the drawn chrome: toolbar, breadcrumb bar, context menu `[~]`
 
-The app frame, entirely `lib/controls` widgets over the theme, painting the
-FM4a model. **The drawn chrome is deferred to land with the actions its
-surfaces invoke** so no menu/toolbar entry is built ahead of the behaviour it
-calls (§2.4).
+The app frame, entirely `lib/controls`/`lib/browse::render` widgets over the
+theme, painting the FM4a model. **A drawn surface lands with the action it
+invokes** so no menu/toolbar entry is built ahead of the behaviour it calls
+(§2.4) — the breadcrumb path bar lands now (its navigation already exists), the
+toolbar and context menu with their verbs.
+
+**The drawn, clickable breadcrumb path bar is done**: `lib/browse::breadcrumb`
+is the pure placement (`layout` + `crumb_at`) that positions the `chrome::breadcrumbs`
+crumbs left-to-right and **right-anchors** the strip so the current directory
+stays visible, clipping overflowing leading ancestors rather than dropping any
+crumb; it is font-agnostic (measured pixel widths) and shared by the painter
+and the hit-test (§2.2). `render::draw_path_bar` draws the crumbs (ancestors in
+the accent colour, the current directory solid and inert, muted separators) and
+`render::crumb_at` is the app-facing hit-test returning the clicked ancestor's
+`depth`. The `files.app` `Run` binary routes a primary-button `Pointer` press
+through `crumb_at`→`navigate_to_depth` (a path-bar crumb) or
+`entry_index_at`→`select` (an item), the same transactional navigation the
+keyboard drives (a refused re-listing leaves the browser put). Host-tested in
+`lib/browse` (layout fit/overflow right-anchor, `crumb_at` gaps / off-screen /
+out-of-range, empty, and the `render::crumb_at` mirror: root inert, ancestor
+navigable, current inert, path-bar-row guard). Docs: `docs/src/desktop/apps.md`,
+`lib/browse/README.md` + rustdoc.
 
 **The pure chrome model is done** (§2.19 — host-proven ahead of the drawn
 widgets, exactly as FM6a/FM6b/FM7a/FM7b's pure models landed): the
@@ -302,12 +326,10 @@ The remaining drawn chrome (still `planned`):
 - **Toolbar** (`lib/controls::Toolbar`): the `TOOLBAR_COMMANDS` painted as
   `IconButton`s over `ToolbarModel`, each with a keyboard equivalent and the
   disabled state the model reports. New Folder arrives with FM7 (`fs_mkdir`).
-- **Breadcrumb path bar**: the `breadcrumbs` `Crumb`s drawn as clickable
-  components, each click routed through `navigate_to_depth`.
 - **Context menu** (`lib/controls::Menu`): one menu definition whose entries
   land as their stages do — Open/Open With… (FM6), Rename (FM5), Cut/Copy/
   Paste/Delete (FM7), Properties (FM8) — each disabling when inapplicable.
-- **`Alt+←/→`** bound to Back/Forward.
+- **`Alt+←/→`** bound to Back/Forward (lands with the toolbar's Back/Forward).
 
 ### FM5 — in-place rename `[x]`
 

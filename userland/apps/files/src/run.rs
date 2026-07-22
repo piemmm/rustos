@@ -48,8 +48,10 @@ mod program {
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::fs::FS_NAME_MAX;
-    use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
-    use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::input::{
+        KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
+    };
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_browse::render::render;
     use tairix_browse::{
@@ -58,7 +60,7 @@ mod program {
     };
     use tairix_controls::text::{TextAction, TextField};
     use tairix_font::BitmapFont;
-    use tairix_geometry::{Rect, Scale};
+    use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{Key, Modifiers, NamedKey};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
@@ -306,11 +308,16 @@ mod program {
                 );
                 (moved, false)
             }
-            // Focus changes, key releases, and pointer events repaint
-            // nothing today; the selection model is keyboard-driven. The
-            // browser never requests a pick, so a pick conclusion is a
-            // session bug and is ignored rather than acted on (an
-            // unredeemed delegation is reclaimed by the kernel at exit).
+            // A pointer event the desktop routed into this window's local
+            // coordinates: a primary-button press navigates (a path-bar crumb)
+            // or selects (an item); every other pointer action is a no-op.
+            WindowEvent::Pointer { x, y, action, .. } => {
+                apply_pointer(browser, font, theme, viewport, *x, *y, *action)
+            }
+            // Focus changes and key releases repaint nothing. The browser
+            // never requests a pick, so a pick conclusion is a session bug and
+            // is ignored rather than acted on (an unredeemed delegation is
+            // reclaimed by the kernel at exit).
             //
             // Minimized needs no action: the window manager hides the
             // window and keeps its taskbar entry; the browser renders on
@@ -323,12 +330,53 @@ mod program {
             WindowEvent::Key { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
-            | WindowEvent::Pointer { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
         }
+    }
+
+    /// Apply one routed pointer event in navigation mode, reporting whether the
+    /// view changed (and must re-present).
+    ///
+    /// Only a primary-button press acts, and it is the spelling of one user
+    /// intent, never an escalation: a click on a path-bar crumb climbs to that
+    /// ancestor through the same transactional [`Browser::navigate_to_depth`]
+    /// the keyboard uses (a refused re-listing leaves the browser exactly where
+    /// it was); a click on an item selects it. A click on the inert current
+    /// crumb, a separator gap, or empty space resolves to nothing and repaints
+    /// nothing. Opening an item stays keyboard-driven until the launch/open
+    /// stage wires the spawn path.
+    fn apply_pointer<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        x: u32,
+        y: u32,
+        action: PointerAction,
+    ) -> (bool, bool) {
+        if action != PointerAction::Pressed(PointerButtonCode::Primary) {
+            return (false, false);
+        }
+        let point = Point::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+        );
+        if let Some(depth) = tairix_browse::render::crumb_at(browser, font, viewport, point) {
+            let moved = browser.navigate_to_depth(depth).unwrap_or(false);
+            if moved {
+                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+            }
+            return (moved, false);
+        }
+        if let Some(index) =
+            tairix_browse::render::entry_index_at(browser, font, theme, viewport, point)
+        {
+            return (browser.select(index).is_ok(), false);
+        }
+        (false, false)
     }
 
     /// Begin an in-place rename of the selected item: reveal the row so the
@@ -472,6 +520,44 @@ mod program {
         }
     }
 
+    /// Bind the app's own event mailbox and add it to a fresh wait-set the
+    /// event loop parks on, returning `(endpoint, set)`.
+    ///
+    /// The endpoint id is unique by construction (the shared
+    /// `event_endpoint_for` naming rule: this task's never-reused kernel id
+    /// under a fixed tag) and never a reserved endpoint; the bind is refused
+    /// otherwise. On any refusal it states the reason on `stderr` and returns
+    /// the reserved fail-closed [`EXIT_NO_EVENTS`] code for `main` to exit
+    /// with, so the app exits rather than degrade into a busy re-poll.
+    fn bind_event_mailbox() -> Result<(u64, u64), i32> {
+        let Ok(origin) = tairix_rt::self_origin() else {
+            return Err(fail(EXIT_NO_EVENTS, "own identity unavailable"));
+        };
+        let event_endpoint = tairix_window::event_endpoint_for(origin.pid());
+        if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
+            || tairix_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
+        {
+            return Err(fail(EXIT_NO_EVENTS, "event mailbox bind refused"));
+        }
+        let set = tairix_rt::waitset_create();
+        if set < 0 {
+            return Err(fail(EXIT_NO_EVENTS, "wait-set refused"));
+        }
+        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
+        let set = set as u64;
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Port,
+            event_endpoint,
+            EVENT_TOKEN,
+        ) != 0
+        {
+            return Err(fail(EXIT_NO_EVENTS, "event mailbox wait refused"));
+        }
+        Ok((event_endpoint, set))
+    }
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
@@ -518,35 +604,12 @@ mod program {
         // present call while the session reads.
         let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
 
-        // --- The event mailbox the app parks on. The id is unique by
-        // construction (the shared `event_endpoint_for` naming rule: this
-        // task's never-reused kernel id under a fixed tag) and never
-        // reserved; the bind is refused otherwise.
-        let Ok(origin) = tairix_rt::self_origin() else {
-            return fail(EXIT_NO_EVENTS, "own identity unavailable");
+        // --- The event mailbox the app parks on, bound and added to a
+        // fresh wait-set (a bring-up refusal exits fail-loud with its code).
+        let (event_endpoint, set) = match bind_event_mailbox() {
+            Ok(pair) => pair,
+            Err(code) => return code,
         };
-        let event_endpoint = tairix_window::event_endpoint_for(origin.pid());
-        if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
-            || tairix_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
-        {
-            return fail(EXIT_NO_EVENTS, "event mailbox bind refused");
-        }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return fail(EXIT_NO_EVENTS, "wait-set refused");
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            event_endpoint,
-            EVENT_TOKEN,
-        ) != 0
-        {
-            return fail(EXIT_NO_EVENTS, "event mailbox wait refused");
-        }
 
         // --- Open the window and paint the first listing.
         let mut client = WindowClient::new(RtWindowTransport);
