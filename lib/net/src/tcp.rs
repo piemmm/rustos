@@ -361,6 +361,23 @@ impl TcpOptions {
             && self.timestamps.is_none()
             && self.sack_count == 0
     }
+
+    /// Bytes these options occupy on the wire once serialised and padded
+    /// to a 4-byte boundary — the overhead a segment carrying them adds
+    /// beyond the 20-byte fixed header.
+    ///
+    /// The sender uses this to keep header + options + payload within the
+    /// path MTU (RFC 6691): a data segment's payload is the negotiated MSS
+    /// minus this overhead, so a full-size segment never overflows the link.
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
+        // Reuse the one serialiser so the length can never disagree with
+        // the bytes actually emitted. `encode_options` only fails when the
+        // options exceed the 40-byte region, impossible for a self-built
+        // set; the ceiling fallback keeps this total and panic-free.
+        let mut buf = [0u8; MAX_OPTIONS_LEN];
+        encode_options(self, &mut buf).unwrap_or(MAX_OPTIONS_LEN)
+    }
 }
 
 /// TCP option kind numbers (RFC 9293 §3.2 and the options registry).

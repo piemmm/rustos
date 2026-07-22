@@ -518,16 +518,23 @@ impl SocketService {
             self.sockets[index].local_port = port;
         }
         let local_port = self.sockets[index].local_port;
+        let dest = ip_of(peer);
+        // Bind the egress interface and learn its effective MSS for this
+        // family *before* building the TCB, so the SYN advertises — and the
+        // connection segments to — a size that fits the link (RFC 6691).
+        // The stack stays unconnected (the client may retry) when no
+        // interface can reach the peer.
+        let (iface, local_mss) = interfaces.egress_mss_for(dest, now)?;
         // The ISN is a CSPRNG draw (the engine makes no randomness).
         let iss = entropy();
-        let mut tcb = Tcb::connect(TcpConfig::default(), local_port, peer.port, iss, now);
-        let segs = drain_segments(&mut tcb, now);
-        let dest = ip_of(peer);
-        let Some(((meta0, payload0), rest)) = segs.split_first() else {
-            return Err(Errno::NetworkUnreachable);
+        let config = TcpConfig {
+            local_mss,
+            ..TcpConfig::default()
         };
-        let (iface, mut frames) = interfaces.choose_tcp_egress(dest, meta0, payload0, now)?;
-        for (meta, payload) in rest {
+        let mut tcb = Tcb::connect(config, local_port, peer.port, iss, now);
+        let segs = drain_segments(&mut tcb, now);
+        let mut frames = Vec::new();
+        for (meta, payload) in &segs {
             if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, now) {
                 frames.extend(more);
             }

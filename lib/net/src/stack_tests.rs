@@ -1099,6 +1099,50 @@ fn tcp_pair() -> (TcpSide, TcpSide) {
     (a, b)
 }
 
+/// An IPv6 link-local TCP pair, brought through DAD so each side's
+/// link-local address is preferred and reachable. Each connection's
+/// `TcpConfig.local_mss` is seeded from [`Stack::tcp_local_mss`] — exactly
+/// as the netstack seeds a real connection — so the segment size accounts
+/// for the 40-byte IPv6 header against the 1500-byte link MTU.
+fn tcp_pair_v6() -> (TcpSide, TcpSide) {
+    let mut sa = stack(MAC_A, IID_A);
+    let mut sb = stack(MAC_B, IID_B);
+    bring_up(&mut sa, &mut sb);
+    let a_addr = IpAddr::V6(link_local(IID_A));
+    let b_addr = IpAddr::V6(link_local(IID_B));
+    let a_mss = sa.tcp_local_mss(b_addr, t(1)).expect("A reaches B");
+    let b_mss = sb.tcp_local_mss(a_addr, t(1)).expect("B reaches A");
+    let a = TcpSide {
+        stack: sa,
+        tcb: Tcb::connect(
+            TcpConfig {
+                local_mss: a_mss,
+                ..TcpConfig::default()
+            },
+            A_PORT,
+            B_PORT,
+            1000,
+            t(1),
+        ),
+        peer: b_addr,
+    };
+    let b = TcpSide {
+        stack: sb,
+        // Passive open: the listener learns the client port from the SYN.
+        tcb: Tcb::listen(
+            TcpConfig {
+                local_mss: b_mss,
+                ..TcpConfig::default()
+            },
+            B_PORT,
+            0,
+            5000,
+        ),
+        peer: a_addr,
+    };
+    (a, b)
+}
+
 #[test]
 fn tcp_handshake_and_bidirectional_data_over_the_engine() {
     let (mut a, mut b) = tcp_pair();
@@ -1196,4 +1240,59 @@ fn tcp_bulk_transfer_over_the_engine() {
         }
     }
     assert_eq!(received, payload, "bulk stream arrived intact and in order");
+}
+
+#[test]
+fn tcp_bulk_transfer_over_ipv6_respects_the_link_mtu() {
+    // Regression (N5c): a full-size data segment on an IPv6 link must fit
+    // the 1500-byte MTU once the 40-byte IPv6 header and the TCP options
+    // are added. Before the send segment size was clamped to the path MSS
+    // (link MTU minus the family's IP header and the fixed TCP header) and
+    // reduced by the carried option bytes, every full-size segment
+    // overflowed the MTU and was silently dropped by `send_tcp` — only each
+    // burst's short trailing segment reached the peer and a bulk transfer
+    // stalled to the user timeout. This drives a multi-segment transfer
+    // over a real IPv6 link and asserts every byte arrives, in order.
+    let (mut a, mut b) = tcp_pair_v6();
+    let mut clock = 2u64;
+    let mut step = || {
+        let now = Duration64::from_nanos(clock * 200_000_000);
+        clock += 1;
+        now
+    };
+    for _ in 0..8 {
+        drive_tcp(&mut a, &mut b, step());
+        if a.tcb.is_established() && b.tcb.is_established() {
+            break;
+        }
+    }
+    assert!(
+        a.tcb.is_established() && b.tcb.is_established(),
+        "v6 handshake established"
+    );
+
+    let payload: Vec<u8> = (0..8000u32).map(|i| (i % 251) as u8).collect();
+    let mut offered = 0usize;
+    let mut received: Vec<u8> = Vec::new();
+    for _ in 0..200 {
+        if offered < payload.len() {
+            offered += a.tcb.send(&payload[offered..]).expect("send");
+        }
+        drive_tcp(&mut a, &mut b, step());
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = b.tcb.recv(&mut buf);
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+        }
+        if received.len() == payload.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        received, payload,
+        "the whole IPv6 bulk stream arrived intact and in order"
+    );
 }

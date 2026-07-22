@@ -177,6 +177,48 @@ pub fn memsoak_store_files(
         .map_err(Clone::clone)
 }
 
+/// Crate directory of the test-only `tcpecho` stream-socket fixture
+/// (`plans/NETWORK.md` N5c), relative to the workspace root. Like the
+/// `memsoak` fixture it lives outside the userland discovery walk: it is
+/// planted only on the stream vertical's disk, never on a production image.
+const TCPECHO_CRATE_DIR: &str = "tests/integration/tcpecho_program";
+
+/// The composed store files the stream vertical's disk plants in `/System`:
+/// the shared [`app_store_files`] set **plus** the test-only `tcpecho`
+/// fixture bundle, composed through the same discovery/compose/sign path as
+/// every store bundle and memoised like the shared set.
+///
+/// # Errors
+///
+/// As [`build_app_bundles`], plus a failed fixture-manifest discovery.
+pub fn tcpecho_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
+        .get_or_init(|| {
+            let base = app_store_files(ctx, arch)?;
+            let crate_dir = ctx.workspace_root.join(TCPECHO_CRATE_DIR);
+            let app = discover_crate_manifest(&crate_dir)
+                .map_err(|e| format!("image: tcpecho manifest discovery: {e}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "image: {} has no {APP_MANIFEST_SOURCE}",
+                        crate_dir.display()
+                    )
+                })?;
+            let bundle = build_bundle(ctx, arch, &app)?;
+            let mut files = base.to_vec();
+            files.extend(store_files(&[bundle]));
+            Ok(files)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// Run `body` over the borrowed `(components, bytes)` view of `files` —
 /// the planting shape `tools/mkimage` and the QEMU fixture accept. The
 /// borrow gymnastics live here once instead of at every call site.

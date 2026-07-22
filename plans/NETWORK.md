@@ -902,7 +902,7 @@ the whole is too large for one change and each leaves the tree working.
   (two live TCBs + a hostile parseable-segment injector; asserts no panic
   and that every emitted segment re-parses).
 
-#### N5c — the stream socket surface + QEMU vertical `[~]`
+#### N5c — the stream socket surface + QEMU vertical `[x]`
 - **The software path is landed and host-gate-green.** `SocketType::Stream`
   is wired through the whole stack:
   - `lib/net::stack`: the engine gained a `StackEvent::TcpSegment`
@@ -927,11 +927,46 @@ the whole is too large for one change and each leaves the tree working.
   - `lib/rt::net`: `stream_socket`/`stream_send`/`stream_recv` client
     wrappers (`connect`/`close` shared with datagrams).
   `listen`/`accept`/`shutdown` remain N6.
-- **Remaining: the live QEMU vertical** — client connect to a host peer with
-  bulk transfer both directions and loss injection. (The shared QEMU peer +
-  wire fixture are v6-link-local-only after the §18.5 scaffold removal — this
-  vertical re-adds the v4/bulk topology here, not by resurrecting the deleted
-  path.)
+- **The live two-process QEMU vertical passes a real guest boot.**
+  `tests/integration/netstack_stream_qemu_aarch64` boots the production
+  aarch64 pipeline with the encrypted-root disk carrying the standard store
+  bundles **plus** the signed virtio-net driver bundle and the test-only
+  `tcpecho` client fixture (`FsDisk::StreamRootDisk` — net driver only, no
+  display/input, so login is serial-scripted over the UART console). `devmgr`
+  autoloads the NIC driver into its own process and `netstack` binds it; the
+  runner unlocks the root, logs in `root`/`root`, and types `tcpecho`. The
+  client (`tests/integration/tcpecho_program`) opens a `SocketType::Stream`
+  socket, connects to the harness-side passive TCP echo peer
+  (`NetPeerMode::V6TcpEcho`), streams a fixed deterministic 32 KiB run, and
+  verifies the peer echoes every byte back in order. The peer injects bounded
+  frame loss so a pass proves RFC 9293 retransmission carried the stream
+  across the two-process boundary. PASS keys on the client's audited `exit`
+  (`comm=tcpecho`) then the shell's exit (typed after the `TCPECHO PASS`
+  marker), and the harness additionally requires the echo peer to report the
+  whole transfer received and echoed — neither side passes alone.
+- **The wire reuses the proven IPv6 link-local addressing**, not a new v4
+  path: the guest already auto-configures its EUI-64 link-local and the peer
+  already reaches it (the N4e ICMP vertical proves both directions), and TCP
+  is family-agnostic, so no admin v4-address-assignment machinery was invented
+  for the stream test — the deterministic transfer byte generator + port live
+  in the shared `tairix-test-netstack-wire` topology so client and echo server
+  cannot drift.
+- **Send segment sizing is path- and option-aware (RFC 6691).** A connection
+  clamps its send segment size to `min(peer advertised MSS, local path MSS)`,
+  where the local path MSS is the egress link MTU minus the family's IP header
+  and the fixed TCP header — computed by `Stack::tcp_local_mss` and seeded into
+  the connection's `TcpConfig.local_mss` by `netstack` at connect
+  (`Netstack::egress_mss_for`), so the SYN advertises and the sender segments to
+  a size the link can carry. The per-segment payload is further reduced by the
+  wire length of the TCP options it carries (`TcpOptions::wire_len`; timestamps
+  = 12 B), so header + options + payload never exceeds the MTU. Without this an
+  IPv6 connection built full IPv4-MSS (1460 B) segments that overflowed the
+  1500 B MTU once the 40 B IPv6 header was added; `send_tcp` refused each as
+  `TooLarge` and the sender silently dropped every full-size segment, emitting
+  only each burst's short trailing segment — the bulk transfer then stalled to
+  the RFC 9293 user timeout. Regression: `stack_tests`
+  `tcp_bulk_transfer_over_ipv6_respects_the_link_mtu` drives a multi-segment
+  transfer over a real v6 link and asserts every byte arrives in order.
 
 ### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[ ]`
 - `listen`/`accept` with bounded accept + SYN queues; overflow ⇒

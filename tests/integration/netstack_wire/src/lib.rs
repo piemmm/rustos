@@ -57,6 +57,50 @@ pub const PEER_ECHO_ID: u16 = 0x5EED;
 /// mirrors it back and the peer verifies the reflection.
 pub const PEER_ECHO_PAYLOAD: &[u8] = b"tairix-netstack-peer";
 
+// --- TCP stream vertical (N5c) -----------------------------------------
+//
+// The stream vertical reuses the same emulated link and the same
+// IPv6-link-local addressing the ICMP vertical proves (the guest forms its
+// link-local from `GUEST_MAC`, the peer from `PEER_IID`), so no address
+// configuration or new address family is invented for it. On top of that
+// link the guest runs a TCP **client** command (`tcpecho`) that connects to
+// a passive TCP **echo** server the host peer hosts, streams a fixed,
+// deterministic byte run to it, and verifies the server echoes every byte
+// back in order. The host peer injects deterministic frame loss so the run
+// exercises RFC 9293 retransmission end to end across the two-process
+// boundary, not just a clean link.
+
+/// TCP port the host peer's passive echo server listens on, and the port
+/// the guest `tcpecho` client connects to. A fixed, unprivileged value so
+/// the two builds cannot drift.
+pub const PEER_TCP_PORT: u16 = 7;
+
+/// Number of bytes the `tcpecho` client streams to the peer (and expects
+/// echoed back). Large enough to span many maximum-segment-sized segments
+/// — so windowing, cumulative/selective acknowledgement, and retransmission
+/// under the peer's injected loss are all exercised — while staying quick
+/// under TCG emulation. Both ends derive their transfer length from this one
+/// constant, so a client that sends `STREAM_TRANSFER_BYTES` and a server
+/// that echoes every received byte agree by construction.
+pub const STREAM_TRANSFER_BYTES: usize = 32 * 1024;
+
+/// The deterministic byte at stream offset `index` of the `tcpecho`
+/// transfer. A cheap full-period generator (a byte-wise linear congruential
+/// step) so the client can produce the outbound run and verify the echoed
+/// run **without buffering** the whole transfer — it recomputes the expected
+/// byte at each received offset. Being deterministic, a corrupted or
+/// reordered echo is caught at the first mismatched offset, and the run
+/// stays byte-exactly replayable.
+#[must_use]
+pub const fn stream_byte(index: usize) -> u8 {
+    // `index * 181 + 89` folded to a byte: 181 is odd (coprime with 256),
+    // so the low byte cycles through all 256 values over any 256 consecutive
+    // offsets — a well-mixed, non-constant pattern with no external state.
+    // The low byte (`& 0xFF`) taken without a truncating cast: `to_le_bytes`
+    // is const on the pinned toolchain and its first element is the low byte.
+    index.wrapping_mul(181).wrapping_add(89).to_le_bytes()[0]
+}
+
 /// The link-local address formed from an interface identifier
 /// (`fe80::/64` + IID) — the one derivation both ends use.
 #[must_use]
@@ -100,5 +144,26 @@ mod tests {
         }
         assert_eq!(count, 6, "the string has six colon-separated octets");
         assert_eq!(parsed, GUEST_MAC);
+    }
+
+    #[test]
+    fn stream_byte_is_deterministic_and_non_constant() {
+        // Re-derivation is stable (the client and its own verification agree)
+        // and the pattern is not a single repeated value (a constant stream
+        // would not catch a stuck or duplicated segment).
+        assert_eq!(stream_byte(0), stream_byte(0));
+        assert_eq!(stream_byte(1234), stream_byte(1234));
+        assert_ne!(stream_byte(0), stream_byte(1));
+    }
+
+    #[test]
+    fn stream_byte_covers_every_value_over_256_offsets() {
+        // 181 is coprime with 256, so any run of 256 consecutive offsets is a
+        // permutation of all byte values — a well-mixed run with no gaps.
+        let mut seen = [false; 256];
+        for index in 0..256usize {
+            seen[stream_byte(index) as usize] = true;
+        }
+        assert!(seen.iter().all(|&hit| hit), "all 256 byte values appear");
     }
 }

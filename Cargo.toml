@@ -334,6 +334,8 @@ members = [
     "tests/integration/virtio_blk_mmio_aarch64",
     "tests/integration/netstack_autoload_qemu_aarch64",
     "tests/integration/netstack_autoload_qemu_riscv64",
+    "tests/integration/tcpecho_program",
+    "tests/integration/netstack_stream_qemu_aarch64",
     "tests/integration/users_db_qemu_aarch64",
     "tests/integration/users_db_qemu_x86_64",
     "tests/integration/root_unlock_login_qemu_aarch64",

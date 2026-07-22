@@ -2973,6 +2973,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-stream-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-tcpecho",
+]
+
+[[package]]
 name = "tairix-test-netstack-wire"
 version = "0.0.0"
 
@@ -3737,6 +3749,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-tcpecho"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-rt",
+ "tairix-test-netstack-wire",
+]
+
+[[package]]
 name = "tairix-test-timer-preempt-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -4204,6 +4225,7 @@ dependencies = [
  "tairix-test-fat32-image",
  "tairix-test-memsoak",
  "tairix-test-netstack-wire",
+ "tairix-test-tcpecho",
  "tairix-theme",
  "tairix-users",
  "tairix-util",

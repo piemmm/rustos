@@ -1,0 +1,16 @@
+# Signed-AppInfo manifest source for the `tcpecho` stream-socket fixture
+# (plans/NETWORK.md N5c). Composed and planted ONLY on the aarch64 stream
+# QEMU vertical's disk image by tools/xtask — the crate lives outside the
+# userland discovery walk, so no production image ever ships it. The
+# capability list is the bundle's request, intersected with the launching
+# user's grants (the seeded root administrator ceiling): CAP_NET to open and
+# connect a stream socket (the netstack socket dispatcher enforces it against
+# this process's kernel-attested origin), and CAP_CONSOLE_WRITE for the
+# TCPECHO PASS/FAIL report on fd 1/2. Binding the client's own async delivery
+# port needs no capability (an unrestricted port is an ordinary process
+# resource), so none is requested for it.
+id = "os.tairix.test.tcpecho"
+name = "tcpecho"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_NET", "CAP_CONSOLE_WRITE"]

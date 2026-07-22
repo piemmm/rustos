@@ -142,6 +142,13 @@ enum NetPeerMode {
     /// link-local alone (the two-process autoload vertical, whose guest
     /// has no admin-assigned IPv4).
     V6LinkLocal,
+    /// A v6-link-local-only *passive TCP echo server* (the N5c stream
+    /// vertical): same deterministic link-local addressing as
+    /// [`Self::V6LinkLocal`], but the peer accepts the guest client's TCP
+    /// connection on `tairix_test_netstack_wire::PEER_TCP_PORT`, echoes
+    /// every received byte back, and injects bounded frame loss so the
+    /// stream survives retransmission.
+    V6TcpEcho,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -186,6 +193,17 @@ enum FsDisk {
     /// fixture crate lives outside the userland discovery walk, so only
     /// this disk ever carries it; no production image ships it.
     MemsoakRootDisk,
+    /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
+    /// volume** additionally carries the signed virtio-net driver bundle
+    /// (only — no display/input driver, so the console stays the UART text
+    /// console the serial script drives) plus the test-only `tcpecho`
+    /// fixture bundle ([`super::image_apps::tcpecho_store_files`]) — the
+    /// stream-socket vertical's backing (`plans/NETWORK.md` N5c). `devmgr`
+    /// autoloads the NIC driver into its own process and `netstack` binds
+    /// it, so the guest `tcpecho` client reaches the host echo peer over the
+    /// live two-process network. Only this disk carries the fixtures; no
+    /// production image ships them.
+    StreamRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -389,6 +407,12 @@ const SESSION_PASSWORD_LINE: &str = "root\n";
 /// `tairix_test_memsoak::PASS_MARKER` by a unit test below, so the script
 /// and the program cannot drift.
 const MEMSOAK_PASS_PREFIX: &str = "MEMSOAK PASS baseline=";
+
+/// Serial marker the stream-socket vertical waits for before typing the
+/// shell `exit` that completes its PASS chain: the `tcpecho` client's success
+/// report marker. Pinned to the fixture's own `tairix_test_tcpecho::PASS_MARKER`
+/// by a unit test below, so the script and the program cannot drift.
+const TCPECHO_PASS_PREFIX: &str = "TCPECHO PASS";
 
 /// `true` if the two byte strings are equal — the compile-time complement of
 /// [`is_line_of`] for asserting a typed line does **not** match the fixture.
@@ -3652,6 +3676,56 @@ const TESTS: &[QemuTest] = &[
             (MEMSOAK_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
+    // `plans/NETWORK.md` N5c: the stream-socket (TCP) vertical.
+    // `tairix-test-netstack-stream-qemu-aarch64` boots the *production*
+    // aarch64 pipeline with the encrypted-root disk that carries the standard
+    // signed store bundles **plus** the signed virtio-net driver bundle and
+    // the test-only `tcpecho` fixture bundle (`FsDisk::StreamRootDisk`), with
+    // a virtio-net device attached and the harness-side passive TCP echo peer
+    // on its `dgram` netdev (`NetPeerMode::V6TcpEcho`). It unlocks the root,
+    // authenticates `root`/`root` at the console login, and types the bare
+    // word `tcpecho` at the shell. The client opens a `SocketType::Stream`
+    // socket (its manifest's `CAP_NET`, enforced by the netstack socket
+    // dispatcher against the kernel-attested origin), connects to the peer's
+    // echo server over the shared IPv6 link-local wire — retrying through the
+    // boot window while the NIC driver is still autoloading — streams a fixed
+    // deterministic 32 KiB run, and verifies the peer echoes every byte back
+    // in order. The peer injects bounded frame loss, so a pass proves RFC 9293
+    // retransmission carried the stream across the two-process boundary. On a
+    // fully verified transfer the client prints `TCPECHO PASS …` and exits 0;
+    // on any shortfall it prints the reason and parks forever (it never
+    // exits), so the run times out fail-loud with the reason in the transcript.
+    // The guest audit sink arms on the client's audited `exit` (`sc=exit`,
+    // `comm=tcpecho`) and reports PASS on the next audited `exit` — the
+    // shell's, typed only after the `TCPECHO PASS` marker appeared — so the
+    // report provably reached the transcript before the run ended (the
+    // session-ceiling arm-then-exit discipline). The harness additionally
+    // requires the echo peer to report the whole transfer received and echoed,
+    // so neither side can pass alone. A 300-second budget covers boot +
+    // bounded PBKDF2 + the two-process net bring-up + the loss-recovered
+    // transfer on QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-netstack-stream-qemu-aarch64",
+        binary: "tairix-test-netstack-stream-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6TcpEcho,
+        ramfb: false,
+        fs_disk: FsDisk::StreamRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, "tcpecho\n"),
+            (TCPECHO_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+    },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
     // `tairix-test-pipeline-qemu-aarch64` boots the *production* aarch64
     // pipeline with the planted encrypted-root disk, unlocks the root,
@@ -4867,6 +4941,12 @@ pub(crate) struct StoreSet {
     /// The signed autoload driver bundles the `-M virt` autoload verticals
     /// plant in the `/System/Drivers/` store.
     autoload_drivers: &'static [AppStoreFile],
+    /// The application/service bundles the stream vertical plants: the shared
+    /// set plus the test-only `tcpecho` fixture bundle.
+    apps_with_tcpecho: &'static [AppStoreFile],
+    /// The signed driver bundles the stream vertical plants: the virtio-net
+    /// driver alone (no display/input driver, to keep the UART console).
+    stream_drivers: &'static [AppStoreFile],
 }
 
 /// Resolve exactly the `/System`-store bundle sets `t` plants, cross-compiled
@@ -4900,10 +4980,20 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::AutoloadRootDisk => super::image_drivers::autoload_driver_store_files(ctx, arch)?,
         _ => EMPTY,
     };
+    let apps_with_tcpecho = match t.fs_disk {
+        FsDisk::StreamRootDisk => super::image_apps::tcpecho_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
+    let stream_drivers = match t.fs_disk {
+        FsDisk::StreamRootDisk => super::image_drivers::net_driver_store_files(ctx, arch)?,
+        _ => EMPTY,
+    };
     Ok(StoreSet {
         apps,
         apps_with_memsoak,
         autoload_drivers,
+        apps_with_tcpecho,
+        stream_drivers,
     })
 }
 
@@ -4953,6 +5043,8 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
         stores.apps,
         stores.apps_with_memsoak,
         stores.autoload_drivers,
+        stores.apps_with_tcpecho,
+        stores.stream_drivers,
     )? {
         let image = kernel.with_extension(fs.extension);
         let sector_bytes = tairix_qemu::disk::SECTOR_BYTES;
@@ -5421,6 +5513,8 @@ fn fs_disk_image(
     apps: &[super::image_apps::AppStoreFile],
     apps_with_memsoak: &[super::image_apps::AppStoreFile],
     autoload_drivers: &[super::image_apps::AppStoreFile],
+    apps_with_tcpecho: &[super::image_apps::AppStoreFile],
+    stream_drivers: &[super::image_apps::AppStoreFile],
 ) -> Result<Option<FsImage>, String> {
     Ok(match t.fs_disk {
         FsDisk::None => None,
@@ -5493,6 +5587,33 @@ fn fs_disk_image(
                 total_sectors,
             })
         }
+        // The encrypted-root layout carrying the virtio-net driver bundle in
+        // `/System/Drivers/` plus the `tcpecho` fixture in the app store: the
+        // same whole-disk author as the autoload verticals, planting the
+        // net-only driver set alongside the tcpecho-augmented app set.
+        FsDisk::StreamRootDisk => {
+            let bytes = super::image_apps::with_plant_refs(stream_drivers, |driver_files| {
+                super::image_apps::with_plant_refs(apps_with_tcpecho, |app_files| {
+                    tairix_test_encrypted_root_image::build_image_with_contents(
+                        driver_files,
+                        app_files,
+                        tairix_test_encrypted_root_image::PASSPHRASE,
+                    )
+                })
+            })
+            .map_err(|e| {
+                format!(
+                    "test --qemu ({}): build stream-root image: {e:?}",
+                    t.package
+                )
+            })?;
+            let total_sectors = image_total_sectors(&bytes);
+            Some(FsImage {
+                extension: "stream-root.img",
+                bytes,
+                total_sectors,
+            })
+        }
     })
 }
 
@@ -5514,10 +5635,15 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
         let sock_base = std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
         let qemu_sock = sock_base.with_extension("qemu.sock");
         let peer_sock = sock_base.with_extension("peer.sock");
-        peer = Some(
-            super::netpeer::NetPeer::spawn(&qemu_sock, &peer_sock)
-                .map_err(|e| format!("test --qemu ({}): {e}", t.package))?,
-        );
+        let started = match t.netstack_peer {
+            // Handled by the guard above; unreachable here.
+            NetPeerMode::None => unreachable!("peer mode None is filtered above"),
+            NetPeerMode::V6LinkLocal => super::netpeer::NetPeer::spawn(&qemu_sock, &peer_sock),
+            NetPeerMode::V6TcpEcho => {
+                super::netpeer::NetPeer::spawn_tcp_echo(&qemu_sock, &peer_sock)
+            }
+        };
+        peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
         // The guest derives its link-local from the device MAC, so the MAC
         // is pinned to the wire constant both sides agree on.
         spec = spec.with_virtio_net_dgram_mac(
@@ -5653,7 +5779,7 @@ fn persist_failure_serial(package: &str, path: &Path, serial: &str) -> Result<()
 mod tests {
     use super::{
         build_targets, persist_failure_serial, qemu_host_budget_for, qemu_job_weight, PrimePlan,
-        MEMSOAK_PASS_PREFIX, TESTS,
+        MEMSOAK_PASS_PREFIX, TCPECHO_PASS_PREFIX, TESTS,
     };
     use std::time::Duration;
 
@@ -5669,6 +5795,14 @@ mod tests {
             pass.starts_with(MEMSOAK_PASS_PREFIX),
             "fixture PASS line {pass:?} must start with the script marker {MEMSOAK_PASS_PREFIX:?}"
         );
+    }
+
+    /// The stream vertical's serial-script marker is exactly the `tcpecho`
+    /// fixture's own success marker, so the script waits for the marker the
+    /// program actually prints and the two cannot drift.
+    #[test]
+    fn tcpecho_script_marker_matches_the_fixture_marker() {
+        assert_eq!(TCPECHO_PASS_PREFIX, tairix_test_tcpecho::PASS_MARKER);
     }
 
     #[test]

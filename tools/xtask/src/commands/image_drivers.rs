@@ -525,6 +525,36 @@ pub fn autoload_driver_store_files(
         .map_err(Clone::clone)
 }
 
+/// The signed **virtio-net driver bundle alone**, paired with its store path
+/// — the `/System/Drivers/` set the stream vertical (`plans/NETWORK.md` N5c)
+/// plants. That vertical drives the network stack over a text (UART) console,
+/// so it deliberately carries *only* the NIC driver, not the input/display
+/// drivers [`autoload_driver_store_files`] plants: a display driver would take
+/// over console 0 and defeat the serial-scripted login. Built once per xtask
+/// process and memoised, like the full autoload set; the underlying
+/// [`build_virtio_net_bundle`] is itself memoised, so this shares that work.
+///
+/// # Errors
+///
+/// As [`build_virtio_net_bundle`].
+pub fn net_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; PieArch::COUNT] =
+        [const { OnceLock::new() }; PieArch::COUNT];
+    FILES[arch.index()]
+        .get_or_init(|| {
+            Ok(vec![store_file(
+                VIRTIO_NET_STORE_PATH,
+                build_virtio_net_bundle(ctx, arch)?,
+            )])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// Pair a `/System`-volume-relative store path with a built bundle's bytes
 /// as the [`AppStoreFile`] the planter accepts.
 fn store_file(path: &[&[u8]], bytes: Vec<u8>) -> AppStoreFile {

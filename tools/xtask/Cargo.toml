@@ -117,6 +117,12 @@ tairix-test-encrypted-root-image = { path = "../../tests/integration/encrypted_r
 # `default-features = false`: the fixture's `program` feature (its `Run`
 # binary's userland runtime) is for its freestanding cross-compile only.
 tairix-test-memsoak = { path = "../../tests/integration/memsoak_program", version = "=0.0.0", default-features = false }
+# The stream-socket vertical's fixture constant: the `TCPECHO PASS` marker its
+# serial script waits for is pinned against the fixture's own `PASS_MARKER` by
+# a unit test, so the script and the program cannot drift. `default-features =
+# false`: the fixture's `program` feature (its `Run` binary's userland runtime)
+# is for its freestanding cross-compile only.
+tairix-test-tcpecho = { path = "../../tests/integration/tcpecho_program", version = "=0.0.0", default-features = false }
 # The fuzz/proptest orchestrators and the in-tree harnesses share one
 # per-run seed/budget vocabulary: the orchestrator picks and logs the
 # seed, the harness reads it. Both sides use `tairix-fuzzseed` so the

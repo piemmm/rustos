@@ -777,7 +777,15 @@ impl Tcb {
     /// Adopt the peer's SYN options (MSS, window scale, SACK, timestamps).
     fn negotiate_from_syn(&mut self, seg: &TcpSegment<'_>) {
         self.peer_mss = seg.options.mss.unwrap_or(DEFAULT_SEND_MSS).max(1);
-        self.send_mss = self.peer_mss;
+        // A segment we send must fit both the peer's advertised MSS *and*
+        // our own link: the peer's value is what it will accept, but our
+        // egress link's MTU (folded into `local_mss` by the stack for this
+        // connection's family) bounds what we can put on the wire. Absent
+        // the clamp, a peer advertising the IPv4 1460 over an IPv6 link
+        // would have us build 1460-byte payloads that overflow the 1500
+        // MTU once the 40-byte IPv6 header is added, and every full-size
+        // segment would be silently dropped by the network layer.
+        self.send_mss = self.peer_mss.min(self.config.local_mss.max(1));
         if let Some(ws) = seg.options.window_scale {
             self.snd_wnd_shift = ws.min(MAX_WINDOW_SCALE);
         } else {
@@ -1259,7 +1267,13 @@ impl Tcb {
         let avail = self.tx.len().saturating_sub(offset);
         let in_flight = self.snd_nxt.distance_from(self.snd_una);
         let usable = self.snd_wnd.saturating_sub(in_flight) as usize;
-        let mut len = avail.min(usable).min(self.send_mss as usize);
+        // A data segment's payload is the negotiated MSS *minus* the TCP
+        // options it carries (RFC 6691): the MSS counts data only, so
+        // timestamps/SACK bytes must come out of the payload or the whole
+        // segment overflows the path MTU. `send_mss` is already clamped to
+        // our egress link, so header + options + payload then fits.
+        let max_payload = (self.send_mss as usize).saturating_sub(self.data_option_len());
+        let mut len = avail.min(usable).min(max_payload.max(1));
         let mut probe = false;
         if len == 0
             && avail > 0
@@ -1367,6 +1381,15 @@ impl Tcb {
                 (meta, alloc::vec::Vec::new())
             }
         }
+    }
+
+    /// Wire bytes a data segment's TCP options occupy (timestamps and any
+    /// SACK blocks) — the overhead a full-size payload must leave room for
+    /// so header + options + payload stays within the path MTU (RFC 6691).
+    /// The length is independent of the timestamp *value*, so any `ts_now`
+    /// gives the right size.
+    fn data_option_len(&self) -> usize {
+        self.data_options(0).wire_len()
     }
 
     /// Options for a non-SYN segment: timestamps (if negotiated) and the

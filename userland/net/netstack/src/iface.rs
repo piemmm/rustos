@@ -285,9 +285,9 @@ impl Netstack {
     /// Originate one TCP segment out the interface named `name`.
     ///
     /// A connected stream is bound to one egress interface for its life
-    /// (chosen by [`choose_tcp_egress`](Self::choose_tcp_egress) at
-    /// connect), so every later segment — data, ACKs, retransmits — is
-    /// sent through this fixed link.
+    /// (chosen by [`egress_mss_for`](Self::egress_mss_for) at connect), so
+    /// every later segment — data, ACKs, retransmits — is sent through this
+    /// fixed link.
     ///
     /// # Errors
     ///
@@ -315,38 +315,32 @@ impl Netstack {
         }
     }
 
-    /// Choose the egress interface for a new TCP connection to `dest` by
-    /// originating its first segment (the SYN): the first interface whose
-    /// engine accepts it becomes the connection's fixed egress, returning
-    /// that interface's alias and the frames the SYN produced (which may be
-    /// the neighbour-resolution frames, the SYN itself parking until the
-    /// neighbour answers — exactly the datagram/echo behaviour).
+    /// Choose the egress interface for a new TCP connection to `dest` and
+    /// return its alias together with the effective local maximum segment
+    /// size ([`Stack::tcp_local_mss`]) for that interface and `dest`'s
+    /// family: the first interface that can reach `dest`.
+    ///
+    /// The connection is bound to this interface for its life, and the MSS
+    /// seeds its [`TcpConfig`](tairix_net::tcp::conn::TcpConfig) so every
+    /// segment fits the link before it is built (RFC 6691) — an IPv6 link's
+    /// 40-byte header is accounted here, not discovered as a dropped
+    /// full-size segment.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NetworkUnreachable`] — no interface has a route, a usable
-    ///   source address, and an up link to `dest`.
-    /// * [`Errno::OutOfRange`] — `dest` is not a legal unicast TCP
-    ///   destination (multicast / broadcast / unspecified).
-    /// * [`Errno::MessageTooLarge`] — the SYN did not fit an otherwise
-    ///   matching interface's path.
-    pub fn choose_tcp_egress(
+    /// [`Errno::NetworkUnreachable`] — no interface has a route, a usable
+    /// source address, and an up link to `dest`.
+    pub fn egress_mss_for(
         &mut self,
         dest: IpAddr,
-        meta: &TcpSegmentMeta,
-        payload: &[u8],
         now: Duration64,
-    ) -> Result<([u8; IF_NAME_LEN], Vec<Vec<u8>>), Errno> {
-        let mut deferred: Option<Errno> = None;
+    ) -> Result<([u8; IF_NAME_LEN], u16), Errno> {
         for iface in &mut self.interfaces {
-            match iface.stack.send_tcp(dest, meta, payload, now) {
-                Ok(out) => return Ok((iface.name, out.frames)),
-                Err(SendError::NotUnicast) => return Err(Errno::OutOfRange),
-                Err(SendError::TooLarge) => deferred = Some(Errno::MessageTooLarge),
-                Err(_) => deferred = deferred.or(Some(Errno::NetworkUnreachable)),
+            if let Some(mss) = iface.stack.tcp_local_mss(dest, now) {
+                return Ok((iface.name, mss));
             }
         }
-        Err(deferred.unwrap_or(Errno::NetworkUnreachable))
+        Err(Errno::NetworkUnreachable)
     }
 
     /// Whether any managed interface owns the local address `addr` of

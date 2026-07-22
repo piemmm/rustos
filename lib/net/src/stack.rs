@@ -1923,6 +1923,54 @@ impl Stack {
         Ok(out)
     }
 
+    /// The effective TCP maximum segment size (data bytes) for a
+    /// reachable unicast `dest` over this interface: the family's path
+    /// MTU minus the IP and fixed TCP headers (RFC 6691).
+    ///
+    /// This is the value the stack both advertises in its SYN (the most it
+    /// is willing to receive over this link) and clamps its send
+    /// segmentation to (the most it can put on the wire), so a full-size
+    /// segment plus its headers and options never exceeds the link — the
+    /// difference between the IPv4 (20-byte) and IPv6 (40-byte) headers is
+    /// accounted here rather than discovered as a dropped segment.
+    ///
+    /// Returns `None` when `dest` is not a reachable unicast destination
+    /// (link down, no route, no usable source address, or a non-unicast
+    /// address), so the caller fails closed rather than opening a
+    /// connection this interface cannot carry.
+    #[must_use]
+    pub fn tcp_local_mss(&mut self, dest: IpAddr, now: Duration64) -> Option<u16> {
+        if !self.link_up {
+            return None;
+        }
+        let (mtu, ip_header) = match dest {
+            IpAddr::V4(d) => {
+                if d.is_broadcast() || d.is_unspecified() || d.is_multicast() {
+                    return None;
+                }
+                self.iface.ipv4()?;
+                self.next_hop_v4(d)?;
+                (self.link_mtu, IPV4_HEADER_LEN)
+            }
+            IpAddr::V6(d) => {
+                if d.is_unspecified() || d.is_multicast() {
+                    return None;
+                }
+                self.source_for_v6(d)?;
+                self.next_hop_v6(d, now)?;
+                (
+                    self.pmtu.mtu(d, self.mtu_v6_wire(), now) as usize,
+                    IPV6_HEADER_LEN,
+                )
+            }
+        };
+        let payload = mtu
+            .saturating_sub(ip_header)
+            .saturating_sub(tcp::TCP_HEADER_LEN);
+        // Clamped into `1..=u16::MAX`, so the conversion is always exact.
+        Some(u16::try_from(payload.clamp(1, usize::from(u16::MAX))).unwrap_or(u16::MAX))
+    }
+
     /// Originate one TCP segment to `dest`, folding the mandatory
     /// pseudo-header checksum over the source address this interface
     /// selects for `dest`.
