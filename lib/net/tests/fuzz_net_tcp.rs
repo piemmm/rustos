@@ -301,6 +301,54 @@ fn injected(rng: &mut Lcg, base_seq: u32) -> Vec<u8> {
     }
 }
 
+/// A parseable ACK aimed at the *client* (the sender running RFC 6675
+/// recovery), carrying arbitrary SACK blocks near its send space, so the
+/// scoreboard's `record`/`is_lost`/`NextSeg` path is driven by hostile
+/// selective acknowledgements — never trusting them to stay in window.
+fn injected_sack_ack(rng: &mut Lcg, client_isn: u32, server_isn: u32) -> Vec<u8> {
+    let seq = server_isn
+        .wrapping_add(1)
+        .wrapping_add((rng.next_u64() % 4096) as u32);
+    let ack = client_isn
+        .wrapping_add(1)
+        .wrapping_add((rng.next_u64() % 8192) as u32);
+    let mut options = TcpOptions::new();
+    let count = ((rng.next_u64() & 0x3) as usize % MAX_SACK_BLOCKS) + 1;
+    let mut blocks = [SackBlock {
+        left: SeqNumber::new(0),
+        right: SeqNumber::new(0),
+    }; MAX_SACK_BLOCKS];
+    for block in blocks.iter_mut().take(count) {
+        let left = client_isn
+            .wrapping_add(1)
+            .wrapping_add((rng.next_u64() % 16384) as u32);
+        let span = (rng.next_u64() % 4096) as u32;
+        *block = SackBlock {
+            left: SeqNumber::new(left),
+            right: SeqNumber::new(left.wrapping_add(span)),
+        };
+    }
+    assert!(options.set_sack(&blocks[..count]));
+    let meta = TcpSegmentMeta {
+        source_port: 80,
+        destination_port: 40000,
+        seq: SeqNumber::new(seq),
+        ack: SeqNumber::new(ack),
+        flags: TcpFlags::ACK,
+        window: (rng.next_u64() & 0xFFFF) as u16,
+        urgent: 0,
+        options,
+    };
+    let mut buf = vec![0u8; MAX_HEADER_LEN];
+    match tcp::write(DRIVER_PSEUDO, &meta, &[], &mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            buf
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 fn drive_once(rng: &mut Lcg) {
     let now0 = ms(0);
     let client_isn = (rng.next_u64() & 0xFFFF_FFFF) as u32;
@@ -358,6 +406,14 @@ fn drive_once(rng: &mut Lcg) {
             let f = injected(rng, injection_base);
             if !f.is_empty() {
                 driver_feed(&mut server, &f, now);
+            }
+        }
+
+        // Injected hostile SACK-bearing ACKs at the client sender.
+        if rng.next_u64() % 3 == 0 {
+            let f = injected_sack_ack(rng, client_isn, server_isn);
+            if !f.is_empty() {
+                driver_feed(&mut client, &f, now);
             }
         }
 

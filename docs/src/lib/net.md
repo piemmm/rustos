@@ -315,17 +315,19 @@ open; the complete teardown lattice through TIME-WAIT (2·MSL) — plus the
 send and receive windows over `SeqNumber`, RFC 7323 window scaling and
 timestamps with PAWS, RFC 2018 SACK generation from a bounded
 out-of-order reassembly set, RFC 6298 retransmission (SRTT/RTTVAR/RTO)
-with Karn's algorithm and go-back-N recovery, fast retransmit on three
-duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
+with Karn's algorithm, RFC 6675 SACK-based selective loss recovery (a
+bounded scoreboard drives `IsLost`/`SetPipe`/`NextSeg`, replacing
+go-back-N when the peer negotiated SACK; go-back-N remains the fallback
+after a retransmission timeout and when SACK is absent), fast retransmit on
+three duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
 handling with rate-limited challenge ACKs (so a hostile peer cannot
 induce an ACK storm), delayed ACKs, and the RFC 9293 user timeout. Every
 buffer and the reassembly set are capacity-bounded and fail closed;
 addresses never enter the TCB (the caller folds the pseudo-header
 checksum through `tcp::write`), so it is address-family agnostic. The
 send path is bounded by both the peer's advertised window and the
-congestion window (`tcp::cc`, below). Listeners with an accept queue, SYN
-cookies, and RFC 6675 SACK-based selective retransmission are the next
-increment (N6b). The connection engine is
+congestion window (`tcp::cc`, below). Listeners with an accept queue and
+stateless SYN cookies are the next increment (N6b-2). The connection engine is
 driven end to end through the `Stack` demux/originate paths above by the
 `netstack` `SocketService` stream sockets (N5c): the service owns one `Tcb`
 per connection and turns `Connect`/`Send`/`Close` and inbound
@@ -359,16 +361,31 @@ under a pure ACK stream):
   loss.
 
 The connection feeds the policy three signals: `on_ack` (new data
-acknowledged — grow), `on_loss` (three duplicate ACKs — multiplicative
-decrease, applied once per loss window through the RFC 6582 `recover`
-high-water mark so a burst cannot halve the window repeatedly), and
-`on_rto` (a timeout — collapse to one segment and restart slow start).
-Retransmission is the connection's existing go-back-N; SACK-based
-selective retransmission (RFC 6675) is N6b.
+acknowledged — grow), `on_loss` (loss detected by duplicate/selective
+ACKs — multiplicative decrease, applied once per loss window through the
+RFC 6582 `recover` high-water mark so a burst cannot halve the window
+repeatedly), and `on_rto` (a timeout — collapse to one segment and restart
+slow start). During recovery the send rate is governed by the RFC 6675
+`pipe` estimate against `cwnd`, not by window inflation.
+
+### RFC 6675 SACK-based loss recovery
+
+When the peer negotiated SACK, the connection retransmits selectively
+rather than by go-back-N. A bounded scoreboard records the SACKed send
+ranges (coalesced, capped, and clamped to the outstanding window, so a
+reordering or hostile peer can never grow the state or inject ranges
+outside the data in flight). From it the engine computes RFC 6675's three
+functions: `IsLost` (a byte is lost once at least three discontiguous SACK
+ranges — or more than `2·SMSS` bytes — lie above it), `SetPipe` (the
+in-flight estimate that bounds transmission against `cwnd`), and `NextSeg`
+(the next segment to send: a lost hole to retransmit, then fresh data,
+then a single rescue retransmission per episode). A retransmission timeout
+clears the scoreboard and falls back to go-back-N (RFC 6675 §5.1); future
+selective acknowledgements rebuild it.
 
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place —
-listeners with a bounded accept queue, stateless SYN cookies, and RFC 6675
-SACK-based loss recovery (N6b), then the hardware offloads (N7). Each is
+listeners with a bounded accept queue and stateless SYN cookies (N6b-2),
+then the hardware offloads (N7). Each is
 added with its callers, tests, and fuzz harnesses per increment.

@@ -103,8 +103,11 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
   `now`, output is drained through an `emit` closure, timers re-arm from
   `next_deadline`). It carries active/passive/simultaneous open, teardown
   (incl. TIME-WAIT), the send/receive windows with RFC 7323 window scaling
-  and timestamps (PAWS), RFC 2018 SACK generation, RFC 6298 retransmission
-  with Karn's algorithm and go-back-N recovery, fast retransmit on triple
+  and timestamps (PAWS), RFC 2018 SACK generation, RFC 6675 SACK-based
+  selective loss recovery (a bounded scoreboard drives IsLost/SetPipe/
+  NextSeg, replacing go-back-N when the peer negotiated SACK; go-back-N is
+  the fallback after an RTO and when SACK is absent), RFC 6298 retransmission
+  with Karn's algorithm, fast retransmit on triple
   duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
   handling with rate-limited challenge ACKs, delayed ACKs, and the RFC 9293
   user timeout. The initial sequence number is a caller-supplied CSPRNG

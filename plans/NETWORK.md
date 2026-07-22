@@ -994,13 +994,42 @@ the whole is too large for one change and each leaves the tree working.
   property test now also exercises cwnd + go-back-N together. Docs in
   `lib/net` lib.rs, `lib/net/README.md`, `docs/src/lib/net.md`.
 
-#### N6b — listeners, SYN-flood defence, SACK loss recovery `[ ]`
+#### N6b-1 — RFC 6675 SACK-based selective loss recovery `[x]`
+- `lib/net::tcp::conn` now recovers loss selectively when the peer
+  negotiated SACK, replacing go-back-N. A bounded `Scoreboard` records the
+  peer's SACKed send ranges — coalesced, capped at `MAX_SACK_RANGES`, and
+  clamped to the outstanding window `(snd_una, snd_max]`, so a reordering
+  or hostile peer can neither grow the state nor inject ranges outside the
+  data actually in flight (fail closed; the board holds only sequence
+  extents, never payload).
+- From the board the engine computes RFC 6675's three functions:
+  `is_lost` (a byte is lost once ≥ `DUP_THRESH` discontiguous SACK ranges,
+  or > `(DUP_THRESH−1)·SMSS` SACKed bytes, lie above it — constant across a
+  hole because a hole contains no SACK edges), `set_pipe` (the in-flight
+  estimate bounding transmission against `cwnd`), and the `NextSeg` walk in
+  `plan_sack` (rule 1: the lowest lost hole above `HighRxt`; rule 2: fresh
+  data; rule 3: one rescue retransmission per episode). `Plan::Retransmit`
+  carries an explicit `seq` and never advances the send frontier.
+- Recovery entry is RFC 6675 §5 (`DUP_THRESH` duplicate ACKs **or**
+  `is_lost(snd_una)`); the one multiplicative decrease per episode uses the
+  RFC 6582 `recover` high-water mark. A retransmission timeout clears the
+  board and falls back to go-back-N (§5.1); `HighRxt` initialises to
+  `snd_una − 1` so the first hole byte is eligible. SACK stays negotiated
+  via the existing SYN option; go-back-N remains the fallback when the peer
+  did not permit SACK.
+- Covered by `tcp::conn::tests`: scoreboard unit tests (lost-by-count,
+  lost-by-volume, coalescing, out-of-window/hostile-block rejection,
+  bounded-under-fragmentation), and end-to-end recovery tests
+  (selective retransmit of a single lost segment with no RTO and no
+  go-back-N amplification; two-hole recovery with no RTO). The
+  `fuzz_net_tcp` state-machine driver gained hostile SACK-bearing ACK
+  injection at the sender. Docs: `lib/net` lib.rs, `README.md`,
+  `docs/src/lib/net.md`.
+
+#### N6b-2 — listeners, SYN-flood defence `[ ]`
 - `listen`/`accept` with bounded accept + SYN queues; overflow ⇒
   stateless SYN cookies (RFC 4987) with the documented option-loss
   trade-off; `CAP_NET_BIND_PRIVILEGED` introduced + enforced.
-- RFC 6675 SACK-based selective loss recovery (on top of the N5b SACK
-  generation and the N6a congestion window), replacing go-back-N with a
-  scoreboard-driven retransmit.
 - Adversarial tests: SYN flood soak (bounded memory asserted), RST/data
   injection corpus (RFC 5961 behaviour), connection-exhaustion
   fail-closed, cookie round-trip property tests.

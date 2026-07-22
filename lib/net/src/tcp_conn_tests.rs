@@ -493,3 +493,220 @@ fn bulk_transfer_completes_under_each_policy() {
         assert_eq!(received, data, "{algo:?}: bytes");
     }
 }
+
+// ---------------------------------------------------------------------------
+// RFC 6675 SACK-based loss recovery (N6b).
+// ---------------------------------------------------------------------------
+
+use crate::tcp::SackBlock;
+
+/// Build a scoreboard from `ranges` (raw `[left, right)` sequence values),
+/// as if the peer had SACKed them while `base..base+100_000` was in flight.
+fn scoreboard(base: u32, ranges: &[(u32, u32)]) -> Scoreboard {
+    let mut board = Scoreboard::new();
+    let blocks: Vec<SackBlock> = ranges
+        .iter()
+        .map(|(l, r)| SackBlock {
+            left: SeqNumber::new(*l),
+            right: SeqNumber::new(*r),
+        })
+        .collect();
+    board.record(
+        &blocks,
+        SeqNumber::new(base),
+        SeqNumber::new(base + 100_000),
+    );
+    board
+}
+
+/// Collect the unSACKed holes of `board` within `[from, to)`.
+fn holes(board: &Scoreboard, from: u32, to: u32) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    board.for_each_hole(SeqNumber::new(from), SeqNumber::new(to), |l, r| {
+        out.push((l.value(), r.value()));
+        true
+    });
+    out
+}
+
+#[test]
+fn scoreboard_marks_lost_by_discontiguous_block_count() {
+    // Three discontiguous SACKed blocks above 1000 satisfy the RFC 6675
+    // duplicate threshold, so 1000 is lost regardless of the byte volume.
+    let board = scoreboard(1000, &[(1100, 1200), (1300, 1400), (1500, 1600)]);
+    assert!(board.is_lost(SeqNumber::new(1000), 100_000));
+    // Only two blocks lie above 1250 and the SACKed volume there (200 B) is
+    // tiny, so 1250 is not lost.
+    assert!(!board.is_lost(SeqNumber::new(1250), 100_000));
+}
+
+#[test]
+fn scoreboard_marks_lost_by_sacked_volume() {
+    // One big SACKed block (3000 B) above 1000 exceeds (DupThresh-1)*SMSS
+    // for a 1000-byte MSS, so 1000 is lost even though it is a single block.
+    let board = scoreboard(1000, &[(2000, 5000)]);
+    assert!(board.is_lost(SeqNumber::new(1000), 1000));
+    // With a 2000-byte MSS the threshold is 4000 B, above the 3000 SACKed,
+    // and one block is below the count threshold, so it is not lost.
+    assert!(!board.is_lost(SeqNumber::new(1000), 2000));
+}
+
+#[test]
+fn scoreboard_coalesces_overlapping_and_adjacent_ranges() {
+    let board = scoreboard(1000, &[(1100, 1200), (1150, 1300), (1300, 1400)]);
+    // Overlap (1100..1300) and adjacency (..1400) collapse to one range.
+    assert!(board.is_sacked(SeqNumber::new(1100)));
+    assert!(board.is_sacked(SeqNumber::new(1399)));
+    assert!(!board.is_sacked(SeqNumber::new(1400)));
+    assert_eq!(holes(&board, 1000, 1500), vec![(1000, 1100), (1400, 1500)]);
+}
+
+#[test]
+fn scoreboard_ignores_out_of_window_and_hostile_blocks() {
+    let mut board = Scoreboard::new();
+    let una = SeqNumber::new(1000);
+    let max = SeqNumber::new(2000);
+    // Below the cumulative ack, above the frontier, and inverted — all must
+    // be refused rather than injecting state (fail closed, never a panic).
+    board.record(
+        &[
+            SackBlock {
+                left: SeqNumber::new(500),
+                right: SeqNumber::new(600),
+            },
+            SackBlock {
+                left: SeqNumber::new(1900),
+                right: SeqNumber::new(9000),
+            },
+            SackBlock {
+                left: SeqNumber::new(1600),
+                right: SeqNumber::new(1500),
+            },
+            SackBlock {
+                left: SeqNumber::new(1200),
+                right: SeqNumber::new(1300),
+            },
+        ],
+        una,
+        max,
+    );
+    assert!(board.is_sacked(SeqNumber::new(1250)));
+    assert!(!board.is_sacked(SeqNumber::new(550)));
+    assert!(!board.is_sacked(SeqNumber::new(1950)));
+    assert_eq!(holes(&board, 1000, 2000), vec![(1000, 1200), (1300, 2000)]);
+}
+
+#[test]
+fn scoreboard_record_is_bounded_under_a_fragmenting_peer() {
+    let mut board = Scoreboard::new();
+    let una = SeqNumber::new(0);
+    let max = SeqNumber::new(1_000_000);
+    // A peer that fragments its SACK into far more ranges than the cap: the
+    // board must stay bounded (fail closed), never grow with the input.
+    for i in 0..(u32::try_from(MAX_SACK_RANGES).unwrap() + 200) {
+        let left = i * 10;
+        board.record(
+            &[SackBlock {
+                left: SeqNumber::new(left),
+                right: SeqNumber::new(left + 5),
+            }],
+            una,
+            max,
+        );
+    }
+    assert!(board.ranges.len() <= MAX_SACK_RANGES);
+}
+
+/// The application-data payload length summed over a set of frames.
+fn total_payload(frames: &[Vec<u8>]) -> usize {
+    frames.iter().map(|f| payload_len(f)).sum()
+}
+
+#[test]
+fn sack_recovery_retransmits_only_the_lost_segment() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+    let data = vec![0xABu8; 8000];
+    client.send(&data).unwrap();
+
+    // Capture the whole first flight, then drop only its first segment and
+    // deliver the rest — the server sees a single front hole.
+    let flight = drain(&mut client, now);
+    assert!(
+        flight.len() >= 4,
+        "first flight had only {} segments",
+        flight.len()
+    );
+    for frame in flight.iter().skip(1) {
+        feed(&mut server, frame, now);
+    }
+
+    // The server's duplicate ACK carries the SACK of the delivered tail.
+    let acks = drain(&mut server, now);
+    assert!(!acks.is_empty(), "server sent no acknowledgement");
+    for ack in &acks {
+        feed(&mut client, ack, now);
+    }
+
+    // SACK loss detection retransmits the hole with no clock advance (so this
+    // is fast recovery, not an RTO) and sends exactly one segment, never the
+    // whole outstanding window as go-back-N would.
+    let rtx = drain(&mut client, now);
+    let rtx_bytes = total_payload(&rtx);
+    assert!(rtx_bytes > 0, "no selective retransmission occurred");
+    assert!(
+        rtx_bytes <= 1460,
+        "go-back-N resent {rtx_bytes} B instead of one segment"
+    );
+    // Deliver the selective retransmission, then let both sides drain to
+    // quiescence — the transfer completes in order, still with no RTO.
+    for frame in &rtx {
+        feed(&mut server, frame, now);
+    }
+    settle(&mut client, &mut server, now);
+    let mut buf = vec![0u8; 8000];
+    let mut got: Vec<u8> = Vec::new();
+    loop {
+        let n = server.recv(&mut buf);
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(got, data, "the SACK-recovered stream is not byte-exact");
+}
+
+#[test]
+fn sack_recovery_handles_multiple_holes_without_rto() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+    let data: Vec<u8> = (0..12_000u32).map(|i| (i & 0xFF) as u8).collect();
+    client.send(&data).unwrap();
+
+    // Drop two non-adjacent segments from the first flight; deliver the rest.
+    let flight = drain(&mut client, now);
+    assert!(flight.len() >= 5, "flight {}", flight.len());
+    for (idx, frame) in flight.iter().enumerate() {
+        if idx == 1 || idx == 3 {
+            continue;
+        }
+        feed(&mut server, frame, now);
+    }
+
+    // Exchange to quiescence with NO time advance: SACK recovery must fill
+    // both holes from the scoreboard alone (an RTO would need the clock).
+    settle(&mut client, &mut server, now);
+
+    let mut buf = vec![0u8; 12_000];
+    let mut got: Vec<u8> = Vec::new();
+    loop {
+        let n = server.recv(&mut buf);
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(got.len(), data.len(), "length after two-hole recovery");
+    assert_eq!(got, data, "bytes after two-hole recovery");
+    assert_eq!(client.reset_reason(), None, "recovery must not abort");
+}
