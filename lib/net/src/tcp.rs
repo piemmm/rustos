@@ -21,6 +21,9 @@ use crate::checksum::Pseudo;
 #[path = "tcp_conn.rs"]
 pub mod conn;
 
+#[path = "tcp_cc.rs"]
+pub mod cc;
+
 /// IP protocol number (IPv4) and next-header value (IPv6) for TCP.
 pub const PROTOCOL_TCP: u8 = 6;
 

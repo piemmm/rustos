@@ -378,3 +378,118 @@ fn bulk_transfer_survives_reordering_and_loss() {
         assert_eq!(received, payload, "seed {seed}: bytes");
     }
 }
+
+use crate::tcp::cc::CongestionAlgorithm;
+
+/// The application-data payload length of a serialised segment.
+fn payload_len(frame: &[u8]) -> usize {
+    TcpSegment::parse(PSEUDO, frame).map_or(0, |s| s.payload.len())
+}
+
+fn config_cc(algo: CongestionAlgorithm) -> TcpConfig {
+    TcpConfig {
+        congestion: algo,
+        ..TcpConfig::default()
+    }
+}
+
+fn handshake_cc(now: Duration64, algo: CongestionAlgorithm) -> (Tcb, Tcb) {
+    let mut client = Tcb::connect(config_cc(algo), 40000, 80, 1000, now);
+    let mut server = Tcb::listen(config_cc(algo), 80, 0, 5000);
+    settle(&mut client, &mut server, now);
+    assert!(client.is_established() && server.is_established());
+    (client, server)
+}
+
+#[test]
+fn congestion_window_bounds_the_initial_flight() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+    // Offer far more than one window of data.
+    let data = vec![0x5Au8; 60_000];
+    assert!(client.send(&data).unwrap() > 14_600);
+    // The very first burst carries *no* acknowledgements yet, so it is
+    // bounded by the RFC 6928 initial congestion window (~14600 B for a
+    // 1460-byte MSS) — never the whole 60000 B.
+    let first: usize = drain(&mut client, now).iter().map(|f| payload_len(f)).sum();
+    assert!(
+        (10_000..=14_600).contains(&first),
+        "first flight {first} B ignored the congestion window"
+    );
+    let _ = &mut server;
+}
+
+#[test]
+fn congestion_window_opens_as_acks_arrive() {
+    let t0 = ms(0);
+    let (mut client, mut server) = handshake(t0);
+    client.send(&vec![0u8; 64_000]).unwrap();
+
+    // First flight: one initial window, before any ACK.
+    let frames = drain(&mut client, t0);
+    let first: usize = frames.iter().map(|f| payload_len(f)).sum();
+    for f in &frames {
+        feed(&mut server, f, t0);
+    }
+    let mut buf = vec![0u8; 64_000];
+    while server.recv(&mut buf) > 0 {}
+
+    // One round trip later the server's cumulative ACK arrives and opens the
+    // window; the next flight must be larger than the first.
+    let t1 = ms(200);
+    server.advance(t1);
+    for f in drain(&mut server, t1) {
+        feed(&mut client, &f, t1);
+    }
+    let second: usize = drain(&mut client, t1).iter().map(|f| payload_len(f)).sum();
+    assert!(
+        second > first,
+        "congestion window did not open (first {first} B, second {second} B)"
+    );
+}
+
+#[test]
+fn bulk_transfer_completes_under_each_policy() {
+    for algo in [CongestionAlgorithm::Cubic, CongestionAlgorithm::NewReno] {
+        let (mut client, mut server) = handshake_cc(ms(0), algo);
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i & 0xFF) as u8).collect();
+        let mut offered = 0usize;
+        let mut received: Vec<u8> = Vec::new();
+        let mut t = 0u64;
+        for _ in 0..40_000 {
+            t += 10;
+            let now = ms(t);
+            if offered < data.len() {
+                let take = client.send_available().min(data.len() - offered);
+                if take > 0 {
+                    let n = client.send(&data[offered..offered + take]).unwrap_or(0);
+                    offered += n;
+                    if offered == data.len() {
+                        client.close(now).ok();
+                    }
+                }
+            }
+            client.advance(now);
+            server.advance(now);
+            for f in drain(&mut client, now) {
+                feed(&mut server, &f, now);
+            }
+            for f in drain(&mut server, now) {
+                feed(&mut client, &f, now);
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = server.recv(&mut buf);
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+            }
+            if received.len() == data.len() {
+                break;
+            }
+        }
+        assert_eq!(received.len(), data.len(), "{algo:?}: length");
+        assert_eq!(received, data, "{algo:?}: bytes");
+    }
+}

@@ -66,6 +66,11 @@
 //!   algorithm, fast retransmit, zero-window probing, RFC 5961
 //!   challenge ACKs, and the user timeout — driven by injected time and
 //!   a caller-supplied CSPRNG initial sequence number.
+//!   [`tcp::cc`] is the pluggable congestion-control policy the
+//!   connection consults for its send window: a [`tcp::cc::CongestionControl`]
+//!   trait (the scheduler-policy precedent) with RFC 9438 CUBIC (default)
+//!   and RFC 6582 `NewReno` siblings, held to a shared conformance suite —
+//!   pure integer fixed-point arithmetic, no floating point.
 //!
 //! # Security
 //!

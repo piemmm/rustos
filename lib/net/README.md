@@ -110,12 +110,23 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
   user timeout. The initial sequence number is a caller-supplied CSPRNG
   draw (§22) so the engine stays deterministic and replayable; every buffer
   and the reassembly set are bounded (fail closed, never attacker-sized).
-  Congestion control, listeners with an accept queue, and SYN cookies are
-  the next increment (`plans/NETWORK.md` N6).
+  The send path is bounded by both the peer's advertised window and the
+  congestion window from `tcp::cc`.
+- `tcp::cc` — pluggable congestion control, the scheduler-policy precedent
+  applied to TCP: a `CongestionControl` trait the connection consults for
+  its send window, with RFC 9438 CUBIC (the default) and RFC 6582 NewReno
+  siblings and a shared conformance suite both must pass. Windows are byte
+  counts; the arithmetic (including CUBIC's cube root) is exact integer
+  fixed-point, so the crate needs no floating point or libm. Loss (three
+  duplicate ACKs) applies the multiplicative decrease once per window
+  (RFC 6582 recover) and a timeout collapses to one segment; growth is slow
+  start below `ssthresh` and the policy's increase above it. Listeners with
+  an accept queue, SYN cookies, and RFC 6675 SACK-based selective
+  retransmission are the next increment (`plans/NETWORK.md` N6b).
 
-Later increments evolve this crate in place: stream sockets and the QEMU
-vertical (`plans/NETWORK.md` N5c), then congestion control and listeners
-(N6).
+Later increments evolve this crate in place: listeners with an accept
+queue, SYN cookies, and RFC 6675 SACK-based loss recovery (`plans/NETWORK.md`
+N6b).
 
 ## Security
 

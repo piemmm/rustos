@@ -11,26 +11,29 @@
 //! deterministic and replayable — the property tests and the fuzz
 //! state-machine driver exercise the exact code the live service runs.
 //!
-//! What is implemented here (N5b): the full RFC 9293 state machine
+//! What is implemented here (N5b + the N6a congestion control): the full RFC 9293 state machine
 //! (active and passive open, simultaneous open/close, teardown), send and
 //! receive windows over [`SeqNumber`], RFC 7323 window scaling and
 //! timestamps with PAWS, RFC 2018 SACK generation, RFC 6298 retransmission
 //! timeout with Karn's algorithm, fast retransmit on duplicate ACKs, zero-
 //! window (persist) probing, RFC 5961 in-window RST/SYN/ACK checks with
-//! rate-limited challenge ACKs, delayed ACKs, and the RFC 9293 user
-//! timeout. Congestion control (a pluggable policy), listeners with an
-//! accept queue, and SYN cookies are the next increment (N6); the send
-//! path here is flow-control-bounded only.
+//! rate-limited challenge ACKs, delayed ACKs, the RFC 9293 user timeout,
+//! and pluggable congestion control ([`crate::tcp::cc`]): the send path is
+//! bounded by both the peer's advertised window and the congestion window.
+//! Listeners with an accept queue, SYN cookies, and RFC 6675 SACK-based
+//! selective retransmission are the next increment (N6b).
 //!
 //! Every table is bounded: the send and receive buffers and the
 //! out-of-order reassembly set are capped at construction (fail closed on
 //! overflow, never an attacker-sized allocation).
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 
+use crate::tcp::cc::{CongestionAlgorithm, CongestionControl};
 use crate::tcp::{SackBlock, SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
 use crate::timeutil::{from_nanos, nanos, NEVER};
 
@@ -161,6 +164,9 @@ pub struct TcpConfig {
     /// Minimum spacing between challenge ACKs (RFC 5961 §10 rate limit),
     /// so a hostile peer cannot induce an ACK storm.
     pub challenge_ack_interval: Duration64,
+    /// The congestion-control algorithm this connection uses (RFC 9438
+    /// CUBIC by default; see [`crate::tcp::cc`]).
+    pub congestion: CongestionAlgorithm,
 }
 
 impl Default for TcpConfig {
@@ -181,6 +187,7 @@ impl Default for TcpConfig {
             delayed_ack: millis(100),
             maximum_segment_lifetime: Duration64::from_secs(30),
             challenge_ack_interval: millis(500),
+            congestion: CongestionAlgorithm::Cubic,
         }
     }
 }
@@ -433,9 +440,20 @@ pub struct Tcb {
     /// segment sent exactly once is ever measured.
     rtt_sample: Option<(SeqNumber, u128)>,
 
-    // Fast retransmit (RFC 5681 §3.2, the trigger only; recovery is N6).
+    // Fast retransmit (RFC 5681 §3.2): three duplicate ACKs trigger an
+    // early retransmit and a congestion-control loss event.
     last_ack: SeqNumber,
     dup_ack_count: u32,
+
+    // Congestion control (RFC 5681 / RFC 9438). The policy owns `cwnd`; the
+    // TCB bounds every send by `min(snd_wnd, cwnd)` and feeds it the
+    // ACK/loss/timeout signals. `recover` is the RFC 6582 high-water mark:
+    // one multiplicative decrease per loss episode, cleared once the
+    // cumulative ACK passes it, so a burst of losses in one window cannot
+    // halve the window repeatedly.
+    cc: Box<dyn CongestionControl>,
+    recover: SeqNumber,
+    in_recovery: bool,
 
     // Zero-window persist (RFC 9293 §3.8.6.1).
     persist_deadline: u128,
@@ -483,11 +501,15 @@ impl Tcb {
         let zero = SeqNumber::new(0);
         let rto = RtoEstimator::new(&config);
         let ooo = Reassembly::new(config.max_reassembly_segments);
+        let cc = config.congestion.build(u32::from(DEFAULT_SEND_MSS));
         Self {
             config,
             state: State::Closed,
             local_port,
             remote_port,
+            cc,
+            recover: zero,
+            in_recovery: false,
             iss: zero,
             snd_una: zero,
             snd_nxt: zero,
@@ -786,6 +808,7 @@ impl Tcb {
         // MTU once the 40-byte IPv6 header is added, and every full-size
         // segment would be silently dropped by the network layer.
         self.send_mss = self.peer_mss.min(self.config.local_mss.max(1));
+        self.cc.set_mss(u32::from(self.send_mss));
         if let Some(ws) = seg.options.window_scale {
             self.snd_wnd_shift = ws.min(MAX_WINDOW_SCALE);
         } else {
@@ -919,6 +942,7 @@ impl Tcb {
             self.snd_wnd = u32::from(seg.window) << self.snd_wnd_shift;
             self.state = State::Established;
             self.became_established = true;
+            self.cc.init(u32::from(self.send_mss));
             if self.snd_una == self.snd_nxt {
                 self.rtx_deadline = NEVER;
             } else {
@@ -1006,6 +1030,7 @@ impl Tcb {
             self.drop_acked_data();
             self.state = State::Established;
             self.became_established = true;
+            self.cc.init(u32::from(self.send_mss));
             self.snd_wnd = u32::from(seg.window) << self.snd_wnd_shift;
             self.snd_wl1 = seg.seq;
             self.snd_wl2 = seg.ack;
@@ -1051,6 +1076,8 @@ impl Tcb {
     /// when the segment must be dropped without further processing.
     fn process_ack(&mut self, seg: &TcpSegment<'_>, now_ns: u128) -> bool {
         let ack = seg.ack;
+        let prev_una = self.snd_una;
+        let flight_before = self.snd_max.distance_from(prev_una);
         // ACK for something not yet sent: challenge and drop (RFC 5961 §5).
         if ack.gt(self.snd_nxt) {
             self.challenge_ack(now_ns);
@@ -1079,6 +1106,18 @@ impl Tcb {
             self.drop_acked_data();
             self.dup_ack_count = 0;
             self.rtx_count = 0;
+            // Congestion control: a loss episode ends once the cumulative
+            // ACK passes the high-water mark recorded at the loss (RFC 6582
+            // NewReno). Grow the window only outside an episode; during
+            // recovery the window stays at the reduced value.
+            let acked = ack.distance_from(prev_una).min(flight_before);
+            if self.in_recovery {
+                if self.recover.le(ack) {
+                    self.in_recovery = false;
+                }
+            } else {
+                self.cc.on_ack(acked, flight_before, now_ns);
+            }
             if self.snd_una == self.snd_nxt {
                 self.rtx_deadline = NEVER;
                 self.user_timeout_deadline = NEVER;
@@ -1124,8 +1163,18 @@ impl Tcb {
     }
 
     /// Retransmit the oldest unacknowledged segment now (RFC 5681 fast
-    /// retransmit). Congestion-window recovery is N6; this only re-sends.
+    /// retransmit) and, on the first entry per loss window, drive the
+    /// congestion-control multiplicative decrease (RFC 6582 fast recovery).
     fn fast_retransmit(&mut self, now_ns: u128) {
+        // Enter fast recovery at most once per loss window (RFC 6582): apply
+        // the multiplicative decrease and remember the highest sequence sent
+        // so the episode ends when it is cumulatively acknowledged.
+        if !self.in_recovery {
+            let flight = self.snd_max.distance_from(self.snd_una);
+            self.cc.on_loss(flight, now_ns);
+            self.recover = self.snd_max;
+            self.in_recovery = true;
+        }
         self.snd_nxt = self.snd_una;
         // Karn: cancel any in-flight sample so the retransmitted range is
         // never measured.
@@ -1266,7 +1315,11 @@ impl Tcb {
         let offset = self.snd_nxt.distance_from(self.send_data_start) as usize;
         let avail = self.tx.len().saturating_sub(offset);
         let in_flight = self.snd_nxt.distance_from(self.snd_una);
-        let usable = self.snd_wnd.saturating_sub(in_flight) as usize;
+        // The sender is bounded by both the peer's advertised (flow-control)
+        // window and the congestion window (RFC 5681 §4.1): it may keep at
+        // most `min(snd_wnd, cwnd)` bytes in flight.
+        let window = self.snd_wnd.min(self.cc.cwnd());
+        let usable = window.saturating_sub(in_flight) as usize;
         // A data segment's payload is the negotiated MSS *minus* the TCP
         // options it carries (RFC 6691): the MSS counts data only, so
         // timestamps/SACK bytes must come out of the payload or the whole
@@ -1518,6 +1571,11 @@ impl Tcb {
                 return;
             }
             self.rto.backoff();
+            // RFC 5681 §3.1: a timeout collapses the congestion window to
+            // one segment and restarts slow start, ending any fast recovery.
+            let flight = self.snd_max.distance_from(self.snd_una);
+            self.cc.on_rto(flight, now_ns);
+            self.in_recovery = false;
             // Go-back-N: resend from the oldest unacknowledged byte.
             self.snd_nxt = self.snd_una;
             self.rtt_sample = None;

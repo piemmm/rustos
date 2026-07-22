@@ -968,14 +968,39 @@ the whole is too large for one change and each leaves the tree working.
   `tcp_bulk_transfer_over_ipv6_respects_the_link_mtu` drives a multi-segment
   transfer over a real v6 link and asserts every byte arrives in order.
 
-### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[ ]`
+### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[~]`
+
+#### N6a — pluggable congestion control `[x]`
+- `lib/net::tcp::cc` is the pluggable congestion-control policy layer, the
+  §17.1 scheduler-policy precedent applied to TCP: a `CongestionControl`
+  trait the connection consults for its send window, RFC 9438 **CUBIC**
+  (the default) and RFC 6582 **NewReno** siblings, and a shared conformance
+  suite both must pass (RFC 6928 initial window, slow-start vs.
+  congestion-avoidance growth, multiplicative decrease on loss, one-segment
+  collapse on timeout, monotonic growth under a pure ACK stream). Windows
+  are byte counts; all arithmetic — including CUBIC's `K` and window target
+  over an integer cube root (`icbrt`) — is exact integer fixed-point, so the
+  `no_std` crate needs no floating point or libm (§2.12).
+- `TcpConfig.congestion` selects the algorithm; `Tcb` stores the boxed
+  policy, bounds every send by `min(snd_wnd, cwnd)` in `plan_segment`, and
+  feeds it `on_ack`/`on_loss`/`on_rto`. Fast retransmit (three duplicate
+  ACKs) drives the decrease **once per loss window** through the RFC 6582
+  `recover` high-water mark; an RTO collapses to one segment and restarts
+  slow start. Retransmission stays the existing go-back-N.
+- Covered by the `tcp::cc` conformance + unit suite (both policies, the
+  cube root, CUBIC's Reno-friendliness and convex overshoot) and the
+  `tcp::conn` end-to-end tests (initial-window bound, cwnd opening on ACKs,
+  a full bulk transfer under each policy); the existing lossy/reordering
+  property test now also exercises cwnd + go-back-N together. Docs in
+  `lib/net` lib.rs, `lib/net/README.md`, `docs/src/lib/net.md`.
+
+#### N6b — listeners, SYN-flood defence, SACK loss recovery `[ ]`
 - `listen`/`accept` with bounded accept + SYN queues; overflow ⇒
   stateless SYN cookies (RFC 4987) with the documented option-loss
   trade-off; `CAP_NET_BIND_PRIVILEGED` introduced + enforced.
-- Congestion control behind a pluggable `CongestionControl` trait
-  (§17.1 scheduler-policy precedent): CUBIC (RFC 9438) default,
-  NewReno (RFC 6582) sibling — conformance suite both must pass; RFC
-  2018 SACK + RFC 6675 loss recovery.
+- RFC 6675 SACK-based selective loss recovery (on top of the N5b SACK
+  generation and the N6a congestion window), replacing go-back-N with a
+  scoreboard-driven retransmit.
 - Adversarial tests: SYN flood soak (bounded memory asserted), RST/data
   injection corpus (RFC 5961 behaviour), connection-exhaustion
   fail-closed, cookie round-trip property tests.

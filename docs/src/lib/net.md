@@ -321,20 +321,54 @@ handling with rate-limited challenge ACKs (so a hostile peer cannot
 induce an ACK storm), delayed ACKs, and the RFC 9293 user timeout. Every
 buffer and the reassembly set are capacity-bounded and fail closed;
 addresses never enter the TCB (the caller folds the pseudo-header
-checksum through `tcp::write`), so it is address-family agnostic.
-Congestion control (a pluggable policy), listeners with an accept queue,
-and SYN cookies are the next increment (N6). The connection engine is
+checksum through `tcp::write`), so it is address-family agnostic. The
+send path is bounded by both the peer's advertised window and the
+congestion window (`tcp::cc`, below). Listeners with an accept queue, SYN
+cookies, and RFC 6675 SACK-based selective retransmission are the next
+increment (N6b). The connection engine is
 driven end to end through the `Stack` demux/originate paths above by the
 `netstack` `SocketService` stream sockets (N5c): the service owns one `Tcb`
 per connection and turns `Connect`/`Send`/`Close` and inbound
 `StackEvent::TcpSegment`s into segment egress and client-visible
 `SocketStreamEvent`s.
 
+### `tcp::cc` — pluggable congestion control
+
+Congestion control is a policy, the same shape as the pluggable kernel
+scheduler: the connection owns the sequence space and loss detection and
+consults a `CongestionControl` object for the one value it does not own,
+the congestion window `cwnd` (in bytes). `plan_segment` bounds every send
+by `min(snd_wnd, cwnd)` — the peer's flow-control window *and* the
+congestion window (RFC 5681 §4.1). Adding an algorithm is implementing the
+trait and adding a `CongestionAlgorithm` variant; nothing else changes.
+
+Two policies ship, held to one shared conformance suite (RFC 6928 initial
+window, slow-start vs. congestion-avoidance growth rates, multiplicative
+decrease on loss, collapse to one segment on timeout, monotonic growth
+under a pure ACK stream):
+
+- **CUBIC** (RFC 9438), the default: after a congestion event the window
+  follows a cubic curve of the time since that event — concave as it
+  approaches the pre-loss peak, convex as it probes beyond it — with a
+  Reno-friendly floor so it is never *slower* than NewReno on a short-RTT
+  path. The cubic term and its `K` are computed in exact integer
+  fixed-point over an integer cube root, so the crate needs no floating
+  point or libm (the charter's roll-your-own rule).
+- **NewReno** (RFC 6582 / RFC 5681): classic AIMD — slow-start doubling
+  below `ssthresh`, one-MSS-per-RTT additive increase above it, halve on
+  loss.
+
+The connection feeds the policy three signals: `on_ack` (new data
+acknowledged — grow), `on_loss` (three duplicate ACKs — multiplicative
+decrease, applied once per loss window through the RFC 6582 `recover`
+high-water mark so a burst cannot halve the window repeatedly), and
+`on_rto` (a timeout — collapse to one segment and restart slow start).
+Retransmission is the connection's existing go-back-N; SACK-based
+selective retransmission (RFC 6675) is N6b.
+
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place —
-the stream-socket surface is landed (N5c: `Stack` TCP demux/`send_tcp` and
-the `netstack` stream sockets), with its live QEMU connect/bulk-transfer
-vertical still to come; then listeners + congestion control (N6) and the
-hardware offloads (N7). Each is added with its callers, tests, and fuzz
-harnesses per increment.
+listeners with a bounded accept queue, stateless SYN cookies, and RFC 6675
+SACK-based loss recovery (N6b), then the hardware offloads (N7). Each is
+added with its callers, tests, and fuzz harnesses per increment.
