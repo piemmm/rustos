@@ -8,14 +8,28 @@ the system composes, so the `files.app` windowed file manager and the
 desktop session's trusted file picker (`plans/CAPABILITY_USE.md` CU6)
 can never diverge in navigation semantics, listing policy, or look.
 
+- **Entries** (`Entry`/`EntryKind`): each listed child carries its name,
+  its kind, and the display metadata a file manager needs — apparent
+  `size` and the modification `Time64` — mapped straight from the one
+  `fs_readdir` stream the source already produced, so no child is opened
+  and statted to fill a listing. `EntryKind` refines the VFS's
+  file/directory split with the one distinction a manager must make
+  structurally: a `<Name>.app` directory is a `Bundle` — a sealed unit the
+  user launches, not a folder to descend into.
+- **Sort** (`SortMode`/`sort_entries`): the one listing order both views
+  share — directories first, then a `Name`/`Size`/`Modified` key with a
+  direction, with a case-insensitive name tiebreak so the result never
+  depends on the source's incidental order. The default is name-ascending;
+  `Browser::set_sort_mode` re-orders in place, keeping the selection on the
+  same entry.
 - **Model** (`Browser` over the injected `DirectorySource` seam):
   transactional, fail-closed navigation — descend, climb to the parent,
-  refresh, and a selection cursor. The new directory is listed *before*
-  any state changes, so a refused or failing read leaves the browser
-  exactly where it was, and the engine never fabricates an entry: it
-  shows exactly what its source returns, with every permission decision
-  staying in the VFS behind the source under the composing process's own
-  identity.
+  refresh, a selection cursor, and the shared sort applied to every
+  listing. The new directory is listed *before* any state changes, so a
+  refused or failing read leaves the browser exactly where it was, and the
+  engine never fabricates an entry: it shows exactly what its source
+  returns, with every permission decision staying in the VFS behind the
+  source under the composing process's own identity.
 - **Renderer** (`render`): paints the path bar and the scrolling entry
   list into a `lib/raster` `Surface` through the active `lib/theme`
   palette and the shared `lib/font` face; `WIN_WIDTH`/`WIN_HEIGHT` are
