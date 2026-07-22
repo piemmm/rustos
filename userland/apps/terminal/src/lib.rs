@@ -88,7 +88,7 @@ pub use grid::Grid;
 pub use parser::Parser;
 pub use render::render;
 pub use shell::ShellSource;
-pub use spawned::{shell_wires, PipeShellSource};
+pub use spawned::{shell_load_failure, shell_wires, PipeShellSource};
 pub use terminal::Terminal;
 // The cell and rendition vocabulary the emulator consumes is `lib/vt`'s, not a
 // second definition; re-export it so callers name one type.
