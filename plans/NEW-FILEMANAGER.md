@@ -27,9 +27,10 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, FM6a, and FM6b's pure
-association model are done**; the FM6b app-side spawn/delegation, FM4b,
-and FM7–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, FM6a, FM6b's pure
+association model, FM7a's selection + clipboard model, and FM7b's pure
+paste-execution model are done**; the FM6b app-side spawn/delegation, FM4b, the
+FM7b app-side move/copy/delete verbs, and FM8–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -400,19 +401,71 @@ The remaining app-side wiring (still `planned`):
   not freeze the manager's window; it stays responsive and parked while
   the child starts. Host tests: the app-store `BundleSource`, the grant-to-child seam.
 
-### FM7 — clipboard operations: cut, copy, paste, delete, new folder `[ ]`
+### FM7a — the selection + clipboard model `[x]`
 
-The core management verbs, modelled in the engine and executed in the app.
+Done (§2.19 — the pure model host-proven ahead of the app verbs, exactly as
+FM6a/FM6b's pure model landed). The two `lib/browse` modules the management
+verbs are built on:
 
-- **A selection + clipboard model** in `lib/browse`: multi-select
-  (Shift/Ctrl-click ranges, Select All), a cut/copy set with the
-  pending-op kind, and paste-target validation (no paste into a
-  descendant of a moved dir, no self-overwrite without confirm) — all
-  pure and host-tested.
-- **Move** = `fs_rename` when source and target share a volume; otherwise
-  **copy-then-delete**. **Copy** streams `fs_read`→`fs_write` in bounded,
-  interruptible chunks (§2.23 — no unbounded buffer, no spin), preserving
-  metadata where the target format allows and failing closed with
+- **Multi-selection** (`select::Selection` + `Browser` methods): the
+  per-listing set of marked entries plus the range anchor. `single` (plain
+  click / unmodified keyboard move), `toggle` (`Ctrl`-click), `range_to`
+  (`Shift`-click from the anchor), and `select_all`; `Browser::select`,
+  `toggle_selection`, `extend_selection_to`, `select_all`, `clear_selection`
+  bounds-check every index against the live listing (`NoSuchEntry` otherwise).
+  Because members are indices, every listing change (navigate / refresh /
+  re-sort) and every unmodified move collapses the selection to the single
+  focused entry, so it never points at a stale row.
+- **Cut/copy clipboard** (`clipboard` module + `Browser::clipboard`):
+  `ClipboardOp` (`Copy`/`Cut`) and a `Clipboard` capturing the selected
+  entries' absolute component paths (so it survives navigating to the paste
+  target); `None` when nothing is selected. `plan_paste(clipboard, target)`
+  resolves each source to a destination under the target and is fail closed
+  (§5.4): a target inside one of the moved items is `PasteError::WouldRecurse`
+  (an exact component-prefix test), and a paste back into an item's own
+  directory is flagged (`PasteItem::overwrites_source`) for the app to confirm
+  rather than silently clobber (§2.24). The `Empty` case is the *absence* of a
+  clipboard (`Option::None`), not a paste error, so a constructed `Clipboard`
+  is never empty and no dead variant lingers (§2.14). The model names *what*
+  would move where; the app performs the move/copy under the user's own
+  identity, so composing it grants nothing and the picker never builds one.
+- Host-tested in `lib/browse/src/tests.rs` (each `Selection` gesture + anchor,
+  the bounds refusals, the listing-change/keyboard collapse, the empty-directory
+  empty selection, clipboard capture + `None`, `Clipboard::new` empty/root
+  refusal, `plan_paste` mapping / self-overwrite flag / recurse-into-self +
+  descendant + sibling-prefix, and the error message). Docs:
+  `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+### FM7b — move, copy, paste, delete, new folder `[~]`
+
+The core management verbs on top of the FM7a model.
+
+**The pure paste-execution model is done** (§2.19 — host-proven ahead of the
+app verbs, exactly as FM6a/FM6b/FM7a's pure models landed): the
+`lib/browse::execute` module. `paste_strategy(op, source, dest)` makes the
+move-vs-copy decision from the clipboard op and the two items' `VolumeId`s (the
+16-byte `fs_stat` volume identity) — `Copy` streams, a same-volume `Cut` is one
+`Rename`, a cross-volume `Cut` is `CopyThenDelete` — the one `mv`/`st_dev`
+definition (§2.2). `CopyCursor`/`CopyChunk` model the bounded, resumable,
+interruptible streamed copy: a known-length source is walked in fixed
+`COPY_CHUNK_LEN` steps, `advance`d by the bytes actually carried (so short reads
+and cancellation between chunks both work), `resume`d from a persisted offset,
+and fail closed — advancing/resuming past the source length is
+`CopyError::Overrun`, never a silent wrap (§2.23, §5.4). The engine does no I/O
+and the cross-volume source is deleted only after its copy fully succeeds, so
+composing it grants nothing and the read-only picker never runs it. Host-tested
+(strategy per op × volume, `VolumeId` round-trip, empty/small/large chunking to
+completion, short-transfer advance, resume, resume/advance overrun, error
+message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+The remaining app-side verbs (still `planned`):
+
+- **Move** = `fs_rename` when source and target share a volume (the
+  `PasteStrategy::Rename` case); otherwise
+  **copy-then-delete** (the `PasteStrategy::CopyThenDelete` case). **Copy**
+  streams `fs_read`→`fs_write` driving the landed `execute::CopyCursor` in
+  bounded, interruptible chunks (§2.23 — no unbounded buffer, no spin),
+  preserving metadata where the target format allows and failing closed with
   `TimestampOutOfRange`-style honesty on a narrowing target (§21). A
   directory copy recurses depth-bounded; an error mid-copy stops, reports,
   and leaves a partial-copy marker rather than a silent half-result
@@ -423,9 +476,11 @@ The core management verbs, modelled in the engine and executed in the app.
 - **Progress + cancel** for long operations: a bounded progress indicator
   (`lib/controls` `Progress`), a Cancel that stops at the next chunk
   boundary; the window stays parked/responsive throughout (§2.23).
-- Host tests: selection ranges, clipboard state machine, move-vs-copy
-  volume decision, chunked-copy resume/cancel/partial-failure, delete
-  confirm/refuse, mkdir+rename. App wires the VFS seams.
+- Host tests: the engine-side selection ranges, clipboard state machine,
+  move-vs-copy volume decision, and chunked-copy resume/cancel/overrun are
+  **done** in `lib/browse` (FM7a + the `execute` model above); the app-side
+  work adds partial-failure recovery, delete confirm/refuse, and mkdir+rename
+  over the VFS seams.
 
 ### FM8 — properties and permissions `[ ]`
 
@@ -465,8 +520,10 @@ navigation model (history + breadcrumb); FM4b paints the chrome and grows the
 context menu alongside the actions it invokes (FM5–FM8), so no menu entry is
 built ahead of its behaviour (§2.4). FM5 is the first write and the template for
 FM7. FM6a models the activation decision (host-proven); FM6b (launch/open) acts
-on it, depends on FM3 (bundle/file kinds), and reuses AW5 delegation. FM7
-depends on FM4b's selection/menu. FM8 and FM9 close out. Each
+on it, depends on FM3 (bundle/file kinds), and reuses AW5 delegation. FM7 is
+split (§2.19): FM7a models the selection + clipboard in the engine
+(host-proven); FM7b executes the verbs in the app and depends on FM4b's
+selection/menu. FM8 and FM9 close out. Each
 lands fully gated; a stage that turns out larger than one clean increment is
 split and staged here, never shipped half-done "for now" (§2.19).
 

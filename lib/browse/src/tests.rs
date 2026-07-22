@@ -15,8 +15,13 @@ use tairix_raster::Color;
 use tairix_theme::Theme;
 
 use crate::browser::Browser;
+use crate::clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError};
 use crate::entry::Entry;
 use crate::error::BrowseError;
+use crate::execute::{
+    paste_strategy, CopyCursor, CopyError, PasteStrategy, VolumeId, COPY_CHUNK_LEN,
+};
+use crate::select::Selection;
 use crate::source::DirectorySource;
 
 /// The absolute-path key the mock indexes a directory by — the one shared
@@ -1588,4 +1593,398 @@ fn bundle_source_propagates_a_refused_enumeration() {
         store.installed_bundles().err(),
         Some(Errno::PermissionDenied)
     );
+}
+
+// ---------------------------------------------------------------------------
+// FM7 — multi-selection and the cut/copy clipboard (pure engine model).
+// ---------------------------------------------------------------------------
+
+/// Build a root-first component path from string literals.
+fn comps(parts: &[&str]) -> Vec<String> {
+    parts.iter().copied().map(str::to_string).collect()
+}
+
+/// The selected indices, low-to-high, as a `Vec` for assertions.
+fn selected(selection: &Selection) -> Vec<usize> {
+    selection.iter().collect()
+}
+
+#[test]
+fn selection_single_replaces_and_sets_the_anchor() {
+    let mut s = Selection::new();
+    s.single(3);
+    assert_eq!(selected(&s), [3]);
+    assert_eq!(s.anchor(), Some(3));
+    s.single(1);
+    assert_eq!(selected(&s), [1]);
+    assert_eq!(s.anchor(), Some(1));
+}
+
+#[test]
+fn selection_toggle_adds_then_removes_and_moves_the_anchor() {
+    let mut s = Selection::new();
+    s.toggle(2);
+    assert!(s.contains(2));
+    assert_eq!(s.anchor(), Some(2));
+    s.toggle(4);
+    assert_eq!(selected(&s), [2, 4]);
+    assert_eq!(s.anchor(), Some(4));
+    s.toggle(2);
+    assert_eq!(selected(&s), [4]);
+    // Un-selecting still moves the anchor to the acted-on entry.
+    assert_eq!(s.anchor(), Some(2));
+}
+
+#[test]
+fn selection_range_to_covers_both_directions_and_keeps_the_anchor() {
+    let mut s = Selection::new();
+    s.single(2);
+    s.range_to(5);
+    assert_eq!(selected(&s), [2, 3, 4, 5]);
+    assert_eq!(s.anchor(), Some(2));
+    // A second shift-click re-grows from the same anchor, replacing the range.
+    s.range_to(0);
+    assert_eq!(selected(&s), [0, 1, 2]);
+    assert_eq!(s.anchor(), Some(2));
+}
+
+#[test]
+fn selection_range_to_without_an_anchor_is_a_single_select() {
+    let mut s = Selection::new();
+    s.range_to(4);
+    assert_eq!(selected(&s), [4]);
+    assert_eq!(s.anchor(), Some(4));
+}
+
+#[test]
+fn selection_select_all_selects_the_range_and_empty_stays_empty() {
+    let mut s = Selection::new();
+    s.select_all(3);
+    assert_eq!(selected(&s), [0, 1, 2]);
+    assert_eq!(s.anchor(), Some(0));
+    s.select_all(0);
+    assert!(s.is_empty());
+    assert_eq!(s.anchor(), None);
+}
+
+#[test]
+fn selection_clear_drops_everything() {
+    let mut s = Selection::new();
+    s.select_all(4);
+    s.clear();
+    assert!(s.is_empty());
+    assert_eq!(s.anchor(), None);
+}
+
+#[test]
+fn open_root_selects_the_focused_entry() {
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    assert_eq!(selected(browser.selection()), [0]);
+    assert!(browser.is_selected(0));
+    assert!(!browser.is_selected(1));
+}
+
+#[test]
+fn select_all_selects_every_entry_in_the_listing() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select_all();
+    assert_eq!(selected(browser.selection()), [0, 1, 2, 3]);
+}
+
+#[test]
+fn toggle_and_extend_build_a_multi_selection() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select(0).expect("focus 0");
+    browser.toggle_selection(2).expect("toggle 2");
+    assert_eq!(selected(browser.selection()), [0, 2]);
+    // Extend grows from the toggle's anchor (2) to 3.
+    browser.extend_selection_to(3).expect("extend 3");
+    assert_eq!(selected(browser.selection()), [2, 3]);
+    assert_eq!(browser.selected_index(), Some(3));
+}
+
+#[test]
+fn out_of_range_selection_ops_are_refused_and_change_nothing() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select(1).expect("focus 1");
+    assert_eq!(browser.toggle_selection(99), Err(BrowseError::NoSuchEntry));
+    assert_eq!(
+        browser.extend_selection_to(99),
+        Err(BrowseError::NoSuchEntry)
+    );
+    assert_eq!(selected(browser.selection()), [1]);
+    assert_eq!(browser.selected_index(), Some(1));
+}
+
+#[test]
+fn an_unmodified_move_collapses_a_multi_selection() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select_all();
+    assert_eq!(browser.selection().len(), 4);
+    browser.select_next();
+    assert_eq!(selected(browser.selection()), [1]);
+}
+
+#[test]
+fn navigation_collapses_the_selection_to_the_focus() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select_all();
+    // Enter /System (index 2 in the sorted root).
+    browser.open_index(2).expect("enter System");
+    assert_eq!(browser.path(), "/System");
+    assert_eq!(selected(browser.selection()), [0]);
+}
+
+#[test]
+fn a_reorder_collapses_the_selection_to_the_focus() {
+    use crate::sort::{SortDirection, SortKey, SortMode};
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select_all();
+    browser.set_sort_mode(SortMode {
+        key: SortKey::Name,
+        direction: SortDirection::Descending,
+    });
+    assert_eq!(browser.selection().len(), 1);
+}
+
+#[test]
+fn an_empty_directory_has_an_empty_selection() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    // /System index 0 is Fonts, an empty directory.
+    browser.open_index(0).expect("enter Fonts");
+    assert_eq!(browser.path(), "/System/Fonts");
+    assert!(browser.entries().is_empty());
+    assert!(browser.selection().is_empty());
+    assert!(browser.clipboard(ClipboardOp::Copy).is_none());
+}
+
+#[test]
+fn clipboard_captures_the_selected_entries_absolute_paths() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    // /System sorted: [Fonts, Security, Kernel]. Select Fonts and Kernel.
+    browser.select(0).expect("focus Fonts");
+    browser.toggle_selection(2).expect("also Kernel");
+    let clipboard = browser.clipboard(ClipboardOp::Cut).expect("clipboard");
+    assert_eq!(clipboard.op(), ClipboardOp::Cut);
+    assert_eq!(
+        clipboard.items(),
+        &[comps(&["System", "Fonts"]), comps(&["System", "Kernel"])]
+    );
+}
+
+#[test]
+fn clipboard_is_none_when_nothing_is_selected() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.clear_selection();
+    assert!(browser.selection().is_empty());
+    assert!(browser.clipboard(ClipboardOp::Copy).is_none());
+}
+
+#[test]
+fn clipboard_new_refuses_empty_or_root_items() {
+    assert!(Clipboard::new(ClipboardOp::Copy, Vec::new()).is_none());
+    // A root (empty component) item is not a real entry.
+    assert!(Clipboard::new(ClipboardOp::Copy, vec![Vec::new()]).is_none());
+    assert!(Clipboard::new(ClipboardOp::Copy, vec![comps(&["a"]), Vec::new()]).is_none());
+    let ok = Clipboard::new(ClipboardOp::Copy, vec![comps(&["a"])]).expect("built");
+    assert_eq!(ok.len(), 1);
+    assert!(!ok.is_empty());
+}
+
+#[test]
+fn plan_paste_maps_each_source_into_the_target() {
+    let clipboard = Clipboard::new(
+        ClipboardOp::Cut,
+        vec![comps(&["Users", "alice"]), comps(&["System", "Kernel"])],
+    )
+    .expect("clipboard");
+    let plan = plan_paste(&clipboard, &comps(&["Storage"])).expect("plan");
+    assert_eq!(plan.op(), ClipboardOp::Cut);
+    assert_eq!(plan.items().len(), 2);
+    assert_eq!(
+        plan.items()[0].source(),
+        comps(&["Users", "alice"]).as_slice()
+    );
+    assert_eq!(
+        plan.items()[0].dest(),
+        comps(&["Storage", "alice"]).as_slice()
+    );
+    assert!(!plan.items()[0].overwrites_source());
+    assert_eq!(
+        plan.items()[1].dest(),
+        comps(&["Storage", "Kernel"]).as_slice()
+    );
+}
+
+#[test]
+fn plan_paste_flags_a_paste_back_into_the_same_directory() {
+    let clipboard =
+        Clipboard::new(ClipboardOp::Copy, vec![comps(&["System", "Fonts"])]).expect("clipboard");
+    // Paste into /System, where Fonts already lives.
+    let plan = plan_paste(&clipboard, &comps(&["System"])).expect("plan");
+    let item = &plan.items()[0];
+    assert_eq!(item.dest(), comps(&["System", "Fonts"]).as_slice());
+    assert!(item.overwrites_source());
+}
+
+#[test]
+fn plan_paste_refuses_a_folder_into_itself_or_a_descendant() {
+    let clipboard = Clipboard::new(ClipboardOp::Cut, vec![comps(&["System"])]).expect("clipboard");
+    // Into itself.
+    assert_eq!(
+        plan_paste(&clipboard, &comps(&["System"])),
+        Err(PasteError::WouldRecurse)
+    );
+    // Into a descendant.
+    assert_eq!(
+        plan_paste(&clipboard, &comps(&["System", "Fonts"])),
+        Err(PasteError::WouldRecurse)
+    );
+    // A sibling prefix (`/Systematic`) is not a descendant.
+    assert!(plan_paste(&clipboard, &comps(&["Systematic"])).is_ok());
+}
+
+#[test]
+fn paste_error_message_is_non_empty() {
+    assert!(!PasteError::WouldRecurse.to_string().is_empty());
+}
+
+// ---- FM7b: the paste-execution model (`execute`) ----
+
+/// Two distinct volume ids so the move-vs-copy tests read clearly.
+fn vol(tag: u8) -> VolumeId {
+    let mut bytes = [0u8; 16];
+    bytes[0] = tag;
+    VolumeId::new(bytes)
+}
+
+#[test]
+fn volume_id_round_trips_its_bytes_and_compares() {
+    let bytes = *b"0123456789abcdef";
+    assert_eq!(VolumeId::new(bytes).bytes(), bytes);
+    assert_eq!(vol(1), vol(1));
+    assert_ne!(vol(1), vol(2));
+}
+
+#[test]
+fn a_copy_always_streams_regardless_of_volume() {
+    assert_eq!(
+        paste_strategy(ClipboardOp::Copy, vol(1), vol(1)),
+        PasteStrategy::Copy
+    );
+    assert_eq!(
+        paste_strategy(ClipboardOp::Copy, vol(1), vol(2)),
+        PasteStrategy::Copy
+    );
+}
+
+#[test]
+fn a_cut_within_one_volume_renames() {
+    assert_eq!(
+        paste_strategy(ClipboardOp::Cut, vol(7), vol(7)),
+        PasteStrategy::Rename
+    );
+}
+
+#[test]
+fn a_cut_across_volumes_copies_then_deletes() {
+    assert_eq!(
+        paste_strategy(ClipboardOp::Cut, vol(1), vol(2)),
+        PasteStrategy::CopyThenDelete
+    );
+}
+
+#[test]
+fn an_empty_source_needs_no_chunk_and_is_complete() {
+    let cursor = CopyCursor::new(0);
+    assert!(cursor.is_complete());
+    assert_eq!(cursor.remaining(), 0);
+    assert_eq!(cursor.next_chunk(), None);
+}
+
+#[test]
+fn a_small_source_is_one_short_chunk() {
+    let cursor = CopyCursor::new(10);
+    let chunk = cursor.next_chunk().expect("a chunk");
+    assert_eq!(chunk.offset(), 0);
+    assert_eq!(chunk.len(), 10);
+    assert!(!chunk.is_empty());
+}
+
+#[test]
+fn a_large_source_is_walked_in_bounded_chunks_to_completion() {
+    let total = COPY_CHUNK_LEN * 2 + 5;
+    let mut cursor = CopyCursor::new(total);
+
+    let first = cursor.next_chunk().expect("first");
+    assert_eq!(first.offset(), 0);
+    assert_eq!(first.len(), COPY_CHUNK_LEN);
+    cursor.advance(first.len()).expect("advance first");
+
+    let second = cursor.next_chunk().expect("second");
+    assert_eq!(second.offset(), COPY_CHUNK_LEN);
+    assert_eq!(second.len(), COPY_CHUNK_LEN);
+    cursor.advance(second.len()).expect("advance second");
+
+    let third = cursor.next_chunk().expect("third");
+    assert_eq!(third.offset(), COPY_CHUNK_LEN * 2);
+    assert_eq!(third.len(), 5);
+    cursor.advance(third.len()).expect("advance third");
+
+    assert!(cursor.is_complete());
+    assert_eq!(cursor.copied(), total);
+    assert_eq!(cursor.next_chunk(), None);
+}
+
+#[test]
+fn a_short_transfer_advances_only_by_what_moved() {
+    let mut cursor = CopyCursor::new(10);
+    // The read carried 4 of the 10 bytes it was asked for.
+    cursor.advance(4).expect("short advance");
+    assert_eq!(cursor.copied(), 4);
+    let next = cursor.next_chunk().expect("remainder");
+    assert_eq!(next.offset(), 4);
+    assert_eq!(next.len(), 6);
+    cursor.advance(6).expect("finish");
+    assert!(cursor.is_complete());
+}
+
+#[test]
+fn a_cursor_resumes_from_a_persisted_offset() {
+    let mut cursor = CopyCursor::resume(100, 40).expect("resume");
+    assert_eq!(cursor.copied(), 40);
+    assert_eq!(cursor.remaining(), 60);
+    let chunk = cursor.next_chunk().expect("chunk");
+    assert_eq!(chunk.offset(), 40);
+    assert_eq!(chunk.len(), 60);
+    cursor.advance(60).expect("finish");
+    assert!(cursor.is_complete());
+}
+
+#[test]
+fn resuming_past_the_total_is_overrun() {
+    assert_eq!(CopyCursor::resume(10, 11), Err(CopyError::Overrun));
+    // Resuming exactly at the end is a complete, valid cursor.
+    let done = CopyCursor::resume(10, 10).expect("at end");
+    assert!(done.is_complete());
+    assert_eq!(done.next_chunk(), None);
+}
+
+#[test]
+fn advancing_past_the_source_length_fails_closed() {
+    let mut cursor = CopyCursor::new(10);
+    assert_eq!(cursor.advance(11), Err(CopyError::Overrun));
+    // The cursor is left untouched by the refused advance.
+    assert_eq!(cursor.copied(), 0);
+    // A valid advance to the exact end still works afterwards.
+    cursor.advance(10).expect("advance to end");
+    assert!(cursor.is_complete());
+    assert_eq!(cursor.advance(1), Err(CopyError::Overrun));
+}
+
+#[test]
+fn copy_error_message_is_non_empty() {
+    assert!(!CopyError::Overrun.to_string().is_empty());
 }

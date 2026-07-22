@@ -263,6 +263,62 @@ follows the entry to its new name. The trusted file picker composes the same
 `Browser` and simply never calls the write path, so it stays read-only
 (`plans/CAPABILITY_USE.md` CU6).
 
+### Multi-selection and the clipboard model
+
+The management verbs — cut, copy, move, delete — act on a *set* of entries,
+not just the focus cursor. That set and the cut/copy clipboard are modelled
+purely in `lib/browse` (`plans/NEW-FILEMANAGER.md` FM7), host-tested without a
+kernel exactly as the rename and activation models are; the app-side verbs
+that execute a plan (the `fs_rename` / streamed copy / `fs_unlink`) ride on top
+of it in a later increment.
+
+`select::Selection` is the per-listing set of marked entries plus the anchor a
+range extension grows from. `Browser` drives it with the familiar gestures: a
+plain click or unmodified keyboard move selects one entry (`select`), a
+`Ctrl`-click toggles one (`toggle_selection`), a `Shift`-click selects the
+contiguous range from the anchor (`extend_selection_to`), and Select All
+(`select_all`) marks everything; each bounds-checks its index against the live
+listing and fails closed (`BrowseError::NoSuchEntry`) rather than marking a
+phantom row. Because the members are indices into the current listing, any
+listing change — a navigation, a refresh, or a re-sort — collapses the
+selection back to the single focused entry, so it can never point at a stale
+row.
+
+`Browser::clipboard(op)` captures the selected entries' absolute component
+paths onto a `clipboard::Clipboard` for a `Copy` or a `Cut` (`None` when
+nothing is selected, so "paste" is simply unavailable rather than a silent
+no-op). Because it holds absolute paths, the clipboard stays valid after the
+user navigates to the directory they want to paste into. `plan_paste(clipboard,
+target)` then resolves each source to a destination under the target directory
+and is **fail closed** (`AGENTS.md` §5.4): a target that is one of the moved
+items or lies inside it is refused as `PasteError::WouldRecurse` — an exact
+root-first component-prefix test, so `/a/b` is inside `/a` but `/ab` is not —
+and a paste back into an item's own directory is not silently applied but
+flagged (`PasteItem::overwrites_source`) for the app to confirm or to give the
+copy a new name (`AGENTS.md` §2.24). The engine only names *what* would move
+where and *why a paste is refused*; the app performs the capability-checked
+`fs_rename` / streamed copy under the launching user's own identity, so
+composing the model grants no authority and the trusted picker never builds a
+clipboard.
+
+Given a `plan_paste` result, `execute::paste_strategy(op, source, dest)` decides
+*how* each item is carried out from the clipboard operation and the two items'
+`execute::VolumeId`s (the 16-byte `fs_stat` volume identity): a `Copy` always
+streams, a `Cut` within one volume is a single `Rename`, and a `Cut` across
+volumes is a `CopyThenDelete` — the same `st_dev` decision `mv` makes, in one
+place (`AGENTS.md` §2.2). A streamed copy runs through an `execute::CopyCursor`:
+it walks a known-length source in fixed `execute::COPY_CHUNK_LEN` steps,
+yielding the next `execute::CopyChunk` for the app to read and write, then
+`advance`s by the bytes actually carried — so a large copy holds no unbounded
+buffer and never spins (`AGENTS.md` §2.23), stays cancellable between chunks,
+and `resume`s from a persisted offset after a cancel or a preemption. It is
+fail closed: advancing or resuming past the source length is
+`execute::CopyError::Overrun` rather than a silent wrap (`AGENTS.md` §5.4), and
+the source of a cross-volume move is removed only once its copy has fully
+succeeded, so a failed copy loses no data. The engine does no I/O; the app
+performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
+launching user's own identity, so the read-only picker never runs it.
+
 ## Terminal emulator (`tairix-terminal`)
 
 The terminal emulator hosts the system shell and shows its output on a
