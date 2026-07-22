@@ -1444,3 +1444,148 @@ fn activating_an_unreadable_directory_fails_closed_and_stays_put() {
     assert_eq!(browser.path(), "/System");
     assert_eq!(names(&browser), names_before);
 }
+
+// --- open_with: the "Open With…" type→bundle association model (FM6b) ---
+
+use crate::open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
+
+/// An in-memory installed-bundle store, the test backing for [`BundleSource`].
+struct MockBundleStore {
+    bundles: Vec<AppAssociation>,
+    denied: bool,
+}
+
+impl BundleSource for MockBundleStore {
+    fn installed_bundles(&mut self) -> Result<Vec<AppAssociation>, Errno> {
+        if self.denied {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(self.bundles.clone())
+    }
+}
+
+#[test]
+fn mime_for_name_classifies_each_content_class() {
+    assert_eq!(mime_for_name("notes.txt"), Some("text/plain"));
+    assert_eq!(mime_for_name("main.rs"), Some("text/plain"));
+    assert_eq!(mime_for_name("README.md"), Some("text/markdown"));
+    assert_eq!(mime_for_name("data.json"), Some("application/json"));
+    assert_eq!(mime_for_name("photo.png"), Some("image/png"));
+    assert_eq!(mime_for_name("scan.jpeg"), Some("image/jpeg"));
+    assert_eq!(mime_for_name("logo.svg"), Some("image/svg+xml"));
+    assert_eq!(mime_for_name("backup.tar"), Some("application/x-tar"));
+    assert_eq!(mime_for_name("bundle.tgz"), Some("application/gzip"));
+    assert_eq!(mime_for_name("tool.rxe"), Some("application/x-tairix-rxe"));
+    assert_eq!(mime_for_name("mod.wasm"), Some("application/wasm"));
+}
+
+#[test]
+fn mime_for_name_is_case_insensitive_on_the_extension() {
+    assert_eq!(mime_for_name("PHOTO.PNG"), Some("image/png"));
+    assert_eq!(mime_for_name("Notes.TxT"), Some("text/plain"));
+}
+
+#[test]
+fn mime_for_name_fails_closed_on_an_unrecognised_or_absent_extension() {
+    // Unknown extension, no extension, a dotfile with no further extension, and
+    // a trailing dot all yield no type — never a guess.
+    assert_eq!(mime_for_name("mystery.xyz"), None);
+    assert_eq!(mime_for_name("Makefile"), None);
+    assert_eq!(mime_for_name(".profile"), None);
+    assert_eq!(mime_for_name("archive."), None);
+    assert_eq!(mime_for_name(""), None);
+}
+
+#[test]
+fn handles_matches_a_declared_type_case_insensitively() {
+    let assoc = AppAssociation::new(
+        "viewer",
+        "/System/Apps/viewer.app",
+        vec!["text/plain".to_string(), "text/markdown".to_string()],
+    );
+    assert!(assoc.handles("text/plain"));
+    assert!(assoc.handles("TEXT/PLAIN"));
+    assert!(!assoc.handles("image/png"));
+    assert_eq!(assoc.name(), "viewer");
+    assert_eq!(assoc.bundle_path(), "/System/Apps/viewer.app");
+    assert_eq!(assoc.mime_types(), ["text/plain", "text/markdown"]);
+}
+
+/// A store with a text viewer, an image viewer, and a "studio" that claims
+/// both — the shapes the match / bundle / none cases need.
+fn open_with_store() -> MockBundleStore {
+    MockBundleStore {
+        bundles: vec![
+            AppAssociation::new(
+                "viewer",
+                "/System/Apps/viewer.app",
+                vec!["text/plain".to_string()],
+            ),
+            AppAssociation::new(
+                "images",
+                "/Apps/images.app",
+                vec!["image/png".to_string(), "image/jpeg".to_string()],
+            ),
+            AppAssociation::new(
+                "studio",
+                "/Apps/studio.app",
+                vec!["text/plain".to_string(), "image/png".to_string()],
+            ),
+        ],
+        denied: false,
+    }
+}
+
+#[test]
+fn applications_for_offers_every_bundle_that_claims_the_type_in_order() {
+    let mut store = open_with_store();
+    let bundles = store.installed_bundles().expect("enumerate");
+    // A text file is offered the text viewer and the studio, in enumeration
+    // order — never the image-only bundle.
+    let names: Vec<&str> = applications_for("notes.txt", &bundles)
+        .iter()
+        .map(|b| b.name())
+        .collect();
+    assert_eq!(names, ["viewer", "studio"]);
+}
+
+#[test]
+fn applications_for_offers_a_single_matching_bundle() {
+    let mut store = open_with_store();
+    let bundles = store.installed_bundles().expect("enumerate");
+    let matches = applications_for("scan.jpeg", &bundles);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].name(), "images");
+    assert_eq!(matches[0].bundle_path(), "/Apps/images.app");
+}
+
+#[test]
+fn applications_for_is_empty_when_no_bundle_claims_a_known_type() {
+    let mut store = open_with_store();
+    let bundles = store.installed_bundles().expect("enumerate");
+    // A recognised type (gzip archive) that no installed bundle handles is an
+    // honest "no application" answer, not a fabricated default.
+    assert!(applications_for("backup.tgz", &bundles).is_empty());
+}
+
+#[test]
+fn applications_for_is_empty_for_an_unrecognised_type() {
+    let mut store = open_with_store();
+    let bundles = store.installed_bundles().expect("enumerate");
+    // The file's type cannot be derived, so nothing is offered even though
+    // bundles exist.
+    assert!(applications_for("mystery.xyz", &bundles).is_empty());
+    assert!(applications_for("Makefile", &bundles).is_empty());
+}
+
+#[test]
+fn bundle_source_propagates_a_refused_enumeration() {
+    let mut store = MockBundleStore {
+        bundles: Vec::new(),
+        denied: true,
+    };
+    assert_eq!(
+        store.installed_bundles().err(),
+        Some(Errno::PermissionDenied)
+    );
+}

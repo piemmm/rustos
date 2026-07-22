@@ -149,6 +149,37 @@ launching user's identity (so the read-only picker composes the same
 the `files.app` `Run` binary — the spawn, the CU6 `fd_grant` hand-off of a
 file to its viewer, and "Open With…" — is FM6b.
 
+### "Open With…" — the type→bundle association
+
+Offering a file to a chosen application is a second pure engine model, the
+`open_with` module (`plans/NEW-FILEMANAGER.md` FM6b), host-proven ahead of the
+app-side spawn exactly as the `Activation` decision was:
+
+- `mime_for_name(name)` derives a file's content type from its filename
+  extension — the one bridge from a name (all a VFS listing gives) to the MIME
+  vocabulary a bundle's signed `AppInfo` declares its associations in. It
+  recognises exactly the extensions the `icon` classifier draws a typed glyph
+  for, mapping source and structured-config files to their honest concrete
+  type (`text/plain`, `application/json`, …); an unknown or absent extension
+  yields `None`, never a guess.
+- `BundleSource` is the injected installed-bundle enumeration seam — the
+  "Open With…" analogue of `DirectorySource`. On a running system it is backed
+  by the app store (each bundle's `AppInfo` MIME table, read under the caller's
+  own identity); in tests it is an in-memory list, so the matching is exercised
+  without a kernel.
+- `applications_for(name, bundles)` returns the `AppAssociation`s whose
+  declared MIME set handles the file's type, in the source's enumeration order.
+  No match is an **honest empty answer** — the caller shows a "no application"
+  notice (`AGENTS.md` §2.24), never a crash and never a fabricated default.
+
+The type decision is a **display hint only**, like the icon classifier: it
+decides which applications are *offered*, and the ordinary signed load gate
+still verifies and capability-checks whichever bundle the user picks. The
+engine holds no launch authority and never opens the file — spawning the chosen
+bundle and the CU6 `fd_grant` hand-off stay in the `files.app` `Run` binary's
+own capability-checked tail under the user's identity (FM6b), so the read-only
+picker composes the same engine and never launches.
+
 ### Rendering
 
 `render(browser, theme, font, viewport)` paints a path bar plus the current

@@ -71,6 +71,18 @@ can never diverge in navigation semantics, listing policy, or look.
   a name that cannot be spelled fails closed. The engine holds no launch or
   open authority of its own — it decides *what* and *what should happen*, never
   performs the spawn or the `fs_open` (so the read-only picker never launches).
+- **"Open With…" association** (`open_with`, `plans/NEW-FILEMANAGER.md` FM6b):
+  the pure type→bundle model behind offering a file to a chosen application.
+  `mime_for_name` derives a file's content type from its filename extension —
+  the one bridge from a name to the MIME vocabulary a bundle declares its
+  associations in, recognising exactly the extensions the `icon` classifier
+  draws a typed glyph for. `BundleSource` is the injected installed-bundle
+  enumeration seam (the "Open With…" analogue of `DirectorySource`), and
+  `applications_for` selects the `AppAssociation`s whose declared MIME set
+  handles a file's type, in the source's order. No match is an honest empty
+  answer — a "no application" notice, never a fabricated default — and the type
+  decision is a display hint only: the load gate still verifies and
+  capability-checks whichever bundle the user picks. The engine never spawns.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the

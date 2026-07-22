@@ -27,8 +27,9 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, and FM6a are done**; FM4b,
-FM6b, and FM7–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, FM6a, and FM6b's pure
+association model are done**; the FM6b app-side spawn/delegation, FM4b,
+and FM7–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -44,11 +45,15 @@ gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so the menu is not
 built as speculative surface ahead of the behaviours it invokes (§2.4).
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
-decision — descend / launch a bundle / open a file, host-proven) is done; **FM6b**
-(the app-side spawn of a launched bundle, the CU6 `fd_grant` hand-off of a file to
-its associated viewer, the type→bundle "open with" association model, and the async
-non-blocking launch) is `planned`, since it needs the `CAP_PROC_SPAWN` manifest
-grant and the spawn/delegation wiring that the pure engine model does not.
+decision — descend / launch a bundle / open a file, host-proven) is done, and
+so now is **FM6b's pure type→bundle "open with" association model** (the
+`lib/browse::open_with` module — the `BundleSource` enumeration seam, the
+extension→MIME `mime_for_name` classifier, and `applications_for`, host-proven
+like FM6a). The rest of **FM6b** (the app-side spawn of a launched bundle, the
+CU6 `fd_grant` hand-off of a file to its associated viewer wired onto that
+model, and the async non-blocking launch) is `planned`, since it needs the
+`CAP_PROC_SPAWN` manifest grant and the spawn/delegation wiring that the pure
+engine model does not.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -347,11 +352,29 @@ to `lib/browse` as the `activate` module (`Activation`) + `Browser::activate_sel
   descent into an unreadable directory failing closed and staying put. Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-### FM6b — the app: launch `.app`, open a file, "Open With…" `[ ]`
+### FM6b — the app: launch `.app`, open a file, "Open With…" `[~]`
 
 Make items *do* something end-to-end — the defining first-class behaviour. The
 `files.app` `Run` binary acts on the FM6a decision; this stage needs the spawn
 and delegation wiring the pure engine model does not.
+
+**The pure association model is done** (§2.19): the `lib/browse::open_with`
+module lands the type→bundle "open with" model host-proven ahead of the app
+wiring, exactly as FM6a landed the activation decision. `mime_for_name` derives
+a file's content type from its filename extension (recognising exactly the
+extensions the `icon` classifier draws a typed glyph for, sharing one
+`extension` split, §2.2), `BundleSource` is the injected installed-bundle
+enumeration seam mirroring `DirectorySource`, and `applications_for(name,
+bundles)` returns the `AppAssociation`s whose declared `AppInfo` MIME set
+handles the file's type, in source order — no match being an honest empty
+answer (§2.24), never a fabricated default. The type decision is a display
+hint only; the load gate still verifies and capability-checks the picked
+bundle, and the engine never spawns. Host-tested (classifier per class,
+case-insensitivity, unknown/dotfile fail-closed, `handles`, match / single /
+none / unrecognised, seam refusal). Docs: `docs/src/desktop/apps.md`,
+`lib/browse/README.md` + rustdoc.
+
+The remaining app-side wiring (still `planned`):
 
 - **The app dispatches Enter/double-click through `Browser::activate_selected`**:
   `Descended` repaints; `LaunchBundle`/`OpenFile` drive the launch below.
@@ -368,14 +391,14 @@ and delegation wiring the pure engine model does not.
   picker does — the viewer needs no filesystem capability of its own
   (least privilege, §5.2). Write-capable "open" is a future, separately
   gated concern (not built speculatively, §2.4).
-- **"Open With…"** lists the bundles whose `AppInfo` claims the type (from
-  the same lookup) — a `Menu`, no invented registry. No match ⇒ an honest
-  "no application" answer, never a crash (§2.24). The type→bundle association
-  is a pure `lib/browse` model over an injected bundle-enumeration seam
-  (mirroring `DirectorySource`), host-tested (match / bundle / none).
+- **"Open With…"** draws the bundles the done `open_with` model returns as a
+  `lib/controls` `Menu` — no invented registry, no crash on an empty result
+  (§2.24). The remaining work is only the app-side `BundleSource` backed by the
+  real app store (each bundle's `AppInfo` MIME table) and the menu that lists
+  `applications_for`'s result; the matching model itself is landed above.
 - **Async, non-blocking launch (`plans/FIX-DESKTOP.md`).** The spawn must
   not freeze the manager's window; it stays responsive and parked while
-  the child starts. Host tests: the association lookup, the grant-to-child seam.
+  the child starts. Host tests: the app-store `BundleSource`, the grant-to-child seam.
 
 ### FM7 — clipboard operations: cut, copy, paste, delete, new folder `[ ]`
 
