@@ -1,0 +1,33 @@
+[package]
+name = "tairix-test-root-unlock-admission-qemu-x86-64"
+description = "plans/OPEN-DEFECTS.md D7 / plans/ARCHSUPPORT.md A3 QEMU integration test: boot the production x86_64 tairix-kernel pipeline (boot_x86_64::boot) with a planted whole-disk encrypted-root image attached as a virtio-blk-pci device. The production boot path discovers + binds the virtio-blk root, the init seam admits the in-kernel root-unlock kthread (unlock_service::spawn_if_present), and the kthread brings the device up over the production MSI-X device-IRQ path, prompts for the passphrase on the primary COM1 console, mounts the encrypted ARXFS root, and installs the users database into LATE_USERS_DB. PASS once the unlock-service install message is observed — proving the *kthread admission* path (distinct from root_unlock_login, which drives the policy directly) mounts the root over the MSI-X wake path on x86_64."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-root-unlock-admission-qemu-x86-64"
+path = "src/main.rs"
+
+# This bin reuses the entire production x86_64 boot pipeline through
+# `tairix-kernel`'s library half (`boot_x86_64::boot`) — the bootstrap-floor
+# virtio-PCI discovery, the `InitSpawn` seam, the runtime `ProcessSpawn`
+# producer, the MSI-X device-IRQ wiring, and `unlock_service::spawn_if_present`
+# — and only swaps the audit sink to observe the unlock-service install
+# message (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut
+# in a dedicated bin (not a Cargo feature on a production crate) prevents
+# feature unification from leaking it into any production build
+# (`AGENTS.md` §5.4 — fail closed).
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

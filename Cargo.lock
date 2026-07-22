@@ -3122,6 +3122,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-root-unlock-admission-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-root-unlock-login-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
