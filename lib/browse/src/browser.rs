@@ -19,10 +19,13 @@ use core::mem;
 
 use tairix_abi::Errno;
 
-use crate::entry::Entry;
+use crate::activate::Activation;
+use crate::clipboard::{Clipboard, ClipboardOp};
+use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::rename::{validate_new_name, RenameError};
+use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
 use crate::source::DirectorySource;
 
@@ -47,6 +50,7 @@ pub struct Browser<S: DirectorySource> {
     components: Vec<String>,
     entries: Vec<Entry>,
     selected: usize,
+    selection: Selection,
     sort_mode: SortMode,
     view_mode: ViewMode,
     scroll_offset: u64,
@@ -69,11 +73,16 @@ impl<S: DirectorySource> Browser<S> {
         let sort_mode = SortMode::default_order();
         let mut entries = source.list(&[]).map_err(BrowseError::Source)?;
         sort_entries(&mut entries, sort_mode);
+        let mut selection = Selection::new();
+        if !entries.is_empty() {
+            selection.single(0);
+        }
         Ok(Self {
             source,
             components: Vec::new(),
             entries,
             selected: 0,
+            selection,
             sort_mode,
             view_mode: ViewMode::default(),
             scroll_offset: 0,
@@ -141,6 +150,9 @@ impl<S: DirectorySource> Browser<S> {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
         }
+        // The selection is index-based, so a reorder invalidates any
+        // multi-selection; collapse it to the (preserved) focused entry.
+        self.reset_selection_to_focus();
     }
 
     /// The current directory's path components, root-first. Empty at the root.
@@ -202,20 +214,114 @@ impl<S: DirectorySource> Browser<S> {
             return Err(BrowseError::NoSuchEntry);
         }
         self.selected = index;
+        self.selection.single(index);
         Ok(())
     }
 
-    /// Move the selection to the next entry, stopping at the last. A no-op on
-    /// an empty directory.
+    /// Move the focus to the next entry, stopping at the last, and select it
+    /// alone (an unmodified keyboard move collapses any multi-selection). A
+    /// no-op on an empty directory.
     pub fn select_next(&mut self) {
         if let Some(last) = self.entries.len().checked_sub(1) {
             self.selected = self.selected.saturating_add(1).min(last);
+            self.selection.single(self.selected);
         }
     }
 
-    /// Move the selection to the previous entry, stopping at the first.
+    /// Move the focus to the previous entry, stopping at the first, and select
+    /// it alone. A no-op on an empty directory.
     pub fn select_previous(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
         self.selected = self.selected.saturating_sub(1);
+        self.selection.single(self.selected);
+    }
+
+    /// The set of entries currently selected in this listing — the members the
+    /// management verbs (cut / copy / delete) act on. A superset of the single
+    /// focused entry only while a multi-selection is in force; a fresh listing
+    /// collapses it back to the focus.
+    #[must_use]
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// Whether the entry at `index` is in the current [`selection`](Self::selection).
+    #[must_use]
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selection.contains(index)
+    }
+
+    /// Toggle the entry at `index` in the selection (a `Ctrl`-click) and move
+    /// the focus to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::NoSuchEntry`] if `index` is out of range; the
+    /// selection and focus are unchanged.
+    pub fn toggle_selection(&mut self, index: usize) -> Result<(), BrowseError> {
+        if index >= self.entries.len() {
+            return Err(BrowseError::NoSuchEntry);
+        }
+        self.selected = index;
+        self.selection.toggle(index);
+        Ok(())
+    }
+
+    /// Extend the selection to the contiguous range between its anchor and
+    /// `index` (a `Shift`-click) and move the focus to `index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::NoSuchEntry`] if `index` is out of range; the
+    /// selection and focus are unchanged.
+    pub fn extend_selection_to(&mut self, index: usize) -> Result<(), BrowseError> {
+        if index >= self.entries.len() {
+            return Err(BrowseError::NoSuchEntry);
+        }
+        self.selected = index;
+        self.selection.range_to(index);
+        Ok(())
+    }
+
+    /// Select every entry in the current listing (Select All). The focus is
+    /// left where it was; an empty directory stays with an empty selection.
+    pub fn select_all(&mut self) {
+        self.selection.select_all(self.entries.len());
+    }
+
+    /// Drop the whole selection (leaving the focus cursor where it is).
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// The absolute root-first component paths of the currently selected
+    /// entries, in listing order — the source paths a [`clipboard`](Self::clipboard)
+    /// captures for a move or copy.
+    #[must_use]
+    pub fn selected_component_paths(&self) -> Vec<Vec<String>> {
+        self.selection
+            .iter()
+            .filter_map(|index| self.entries.get(index))
+            .map(|entry| {
+                let mut path = self.components.clone();
+                path.push(String::from(entry.name()));
+                path
+            })
+            .collect()
+    }
+
+    /// Capture the current selection onto a cut/copy [`Clipboard`] for `op`, or
+    /// `None` when nothing is selected.
+    ///
+    /// The clipboard holds the selected entries' absolute paths, so it stays
+    /// valid after the user navigates elsewhere to paste. Building it grants no
+    /// authority — the move/copy the app later performs is the user's own
+    /// capability-checked filesystem operation.
+    #[must_use]
+    pub fn clipboard(&self, op: ClipboardOp) -> Option<Clipboard> {
+        Clipboard::new(op, self.selected_component_paths())
     }
 
     /// Re-read the current directory from the source, preserving the selection
@@ -322,6 +428,65 @@ impl<S: DirectorySource> Browser<S> {
         let mut child = self.components.clone();
         child.push(String::from(entry.name()));
         self.navigate_recording(child)
+    }
+
+    /// Activate the selected entry — the double-click / `Enter` decision.
+    ///
+    /// Dispatches by kind through the shared [`Activation`] decision so the
+    /// file manager and the trusted picker act identically: a directory is
+    /// descended into (as [`open_selected`](Self::open_selected) does) and a
+    /// bundle or file is *named* for the caller to launch or open (the engine
+    /// performs neither — it holds no such authority).
+    ///
+    /// # Errors
+    ///
+    /// * [`BrowseError::NoSuchEntry`] if there is no selection (an empty
+    ///   directory).
+    /// * [`BrowseError::Source`] if a descended directory cannot be listed, or
+    ///   a bundle/file target cannot be named as a valid absolute path; the
+    ///   browser stays on the current directory in either case.
+    pub fn activate_selected(&mut self) -> Result<Activation, BrowseError> {
+        let index = self.selected_index().ok_or(BrowseError::NoSuchEntry)?;
+        self.activate_index(index)
+    }
+
+    /// Activate the entry at `index` — the pointer-hit form of
+    /// [`activate_selected`](Self::activate_selected).
+    ///
+    /// # Errors
+    ///
+    /// * [`BrowseError::NoSuchEntry`] if `index` is out of range.
+    /// * [`BrowseError::Source`] as for [`activate_selected`](Self::activate_selected).
+    pub fn activate_index(&mut self, index: usize) -> Result<Activation, BrowseError> {
+        let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
+        let kind = entry.kind();
+        let name = String::from(entry.name());
+        match kind {
+            EntryKind::Directory => {
+                self.open_index(index)?;
+                Ok(Activation::Descended)
+            }
+            EntryKind::Bundle => Ok(Activation::LaunchBundle {
+                path: self.child_target_path(&name)?,
+            }),
+            EntryKind::File => Ok(Activation::OpenFile {
+                path: self.child_target_path(&name)?,
+            }),
+        }
+    }
+
+    /// Spell the validated absolute path of a child named `name` in the current
+    /// directory — the target a launch or open acts on.
+    ///
+    /// Uses the one shared path spelling ([`crate::vfs::absolute_path`]) so the
+    /// named target can never differ from what the VFS fetch would read, and a
+    /// name that cannot be spelled as a valid, bounded absolute path is a
+    /// fail-closed [`BrowseError::Source`] — the same outcome descending into
+    /// such a name already produces.
+    fn child_target_path(&self, name: &str) -> Result<String, BrowseError> {
+        let mut components = self.components.clone();
+        components.push(String::from(name));
+        crate::vfs::absolute_path(&components).map_err(BrowseError::Source)
     }
 
     /// Climb to the parent directory, listing it.
@@ -461,9 +626,24 @@ impl<S: DirectorySource> Browser<S> {
         sort_entries(&mut entries, self.sort_mode);
         self.entries = entries;
         self.clamp_selection();
+        // The selection's indices refer to the previous listing; a fresh
+        // directory collapses it to the (clamped) focused entry.
+        self.reset_selection_to_focus();
         // A freshly listed directory is shown from the top; a caller reveals
         // the (clamped) selection again once it knows the live geometry.
         self.scroll_offset = 0;
+    }
+
+    /// Collapse the multi-selection to the single focused entry, or clear it on
+    /// an empty directory — the invariant restored after every listing change,
+    /// since selection indices only make sense for the listing they were made
+    /// in.
+    fn reset_selection_to_focus(&mut self) {
+        if self.entries.is_empty() {
+            self.selection.clear();
+        } else {
+            self.selection.single(self.selected);
+        }
     }
 
     /// Clamp the selection cursor into the current entry range (to the last

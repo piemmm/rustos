@@ -27,8 +27,10 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, and FM5 are done**; FM4b and
-FM6–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+`in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, FM6a, FM6b's pure
+association model, FM7a's selection + clipboard model, and FM7b's pure
+paste-execution model are done**; the FM6b app-side spawn/delegation, FM4b, the
+FM7b app-side move/copy/delete verbs, and FM8–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -42,6 +44,17 @@ history + breadcrumb navigation) is done; **FM4b** (the drawn toolbar/breadcrumb
 chrome and the context menu) is deferred to land *with* the actions its entries
 gate (FM5 rename, FM6 open/open-with, FM7 clipboard verbs), so the menu is not
 built as speculative surface ahead of the behaviours it invokes (§2.4).
+
+FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
+decision — descend / launch a bundle / open a file, host-proven) is done, and
+so now is **FM6b's pure type→bundle "open with" association model** (the
+`lib/browse::open_with` module — the `BundleSource` enumeration seam, the
+extension→MIME `mime_for_name` classifier, and `applications_for`, host-proven
+like FM6a). The rest of **FM6b** (the app-side spawn of a launched bundle, the
+CU6 `fd_grant` hand-off of a file to its associated viewer wired onto that
+model, and the async non-blocking launch) is `planned`, since it needs the
+`CAP_PROC_SPAWN` manifest grant and the spawn/delegation wiring that the pure
+engine model does not.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -313,13 +326,59 @@ binary supplies the inline text editor and the `fs_rename` seam.
   `selection_rect`. Docs: `docs/src/desktop/apps.md`, `lib/browse`/`lib/path`
   README + rustdoc.
 
-### FM6 — opening: double-click, launch `.app`, "Open With…" `[ ]`
+### FM6a — the engine activation decision `[x]`
 
-Make items *do* something — the defining first-class behaviour.
+Done. The pure dispatch-by-kind decision behind a double-click / `Enter`, the
+one primitive both the file manager and the trusted picker act on (§2.2). Added
+to `lib/browse` as the `activate` module (`Activation`) + `Browser::activate_selected`
+/ `activate_index`:
 
-- **Double-click / Enter dispatches by kind** through one engine
-  `activate(entry)` decision (§2.2): a directory descends (as today); a
-  `.app` bundle launches; a regular file opens in the associated viewer.
+- **`Activation`** is exhaustive over the three entry kinds: `Descended` (the
+  entry was a directory and the engine descended into it, transactionally, via
+  its own fail-closed navigation — nothing to launch), `LaunchBundle { path }`
+  (a `<Name>.app` bundle, named for the caller to launch through the signed
+  load gate), and `OpenFile { path }` (a regular file, named for the caller to
+  open in the associated viewer).
+- **The engine holds no launch or open authority.** It decides *what* the
+  target is and *what should happen*; the spawn and the `fs_open` stay in the
+  app's own capability-checked tail under the user's identity, so the read-only
+  picker composes the same `Browser` and simply never launches.
+- **The target path is spelled through the one shared `vfs::absolute_path`**,
+  so a launch/open can never name a different node than the browser shows; a
+  name that cannot be spelled as a valid bounded absolute path fails closed as
+  `BrowseError::Source` — the same outcome descending into it already produces.
+- Host tests (`lib/browse`): directory→descend (listing changes), bundle→
+  `LaunchBundle` without descending, file→`OpenFile` without descending, a
+  nested target's path spelling, no-selection and out-of-range refusal, and a
+  descent into an unreadable directory failing closed and staying put. Docs:
+  `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+### FM6b — the app: launch `.app`, open a file, "Open With…" `[~]`
+
+Make items *do* something end-to-end — the defining first-class behaviour. The
+`files.app` `Run` binary acts on the FM6a decision; this stage needs the spawn
+and delegation wiring the pure engine model does not.
+
+**The pure association model is done** (§2.19): the `lib/browse::open_with`
+module lands the type→bundle "open with" model host-proven ahead of the app
+wiring, exactly as FM6a landed the activation decision. `mime_for_name` derives
+a file's content type from its filename extension (recognising exactly the
+extensions the `icon` classifier draws a typed glyph for, sharing one
+`extension` split, §2.2), `BundleSource` is the injected installed-bundle
+enumeration seam mirroring `DirectorySource`, and `applications_for(name,
+bundles)` returns the `AppAssociation`s whose declared `AppInfo` MIME set
+handles the file's type, in source order — no match being an honest empty
+answer (§2.24), never a fabricated default. The type decision is a display
+hint only; the load gate still verifies and capability-checks the picked
+bundle, and the engine never spawns. Host-tested (classifier per class,
+case-insensitivity, unknown/dotfile fail-closed, `handles`, match / single /
+none / unrecognised, seam refusal). Docs: `docs/src/desktop/apps.md`,
+`lib/browse/README.md` + rustdoc.
+
+The remaining app-side wiring (still `planned`):
+
+- **The app dispatches Enter/double-click through `Browser::activate_selected`**:
+  `Descended` repaints; `LaunchBundle`/`OpenFile` drive the launch below.
 - **Launch via the app loader, never a private path (§16.5, §18).** The
   manager requests `CAP_PROC_SPAWN` (added to `AppInfo.toml` in *this*
   stage, §2.4) and spawns through the ordinary load gate — for a `.app`
@@ -333,27 +392,80 @@ Make items *do* something — the defining first-class behaviour.
   picker does — the viewer needs no filesystem capability of its own
   (least privilege, §5.2). Write-capable "open" is a future, separately
   gated concern (not built speculatively, §2.4).
-- **"Open With…"** lists the bundles whose `AppInfo` claims the type (from
-  the same lookup) — a `Menu`, no invented registry. No match ⇒ an honest
-  "no application" answer, never a crash (§2.24).
+- **"Open With…"** draws the bundles the done `open_with` model returns as a
+  `lib/controls` `Menu` — no invented registry, no crash on an empty result
+  (§2.24). The remaining work is only the app-side `BundleSource` backed by the
+  real app store (each bundle's `AppInfo` MIME table) and the menu that lists
+  `applications_for`'s result; the matching model itself is landed above.
 - **Async, non-blocking launch (`plans/FIX-DESKTOP.md`).** The spawn must
   not freeze the manager's window; it stays responsive and parked while
-  the child starts. Host tests: the `activate` decision per kind, the
-  association lookup (match / bundle / none), the grant-to-child seam.
+  the child starts. Host tests: the app-store `BundleSource`, the grant-to-child seam.
 
-### FM7 — clipboard operations: cut, copy, paste, delete, new folder `[ ]`
+### FM7a — the selection + clipboard model `[x]`
 
-The core management verbs, modelled in the engine and executed in the app.
+Done (§2.19 — the pure model host-proven ahead of the app verbs, exactly as
+FM6a/FM6b's pure model landed). The two `lib/browse` modules the management
+verbs are built on:
 
-- **A selection + clipboard model** in `lib/browse`: multi-select
-  (Shift/Ctrl-click ranges, Select All), a cut/copy set with the
-  pending-op kind, and paste-target validation (no paste into a
-  descendant of a moved dir, no self-overwrite without confirm) — all
-  pure and host-tested.
-- **Move** = `fs_rename` when source and target share a volume; otherwise
-  **copy-then-delete**. **Copy** streams `fs_read`→`fs_write` in bounded,
-  interruptible chunks (§2.23 — no unbounded buffer, no spin), preserving
-  metadata where the target format allows and failing closed with
+- **Multi-selection** (`select::Selection` + `Browser` methods): the
+  per-listing set of marked entries plus the range anchor. `single` (plain
+  click / unmodified keyboard move), `toggle` (`Ctrl`-click), `range_to`
+  (`Shift`-click from the anchor), and `select_all`; `Browser::select`,
+  `toggle_selection`, `extend_selection_to`, `select_all`, `clear_selection`
+  bounds-check every index against the live listing (`NoSuchEntry` otherwise).
+  Because members are indices, every listing change (navigate / refresh /
+  re-sort) and every unmodified move collapses the selection to the single
+  focused entry, so it never points at a stale row.
+- **Cut/copy clipboard** (`clipboard` module + `Browser::clipboard`):
+  `ClipboardOp` (`Copy`/`Cut`) and a `Clipboard` capturing the selected
+  entries' absolute component paths (so it survives navigating to the paste
+  target); `None` when nothing is selected. `plan_paste(clipboard, target)`
+  resolves each source to a destination under the target and is fail closed
+  (§5.4): a target inside one of the moved items is `PasteError::WouldRecurse`
+  (an exact component-prefix test), and a paste back into an item's own
+  directory is flagged (`PasteItem::overwrites_source`) for the app to confirm
+  rather than silently clobber (§2.24). The `Empty` case is the *absence* of a
+  clipboard (`Option::None`), not a paste error, so a constructed `Clipboard`
+  is never empty and no dead variant lingers (§2.14). The model names *what*
+  would move where; the app performs the move/copy under the user's own
+  identity, so composing it grants nothing and the picker never builds one.
+- Host-tested in `lib/browse/src/tests.rs` (each `Selection` gesture + anchor,
+  the bounds refusals, the listing-change/keyboard collapse, the empty-directory
+  empty selection, clipboard capture + `None`, `Clipboard::new` empty/root
+  refusal, `plan_paste` mapping / self-overwrite flag / recurse-into-self +
+  descendant + sibling-prefix, and the error message). Docs:
+  `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+### FM7b — move, copy, paste, delete, new folder `[~]`
+
+The core management verbs on top of the FM7a model.
+
+**The pure paste-execution model is done** (§2.19 — host-proven ahead of the
+app verbs, exactly as FM6a/FM6b/FM7a's pure models landed): the
+`lib/browse::execute` module. `paste_strategy(op, source, dest)` makes the
+move-vs-copy decision from the clipboard op and the two items' `VolumeId`s (the
+16-byte `fs_stat` volume identity) — `Copy` streams, a same-volume `Cut` is one
+`Rename`, a cross-volume `Cut` is `CopyThenDelete` — the one `mv`/`st_dev`
+definition (§2.2). `CopyCursor`/`CopyChunk` model the bounded, resumable,
+interruptible streamed copy: a known-length source is walked in fixed
+`COPY_CHUNK_LEN` steps, `advance`d by the bytes actually carried (so short reads
+and cancellation between chunks both work), `resume`d from a persisted offset,
+and fail closed — advancing/resuming past the source length is
+`CopyError::Overrun`, never a silent wrap (§2.23, §5.4). The engine does no I/O
+and the cross-volume source is deleted only after its copy fully succeeds, so
+composing it grants nothing and the read-only picker never runs it. Host-tested
+(strategy per op × volume, `VolumeId` round-trip, empty/small/large chunking to
+completion, short-transfer advance, resume, resume/advance overrun, error
+message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+The remaining app-side verbs (still `planned`):
+
+- **Move** = `fs_rename` when source and target share a volume (the
+  `PasteStrategy::Rename` case); otherwise
+  **copy-then-delete** (the `PasteStrategy::CopyThenDelete` case). **Copy**
+  streams `fs_read`→`fs_write` driving the landed `execute::CopyCursor` in
+  bounded, interruptible chunks (§2.23 — no unbounded buffer, no spin),
+  preserving metadata where the target format allows and failing closed with
   `TimestampOutOfRange`-style honesty on a narrowing target (§21). A
   directory copy recurses depth-bounded; an error mid-copy stops, reports,
   and leaves a partial-copy marker rather than a silent half-result
@@ -364,9 +476,11 @@ The core management verbs, modelled in the engine and executed in the app.
 - **Progress + cancel** for long operations: a bounded progress indicator
   (`lib/controls` `Progress`), a Cancel that stops at the next chunk
   boundary; the window stays parked/responsive throughout (§2.23).
-- Host tests: selection ranges, clipboard state machine, move-vs-copy
-  volume decision, chunked-copy resume/cancel/partial-failure, delete
-  confirm/refuse, mkdir+rename. App wires the VFS seams.
+- Host tests: the engine-side selection ranges, clipboard state machine,
+  move-vs-copy volume decision, and chunked-copy resume/cancel/overrun are
+  **done** in `lib/browse` (FM7a + the `execute` model above); the app-side
+  work adds partial-failure recovery, delete confirm/refuse, and mkdir+rename
+  over the VFS seams.
 
 ### FM8 — properties and permissions `[ ]`
 
@@ -405,8 +519,11 @@ FM2a repaints the list, FM2b adds the icon grid). FM4a adds the engine
 navigation model (history + breadcrumb); FM4b paints the chrome and grows the
 context menu alongside the actions it invokes (FM5–FM8), so no menu entry is
 built ahead of its behaviour (§2.4). FM5 is the first write and the template for
-FM7. FM6 (launch/open) depends on FM3 (bundle/file kinds) and reuses AW5
-delegation. FM7 depends on FM4b's selection/menu. FM8 and FM9 close out. Each
+FM7. FM6a models the activation decision (host-proven); FM6b (launch/open) acts
+on it, depends on FM3 (bundle/file kinds), and reuses AW5 delegation. FM7 is
+split (§2.19): FM7a models the selection + clipboard in the engine
+(host-proven); FM7b executes the verbs in the app and depends on FM4b's
+selection/menu. FM8 and FM9 close out. Each
 lands fully gated; a stage that turns out larger than one clean increment is
 split and staged here, never shipped half-done "for now" (§2.19).
 

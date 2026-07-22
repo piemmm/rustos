@@ -58,6 +58,70 @@ can never diverge in navigation semantics, listing policy, or look.
   follows the entry to its new name. The engine adds no authority (the write
   is the caller's own permission-checked `fs_rename`, no new capability), so
   the read-only picker composes the same `Browser` and never calls it.
+- **Activation** (`activate`, `Browser::activate_selected` /
+  `activate_index`): the one dispatch-by-kind decision behind a double-click
+  or `Enter` (`plans/NEW-FILEMANAGER.md` FM6), so the file manager and the
+  picker act identically. Exhaustive over the three kinds: a directory is
+  *descended into* by the engine itself (its own fail-closed navigation); a
+  bundle is named as `Activation::LaunchBundle` for the caller to launch
+  through the ordinary signed app-load gate; a file is named as
+  `Activation::OpenFile` for the caller to open in the associated viewer. The
+  target's absolute path is spelled through the one shared `absolute_path`, so
+  a launch or open can never name a different node than the browser shows, and
+  a name that cannot be spelled fails closed. The engine holds no launch or
+  open authority of its own — it decides *what* and *what should happen*, never
+  performs the spawn or the `fs_open` (so the read-only picker never launches).
+- **"Open With…" association** (`open_with`, `plans/NEW-FILEMANAGER.md` FM6b):
+  the pure type→bundle model behind offering a file to a chosen application.
+  `mime_for_name` derives a file's content type from its filename extension —
+  the one bridge from a name to the MIME vocabulary a bundle declares its
+  associations in, recognising exactly the extensions the `icon` classifier
+  draws a typed glyph for. `BundleSource` is the injected installed-bundle
+  enumeration seam (the "Open With…" analogue of `DirectorySource`), and
+  `applications_for` selects the `AppAssociation`s whose declared MIME set
+  handles a file's type, in the source's order. No match is an honest empty
+  answer — a "no application" notice, never a fabricated default — and the type
+  decision is a display hint only: the load gate still verifies and
+  capability-checks whichever bundle the user picks. The engine never spawns.
+- **Multi-selection** (`select`, `Browser` selection methods,
+  `plans/NEW-FILEMANAGER.md` FM7): the per-listing set of marked entries the
+  management verbs act on. `Selection` models a plain click (`single`), a
+  `Ctrl`-click (`toggle`), a `Shift`-click range (`range_to`, grown from the
+  anchor), and Select All (`select_all`); `Browser::toggle_selection` /
+  `extend_selection_to` / `select_all` / `clear_selection` bounds-check every
+  index against the live listing. The selection is index-based, so any listing
+  change (navigate, refresh, re-sort) collapses it to the single focused entry,
+  and an unmodified keyboard move collapses it too — standard file-manager
+  semantics.
+- **Cut/copy clipboard** (`clipboard`, `Browser::clipboard`,
+  `plans/NEW-FILEMANAGER.md` FM7): the cross-directory set the move/copy verbs
+  act on. `Browser::clipboard(op)` captures the selected entries' absolute
+  component paths onto a `Clipboard` (`None` when nothing is selected), so it
+  survives navigating to the paste target. `plan_paste(clipboard, target)`
+  resolves each source to a destination in the target directory, **fail
+  closed**: a target inside one of the moved items is `PasteError::WouldRecurse`
+  (an exact component-prefix test — `/a/b` is within `/a`, `/ab` is not), and a
+  paste back into an item's own directory is flagged
+  (`PasteItem::overwrites_source`) for the app to confirm rather than silently
+  clobber. The model names *what* would move where; the app performs the
+  capability-checked `fs_rename` / streamed copy under the user's own identity,
+  so composing it grants nothing and the read-only picker never builds a
+  clipboard.
+- **Paste execution** (`execute`, `plans/NEW-FILEMANAGER.md` FM7b): the pure
+  model of *how* a planned paste is carried out, host-proven ahead of the app
+  verbs. `paste_strategy(op, source, dest)` decides from the clipboard
+  operation and the two items' `VolumeId`s (the 16-byte `fs_stat` volume id):
+  a `Copy` streams, a `Cut` within one volume is a single `Rename`, a `Cut`
+  across volumes is `CopyThenDelete` — the one `mv`/`st_dev` decision.
+  `CopyCursor` walks a known-length source in fixed `COPY_CHUNK_LEN` steps,
+  yielding the next `CopyChunk` to transfer; the app reads/writes it and
+  reports the bytes carried with `advance`, so a large copy stays bounded and
+  interruptible with no unbounded buffer and no spin, and it `resume`s from a
+  persisted offset after a cancel or a preemption. It is fail closed:
+  advancing (or resuming) past the source length is `CopyError::Overrun`,
+  never a silent wrap. The engine does no I/O and the source is deleted only
+  after a cross-volume copy fully succeeds — the app performs every syscall
+  under the user's own identity, so the read-only picker never runs it.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the

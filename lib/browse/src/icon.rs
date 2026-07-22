@@ -47,7 +47,11 @@ pub fn icon_for_name(name: &str) -> IconKind {
 /// The filename extension of `name`: the text after the final `.`, or `None`
 /// when there is no such dot, the dot is the first byte (a dotfile with no
 /// further extension, e.g. `.profile`), or nothing follows it (`archive.`).
-fn extension(name: &str) -> Option<&str> {
+///
+/// Shared with the [`open_with`](crate::open_with) MIME classifier so the two
+/// file-type views split a name's extension off identically, never each its own
+/// copy.
+pub(crate) fn extension(name: &str) -> Option<&str> {
     let dot = name.rfind('.')?;
     if dot == 0 {
         return None;
