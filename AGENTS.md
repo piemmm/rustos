@@ -1699,6 +1699,7 @@ You are not exempt from any rule above. In addition:
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | TPM / measured boot | `plans/TPM.md` |
+    | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The `vim` app | `plans/VIM.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
