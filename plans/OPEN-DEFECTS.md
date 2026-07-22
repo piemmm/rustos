@@ -375,9 +375,50 @@ users-DB install (`unlock_service::USERS_DB_INSTALLED_MESSAGE`) with the
 restored — the full kthread-admission witness the vertical is scoped to
 reach once D8 is closed.
 
+## D9 — x86_64 `spawn-session` login never exits on the dead console (relaunch witness never fires)
+
+**State:** open, pre-existing (reproduces deterministically on the clean
+tree, standalone, independent of any current change). Discovered while
+running the full `cargo xtask ci` gate; it — not D6 — is what currently
+reddens the gate.
+
+**Symptom.** `tests/integration/spawn_session_qemu_x86_64` times out at its
+60 s budget (identical standalone and under the matrix — **not** load, not
+TCG speed). The vertical keys PASS on **seven** `ProcessSpawned` records:
+`init`, the boot services `sysinfod` / `netstack` / `devmgr` / `seatmgr`,
+the first `login`, and the **relaunched** `login` after `init` reaps the
+first (the `wait`→reap→relaunch supervision witness). The serial reaches
+only **six** spawns: the first `login` (task 6) is correctly denied
+`users_db_read` / `fs_open` (`err=12`, no root volume bound), but then —
+instead of failing closed on the dead console (`NULL_CONSOLE_READ`) and
+`exit`ing as the test's documented model expects — it spins forever in an
+`ipc_call` loop against a session call endpoint (`0x59531001`, created
+`id=3040`), ~40 iterations over 60 s, each replying cleanly. Because
+`login` never exits, `init`'s `wait` never reaps it, the seventh
+(relaunch) `ProcessSpawned` never fires, and the run times out.
+
+**Likely area.** The x86_64 dead-console `login` path no longer fails
+closed to an `exit`: `login`'s console/seat acquisition (note `seatmgr` is
+now in this boot) loops on the session endpoint rather than clamping to a
+zero-length read and exiting. The vertical's PASS accounting (seven
+spawns / eight audited syscalls) may also need re-confirming against the
+current service set (`sysinfod` + `netstack` + `devmgr` + `seatmgr`), but
+the primary defect is the non-exiting login loop.
+
+**Not caused by recent doc/tracker work.** The freestanding kernel binary
+is byte-identical regardless of `#[cfg(test)]`-only or markdown changes, so
+this is a property of the committed tree.
+
+**What remains.** Root-cause why x86_64 dead-console `login` loops on the
+seat/console endpoint instead of failing closed and exiting; fix it so the
+`wait`→reap→relaunch cycle completes (or, if the boot's service set
+legitimately changed the spawn accounting, correct the witness — but only
+after confirming `login` actually exits). Restore a green
+`spawn_session_qemu_x86_64` and a whole-project-green gate.
+
 ## Definition of done (whole plan, §7/§15/§23)
 
-This umbrella is closed only when D1–D8 are each closed on their own
+This umbrella is closed only when D1–D9 are each closed on their own
 whole-project-green gate:
 
 - D1: syscall-body verticals green on all bare-metal targets + wasm32
@@ -395,9 +436,9 @@ whole-project-green gate:
   whole-project-green.
 - D6: **NON-REPRODUCING** — the cross-crate rustdoc `docs-check` failure
   documenting `tairix-kernel` does not reproduce on the pinned toolchain
-  (verified from a full `cargo clean`); `cargo xtask ci` (`docs-check`
-  included) is whole-project-green. Recorded with its reproduction
-  procedure in case it recurs.
+  (verified from a full `cargo clean`); the `docs-check` step itself passes
+  end to end. (The gate as a whole is currently blocked by D9, not D6.)
+  Recorded with its reproduction procedure in case it recurs.
 - D7: **DONE** — the x86_64 disk-completion-interrupt triple fault
   root-caused (external-IRQ frame offset + shared IO-APIC-pin MSI vector)
   and fixed; `root_unlock_admission_qemu_x86_64` reaches the `/System`
@@ -405,6 +446,10 @@ whole-project-green gate:
 - D8: the x86_64 encrypted-root / users-DB read loop root-caused and
   fixed; `root_unlock_admission_qemu_x86_64` extended to key on the
   users-DB install.
+- D9: the x86_64 `spawn-session` dead-console `login` loop root-caused and
+  fixed so `login` fails closed and exits, `init` reaps + relaunches it,
+  and `spawn_session_qemu_x86_64` reaches its seven-spawn witness; gate
+  whole-project-green again.
 - For each landing: `cargo fmt --all` (+ `--check`), `cargo xtask ci`
   (once), `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both
   --secs 20` green and quoted; §23 self-review verdict stated.

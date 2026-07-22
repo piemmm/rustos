@@ -24978,9 +24978,17 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
-        // Unique server task + endpoint id (the registry is process-global).
+        // Unique server *owner* task id + endpoint id (the call-endpoint
+        // registry `crate::callreg` is process-global, so both must be
+        // unique across the whole test binary — see the client-id note
+        // below). The owner id in particular must not collide with any id a
+        // sibling test reclaims: `reclaim_task_resources` scrubs the global
+        // registry by owner (`callreg::teardown_owned_by`), so a sibling
+        // reclaiming a shared owner id (e.g. the widely-reused `0x5708`)
+        // would destroy this test's endpoint between the post and the
+        // assert. Hence a dedicated owner id no other test reclaims.
         let id = 0xCA11_6006;
-        let server_caps = make_caps_record(0x5708, &[], sink);
+        let server_caps = make_caps_record(0x600D_6006, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
