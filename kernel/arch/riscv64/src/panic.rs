@@ -7,14 +7,13 @@
 //! (fail closed, never silently reset; — no
 //! panic recovery in production paths).
 //!
-//! Unlike the x86_64 bridge, this does not route through
-//! `kernel_core::handle_panic`: the boot-to-`BootCompleted` slice has
-//! no post-init arch handle to publish for a richer panic context, and
-//! adding the `AtomicPtr<RiscvArch>` dance now would be unused
-//! machinery (no bloat). A panic before
-//! `BootCompleted` therefore parks the hart, the QEMU integration test
-//! times out, and the harness reports `Outcome::Timeout` — the
-//! documented fail-loud behaviour.
+//! This is the minimal park-on-panic helper the freestanding QEMU
+//! integration-test kernels use: a panic parks the hart, the QEMU test
+//! times out, and the harness reports `Outcome::Timeout` — the documented
+//! fail-loud behaviour. The *production* kernel does route its panic
+//! through `tairix_kernel_core::handle_panic` (a register snapshot + a
+//! bounded backtrace) via the bin-crate `panic_ctx` bridge; this helper is
+//! the test-harness path, not that one.
 
 use core::fmt::Write as _;
 use core::panic::PanicInfo;

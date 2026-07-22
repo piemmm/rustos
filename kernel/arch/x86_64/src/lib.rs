@@ -73,6 +73,7 @@ core::arch::global_asm!(include_str!("external_irq.s"), options(att_syntax));
 pub mod acpi;
 pub mod apic;
 pub mod apic_timer;
+pub mod backtrace;
 pub mod bootinfo;
 pub mod bootmemory;
 pub mod context;

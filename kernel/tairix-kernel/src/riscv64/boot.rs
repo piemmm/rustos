@@ -964,6 +964,15 @@ pub fn try_boot(
         RiscvArch::new(&STORAGE, BOOT_CPU, timebase_hz),
         cpu_name,
     ));
+    // Publish the arch handle for the panic-handler bridge before it is
+    // moved into `BootInfo` (a panic after this point carries registers +
+    // a backtrace; before it, the pre-init SBI path runs).
+    // SAFETY: `arch` is moved into `BootInfo` immediately below (which
+    // `kernel_main` consumes and stores); `Arc::as_ptr` is stable for the
+    // lifetime of any clone of the `Arc`.
+    unsafe {
+        crate::riscv64::panic_ctx::publish_arch(Arc::as_ptr(&arch));
+    }
     let boot_info = BootInfo::new(
         BOOT_CPU,
         1,

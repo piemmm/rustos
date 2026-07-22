@@ -85,6 +85,7 @@ core::arch::global_asm!(include_str!("smp.s"));
 /// one shared GIC SPI. Host-testable register/demux logic over an
 /// [`brcm_msi::MsiMmio`] seam; the real MMIO is the freestanding
 /// `brcm_msi::VolatileMsiMmio` over the discovered root-complex base.
+pub mod backtrace;
 pub mod brcm_msi;
 /// Board-discovered console model + runtime MMIO base (`plans/PI.md` P2):
 /// the one console abstraction ([`console::ConsoleModel`] — PL011 / BCM2835

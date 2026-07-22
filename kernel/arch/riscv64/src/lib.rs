@@ -104,6 +104,7 @@ core::arch::global_asm!(include_str!("context.s"));
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 core::arch::global_asm!(include_str!("smp.s"));
 
+pub mod backtrace;
 pub mod context;
 /// riscv64 implementation of the Arch HAL context-switch surface
 /// ([`tairix_arch_api::ContextSwitch`]): the

@@ -297,8 +297,10 @@ boot_pds:
 // `boot_pds` page tables. `KERNEL_STACK_BYTES` in `tairix-kernel`
 // tracks this value (its static assert pins the lower bound).
 .align 16
+.global boot_stack_bottom
 boot_stack_bottom:
     .skip 65536
+.global boot_stack_top
 boot_stack_top:
 
 // -- Long-mode GDT. Lives in the low `.boot.rodata` section (linker.ld) so

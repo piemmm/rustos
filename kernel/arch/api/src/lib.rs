@@ -98,6 +98,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod backtrace;
 pub mod conformance;
 pub mod context;
 pub mod entropy;
@@ -116,6 +117,12 @@ pub mod userentry;
 pub mod wakeup;
 pub mod watchdog;
 pub mod xtlb;
+
+pub use backtrace::{
+    conformance as backtrace_conformance, walk as backtrace_walk, Backtrace, BacktraceEntry,
+    BacktraceProfile, CpuStateCapture, FrameLayout, NamedReg, RegisterSnapshot, StackBounds,
+    StackReader, MAX_FRAMES as BACKTRACE_MAX_FRAMES, MAX_NAMED_REGS,
+};
 
 pub use sidechannel::{
     conformance as sidechannel_conformance, Mitigation, MitigationEntry, MitigationProfile,

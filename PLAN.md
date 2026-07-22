@@ -2076,6 +2076,32 @@ order (one fully-gated increment each):
                    `docs/src/architecture/kernel.md` (4090). The separate
                    Pi-only question of *why* the VL805/xHCI re-asserts is now
                    chased from this audit trail rather than a wedged core.
+                 - **Verbose kernel-panic post-mortem — registers + a bounded
+                   backtrace on every image (host-proven; QEMU e2e per arch).
+                   Design: `plans/FIX-PANICS.md`,
+                   `docs/src/architecture/panic-diagnostics.md`.** A panic now
+                   emits a register snapshot and a frame-pointer backtrace, not
+                   one line. A new closed Arch HAL slice
+                   `tairix_arch_api::backtrace` (`CpuStateCapture`:
+                   `capture` + a pure `FrameLayout` + `stack_bounds` + honest
+                   `BacktraceProfile`, plus its `conformance` vertical) is
+                   implemented honestly on x86_64/aarch64/riscv64 and an honest
+                   `Unsupported` on wasm32. The single bounds-checked, monotonic,
+                   depth-capped (64) frame-pointer `walk` lives once in
+                   `kernel/arch/api` and reads only through a `StackReader`, so
+                   the one dangerous dereference site is shared and fuzzed
+                   (`fuzz_backtrace`), never copied per arch. `kernel_core::panic_dump`
+                   gained a per-boot re-entrancy guard, `format_hex_u64`, and the
+                   register/`frame_N` audit fields (kernel addresses are printed
+                   deliberately — fatal/halting — while user-fault kills still
+                   omit the user address). The three divergent *production* panic
+                   bridges are collapsed onto this one path via the bin-crate
+                   `panic_ctx` publish-arch-ptr pattern (x86_64/aarch64/riscv64);
+                   the arch-crate `handle_panic_via_serial` stays as the QEMU
+                   test-harness park-on-panic helper. **Staged follow-up:**
+                   on-target symbolication (a `cfg!(debug_assertions)`-gated
+                   compiled-in `(addr, name)` table); the zero-image-cost default
+                   everywhere is raw addresses resolved offline with `addr2line`.
                - **P-5b — syscalls run with interrupts enabled (the
                  syscall-entry half of the §17.1 no-cooperative-dispatch fix).
                  Design: `plans/FIX-SYSCALL.md`.** P-5 made the *dispatch loop*

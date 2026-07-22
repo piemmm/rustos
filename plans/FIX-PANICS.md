@@ -1,6 +1,22 @@
 # FIX-PANICS — Verbose kernel-panic post-mortem (registers + backtrace)
 
-Status: **planned** (not started)
+Status: **done** — every image emits a register snapshot + a bounded
+hex-address backtrace; the three per-arch production panic bridges are
+collapsed onto the one arch-neutral `kernel_core::panic_dump`; on-target
+symbolication (a compiled-in symbol table) remains the one deliberately
+staged follow-up (offline `addr2line` is the complete story today).
+
+Design note (divergence from the original sketch below, per the "redo it
+correctly" mandate): the arch slice exposes register `capture()` plus a
+pure `FrameLayout` (saved-fp / return-addr offsets) and `stack_bounds()`,
+while the single audited, bounds-checked, monotonic, depth-capped
+frame-pointer walk lives once in `kernel/core` and reads memory only
+through a `StackReader`. This is stronger than the sketched per-arch
+`unwind_one`: the one dangerous dereference site is shared and fuzzed, not
+copied three times. wasm32 is an honest `Unsupported`. The arch-crate
+`handle_panic_via_serial` is retained as the QEMU integration-test
+harnesses' minimal park-on-panic helper (live code, ~40 consumers), not
+the production path.
 
 Binding under `AGENTS.md`. This plan makes a kernel panic dump a rich,
 structured post-mortem — a register snapshot and a bounded stack
