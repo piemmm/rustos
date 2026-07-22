@@ -102,6 +102,7 @@ the burn-down is complete.
 | Heterogeneous `core_class`        | ✓ hybrid| ✓ FDT  |  n/a   |  n/a   |
 | Side-channel profile (§19.1)      |   ✓    |    ✓    |    ✓    |   ✓    |
 | Memory-tagging profile (§19.10)   |   ✓    | ✓ MTE pend | ✓ unsup | ✓ unsup |
+| Post-mortem capture (`CpuStateCapture`) | ✓ | ✓ | ✓ | ✓ unsup |
 | **Arch HAL conformance suite**    |   ✓    |    ✓    |    ✓    |   ✓    |
 
 **QEMU vertical parity** (`tests/integration/*`):

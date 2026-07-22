@@ -34,9 +34,14 @@ use core::fmt::Write as _;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use tairix_arch_x86_64::backtrace::Backtracer;
 use tairix_arch_x86_64::kernel_arch::halt as arch_halt;
 use tairix_arch_x86_64::serial::{Serial, COM1_BASE};
 use tairix_kernel_core::{handle_panic, PanicContext};
+
+/// The x86_64 post-mortem CPU-state handle the panic bridge attaches so
+/// the dump carries registers + a backtrace. Zero-sized and stateless.
+static BACKTRACER: Backtracer = Backtracer::new();
 
 use crate::x86_64::arch_wrapper::BinArch;
 use crate::x86_64::serial_sink::SERIAL_SINK;
@@ -88,7 +93,7 @@ pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
         // kernel; the pointee therefore outlives every panic that can
         // observe a non-null `PANIC_ARCH_PTR`.
         let arch: &BinArch = unsafe { &*raw };
-        let ctx = PanicContext::new(arch, &SERIAL_SINK);
+        let ctx = PanicContext::new(arch, &SERIAL_SINK).with_backtrace(&BACKTRACER);
         handle_panic(info, &ctx)
     }
 }

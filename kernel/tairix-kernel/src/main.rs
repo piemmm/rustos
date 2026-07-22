@@ -100,8 +100,9 @@ mod kernel {
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, SERIAL_SINK};
+    use tairix_arch_aarch64::SERIAL_SINK;
     use tairix_kernel::aarch64::boot;
+    use tairix_kernel::aarch64::panic_ctx::handle_panic_via_kernel_core;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::FreeListAllocator;
 
@@ -125,10 +126,12 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
-    /// Forward to the shared aarch64 panic bridge (parks the CPU).
+    /// Forward to the shared aarch64 panic bridge, which routes through
+    /// `kernel_core::handle_panic` (registers + backtrace) once the arch
+    /// handle is published, or parks the CPU with a pre-init serial record.
     #[panic_handler]
     fn tairix_kernel_panic_aarch64(info: &PanicInfo<'_>) -> ! {
-        handle_panic_via_serial(info)
+        handle_panic_via_kernel_core(info)
     }
 
     /// The symbol the aarch64 boot trampoline calls (via
@@ -170,9 +173,10 @@ mod kernel {
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_arch_riscv64::{handle_panic_via_serial, SERIAL_SINK};
+    use tairix_arch_riscv64::SERIAL_SINK;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::riscv64::boot;
+    use tairix_kernel::riscv64::panic_ctx::handle_panic_via_kernel_core;
     use tairix_kernel::FreeListAllocator;
 
     /// Static boot heap for the bump allocator.
@@ -199,10 +203,12 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
-    /// Forward to the shared riscv64 panic bridge (parks the hart).
+    /// Forward to the shared riscv64 panic bridge, which routes through
+    /// `kernel_core::handle_panic` (registers + backtrace) once the arch
+    /// handle is published, or parks the hart with a pre-init SBI record.
     #[panic_handler]
     fn tairix_kernel_panic_riscv64(info: &PanicInfo<'_>) -> ! {
-        handle_panic_via_serial(info)
+        handle_panic_via_kernel_core(info)
     }
 
     /// The symbol the riscv64 boot trampoline calls (via

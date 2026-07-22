@@ -67,6 +67,7 @@ extern crate std;
 /// wasm32 implementation of the Arch HAL platform-entropy surface
 /// ([`tairix_arch_api::PlatformEntropy`]): the host CSPRNG, honestly
 /// `Pending` on the host entropy import (see the module docs).
+pub mod backtrace;
 pub mod entropy;
 pub mod isolation;
 pub mod kernel_arch;

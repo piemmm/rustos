@@ -576,6 +576,7 @@ name = "tairix-arch-api"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
  "tairix-rng",
 ]
 

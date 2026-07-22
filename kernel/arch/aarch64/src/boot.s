@@ -237,6 +237,8 @@ _el2_establish_and_drop:
 // generous headroom for the single-CPU boot pipeline.
 .section .bss.boot_stack, "aw", %nobits
 .balign 16
+.global __boot_stack_bottom
 __boot_stack_bottom:
     .skip 65536
+.global __boot_stack_top
 __boot_stack_top:

@@ -36,3 +36,10 @@ path = "src/lib.rs"
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+
+# The stack-unwinder fuzz harness (`tests/fuzz_backtrace.rs`, AGENTS.md
+# §19.6) drives `backtrace::walk` over adversarial frame chains. It uses
+# the shared per-run seed/budget seam so `cargo xtask fuzz` can extend the
+# loop to a wall-clock budget; dev-only, never shipped.
+[dev-dependencies]
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

@@ -49,6 +49,11 @@ pub struct Target {
 /// protocol parsers, and the capability-checked IPC port endpoint.
 pub const TARGETS: &[Target] = &[
     Target {
+        package: "tairix-arch-api",
+        test: "fuzz_backtrace",
+        description: "Arch HAL frame-pointer stack unwinder (panic backtrace)",
+    },
+    Target {
         package: "tairix-abi",
         test: "fuzz_decode",
         description: "lib/abi wire decoders (IPC + manifest headers)",

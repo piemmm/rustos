@@ -1263,6 +1263,15 @@ fn enter_kernel_core(
     // and names how many cores `kernel_main`'s SMP phase brings online.
     let cpu_count = arch.cpu_count();
     let arch = Arc::new(Aarch64BinArch::new(arch));
+    // Publish the arch handle for the panic-handler bridge before it is
+    // moved into `BootInfo` (a panic after this point carries registers +
+    // a backtrace; before it, the pre-init serial path runs).
+    // SAFETY: `arch` is moved into `BootInfo` immediately below (which
+    // `kernel_main` consumes and stores); `Arc::as_ptr` is stable for the
+    // lifetime of any clone of the `Arc`.
+    unsafe {
+        crate::aarch64::panic_ctx::publish_arch(Arc::as_ptr(&arch));
+    }
     let boot_info = BootInfo::new(
         BOOT_CPU,
         cpu_count,

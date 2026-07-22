@@ -1,6 +1,6 @@
 //! wasm32 platform entropy source.
 //!
-//! Implements the Arch HAL [`PlatformEntropy`](tairix_arch_api::PlatformEntropy)
+//! Implements the Arch HAL [`PlatformEntropy`]
 //! surface for the wasm32 host environment. A browser/host sandbox *does*
 //! expose a CSPRNG (`crypto.getRandomValues`), but a freestanding
 //! `wasm32-unknown-unknown` module reaches it only through an imported host
