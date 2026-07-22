@@ -83,6 +83,30 @@ can never diverge in navigation semantics, listing policy, or look.
   answer — a "no application" notice, never a fabricated default — and the type
   decision is a display hint only: the load gate still verifies and
   capability-checks whichever bundle the user picks. The engine never spawns.
+- **Multi-selection** (`select`, `Browser` selection methods,
+  `plans/NEW-FILEMANAGER.md` FM7): the per-listing set of marked entries the
+  management verbs act on. `Selection` models a plain click (`single`), a
+  `Ctrl`-click (`toggle`), a `Shift`-click range (`range_to`, grown from the
+  anchor), and Select All (`select_all`); `Browser::toggle_selection` /
+  `extend_selection_to` / `select_all` / `clear_selection` bounds-check every
+  index against the live listing. The selection is index-based, so any listing
+  change (navigate, refresh, re-sort) collapses it to the single focused entry,
+  and an unmodified keyboard move collapses it too — standard file-manager
+  semantics.
+- **Cut/copy clipboard** (`clipboard`, `Browser::clipboard`,
+  `plans/NEW-FILEMANAGER.md` FM7): the cross-directory set the move/copy verbs
+  act on. `Browser::clipboard(op)` captures the selected entries' absolute
+  component paths onto a `Clipboard` (`None` when nothing is selected), so it
+  survives navigating to the paste target. `plan_paste(clipboard, target)`
+  resolves each source to a destination in the target directory, **fail
+  closed**: a target inside one of the moved items is `PasteError::WouldRecurse`
+  (an exact component-prefix test — `/a/b` is within `/a`, `/ab` is not), and a
+  paste back into an item's own directory is flagged
+  (`PasteItem::overwrites_source`) for the app to confirm rather than silently
+  clobber. The model names *what* would move where; the app performs the
+  capability-checked `fs_rename` / streamed copy under the user's own identity,
+  so composing it grants nothing and the read-only picker never builds a
+  clipboard.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the

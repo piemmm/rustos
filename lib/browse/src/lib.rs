@@ -32,6 +32,10 @@
 //! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary.
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
+//! * [`select`](mod@select) — the [`Selection`] multi-entry set (single /
+//!   toggle / range / select-all) the management verbs act on.
+//! * [`clipboard`](mod@clipboard) — the cut/copy [`Clipboard`] and
+//!   [`plan_paste`] paste-target validation (`plans/NEW-FILEMANAGER.md` FM7).
 //! * [`icon`](mod@icon) — the one file-type [`IconKind`](tairix_icon::IconKind)
 //!   classifier the manager and picker share (a display hint, never authority).
 //! * [`open_with`](mod@open_with) — the type→bundle "Open With…" association
@@ -64,6 +68,7 @@ extern crate alloc;
 
 pub mod activate;
 pub mod browser;
+pub mod clipboard;
 pub mod entry;
 pub mod error;
 pub mod format;
@@ -72,12 +77,14 @@ pub mod layout;
 pub mod open_with;
 pub mod rename;
 pub mod render;
+pub mod select;
 pub mod sort;
 pub mod source;
 pub mod vfs;
 
 pub use activate::Activation;
 pub use browser::Browser;
+pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
 pub use format::{format_date, format_size};
@@ -86,6 +93,7 @@ pub use layout::{GridView, ListView, ViewLayout, ViewMode};
 pub use open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
 pub use rename::{validate_new_name, RenameError};
 pub use render::render;
+pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;
 pub use vfs::VfsDirectorySource;
