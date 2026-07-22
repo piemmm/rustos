@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-input-virtio-kbd"
-description = "TAIRiX autoloaded user-space virtio-input keyboard driver process: builds the bus-agnostic virtio-MMIO transport over its granted register window and a `VirtioHost` over its granted DMA, brings the virtio-input device up via `lib/virtio_input`, and pumps decoded key edges into the kernel input-focus arbiter (`AGENTS.md` §4 / §18, plans/PI.md P10 chunk 5d-2-ii)."
+description = "TAIRiX autoloaded user-space virtio-input keyboard/pointer driver process: shape-keys the bus-agnostic virtio transport from its granted windows (a single virtio-MMIO aperture or the four role-tagged virtio-PCI config windows) and a `VirtioHost` over its granted DMA, brings the virtio-input device up via `lib/virtio_input`, and pumps decoded key/pointer records into the kernel input-focus arbiter (`AGENTS.md` §4 / §18, plans/PI.md P10 chunk 5d-2-ii)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -31,8 +31,9 @@ workspace = true
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The capability-set type the rt-backed `DriverHost` is built over (§5.2).
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# The bus-agnostic virtio-MMIO transport this driver builds over its granted
-# register window — a `lib/*` crate, so the §17.4 layering holds (the driver
+# The bus-agnostic virtio transports this driver builds over its granted
+# window(s) — the single-aperture `MmioTransport` and the four-window
+# `PciTransport` — a `lib/*` crate, so the §17.4 layering holds (the driver
 # never names `drivers/bus/virtio`; the `lib/usb` ↔ `drivers/bus/usb` precedent).
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 # The arch-neutral virtio-input open/poll/decode device logic and the

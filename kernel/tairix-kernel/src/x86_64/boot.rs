@@ -930,12 +930,14 @@ fn try_boot(
 ///    interrupt-controller nodes — from the already-validated `madt_bytes`.
 /// 2. The virtio-PCI probe: enumerate configuration space and emit every
 ///    virtio-net function as a role-tagged network node
-///    ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]) the
-///    two-process user-space driver autoloads against, plus every
+///    ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]) and every
+///    virtio-input function as a role-tagged input node
+///    ([`crate::hwdiscovery::observe_virtio_pci_input_devices`]) the
+///    two-process user-space drivers autoload against, plus every
 ///    virtio-blk function as a match-key-only storage node
 ///    ([`crate::hwdiscovery::observe_virtio_pci_block_devices`]) the
 ///    root-mount autoload binds the bootstrap-floor block driver from. The
-///    interrupt line each network node carries is the function's
+///    interrupt line each network and input node carries is the function's
 ///    firmware-assigned PCI interrupt line (a *discovered* value, read from
 ///    configuration space, never a board constant); the block node carries
 ///    only its bind key, as its in-kernel bring-up re-resolves the
@@ -977,9 +979,9 @@ unsafe fn seed_hardware_tree(
     tree
 }
 
-/// Enumerate the virtio-PCI bus and emit every virtio-net function (with its
-/// resolved config windows + interrupt line) and every virtio-blk function
-/// (match-key-only) into `sink`.
+/// Enumerate the virtio-PCI bus and emit every virtio-net and virtio-input
+/// function (each with its resolved config windows + interrupt line) and
+/// every virtio-blk function (match-key-only) into `sink`.
 ///
 /// Configuration space is reached through the modern memory-mapped ECAM
 /// (MMCONFIG) mechanism when the firmware advertises it (an `MCFG` table),
@@ -1067,10 +1069,11 @@ unsafe fn ecam_bus(
     Some(tairix_pci::mechanism_ecam(window))
 }
 
-/// Run both virtio-PCI observers over `pci` (whichever config-access
+/// Run every virtio-PCI observer over `pci` (whichever config-access
 /// mechanism [`seed_virtio_pci`] selected), emitting the discovered
-/// virtio-net and virtio-blk nodes into `sink`. One generic definition, so
-/// the ECAM and mechanism-#1 paths share the exact same probe.
+/// virtio-net, virtio-input, and virtio-blk nodes into `sink`. One generic
+/// definition, so the ECAM and mechanism-#1 paths share the exact same
+/// probe.
 fn probe_virtio_pci<B>(pci: &B, sink: &mut crate::boot_hwtree::CollectingHwNodeSink, log: &dyn Sink)
 where
     B: tairix_abi::driver::virtio_pci::VirtioPciBus
@@ -1097,6 +1100,16 @@ where
     // An enumeration error leaves the NIC undiscovered; the ACPI nodes
     // already collected are seeded regardless.
     let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &dev_irq, sink, log);
+
+    // Emit every virtio-input function (a `-device virtio-keyboard-pci` /
+    // `virtio-mouse-pci`) as an interrupt-driven input node carrying its
+    // four role-tagged config windows + DMA + routed line, so `devmgr`
+    // autoloads the user-space `virtio_kbd` driver against it — the
+    // PCI-bus sibling of the aarch64/riscv64 device-tree input probe.
+    // Like the NIC it parks on its interrupt, so an enumeration error
+    // leaves the keyboard undiscovered; whatever was collected is seeded
+    // regardless (fail closed).
+    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(pci, &dev_irq, sink, log);
 
     // Emit every virtio-blk function as a match-key-only storage node the
     // root-mount autoload resolves the bootstrap-floor block driver from —

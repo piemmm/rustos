@@ -3,20 +3,25 @@
 //! **autoloaded into user space** by `devmgr` when a virtio-input device is
 //! discovered (`plans/PI.md` P10 chunk 5d-2-ii).
 //!
-//! This is the "drivers in user space" steady state on the
-//! hardware QEMU `-M virt` actually presents (a virtio-input keyboard and
-//! its virtio-mouse pointer sibling; the metal Pi 4 keyboard is the USB
-//! `drivers/input/usb_kbd`). One driver instance is spawned per discovered
+//! This is the "drivers in user space" steady state for virtio-input on
+//! both buses QEMU can present: the single-aperture virtio-MMIO keyboard
+//! and its virtio-mouse pointer sibling on `-M virt` (aarch64/riscv64), and
+//! the scattered virtio-**PCI** `virtio-keyboard-pci` / `virtio-mouse-pci`
+//! on a PC (x86_64); the metal Pi 4 keyboard is the USB
+//! `drivers/input/usb_kbd`. One driver instance is spawned per discovered
 //! virtio-input node, and each instance serves whatever event stream its
 //! own device produces — the bind table cannot know whether a node is a
 //! keyboard or a mouse, so every instance runs both producers and the
 //! device decides which of them ever yields a record. The kernel mints
 //! this process exactly the device-resource grants its matched node requested
-//! — the device's register window and a DMA constraint, and no more — and this program reaches them through the
-//! rt-backed `RtDriverHost`. It names no board, bus, or transport detail: it maps a register window by address, carves a DMA
-//! region, and speaks the bus-agnostic virtio split-virtqueue protocol via the
-//! arch-neutral `tairix_virtio_input` composition over the `tairix_virtio`
-//! MMIO transport.
+//! — the device's register window(s), a DMA constraint, and its interrupt
+//! line, and no more — and this program reaches them through the rt-backed
+//! `RtDriverHost`. It names no board or transport detail: it maps the
+//! granted window(s) by address, carves a DMA region, and speaks the
+//! bus-agnostic virtio split-virtqueue protocol via the arch-neutral
+//! `tairix_virtio_input` composition over whichever `tairix_virtio`
+//! transport the grant shape selects (a single-aperture MMIO aperture or
+//! the four role-tagged PCI config windows).
 //!
 //! It is a **pure-Rust** program: TAIRiX is Rust-only, so it
 //! links the Rust userland runtime `tairix-rt`, never the C ABI (which exists
@@ -37,14 +42,18 @@
 //!   (the QEMU `virt` virtio interconnect snoops the CPU caches), so no
 //!   architecture-specific cache-maintenance shim is supplied here
 //!   (`coherency = None`, keeping the program platform-neutral).
-//! * `sole_register_window` over the delivered grants: the device's register
-//!   window `(base, len)` is read from the grants the kernel delivered, never a
-//!   build-time board constant.
-//! * `MmioTransport::new` over the mapped window, then
-//!   `VirtioInput::open_armed`: brings the virtio-input device online, posts
-//!   its event queue, and only then binds the granted interrupt (the arm
-//!   step), so readiness is never advertised before the device can accept a
-//!   keystroke.
+//! * Transport selection by grant shape: `virtio_pci_windows` resolving the
+//!   four role-tagged config windows the kernel PCI probe delivered builds a
+//!   `PciTransport` (selecting the kernel-routed MSI-X entry); otherwise
+//!   `sole_register_window` reads the single MMIO aperture `(base, len)` and
+//!   builds an `MmioTransport`. Every window `(base, len)` is read from the
+//!   grants the kernel delivered, never a build-time board constant, and the
+//!   driver never reads PCI configuration space (the kernel resolved and
+//!   role-tagged every window). One signed bundle thus binds on either bus.
+//! * `VirtioInput::open_armed` over the built transport: brings the
+//!   virtio-input device online, posts its event queue, and only then binds
+//!   the granted interrupt (the arm step), so readiness is never advertised
+//!   before the device can accept a keystroke.
 //! * The poll/feed/inject loop: each decoded `InputEvent` is offered to the
 //!   shared pointer mapping first (`PointerInput::from_device_event` — axis
 //!   deltas, the `BTN_*` button edges, and scroll ticks) and injected
@@ -82,11 +91,12 @@ mod program {
     use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::driver::virtio::VirtioHost;
+    use tairix_abi::driver::virtio_pci::{virtio_pci_windows, VirtioPciWindows};
     use tairix_abi::input::PointerInput;
-    use tairix_abi::{CapabilityId, MmioMapper};
+    use tairix_abi::{CapabilityId, DriverError, MmioMapper};
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use tairix_virtio::MmioTransport;
+    use tairix_virtio::{MmioTransport, PciTransport, PciTransportWindows, Transport};
     use tairix_virtio_input::{VirtioInput, VirtioKeyboardConsole};
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -94,9 +104,21 @@ mod program {
     /// delivery did not fit). A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
-    /// Exit code when the delivered grants do not name the single register
-    /// window this driver needs — an unbound or mis-provisioned node. A reserved, fail-closed value.
+    /// Exit code when the delivered grants do not name a usable register
+    /// window (a single MMIO aperture or the full set of four role-tagged
+    /// virtio-PCI config windows) this driver needs — an unbound,
+    /// mis-provisioned, or malformed node. A reserved, fail-closed value.
     const EXIT_NO_RESOURCES: i32 = 81;
+
+    /// MSI-X table entry the kernel PCI probe routes this device's single
+    /// interrupt to, and the entry the driver selects for the config change
+    /// and every virtqueue. The driver parks on one bound handle, so one
+    /// shared MSI-X vector — entry `0` — carries every device notification;
+    /// the kernel programs that entry's table slot at spawn and the driver
+    /// only echoes the entry number into the device's vector registers
+    /// (writing its own mapped common window, no PCI config access).
+    /// Ignored on the single-aperture MMIO bus, which has no MSI-X.
+    const MSIX_ENTRY: u16 = 0;
 
     /// Exit code when the device bring-up failed (the register window could
     /// not be mapped, the window is not a virtio-MMIO device, the device
@@ -155,30 +177,90 @@ mod program {
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
-        // Resolve the single granted register window — the one definition of
-        // "which window did the kernel grant me".
-        let Ok((base, len)) = sole_register_window(host.resources()) else {
-            return EXIT_NO_RESOURCES;
-        };
-        // Map the register window and build the bus-agnostic transport over it,
-        // then bring the virtio-input device online. The host is borrowed as
-        // the `VirtioHost` the device carves its event buffers from.
-        // The interrupt bind is the *arm* step of `open_armed`, run strictly
+
+        // Shape-key the transport by the grant set the kernel minted, so one
+        // signed bundle binds on either virtio bus: a scattered PCI device
+        // (a `-device virtio-keyboard-pci` / `virtio-mouse-pci`) grants the
+        // four role-tagged config windows (`common`/`notify`/`isr`/`device`),
+        // while a single-aperture MMIO device (the `-M virt` keyboard) grants
+        // one register window. The kernel resolved and role-tagged every
+        // window — the driver never reads PCI configuration space.
+        match virtio_pci_windows(host.resources()) {
+            Ok(windows) => {
+                let Some(transport) = build_pci_transport(&host, &windows) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                run(&host, transport)
+            }
+            // No role-tagged window at all: a single-aperture MMIO delivery.
+            Err(DriverError::NotFound) => {
+                let Ok((base, len)) = sole_register_window(host.resources()) else {
+                    return EXIT_NO_RESOURCES;
+                };
+                let Ok(window) = host.map_window(base, len) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                let Ok(transport) = MmioTransport::new(window) else {
+                    return EXIT_BRINGUP_FAILED;
+                };
+                run(&host, transport)
+            }
+            // Some virtio-PCI windows but not the full four — a malformed,
+            // mis-provisioned node. Fail closed rather than half-bind.
+            Err(_) => EXIT_NO_RESOURCES,
+        }
+    }
+
+    /// Build the modern virtio-PCI [`PciTransport`] from the four
+    /// kernel-resolved config windows, mapping each through the host's
+    /// capability-gated MMIO facility and selecting the kernel-routed MSI-X
+    /// entry before the transport programs the device's virtqueues.
+    ///
+    /// Returns [`None`] on any window map failure (a refused or malformed
+    /// grant) or a malformed common-configuration window — fail closed, never
+    /// a half-built transport.
+    fn build_pci_transport(
+        mapper: &dyn MmioMapper,
+        windows: &VirtioPciWindows,
+    ) -> Option<PciTransport> {
+        let common = mapper.map_window(windows.common.0, windows.common.1).ok()?;
+        let notify = mapper.map_window(windows.notify.0, windows.notify.1).ok()?;
+        let isr = mapper.map_window(windows.isr.0, windows.isr.1).ok()?;
+        let device = mapper.map_window(windows.device.0, windows.device.1).ok()?;
+        let mut transport = PciTransport::new(PciTransportWindows {
+            common,
+            notify,
+            isr,
+            device,
+            notify_off_multiplier: windows.notify_off_multiplier,
+        })
+        .ok()?;
+        // Select the MSI-X entry the kernel routed this device's interrupt to,
+        // before `VirtioInput::open_armed` drives the virtqueue programming
+        // that reads it back. Writes only the driver's own mapped common
+        // window.
+        transport.enable_msix(MSIX_ENTRY);
+        Some(transport)
+    }
+
+    /// Bring the virtio-input device online over whatever transport backs it
+    /// and pump its events for the life of the process. Generic over the
+    /// [`Transport`] so the MMIO and PCI paths share exactly one bring-up and
+    /// report-pump definition (no per-bus duplication). Never returns on the
+    /// success path; a bring-up or device fault exits fail-closed.
+    fn run<T: Transport>(host: &RtDriverHost<RtGrantSyscalls>, transport: T) -> i32 {
+        // Bring the virtio-input device online. The host is borrowed as the
+        // `VirtioHost` the device carves its event buffers from. The
+        // interrupt bind is the *arm* step of `open_armed`, run strictly
         // after the eventq is live: the audited `irq_bind` syscall is the
         // kernel-observable "keyboard ready" witness, and binding before the
         // device has posted buffers advertises readiness while a keystroke
         // can still be silently dropped against an un-ready device. The bind
         // stays mandatory and fail-loud — the event pump parks on this line
-        // between keystrokes, so a driver that cannot bind it must exit here
+        // between keystrokes, so a driver that cannot bind it must exit
         // rather than silently degrade into a busy re-poll; on that failure
         // `open_armed` has already reset the device.
-        let Ok(window) = host.map_window(base, len) else {
-            return EXIT_BRINGUP_FAILED;
-        };
-        let Ok(transport) = MmioTransport::new(window) else {
-            return EXIT_BRINGUP_FAILED;
-        };
-        let vhost: &dyn VirtioHost = &host;
+        let vhost: &dyn VirtioHost = host;
         let Ok(mut input) = VirtioInput::open_armed(transport, vhost, |_| host.bind_irq()) else {
             return EXIT_BRINGUP_FAILED;
         };

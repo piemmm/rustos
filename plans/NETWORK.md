@@ -792,11 +792,24 @@ improvement, not test scaffolding):
   function's IRQ from its PCI Interrupt-Line register. The `virtio_net_driver`
   process is grant-shape-keyed (four role-tagged windows ⇒ `PciTransport` +
   `enable_msix`, one window ⇒ `MmioTransport`) over one shared generic serve
-  path. Host-test-validated only — x86_64 still has no autoload subsystem, so
-  no *live* boot exercises the PCI path yet. The next x86_64 tranche is the
-  autoload parity port (root mount, unlock kthread, `devmgr`,
-  `driver_spawn_loader`), then the verticals — the first live exercise of this
-  contract.
+  path. **Third x86_64 foundation landed: the virtio-input-PCI probe + the
+  `virtio_kbd` driver's PCI path** (the input sibling of the net foundation,
+  host-gate-green): `hwdiscovery::observe_virtio_pci_input_devices` (over the
+  same shared `observe_virtio_pci_devices` core, node-id `region(6)`) emits
+  each modern virtio-input PCI function as an `Input` node keyed by the shared
+  `HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)` carrying the four role-tagged
+  windows + `dma(0,0)` + the discovered PCI Interrupt-Line GSI;
+  `boot_x86_64::probe_virtio_pci` runs it beside the net + block probes over
+  either config-access mechanism; and `drivers/input/virtio_kbd` gained the
+  same grant-shape-keyed transport (`virtio_pci_windows` ⇒ `PciTransport` +
+  `enable_msix`, else `sole_register_window` ⇒ `MmioTransport`) over one
+  generic `run<T: Transport>` bring-up/pump, so one signed input bundle binds
+  on both buses. Host-test-validated only — the A2/A3 x86_64 autoload
+  production path is composed and boot-confirmed, but no *live* boot exercises
+  the PCI *input* path yet. The next x86_64 tranche is the verticals
+  themselves (`autoload_input_qemu_x86_64`, then the two-process
+  `netstack_autoload_qemu_x86_64`) — the first live exercise of these
+  contracts.
 - **§18.5 scaffold removal** (once all three arches are two-process): delete the
   `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
   `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and

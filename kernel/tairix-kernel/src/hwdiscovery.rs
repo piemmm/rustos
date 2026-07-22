@@ -37,7 +37,7 @@ use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 use crate::hwtree_node_ids::{
     VIRTIO_BLOCK_PROBE_NODE_BASE_ID, VIRTIO_INPUT_PROBE_NODE_BASE_ID,
     VIRTIO_NET_PROBE_NODE_BASE_ID, VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
-    VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
+    VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID, VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
 };
 
 /// PCI device-ID base of a **modern** virtio function: the device ID is
@@ -496,12 +496,63 @@ pub fn observe_virtio_pci_network_devices(
     )
 }
 
+/// Discover every modern virtio-**input** PCI function and emit each as a
+/// [`HwDeviceClass::Input`] node keyed by the shared
+/// [`HwMatchKey::virtio`]`(`[`VIRTIO_INPUT_DEVICE_ID`]`)`, carrying the same
+/// four role-tagged config windows, coherent-DMA constraint, and routed
+/// interrupt line as the network PCI probe — the PCI-bus analogue of
+/// [`observe_virtio_mmio_input_devices`] (`plans/NETWORK.md` N4e-x86_64).
+///
+/// A virtio-input device on a PC is presented on the PCI bus (`-device
+/// virtio-keyboard-pci` / `virtio-mouse-pci`), not on a single MMIO
+/// aperture, so its register blocks are scattered across BARs at
+/// capability-referenced offsets only PCI-configuration-space access can
+/// resolve — which a user-space driver cannot do. The kernel resolves the
+/// four windows here (through the frozen [`VirtioPciBus`] seam, never
+/// naming a concrete `drivers/bus/*` type) and emits each as a role-tagged
+/// grant, so the autoloaded `drivers/input/virtio_kbd` process receives
+/// pre-resolved `(base, len)` windows it maps in its own address space
+/// (`AGENTS.md` §4 — no ambient authority). The node is keyed by the shared
+/// virtio *type* (not the PCI device ID), so the one signed input bundle
+/// binds on the MMIO and PCI buses alike (§2.2).
+///
+/// `dev_irq(bdf)` resolves the interrupt line the platform routes the
+/// function to (a discovered value, never a board constant). A function
+/// whose windows, notify multiplier, or interrupt line cannot be resolved
+/// is left undiscovered rather than emitted on a partial identity (fail
+/// closed).
+///
+/// # Errors
+///
+/// As [`observe_virtio_pci_network_devices`]: propagates the bus
+/// enumeration error and surfaces a full sink as
+/// [`DriverError::BufferTooSmall`] (fail closed).
+pub fn observe_virtio_pci_input_devices(
+    bus: &dyn VirtioPciBus,
+    dev_irq: &dyn Fn(u64) -> Option<u32>,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+) -> Result<(), DriverError> {
+    observe_virtio_pci_devices(
+        bus,
+        dev_irq,
+        sink,
+        log,
+        VIRTIO_INPUT_DEVICE_ID,
+        HwDeviceClass::Input,
+        VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
+    )
+}
+
 /// Shared core of the virtio-PCI class probes: enumerate the bus, and for
 /// every modern virtio function of the requested `virtio_type` resolve its
 /// four config windows and emit a role-tagged node of `class` (numbered
-/// from `node_base_id`). Written once so a future virtio-PCI block/input
-/// probe reuses it (§2.2); the MMIO probes stay separate because their
-/// window shape (a single aperture) differs.
+/// from `node_base_id`). Written once and shared by the network
+/// ([`observe_virtio_pci_network_devices`]) and input
+/// ([`observe_virtio_pci_input_devices`]) probes (§2.2); the block PCI
+/// probe stays separate (its node carries no grants — the floor bring-up
+/// re-resolves the transport from config space), and the MMIO probes stay
+/// separate because their window shape (a single aperture) differs.
 fn observe_virtio_pci_devices(
     bus: &dyn VirtioPciBus,
     dev_irq: &dyn Fn(u64) -> Option<u32>,
@@ -1197,5 +1248,122 @@ mod tests {
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID + 1);
+    }
+
+    // --- virtio-PCI input probe ------------------------------------------
+
+    /// The modern virtio-input PCI device id (`0x1040 + 18`).
+    const VIRTIO_INPUT_PCI_DEVICE_ID: u16 = 0x1052;
+
+    #[test]
+    fn a_virtio_input_pci_function_is_discovered_with_role_tagged_windows() {
+        // A modern virtio-input PCI function (a `-device virtio-keyboard-pci`
+        // / `virtio-mouse-pci`) is emitted as an `Input` node keyed by the
+        // shared virtio *type* (18) — the same key the MMIO input probe
+        // uses, so one signed input bundle binds on either bus — carrying
+        // its four role-tagged config windows (the notify window alone
+        // carrying the multiplier), a coherent DMA constraint, and its
+        // routed interrupt line: the exact grant set the autoloaded
+        // `virtio_kbd` driver's `virtio_pci_windows` resolver consumes.
+        let bus = FakePciBus::with(&[(VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800)]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_input_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1);
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Input));
+        assert_eq!(node.id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID);
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)]
+        );
+        let base = 0xC000_0000 + (0x0000_0800u64 << 16);
+        assert_eq!(
+            node.resources(),
+            &[
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_COMMON,
+                    base + (u64::from(VIRTIO_PCI_CFG_COMMON) << 8),
+                    0x38,
+                    0,
+                ),
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_NOTIFY,
+                    base + (u64::from(VIRTIO_PCI_CFG_NOTIFY) << 8),
+                    0x10,
+                    TEST_NOTIFY_MULTIPLIER,
+                ),
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_ISR,
+                    base + (u64::from(VIRTIO_PCI_CFG_ISR) << 8),
+                    0x4,
+                    0,
+                ),
+                virtio_pci_window_resource(
+                    VIRTIO_PCI_CFG_DEVICE,
+                    base + (u64::from(VIRTIO_PCI_CFG_DEVICE) << 8),
+                    0x8,
+                    0,
+                ),
+                HwResource::dma(0, 0),
+                HwResource::irq(u64::from(TEST_PCI_INTID), 1),
+            ]
+        );
+        // The emitted windows round-trip through the driver-side resolver,
+        // exactly as the `virtio_kbd` PCI path consumes them.
+        let windows =
+            tairix_abi::driver::virtio_pci::virtio_pci_windows(node.resources()).expect("resolve");
+        assert_eq!(windows.notify_off_multiplier, TEST_NOTIFY_MULTIPLIER);
+        assert_eq!(
+            windows.common,
+            (base + (u64::from(VIRTIO_PCI_CFG_COMMON) << 8), 0x38)
+        );
+    }
+
+    #[test]
+    fn a_non_input_virtio_pci_function_emits_no_input_node() {
+        // A virtio-net PCI function (0x1041) and a non-input virtio device
+        // id are not virtio-input, so the input probe emits nothing.
+        let bus = FakePciBus::with(&[
+            (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800),
+            (0x1050, 0x0000_0900),
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_input_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert!(sink.nodes.is_empty());
+    }
+
+    #[test]
+    fn two_virtio_input_pci_functions_get_distinct_ids() {
+        // A keyboard and a mouse function each become a distinct node from
+        // the PCI input base, so the two are never merged (one driver
+        // instance is spawned per node).
+        let bus = FakePciBus::with(&[
+            (VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800),
+            (VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_1000),
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_input_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 2);
+        assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID);
+        assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID + 1);
+        // The input region is disjoint from the PCI network and block bases,
+        // so a machine with a NIC, a disk, and a keyboard never aliases them.
+        assert_ne!(sink.nodes[0].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
+        assert_ne!(sink.nodes[0].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
+    }
+
+    #[test]
+    fn a_virtio_input_pci_function_without_an_irq_is_skipped_fail_closed() {
+        // The driver parks on its interrupt, so a function whose line the
+        // arch resolver cannot route is left undiscovered rather than
+        // emitted without it.
+        let bus = FakePciBus::with(&[(VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800)]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_input_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+            .expect("enumerate");
+        assert!(sink.nodes.is_empty());
     }
 }
