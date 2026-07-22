@@ -107,6 +107,21 @@ can never diverge in navigation semantics, listing policy, or look.
   capability-checked `fs_rename` / streamed copy under the user's own identity,
   so composing it grants nothing and the read-only picker never builds a
   clipboard.
+- **Paste execution** (`execute`, `plans/NEW-FILEMANAGER.md` FM7b): the pure
+  model of *how* a planned paste is carried out, host-proven ahead of the app
+  verbs. `paste_strategy(op, source, dest)` decides from the clipboard
+  operation and the two items' `VolumeId`s (the 16-byte `fs_stat` volume id):
+  a `Copy` streams, a `Cut` within one volume is a single `Rename`, a `Cut`
+  across volumes is `CopyThenDelete` — the one `mv`/`st_dev` decision.
+  `CopyCursor` walks a known-length source in fixed `COPY_CHUNK_LEN` steps,
+  yielding the next `CopyChunk` to transfer; the app reads/writes it and
+  reports the bytes carried with `advance`, so a large copy stays bounded and
+  interruptible with no unbounded buffer and no spin, and it `resume`s from a
+  persisted offset after a cancel or a preemption. It is fail closed:
+  advancing (or resuming) past the source length is `CopyError::Overrun`,
+  never a silent wrap. The engine does no I/O and the source is deleted only
+  after a cross-volume copy fully succeeds — the app performs every syscall
+  under the user's own identity, so the read-only picker never runs it.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the

@@ -301,6 +301,24 @@ where and *why a paste is refused*; the app performs the capability-checked
 composing the model grants no authority and the trusted picker never builds a
 clipboard.
 
+Given a `plan_paste` result, `execute::paste_strategy(op, source, dest)` decides
+*how* each item is carried out from the clipboard operation and the two items'
+`execute::VolumeId`s (the 16-byte `fs_stat` volume identity): a `Copy` always
+streams, a `Cut` within one volume is a single `Rename`, and a `Cut` across
+volumes is a `CopyThenDelete` — the same `st_dev` decision `mv` makes, in one
+place (`AGENTS.md` §2.2). A streamed copy runs through an `execute::CopyCursor`:
+it walks a known-length source in fixed `execute::COPY_CHUNK_LEN` steps,
+yielding the next `execute::CopyChunk` for the app to read and write, then
+`advance`s by the bytes actually carried — so a large copy holds no unbounded
+buffer and never spins (`AGENTS.md` §2.23), stays cancellable between chunks,
+and `resume`s from a persisted offset after a cancel or a preemption. It is
+fail closed: advancing or resuming past the source length is
+`execute::CopyError::Overrun` rather than a silent wrap (`AGENTS.md` §5.4), and
+the source of a cross-volume move is removed only once its copy has fully
+succeeded, so a failed copy loses no data. The engine does no I/O; the app
+performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
+launching user's own identity, so the read-only picker never runs it.
+
 ## Terminal emulator (`tairix-terminal`)
 
 The terminal emulator hosts the system shell and shows its output on a

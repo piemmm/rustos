@@ -36,6 +36,9 @@
 //!   toggle / range / select-all) the management verbs act on.
 //! * [`clipboard`](mod@clipboard) — the cut/copy [`Clipboard`] and
 //!   [`plan_paste`] paste-target validation (`plans/NEW-FILEMANAGER.md` FM7).
+//! * [`execute`](mod@execute) — the pure paste-execution model: the
+//!   [`paste_strategy`] move-vs-copy volume decision and the bounded,
+//!   resumable [`CopyCursor`] streaming-copy model the management verbs run.
 //! * [`icon`](mod@icon) — the one file-type [`IconKind`](tairix_icon::IconKind)
 //!   classifier the manager and picker share (a display hint, never authority).
 //! * [`open_with`](mod@open_with) — the type→bundle "Open With…" association
@@ -71,6 +74,7 @@ pub mod browser;
 pub mod clipboard;
 pub mod entry;
 pub mod error;
+pub mod execute;
 pub mod format;
 pub mod icon;
 pub mod layout;
@@ -87,6 +91,9 @@ pub use browser::Browser;
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
+pub use execute::{
+    paste_strategy, CopyChunk, CopyCursor, CopyError, PasteStrategy, VolumeId, COPY_CHUNK_LEN,
+};
 pub use format::{format_date, format_size};
 pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};

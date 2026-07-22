@@ -28,9 +28,9 @@ which the drift guard enforces.
 ## Status
 
 `in progress` — **FM1, FM2a, FM2b, FM3, FM4a, FM5, FM6a, FM6b's pure
-association model, and FM7a's selection + clipboard model are done**; the
-FM6b app-side spawn/delegation, FM4b, the FM7b app-side move/copy/delete
-verbs, and FM8–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
+association model, FM7a's selection + clipboard model, and FM7b's pure
+paste-execution model are done**; the FM6b app-side spawn/delegation, FM4b, the
+FM7b app-side move/copy/delete verbs, and FM8–FM9 are `planned`. The starting point is `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
 navigates by keyboard; the renderer-mirroring point hit-test
@@ -436,14 +436,36 @@ verbs are built on:
   descendant + sibling-prefix, and the error message). Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-### FM7b — the app: move, copy, paste, delete, new folder `[ ]`
+### FM7b — move, copy, paste, delete, new folder `[~]`
 
-The core management verbs executed in the app on top of the FM7a model.
+The core management verbs on top of the FM7a model.
 
-- **Move** = `fs_rename` when source and target share a volume; otherwise
-  **copy-then-delete**. **Copy** streams `fs_read`→`fs_write` in bounded,
-  interruptible chunks (§2.23 — no unbounded buffer, no spin), preserving
-  metadata where the target format allows and failing closed with
+**The pure paste-execution model is done** (§2.19 — host-proven ahead of the
+app verbs, exactly as FM6a/FM6b/FM7a's pure models landed): the
+`lib/browse::execute` module. `paste_strategy(op, source, dest)` makes the
+move-vs-copy decision from the clipboard op and the two items' `VolumeId`s (the
+16-byte `fs_stat` volume identity) — `Copy` streams, a same-volume `Cut` is one
+`Rename`, a cross-volume `Cut` is `CopyThenDelete` — the one `mv`/`st_dev`
+definition (§2.2). `CopyCursor`/`CopyChunk` model the bounded, resumable,
+interruptible streamed copy: a known-length source is walked in fixed
+`COPY_CHUNK_LEN` steps, `advance`d by the bytes actually carried (so short reads
+and cancellation between chunks both work), `resume`d from a persisted offset,
+and fail closed — advancing/resuming past the source length is
+`CopyError::Overrun`, never a silent wrap (§2.23, §5.4). The engine does no I/O
+and the cross-volume source is deleted only after its copy fully succeeds, so
+composing it grants nothing and the read-only picker never runs it. Host-tested
+(strategy per op × volume, `VolumeId` round-trip, empty/small/large chunking to
+completion, short-transfer advance, resume, resume/advance overrun, error
+message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+The remaining app-side verbs (still `planned`):
+
+- **Move** = `fs_rename` when source and target share a volume (the
+  `PasteStrategy::Rename` case); otherwise
+  **copy-then-delete** (the `PasteStrategy::CopyThenDelete` case). **Copy**
+  streams `fs_read`→`fs_write` driving the landed `execute::CopyCursor` in
+  bounded, interruptible chunks (§2.23 — no unbounded buffer, no spin),
+  preserving metadata where the target format allows and failing closed with
   `TimestampOutOfRange`-style honesty on a narrowing target (§21). A
   directory copy recurses depth-bounded; an error mid-copy stops, reports,
   and leaves a partial-copy marker rather than a silent half-result
@@ -454,9 +476,11 @@ The core management verbs executed in the app on top of the FM7a model.
 - **Progress + cancel** for long operations: a bounded progress indicator
   (`lib/controls` `Progress`), a Cancel that stops at the next chunk
   boundary; the window stays parked/responsive throughout (§2.23).
-- Host tests: selection ranges, clipboard state machine, move-vs-copy
-  volume decision, chunked-copy resume/cancel/partial-failure, delete
-  confirm/refuse, mkdir+rename. App wires the VFS seams.
+- Host tests: the engine-side selection ranges, clipboard state machine,
+  move-vs-copy volume decision, and chunked-copy resume/cancel/overrun are
+  **done** in `lib/browse` (FM7a + the `execute` model above); the app-side
+  work adds partial-failure recovery, delete confirm/refuse, and mkdir+rename
+  over the VFS seams.
 
 ### FM8 — properties and permissions `[ ]`
 
