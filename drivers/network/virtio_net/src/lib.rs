@@ -1,4 +1,4 @@
-//! TAIRiX virtio-net link-layer driver.
+//! TAIRiX virtio-net link-layer driver identity.
 //!
 //! The device engine itself — the bus-agnostic virtio-net bring-up and
 //! frame-ring [`Net`](tairix_abi::driver::net::Net) service — lives in
@@ -6,27 +6,25 @@
 //! It is hoisted into `lib/*` (rather than kept in this `drivers/*`
 //! crate) so a user-space driver *process* can link the engine directly:
 //! a process crate may depend on `lib/*` but never on another `drivers/*`
-//! crate (`AGENTS.md` §17.4). This crate is the driver-host registration
-//! shell over that shared engine.
+//! crate (`AGENTS.md` §17.4). The concrete driver is the user-space
+//! process crate `drivers/network/virtio_net_driver`, which brings the
+//! device up over that shared engine in its own address space.
 //!
 //! # Public surface
 //!
-//! [`register`] is the only public *function* — the driver-host entry
-//! point. [`VirtioNet`] is re-exported so a host can instantiate the
-//! engine; the host never reaches the type beyond the
-//! [`Net`](tairix_abi::driver::net::Net) trait.
-//!
-//! # Capabilities
-//!
-//! Loading requires [`CapabilityId::DRV_LOAD`]; `service` additionally
-//! requires the dispatcher to have verified [`CapabilityId::NET_RAW`]
-//! (see `lib/abi/src/driver/net.rs`).
+//! This crate is the driver's discovery *identity*: [`BIND_KEYS`] is the
+//! single §18.3 bind table the signed manifest is authored from and the
+//! device manager (or the in-kernel bootstrap-floor catalogue) resolves a
+//! discovered virtio-net node against. [`VirtioNet`] and
+//! [`VIRTIO_NET_DEVICE_ID`] are re-exported so a driver process and the
+//! kernel's bootstrap-floor discovery share one definition of the engine
+//! and the device id (§2.2).
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{DriverBindKey, HwMatchKey};
 
 pub use tairix_virtio_net::VirtioNet;
 
@@ -37,9 +35,6 @@ pub use tairix_virtio_net::VirtioNet;
 /// virtio node whose probed device id is 1 binds this driver and nothing
 /// else.
 pub use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
-
-/// Per-driver `DriverHandle` marker returned by [`register`].
-const REGISTER_HANDLE_MARKER: u64 = 0x564E_4554_0000_0001; // "VNET"
 
 /// The bind priority [`BIND_KEYS`] carries.
 ///
@@ -64,46 +59,9 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     HwMatchKey::virtio(VIRTIO_NET_DEVICE_ID),
 )];
 
-/// Driver entry point.
-///
-/// # Errors
-///
-/// * [`DriverError::PermissionDenied`] if the host did not grant
-///   [`CapabilityId::DRV_LOAD`].
-///
-/// # Capabilities
-///
-/// Requires [`CapabilityId::DRV_LOAD`].
-pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
-    if !host.has_capability(CapabilityId::DRV_LOAD) {
-        return Err(DriverError::PermissionDenied);
-    }
-    DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn register_requires_drv_load() {
-        struct H {
-            grant: bool,
-        }
-        impl DriverHost for H {
-            fn has_capability(&self, cap: CapabilityId) -> bool {
-                cap == CapabilityId::DRV_LOAD && self.grant
-            }
-            fn kind(&self) -> tairix_abi::driver::DriverKind {
-                tairix_abi::driver::DriverKind::UserSpace
-            }
-        }
-        assert_eq!(
-            register(&H { grant: false }),
-            Err(DriverError::PermissionDenied)
-        );
-        assert!(register(&H { grant: true }).is_ok());
-    }
 
     #[test]
     fn bind_table_matches_a_virtio_net_node() {

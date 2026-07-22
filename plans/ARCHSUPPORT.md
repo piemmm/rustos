@@ -76,7 +76,8 @@ in all of them applies here without exception.
   preempt_el0, uaccess_fault, syscall_regs, spawn_program/init/session/
   el0_*, stack_guard/overrun/grow, kthread_switch, c_program, wait,
   mem_map, cross_cpu_tlb_shootdown, scheduler_stress.
-- **Drivers under test:** `virtio_blk_pci_x86_64`, `netstack_pci_x86_64`,
+- **Drivers under test:** `virtio_blk_pci_x86_64`,
+  `netstack_autoload_qemu_x86_64` (the two-process network vertical),
   `fat32_virtio_blk_pci_x86_64`, `arxfs_virtio_blk_pci_x86_64`,
   `vesa_display_qemu_x86_64`, `ps2_input_qemu_x86_64`, `irq_qemu_x86_64`;
   the virtio-PCI provisioning seam and an in-kernel driver host

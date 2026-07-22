@@ -2802,16 +2802,18 @@ RISC-V part is a `core_class` override there, not a change here.
 
 ## virtio-MMIO device verticals (Stage W11-A)
 
-The `virt` board's virtio-MMIO bus is driven end-to-end by two QEMU
-verticals, the EL1/GICv2 analogue of the riscv64 ones:
+The `virt` board's virtio-MMIO bus is driven end-to-end by
 `tests/integration/virtio_blk_mmio_aarch64` (read sector 0 and verify the
-host-planted pattern, then write and read back sector 1) and
-`tests/integration/netstack_mmio_aarch64` (the `tairix-netstack`
-engine's ring pump over the live device against the harness-side
-`netpeer` link peer: ping in/out over v4 and v6, neighbours resolved
-both ways — `plans/NETWORK.md` N3c).
-Both are enrolled in `tools/xtask/src/commands/qemu_tests.rs` and report
-through the `SYS_EXIT` semihosting finisher.
+host-planted pattern, then write and read back sector 1), the EL1/GICv2
+analogue of the riscv64 block vertical, enrolled in
+`tools/xtask/src/commands/qemu_tests.rs` and reporting through the
+`SYS_EXIT` semihosting finisher. The network path is exercised by the
+**two-process** production-boot vertical
+`tests/integration/netstack_autoload_qemu_aarch64` (`plans/NETWORK.md`
+N4e-β), where the virtio-net driver runs in its own user process and the
+`tairix-netstack` service in another — the single-process in-kernel
+netstack-engine vertical it replaced was removed once all three arches
+became two-process.
 
 The device-agnostic bring-up lives in the shared
 `tests/integration/virtio_qemu_support` crate's `imp_mmio_aarch64` module

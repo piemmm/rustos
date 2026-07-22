@@ -719,15 +719,16 @@ stricter `is_release_ready` gate rejects any `Pending`.
 
 ### Stage W11 — QEMU vertical parity sweep (drivers on aarch64)
 
-#### Stage W11-A — virtio blk + net MMIO verticals (aarch64) — ✅ landed
+#### Stage W11-A — virtio blk MMIO vertical (aarch64) — ✅ landed
 
-- aarch64 now runs the virtio-blk and virtio-net `virt`-board MMIO
-  verticals, the EL1/GICv2 analogue of the riscv64 ones:
+- aarch64 runs the virtio-blk `virt`-board MMIO vertical, the EL1/GICv2
+  analogue of the riscv64 one:
   `tests/integration/virtio_blk_mmio_aarch64` (sector-0 verify +
-  sector-1 write/read-back) and `tests/integration/netstack_mmio_aarch64`
-  (the netstack ring pump against the harness-side link peer,
-  `plans/NETWORK.md` N3c), both QEMU-green and
-  enrolled in `tools/xtask/src/commands/qemu_tests.rs`.
+  sector-1 write/read-back), QEMU-green and enrolled in
+  `tools/xtask/src/commands/qemu_tests.rs`. (The single-process
+  netstack-engine MMIO vertical this stage also landed was removed once
+  all three arches went two-process; the aarch64 network path is now the
+  two-process `netstack_autoload_qemu_aarch64`, `plans/NETWORK.md` N4e.)
 - **Shared bring-up (`tests/integration/virtio_qemu_support`).** Added the
   `imp_mmio_aarch64` module behind `cfg(itest_aarch64)`: it enables FP/SIMD
   at EL1 (`CPACR_EL1.FPEN`), brings up a 2 GiB identity-mapped stage-1 MMU
@@ -737,7 +738,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   `KernelMmioMapper`, walks the DTB for the device's GICv2 SPI, wires the
   EL1 device-IRQ dispatch to a `kernel/irq` `IrqTable` over a
   `GicController` bridge, and parks on a race-free `wfi` (DAIF-masked).
-  The device-agnostic lifecycle and the blk/net round-trip tails are the
+  The device-agnostic lifecycle and the device round-trip tails are the
   *same* shared code the riscv64 / x86_64 verticals run (§2.2);
   `dtb_total_size` moved into the shared `common` module.
 - **DTB hand-off.** QEMU's `-kernel <ELF>` aarch64 path treats the image
@@ -747,7 +748,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   and hands those bytes to the scenario. The transport bases and SPIs in
   that blob are the stable `virt`-board layout, independent of which slot
   the backing device lands on.
-- **Verified:** both verticals exit `0` under `qemu-system-aarch64 -M virt`
+- **Verified:** the vertical exits `0` under `qemu-system-aarch64 -M virt`
   (the `cargo xtask test --qemu` enrolment path).
 
 #### Stage W11-B — display + input verticals (aarch64) — ✅ landed
@@ -812,11 +813,11 @@ is now full.
 - **New vertical, thin by design (§2.2).**
   `tests/integration/input_virtio_mmio_qemu_riscv64`
   (`tairix-test-input-virtio-mmio-qemu-riscv64`) reuses the exact
-  `imp_mmio` bring-up the riscv64 blk/net verticals run (DTB virtio-MMIO
+  `imp_mmio` bring-up the riscv64 blk vertical runs (DTB virtio-MMIO
   walk, `CAP_MMIO_MAP`-gated `MmioTransport`, PLIC source + S-mode trap
   dispatch, `KernelVirtioHost`), then loads the signed virtio-input `.rxe`
-  and drives `load → use → unload → reload`. It differs from the net
-  sibling only in the device id (`18`, virtio-input) and the resolver
+  and drives `load → use → unload → reload`. It differs from the blk
+  vertical only in the device id (`18`, virtio-input) and the resolver
   binding the image to `tairix_drv_input_virtio_input::register`; the
   `virtio_input_keypress` key-decode tail is the same shared
   `virtio_qemu_support` code the aarch64 vertical runs. No new driver and

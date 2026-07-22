@@ -10,12 +10,10 @@
 //!
 //! ## What this vertical asserts — and how it differs from its siblings
 //!
-//! * `netstack_pci_x86_64` proves the pure `tairix-netstack` engine pumps a
-//!   live virtio-net-PCI device — but in a *single* process, over the
-//!   in-kernel `register` scaffold. This vertical is the two-process
-//!   production-boot replacement: the driver runs in its own user process,
-//!   the stack in another, and they speak the `netchan-v1` device-channel
-//!   contract across the boundary.
+//! * The full **two-process** network path: the driver runs in its own user
+//!   process, the stack in another, and they speak the `netchan-v1`
+//!   device-channel contract across the boundary — the frame provably crosses
+//!   a real process boundary, unlike a single-process in-kernel engine test.
 //! * `netstack_autoload_qemu_aarch64` / `netstack_autoload_qemu_riscv64`
 //!   prove the same two-process path over the virtio-**MMIO** bus. This is
 //!   their x86_64 virtio-PCI sibling: discovery, match, spawn, and interrupt

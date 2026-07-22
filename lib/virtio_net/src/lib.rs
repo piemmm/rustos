@@ -287,21 +287,6 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         &mut self.transport
     }
 
-    /// Park on the device's event until the device next signals a queue
-    /// completion.
-    ///
-    /// The [`service`](Net::service) doorbell is non-blocking (it drains
-    /// whatever is ready and returns), so a caller driving the device in
-    /// its **own** address space must park between doorbells itself. A
-    /// driver *process* parks on the device IRQ through the kernel
-    /// (`irq_wait`) and never calls this; this is the in-process wait a
-    /// single-address-space host (a test scaffold that owns both the stack
-    /// and the device) uses instead of spinning. The device event is
-    /// shared across queues, so the wait wakes on any completion.
-    pub fn wait_for_device_event(&self) {
-        self.host.notify_wait(self.rx_queue.index());
-    }
-
     fn build_header() -> [u8; wire::HEADER_LEN] {
         // Stage 4 negotiates no offloads, so every field is zero.
         [0u8; wire::HEADER_LEN]

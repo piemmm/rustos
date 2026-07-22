@@ -581,15 +581,16 @@ the controller is one-per-boot (`AGENTS.md` §2.2).
 
 ## virtio-MMIO QEMU verticals
 
-`tests/integration/virtio_blk_mmio_riscv64` and
-`netstack_mmio_riscv64` are the MMIO analogues of the x86_64
-`virtio_blk_pci_x86_64` / `netstack_pci_x86_64` verticals: they boot
-the production riscv64 pipeline and, on `AuditEvent::BootCompleted`,
-drive a real virtio device over the `virt` board's virtio-mmio bus
-end-to-end. The device-agnostic lifecycle and the per-device tails are
-shared with the x86_64 verticals through the
-`tests/integration/virtio_qemu_support` crate (`AGENTS.md` §2.2); only
-the arch-specific bring-up differs (`imp_mmio` vs. `imp_pci`).
+`tests/integration/virtio_blk_mmio_riscv64` is the MMIO analogue of the
+x86_64 `virtio_blk_pci_x86_64` vertical: it boots the production riscv64
+pipeline and, on `AuditEvent::BootCompleted`, drives a real virtio-blk
+device over the `virt` board's virtio-mmio bus end-to-end. The
+device-agnostic lifecycle and the per-device tails are shared with the
+x86_64 verticals through the `tests/integration/virtio_qemu_support`
+crate (`AGENTS.md` §2.2); only the arch-specific bring-up differs
+(`imp_mmio` vs. `imp_pci`). The riscv64 network path is exercised by the
+**two-process** production-boot `netstack_autoload_qemu_riscv64` vertical
+(`plans/NETWORK.md` N4e-riscv64), not a single-process engine test.
 
 The riscv64 bring-up (`imp_mmio`):
 

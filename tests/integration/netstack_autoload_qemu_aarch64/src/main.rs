@@ -9,12 +9,11 @@
 //!
 //! ## What this vertical asserts — and how it differs from its siblings
 //!
-//! * `netstack_mmio_aarch64` proves the pure `tairix-netstack` engine pumps a
-//!   live virtio-net device — but in a *single* process, over the in-kernel
-//!   `register` scaffold (`plans/NETWORK.md` N3c). This vertical is the
-//!   two-process production-boot replacement (N4e-β): the driver runs in its
+//! * The full **two-process** network path (N4e-β): the driver runs in its
 //!   own user process, the stack in another, and they speak the `netchan-v1`
-//!   device-channel contract across the boundary.
+//!   device-channel contract across the boundary — unlike a single-process
+//!   in-kernel engine test, the frame provably crosses a real process
+//!   boundary here.
 //! * `autoload_input_qemu_aarch64` proves the driver-loading-by-discovery
 //!   autoload path for the *input* and *display* classes. This vertical
 //!   composes the same production autoload path for the *network* class.

@@ -136,10 +136,6 @@ struct ScreendumpPlan {
 enum NetPeerMode {
     /// No network interface attached.
     None,
-    /// A dual-stack wire peer: the guest carries the wire's IPv4 address
-    /// and its `GUEST_IID` link-local, and the peer campaigns over both
-    /// families (the single-process `netstack_*` verticals).
-    DualStack,
     /// A v6-link-local-only peer: the device MAC is pinned to
     /// `tairix_test_netstack_wire::GUEST_MAC` so the guest's EUI-64
     /// link-local is deterministic, and the peer campaigns over that
@@ -1114,36 +1110,6 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // `plans/NETWORK.md` N3c: `tairix-test-netstack-pci-x86-64` performs a
-    // full real netstack-over-virtio-net-pci round-trip on the same shared
-    // bring-up scaffolding as the virtio-blk vertical — boot →
-    // `mechanism_one` PCI walk → map the four virtio register windows →
-    // route MSI-X → mint a `KernelVirtioHost` over a per-device DMA pool →
-    // load the signed virtio-net `.rxe` → drive the `tairix-netstack`
-    // engine's ring pump over the device against the harness-side
-    // `netpeer` link peer on the QEMU dgram netdev: answer the peer's
-    // ARP/NS resolution and v4+v6 echo campaign, then resolve and ping
-    // the peer over both families → `qemu_exit`. The peer thread's own
-    // verdict is required too, and a frame dump to `<binary>.pcap` lets a
-    // host inspect the exchange after the run. Single CPU and a
-    // 60-second budget match the other Stage-3/4 boot-then-do-fixed-work
-    // tests.
-    QemuTest {
-        package: "tairix-test-netstack-pci-x86-64",
-        binary: "tairix-test-netstack-pci-x86-64",
-        target: "x86_64-unknown-none",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::DualStack,
-        ramfb: false,
-        fs_disk: FsDisk::None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        serial: &[],
-    },
     // Stage 4.D Item 4: `tairix-test-kernel-arch-boot-riscv64` boots
     // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
     // FDT `/memory` parse → `RiscvArch` → `BootInfo` →
@@ -1708,33 +1674,6 @@ const TESTS: &[QemuTest] = &[
         timeout: Duration::from_secs(60),
         disk_sectors: Some(2048),
         netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        fs_disk: FsDisk::None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        serial: &[],
-    },
-    // `plans/NETWORK.md` N3c: `tairix-test-netstack-mmio-riscv64` is the
-    // riscv64 `virt`-board MMIO analogue of the x86_64 netstack-pci
-    // vertical — same bring-up as the blk MMIO vertical, then drive the
-    // `tairix-netstack` engine's ring pump over the device against the
-    // harness-side `netpeer` link peer on the QEMU dgram netdev: answer
-    // the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve
-    // and ping the peer over both families → `SiFive` Test PASS. The
-    // device-tail ping is the same shared code the x86_64 vertical runs,
-    // the peer thread's own verdict is required too, and a frame dump to
-    // `<binary>.pcap` lets a host inspect the exchange. Single CPU and a
-    // 60-second budget match the other boot-then-do-fixed-work tests.
-    QemuTest {
-        package: "tairix-test-netstack-mmio-riscv64",
-        binary: "tairix-test-netstack-mmio-riscv64",
-        target: "riscv64gc-unknown-none-elf",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::DualStack,
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
@@ -3358,7 +3297,7 @@ const TESTS: &[QemuTest] = &[
     // vertical above — the first *live-boot* exercise of the x86_64
     // boot-time users-database read path over the virtio-**PCI** bus. It
     // reuses the exact shared virtio-PCI bring-up the `root_unlock_login`
-    // /`netstack_pci_x86_64` verticals use (PCI walk to the modern
+    // /`virtio_blk_pci_x86_64` verticals use (PCI walk to the modern
     // virtio-blk function, `PciTransport` provisioning through the
     // capability-gated `KernelMmioMapper`, MSI-X routing) and then drives
     // the *same* shared `users_db_load` tail the aarch64 vertical runs (one
@@ -3426,7 +3365,7 @@ const TESTS: &[QemuTest] = &[
     // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the root-mount->login
     // vertical above — the first *live-boot* exercise of the x86_64 unlock
     // policy over the virtio-**PCI** bus. It reuses the exact shared
-    // virtio-PCI bring-up the `netstack_pci_x86_64` vertical uses (PCI walk
+    // virtio-PCI bring-up the `virtio_blk_pci_x86_64` vertical uses (PCI walk
     // to the modern virtio-blk function, `PciTransport` provisioning through
     // the capability-gated `KernelMmioMapper`, MSI-X routing) and then drives
     // the *same* shared `root_unlock_login` tail the aarch64 vertical runs
@@ -4130,37 +4069,8 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // `plans/NETWORK.md` N3c: `tairix-test-netstack-mmio-aarch64` is the
-    // aarch64 `virt`-board MMIO analogue of the riscv64 netstack-mmio
-    // vertical — same bring-up as the blk MMIO vertical, then drive the
-    // `tairix-netstack` engine's ring pump over the device against the
-    // harness-side `netpeer` link peer on the QEMU dgram netdev: answer
-    // the peer's ARP/NS resolution and v4+v6 echo campaign, then resolve
-    // and ping the peer over both families → ARM semihosting PASS. The
-    // device-tail ping is the same shared code the riscv64 / x86_64
-    // verticals run, the peer thread's own verdict is required too, and
-    // a frame dump to `<binary>.pcap` lets a host inspect the exchange.
-    // Single CPU and a 60-second budget match the other
-    // boot-then-do-fixed-work tests.
-    QemuTest {
-        package: "tairix-test-netstack-mmio-aarch64",
-        binary: "tairix-test-netstack-mmio-aarch64",
-        target: "aarch64-unknown-none",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::DualStack,
-        ramfb: false,
-        fs_disk: FsDisk::None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        serial: &[],
-    },
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
-    // netstack vertical — the production-boot replacement for the
-    // single-process `netstack_mmio_aarch64` scaffold above.
+    // netstack vertical.
     // `tairix-test-netstack-autoload-qemu-aarch64` boots the *production*
     // aarch64 `tairix-kernel` pipeline on the `virt` board against the
     // shared `FsDisk::AutoloadRootDisk` whole-disk image — whose read-only
@@ -4206,8 +4116,7 @@ const TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/NETWORK.md` N4e-riscv64: the riscv64 **two-process** live-boot
-    // netstack vertical — the production-boot replacement for the
-    // single-process `netstack_mmio_riscv64` scaffold. It is the `virt`-board
+    // netstack vertical — the `virt`-board
     // virtio-mmio / PLIC analogue of the aarch64
     // `tairix-test-netstack-autoload-qemu-aarch64` vertical, reduced to the
     // headless boot world (no `ramfb`, no display): riscv64's SBI/NULL console
@@ -4253,9 +4162,8 @@ const TESTS: &[QemuTest] = &[
     },
     // `plans/NETWORK.md` N4e / `plans/ARCHSUPPORT.md` A4: the x86_64
     // **two-process** live-boot netstack vertical — the virtio-**PCI**
-    // analogue of the aarch64/riscv64 `netstack_autoload` verticals and the
-    // production-boot replacement for the single-process `netstack_pci_x86_64`
-    // scaffold. It boots the *production* x86_64 `tairix-kernel` pipeline on
+    // analogue of the aarch64/riscv64 `netstack_autoload` verticals. It
+    // boots the *production* x86_64 `tairix-kernel` pipeline on
     // the `q35`/`pc` machine against the shared `FsDisk::AutoloadRootDisk`
     // whole-disk image — whose always-readable `/System` store carries the
     // kernel-signed virtio-net driver bundle (cross-compiled for x86_64 by
@@ -5602,33 +5510,22 @@ fn finish_run(t: &QemuTest, kernel: &Path, mut spec: Spec) -> Result<(), String>
     // per-process name keeps concurrent runs on private wires.
     let mut peer = None;
     if t.netstack_peer != NetPeerMode::None {
-        // The peer's campaign, and whether the device MAC is pinned:
-        // the v6-link-local vertical's guest derives its link-local from
-        // the device MAC, so the MAC is fixed to the wire constant both
-        // sides agree on; the dual-stack verticals configure the guest
-        // from the wire IIDs and let QEMU assign the device MAC.
-        let campaign = match t.netstack_peer {
-            NetPeerMode::None => unreachable!("guarded by the enclosing check"),
-            NetPeerMode::DualStack => super::netpeer::PeerCampaign::DualStack,
-            NetPeerMode::V6LinkLocal => super::netpeer::PeerCampaign::V6LinkLocalOnly,
-        };
         let pcap = kernel.with_extension("pcap");
         let sock_base = std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
         let qemu_sock = sock_base.with_extension("qemu.sock");
         let peer_sock = sock_base.with_extension("peer.sock");
         peer = Some(
-            super::netpeer::NetPeer::spawn(&qemu_sock, &peer_sock, campaign)
+            super::netpeer::NetPeer::spawn(&qemu_sock, &peer_sock)
                 .map_err(|e| format!("test --qemu ({}): {e}", t.package))?,
         );
-        spec = match t.netstack_peer {
-            NetPeerMode::V6LinkLocal => spec.with_virtio_net_dgram_mac(
-                &qemu_sock,
-                &peer_sock,
-                &pcap,
-                tairix_test_netstack_wire::GUEST_MAC_STR,
-            ),
-            _ => spec.with_virtio_net_dgram(&qemu_sock, &peer_sock, &pcap),
-        };
+        // The guest derives its link-local from the device MAC, so the MAC
+        // is pinned to the wire constant both sides agree on.
+        spec = spec.with_virtio_net_dgram_mac(
+            &qemu_sock,
+            &peer_sock,
+            &pcap,
+            tairix_test_netstack_wire::GUEST_MAC_STR,
+        );
     }
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.

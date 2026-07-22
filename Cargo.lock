@@ -2966,40 +2966,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-test-netstack-mmio-aarch64"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "tairix-abi",
- "tairix-drv-network-virtio-net",
- "tairix-itest-harness",
- "tairix-test-virtio-qemu-support",
-]
-
-[[package]]
-name = "tairix-test-netstack-mmio-riscv64"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "tairix-abi",
- "tairix-drv-network-virtio-net",
- "tairix-itest-harness",
- "tairix-test-virtio-qemu-support",
-]
-
-[[package]]
-name = "tairix-test-netstack-pci-x86-64"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "tairix-abi",
- "tairix-drv-network-virtio-net",
- "tairix-drvhost",
- "tairix-itest-harness",
- "tairix-test-virtio-qemu-support",
-]
-
-[[package]]
 name = "tairix-test-netstack-wire"
 version = "0.0.0"
 
@@ -3915,7 +3881,6 @@ dependencies = [
  "tairix-drv-bus-virtio",
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-fat32",
- "tairix-drv-network-virtio-net",
  "tairix-drv-storage-virtio-blk",
  "tairix-drvhost",
  "tairix-fdt",
@@ -3928,13 +3893,10 @@ dependencies = [
  "tairix-kernel-sec",
  "tairix-kernel-virtio",
  "tairix-log",
- "tairix-net",
- "tairix-netstack",
  "tairix-pci",
  "tairix-test-arxfs-image",
  "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
- "tairix-test-netstack-wire",
  "tairix-test-riscv64-boot",
  "tairix-users",
  "tairix-virtio",

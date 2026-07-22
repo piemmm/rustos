@@ -545,9 +545,7 @@ reach the running `netstack` process. Done:
 - **`VirtioNet::service` is a non-blocking doorbell**: it drains what is ready
   and returns (no internal RX park), so a cross-process `Service` never blocks
   the reply. Parking belongs to each process's own wait loop — the driver
-  parks on the device IRQ; the stack parks on the notify port. The
-  single-address-space in-process caller parks with
-  `VirtioNet::wait_for_device_event` between doorbells.
+  parks on the device IRQ; the stack parks on the notify port.
 - **netstack `run.rs` live glue**: `RtNetChannelTransport` (an `ipc_call`
   `NetChannelTransport`), a bounded channel-client table, and the
   `BindDriver` admin op — capability-checked (`CAP_NET_ADMIN`), audited,
@@ -572,8 +570,9 @@ reach the running `netstack` process. Done:
   identity `devmgr`/the signed-manifest bind table is authored from, so a
   discovered virtio-net node resolves to this driver. Without it the driver
   process was undiscoverable; it lives in the `drivers/network/virtio_net`
-  `lib` (the `virtio_input`/`virtio_blk` `BIND_KEYS` precedent) and survives
-  the N4e scaffold removal (only `register` goes).
+  `lib` (the `virtio_input`/`virtio_blk` `BIND_KEYS` precedent) and outlived
+  the §18.5 scaffold removal, in which the single-process in-kernel `register`
+  shell was deleted (this crate is now a pure bind-table + engine re-export).
 - **Capabilities**: `netstack` += `CAP_SHM` (owns/grants the frame region),
   `devmgr` += `CAP_NET_ADMIN` (calls `BindDriver`) — in both the account
   ceilings and the manifest requests (effective = ceiling ∩ manifest); the
@@ -644,10 +643,10 @@ improvement, not test scaffolding):
 - netstack's `DRIVER_BIND_FAILED` audit now carries the failing step's errno
   (fail-loud); the "inbound echo served" audit is `INBOUND_ECHO_SERVED`
   (`EventId(16_012)`), emitted from `run.rs::deliver` on the engine's
-  `EchoRequestServed` event. `netpeer` gained a `PeerCampaign::V6LinkLocalOnly`
-  mode targeting the guest's EUI-64 link-local from the pinned
-  `tairix_test_netstack_wire::GUEST_MAC`; the QEMU `NetDevice` gained a
-  `mac` field threaded through the shared `net_device_arg` on all three arches.
+  `EchoRequestServed` event. The host `netpeer` targets the guest's EUI-64
+  link-local from the pinned `tairix_test_netstack_wire::GUEST_MAC`; the QEMU
+  `NetDevice` gained a `mac` field threaded through the shared
+  `net_device_arg` on all three arches.
 
 **Follow-up increments.**
 - **N4e-x86_64 `[x]` DONE** — x86_64 is now fully two-process over
@@ -820,10 +819,21 @@ improvement, not test scaffolding):
   two-process `netstack_autoload_qemu_x86_64`) now live-exercise these
   contracts and pass a real guest boot (see the DONE summary above), which is
   where the kernel-routed MSI-X fix landed.
-- **§18.5 scaffold removal** (once all three arches are two-process): delete the
-  `register` shell in `drivers/network/virtio_net` (keeping `BIND_KEYS` +
-  `VirtioNet`), `FixedSpawner`/`netstack_ping` in the support crate, and
-  `VirtioNet::wait_for_device_event` (its only consumer).
+- **§18.5 scaffold removal `[x]` DONE** — with all three arches two-process,
+  the single-process in-kernel netstack path is gone: the `register` shell in
+  `drivers/network/virtio_net` was deleted (the crate is now a pure
+  `BIND_KEYS` + `VirtioNet`/`VIRTIO_NET_DEVICE_ID` re-export), the
+  `netstack_ping` tail and its net-only helpers were removed from the shared
+  `virtio_qemu_support` crate (its four net deps too), and
+  `VirtioNet::wait_for_device_event` (that tail's only consumer) was deleted.
+  The three single-process verticals (`netstack_mmio_aarch64`,
+  `netstack_mmio_riscv64`, `netstack_pci_x86_64`) were **removed**, not kept
+  beside the two-process `netstack_autoload_qemu_*` replacements (§2.14). The
+  now-unused v4/guest-side wire topology and the host `netpeer`'s dual-stack
+  `PeerCampaign` were removed with them; `netpeer` and `tairix_test_netstack_wire`
+  are v6-link-local-only, matching the surviving verticals. (`FixedSpawner`
+  stays: it still spawns the in-kernel-floor block driver and the input driver
+  for their live single-process verticals — it was never net-only.)
 
 ### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
 - Connection establishment/teardown (full state machine, simultaneous

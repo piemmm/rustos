@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-virtio-qemu-support"
-description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests. The production boot pipeline runs to AuditEvent::BootCompleted, then an arch-specific scenario carves a per-device DMA region, provisions a transport (x86_64 PCI / riscv64 virt-board MMIO), wires the device interrupt, mints a KernelVirtioHost, loads a signed `.rxe` through tairix_drvhost::Host, and drives a load/reload/unload cycle with a device-specific tail. The blk/net round-trip tails are shared, generic over the transport, so the PCI and MMIO verticals run identical device code (AGENTS.md §2.2)."
+description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests. The production boot pipeline runs to AuditEvent::BootCompleted, then an arch-specific scenario carves a per-device DMA region, provisions a transport (x86_64 PCI / riscv64 virt-board MMIO), wires the device interrupt, mints a KernelVirtioHost, loads a signed `.rxe` through tairix_drvhost::Host, and drives a load/reload/unload cycle with a device-specific tail. The device round-trip tails are shared, generic over the transport, so the PCI and MMIO verticals run identical device code (AGENTS.md §2.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -44,7 +44,6 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
-tairix-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
@@ -54,9 +53,6 @@ tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # The shared root-unlock scenario tail (`common::root_unlock_login`) names
 # the whole-disk encrypted-root fixture's passphrase + planted account.
 tairix-test-encrypted-root-image = { path = "../encrypted_root_image", version = "=0.0.0" }
-tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
-tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
-tairix-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
 
 # --- aarch64 (`virt`-board MMIO) -------------------------------------
 # The aarch64 vertical owns its bring-up directly from `kernel_main` (the
@@ -86,7 +82,6 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 tairix-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
-tairix-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
@@ -96,9 +91,6 @@ tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # The shared root-unlock scenario tail (`common::root_unlock_login`) names
 # the whole-disk encrypted-root fixture's passphrase + planted account.
 tairix-test-encrypted-root-image = { path = "../encrypted_root_image", version = "=0.0.0" }
-tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
-tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
-tairix-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
 
 # --- riscv64 (`virt`-board MMIO) -------------------------------------
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
@@ -124,13 +116,9 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 tairix-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
-tairix-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 tairix-test-fat32-image = { path = "../fat32_image", version = "=0.0.0" }
 tairix-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
-tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
-tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
-tairix-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }

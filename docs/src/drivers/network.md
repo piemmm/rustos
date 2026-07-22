@@ -46,11 +46,10 @@ cannot wedge the queue behind it.
   the stack drains and calls again).
 - `service` is **non-blocking**: it drains whatever is ready and
   returns (an empty `ServiceReport` means "nothing yet", not "spin").
-  Waiting for the *next* device event is the caller's job — a driver
+  Waiting for the *next* device event is the caller's job — the driver
   process parks on the device IRQ and `ack_interrupt`s it, then rings
-  the stack's notify port; a single-address-space caller parks on the
-  device event itself between doorbells. A blocking doorbell would
-  wedge a cross-process `Service` reply, so the wait never lives here.
+  the stack's notify port. A blocking doorbell would wedge a
+  cross-process `Service` reply, so the wait never lives here.
 
 ## Cross-process channel handoff (`net_channel`)
 
@@ -107,21 +106,16 @@ stack, and serves the `netchan-v1` contract over a wait-set loop on
 `{call endpoint, device IRQ}`. The device manager autobinds a
 discovered `netchan` node to `netstack` (`plans/NETWORK.md` N4d).
 
-The netstack QEMU verticals (`tests/integration/netstack_*`) drive a
-live emulated device end to end through the ring transport — the
-`tairix-netstack` engine answers the harness peer's ARP/NS resolution
-and v4+v6 echo campaign, then resolves and pings the peer over both
-families. The single-process `netstack_mmio_*` / `netstack_pci_*`
-verticals run the in-kernel scaffold; the **two-process** form is live
-on aarch64 (`netstack_autoload_qemu_aarch64`, `plans/NETWORK.md`
-N4e-β) and riscv64 (`netstack_autoload_qemu_riscv64`, over the
-`virt`-board virtio-mmio / PLIC path): the production boot's
-bootstrap-floor discovery enumerates the virtio-net node
-(`hwdiscovery::observe_virtio_mmio_network_devices`, the
-interrupt-driven-class sibling of the input probe), `devmgr` autoloads
-the signed driver bundle from `/System/Drivers/network/` into its own
-process, and it serves `netstack` — which auto-configures the
-interface's EUI-64 IPv6 link-local and answers a host peer's
-link-local echo across the two-process boundary. The x86_64
-two-process vertical (over its virtio-PCI bus) and the scaffold removal
-are staged follow-ups.
+The netstack QEMU verticals
+(`tests/integration/netstack_autoload_qemu_{aarch64,riscv64,x86_64}`)
+drive a live emulated device end to end across the **two-process**
+boundary: the production boot's bootstrap-floor discovery enumerates the
+virtio-net node (over each arch's bus — virtio-MMIO on aarch64/riscv64
+via `hwdiscovery::observe_virtio_mmio_network_devices`, virtio-PCI +
+kernel-routed MSI-X on x86_64), `devmgr` autoloads the signed driver
+bundle from `/System/Drivers/network/` into its own process, and it
+serves `netstack`, which auto-configures the interface's EUI-64 IPv6
+link-local and answers a host peer's link-local echo across the boundary
+(`plans/NETWORK.md` N4e). All three arches are two-process; the earlier
+single-process in-kernel netstack-engine verticals were removed once
+that became true.

@@ -16,9 +16,9 @@
 //!   unload` cycle that drives the device round-trip *after* the reload
 //!   and *before* the unload (the Stage 4.D Item 4 unload→reload→reuse
 //!   deliverable, shared once here).
-//! * [`virtio_blk_round_trip`] / [`virtio_net_ping`] — the per-device
-//!   tails, generic over the [`Transport`] so the PCI and MMIO verticals
-//!   run *identical* device code.
+//! * [`virtio_blk_round_trip`] and the filesystem/users tails — the
+//!   per-device round-trips, generic over the [`Transport`] so the PCI
+//!   and MMIO verticals run *identical* device code.
 
 extern crate alloc;
 
@@ -27,27 +27,17 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
-use tairix_abi::driver::net::Net;
-use tairix_abi::driver::net_ring::{FrameRings, RingGeometry};
-use tairix_abi::driver::BufferClass;
-use tairix_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
-use tairix_abi::Duration64;
 use tairix_abi::{CapabilityId, DriverHandle, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::ARXFS;
 use tairix_drv_fs_fat32::Fat32;
-use tairix_drv_network_virtio_net::VirtioNet;
 use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_drvhost::{
     DriverEntry, DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
 use tairix_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use tairix_kernel_mem::{PhysAddr, PAGE_SIZE};
-use tairix_net::addr::IpAddr;
-use tairix_net::stack::StackEvent;
-use tairix_netstack::{FrameService, LocalFrameService, Netstack};
-use tairix_test_netstack_wire as wire;
 use tairix_virtio::{Transport, VirtioHost, VirtioHostFactory};
 use tairix_virtio_input::VirtioInput;
 
@@ -513,259 +503,6 @@ pub fn users_db_load<Tr: Transport>(
         return Err("a wrong password must be refused");
     }
     env.log("virtio-qemu: users database authenticates");
-    Ok(())
-}
-
-/// Synthetic engine-clock step per pump pass. The scenario has no wall
-/// clock; each `service` call parks on the device interrupt, so a fixed
-/// step per pass drives the engine's timers (DAD confirmation, ARP/NS
-/// retransmission) deterministically while the real exchange is gated
-/// on frames actually arriving.
-const PUMP_STEP_NANOS: u64 = 250_000_000;
-/// Bounded pump budget per phase; exhausting it fails the run loudly.
-const MAX_PUMPS: usize = 2048;
-/// Pump passes between outbound echo retransmissions (the peer answers
-/// only after its own inbound campaign has passed, so retries are the
-/// expected steady state, never an error).
-const RESEND_EVERY: usize = 8;
-
-/// The guest interface's `netstack` table alias, from the shared wire
-/// fixture.
-fn if_name() -> [u8; IF_NAME_LEN] {
-    let mut out = [0u8; IF_NAME_LEN];
-    out[..wire::IF_NAME.len()].copy_from_slice(wire::IF_NAME.as_bytes());
-    out
-}
-
-/// The synthetic engine clock after `tick` pump passes.
-fn pump_now(tick: u64) -> Duration64 {
-    Duration64::from_nanos(tick.saturating_mul(PUMP_STEP_NANOS))
-}
-
-/// Map a ring-pump refusal onto a distinct breadcrumb so a failing run
-/// names the concrete fault.
-fn pump_error(err: tairix_abi::Errno) -> &'static str {
-    match err {
-        tairix_abi::Errno::NotFound => "ring pump: unknown interface",
-        tairix_abi::Errno::DeviceFault => "ring pump: driver fault",
-        tairix_abi::Errno::BadMagic => "ring pump: ring corrupt",
-        tairix_abi::Errno::NoSpace => "ring pump: no space",
-        tairix_abi::Errno::LengthOutOfRange => "ring pump: length out of range",
-        tairix_abi::Errno::BufferTooSmall => "ring pump: buffer too small",
-        _ => "ring pump: other",
-    }
-}
-
-/// The `netstack` admin wire form of an IPv4 address.
-fn v4_bytes(addr: core::net::Ipv4Addr) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    out[..4].copy_from_slice(&addr.octets());
-    out
-}
-
-/// Queue one outbound echo request toward `dest`, tolerating transient
-/// refusals (an address still in DAD, a busy resolution queue, a full
-/// ring): the caller's retry cadence covers them, and a persistent
-/// refusal surfaces as the phase budget expiring.
-fn send_echo<F: FrameService>(
-    stack: &mut Netstack,
-    name: [u8; IF_NAME_LEN],
-    dest: IpAddr,
-    sequence: u16,
-    now: Duration64,
-    fs: &mut F,
-) {
-    let Some(iface) = stack.interface_mut(name) else {
-        return;
-    };
-    if let Ok(out) = iface.stack_mut().send_echo_request(
-        dest,
-        wire::GUEST_ECHO_ID,
-        sequence,
-        wire::GUEST_ECHO_PAYLOAD,
-        now,
-    ) {
-        // Queue the engine's output into the TX ring bound over the frame
-        // service's own region, exactly as the pump does.
-        let geometry = fs.geometry();
-        let class = fs.class();
-        if let Ok(mut rings) = FrameRings::bind(fs.region_mut(), geometry, class) {
-            for frame in &out.frames {
-                if rings.tx.push(frame).is_err() {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/// virtio-net device tail (`plans/NETWORK.md` N3c): open the device over
-/// `transport`, then drive the `tairix-netstack` engine's ring pump over
-/// it against the harness-side peer stack on the other end of the QEMU
-/// dgram netdev. The choreography lives in the shared
-/// [`tairix_test_netstack_wire`] fixture: first the guest answers the
-/// peer's ARP/NS resolution and v4+v6 echo campaign (observed through
-/// the engine's `EchoRequestServed` events), then it resolves and pings
-/// the peer over both families and requires both replies. Generic over
-/// the transport so the PCI and MMIO verticals run identical code.
-pub fn netstack_ping<Tr: Transport>(
-    env: &dyn QemuEnv,
-    transport: Tr,
-    vhost: &dyn VirtioHost,
-) -> Result<(), &'static str> {
-    let net = VirtioNet::open(transport, vhost).map_err(|_| "virtio-net open")?;
-    let facts = net.device_facts().map_err(|_| "read device facts")?;
-    facts.validate().map_err(|_| "device facts invalid")?;
-    env.log("virtio-qemu: virtio-net online");
-
-    // The shared-memory frame-ring pair the stack side owns: sixteen
-    // slots per direction, each holding one full Ethernet frame
-    // (MTU + 14-byte header) — ample for the neighbour + echo
-    // exchanges of both campaign phases.
-    const RING_GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514) {
-        Ok(g) => g,
-        Err(_) => panic!("valid ring geometry"),
-    };
-    // Present the virtio-net device and the stack-owned frame region as the
-    // single `FrameService` the interface pump drives (the single-address-
-    // space in-process form): each pump binds a `FrameRings` view over this
-    // region and drives the device's `service` doorbell directly.
-    let mut region = alloc::vec![0u8; RING_GEOMETRY.region_len()];
-    let mut fs = LocalFrameService::new(net, &mut region, RING_GEOMETRY, BufferClass::NonSensitive)
-        .map_err(|_| "frame service")?;
-
-    let name = if_name();
-    let mut stack = Netstack::new();
-    let mut tick: u64 = 0;
-    stack
-        .add_interface(
-            name,
-            NetIfKind::Ethernet,
-            facts,
-            wire::GUEST_IID,
-            7,
-            pump_now(tick),
-        )
-        .map_err(|_| "add interface")?;
-    stack
-        .addr_add(
-            name,
-            NetAddrFamily::V4,
-            wire::V4_PREFIX,
-            v4_bytes(wire::GUEST_V4),
-            pump_now(tick),
-        )
-        .map_err(|_| "assign IPv4 address")?;
-
-    let peer_v6 = wire::link_local(wire::PEER_IID);
-
-    // Phase 1 — inbound: pump until the peer's v4 and v6 echo requests
-    // were both answered (the peer resolved us by ARP and NS to get
-    // here, so neighbour resolution toward the guest is proven too).
-    let mut served_v4 = false;
-    let mut served_v6 = false;
-    let mut pumps = 0usize;
-    while !(served_v4 && served_v6) {
-        pumps += 1;
-        if pumps > MAX_PUMPS {
-            return Err("netstack: peer echo campaign never observed");
-        }
-        tick += 1;
-        let events = stack
-            .service_interface(name, &mut fs, pump_now(tick))
-            .map_err(pump_error)?;
-        // The `service` doorbell no longer parks internally, so this
-        // single-address-space scaffold (stack + device in one loop) owns
-        // the wait: when a pump moved nothing, park on the device event
-        // until the peer's next frame arrives rather than spinning.
-        let idle = events.is_empty();
-        for event in events {
-            if let StackEvent::EchoRequestServed {
-                source, identifier, ..
-            } = event
-            {
-                if identifier == wire::PEER_ECHO_ID {
-                    match source {
-                        IpAddr::V4(v4) if v4 == wire::PEER_V4 => served_v4 = true,
-                        IpAddr::V6(v6) if v6 == peer_v6 => served_v6 = true,
-                        _ => {}
-                    }
-                }
-            }
-        }
-        if idle && !(served_v4 && served_v6) {
-            fs.net().wait_for_device_event();
-        }
-    }
-    env.log("virtio-qemu: netstack answered the peer's v4+v6 pings");
-
-    // Phase 2 — outbound: resolve and ping the peer over both families,
-    // retransmitting with fresh sequence numbers until both replies
-    // arrive (the engine performs the ARP/NS resolution en route).
-    let mut reply_v4 = false;
-    let mut reply_v6 = false;
-    let mut sequence: u16 = 0;
-    let mut pumps = 0usize;
-    while !(reply_v4 && reply_v6) {
-        if pumps % RESEND_EVERY == 0 {
-            sequence = sequence.wrapping_add(1);
-            if !reply_v4 {
-                send_echo(
-                    &mut stack,
-                    name,
-                    IpAddr::V4(wire::PEER_V4),
-                    sequence,
-                    pump_now(tick),
-                    &mut fs,
-                );
-            }
-            if !reply_v6 {
-                send_echo(
-                    &mut stack,
-                    name,
-                    IpAddr::V6(peer_v6),
-                    sequence,
-                    pump_now(tick),
-                    &mut fs,
-                );
-            }
-        }
-        pumps += 1;
-        if pumps > MAX_PUMPS {
-            return Err("netstack: v4+v6 echo replies missing");
-        }
-        tick += 1;
-        let events = stack
-            .service_interface(name, &mut fs, pump_now(tick))
-            .map_err(pump_error)?;
-        // A pump that moved nothing parks on the device event (see phase 1)
-        // rather than spinning through the resend budget; a real reply or
-        // the retransmit deadline wakes it.
-        let idle = events.is_empty();
-        for event in events {
-            if let StackEvent::EchoReply {
-                source,
-                identifier,
-                payload,
-                ..
-            } = event
-            {
-                if identifier == wire::GUEST_ECHO_ID
-                    && payload.as_slice() == wire::GUEST_ECHO_PAYLOAD
-                {
-                    match source {
-                        IpAddr::V4(v4) if v4 == wire::PEER_V4 => reply_v4 = true,
-                        IpAddr::V6(v6) if v6 == peer_v6 => reply_v6 = true,
-                        _ => {}
-                    }
-                }
-            }
-        }
-        if idle && !(reply_v4 && reply_v6) {
-            fs.net().wait_for_device_event();
-        }
-    }
-    env.log("virtio-qemu: netstack v4+v6 echo round-trips verified");
     Ok(())
 }
 
