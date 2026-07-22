@@ -643,6 +643,7 @@ name = "tairix-browse"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-controls",
  "tairix-font",
  "tairix-geometry",
  "tairix-raster",

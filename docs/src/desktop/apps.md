@@ -100,17 +100,31 @@ showing. The fail-closed outcomes are the `BrowseError` variants: `Source`
 
 ### Rendering
 
-`render(browser, theme, viewport)` paints a path bar plus a scrolling entry
-list into a `tairix-raster` `Surface` sized to the viewport, using the theme's
-palette for every colour and the shared `tairix-font` face for every label.
-Directory names carry a trailing `/`, and the selected row is filled with the
-accent role. The surface is rectangular; the compositor places and rounds it
-through its single anti-aliased rounded-corner path, so there is no rounding —
-and no colour algebra — in the app (`AGENTS.md` §2.2). Label truncation reuses
-`BitmapFont::truncate_to_width`, the same fit-to-width path the taskbar uses,
-rather than a second copy (§2.2). The list scrolls so the selected entry stays
-visible, and every length saturates so a degenerate viewport paints what it
-can rather than panicking (`AGENTS.md` §2.9).
+`render(browser, theme, font, viewport)` paints a path bar plus a scrolling
+entry list into a `tairix-raster` `Surface` sized to the viewport. The path
+bar takes the theme's raised role; each entry below it is drawn as a shared
+`lib/controls` `TableRow` with an aligned **name / size / modified** column
+layout — the same collection control (and the same one column-width
+definition) the trusted picker uses, so the file manager and the picker are
+one coherent themed surface rather than a browser-private row painter
+(`AGENTS.md` §2.2). A directory's name carries a trailing `/`; the size column
+is blank for a directory or bundle and otherwise the binary-unit `format_size`
+(`1.5 MiB`); the modified column is `format_date` (an ISO `YYYY-MM-DD`, blank
+at the epoch so a stampless file is never given a fabricated date, §21). The
+selected row carries the row chrome's selection state — the raised surface plus
+the accent selection rail every collection view shares — not a bespoke accent
+fill.
+
+Where each row is drawn, which rows are visible for the current selection, and
+the pixel-to-index pointer hit-test (`entry_index_at`) all come from the one
+shared `layout::ListView` geometry, which clamps its scroll window through the
+`lib/controls` `scroll::ScrollRange` rather than a re-derived anchor — so the
+paint and the hit-test can never disagree (`AGENTS.md` §2.2). The surface is
+rectangular; the compositor places and rounds it through its single
+anti-aliased rounded-corner path, so there is no rounding in the app. The list
+scrolls so the selected entry stays visible, and every length saturates so a
+degenerate viewport paints what it can rather than panicking (`AGENTS.md`
+§2.9).
 
 ### The `Run` bundle
 

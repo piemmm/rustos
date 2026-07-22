@@ -34,6 +34,10 @@
 //! * [`error`] — [`BrowseError`], the fail-closed navigation outcomes.
 //! * [`source`] — the [`DirectorySource`] seam.
 //! * [`browser`] — the [`Browser`] navigation model.
+//! * [`layout`](mod@layout) — the [`ListView`] item-view geometry (the one
+//!   visible-window/row-rect/hit-test definition the renderer and the
+//!   pointer hit-test share).
+//! * [`format`](mod@format) — the size/date column formatting.
 //! * [`render`](mod@render) — painting the current directory into a
 //!   `Surface`.
 //!
@@ -53,6 +57,8 @@ extern crate alloc;
 pub mod browser;
 pub mod entry;
 pub mod error;
+pub mod format;
+pub mod layout;
 pub mod render;
 pub mod sort;
 pub mod source;
@@ -61,6 +67,8 @@ pub mod vfs;
 pub use browser::Browser;
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
+pub use format::{format_date, format_size};
+pub use layout::ListView;
 pub use render::render;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;

@@ -30,11 +30,22 @@ can never diverge in navigation semantics, listing policy, or look.
   engine never fabricates an entry: it shows exactly what its source
   returns, with every permission decision staying in the VFS behind the
   source under the composing process's own identity.
+- **Item-view geometry** (`layout::ListView`): the one definition of
+  which entry rows are visible for a given selection, the rectangle each
+  occupies, and the pixel-to-index hit-test — built on the shared
+  `lib/controls` `scroll::ScrollRange` clamp rather than a re-derived
+  anchor, so the renderer and the pointer hit-test can never disagree.
+- **Column formatting** (`format`): `format_size` (binary units — `1.5
+  MiB`) and `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
+  epoch so a stampless file is never given a fabricated date), the
+  file-listing convention shared by both views.
 - **Renderer** (`render`): paints the path bar and the scrolling entry
-  list into a `lib/raster` `Surface` through the active `lib/theme`
-  palette and the shared `lib/font` face; `WIN_WIDTH`/`WIN_HEIGHT` are
-  the one browser-view geometry the files app, the picker, and the QEMU
-  vertical's host-side assertions share.
+  list into a `lib/raster` `Surface`; each entry is a shared
+  `lib/controls` `TableRow` (name/size/modified columns) so the file
+  manager and the trusted picker render one coherent themed surface, the
+  selected row carrying the row chrome's selection state. `WIN_WIDTH`/
+  `WIN_HEIGHT` are the one browser-view geometry the files app, the
+  picker, and the QEMU vertical's host-side assertions share.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into
   a bounded, validated absolute path — refusing an empty, `/`-bearing,
   or NUL-bearing component before any syscall) and `VfsDirectorySource`,
@@ -42,5 +53,5 @@ can never diverge in navigation semantics, listing policy, or look.
   the engine is host-proven end to end without a kernel.
 
 `no_std` (with `alloc`); depends only on `lib/abi`, `lib/geometry`,
-`lib/theme`, `lib/raster`, and `lib/font` — never a kernel, driver, or
-window-manager crate. No `unsafe`.
+`lib/theme`, `lib/raster`, `lib/font`, and `lib/controls` — never a
+kernel, driver, or window-manager crate. No `unsafe`.

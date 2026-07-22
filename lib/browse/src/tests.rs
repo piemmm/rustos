@@ -233,9 +233,9 @@ fn render_produces_a_surface_the_size_of_the_viewport() {
 }
 
 #[test]
-fn render_highlights_the_selected_entry_with_the_accent() {
+fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.select(1).expect("select Users");
+    browser.select(1).expect("select second entry");
     let theme = Theme::dark();
     let surface = crate::render(
         &browser,
@@ -247,15 +247,29 @@ fn render_highlights_the_selected_entry_with_the_accent() {
 
     let accent = Color::from(theme.palette().accent).premultiply();
     let raised = Color::from(theme.palette().surface_raised).premultiply();
+    let base = Color::from(theme.palette().surface).premultiply();
     // The path bar (top-left) carries the raised role.
     assert_eq!(surface.get(0, 0), Some(raised));
-    // Row 0 of the list (the path bar is row 0) is "Apps"; row 1 is the
-    // selected "Storage", filled with the accent. Each row is the shared
-    // font's glyph height plus the renderer's padding, so the selected fill
-    // starts two rows down.
+
+    // The list is drawn through the shared `TableRow` chrome: the path bar is
+    // the top row, so entry index 0 is one row down and the selected entry
+    // index 1 is two rows down. The selected row lifts to the raised surface
+    // and shows the accent *selection rail* in its leading gutter (not a full
+    // accent fill), and an unselected row stays the base surface — the one
+    // selection look every collection view shares.
     let row_height = tairix_font::BitmapFont::inconsolata().glyph_height() + 4;
+    let unselected_y = row_height + 1;
     let selected_y = row_height * 2 + 1;
-    assert_eq!(surface.get(199, selected_y), Some(accent));
+    // The unselected row's trailing edge is the base surface.
+    assert_eq!(surface.get(199, unselected_y), Some(base));
+    // The selected row's trailing edge lifts to the raised surface.
+    assert_eq!(surface.get(199, selected_y), Some(raised));
+    // The accent selection rail sits in the selected row's leading gutter.
+    let has_accent_rail = (0..20).any(|x| surface.get(x, selected_y) == Some(accent));
+    assert!(
+        has_accent_rail,
+        "the selected row shows the shared accent selection rail"
+    );
 }
 
 #[test]

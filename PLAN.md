@@ -3317,15 +3317,22 @@ transfer, landed in increments:
   through the redeemed delegation. Remaining (staged in `plans/APPWIN.md`
   AW5): the autoload QEMU vertical's picker stage, which shifts the
   AW3/AW4 interaction contract's delivery counts and reply indices.
-- **First-class file manager (`plans/NEW-FILEMANAGER.md`, planned).** The
+- **First-class file manager (`plans/NEW-FILEMANAGER.md`, in progress).** The
   Stage-7 `files.app` browser is staged into a full graphical file manager
   — clickable file/folder icons, open/launch `.app` bundles, hand files to
   viewers over the AW5 CU6 delegation, in-place rename, move/copy/delete,
   make-directory, and properties — built entirely on the shared
   `lib/browse` engine + `lib/controls` widgets + `lib/icon` (no second
   rendering path, §2.2), needing no new capability for the user's own
-  §5.3-checked writes. Nine gated stages FM1–FM9; every stage host-proven
+  §5.3-checked writes. Gated stages FM1–FM9; every stage host-proven
   in `lib/browse` and, where end-to-end, on the autoload QEMU vertical.
+  **FM1** (richer entries — `size`/`modified`, the `Bundle` kind, the shared
+  sort) and **FM2a** (the list item view: each entry a shared
+  `lib/controls::TableRow` with name/size/modified columns over the one pure
+  `lib/browse::layout::ListView` visible-window/row-rect/hit-test geometry —
+  built on the shared `scroll::ScrollRange` clamp — plus the `format`
+  size/date column formatting) are **done**; FM2 was split (§2.19) so **FM2b**
+  (icon-grid view, runtime view toggle, drawn `ScrollBar`) and FM3–FM9 remain.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

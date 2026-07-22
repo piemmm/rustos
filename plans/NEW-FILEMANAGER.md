@@ -27,13 +27,17 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1 is done**; FM2–FM9 are `planned`. The starting point
-is `plans/APPWIN.md` AW3/AW5 (done): the `files.app` `Run` binary composes
-the shared `lib/browse` `Browser` model + `render` renderer over the AW2
-window channel, parks on its event mailbox, and navigates by keyboard;
-AW5 already added the renderer-mirroring row hit-test
+`in progress` — **FM1 and FM2a are done**; FM2b and FM3–FM9 are `planned`.
+The starting point is `plans/APPWIN.md` AW3/AW5 (done): the `files.app` `Run`
+binary composes the shared `lib/browse` `Browser` model + `render` renderer
+over the AW2 window channel, parks on its event mailbox, and navigates by
+keyboard; AW5 already added the renderer-mirroring row hit-test
 (`render::entry_index_at`) and the kernel one-shot read delegation
 (`fd_grant`/`fd_redeem`) the viewer consumes.
+
+FM2 turned out larger than one clean increment, so it is split (§2.19): **FM2a
+(the list item view over `lib/controls`) is done**; **FM2b (the icon-grid view,
+the runtime view toggle, and the drawn `ScrollBar` widget) is `planned`**.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -126,27 +130,54 @@ Deliberately deferred to a later stage (not FM1): a `Symlink`/`Special`
 variant is added only when the VFS surfaces such a kind (a new variant, never
 overloading the existing ones).
 
-### FM2 — the item view: list and icon grid over `lib/controls` `[ ]`
+### FM2a — the list item view over `lib/controls` `[x]`
 
-Replace the ad-hoc row painter in `lib/browse::render` with a real item
-view built from the shared collection controls, so the manager and picker
-share one coherent, themed surface (§2.2, §17.4).
+Done. The ad-hoc row painter in `lib/browse::render` is replaced with a real
+list item view built from the shared collection controls, so the manager and
+the trusted picker share one coherent, themed surface (§2.2, §17.4). No app-
+behaviour change: the `files.app`/picker `render` and `entry_index_at`
+signatures are unchanged, so both get the new look for free.
 
-- **List view**: `lib/controls` `TableRow`/`TableCell` with an icon rail,
-  name, size, and modified columns (the shared row chrome keeps the rail
-  gutter aligned as row state changes). Column layout is one definition.
+- **List view**: each entry is a `lib/controls` `TableRow` with a leading
+  name cell (a directory suffixed `/`), a trailing numeric size cell, and a
+  modified-date cell; the selected row carries the shared row chrome's
+  selection state (raised surface + accent selection rail), not a browser-
+  private accent fill. The column layout is one definition (`render::COLUMNS`),
+  scaled proportionally into the content width by `TableRow::render`.
+- **Item-view geometry** (`lib/browse::layout::ListView`): the one pure
+  definition of the visible-row window, each row's `Rect`, and the pixel→index
+  hit-test, built on the shared `lib/controls` `scroll::ScrollRange` clamp
+  rather than a re-derived anchor. Both `render` (paint) and `entry_index_at`
+  (hit-test) consume it, so they can never disagree (§2.2).
+- **Column formatting** (`lib/browse::format`): `format_size` (binary units)
+  and `format_date` (`Time64` → ISO `YYYY-MM-DD`, blank at the epoch so a
+  stampless file is never given a fabricated date, §21) — the file-listing
+  convention shared by both views, deliberately distinct from the `top`/
+  `sysinfo` figure spellings in `lib/procinfo` (a browser engine does not
+  depend on the System Information client crate).
+- Host tests: `format` size/date (bytes, binary scaling, huge-size no-overflow,
+  epoch-blank, pre-1970/post-2038, leap day); `layout` (visible window excludes
+  the header, degenerate viewport/zero row height show nothing, row rects and
+  the mirroring hit-test at normal sizes, selection-anchored scroll, the
+  `ScrollRange` offset clamp); the updated render selection-chrome assertion.
+
+### FM2b — the icon-grid view, the view toggle, and the drawn `ScrollBar` `[ ]`
+
+The remaining half of the original FM2, staged on top of FM2a's `ListView`.
+
 - **Icon-grid view**: a wrapped grid of `Card`-framed items (icon + label)
-  over the same selection model — a *view* toggle, one model, **not** a
-  second code path (§2.2). The view toggle is a toolbar control (FM4).
-- **Scrolling** is the shared `lib/controls` `ScrollBar` over the one
-  `ScrollRange`/`ScrollModel` geometry (§2.2) — the browser stops
-  re-deriving a scroll anchor; the selection-follows-scroll behaviour and
-  wheel handling route through it.
-- **Hit-testing** stays the one renderer-mirroring definition
-  (`entry_index_at` generalised to the grid), so a click resolves to
-  exactly the item the user saw (§2.2). The picker adopts the same view.
-- Host tests: layout/hit-test for both views at degenerate and normal
-  sizes, scroll geometry, view-toggle invariants (selection preserved).
+  over the same selection model — a `ViewMode` *toggle*, one model, **not** a
+  second code path (§2.2). Introducing `ViewMode` means *both* variants land
+  complete in this increment (§27), not a list-only enum. The toolbar toggle
+  itself is FM4; the engine models the mode here.
+- **Scrolling** is the drawn `lib/controls` `ScrollBar` widget over the same
+  `ScrollRange`/`ScrollModel` geometry `ListView` already uses (§2.2), with
+  wheel handling routed through it.
+- **Hit-testing** generalises `ListView`'s pixel→index definition to the grid
+  so a click resolves to exactly the item the user saw (§2.2). The picker
+  adopts the same view.
+- Host tests: grid layout/hit-test at degenerate and normal sizes, view-toggle
+  invariants (selection preserved), the drawn scrollbar geometry.
 
 ### FM3 — file-type icons `[ ]`
 
@@ -292,8 +323,8 @@ The core management verbs, modelled in the engine and executed in the app.
 
 ## 2. Sequencing and dependencies
 
-FM1→FM2→FM3 build the shared engine + view + icons (all host-proven, no
-app-behaviour change until FM2 repaints). FM4 adds the chrome. FM5 is the
+FM1→FM2a→FM2b→FM3 build the shared engine + views + icons (host-proven;
+FM2a repaints the list, FM2b adds the icon grid). FM4 adds the chrome. FM5 is the
 first write and the template for FM7. FM6 (launch/open) depends on FM3
 (bundle/file kinds) and reuses AW5 delegation. FM7 depends on FM4's
 selection/menu. FM8 and FM9 close out. Each lands fully gated; a stage
