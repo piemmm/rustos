@@ -359,11 +359,23 @@ const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
 /// view's `Username:` field.
 const SESSION_USERNAME_LINE: &str = "root\n";
 
-/// One character beyond the account format's username bound. The byte array
-/// is generated from the shared bound, and its fixed ASCII payload is valid
-/// UTF-8 by construction.
-const OVERLONG_USERNAME_BYTES: [u8; tairix_users::MAX_USERNAME_LEN + 1] =
-    [b'x'; tairix_users::MAX_USERNAME_LEN + 1];
+/// The over-long username line the spawn-session verticals type at the login
+/// view's `Username:` field: the account format's `MAX_USERNAME_LEN` bound
+/// plus one character, then Enter. The extra character trips the view's
+/// `LengthOutOfRange` refusal, so login records the console error and exits
+/// fail-closed (the reap→relaunch witness). The trailing newline makes it a
+/// *complete* line, so the reader receives it whether the console is in the
+/// view's raw discipline (per-keystroke delivery) or the kernel's cooked line
+/// discipline (which buffers a partial line until Enter): a no-newline
+/// over-long line stalls a cooked reader forever, which is exactly the
+/// intermittent x86_64 COM1 failure this newline forecloses. The byte array is
+/// generated from the shared bound and its fixed ASCII payload is valid UTF-8
+/// by construction.
+const OVERLONG_USERNAME_BYTES: [u8; tairix_users::MAX_USERNAME_LEN + 2] = {
+    let mut bytes = [b'x'; tairix_users::MAX_USERNAME_LEN + 2];
+    bytes[tairix_users::MAX_USERNAME_LEN + 1] = b'\n';
+    bytes
+};
 
 /// String view of [`OVERLONG_USERNAME_BYTES`] for the serial dialogue table.
 const OVERLONG_USERNAME: &str = match core::str::from_utf8(&OVERLONG_USERNAME_BYTES) {
@@ -3019,23 +3031,32 @@ const TESTS: &[QemuTest] = &[
     // console backing; only the audit sink is replaced. After `BootCompleted`,
     // `kernel_main` builds PID 1 `init`'s ring-3 image (`ProcessSpawned`,
     // EventId 4030, #1) and drains the run queue. `init` writes its gated
-    // banner, then issues its (audited) `spawn` syscall for
-    // `/System/Apps/elsh.app/Run`; the producer builds the session a fresh isolated
-    // PML4 (`ProcessSpawned` #2) and admits it Ready, then `init` `wait`s on
-    // it; the cooperative drain runs the session, which writes its prompt,
-    // reads end-of-input (no input backing), and `exit`s; `init`'s `wait` reaps
-    // it, returns to ring 3, and **relaunches** the session (`ProcessSpawned`
-    // #3). PASS keys on **three** `ProcessSpawned` and **four** audited
-    // `SyscallInvoked` (EventId 5000 — `init`'s `spawn`, the session's `exit`,
+    // banner, then launches the boot services first — `sysinfod`, `netstack`,
+    // `devmgr`, `seatmgr` (each an audited `spawn` building a fresh isolated
+    // PML4, `ProcessSpawned` #2–#5) — and then the login session
+    // `/System/Services/login.app/Run`, whose producer admits it Ready
+    // (`ProcessSpawned` #6). `init` `wait`s on the children. This boot binds
+    // no root disk, so the in-kernel unlock seam opens the console-0 gate at
+    // once (`root_unlock::spawn_if_present`) and login owns console 0: its
+    // `users_db_read` fails closed (no database), it wires the deny-all
+    // authenticator and draws the `Username:` field, then blocks in
+    // `stream_read` on the poll-backed COM1 receive queue. The scripted
+    // serial dialogue below types one character past the account format's
+    // `MAX_USERNAME_LEN` bound at that field (exactly the aarch64 sibling's
+    // final step); the view refuses the over-long line whole
+    // (`LengthOutOfRange`), login records the console error and `exit`s
+    // fail-closed; `init`'s `wait` reaps it, returns to ring 3, and
+    // **relaunches** the session (`ProcessSpawned` #7). PASS keys on **seven**
+    // `ProcessSpawned` and **eight** audited `SyscallInvoked` (EventId 5000 —
+    // `init`'s four service `spawn`s, the login `spawn`, login's `exit`,
     // `init`'s `wait`, and `init`'s relaunch `spawn`), proving the full
-    // `wait`→reap→relaunch supervision cycle on x86_64. (The earlier 2/2
-    // assertion was raised once the X4 follow-on frame-allocator defect was
-    // fixed — the boot path now reserves the kernel image out of usable RAM, so
-    // the relaunch producer no longer corrupts the kernel; see boot.rs
-    // `build_memory_map` and `plans/PI.md` §X.) A regression that never builds,
-    // runs, reaps, or relaunches the session never reaches the threshold, so
-    // the run times out (fail-loud). Single CPU and a 60-second
-    // budget match the other boot-then-do-fixed-work x86_64 tests.
+    // `wait`→reap→relaunch supervision cycle on x86_64. The runner fails the
+    // run if the guest exits before the scripted `Username:` line was sent, so
+    // a login that dies without ever reading the console cannot pass on its
+    // relaunch alone. A regression that never builds, runs, reaps, or
+    // relaunches the session never reaches the threshold, so the run times out
+    // (fail-loud). Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "tairix-test-spawn-session-qemu-x86-64",
         binary: "tairix-test-spawn-session-qemu-x86-64",
@@ -3050,7 +3071,7 @@ const TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
-        serial: &[],
+        serial: &[("Username:", Duration::ZERO, OVERLONG_USERNAME)],
     },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
     // vertical — the proof that the `tairix-rt` `mem_map`-backed
@@ -5663,11 +5684,18 @@ mod tests {
 
     #[test]
     fn spawn_session_overlong_username_tracks_the_account_format_bound() {
+        // One character past the bound, then Enter: the payload trips the
+        // view's `LengthOutOfRange` refusal and the trailing newline makes the
+        // line complete so a cooked-discipline reader delivers it too.
         assert_eq!(
             super::OVERLONG_USERNAME.len(),
-            tairix_users::MAX_USERNAME_LEN + 1
+            tairix_users::MAX_USERNAME_LEN + 2
         );
-        assert!(super::OVERLONG_USERNAME.bytes().all(|byte| byte == b'x'));
+        assert!(super::OVERLONG_USERNAME.ends_with('\n'));
+        assert!(super::OVERLONG_USERNAME
+            .bytes()
+            .take(tairix_users::MAX_USERNAME_LEN + 1)
+            .all(|byte| byte == b'x'));
     }
 
     #[test]

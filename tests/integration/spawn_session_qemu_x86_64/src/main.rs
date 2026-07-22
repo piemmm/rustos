@@ -36,15 +36,22 @@
 //!    PID — the X3b deliverable.
 //! 4. Calls `wait` on that child. The cooperative drain steps login: its
 //!    `users_db_read` fails closed (no root volume, no database held), it
-//!    wires the deny-all authenticator, writes its
-//!    `Username: ` prompt, and reads a dead console (the x86_64 boot path
-//!    installs no console-read backing, so its `stream_read` on fd 0 fails
-//!    closed at `NULL_CONSOLE_READ` and `stdin` clamps to a zero-length
-//!    read), records the console error, and `exit`s fail-closed. `init`'s
-//!    `wait` then reaps it, returns to ring 3, and **relaunches** the
-//!    session with a second `spawn` — the full `wait`→reap→relaunch
-//!    supervision cycle (`plans/PI.md` X4 follow-on, the cross-port sibling
-//!    of the aarch64 `spawn_session_qemu_aarch64`).
+//!    wires the deny-all authenticator, and draws its full-screen view —
+//!    the `Username:` label — then **blocks** in `stream_read` on the
+//!    kernel-core `BlockingConsoleRead` backing over the interrupt-fed,
+//!    unlock-gated COM1 receive queue. Because this boot binds no root
+//!    disk, the in-kernel unlock seam opens the console-0 gate immediately
+//!    (`root_unlock::spawn_if_present`), so login owns console 0 and its
+//!    read is a live, poll-backed COM1 read — never a fail-closed
+//!    `NULL_CONSOLE_READ`. The runner's scripted serial dialogue then types
+//!    one character past the account format's `MAX_USERNAME_LEN` validation
+//!    bound at the `Username:` field; the view refuses the over-long line
+//!    whole (`LengthOutOfRange`), login records the console error, and
+//!    `exit`s fail-closed. `init`'s `wait` then reaps it, returns to ring 3,
+//!    and **relaunches** the session with a second `spawn` — the full
+//!    `wait`→reap→relaunch supervision cycle (`plans/PI.md` X4 follow-on,
+//!    the cross-port sibling of the aarch64 `spawn_session_qemu_aarch64`,
+//!    which drives login to the same over-long-username exit).
 //!
 //! ## Why the PASS keys on seven spawns and eight audited syscalls
 //!

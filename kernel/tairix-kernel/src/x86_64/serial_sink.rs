@@ -18,23 +18,46 @@
 //! The Sink is a zero-sized type and is exposed through the
 //! [`SERIAL_SINK`] `'static` so each bin can hand the same reference
 //! to `BootInfo`'s `log_sink` / `audit_sink` slots without taking a
-//! mutable reference. Re-initialisation of the UART per call is
-//! idempotent on the 16550 — the divisor and line-control bits are
-//! sticky — so the cost is a handful of `outb`s and the overhead is
-//! deliberate: it removes one shared mutable static from the bin's
-//! surface (*"No global mutable static beyond the
-//! per-CPU bootstrap area"*).
+//! mutable reference. The UART is brought up **once** through
+//! [`com1_writer`]'s one-shot guard; every later write reaches it through
+//! the non-reinitialising [`Serial::at`], which touches only the
+//! transmitter. A per-write re-`init` was wrong: it clears `IER` and flushes
+//! the receive FIFO, so it disarmed the login console's interrupt-driven
+//! receive and dropped typed-ahead input.
 
 use tairix_arch_x86_64::serial::{self, Serial, COM1_BASE};
 use tairix_kernel_core::ConsoleWrite;
 use tairix_log::{Event, Sink};
+use tairix_sync::once::Once;
+
+/// One-shot COM1 bring-up guard (see [`com1_writer`]).
+static COM1_INIT: Once<()> = Once::new();
+
+/// A COM1 writer that runs the 16550 bring-up **exactly once** and returns a
+/// non-reinitialising handle on every subsequent call.
+///
+/// [`Serial::init`] is *not* idempotent for a console with interrupt-driven
+/// receive armed: it writes `IER = 0` (disarming the receive interrupt the
+/// login console enabled) and the FIFO-control `clear` bits (flushing any
+/// typed-ahead bytes still in the receive FIFO). Re-running it on every log
+/// line or console write therefore raced the interactive `login` read and
+/// silently dropped keystrokes while disabling receive delivery. The UART is
+/// configured once here (the line settings are sticky) and every later write
+/// reaches it through [`Serial::at`], which touches only the transmitter — so
+/// diagnostic output and prompt writes never clobber the receive path.
+fn com1_writer() -> Serial {
+    let _ = COM1_INIT.call_once_infallible(|| {
+        let _ = Serial::init(COM1_BASE);
+    });
+    Serial::at(COM1_BASE)
+}
 
 /// `Sink` implementation that emits one formatted line per event to
 /// the 16550 UART at [`COM1_BASE`].
 ///
-/// Zero-sized; safe to share through a `&'static` reference because
-/// every call constructs a fresh [`Serial`] handle (the UART itself is
-/// the shared mutable state, not the wrapper).
+/// Zero-sized; safe to share through a `&'static` reference. The UART is
+/// the shared mutable state (brought up once by [`com1_writer`]); this
+/// wrapper holds nothing.
 #[derive(Debug)]
 pub struct SerialSink;
 
@@ -55,12 +78,12 @@ impl Default for SerialSink {
 
 impl Sink for SerialSink {
     fn write_event(&self, event: &Event<'_>) {
-        // Re-`init` per call is idempotent on the 16550 (the divisor
-        // and line-control bits are sticky). Avoids needing a `static
-        // mut` for the writer. A serial capture renders ANSI SGR, so the
-        // level tag is coloured; no monotonic-uptime seam is wired on
-        // this port yet, so the stamp is omitted.
-        let mut s = Serial::init(COM1_BASE);
+        // The UART is brought up once (`com1_writer`) and written without
+        // re-init, so logging never disarms the console's receive path. A
+        // serial capture renders ANSI SGR, so the level tag is coloured; no
+        // monotonic-uptime seam is wired on this port yet, so the stamp is
+        // omitted.
+        let mut s = com1_writer();
         tairix_log::write_diag_line(&mut s, None, true, event);
     }
 }
@@ -85,10 +108,9 @@ pub use serial::COM1_BASE as REEXPORT_COM1_BASE;
 /// device interface — a program names only its inherited descriptors and
 /// the kernel routes the bytes here.
 ///
-/// Zero-sized and shared through a `&'static` reference: every call
-/// constructs a fresh [`Serial`] handle (the UART itself is the shared
-/// mutable state, not the wrapper), matching [`SerialSink`]'s discipline of
-/// holding no global mutable static.
+/// Zero-sized and shared through a `&'static` reference: the UART is the
+/// shared mutable state (brought up once by [`com1_writer`], then written
+/// through the non-reinitialising [`Serial::at`]), not the wrapper.
 #[derive(Debug)]
 pub struct Com1Console;
 
@@ -108,12 +130,13 @@ impl Default for Com1Console {
 
 impl ConsoleWrite for Com1Console {
     fn write(&self, bytes: &[u8]) -> Result<usize, tairix_abi::Errno> {
-        // The 16550 init is idempotent (sticky divisor + line-control), so a
-        // fresh handle per call avoids a shared mutable static. `write_byte`
-        // busy-polls the transmitter-holding register, so every byte lands;
-        // the count returned is therefore the full slice length, and the
-        // gated banner write in PID 1 `init` (`run.rs`) sees a full write.
-        let mut serial = Serial::init(COM1_BASE);
+        // The UART is brought up once (`com1_writer`) and written without
+        // re-init, so a prompt write never flushes the receive FIFO the
+        // interactive `login` reader is draining. `write_byte` busy-polls the
+        // transmitter-holding register, so every byte lands; the count
+        // returned is therefore the full slice length, and the gated banner
+        // write in PID 1 `init` (`run.rs`) sees a full write.
+        let mut serial = com1_writer();
         for &b in bytes {
             serial.write_byte(b);
         }

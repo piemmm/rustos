@@ -375,46 +375,58 @@ users-DB install (`unlock_service::USERS_DB_INSTALLED_MESSAGE`) with the
 restored — the full kthread-admission witness the vertical is scoped to
 reach once D8 is closed.
 
-## D9 — x86_64 `spawn-session` login never exits on the dead console (relaunch witness never fires)
+## D9 — x86_64 `spawn-session` login never exits on the (now live) console — DONE
 
-**State:** open, pre-existing (reproduces deterministically on the clean
-tree, standalone, independent of any current change). Discovered while
-running the full `cargo xtask ci` gate; it — not D6 — is what currently
-reddens the gate.
+**State:** fixed. `spawn_session_qemu_x86_64` reaches its seven-spawn
+`wait`→reap→relaunch witness and passes a real guest boot.
 
-**Symptom.** `tests/integration/spawn_session_qemu_x86_64` times out at its
-60 s budget (identical standalone and under the matrix — **not** load, not
-TCG speed). The vertical keys PASS on **seven** `ProcessSpawned` records:
-`init`, the boot services `sysinfod` / `netstack` / `devmgr` / `seatmgr`,
-the first `login`, and the **relaunched** `login` after `init` reaps the
-first (the `wait`→reap→relaunch supervision witness). The serial reaches
-only **six** spawns: the first `login` (task 6) is correctly denied
-`users_db_read` / `fs_open` (`err=12`, no root volume bound), but then —
-instead of failing closed on the dead console (`NULL_CONSOLE_READ`) and
-`exit`ing as the test's documented model expects — it spins forever in an
-`ipc_call` loop against a session call endpoint (`0x59531001`, created
-`id=3040`), ~40 iterations over 60 s, each replying cleanly. Because
-`login` never exits, `init`'s `wait` never reaps it, the seventh
-(relaunch) `ProcessSpawned` never fires, and the run times out.
+**Root cause — two layers.** The vertical's PASS keys on **seven**
+`ProcessSpawned` — `init`, the boot services `sysinfod` / `netstack` /
+`devmgr` / `seatmgr`, the first `login`, and the **relaunched** `login`
+after `init` reaps the first. Its documented model assumed the x86_64
+console had *no read backing*, so `login`'s `stream_read` failed closed at
+`NULL_CONSOLE_READ` and `login` exited. The A3 interrupt-driven COM1 receive
+path made that assumption false: the diskless boot opens `CONSOLE0_GATE` at
+the init seam (`root_unlock::spawn_if_present`, no binding →
+`release_console0_to_login`), so `login` owns console 0 and its read is a
+**live, poll-backed COM1 read**. With no scripted input `login` correctly
+*waited* (a timed `stream_read` returning `TimedOut` → the view's idle
+refresh re-queries `sysinfod`, the `ipc_call`s each replying cleanly). So
+the test had to be brought in line with its aarch64 sibling and *drive*
+login to exit.
 
-**Likely area.** The x86_64 dead-console `login` path no longer fails
-closed to an `exit`: `login`'s console/seat acquisition (note `seatmgr` is
-now in this boot) loops on the session endpoint rather than clamping to a
-zero-length read and exiting. The vertical's PASS accounting (seven
-spawns / eight audited syscalls) may also need re-confirming against the
-current service set (`sysinfod` + `netstack` + `devmgr` + `seatmgr`), but
-the primary defect is the non-exiting login loop.
+Doing so exposed the **real production defect** underneath: the x86_64
+COM1 log sink (`SerialSink::write_event`) and console-write backing
+(`Com1Console::write`) called `Serial::init(COM1_BASE)` on **every** log
+line / console write. `Serial::init` is *not* idempotent for an armed
+interactive console — it writes `IER = 0` (disarming the receive interrupt
+the login console enabled) and the FIFO-control clear bits (flushing the
+receive FIFO). Under the debug-log flood a re-init raced `login`'s
+interactive read and **silently dropped the typed input** while disabling
+receive delivery — an intermittent hang. This is a genuine bug in the A3
+console work: on real hardware, any log output or prompt write while a user
+types at the x86_64 login would drop keystrokes.
 
-**Not caused by recent doc/tracker work.** The freestanding kernel binary
-is byte-identical regardless of `#[cfg(test)]`-only or markdown changes, so
-this is a property of the committed tree.
+**Fix (production + test).**
+- **Production (`x86_64/serial_sink.rs`):** a `com1_writer()` helper brings
+  the 16550 up **exactly once** (a `tairix_sync::Once` guard) and returns
+  the non-reinitialising `Serial::at` on every later call. `SerialSink` and
+  `Com1Console` route through it, so diagnostic output and prompt writes
+  never clear `IER` or flush the receive FIFO. The `Serial::at` seam and its
+  "init clears IER/FIFO" warning already existed; the write paths simply
+  stopped re-initialising.
+- **Test (`qemu_tests.rs`):** the x86_64 enrolment scripts a serial dialogue
+  typing one character past `MAX_USERNAME_LEN` at the `Username:` field so
+  the view refuses the over-long line (`LengthOutOfRange`), `login` fails
+  closed and exits, and `init` reaps + relaunches it (seventh
+  `ProcessSpawned`). The injected line is **newline-terminated**
+  (`OVERLONG_USERNAME`, shared with aarch64) so it is a complete line the
+  reader receives whether the console is in the view's raw discipline or a
+  cooked line discipline. The stale test-crate module doc and enrolment
+  comment are corrected to the live-console model.
 
-**What remains.** Root-cause why x86_64 dead-console `login` loops on the
-seat/console endpoint instead of failing closed and exiting; fix it so the
-`wait`→reap→relaunch cycle completes (or, if the boot's service set
-legitimately changed the spawn accounting, correct the witness — but only
-after confirming `login` actually exits). Restore a green
-`spawn_session_qemu_x86_64` and a whole-project-green gate.
+Verified: `spawn_session_qemu_x86_64` is stable over repeated runs (was
+~40 % flaky before the production fix); the aarch64 sibling still passes.
 
 ## Definition of done (whole plan, §7/§15/§23)
 
@@ -437,8 +449,7 @@ whole-project-green gate:
 - D6: **NON-REPRODUCING** — the cross-crate rustdoc `docs-check` failure
   documenting `tairix-kernel` does not reproduce on the pinned toolchain
   (verified from a full `cargo clean`); the `docs-check` step itself passes
-  end to end. (The gate as a whole is currently blocked by D9, not D6.)
-  Recorded with its reproduction procedure in case it recurs.
+  end to end. Recorded with its reproduction procedure in case it recurs.
 - D7: **DONE** — the x86_64 disk-completion-interrupt triple fault
   root-caused (external-IRQ frame offset + shared IO-APIC-pin MSI vector)
   and fixed; `root_unlock_admission_qemu_x86_64` reaches the `/System`
@@ -446,10 +457,13 @@ whole-project-green gate:
 - D8: the x86_64 encrypted-root / users-DB read loop root-caused and
   fixed; `root_unlock_admission_qemu_x86_64` extended to key on the
   users-DB install.
-- D9: the x86_64 `spawn-session` dead-console `login` loop root-caused and
-  fixed so `login` fails closed and exits, `init` reaps + relaunches it,
-  and `spawn_session_qemu_x86_64` reaches its seven-spawn witness; gate
-  whole-project-green again.
+- D9: **DONE** — root-caused to a stale dead-console test model *and* a real
+  production bug it exposed: the x86_64 COM1 log sink / console-write backing
+  re-ran `Serial::init` per write, clearing `IER` and flushing the receive
+  FIFO and so dropping the interactive `login`'s typed input. Fixed by a
+  one-time `com1_writer` init guard (`x86_64/serial_sink.rs`) plus an
+  aarch64-aligned over-long-username serial script in the enrolment;
+  `spawn_session_qemu_x86_64` reaches its seven-spawn witness and is stable.
 - For each landing: `cargo fmt --all` (+ `--check`), `cargo xtask ci`
   (once), `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both
   --secs 20` green and quoted; §23 self-review verdict stated.
