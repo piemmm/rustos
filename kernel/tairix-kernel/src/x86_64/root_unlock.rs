@@ -17,18 +17,20 @@
 //! directly-described SD host as on the Raspberry Pi), so there is one
 //! bring-up.
 //!
-//! # Interrupt delivery: MSI-X, not legacy INTx
+//! # Interrupt delivery: MSI-X on a dedicated MSI vector
 //!
-//! A modern virtio-PCI function delivers through MSI-X: the device writes
-//! the bound line's LAPIC vector directly, so no IO-APIC redirection entry
-//! is on the delivery path. The bring-up still binds the function's
-//! firmware-assigned PCI Interrupt-Line GSI (a discovered value read from
-//! configuration space, never a board constant) as the kernel-side line
-//! handle, reuses the vector the boot pipeline assigned that GSI
-//! (`discover_and_program_io_apics`) to build the MSI message, and routes
-//! it into the device's MSI-X table. The IO-APIC pin stays masked
-//! throughout; the shared [`IrqParkWaiter`] re-arm path's mask/unmask of it
-//! is harmless because MSI-X does not use the pin.
+//! A modern virtio-PCI function delivers through MSI-X: the device writes a
+//! chosen LAPIC vector directly to the local-APIC doorbell, an *edge*
+//! message that never uses an IO-APIC pin. The bring-up allocates a
+//! **dedicated** MSI vector + virtual interrupt line ([`crate::x86_64::msi`])
+//! for the device — never an IO-APIC pin's vector — binds that MSI line in
+//! the kernel [`IrqTable`], builds the MSI message from it, and routes it
+//! into the device's MSI-X table. The line's controller half is the edge
+//! no-op in [`crate::x86_64::msi::CompositeIrqController`]: there is no pin
+//! to mask before the wake or to re-arm after it, so the ready-flag consume
+//! is the whole interlock, exactly as an MSI's edge semantics require. (The
+//! legacy PCI Interrupt-Line register is an `INTx` hint and is meaningless
+//! once MSI-X is enabled, so it is not read.)
 
 use core::convert::Infallible;
 
@@ -36,9 +38,8 @@ use alloc::boxed::Box;
 
 use tairix_abi::driver::dma::PoolId;
 use tairix_abi::driver::msix::MsixBus;
-use tairix_abi::driver::pci::PciBus;
 use tairix_abi::IrqHandle;
-use tairix_arch_x86_64::irq::{global_routing, msi_message};
+use tairix_arch_x86_64::irq::msi_message;
 use tairix_arch_x86_64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
 use tairix_arch_x86_64::pio::x86_port_io;
 use tairix_arch_x86_64::smp::bsp_lapic_id;
@@ -65,14 +66,7 @@ use crate::unlock_service::{
     loader_caps, note, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK,
 };
 use crate::x86_64::arch_wrapper::published_irq_table;
-use crate::x86_64::ioapic_controller::published_typed;
 use crate::x86_64::serial_sink::{COM1_CONSOLE, SERIAL_SINK};
-
-/// PCI configuration-space offset of the Interrupt Line register (PCI 3.0
-/// §6.2.4, low byte of the dword at 0x3C). Firmware programs it with the
-/// GSI the function's INTx pin is routed to; `0xFF` is the "no connection"
-/// sentinel.
-const INTERRUPT_LINE_OFFSET: u16 = 0x3C;
 
 /// The MSI-X table entry the device's vector is programmed into. Every
 /// virtqueue shares it, so one bound [`IrqHandle`] covers the whole device.
@@ -410,7 +404,7 @@ fn virtio_blk_unlock<'a>(
 
     // Provision the four virtio configuration windows into a `PciTransport`
     // through the `CAP_MMIO_MAP`-gated kernel mapper, capturing the function
-    // address for the interrupt-line read and MSI-X routing below.
+    // address for the MSI-X routing below.
     let (mut transport, bdf) = {
         let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
         let prov = provision_virtio_pci(&bus, device_id, &mapper, PciTransport::new)
@@ -418,33 +412,25 @@ fn virtio_blk_unlock<'a>(
         (prov.transport, prov.bdf)
     };
 
-    // Resolve the function's firmware-assigned PCI Interrupt-Line GSI from
-    // its own configuration space (a discovered value, never a board
-    // constant). `0xFF` is the "no connection" sentinel — a function with no
-    // routed line is refused fail-closed.
-    let line = PciBus::read_config(&bus, bdf, INTERRUPT_LINE_OFFSET)
-        .map_err(|_| "root-unlock: read interrupt line")?
-        & 0xFF;
-    if line == 0xFF {
-        return Err("root-unlock: device has no routed interrupt line");
-    }
-    let gsi = line;
-
-    // Bind the line in the table the kernel core published
-    // (`BinArch::install_irq_dispatch`, run in the core's `Irq` phase) and
-    // reuse the vector the boot pipeline assigned that GSI to build the MSI
-    // message MSI-X delivers through.
+    // Allocate a **dedicated** MSI vector + virtual interrupt line for the
+    // device's MSI-X message. An MSI-X completion is an edge message straight
+    // to the local APIC — it does not use the function's INTx pin (the
+    // interrupt-line register is a legacy INTx hint, meaningless once MSI-X
+    // is enabled). Reusing an IO-APIC pin's vector for the MSI, and driving
+    // that pin's level controller for the edge source, was the D7 hang; the
+    // dedicated MSI line binds an edge source with no pin to mask, exactly as
+    // the aarch64 port's MSI vectors do.
     let table: &'static IrqTable =
         published_irq_table().ok_or("root-unlock: no published IRQ table")?;
-    let controller = published_typed().ok_or("root-unlock: no IO-APIC controller")?;
+    let composite =
+        crate::x86_64::msi::published_composite().ok_or("root-unlock: no interrupt controller")?;
+    let msi_vector =
+        crate::x86_64::msi::allocate().map_err(|_| "root-unlock: no free MSI vector")?;
     let bind = table
-        .bind(gsi, UNLOCK_TASK)
+        .bind(msi_vector.line, UNLOCK_TASK)
         .map_err(|_| "root-unlock: bind device source")?;
     let handle: IrqHandle = bind.handle;
-    let vector = global_routing()
-        .vector_for_gsi(gsi)
-        .ok_or("root-unlock: no vector for interrupt line")?;
-    let msi = msi_message(vector, bsp_lapic_id());
+    let msi = msi_message(msi_vector.vector, bsp_lapic_id());
 
     // Route the MSI message into the device's MSI-X table entry, then enable
     // MSI-X on the transport so every queue signals through it.
@@ -457,9 +443,10 @@ fn virtio_blk_unlock<'a>(
 
     // Mint the per-driver DMA host the driver allocates through, over the
     // kernel's live frame allocator and the identity physical map, driven by
-    // the shared parking waiter. The IO-APIC pin is never on the MSI-X
-    // delivery path; the waiter's re-arm of it through the controller is
-    // therefore harmless.
+    // the shared parking waiter. The waiter re-arms through the composite
+    // controller, whose MSI-line half is a no-op — an edge MSI has no line to
+    // re-enable, the message delivers on its own and the ready-flag consume
+    // is the interlock.
     let dma_space = ArchAddressSpace::new_identity_first_32mib(&UNLOCK_PT_POOL)
         .ok_or("root-unlock: dma bookkeeping space")?;
     let pool = DmaPool::new(
@@ -470,11 +457,11 @@ fn virtio_blk_unlock<'a>(
         phys,
     )
     .map_err(|_| "root-unlock: dma pool")?;
-    let controller_dyn: &'static (dyn IrqController + Sync) = controller;
+    let controller_dyn: &'static (dyn IrqController + Sync) = composite;
     let waiter: &'static IrqParkWaiter = Box::leak(Box::new(IrqParkWaiter::new(
         table,
         handle,
-        gsi,
+        msi_vector.line,
         controller_dyn,
         hlt_fallback_park,
     )));

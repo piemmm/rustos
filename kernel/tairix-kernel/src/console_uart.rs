@@ -154,10 +154,7 @@ mod tests {
         }
     }
 
-    fn queue_and_device() -> (
-        &'static ConsoleInputQueue,
-        &'static ConsoleDevice,
-    ) {
+    fn queue_and_device() -> (&'static ConsoleInputQueue, &'static ConsoleDevice) {
         // Leak `'static` handles: the host test process is short-lived and a
         // `ConsoleDevice` borrows its halves for `'static`.
         let queue: &'static ConsoleInputQueue = Box::leak(Box::new(ConsoleInputQueue::new()));

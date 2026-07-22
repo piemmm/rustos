@@ -141,6 +141,14 @@ const ROOT_UNLOCK_KEY_REJECTED: EventId = EventId(4142);
 /// volume is reachable and read-only.
 const SYSTEM_VOLUME_MOUNTED: EventId = EventId(4140);
 
+/// The message the `SYSTEM_VOLUME_MOUNTED` audit event carries — the single
+/// source both the log site and an audit observer key on, so the two spellings
+/// cannot drift. Reaching it proves the read-only `/System` root was
+/// brought up over the disk, which on a real boot requires the disk's
+/// completion interrupt to have woken the bring-up repeatedly (the x86_64
+/// MSI-X device-IRQ path).
+pub const SYSTEM_VOLUME_MOUNTED_MESSAGE: &str = "root-mount: read-only /System volume mounted";
+
 /// Audit event: no read-only `/System` volume was mounted — the disk
 /// carries no `ARXFSSystem` partition, or the volume's window could not be
 /// built or opened read-only. In B1 this is **not** fatal: the encrypted
@@ -709,7 +717,7 @@ pub fn with_system_volume<Disk: Block, R>(
         &Event {
             level: Level::Info,
             id: SYSTEM_VOLUME_MOUNTED,
-            message: "root-mount: read-only /System volume mounted",
+            message: SYSTEM_VOLUME_MOUNTED_MESSAGE,
             fields: &[],
         },
     );

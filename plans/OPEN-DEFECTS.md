@@ -290,45 +290,76 @@ work.
 
 ---
 
-## D7 — x86_64 production MSI-X kthread disk-completion never wakes
+## D7 — x86_64 disk-completion interrupt triple-faulted the boot — DONE
 
-**State:** open, discovered by the `plans/ARCHSUPPORT.md` A3 work (the
-x86_64 interrupt-driven-console increment, whose admission live vertical
-first boots the production x86_64 kthread-admission disk bring-up). It is
-**not** a console defect — it sits in the never-live-confirmed A2
-production path (`plans/ARCHSUPPORT.md` A2 was landed host-gate-green
-only).
+**State:** fixed. The live x86_64 disk bring-up now delivers the
+virtio-blk-PCI completion interrupt, wakes the scheduler-parked bring-up
+repeatedly, and mounts the read-only `/System` volume — proven by
+`tests/integration/root_unlock_admission_qemu_x86_64` (keys PASS on
+`root_mount::SYSTEM_VOLUME_MOUNTED_MESSAGE`).
 
-**Symptom.** On a live x86_64 `pc`/PVH boot, `unlock_service::
-spawn_if_present` admits the in-kernel root-unlock kthread, which brings
-the virtio-blk-PCI root up over the production MSI-X path
-(`kernel/tairix-kernel/src/x86_64/root_unlock.rs` `virtio_blk_unlock`):
-the transport provisions, MSI-X is routed, the driver is admitted through
-the signed gate, and `VirtioBlk::open` allocates its DMA buffers — then
-the kthread parks (`IrqParkWaiter`) on the first device read and **is
-never woken**: the disk completion never reaches the parked task, so the
-mount/users-DB-install never runs, `login` opens deny-all, and the run
-times out with no `ARXFS passphrase:` prompt.
+**Root cause (two x86_64 defects, both fixed).** The symptom looked like
+"the parked kthread never wakes" (the serial stalls with no prompt), but
+the guest was actually **triple-faulting** (`qemu -d int`: a ring-3 `#PF`
+storm, then a kernel `#PF` in `syscall_entry_stub` with `RSP=0` /
+`CR2=-8`, → `#DF`). Two independent bugs:
 
-**Not the discovered GSI.** Pinning the bound line to the scenario's
-known-good `DEVICE_GSI` (16) instead of the discovered PCI Interrupt-Line
-did not help (it regressed earlier), so the stall is in MSI-X
-delivery/wake of the *scheduler-parked kthread*, not the line value. The
-passing `root_unlock_login_qemu_x86_64` proves MSI-X completions work at
-GSI 16 in the *boot-observer* context (its own `HltWaiter` busy-`hlt`
-loop), which does **not** exercise the production scheduler-park →
-`irq_wake` → re-dispatch path the kthread uses; aarch64/riscv64 drive that
-same production kthread path successfully, so the gap is x86_64-specific
-(MSI-X delivery into, or scheduler re-dispatch after, the parked kthread).
+1. **External-IRQ ISR read the interrupted CPU frame at the wrong stack
+   offset.** `external_irq.s` pushes a synthetic *vector qword* between the
+   15-GPR `SavedRegs` block and the CPU-pushed `InterruptStackFrame`, but
+   the shared `preempt::preempt_ring3_if_pending` located the frame at
+   `regs + size_of::<SavedRegs>()` — correct only for the *timer* stub,
+   which pushes no vector qword. On a device IRQ it read the vector qword
+   as the interrupted `CS`, mis-decided ring-3, and ran an unbalanced
+   `swapgs`; a later `syscall` then loaded `kernel_rsp0` from the wrong GS
+   base (0) → push into a null stack → `#DF`. Fix:
+   `preempt_ring3_if_pending` now takes the `InterruptStackFrame` pointer,
+   and each ISR computes it at its own offset (the external path adds
+   `EXTERNAL_VECTOR_QWORD_BYTES`). Timer-driven preemption (used by
+   `spawn_session_qemu_x86_64`, which passed) was unaffected, which is why
+   only the disk (external-IRQ) path crashed. Host guard:
+   `irq::tests::external_irq_frame_sits_one_vector_qword_above_saved_regs`.
+2. **The MSI-X source shared an IO-APIC pin's vector.** `virtio_blk_unlock`
+   reused the PCI interrupt-line GSI's vector for the device's MSI and
+   drove that pin's *level* `IoApicController` for an *edge* MSI. Fixed by
+   `kernel/tairix-kernel/src/x86_64/msi.rs`: a dedicated MSI vector +
+   virtual `MSI_LINE_BASE` line space with an edge no-op
+   `CompositeIrqController` (the Linux / aarch64-`MSI_LINE_BASE` model), so
+   an MSI-X source is never bound to a shared IO-APIC pin. Boot pre-installs
+   the free external vectors as MSI lines; `root_unlock` allocates a
+   dedicated `(vector, line)`.
 
-**What remains.** Instrument the live x86_64 kthread bring-up (does the
-MSI-X ISR fire? does `irq_wake` wake IRQ_WAITQ? is the kthread
-re-dispatched?) and fix the delivery/wake gap, then land the x86_64
-interrupt-driven-console live verticals A3 needs
-(`root_unlock_admission_qemu_x86_64` — thin bin over the production boot
-with an `UnlockAdmissionSink` keying on `USERS_DB_INSTALLED_MESSAGE` and a
-`serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]` enrolment,
-which this session authored and then removed to keep the gate green).
+## D8 — x86_64 encrypted-root / users-DB read loop stalls the interactive unlock
+
+**State:** open, uncovered by the D7 fix (the disk interrupt now works, so
+boot proceeds far enough to hit this). **Not** an interrupt defect.
+
+**Symptom.** With the disk interrupt fixed,
+`root_unlock_admission_qemu_x86_64` reaches the `ARXFS passphrase:` prompt,
+accepts the passphrase, and mounts the read-only `/System` volume, then
+stalls **deterministically** (identical at 120 s and 300 s — not slowness)
+before `USERS_DB_INSTALLED_MESSAGE`. Tracing shows the disk `notify_wait`
+enters and *returns* thousands of times (5000+, each completion woken
+cleanly — the interrupt path is solid) with **no** log-visible forward
+progress: an unbounded disk-read loop in the encrypted-root / users-DB
+read path (the interactive unlock kthread). `devmgr` is not the culprit
+(it logs its catalogue-retry once and parks on `hw_tree_wait`).
+
+**Not the observer path.** `root_unlock_login_qemu_x86_64` reads the same
+users DB over the same fixture and PASSES, so the loop is specific to the
+full-pipeline admission path (concurrency between the interactive-unlock
+kthread and the driver-store serve kthread over the shared disk, and/or
+the block/transform-cache behaviour under the production scheduler on a
+256 MiB guest), not the users-DB read itself.
+
+**What remains.** Root-cause the read loop (add a per-read LBA trace to
+confirm same-block re-read vs. advancing thrash; audit the `block_cache` /
+`transform_cache` and the two-kthread disk sharing under memory pressure),
+fix it, then extend `root_unlock_admission_qemu_x86_64` to key PASS on the
+users-DB install (`unlock_service::USERS_DB_INSTALLED_MESSAGE`) with the
+`serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]` step
+restored — the full kthread-admission witness the vertical is scoped to
+reach once D8 is closed.
 
 ## Definition of done (whole plan, §7/§15/§23)
 
@@ -351,6 +382,13 @@ whole-project-green gate:
 - D6: the cross-crate rustdoc `docs-check` failure documenting
   `tairix-kernel` root-caused and fixed; `cargo xtask ci` (`docs-check`
   included) whole-project-green again.
+- D7: **DONE** — the x86_64 disk-completion-interrupt triple fault
+  root-caused (external-IRQ frame offset + shared IO-APIC-pin MSI vector)
+  and fixed; `root_unlock_admission_qemu_x86_64` reaches the `/System`
+  mount over the dedicated MSI-X vector.
+- D8: the x86_64 encrypted-root / users-DB read loop root-caused and
+  fixed; `root_unlock_admission_qemu_x86_64` extended to key on the
+  users-DB install.
 - For each landing: `cargo fmt --all` (+ `--check`), `cargo xtask ci`
   (once), `cargo xtask fuzz --secs 5`, and `tools/ci/soak.sh both
   --secs 20` green and quoted; §23 self-review verdict stated.

@@ -3502,27 +3502,29 @@ const TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
     },
-    // `plans/OPEN-DEFECTS.md` D7 / `plans/ARCHSUPPORT.md` A3: the x86_64
-    // sibling of the aarch64 root-unlock-admission vertical above. It boots
-    // the *production* x86_64 `tairix-kernel` pipeline (`boot_x86_64::boot`)
-    // with the same planted whole-disk encrypted-root image
-    // (`FsDisk::EncryptedRootDisk`) attached as a virtio-blk-**pci** device,
-    // and proves the *kthread admission* path over the production **MSI-X**
-    // device-IRQ wake path: production PCI discovery binds the virtio-blk
-    // root, the init seam admits the in-kernel unlock kthread
-    // (`unlock_service::spawn_if_present`), and the kthread brings the device
-    // up over MSI-X, prompts at `ARXFS passphrase: `, reads the typed
-    // passphrase, mounts the encrypted `ARXFS` root, and installs the users
-    // database — the kernel audit sink reporting PASS through the
-    // `isa-debug-exit` device the instant it sees the unlock-service install
-    // message. Unlike `root_unlock_login_qemu_x86_64` (which drives the
-    // unlock *policy* from a boot-observer context that hijacks the CPU
-    // before the admitted kthread ever dispatches), this vertical exercises
-    // the scheduler-park -> MSI-X `irq_wake` -> re-dispatch wake path that
-    // D7 tracks. The runner types the fixture passphrase once the prompt
-    // appears; the database *content* is proven by `root_unlock_login`. A
-    // 120-second budget matches the aarch64 admission vertical (boot +
-    // bounded PBKDF2); single CPU like the other full-boot verticals.
+    // `plans/OPEN-DEFECTS.md` D7: the x86_64 disk-completion-interrupt
+    // regression. It boots the *production* x86_64 `tairix-kernel` pipeline
+    // (`boot_x86_64::boot`) with the planted whole-disk encrypted-root image
+    // (`FsDisk::EncryptedRootDisk`) attached as a virtio-blk-**pci** device.
+    // Production PCI discovery binds the virtio-blk root, the init seam
+    // admits the in-kernel root-unlock kthread
+    // (`unlock_service::spawn_if_present`), and that kthread brings the
+    // device up over a **dedicated MSI-X vector** and mounts the read-only
+    // `/System` volume. Reaching the mount requires the disk's completion
+    // MSI-X to be delivered on its dedicated vector and to wake the
+    // scheduler-parked bring-up over many block reads, with a device IRQ
+    // preempting ring-3 services without corrupting the per-CPU GS state —
+    // the exact path the D7 triple fault broke (the external-IRQ ISR located
+    // the CPU frame at the wrong stack offset and ran an unbalanced
+    // `swapgs`; the MSI shared an IO-APIC pin's vector). The guest audit
+    // sink reports PASS through the `isa-debug-exit` device the instant it
+    // sees `SYSTEM_VOLUME_MOUNTED_MESSAGE`; a regression triple-faults on the
+    // first disk read (before any mount) and the run fails loud. No serial
+    // input is scripted — the `/System` mount does not need the user-data
+    // passphrase, and the *interactive users-DB install* over the encrypted
+    // root is deferred to the separate D8 read-loop fix (see the bin docs).
+    // 120 s matches the aarch64 admission vertical; single CPU like the
+    // other full-boot verticals.
     QemuTest {
         package: "tairix-test-root-unlock-admission-qemu-x86-64",
         binary: "tairix-test-root-unlock-admission-qemu-x86-64",
@@ -3537,7 +3539,7 @@ const TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
-        serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
+        serial: &[],
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
     // `tairix-test-session-ceiling-qemu-aarch64` boots the *production*

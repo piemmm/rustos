@@ -496,6 +496,48 @@ The crate is enrolled in `tools/xtask::commands::qemu_tests::TESTS`
 with a 60 s budget. `cargo xtask test --qemu` builds and runs it
 alongside the other five freestanding integration crates.
 
+### x86_64 MSI/MSI-X routing (dedicated vectors, `plans/OPEN-DEFECTS.md` D7)
+
+A PCI device that delivers **message-signalled** interrupts (MSI/MSI-X)
+writes a chosen vector straight to the local-APIC doorbell — an *edge*
+message that never uses an IO-APIC pin. `kernel/tairix-kernel/src/x86_64/msi.rs`
+models this the way Linux (and the aarch64 `MSI_LINE_BASE` range) does,
+rather than reusing an IO-APIC pin:
+
+1. **Dedicated vectors + a virtual line space.** After the boot pipeline
+   assigns one IDT vector per IO-APIC pin, `msi::install_msi_lines` claims
+   the remaining free external vectors (`0x30..=0xFE`) as MSI vectors:
+   each gets its IDT entry and a `vector → MSI line` entry in the arch
+   routing table, but **no** IO-APIC redirection entry. The MSI lines live
+   in a virtual range at `MSI_LINE_BASE` (far above any real GSI), so an
+   MSI line and a GSI can never alias. A driver allocates a dedicated
+   `(vector, line)` with `msi::allocate` and binds the line in the
+   `IrqTable` exactly as it would a GSI.
+2. **Edge controller.** `msi::CompositeIrqController` is the one
+   line→controller fan-out published as `IrqRouting.controller`: a real
+   GSI masks/unmasks the `IoApicController` redirection entry; an MSI line
+   is an edge source with **no** hardware line to mask, so its
+   `mask`/`rearm` are honest no-ops — the `IrqTable` ready-flag consume is
+   the whole re-arm interlock, and the runaway-interrupt safety net still
+   contains a storming vector. The bootstrap virtio-blk-PCI root
+   (`root_unlock::virtio_blk_unlock`) routes its MSI-X through a dedicated
+   vector and binds the MSI line, never a shared IO-APIC pin.
+
+**Interrupted-frame offset (the D7 triple fault).** The external-IRQ
+trampoline (`external_irq.s`) pushes a synthetic *vector qword* between the
+15-GPR `SavedRegs` block and the CPU-pushed `InterruptStackFrame`; the
+timer stub (`define_isr!`) does not. `preempt::preempt_ring3_if_pending`
+therefore takes the `InterruptStackFrame` pointer explicitly — each ISR
+computes it at its own offset (`regs + size_of::<SavedRegs>()` for the
+timer, one `EXTERNAL_VECTOR_QWORD_BYTES` more for the external path).
+Reading it one qword too low mis-decoded the interrupted `CS`, ran an
+unbalanced `swapgs`, and triple-faulted a later `syscall` (`kernel_rsp0`
+loaded from a null GS base). The host guard
+`irq::tests::external_irq_frame_sits_one_vector_qword_above_saved_regs`
+pins the two sizes the offset is built from; the QEMU regression is
+`tests/integration/root_unlock_admission_qemu_x86_64` (a D7 regression
+triple-faults before any `/System` mount).
+
 ### riscv64 trap glue (Stage 4.D Item 4 — riscv64 external-IRQ controller)
 
 The riscv64 port supplies the same `IrqController` seam through a

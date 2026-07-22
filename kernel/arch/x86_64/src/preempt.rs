@@ -417,12 +417,18 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1c), honoured on
     // return to ring 3 for a quantum expiry or a reschedule IPI (which
     // `X86_64Arch::send_ipi` delivers on `TIMER_VECTOR`, so it lands here).
+    // The timer stub pushes exactly the `SavedRegs` block, so the CPU-pushed
+    // interrupt frame sits immediately above it. EOI was written above, so
+    // the in-service bit is released before the callback may context-switch
+    // away.
     // SAFETY: `regs` is the live saved-regs block the stub passed at the
-    // current `%rsp`, with the CPU-pushed `InterruptStackFrame` immediately
-    // above it; EOI was written above, so the in-service bit is released
-    // before the callback may context-switch away.
+    // current `%rsp`; the `InterruptStackFrame` lies exactly
+    // `size_of::<SavedRegs>()` bytes above it (the timer stub inserts no
+    // other words), so the frame pointer is valid.
     unsafe {
-        preempt_ring3_if_pending(regs, cpu_id);
+        let frame =
+            (regs as usize + core::mem::size_of::<SavedRegs>()) as *const InterruptStackFrame;
+        preempt_ring3_if_pending(frame, cpu_id);
     }
 }
 
@@ -456,30 +462,30 @@ pub fn current_cpu_id_from_lapic() -> u32 {
 ///
 /// # Safety
 ///
-/// Must be called from an ISR **after** the LAPIC EOI write, with `regs`
-/// the live saved-regs block the stub pushed at the current `%rsp` and the
-/// CPU-pushed `InterruptStackFrame` immediately above it. `cpu_id` is the
-/// running CPU's dense id (or [`u32::MAX`] when unmapped, making this a
+/// Must be called from an ISR **after** the LAPIC EOI write, with `frame`
+/// pointing at the CPU-pushed [`InterruptStackFrame`] for the interrupted
+/// context (whichever stack offset the calling stub placed it at — the
+/// timer stub places it immediately above [`SavedRegs`], the external-IRQ
+/// stub one qword higher because it also pushed the vector). `cpu_id` is
+/// the running CPU's dense id (or [`u32::MAX`] when unmapped, making this a
 /// no-op).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) unsafe fn preempt_ring3_if_pending(regs: *mut SavedRegs, cpu_id: u32) {
+pub(crate) unsafe fn preempt_ring3_if_pending(frame: *const InterruptStackFrame, cpu_id: u32) {
     let preempt_raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
     if preempt_raw == 0 || cpu_id == u32::MAX {
         return;
     }
-    // The CPU-pushed interrupt frame sits immediately above the saved GPR
-    // block the stub pushed; its `cs` is the selector of the interrupted
-    // context.
-    // SAFETY: `regs` is the live saved-regs block the stub passed at the
-    // current `%rsp`; the `InterruptStackFrame` the CPU pushed lies exactly
-    // `size_of::<SavedRegs>()` bytes above it (the stubs insert no other
-    // words between them), so the read is in bounds and reads an
-    // initialised qword.
-    let from_ring3 = unsafe {
-        let frame =
-            (regs as usize + core::mem::size_of::<SavedRegs>()) as *const InterruptStackFrame;
-        cs_is_ring3((*frame).cs)
-    };
+    // `frame.cs` is the selector of the interrupted context, decoded to
+    // ring 3 vs ring 0. The caller located `frame` at the correct stack
+    // offset for its own stub — this function must never assume a fixed
+    // distance from a saved-regs block, because the two ISR stubs push
+    // different amounts before the CPU frame (the external-IRQ stub adds a
+    // vector qword the timer stub does not). Reading the wrong slot here as
+    // the `CS` was the D7 triple fault: it mis-decided ring-3 and ran an
+    // unbalanced `swapgs`.
+    // SAFETY: `frame` is the live CPU-pushed interrupt frame per the
+    // function's contract; reading its `cs` is in bounds.
+    let from_ring3 = unsafe { cs_is_ring3((*frame).cs) };
     if !from_ring3 {
         return;
     }

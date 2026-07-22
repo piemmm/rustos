@@ -15,6 +15,7 @@ pub mod arch_wrapper;
 pub mod dispatch;
 pub mod driver_host;
 pub mod ioapic_controller;
+pub mod msi;
 pub mod virtio_boot;
 
 #[cfg(freestanding)]

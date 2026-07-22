@@ -1400,9 +1400,40 @@ fn discover_and_program_io_apics(
         crate::x86_64::com1_rx::set_com1_console_gsi(com1_gsi);
     }
 
+    // Step 5. Pre-install every free external vector above the IO-APIC pins
+    // as a dedicated MSI vector (IDT entry + `vector → MSI line` routing, no
+    // IO-APIC redirection entry — an MSI is an edge message straight to the
+    // local APIC, never a pin). A device that delivers MSI/MSI-X (the
+    // virtio-blk-PCI root, every user-space PCI driver) then allocates a
+    // dedicated `(vector, line)` from this pool rather than reusing an
+    // IO-APIC pin's vector — the fix for the D7 root-disk hang, and the
+    // x86_64 analogue of the aarch64 `MSI_LINE_BASE` range. The MSI virtual
+    // lines sit far above every real GSI, so the two line spaces cannot
+    // alias; refuse to proceed if a platform's IO-APIC GSI ceiling ever
+    // reaches that base (fail closed rather than let an MSI line collide).
+    if max_gsi >= crate::x86_64::msi::MSI_LINE_BASE {
+        return Err(BootError::IrqVectorExhausted);
+    }
+    let msi_top = crate::x86_64::msi::install_msi_lines(next_vector)
+        .map_err(|_| BootError::IrqRoutingPublish)?;
+
+    // The composite controller is the single line→controller fan-out the
+    // kernel core and the device-IRQ dispatch drive: a real GSI masks the
+    // IO-APIC redirection entry; an MSI line is an edge source with no line
+    // to mask (a no-op). It wraps the same leaked IO-APIC controller the
+    // typed slot exposes, so there is one controller instance.
+    let composite: &'static crate::x86_64::msi::CompositeIrqController<VolatileIoApicMmio> =
+        Box::leak(Box::new(crate::x86_64::msi::CompositeIrqController::new(
+            controller_static,
+        )));
+    crate::x86_64::msi::publish_composite(composite);
+
+    // The bind ceiling covers both the real GSIs and the MSI line space;
+    // `msi_top` is `MSI_LINE_BASE - 1` (below `max_gsi`) when no MSI vector
+    // was free, so the `max` leaves the ceiling unchanged on such a boot.
     Ok(IrqRouting {
-        max_line: max_gsi,
-        controller: controller_static as &'static (dyn IrqController + Send + Sync),
+        max_line: max_gsi.max(msi_top),
+        controller: composite as &'static (dyn IrqController + Send + Sync),
     })
 }
 

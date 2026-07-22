@@ -40,7 +40,7 @@
 //! static).
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use crate::interrupts::SavedRegs;
+use crate::interrupts::{InterruptStackFrame, SavedRegs};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::preempt::{LAPIC_BASE_PHYS, LAPIC_EOI_OFFSET};
@@ -312,13 +312,38 @@ unsafe extern "C" fn tairix_arch_x86_64_external_irq_dispatch(regs: *mut SavedRe
     // context switch. This is what lets a device IRQ (e.g. a keystroke)
     // preempt a CPU-bound ring-3 task that issues no syscall.
     let cpu_id = crate::preempt::current_cpu_id_from_lapic();
+    // Locate the CPU-pushed `InterruptStackFrame`. Unlike the timer stub,
+    // the external-IRQ trampoline (`external_irq.s`) pushed the synthetic
+    // **vector qword** between the `SavedRegs` block and the CPU frame, so
+    // the frame sits one extra qword above `regs`. Passing the raw `regs`
+    // (as the timer path does) would read that vector qword as the frame's
+    // `rip`/`cs` and mis-decide ring-3, running an unbalanced `swapgs` — the
+    // D7 triple fault. Account for the vector qword here so
+    // `preempt_ring3_if_pending` reads the true interrupted `CS`.
+    //
     // SAFETY: `regs` is the live saved-regs block the trampoline pushed at
-    // the current `%rsp`, with the CPU-pushed frame immediately above it;
-    // the EOI was written just above.
+    // the current `%rsp`; the vector qword lies at `regs +
+    // size_of::<SavedRegs>()` and the CPU frame immediately above it, so
+    // `frame` addresses the initialised interrupt frame. The EOI was
+    // written just above, releasing the in-service bit before any switch.
+    let frame = (regs as usize + core::mem::size_of::<SavedRegs>() + EXTERNAL_VECTOR_QWORD_BYTES)
+        as *const InterruptStackFrame;
     unsafe {
-        crate::preempt::preempt_ring3_if_pending(regs, cpu_id);
+        crate::preempt::preempt_ring3_if_pending(frame, cpu_id);
     }
 }
+
+/// Size, in bytes, of the synthetic vector qword the per-vector external-IRQ
+/// stub (`external_irq.s`) pushes before jumping to the shared trampoline.
+/// It sits between the [`SavedRegs`] block the trampoline pushes and the
+/// CPU-pushed [`InterruptStackFrame`], so the frame is this many bytes
+/// higher than on the timer path (which pushes no such qword). A 64-bit
+/// `push imm` always stores 8 bytes. Present on the freestanding target
+/// (where the dispatch uses it) and under `test` (where the host layout
+/// guard pins it against the `SavedRegs` size the frame-location arithmetic
+/// in `tairix_arch_x86_64_external_irq_dispatch` depends on).
+#[cfg(any(all(target_arch = "x86_64", target_os = "none"), test))]
+const EXTERNAL_VECTOR_QWORD_BYTES: usize = 8;
 
 // --- Host tests ----------------------------------------------------
 
@@ -331,6 +356,25 @@ mod tests {
         assert_eq!(EXTERNAL_VECTOR_FIRST, 0x30);
         assert_eq!(EXTERNAL_VECTOR_LAST, 0xFE);
         assert_eq!(EXTERNAL_VECTOR_COUNT, 207);
+    }
+
+    /// `plans/OPEN-DEFECTS.md` D7 regression guard. The external-IRQ
+    /// trampoline pushes the 15-GPR [`crate::interrupts::SavedRegs`] block
+    /// *and* one synthetic vector qword before the CPU-pushed
+    /// [`crate::interrupts::InterruptStackFrame`], so
+    /// `tairix_arch_x86_64_external_irq_dispatch` must locate the frame at
+    /// `regs + size_of::<SavedRegs>() + EXTERNAL_VECTOR_QWORD_BYTES`. Reading
+    /// it one qword too low (as the timer path, which pushes no vector
+    /// qword, correctly does) mis-decoded the interrupted `CS` and ran an
+    /// unbalanced `swapgs` — the triple fault. Pin the two sizes the offset
+    /// is built from so a layout change can't silently reintroduce it.
+    #[test]
+    fn external_irq_frame_sits_one_vector_qword_above_saved_regs() {
+        use crate::interrupts::{InterruptStackFrame, SavedRegs};
+        assert_eq!(core::mem::size_of::<SavedRegs>(), 15 * 8);
+        assert_eq!(EXTERNAL_VECTOR_QWORD_BYTES, 8);
+        // The CPU frame is a fixed five words; the dispatch reads its `cs`.
+        assert_eq!(core::mem::size_of::<InterruptStackFrame>(), 5 * 8);
     }
 
     #[test]
