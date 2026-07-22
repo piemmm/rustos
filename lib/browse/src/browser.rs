@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use crate::entry::Entry;
 use crate::error::BrowseError;
+use crate::sort::{sort_entries, SortMode};
 use crate::source::DirectorySource;
 
 /// A live view of one directory, with a selection cursor.
@@ -29,6 +30,7 @@ pub struct Browser<S: DirectorySource> {
     components: Vec<String>,
     entries: Vec<Entry>,
     selected: usize,
+    sort_mode: SortMode,
 }
 
 impl<S: DirectorySource> Browser<S> {
@@ -38,13 +40,42 @@ impl<S: DirectorySource> Browser<S> {
     ///
     /// Returns [`BrowseError::Source`] if the root directory cannot be listed.
     pub fn open_root(mut source: S) -> Result<Self, BrowseError> {
-        let entries = source.list(&[]).map_err(BrowseError::Source)?;
+        let sort_mode = SortMode::default_order();
+        let mut entries = source.list(&[]).map_err(BrowseError::Source)?;
+        sort_entries(&mut entries, sort_mode);
         Ok(Self {
             source,
             components: Vec::new(),
             entries,
             selected: 0,
+            sort_mode,
         })
+    }
+
+    /// The order the current listing is shown in.
+    #[must_use]
+    pub const fn sort_mode(&self) -> SortMode {
+        self.sort_mode
+    }
+
+    /// Re-order the current listing by `mode`, keeping the selection on the
+    /// same entry where it still exists and clamping it otherwise.
+    ///
+    /// A no-op when `mode` is already in effect. The re-order is a pure
+    /// rearrangement of the entries already loaded — it never re-reads the
+    /// directory, so it cannot fail or change *which* entries are shown, only
+    /// their order (the picker and the manager stay one shared order).
+    pub fn set_sort_mode(&mut self, mode: SortMode) {
+        if mode == self.sort_mode {
+            return;
+        }
+        self.sort_mode = mode;
+        let anchor = self.selected_entry().cloned();
+        sort_entries(&mut self.entries, mode);
+        match anchor.and_then(|anchor| self.entries.iter().position(|e| *e == anchor)) {
+            Some(index) => self.selected = index,
+            None => self.clamp_selection(),
+        }
     }
 
     /// The current directory's path components, root-first. Empty at the root.
@@ -192,12 +223,20 @@ impl<S: DirectorySource> Browser<S> {
         Ok(true)
     }
 
-    /// Replace the loaded entries and clamp the selection into the new range.
-    fn adopt_entries(&mut self, entries: Vec<Entry>) {
-        self.selected = match entries.len().checked_sub(1) {
+    /// Replace the loaded entries — ordered by the current sort mode — and
+    /// clamp the selection into the new range.
+    fn adopt_entries(&mut self, mut entries: Vec<Entry>) {
+        sort_entries(&mut entries, self.sort_mode);
+        self.entries = entries;
+        self.clamp_selection();
+    }
+
+    /// Clamp the selection cursor into the current entry range (to the last
+    /// entry, or to `0` when the directory is empty).
+    fn clamp_selection(&mut self) {
+        self.selected = match self.entries.len().checked_sub(1) {
             Some(last) => self.selected.min(last),
             None => 0,
         };
-        self.entries = entries;
     }
 }

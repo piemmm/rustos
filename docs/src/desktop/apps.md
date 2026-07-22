@@ -25,8 +25,32 @@ package is only the `Run` binary that composes it over the live syscalls.
 is a capability-checked VFS directory read, so the §5.3 permission decision and
 the §16 path policy live in the VFS, not in the app. The browser shows exactly
 the entries the source returns — it never fabricates a `/proc`/`/sys`-style
-synthetic entry (`AGENTS.md` §16.1). Each entry is an `Entry` carrying a name
-and an `EntryKind` (directory or regular file).
+synthetic entry (`AGENTS.md` §16.1). Each entry is an `Entry` carrying a name,
+an `EntryKind`, and the display metadata a file manager needs (see below).
+
+### Entries, kinds, and the shared sort
+
+An `Entry` carries its name, its `EntryKind`, its apparent `size`, and its
+last-modification `Time64` — the size and timestamp mapped straight from the
+one `fs_readdir` stream the source already produced (each
+`tairix_abi::fs::DirEntry` reports them), so the browser never opens and
+`fs_stat`s every child to fill a listing (`AGENTS.md` §2.16). `EntryKind`
+refines the VFS's file/directory split with the one distinction a manager
+must make structurally: a `<Name>.app` directory is a `Bundle` — a sealed
+unit the user launches, not a folder to descend into (`AGENTS.md` §16.5). The
+engine only *models* the distinction (`Entry::is_bundle`, and `is_directory`
+is `false` for a bundle so `open_index` refuses to descend); deciding what a
+bundle activation *does* is the launching layer's job (staged for a later
+increment).
+
+`SortMode` (`SortKey` — `Name`/`Size`/`Modified` — plus a `SortDirection`)
+is the one listing order both the file manager and the trusted picker share
+(`AGENTS.md` §2.2): directories first, then the chosen key, with a
+case-insensitive name tiebreak so the result never depends on the source's
+incidental order. `sort_entries` is the pure definition; the `Browser`
+applies it to every listing and `set_sort_mode` re-orders in place, keeping
+the selection on the same entry. The default is name-ascending — a
+general-purpose directory order.
 
 ### The production source (`vfs`)
 

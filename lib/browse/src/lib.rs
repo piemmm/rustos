@@ -30,6 +30,7 @@
 //! # Module map
 //!
 //! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary.
+//! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
 //! * [`error`] — [`BrowseError`], the fail-closed navigation outcomes.
 //! * [`source`] — the [`DirectorySource`] seam.
 //! * [`browser`] — the [`Browser`] navigation model.
@@ -53,13 +54,15 @@ pub mod browser;
 pub mod entry;
 pub mod error;
 pub mod render;
+pub mod sort;
 pub mod source;
 pub mod vfs;
 
 pub use browser::Browser;
-pub use entry::{Entry, EntryKind};
+pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
 pub use render::render;
+pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;
 pub use vfs::VfsDirectorySource;
 

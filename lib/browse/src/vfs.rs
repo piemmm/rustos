@@ -27,6 +27,11 @@ use tairix_abi::Errno;
 use crate::entry::{Entry, EntryKind};
 use crate::source::DirectorySource;
 
+// The listing returned here is in the source's own stream order; the
+// `Browser` applies the shared sort. This function only decodes and maps,
+// so a caller that wants raw stream order (a test, a `du`-style walk) sees
+// exactly what the kernel produced.
+
 /// Spell root-first `components` as an absolute path (an empty slice is the
 /// root `/`).
 ///
@@ -91,11 +96,8 @@ pub fn entries_from_dir_stream(stream: &[u8]) -> Result<Vec<Entry>, Errno> {
     for item in DirEntries::new(stream) {
         let entry = item?;
         let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
-        let kind = match entry.kind {
-            FileKind::Directory => EntryKind::Directory,
-            FileKind::Regular => EntryKind::File,
-        };
-        entries.push(Entry::new(name, kind));
+        let kind = EntryKind::for_listing(matches!(entry.kind, FileKind::Directory), name);
+        entries.push(Entry::new(name, kind, entry.size, entry.modified));
     }
     Ok(entries)
 }

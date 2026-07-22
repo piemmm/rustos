@@ -99,7 +99,9 @@ fn open_root_lists_the_four_top_level_directories() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root lists");
     assert!(browser.is_root());
     assert_eq!(browser.path(), "/");
-    assert_eq!(names(&browser), ["System", "Users", "Apps", "Storage"]);
+    // The source lists the four in insertion order; the browser shows them in
+    // the shared default order (directories, then case-insensitive by name).
+    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
     assert_eq!(browser.selected_index(), Some(0));
 }
 
@@ -117,14 +119,15 @@ fn open_root_fails_closed_when_the_root_is_unreadable() {
 #[test]
 fn descend_and_climb_track_the_path_and_entries() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.open_index(0).expect("enter System");
+    // Sorted root order is [Apps, Storage, System, Users]; System is index 2.
+    browser.open_index(2).expect("enter System");
     assert!(!browser.is_root());
     assert_eq!(browser.path(), "/System");
     assert_eq!(names(&browser), ["Fonts", "Security", "Kernel"]);
 
     assert_eq!(browser.go_up(), Ok(true));
     assert_eq!(browser.path(), "/");
-    assert_eq!(names(&browser), ["System", "Users", "Apps", "Storage"]);
+    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
 }
 
 #[test]
@@ -132,13 +135,13 @@ fn go_up_at_the_root_is_a_no_op() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     assert_eq!(browser.go_up(), Ok(false));
     assert!(browser.is_root());
-    assert_eq!(names(&browser), ["System", "Users", "Apps", "Storage"]);
+    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
 }
 
 #[test]
 fn opening_a_regular_file_is_rejected_and_changes_nothing() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.open_index(0).expect("enter System");
+    browser.open_index(2).expect("enter System");
     // Index 2 under /System is the regular file "Kernel".
     assert_eq!(browser.open_index(2), Err(BrowseError::NotADirectory));
     assert_eq!(browser.path(), "/System");
@@ -155,7 +158,7 @@ fn opening_an_out_of_range_index_is_rejected() {
 #[test]
 fn descending_into_an_unreadable_directory_fails_closed() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.open_index(0).expect("enter System");
+    browser.open_index(2).expect("enter System");
     // Index 1 under /System is "Security", which exists but is denied: the
     // read fails and the browser stays on /System with its entries intact.
     assert_eq!(
@@ -169,7 +172,7 @@ fn descending_into_an_unreadable_directory_fails_closed() {
 #[test]
 fn an_empty_directory_has_no_selection() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.open_index(0).expect("enter System");
+    browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter Fonts");
     assert_eq!(browser.path(), "/System/Fonts");
     assert!(browser.entries().is_empty());
@@ -180,7 +183,8 @@ fn an_empty_directory_has_no_selection() {
 #[test]
 fn open_selected_descends_into_the_selected_directory() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.select(1).expect("select Users");
+    // Sorted root order is [Apps, Storage, System, Users]; Users is index 3.
+    browser.select(3).expect("select Users");
     browser.open_selected().expect("enter Users");
     assert_eq!(browser.path(), "/Users");
     assert_eq!(names(&browser), ["alice"]);
@@ -245,8 +249,8 @@ fn render_highlights_the_selected_entry_with_the_accent() {
     let raised = Color::from(theme.palette().surface_raised).premultiply();
     // The path bar (top-left) carries the raised role.
     assert_eq!(surface.get(0, 0), Some(raised));
-    // Row 0 of the list (the path bar is row 0) is "System"; row 1 is the
-    // selected "Users", filled with the accent. Each row is the shared
+    // Row 0 of the list (the path bar is row 0) is "Apps"; row 1 is the
+    // selected "Storage", filled with the accent. Each row is the shared
     // font's glyph height plus the renderer's padding, so the selected fill
     // starts two rows down.
     let row_height = tairix_font::BitmapFont::inconsolata().glyph_height() + 4;
@@ -468,4 +472,241 @@ fn a_missing_directory_surfaces_the_fetch_refusal() {
         Err(Errno::NotFound),
         "the engine adds no authority and fabricates no listing"
     );
+}
+
+// --- FM1: richer entries, bundle recognition, and the shared sort --------
+
+use crate::entry::{is_bundle_name, EntryKind};
+use crate::sort::{sort_entries, SortDirection, SortKey, SortMode};
+
+/// Encode `(name, kind, size, modified)` children as one packed `DirEntry`
+/// stream — the metadata-carrying sibling of [`encoded_stream`].
+fn encoded_stream_meta(children: &[(&[u8], FileKind, u64, Time64)]) -> Vec<u8> {
+    let mut buf = vec![0u8; 4096];
+    let mut off = 0;
+    for (name, kind, size, modified) in children {
+        off += DirEntry {
+            kind: *kind,
+            size: *size,
+            allocated: 0,
+            modified: *modified,
+            name,
+        }
+        .encode_into(&mut buf[off..])
+        .expect("fits");
+    }
+    buf.truncate(off);
+    buf
+}
+
+#[test]
+fn entries_carry_size_and_modified_from_the_stream() {
+    let modified = Time64::new(1_700_000_000, 500).expect("canonical");
+    let stream = encoded_stream_meta(&[
+        (b"data.bin", FileKind::Regular, 4096, modified),
+        (b"Docs", FileKind::Directory, 0, Time64::from_secs(-100)),
+    ]);
+    let entries = entries_from_dir_stream(&stream).expect("valid");
+    // The stream order is preserved here (the browser applies the sort).
+    assert_eq!(entries[0].name(), "data.bin");
+    assert_eq!(entries[0].size(), 4096);
+    assert_eq!(entries[0].modified(), modified);
+    assert_eq!(entries[0].kind(), EntryKind::File);
+    assert_eq!(entries[1].name(), "Docs");
+    assert_eq!(entries[1].size(), 0);
+    assert_eq!(entries[1].modified(), Time64::from_secs(-100));
+    assert_eq!(entries[1].kind(), EntryKind::Directory);
+}
+
+#[test]
+fn a_bad_record_still_refuses_the_whole_listing() {
+    // A directory record whose kind byte is corrupt fails the whole stream:
+    // the metadata path never shows a partial listing (fail closed).
+    let mut stream = encoded_stream_meta(&[(b"ok", FileKind::Regular, 1, Time64::UNIX_EPOCH)]);
+    let mut bad = encoded_stream_meta(&[(b"x", FileKind::Regular, 0, Time64::UNIX_EPOCH)]);
+    bad[0] = 9;
+    stream.extend_from_slice(&bad);
+    assert_eq!(entries_from_dir_stream(&stream), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn is_bundle_name_matches_only_a_named_dot_app() {
+    assert!(is_bundle_name("Example.app"));
+    assert!(is_bundle_name("Text Editor.app"));
+    // Case-insensitive suffix so a volume's casing does not hide a bundle.
+    assert!(is_bundle_name("Thing.APP"));
+    // A base name is required: the bare suffix is not a bundle.
+    assert!(!is_bundle_name(".app"));
+    assert!(!is_bundle_name("app"));
+    assert!(!is_bundle_name("notes.txt"));
+    assert!(!is_bundle_name(""));
+    assert!(!is_bundle_name("Example.apple"));
+}
+
+#[test]
+fn a_dot_app_directory_is_a_bundle_not_a_folder_to_descend() {
+    let stream = encoded_stream(&[
+        (b"Editor.app", FileKind::Directory),
+        (b"plain", FileKind::Directory),
+        // A regular file that merely ends in .app is a file, not a bundle:
+        // only a *directory* named <Name>.app is a bundle.
+        (b"report.app", FileKind::Regular),
+    ]);
+    let entries = entries_from_dir_stream(&stream).expect("valid");
+    assert_eq!(entries[0].kind(), EntryKind::Bundle);
+    assert!(entries[0].is_bundle());
+    assert!(!entries[0].is_directory(), "a bundle is not descended into");
+    assert_eq!(entries[1].kind(), EntryKind::Directory);
+    assert!(entries[1].is_directory());
+    assert_eq!(entries[2].kind(), EntryKind::File);
+}
+
+#[test]
+fn a_browser_refuses_to_descend_into_a_bundle() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[(b"Editor.app", FileKind::Directory)]),
+    );
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root opens");
+    // The bundle is modelled as a sealed unit: the browser opens nothing
+    // itself (launching is the app layer's job), so descending is refused.
+    assert_eq!(browser.open_index(0), Err(BrowseError::NotADirectory));
+    assert!(browser.is_root());
+}
+
+/// A short listing spanning both groups and mixed case, in a deliberately
+/// unsorted source order.
+fn mixed_listing() -> Vec<Entry> {
+    vec![
+        Entry::new("banana.txt", EntryKind::File, 30, Time64::from_secs(300)),
+        Entry::directory("Zebra"),
+        Entry::new("Apple.txt", EntryKind::File, 10, Time64::from_secs(100)),
+        Entry::directory("apricot"),
+        Entry::new("Editor.app", EntryKind::Bundle, 0, Time64::from_secs(200)),
+        Entry::new("cherry.txt", EntryKind::File, 20, Time64::from_secs(400)),
+    ]
+}
+
+#[test]
+fn default_sort_is_directories_first_then_case_insensitive_name() {
+    let mut entries = mixed_listing();
+    sort_entries(&mut entries, SortMode::default_order());
+    let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
+    // Directories first (apricot < Zebra, case-folded); then files and the
+    // bundle together, case-insensitively by name.
+    assert_eq!(
+        ordered,
+        [
+            "apricot",
+            "Zebra",
+            "Apple.txt",
+            "banana.txt",
+            "cherry.txt",
+            "Editor.app",
+        ]
+    );
+}
+
+#[test]
+fn sort_by_size_descending_keeps_directories_first() {
+    let mut entries = mixed_listing();
+    sort_entries(
+        &mut entries,
+        SortMode {
+            key: SortKey::Size,
+            direction: SortDirection::Descending,
+        },
+    );
+    let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
+    // Directories still lead (grouping is fixed); among the rest, largest
+    // size first, with the two zero-size entries settled by the name tiebreak.
+    assert_eq!(
+        ordered,
+        [
+            "apricot",
+            "Zebra",
+            "banana.txt",
+            "cherry.txt",
+            "Apple.txt",
+            "Editor.app",
+        ]
+    );
+}
+
+#[test]
+fn sort_by_modified_orders_within_the_file_group() {
+    let mut entries = mixed_listing();
+    sort_entries(
+        &mut entries,
+        SortMode {
+            key: SortKey::Modified,
+            direction: SortDirection::Ascending,
+        },
+    );
+    let files: Vec<&str> = entries
+        .iter()
+        .filter(|e| !e.is_directory())
+        .map(Entry::name)
+        .collect();
+    // Earliest modified first: Apple(100) < Editor(200) < banana(300) < cherry(400).
+    assert_eq!(
+        files,
+        ["Apple.txt", "Editor.app", "banana.txt", "cherry.txt"]
+    );
+}
+
+#[test]
+fn sort_of_an_empty_listing_is_a_no_op() {
+    let mut entries: Vec<Entry> = Vec::new();
+    sort_entries(&mut entries, SortMode::default_order());
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn set_sort_mode_keeps_the_selection_on_the_same_entry() {
+    // A source whose entries only sort differently under each mode.
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream_meta(&[
+            (b"a.txt", FileKind::Regular, 300, Time64::UNIX_EPOCH),
+            (b"b.txt", FileKind::Regular, 100, Time64::UNIX_EPOCH),
+            (b"c.txt", FileKind::Regular, 200, Time64::UNIX_EPOCH),
+        ]),
+    );
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    // Default (name asc): [a, b, c]; select "b".
+    assert_eq!(browser.select(1), Ok(()));
+    assert_eq!(browser.selected_entry().map(Entry::name), Some("b.txt"));
+
+    browser.set_sort_mode(SortMode {
+        key: SortKey::Size,
+        direction: SortDirection::Ascending,
+    });
+    // Now [b(100), c(200), a(300)]; the selection followed "b" to index 0.
+    let names: Vec<&str> = browser.entries().iter().map(Entry::name).collect();
+    assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+    assert_eq!(browser.selected_entry().map(Entry::name), Some("b.txt"));
+    assert_eq!(browser.selected_index(), Some(0));
+    assert_eq!(browser.sort_mode().key, SortKey::Size);
+}
+
+#[test]
+fn set_sort_mode_is_a_no_op_when_the_mode_is_unchanged() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select(2).expect("select");
+    let before: Vec<String> = browser
+        .entries()
+        .iter()
+        .map(|e| e.name().to_string())
+        .collect();
+    browser.set_sort_mode(SortMode::default_order());
+    let after: Vec<String> = browser
+        .entries()
+        .iter()
+        .map(|e| e.name().to_string())
+        .collect();
+    assert_eq!(before, after);
+    assert_eq!(browser.selected_index(), Some(2));
 }

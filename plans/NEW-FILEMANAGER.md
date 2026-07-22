@@ -27,7 +27,7 @@ which the drift guard enforces.
 
 ## Status
 
-`planned` — every stage below (FM1–FM9) is `planned`. The starting point
+`in progress` — **FM1 is done**; FM2–FM9 are `planned`. The starting point
 is `plans/APPWIN.md` AW3/AW5 (done): the `files.app` `Run` binary composes
 the shared `lib/browse` `Browser` model + `render` renderer over the AW2
 window channel, parks on its event mailbox, and navigates by keyboard;
@@ -101,31 +101,30 @@ is host-proven in `lib/browse` against injected sources exactly as the AW1
 model was; the app work (painting, click routing, spawn) rides the desktop
 autoload vertical the AW3/AW5 interaction contract already drives.
 
-### FM1 — richer entries: metadata, kinds, and a stable sort `[ ]`
+### FM1 — richer entries: metadata, kinds, and a stable sort `[x]`
 
-The browser today knows only `Directory`/`File` and a name. Real file
-management needs size, timestamps, and a distinguishable kind, surfaced
-without breaking the transactional listing discipline.
+Done. `lib/browse::Entry` now carries `size: u64` and `modified: Time64`
+alongside its name and kind, mapped straight from the existing `fs_readdir`
+`DirEntry` stream (no new syscall); a bad record still refuses the *whole*
+listing (§5.4). `EntryKind` gained a `Bundle` variant — a `<Name>.app`
+directory is a sealed unit, so `Entry::is_directory` is `false` for it and
+`Browser::open_index` refuses to descend; the engine only models the
+distinction (FM6 owns the launch). `EntryKind::for_listing` / `is_bundle_name`
+are the one pure classifier both views share. `lib/browse::sort` adds
+`SortMode` (`SortKey` name/size/modified × `SortDirection`) and the pure
+`sort_entries` — directories first, then the key, with an alloc-free
+case-insensitive name tiebreak; the `Browser` applies it to every listing and
+`set_sort_mode` re-orders in place keeping the selection on the same entry
+(default: name-ascending). Host-tested in `lib/browse/src/tests.rs` (metadata
+mapping/refuse, `is_bundle_name`, bundle-not-descendable, the three sort keys +
+direction + empty, `set_sort_mode` selection-preserve); the order-dependent
+existing tests were updated to the sorted order. Docs:
+`docs/src/desktop/apps.md`, `lib/browse/README.md`. No app-behaviour change
+(the app repaints in FM2).
 
-- **`lib/browse::Entry` grows metadata**, fed from the existing
-  `fs_readdir` stream (`DirEntry` already carries kind, name, size,
-  allocated bytes, and the modification `Time64`) — no new syscall. Add
-  `size: u64`, `modified: Time64`, and a widened `EntryKind`
-  (`Directory`, `File`, plus a `Symlink`/`Special` variant added *only*
-  when the VFS surfaces it — a new variant, never overloading the two,
-  per the existing `entry.rs` note). `VfsDirectorySource` maps the extra
-  fields through; a bad record still refuses the *whole* listing (§5.4).
-- **A stable, documented default sort** in the engine: directories first,
-  then case-insensitive name order, with the sort key a pure function so
-  the picker and the manager order identically (§2.2). Sort mode
-  (name / size / modified, asc/desc) is engine state the app toggles;
-  the default is chosen for a general listing, not guessed (§2.16).
-- **The `.app` bundle is one item, not a directory to descend (§16.5).**
-  The engine recognises a `<Name>.app` entry as a *bundle* kind (a sealed
-  unit), so FM6's launch path and the icon layer treat it as an app, not
-  a folder — the engine models the distinction; it opens nothing itself.
-- Host tests: metadata decode/refuse, the sort key (dirs-first, ties,
-  case-folding, empty), bundle recognition. No app change yet.
+Deliberately deferred to a later stage (not FM1): a `Symlink`/`Special`
+variant is added only when the VFS surfaces such a kind (a new variant, never
+overloading the existing ones).
 
 ### FM2 — the item view: list and icon grid over `lib/controls` `[ ]`
 
