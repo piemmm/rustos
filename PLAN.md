@@ -3048,6 +3048,16 @@ are retained as a security bound (§24.4), not the unbounded
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
+Full **icon-bar** build-out (staged, `planned`) — `plans/NEW-TASKBAR.md`: a
+first-class, folder-organised program library (`lib/proglib`, programmatically
+add/removable via the `applib` command + the installer), a permanent
+file-manager icon, user-pinned shortcuts (`lib/taskpins`, pin-to-taskbar +
+drag), the notification area, and the always-rightmost Switchboard
+system-overview surface (`userland/gui/switchboard` hosting the existing
+`lib/controls::switchboard`, implementing `plans/desktop1.png` /
+`plans/desktop2a.png` — and where System Settings is reached, deliberately not
+the library).
+
 Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/wm` software compositor: premultiplied-alpha blending
   (Porter–Duff `over`), `Surface`/`geometry`, anti-aliased rounded corners via
