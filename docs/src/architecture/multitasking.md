@@ -287,3 +287,22 @@ status band is one `lib/abi` definition both sides share:
 `load_failure_reason(i32) -> Option<&str>` is the reverse map the parent
 reap uses. A refused load leaves nothing half-installed: no address space
 is registered and the admit-time bookkeeping is reclaimed.
+
+### The parent reports the refusal (DESK-2)
+
+Because a load refusal now arrives as the child's *exit status* rather than
+the `spawn` return, a launcher must inspect what it reaps. The desktop
+session is the worked example (`userland/gui/session`): every app started
+from the start menu is admitted immediately and its PID remembered under
+its launcher label, and the session's `CHILD_TOKEN` wait-set member reaps
+every exited child. On each reap it maps the status through the shared
+`launch_failure_report`, which consults `load_failure_reason`: a reserved
+`LOAD_*` code becomes a terse, named line on `stderr` (e.g. `desktop: Files
+failed to launch: signature or hash verification failed`), while a clean or
+ordinary exit reports nothing. A refused launch is therefore a loud,
+non-fatal diagnosis — the desktop keeps presenting and handling input,
+never freezing and never letting a failed app vanish without explanation
+(`AGENTS.md` §24.1, fail loud / degrade gracefully). Reusing
+`load_failure_reason` keeps the wording identical to every other launcher's
+diagnosis (`AGENTS.md` §2.2), so the shell and the desktop describe the same
+cause the same way.

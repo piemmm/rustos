@@ -79,7 +79,7 @@ mod program {
     use tairix_browse::{DirectorySource, VfsDirectorySource};
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        parse, window_control_event, CliError, Command, ConcludedPick, DesktopShell,
+        parse, reap_launched, window_control_event, CliError, Command, ConcludedPick, DesktopShell,
         DeviceInputSource, KeyboardInputSource, PickConclusion, SeatEventReader, SeatInputChannel,
         SessionPicker, SessionWindows, ShellWindowHost, APPEARANCE_LABEL, FILES_LABEL,
         FILES_LAUNCHER, FILES_RUN_PATH, TERMINAL_LABEL, TERMINAL_LAUNCHER, TERMINAL_RUN_PATH,
@@ -506,6 +506,14 @@ mod program {
         let mut identity = RtWindowIdentity::new();
         let mut sink = RtEventSink;
         let mut focused: Option<u64> = None;
+        // Every app in_flight from the desktop is admitted immediately and
+        // loads on its own task (asynchronous launch); a load refusal now
+        // surfaces as the child's reserved-`LOAD_*` exit status, not the
+        // `spawn` return. This table remembers each in_flight child's
+        // start-menu label so the `CHILD_TOKEN` reap below can name the app
+        // in the fail-loud diagnosis. An entry is removed when its child is
+        // reaped, so it never grows beyond the apps currently in flight.
+        let mut in_flight: BTreeMap<u64, &'static str> = BTreeMap::new();
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh root listing under the session's
@@ -558,34 +566,49 @@ mod program {
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
                 }
             } else if token == CHILD_TOKEN {
-                // Reap exited children and tear their windows down: the
-                // kernel already reclaimed a dead app's port and shm, and
-                // the reap resolves its pid back to the attested client
-                // whose windows must leave the desktop. Draining every
-                // reapable zombie here is safe — the non-blocking wait
-                // returns immediately when none remains.
-                loop {
-                    // Placeholder the kernel overwrites on a successful
-                    // reap; the loop only needs the pid.
-                    let mut status = WaitStatus::Exited(0);
-                    let pid = tairix_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::NONBLOCK);
-                    if pid <= 0 {
-                        break;
-                    }
-                    #[allow(clippy::cast_sign_loss)] // `pid > 0` checked above.
-                    if let Some(client) = identity.take_by_pid(pid as u64) {
-                        let mut bridge = ShellWindowHost {
-                            shell: &mut shell,
-                            compositor: &mut compositor,
-                            windows: &mut windows,
-                            picker: &mut picker,
-                        };
-                        server.client_exited(&mut bridge, client);
-                        if focused.is_some_and(|id| server.owner_of(id).is_none()) {
-                            focused = None;
+                // Reap every exited child in one wake and act on each: a child
+                // whose asynchronous load was refused exits with a reserved
+                // `LOAD_*` status (the load ran on the child's own task, so
+                // the refusal arrives here, not at `spawn`), which is reported
+                // fail-loud on `stderr` named by its launcher label; and every
+                // reaped child — refused or clean — has its windows torn down
+                // (the kernel already reclaimed its port and shm). Draining
+                // fully is safe and never busy-waits: the non-blocking `wait`
+                // yields nothing once no zombie remains. The whole
+                // reap/report/teardown flow is the shared, host-tested
+                // `reap_launched`.
+                reap_launched(
+                    &mut in_flight,
+                    || {
+                        // Placeholder the kernel overwrites on a successful
+                        // reap; only the pid and status are needed.
+                        let mut status = WaitStatus::Exited(0);
+                        let pid = tairix_rt::wait(WAIT_PID_ANY, &mut status, WaitFlags::NONBLOCK);
+                        if pid > 0 {
+                            #[allow(clippy::cast_sign_loss)] // guarded by `pid > 0`.
+                            Some((pid as u64, status))
+                        } else {
+                            None
                         }
-                    }
-                }
+                    },
+                    |line| {
+                        let _ = tairix_rt::stderr(line.as_bytes());
+                    },
+                    |pid| {
+                        if let Some(client) = identity.take_by_pid(pid) {
+                            let mut bridge = ShellWindowHost {
+                                shell: &mut shell,
+                                compositor: &mut compositor,
+                                windows: &mut windows,
+                                picker: &mut picker,
+                            };
+                            server.client_exited(&mut bridge, client);
+                            if focused.is_some_and(|id| server.owner_of(id).is_none()) {
+                                focused = None;
+                            }
+                        }
+                    },
+                );
             } else if token == SEAT_TOKEN {
                 // Drain both input channels through the shell, routing
                 // every outcome onward (to the focused app window, or the
@@ -609,6 +632,7 @@ mod program {
                         &mut sink,
                         &mut identity,
                         &mut picker,
+                        &mut in_flight,
                     );
                 }
                 loop {
@@ -627,6 +651,7 @@ mod program {
                                 &mut sink,
                                 &mut identity,
                                 &mut picker,
+                                &mut in_flight,
                             );
                         }
                         Err(err) => return drain_fault(err),
@@ -659,6 +684,7 @@ mod program {
         sink: &mut RtEventSink,
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
+        in_flight: &mut alloc::collections::BTreeMap<u64, &'static str>,
     ) {
         use tairix_desktop_session::{SessionEvent, ShellOutcome};
         match outcome {
@@ -856,36 +882,59 @@ mod program {
                 ..
             })) if launcher == FILES_LAUNCHER => {
                 // Spawn the file browser under the session's own identity
-                // and ceiling; a refusal (missing bundle, stripped spawn
-                // capability) is reported and the desktop carries on — a
-                // denied optional action never ends the session.
-                if tairix_rt::spawn(FILES_RUN_PATH) < 0 {
-                    let _ = tairix_rt::stderr(b"desktop: files launch refused\n");
-                }
+                // and ceiling; the child is admitted and returns its PID at
+                // once (asynchronous launch), loading on its own task. A
+                // synchronous refusal (stripped spawn capability, malformed
+                // path) is reported here; a load refusal surfaces later as
+                // the child's exit status, reported by the reap. Either way
+                // a denied optional action never ends the session.
+                record_launch(in_flight, tairix_rt::spawn(FILES_RUN_PATH), FILES_LABEL);
             }
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
                 action: MenuAction::Launch(launcher),
                 ..
             })) if launcher == TERMINAL_LAUNCHER => {
-                // The terminal, exactly as the file browser above: spawned
-                // from the on-disk store bundle, refusal reported, desktop
-                // carries on.
-                if tairix_rt::spawn(TERMINAL_RUN_PATH) < 0 {
-                    let _ = tairix_rt::stderr(b"desktop: terminal launch refused\n");
-                }
+                // The terminal, exactly as the file browser above: admitted
+                // immediately, loaded on its own task, refusal reported
+                // (synchronously here or by the reap), desktop carries on.
+                record_launch(
+                    in_flight,
+                    tairix_rt::spawn(TERMINAL_RUN_PATH),
+                    TERMINAL_LABEL,
+                );
             }
             ShellOutcome::Session(SessionEvent::Forward(TaskbarResponse::MenuEntrySelected {
                 action: MenuAction::Launch(launcher),
                 ..
             })) if launcher == VIEWER_LAUNCHER => {
-                // The file viewer, exactly as the apps above: spawned from
-                // the on-disk store bundle, refusal reported, desktop
-                // carries on.
-                if tairix_rt::spawn(VIEWER_RUN_PATH) < 0 {
-                    let _ = tairix_rt::stderr(b"desktop: viewer launch refused\n");
-                }
+                // The file viewer, exactly as the apps above: admitted
+                // immediately, loaded on its own task, refusal reported
+                // (synchronously here or by the reap), desktop carries on.
+                record_launch(in_flight, tairix_rt::spawn(VIEWER_RUN_PATH), VIEWER_LABEL);
             }
             _ => {}
+        }
+    }
+
+    /// Record a just-issued launch. Asynchronous launch admits the child and
+    /// returns its PID (`ret > 0`) before the image is loaded, so a
+    /// successful admit only *starts* the launch: remember the PID under its
+    /// start-menu label so the `CHILD_TOKEN` reap can name the app if its
+    /// load is later refused (via the child's reserved-`LOAD_*` exit status).
+    /// A synchronous refusal (`ret < 0` — a stripped spawn capability or a
+    /// malformed path, decided before any child exists) is reported fail-loud
+    /// at once. Either way a denied optional launch never ends the session.
+    fn record_launch(
+        in_flight: &mut alloc::collections::BTreeMap<u64, &'static str>,
+        ret: i64,
+        label: &'static str,
+    ) {
+        if ret < 0 {
+            let _ =
+                tairix_rt::stderr(alloc::format!("desktop: {label} launch refused\n").as_bytes());
+        } else {
+            #[allow(clippy::cast_sign_loss)] // `ret >= 0` in this branch; it is a PID.
+            in_flight.insert(ret as u64, label);
         }
     }
 

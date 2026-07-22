@@ -133,6 +133,7 @@ pub mod config;
 pub mod device;
 pub mod input;
 pub mod keyboard;
+pub mod launch;
 pub mod picker;
 pub mod presenter;
 pub mod seat;
@@ -153,6 +154,7 @@ pub use config::{
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
+pub use launch::{launch_failure_report, reap_launched};
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };

@@ -544,15 +544,27 @@ Each stage is independently reviewable and must leave the whole-project
   spawn/session verticals still pass.
 
 ### DESK-2 — Desktop launcher no longer freezes (proves the fix)
-- **Deliverables:** `userland/gui/session/src/run.rs` launcher arms are
-  unchanged in code (they already call `spawn` and reap via
-  `CHILD_TOKEN`) but now return immediately; a child that exits with a
-  load-failure status is reported on `stderr` (`§24.1`) instead of
-  vanishing silently. Add the reserved-status → message mapping.
-- **Tests:** a QEMU desktop vertical that launches an app and asserts the
-  compositor keeps presenting/handling input during the load (a present
-  count / input echo advances while a child is mid-load); a refused
-  launch surfaces the diagnosis and the desktop survives.
+- **Deliverables:** `userland/gui/session/src/run.rs` launcher arms return
+  immediately (they issue `spawn`, which now only *admits* the child), and
+  a child that exits with a reserved `LOAD_*` status is reported on `stderr`
+  (`§24.1`) named by its launcher label instead of vanishing silently. The
+  reserved-status → message mapping is `lib/abi::load_failure_reason` (the
+  one shared definition, `§2.2`); the desktop remembers each launched
+  child's label (`in_flight` map) and the whole reap-and-report flow is the
+  host-tested `reap_launched` in `userland/gui/session/src/launch.rs`.
+- **Tests:** the reap-and-report path is host-tested end to end
+  (`launch::tests`): a scripted multi-child drain reports only the reserved
+  refusal (named), a clean exit reports nothing, an unrecorded child is
+  still reported under a fallback label, every reaped PID reaches teardown,
+  and the decision function maps every reserved status / ignores every
+  ordinary exit or stop. The *responsiveness* half needs no bespoke display
+  vertical: the compositor loop presents once per wait-set wake and no
+  longer blocks on `spawn` at all — that is DESK-1's admit-then-load, which
+  the per-arch spawn verticals already prove (admit returns a PID without
+  touching bundle bytes; a bad bundle admits then exits with the reserved
+  status). Reusing those proofs instead of standing up a display/seat/input
+  QEMU harness purely to scrape a `stderr` string avoids disproportionate
+  test scaffolding (`§2.3`) while covering the actual DESK-2 logic.
 
 ### DESK-3 — Same fix, other interactive loops
 - **Deliverables:** confirm `elsh` foreground launch and the terminal
@@ -688,7 +700,24 @@ Each stage is independently reviewable and must leave the whole-project
     driver_spawn, driver_unload) exercise the admit-then-load path end to end.
     Docs: `docs/src/architecture/multitasking.md` documents the asynchronous
     launch and the reserved statuses.
-- **DESK-2 … DESK-7 — planned.**
+- **DESK-2 — done.** The desktop launcher no longer freezes and a refused
+  launch is loud, not silent. Each start-menu launch admits its child and
+  returns at once (DESK-1), and the session remembers the child's launcher
+  label in an `in_flight` map. The `CHILD_TOKEN` reap runs the shared,
+  host-tested `reap_launched` (`userland/gui/session/src/launch.rs`): it
+  drains every zombie in one wake (no busy-wait), drops each `in_flight`
+  entry, tears the child's windows down, and — for a child that exited with
+  a reserved `LOAD_*` status — writes a terse `stderr` line named by its
+  label (`desktop: <App> failed to launch: <reason>`), the reason being
+  `lib/abi::load_failure_reason` (the one shared mapping, so every launcher
+  words a cause identically). A clean or ordinary exit reports nothing; an
+  unrecorded child still reports under a fallback label so no refusal is
+  dropped. Responsiveness is a structural consequence of DESK-1 (the
+  compositor loop presents once per wake and never blocks on `spawn`), so no
+  bespoke display QEMU vertical is needed; the reap-and-report logic is
+  covered by `launch::tests`. Docs: the "parent reports the refusal"
+  subsection in `docs/src/architecture/multitasking.md`.
+- **DESK-3 … DESK-7 — planned.**
 
 ---
 
