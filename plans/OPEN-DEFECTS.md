@@ -37,12 +37,12 @@ The open items, in priority order:
 - **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE.**
   Root-caused to a lost-wakeup in the vertical's own secondary-CPU idle
   loop and fixed structurally (not a load artifact, not a budget bump).
-- **D6 — Pre-existing `docs-check` failure documenting `tairix-kernel`.**
-  `cargo xtask ci`'s `docs-check` step fails closed with `error[E0432]:
-  unresolved import tairix_abi::driver::virtio_pci::virtio_pci_window_resource`
-  while documenting `kernel/tairix-kernel/src/hwdiscovery.rs`, blocking a
-  fully green gate. Not a kernel-logic defect: it is a cross-crate rustdoc
-  resolution failure, unrelated to any current feature work.
+- **D6 — `docs-check` cross-crate rustdoc failure documenting
+  `tairix-kernel` — NON-REPRODUCING.** Formerly a `cargo xtask ci`
+  `docs-check` failure (`error[E0432]: unresolved import
+  tairix_abi::driver::virtio_pci::virtio_pci_window_resource`); it does
+  not reproduce on the pinned toolchain from a full `cargo clean`. Kept on
+  record with its reproduction procedure in case it recurs.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -260,14 +260,17 @@ tested protocol, and the vertical now runs it.
 
 ---
 
-## D6 — Pre-existing `docs-check` failure documenting `tairix-kernel`
+## D6 — `docs-check` cross-crate rustdoc failure documenting `tairix-kernel` — NON-REPRODUCING (monitoring)
 
-**State:** open, pre-existing (reproduces on a clean tree). It is
-independent of feature work: unrelated changes elsewhere pass the whole
-gate up to `docs-check`, which then fails.
+**State:** does **not** reproduce on the pinned toolchain
+(`nightly-2026-07-03`); `docs-check` is green. Kept on record — not
+deleted — so that a recurrence has its prior context and its
+reproduction procedure to hand.
 
-**Symptom.** `cargo xtask ci` → `docs-check` (`cargo doc` with
-`RUSTDOCFLAGS="-D warnings"`) fails while documenting `tairix-kernel`:
+**Prior symptom (historical).** `cargo xtask ci` → `docs-check`
+(`cargo doc --workspace --no-deps --document-private-items
+-Z rustdoc-mergeable-info`, `RUSTDOCFLAGS="-D warnings"`) was reported to
+fail while documenting `tairix-kernel`:
 
 ```
 error[E0432]: unresolved import
@@ -275,18 +278,29 @@ error[E0432]: unresolved import
  --> kernel/tairix-kernel/src/hwdiscovery.rs:24:5
 ```
 
-**Not a kernel-logic defect.** `virtio_pci_window_resource` is a real,
-unconditional `pub fn` in `lib/abi/src/driver/virtio_pci.rs` (no `cfg`,
-no feature gate); `tairix-abi` documents cleanly on its own
-(`cargo doc -p tairix-abi --no-deps` succeeds) and the kernel *compiles*
-for its bare-metal targets. Only the cross-crate rustdoc pass documenting
-`tairix-kernel` on the host fails to resolve the import.
+`virtio_pci_window_resource` is a real, unconditional `pub fn` in
+`lib/abi/src/driver/virtio_pci.rs` (no `cfg`, no feature gate), so the
+failure was a cross-crate rustdoc resolution issue under the unstable
+`-Z rustdoc-mergeable-info` mergeable-info model, never a kernel-logic
+defect.
 
-**What remains.** Root-cause the cross-crate rustdoc resolution failure
-(rustdoc under the pinned nightly documenting `tairix-kernel` against the
-`tairix-abi` rmeta) and restore a green `docs-check`. Fix in its own
-change on a whole-project-green gate (§7); do not fold it into unrelated
-work.
+**Reproduction attempted, could not reproduce.** The exact CI command was
+run standalone — from a warm cache, from `cargo clean --doc`, and from a
+full `cargo clean` (cold compile of every dependency's rmeta) — and each
+run documented all 373 crates and merged cleanly (`cargo doc -p
+tairix-kernel --no-deps` succeeds too). `cargo xtask docs-check`
+(rustdoc + mdBook + link check) passes end to end. The host carries no
+`sccache`/`RUSTC_WRAPPER` and no shared `CARGO_TARGET_DIR`, so this is not
+a stale-cache artefact.
+
+**If it recurs.** Treat it as a real cross-crate-rustdoc / mergeable-info
+defect (not a load flake, §7): capture whether it appears only under the
+concurrent `cargo xtask ci` static-gate group (memory pressure) vs.
+standalone, and the structural fix is to drop `-Z rustdoc-mergeable-info`
+from `run_docs_check` (`tools/xtask/src/commands.rs`) — the mergeable-info
+model is a doc-build *speed* optimisation, and correctness of the doc
+build takes precedence (§2.16). Do not reinstate the flag until the
+resolution failure is root-caused in rustdoc.
 
 ---
 
@@ -363,7 +377,7 @@ reach once D8 is closed.
 
 ## Definition of done (whole plan, §7/§15/§23)
 
-This umbrella is closed only when D1–D6 are each closed on their own
+This umbrella is closed only when D1–D8 are each closed on their own
 whole-project-green gate:
 
 - D1: syscall-body verticals green on all bare-metal targets + wasm32
@@ -379,9 +393,11 @@ whole-project-green gate:
   to a lost-wakeup in the vertical's secondary idle loop and structurally
   fixed (production masked-park protocol); a full `cargo xtask ci` is
   whole-project-green.
-- D6: the cross-crate rustdoc `docs-check` failure documenting
-  `tairix-kernel` root-caused and fixed; `cargo xtask ci` (`docs-check`
-  included) whole-project-green again.
+- D6: **NON-REPRODUCING** — the cross-crate rustdoc `docs-check` failure
+  documenting `tairix-kernel` does not reproduce on the pinned toolchain
+  (verified from a full `cargo clean`); `cargo xtask ci` (`docs-check`
+  included) is whole-project-green. Recorded with its reproduction
+  procedure in case it recurs.
 - D7: **DONE** — the x86_64 disk-completion-interrupt triple fault
   root-caused (external-IRQ frame offset + shared IO-APIC-pin MSI vector)
   and fixed; `root_unlock_admission_qemu_x86_64` reaches the `/System`
