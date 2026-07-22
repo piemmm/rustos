@@ -217,6 +217,17 @@ in either family are answered (reported as
 inbound direction without a second decode path); `send_echo_request`
 and `StackEvent::EchoReply` support the diagnostic path.
 
+The engine is stateless for the transport protocols: a validated inbound
+UDP datagram surfaces as `StackEvent::UdpDatagram` and a checksum-verified
+inbound TCP segment as `StackEvent::TcpSegment` (the raw segment bytes plus
+its addressing context), leaving demultiplexing to a socket — and, for TCP,
+the per-connection `tcp::conn::Tcb` — to the `netstack` service. Origination
+is the mirror: `Stack::send_datagram` (above) and `Stack::send_tcp` select
+the source address, resolve the next hop, fold the mandatory pseudo-header
+checksum (via `udp::write` / `tcp::write`), and IP-wrap the message. TCP is
+always unicast, so `send_tcp` refuses a multicast/broadcast/unspecified
+destination (`SendError::NotUnicast`).
+
 ### `udp` — the dual-stack UDP codec
 
 One parse/emit core (RFC 768) folding the family-appropriate
@@ -312,12 +323,18 @@ buffer and the reassembly set are capacity-bounded and fail closed;
 addresses never enter the TCB (the caller folds the pseudo-header
 checksum through `tcp::write`), so it is address-family agnostic.
 Congestion control (a pluggable policy), listeners with an accept queue,
-and SYN cookies are the next increment (N6).
+and SYN cookies are the next increment (N6). The connection engine is
+driven end to end through the `Stack` demux/originate paths above by the
+`netstack` `SocketService` stream sockets (N5c): the service owns one `Tcb`
+per connection and turns `Connect`/`Send`/`Close` and inbound
+`StackEvent::TcpSegment`s into segment egress and client-visible
+`SocketStreamEvent`s.
 
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place —
-the stream-socket surface and the QEMU connect/bulk-transfer vertical
-(N5c), then listeners + congestion control (N6) and the hardware
-offloads (N7). Each is added with its callers, tests, and fuzz harnesses
-per increment.
+the stream-socket surface is landed (N5c: `Stack` TCP demux/`send_tcp` and
+the `netstack` stream sockets), with its live QEMU connect/bulk-transfer
+vertical still to come; then listeners + congestion control (N6) and the
+hardware offloads (N7). Each is added with its callers, tests, and fuzz
+harnesses per increment.

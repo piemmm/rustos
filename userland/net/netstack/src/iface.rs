@@ -20,6 +20,7 @@ use tairix_abi::net_ipc::{
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::stack::{SendError, Stack, StackConfig, StackEvent};
+use tairix_net::tcp::TcpSegmentMeta;
 
 use crate::channel::FrameService;
 
@@ -279,6 +280,73 @@ impl Netstack {
             return Err(deferred.unwrap_or(Errno::NetworkUnreachable));
         }
         Ok(batches)
+    }
+
+    /// Originate one TCP segment out the interface named `name`.
+    ///
+    /// A connected stream is bound to one egress interface for its life
+    /// (chosen by [`choose_tcp_egress`](Self::choose_tcp_egress) at
+    /// connect), so every later segment — data, ACKs, retransmits — is
+    /// sent through this fixed link.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no interface bears `name` (its link is
+    ///   gone; the caller drops the segment and the engine retransmits).
+    /// * [`Errno::NetworkUnreachable`] / [`Errno::MessageTooLarge`] — the
+    ///   engine refused the segment (no route/source, link down, or a
+    ///   segment past the path MTU).
+    pub fn send_tcp_on(
+        &mut self,
+        name: [u8; IF_NAME_LEN],
+        dest: IpAddr,
+        meta: &TcpSegmentMeta,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<Vec<Vec<u8>>, Errno> {
+        let index = self.find(name).ok_or(Errno::NotFound)?;
+        match self.interfaces[index]
+            .stack
+            .send_tcp(dest, meta, payload, now)
+        {
+            Ok(out) => Ok(out.frames),
+            Err(SendError::TooLarge) => Err(Errno::MessageTooLarge),
+            Err(_) => Err(Errno::NetworkUnreachable),
+        }
+    }
+
+    /// Choose the egress interface for a new TCP connection to `dest` by
+    /// originating its first segment (the SYN): the first interface whose
+    /// engine accepts it becomes the connection's fixed egress, returning
+    /// that interface's alias and the frames the SYN produced (which may be
+    /// the neighbour-resolution frames, the SYN itself parking until the
+    /// neighbour answers — exactly the datagram/echo behaviour).
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NetworkUnreachable`] — no interface has a route, a usable
+    ///   source address, and an up link to `dest`.
+    /// * [`Errno::OutOfRange`] — `dest` is not a legal unicast TCP
+    ///   destination (multicast / broadcast / unspecified).
+    /// * [`Errno::MessageTooLarge`] — the SYN did not fit an otherwise
+    ///   matching interface's path.
+    pub fn choose_tcp_egress(
+        &mut self,
+        dest: IpAddr,
+        meta: &TcpSegmentMeta,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<([u8; IF_NAME_LEN], Vec<Vec<u8>>), Errno> {
+        let mut deferred: Option<Errno> = None;
+        for iface in &mut self.interfaces {
+            match iface.stack.send_tcp(dest, meta, payload, now) {
+                Ok(out) => return Ok((iface.name, out.frames)),
+                Err(SendError::NotUnicast) => return Err(Errno::OutOfRange),
+                Err(SendError::TooLarge) => deferred = Some(Errno::MessageTooLarge),
+                Err(_) => deferred = deferred.or(Some(Errno::NetworkUnreachable)),
+            }
+        }
+        Err(deferred.unwrap_or(Errno::NetworkUnreachable))
     }
 
     /// Whether any managed interface owns the local address `addr` of

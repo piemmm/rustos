@@ -970,3 +970,230 @@ fn ipv6_multicast_datagram_transmit_reaches_a_member() {
         } if *d == GROUP_V6 && payload == b"mcast6"
     )));
 }
+
+// --- TCP over the engine (N5c Layer 1) ---------------------------------
+//
+// The engine is stateless for TCP: it demultiplexes a checksum-valid
+// inbound segment to a `StackEvent::TcpSegment` and originates a segment
+// (folding the pseudo-header checksum over the source it selects) through
+// `send_tcp`. The connection state machine is the `tcp::conn::Tcb`. These
+// tests wire two `Tcb`s across two back-to-back `Stack`s, exactly as the
+// live `netstack` does, and prove a real handshake and bidirectional data
+// transfer flow through the new demux/originate paths.
+
+use crate::tcp::conn::{State, Tcb, TcpConfig};
+use crate::tcp::TcpSegment;
+
+const A_PORT: u16 = 40000;
+const B_PORT: u16 = 80;
+
+/// One side of the TCP link: its engine, its connection, and the peer
+/// address its segments are sent to.
+struct TcpSide {
+    stack: Stack,
+    tcb: Tcb,
+    peer: IpAddr,
+}
+
+impl TcpSide {
+    /// Drain the connection's outbound segments through the engine,
+    /// returning the frames to hand the peer's engine.
+    fn transmit(&mut self, now: Duration64) -> Vec<Vec<u8>> {
+        let stack = &mut self.stack;
+        let peer = self.peer;
+        let mut frames = Vec::new();
+        self.tcb.poll_transmit(now, |seg| {
+            // A momentary resolution/route miss parks the segment in the
+            // engine, which emits it on resolution; treat it as sent.
+            if let Ok(out) = stack.send_tcp(peer, &seg.meta, seg.payload, now) {
+                frames.extend(out.frames);
+            }
+            true
+        });
+        frames
+    }
+
+    /// Feed one frame into the engine, feeding any surfaced TCP segment
+    /// into the connection and returning the engine's reply frames.
+    fn receive(&mut self, frame: &[u8], now: Duration64) -> Vec<Vec<u8>> {
+        let out = self.stack.on_frame(frame, now);
+        for event in &out.events {
+            if let StackEvent::TcpSegment {
+                source,
+                destination,
+                segment,
+            } = event
+            {
+                let pseudo = match (source, destination) {
+                    (IpAddr::V4(s), IpAddr::V4(d)) => Pseudo::V4 {
+                        source: *s,
+                        destination: *d,
+                    },
+                    (IpAddr::V6(s), IpAddr::V6(d)) => Pseudo::V6 {
+                        source: *s,
+                        destination: *d,
+                    },
+                    _ => continue,
+                };
+                if let Some(seg) = TcpSegment::parse(pseudo, segment) {
+                    self.tcb.on_segment(&seg, now);
+                }
+            }
+        }
+        out.frames
+    }
+}
+
+/// Run the two sides until the link is quiet at `now`: transmit both
+/// connections' due segments and the engines' timer output, then exchange
+/// every frame (feeding surfaced TCP segments into the connections) until
+/// nothing more moves. A frame `X.transmit()` produces is destined for the
+/// *peer*, so it is always enqueued onto the peer's inbound queue.
+fn drive_tcp(a: &mut TcpSide, b: &mut TcpSide, now: Duration64) {
+    let mut to_b: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut to_a: VecDeque<Vec<u8>> = VecDeque::new();
+    a.tcb.advance(now);
+    b.tcb.advance(now);
+    to_b.extend(a.stack.advance(now).frames);
+    to_a.extend(b.stack.advance(now).frames);
+    to_b.extend(a.transmit(now));
+    to_a.extend(b.transmit(now));
+    for _ in 0..256 {
+        if to_a.is_empty() && to_b.is_empty() {
+            // Both sides may still owe a segment (e.g. an ACK unlocked by
+            // a delivered segment); pull once more before concluding.
+            to_b.extend(a.transmit(now));
+            to_a.extend(b.transmit(now));
+            if to_a.is_empty() && to_b.is_empty() {
+                break;
+            }
+        }
+        if let Some(frame) = to_b.pop_front() {
+            to_a.extend(b.receive(&frame, now));
+            to_a.extend(b.transmit(now));
+        }
+        if let Some(frame) = to_a.pop_front() {
+            to_b.extend(a.receive(&frame, now));
+            to_b.extend(a.transmit(now));
+        }
+    }
+}
+
+fn tcp_pair() -> (TcpSide, TcpSide) {
+    let mut sa = stack(MAC_A, IID_A);
+    let mut sb = stack(MAC_B, IID_B);
+    sa.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    sb.set_ipv4_config(V4_B, 24, None).expect("configure B");
+    let cfg = TcpConfig::default();
+    let a = TcpSide {
+        stack: sa,
+        tcb: Tcb::connect(cfg, A_PORT, B_PORT, 1000, t(0)),
+        peer: IpAddr::V4(V4_B),
+    };
+    let b = TcpSide {
+        stack: sb,
+        // Passive open: the listener learns the client port from the SYN.
+        tcb: Tcb::listen(cfg, B_PORT, 0, 5000),
+        peer: IpAddr::V4(V4_A),
+    };
+    (a, b)
+}
+
+#[test]
+fn tcp_handshake_and_bidirectional_data_over_the_engine() {
+    let (mut a, mut b) = tcp_pair();
+    // A time step past the default delayed-ACK (100 ms) each round, so an
+    // owed ACK is always released, keeping the conversation progressing.
+    let mut clock = 1u64;
+    let mut step = || {
+        let now = Duration64::from_nanos(clock * 200_000_000);
+        clock += 1;
+        now
+    };
+
+    // Handshake.
+    for _ in 0..8 {
+        drive_tcp(&mut a, &mut b, step());
+        if a.tcb.is_established() && b.tcb.is_established() {
+            break;
+        }
+    }
+    assert_eq!(a.tcb.state(), State::Established, "client established");
+    assert_eq!(b.tcb.state(), State::Established, "server established");
+    // The listener learned the client's port from the SYN.
+    assert_eq!(b.tcb.remote_port(), A_PORT);
+
+    // Client -> server data.
+    a.tcb.send(b"hello over tcp").expect("client send");
+    for _ in 0..8 {
+        drive_tcp(&mut a, &mut b, step());
+    }
+    let mut got = [0u8; 64];
+    let n = b.tcb.recv(&mut got);
+    assert_eq!(&got[..n], b"hello over tcp", "server received client data");
+
+    // Server -> client data.
+    b.tcb.send(b"and back again").expect("server send");
+    for _ in 0..8 {
+        drive_tcp(&mut a, &mut b, step());
+    }
+    let mut got = [0u8; 64];
+    let n = a.tcb.recv(&mut got);
+    assert_eq!(&got[..n], b"and back again", "client received server data");
+
+    // Orderly close from the client: the server observes the peer FIN.
+    a.tcb.close(step()).expect("client close");
+    for _ in 0..8 {
+        drive_tcp(&mut a, &mut b, step());
+    }
+    assert!(
+        matches!(
+            b.tcb.state(),
+            State::CloseWait | State::LastAck | State::Closing | State::Closed
+        ),
+        "server saw the peer FIN, state = {:?}",
+        b.tcb.state()
+    );
+}
+
+#[test]
+fn tcp_bulk_transfer_over_the_engine() {
+    let (mut a, mut b) = tcp_pair();
+    let mut clock = 1u64;
+    let mut step = || {
+        let now = Duration64::from_nanos(clock * 200_000_000);
+        clock += 1;
+        now
+    };
+    for _ in 0..8 {
+        drive_tcp(&mut a, &mut b, step());
+        if a.tcb.is_established() && b.tcb.is_established() {
+            break;
+        }
+    }
+    assert!(a.tcb.is_established() && b.tcb.is_established());
+
+    // A payload well past one MSS, so it exercises segmentation, windowing,
+    // and cumulative ACKs through the real engine.
+    let payload: Vec<u8> = (0..8000u32).map(|i| (i % 251) as u8).collect();
+    let mut offered = 0usize;
+    let mut received: Vec<u8> = Vec::new();
+    for _ in 0..200 {
+        if offered < payload.len() {
+            offered += a.tcb.send(&payload[offered..]).expect("send");
+        }
+        drive_tcp(&mut a, &mut b, step());
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = b.tcb.recv(&mut buf);
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+        }
+        if received.len() == payload.len() {
+            break;
+        }
+    }
+    assert_eq!(received, payload, "bulk stream arrived intact and in order");
+}

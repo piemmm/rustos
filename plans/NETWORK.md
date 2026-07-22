@@ -902,13 +902,36 @@ the whole is too large for one change and each leaves the tree working.
   (two live TCBs + a hostile parseable-segment injector; asserts no panic
   and that every emitted segment re-parses).
 
-#### N5c — the stream socket surface + QEMU vertical `[ ]`
-- `SocketType::Stream` wired through the socket ABI + `netstack`
-  (`listen`/`accept`/`shutdown` are N6); a QEMU vertical: client connect
-  to a host peer, bulk transfer both directions with loss injection.
-  (The shared QEMU peer + wire fixture are v6-link-local-only after the
-  §18.5 scaffold removal — a vertical needing v4 or a bulk campaign
-  re-adds that topology here, not by resurrecting the deleted path.)
+#### N5c — the stream socket surface + QEMU vertical `[~]`
+- **The software path is landed and host-gate-green.** `SocketType::Stream`
+  is wired through the whole stack:
+  - `lib/net::stack`: the engine gained a `StackEvent::TcpSegment`
+    receive-demux (checksum-verified, v4 + v6) and a `Stack::send_tcp`
+    origination path (source selection + pseudo-header checksum via
+    `tcp::write` + IP-wrap; unicast-only, fail-closed) — the engine stays
+    stateless for TCP, mirroring UDP. Covered by two back-to-back-`Stack`
+    engine tests (handshake + bidirectional data, and an 8 KB bulk transfer).
+  - `lib/abi::net`: `SocketType::Stream`, the accepted-byte-count `Send`
+    reply (`encode_send_reply`), and the `SocketStreamEvent` delivery frame
+    (`Connected`/`Data`/`Closed` + `StreamCloseReason`) — the
+    connection-oriented analogue of `SocketDatagram`. Host-tested and fuzzed
+    (`fuzz_decode` gained the stream-event round-trip arm).
+  - `netstack`: `SocketService` is now one origin-keyed table over datagram
+    **and** stream sockets (`Proto::{Datagram,Stream}`), owning one `Tcb` per
+    connection. `Connect` actively opens (CSPRNG ISN, egress interface chosen
+    once); inbound `StackEvent::TcpSegment`s drive the `Tcb`; the service
+    turns the results into segment egress and client `SocketStreamEvent`s;
+    stream timers fold into `stream_next_deadline`/`advance_streams`. `run.rs`
+    drives the stream pump in the event loop. A netstack stream connect+echo
+    test exercises the real pump against a passive-peer echo server.
+  - `lib/rt::net`: `stream_socket`/`stream_send`/`stream_recv` client
+    wrappers (`connect`/`close` shared with datagrams).
+  `listen`/`accept`/`shutdown` remain N6.
+- **Remaining: the live QEMU vertical** — client connect to a host peer with
+  bulk transfer both directions and loss injection. (The shared QEMU peer +
+  wire fixture are v6-link-local-only after the §18.5 scaffold removal — this
+  vertical re-adds the v4/bulk topology here, not by resurrecting the deleted
+  path.)
 
 ### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[ ]`
 - `listen`/`accept` with bounded accept + SYN queues; overflow ⇒

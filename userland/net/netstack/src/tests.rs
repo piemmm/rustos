@@ -9,7 +9,8 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, Net, NetOffloa
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::net::{
-    decode_bind_reply, decode_socket_reply, SocketAddr, SocketRequest, SocketType,
+    decode_bind_reply, decode_send_reply, decode_socket_reply, SocketAddr, SocketRequest,
+    SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
     decode_counters_reply, decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceFactsRecord,
@@ -24,7 +25,7 @@ use tairix_net::addr::{IpAddr, Ipv4Addr};
 use tairix_net::stack::{Stack, StackConfig, StackEvent};
 
 use crate::channel::{FrameService, LocalFrameService};
-use crate::socket::{SocketService, MAX_SOCKETS_PER_PRINCIPAL};
+use crate::socket::{Delivery, SocketService, MAX_SOCKETS_PER_PRINCIPAL};
 use crate::{serve, Caller, Netstack};
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
@@ -72,7 +73,7 @@ fn local_service(net: PeerNet, region: &mut [u8]) -> LocalFrameService<'_, PeerN
 
 /// Queue engine output onto the service's TX ring before pumping, exactly
 /// as the service layer would.
-fn push_tx(fs: &mut LocalFrameService<'_, PeerNet>, frames: &[Vec<u8>]) {
+fn push_tx<N: Net>(fs: &mut LocalFrameService<'_, N>, frames: &[Vec<u8>]) {
     let mut rings =
         FrameRings::bind(fs.region_mut(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
     for frame in frames {
@@ -1321,4 +1322,296 @@ fn net_channel_client_attach_rejects_a_short_region() {
         Some(Errno::BufferTooSmall)
     );
     assert!(!rig.borrow().server.is_attached());
+}
+
+// --- TCP stream sockets end to end (N5c Layer 3) -----------------------
+//
+// A client `SocketService` + `Netstack` (one interface `wan`, V4_A) opens a
+// stream socket and connects to a peer at V4_B:80. The peer is a
+// `PeerTcpNet` echo server: a peer `Stack` whose TCP segments drive a
+// passive `Tcb` that echoes every received byte. Frames flow through the
+// real `service_interface` pump and the real `on_tcp_segment` /
+// `advance_streams` paths, so the test exercises exactly the code the live
+// `Run` binary drives.
+
+use crate::iface::FrameBatch;
+use tairix_net::checksum::Pseudo;
+use tairix_net::tcp::conn::{Tcb, TcpConfig};
+use tairix_net::tcp::TcpSegment;
+
+/// The client's async delivery port for stream events (the tests decode
+/// the delivered frames directly rather than doing IPC).
+const DELIVER_PORT: u64 = 0x9999;
+/// The peer's listening port.
+const PEER_PORT: u16 = 80;
+
+/// A loopback [`Net`] whose "device" is a peer host running a passive TCP
+/// server that echoes every byte it receives — the far end of the client's
+/// connection.
+struct PeerTcpNet {
+    stack: Stack,
+    tcb: Tcb,
+    now: Duration64,
+    scratch: Vec<u8>,
+}
+
+impl PeerTcpNet {
+    fn new(now: Duration64) -> Self {
+        let mut stack =
+            Stack::new(&StackConfig::new(facts(MAC_B), IID_B, 0x4242), now).expect("peer stack");
+        stack.set_ipv4_config(V4_B, 24, None).expect("peer v4");
+        Self {
+            stack,
+            // Passive open; the listener learns the client's port from the SYN.
+            tcb: Tcb::listen(TcpConfig::default(), PEER_PORT, 0, 0x5000),
+            now,
+            scratch: vec![0u8; 2048],
+        }
+    }
+
+    /// Drain the server connection's outbound segments through the peer
+    /// stack (folding the checksum toward the client), pushing the frames
+    /// onto the receive ring.
+    fn drive_egress(&mut self, rings: &mut FrameRings<'_>, report: &mut ServiceReport) {
+        let Self {
+            stack, tcb, now, ..
+        } = self;
+        let dest = IpAddr::V4(V4_A);
+        tcb.poll_transmit(*now, |seg| {
+            if let Ok(out) = stack.send_tcp(dest, &seg.meta, seg.payload, *now) {
+                for frame in &out.frames {
+                    if rings.rx.push(frame).is_ok() {
+                        report.received += 1;
+                    }
+                }
+            }
+            true
+        });
+    }
+}
+
+impl Net for PeerTcpNet {
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        Ok(facts(MAC_B))
+    }
+
+    fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        let mut report = ServiceReport::default();
+        let out = self.stack.advance(self.now);
+        for frame in &out.frames {
+            if rings.rx.push(frame).is_ok() {
+                report.received += 1;
+            }
+        }
+        self.drive_egress(rings, &mut report);
+        loop {
+            match rings.tx.pop(&mut self.scratch) {
+                Ok(Some(len)) => {
+                    report.transmitted += 1;
+                    let out = self.stack.on_frame(&self.scratch[..len], self.now);
+                    for frame in &out.frames {
+                        if rings.rx.push(frame).is_ok() {
+                            report.received += 1;
+                        }
+                    }
+                    for event in &out.events {
+                        if let StackEvent::TcpSegment {
+                            source,
+                            destination,
+                            segment,
+                        } = event
+                        {
+                            if let (IpAddr::V4(s), IpAddr::V4(d)) = (source, destination) {
+                                let pseudo = Pseudo::V4 {
+                                    source: *s,
+                                    destination: *d,
+                                };
+                                if let Some(seg) = TcpSegment::parse(pseudo, segment) {
+                                    self.tcb.on_segment(&seg, self.now);
+                                }
+                            }
+                        }
+                    }
+                    // Echo every received byte back to the client.
+                    let mut buf = [0u8; 2048];
+                    loop {
+                        let n = self.tcb.recv(&mut buf);
+                        if n == 0 {
+                            break;
+                        }
+                        let _ = self.tcb.send(&buf[..n]);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => return Err(DriverError::BadMagic),
+            }
+        }
+        self.drive_egress(rings, &mut report);
+        Ok(report)
+    }
+}
+
+fn local_service_tcp(net: PeerTcpNet, region: &mut [u8]) -> LocalFrameService<'_, PeerTcpNet> {
+    LocalFrameService::new(net, region, GEOMETRY, BufferClass::NonSensitive).expect("frame service")
+}
+
+fn sockaddr_v4(addr: Ipv4Addr, port: u16) -> SocketAddr {
+    SocketAddr {
+        family: NetAddrFamily::V4,
+        addr: v4_bytes(addr),
+        port,
+    }
+}
+
+/// Serve one socket request against the client service, returning the
+/// `SocketReply` (its `len` bytes written into `response`).
+fn svc_serve(
+    svc: &mut SocketService,
+    ns: &mut Netstack,
+    who: &Caller,
+    entropy: &mut dyn FnMut() -> u32,
+    request: SocketRequest<'_>,
+    response: &mut [u8],
+    now: Duration64,
+) -> Result<crate::SocketReply, Errno> {
+    let mut buf = vec![0u8; SocketRequest::MAX_WIRE_LEN];
+    let n = request.encode(&mut buf).expect("encode request");
+    let sink = RecordingSink::new();
+    svc.serve(ns, who, &sink, entropy, &buf[..n], response, now)
+}
+
+/// Stage a frame batch onto the single interface's TX ring.
+fn stage_batch(fs: &mut LocalFrameService<'_, PeerTcpNet>, batch: &FrameBatch) {
+    for (_iface, frames) in batch {
+        push_tx(fs, frames);
+    }
+}
+
+/// Pump the client interface for a bounded number of rounds at `now`,
+/// routing every engine event through the socket service (stream segments
+/// and datagrams alike) and staging the resulting egress frames, returning
+/// the deliveries. A doorbell may leave a SYN-ACK on the RX ring the same
+/// `service_interface` did not re-harvest, so it iterates a fixed count
+/// rather than stopping on a quiet round; at a fixed `now` the extra rounds
+/// are idle.
+fn pump_client(
+    ns: &mut Netstack,
+    svc: &mut SocketService,
+    fs: &mut LocalFrameService<'_, PeerTcpNet>,
+    now: Duration64,
+) -> Vec<Delivery> {
+    let mut deliveries = Vec::new();
+    for _ in 0..64 {
+        let events = ns.service_interface(name("wan"), fs, now).expect("pump");
+        let io = svc.advance_streams(ns, now);
+        stage_batch(fs, &io.tx);
+        deliveries.extend(io.deliveries);
+        for event in &events {
+            match event {
+                StackEvent::UdpDatagram { .. } => deliveries.extend(svc.deliver(event)),
+                StackEvent::TcpSegment {
+                    source,
+                    destination,
+                    segment,
+                } => {
+                    let io = svc.on_tcp_segment(ns, *source, *destination, segment, now);
+                    stage_batch(fs, &io.tx);
+                    deliveries.extend(io.deliveries);
+                }
+                _ => {}
+            }
+        }
+    }
+    deliveries
+}
+
+#[test]
+fn stream_connect_and_echo_over_the_pump() {
+    let mut ns = managed_stack();
+    ns.addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
+        .expect("addr add");
+    let mut region = rings_region();
+    let mut fs = local_service_tcp(PeerTcpNet::new(t(2)), &mut region);
+    let mut svc = SocketService::new();
+    let who = caller(&[CapabilityId::NET]);
+    let now = t(2);
+    let mut entropy = || 0x1357_9BDFu32;
+    let mut response = [0u8; 64];
+
+    // Open a stream socket.
+    let reply = svc_serve(
+        &mut svc,
+        &mut ns,
+        &who,
+        &mut entropy,
+        SocketRequest::Socket {
+            family: NetAddrFamily::V4,
+            sock_type: SocketType::Stream,
+            deliver_port: DELIVER_PORT,
+        },
+        &mut response,
+        now,
+    )
+    .expect("open");
+    let sid = decode_socket_reply(&response[..reply.len]).expect("socket id");
+
+    // Connect: the SYN is emitted (parking on ARP); pump to established.
+    let reply = svc_serve(
+        &mut svc,
+        &mut ns,
+        &who,
+        &mut entropy,
+        SocketRequest::Connect {
+            socket: sid,
+            peer: sockaddr_v4(V4_B, PEER_PORT),
+        },
+        &mut response,
+        now,
+    )
+    .expect("connect");
+    decode_status_reply(&response[..reply.len]).expect("connect ok");
+    stage_batch(&mut fs, &reply.tx);
+    let deliveries = pump_client(&mut ns, &mut svc, &mut fs, now);
+    assert!(
+        deliveries.iter().any(|d| matches!(
+            SocketStreamEvent::parse(&d.datagram),
+            Ok(SocketStreamEvent::Connected { socket }) if socket == sid
+        )),
+        "client observed the connection establish"
+    );
+
+    // Send a payload; the echo server returns it.
+    let reply = svc_serve(
+        &mut svc,
+        &mut ns,
+        &who,
+        &mut entropy,
+        SocketRequest::Send {
+            socket: sid,
+            dest: None,
+            payload: b"hello over tcp",
+        },
+        &mut response,
+        now,
+    )
+    .expect("send");
+    let accepted = decode_send_reply(&response[..reply.len]).expect("send accepted");
+    assert_eq!(accepted, 14, "the whole payload was accepted");
+    stage_batch(&mut fs, &reply.tx);
+    let deliveries = pump_client(&mut ns, &mut svc, &mut fs, now);
+
+    let mut echoed: Vec<u8> = Vec::new();
+    for d in &deliveries {
+        if let Ok(SocketStreamEvent::Data { socket, payload }) =
+            SocketStreamEvent::parse(&d.datagram)
+        {
+            if socket == sid {
+                echoed.extend_from_slice(payload);
+            }
+        }
+    }
+    assert_eq!(
+        echoed, b"hello over tcp",
+        "the peer echoed the stream bytes"
+    );
 }

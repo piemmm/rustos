@@ -22,8 +22,9 @@
 //! unauthenticated inbox).
 
 use tairix_abi::net::{
-    decode_bind_reply, decode_socket_reply, SocketAddr, SocketDatagram, SocketId, SocketRequest,
-    SocketType, NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY,
+    decode_bind_reply, decode_send_reply, decode_socket_reply, SocketAddr, SocketDatagram,
+    SocketId, SocketRequest, SocketStreamEvent, SocketType, NETSTACK_SOCKET_ENDPOINT,
+    SOCKET_MAX_REPLY,
 };
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_abi::reply::decode_status_reply;
@@ -53,6 +54,81 @@ pub fn socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketId, Errn
     let mut reply = [0u8; SOCKET_MAX_REPLY];
     let len = call(&request, &mut buf, &mut reply)?;
     decode_socket_reply(&reply[..len])
+}
+
+/// Open a connection-oriented TCP stream socket of `family`, delivering
+/// inbound stream events ([`SocketStreamEvent`]) to the async port
+/// `deliver_port` (an endpoint the caller has already bound).
+///
+/// The socket is created unconnected; call [`connect`] to actively open a
+/// connection to a peer. The stack then delivers exactly one
+/// [`Connected`](SocketStreamEvent::Connected), zero or more
+/// [`Data`](SocketStreamEvent::Data), and exactly one
+/// [`Closed`](SocketStreamEvent::Closed) to `deliver_port` over the
+/// connection's life (drain them with [`stream_recv`]).
+///
+/// # Errors
+///
+/// The typed [`Errno`] the stack returned — [`Errno::PermissionDenied`]
+/// without `CAP_NET`, [`Errno::LimitExceeded`] at the socket quota, or a
+/// transport error.
+pub fn stream_socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketId, Errno> {
+    let request = SocketRequest::Socket {
+        family,
+        sock_type: SocketType::Stream,
+        deliver_port,
+    };
+    let mut buf = [0u8; REQUEST_HEADER_MAX];
+    let mut reply = [0u8; SOCKET_MAX_REPLY];
+    let len = call(&request, &mut buf, &mut reply)?;
+    decode_socket_reply(&reply[..len])
+}
+
+/// Send stream bytes on a connected stream `socket`, returning the number
+/// of bytes the stack accepted into the connection's send buffer (which
+/// may be fewer than offered when the buffer is momentarily full — the
+/// caller resends the remainder). A stream `send` never carries a
+/// destination (the peer is fixed at [`connect`]).
+///
+/// # Errors
+///
+/// The typed [`Errno`] the stack returned — [`Errno::NotConnected`] if the
+/// connection is not established (or has closed), or a transport error.
+pub fn stream_send(socket: SocketId, payload: &[u8]) -> Result<u32, Errno> {
+    let request = SocketRequest::Send {
+        socket,
+        dest: None,
+        payload,
+    };
+    let mut buf = alloc::vec![0u8; REQUEST_HEADER_MAX + payload.len()];
+    let mut reply = [0u8; SOCKET_MAX_REPLY];
+    let len = call(&request, &mut buf, &mut reply)?;
+    decode_send_reply(&reply[..len])
+}
+
+/// Receive one inbound stream event on the delivery port `deliver_port`,
+/// decoding it into `buf` and returning the event with the
+/// kernel-attested [`Origin`] of the sender.
+///
+/// Like [`recv`], the caller **must** verify the returned origin is the
+/// network stack before trusting the event: the delivery port is otherwise
+/// an unauthenticated inbox (fail closed).
+///
+/// # Errors
+///
+/// * The raw negative kernel result (as an [`Errno`] via
+///   [`Errno::from_syscall`]) if the receive fails.
+/// * A decode [`Errno`] if the message is not a well-formed
+///   [`SocketStreamEvent`], or the sender origin is malformed.
+pub fn stream_recv(
+    deliver_port: u64,
+    buf: &mut [u8],
+) -> Result<(SocketStreamEvent<'_>, Origin), Errno> {
+    let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
+    let len = ipc_recv(deliver_port, buf, &mut sender).map_err(Errno::from_syscall)?;
+    let origin = Origin::from_bytes(&sender)?;
+    let event = SocketStreamEvent::parse(&buf[..len])?;
+    Ok((event, origin))
 }
 
 /// Bind `socket` to a local address and port; a `port` of `0` requests a

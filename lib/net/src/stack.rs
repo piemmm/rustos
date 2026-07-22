@@ -44,6 +44,7 @@ use crate::addr::{
     ALL_ROUTERS,
 };
 use crate::arp::{ArpPacket, OP_REPLY, OP_REQUEST};
+use crate::checksum::Pseudo;
 use crate::eth::{
     ipv4_multicast_mac, ipv6_multicast_mac, is_group_mac, write_header, EthernetFrame, BROADCAST,
     ETHERNET_HEADER_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
@@ -68,6 +69,7 @@ use crate::mld::{
 use crate::nd::{apply_redirect, NdMessage, ND_HOP_LIMIT};
 use crate::neigh::{LookupResult, NeighborAction, NeighborConfig, NeighborTable};
 use crate::route::{CandidateAddr, DefaultRouterList, PathMtuCache, Prefix, RoutingTable};
+use crate::tcp::{self, TcpSegmentMeta, MAX_HEADER_LEN, PROTOCOL_TCP};
 use crate::udp::{self, UdpDatagram, PROTOCOL_UDP};
 
 /// Bound on frames parked awaiting neighbour resolution, in total.
@@ -204,6 +206,21 @@ pub enum StackEvent {
         destination_port: u16,
         /// The datagram payload.
         payload: Vec<u8>,
+    },
+    /// A TCP segment addressed to this host arrived and verified its
+    /// mandatory pseudo-header checksum. The engine is stateless for TCP
+    /// (connection state — the [`crate::tcp::conn::Tcb`] — lives in the
+    /// service layer), so it surfaces the raw, checksum-valid segment
+    /// bytes with the addressing context and lets the service demultiplex
+    /// it to a connection by four-tuple. A segment that fails its
+    /// checksum is dropped and never surfaced.
+    TcpSegment {
+        /// Peer address the segment came from.
+        source: IpAddr,
+        /// Local address it was delivered to.
+        destination: IpAddr,
+        /// The checksum-valid TCP segment (header, options, payload).
+        segment: Vec<u8>,
     },
 }
 
@@ -650,6 +667,25 @@ impl Stack {
             });
             return;
         }
+        if header.protocol == PROTOCOL_TCP {
+            let pseudo = Pseudo::V4 {
+                source: header.source,
+                destination: header.destination,
+            };
+            // Verify the mandatory checksum here so a flood of corrupt
+            // segments never reaches the connection layer; surface the
+            // raw bytes for the service to re-parse against its TCB.
+            if tcp::TcpSegment::parse(pseudo, payload).is_none() {
+                self.counters.rx_dropped += 1;
+                return;
+            }
+            out.events.push(StackEvent::TcpSegment {
+                source: IpAddr::V4(header.source),
+                destination: IpAddr::V4(header.destination),
+                segment: payload.to_vec(),
+            });
+            return;
+        }
         // Unknown transport: Destination Unreachable, protocol
         // (RFC 1122 §3.2.2.1), gated and rate-limited.
         let Some(original) = original else {
@@ -872,6 +908,22 @@ impl Stack {
                 source_port: datagram.source_port,
                 destination_port: datagram.destination_port,
                 payload: datagram.payload.to_vec(),
+            });
+            return;
+        }
+        if protocol == PROTOCOL_TCP {
+            let pseudo = Pseudo::V6 {
+                source: header.source,
+                destination: header.destination,
+            };
+            if tcp::TcpSegment::parse(pseudo, payload).is_none() {
+                self.counters.rx_dropped += 1;
+                return;
+            }
+            out.events.push(StackEvent::TcpSegment {
+                source: IpAddr::V6(header.source),
+                destination: IpAddr::V6(header.destination),
+                segment: payload.to_vec(),
             });
             return;
         }
@@ -1864,6 +1916,99 @@ impl Stack {
                     PROTOCOL_UDP,
                     &message,
                     hop_limit,
+                    now,
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Originate one TCP segment to `dest`, folding the mandatory
+    /// pseudo-header checksum over the source address this interface
+    /// selects for `dest`.
+    ///
+    /// The connection state machine ([`crate::tcp::conn::Tcb`]) lives in
+    /// the service layer and produces the header [`TcpSegmentMeta`] and
+    /// payload; this engine method owns the *addressing*: it selects the
+    /// source, resolves the next hop, serialises the segment with the
+    /// pseudo-header checksum, and IP-wraps it (protocol 6). TCP is always
+    /// unicast, so a multicast, broadcast, or unspecified destination is
+    /// refused as [`SendError::NotUnicast`] (fail closed). Over IPv6 a
+    /// segment past the path MTU is refused as [`SendError::TooLarge`];
+    /// over IPv4 the segment (already MSS-bounded by the TCB) is emitted,
+    /// fragmenting only in the pathological case a peer's MSS exceeds the
+    /// path.
+    ///
+    /// # Errors
+    ///
+    /// Typed [`SendError`] refusals: link down, a non-unicast
+    /// destination, no usable source address / v4 configuration, no
+    /// route, or a segment that cannot fit the path MTU (v6) or the
+    /// segment-length field.
+    pub fn send_tcp(
+        &mut self,
+        dest: IpAddr,
+        meta: &TcpSegmentMeta,
+        payload: &[u8],
+        now: Duration64,
+    ) -> Result<StackOutput, SendError> {
+        if !self.link_up {
+            return Err(SendError::LinkDown);
+        }
+        let mut out = StackOutput::default();
+        match dest {
+            IpAddr::V4(dest) => {
+                if dest.is_broadcast() || dest.is_unspecified() || dest.is_multicast() {
+                    return Err(SendError::NotUnicast);
+                }
+                let Some((source, _)) = self.iface.ipv4() else {
+                    return Err(SendError::NoSourceAddress);
+                };
+                if self.next_hop_v4(dest).is_none() {
+                    return Err(SendError::NoRoute);
+                }
+                let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
+                let n = tcp::write(
+                    Pseudo::V4 {
+                        source,
+                        destination: dest,
+                    },
+                    meta,
+                    payload,
+                    &mut segment,
+                )
+                .map_err(|_| SendError::TooLarge)?;
+                self.send_ipv4_packet(&mut out, source, dest, PROTOCOL_TCP, &segment[..n], now);
+            }
+            IpAddr::V6(dest) => {
+                if dest.is_unspecified() || dest.is_multicast() {
+                    return Err(SendError::NotUnicast);
+                }
+                let source = self.source_for_v6(dest).ok_or(SendError::NoSourceAddress)?;
+                if self.next_hop_v6(dest, now).is_none() {
+                    return Err(SendError::NoRoute);
+                }
+                let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
+                let n = tcp::write(
+                    Pseudo::V6 {
+                        source,
+                        destination: dest,
+                    },
+                    meta,
+                    payload,
+                    &mut segment,
+                )
+                .map_err(|_| SendError::TooLarge)?;
+                if IPV6_HEADER_LEN + n > self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize {
+                    return Err(SendError::TooLarge);
+                }
+                self.send_ipv6_packet(
+                    &mut out,
+                    source,
+                    dest,
+                    PROTOCOL_TCP,
+                    &segment[..n],
+                    self.hop_limit,
                     now,
                 );
             }

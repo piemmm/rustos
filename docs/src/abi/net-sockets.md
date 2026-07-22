@@ -1,10 +1,10 @@
-# Datagram socket ABI (`netsock-v1`)
+# Socket ABI (`netsock-v1`)
 
-The socket ABI is how a program opens UDP sockets through the user-space
-network stack (`userland/net/netstack`). It is defined once, as a pure wire
-contract, in `lib/abi/src/net.rs` (`tairix_abi::net`), so the client-side
-wrappers and the serving stack share a single source of truth and can never
-drift.
+The socket ABI is how a program opens UDP **datagram** and TCP **stream**
+sockets through the user-space network stack (`userland/net/netstack`). It is
+defined once, as a pure wire contract, in `lib/abi/src/net.rs`
+(`tairix_abi::net`), so the client-side wrappers and the serving stack share a
+single source of truth and can never drift.
 
 The wire contract landed in increment **N4a** of `plans/NETWORK.md`; the
 serving dispatcher, the `CAP_NET` capability, and the `lib/rt` client
@@ -101,26 +101,59 @@ fields.
 | `Close` | socket | status |
 | `JoinMulticast` / `LeaveMulticast` | socket, group `SocketAddr` (port must be `0`) | status |
 
-`SocketType` serves only `Datagram` in this increment; the reserved stream
-(`1`) and raw (`3`) values fail closed at decode. A `SocketAddr` is a family,
-a 16-byte address (IPv4 uses the first four; the tail must be zero), and a
-host-order port.
+`SocketType` serves `Datagram` (`2`) and `Stream` (`1`); the reserved raw
+(`3`) value fails closed at decode. A `SocketAddr` is a family, a 16-byte
+address (IPv4 uses the first four; the tail must be zero), and a host-order
+port. For a stream socket `Send` carries no destination (`dest` must be
+`None` — the peer is fixed at `Connect`) and its reply is the accepted byte
+count (`encode_send_reply`), since a stream `send` is flow-controlled and may
+accept fewer bytes than offered; a datagram `Send` is all-or-nothing and
+replies bare status.
+
+## Stream sockets (TCP, N5c)
+
+A stream socket is opened with `SocketType::Stream`, then actively opened to
+a peer with `Connect` (which returns immediately — the three-way handshake
+runs asynchronously in the stack, driving the pure RFC 9293
+`tairix_net::tcp::conn::Tcb` the stack owns per connection). The connection's
+CSPRNG initial sequence number and its egress interface are chosen by the
+stack at `Connect`. `Send` enqueues bytes onto the connection's bounded send
+buffer; `Close` begins an orderly teardown (FIN) and the connection is reaped
+in the background once fully closed. `listen`/`accept` (passive open) are a
+later increment (N6).
+
+The stack reports the connection lifecycle to the client's delivery port as
+`SocketStreamEvent` frames (magic `"NSKS"`), the connection-oriented analogue
+of `SocketDatagram` — carrying no per-message peer (the peer is fixed):
+
+- `Connected` — exactly once, when the handshake completes;
+- `Data` — zero or more times, the received stream bytes in order (a receive
+  larger than `SOCKET_MAX_DATAGRAM` is fragmented across several events);
+- `Closed` — exactly once at the end, carrying a `StreamCloseReason`
+  (`PeerClosed` orderly EOF, `Reset`, `TimedOut`, or `Refused`), so a
+  `recv` reaching end-of-stream can tell an orderly close from an abortive
+  one (the receive half never ends silently). No event follows `Closed`.
+
+The client links `tairix_rt::net::stream_socket` / `connect` / `stream_send`
+/ `close` and drains events with `stream_recv` (which, like `recv`, returns
+the kernel-attested sender `Origin` for fail-closed authentication).
 
 ## Delivery (`SocketDatagram`)
 
 A `SocketDatagram` is the 36-byte-header-plus-payload frame the stack
-`ipc_send`s to a socket's delivery port: the receiving `SocketId`, the peer
-`SocketAddr` it came from, and the payload. The client decodes it after
-`ipc_recv`.
+`ipc_send`s to a datagram socket's delivery port: the receiving `SocketId`,
+the peer `SocketAddr` it came from, and the payload. The client decodes it
+after `ipc_recv`.
 
 ## Fail-closed decoding
 
-Every decoder (`SocketRequest::from_bytes`, `SocketDatagram::parse`, and the
-reply decoders) is total and fails closed: an unknown magic, version,
-operation, family, or socket type, a dirty reserved field, a group address
-carrying a port, or an over-length payload is refused with a typed `Errno`
-rather than guessed. The decoders are exercised by the `lib/abi`
-never-panic/round-trip fuzz harness (`tests/fuzz_decode.rs`).
+Every decoder (`SocketRequest::from_bytes`, `SocketDatagram::parse`,
+`SocketStreamEvent::parse`, and the reply decoders) is total and fails
+closed: an unknown magic, version, operation, family, socket type, or
+stream-event kind, a dirty reserved field, a group address carrying a port,
+or an over-length payload is refused with a typed `Errno` rather than
+guessed. The decoders are exercised by the `lib/abi` never-panic/round-trip
+fuzz harness (`tests/fuzz_decode.rs`).
 
 ## Error vocabulary
 
