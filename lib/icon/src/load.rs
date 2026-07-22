@@ -23,11 +23,19 @@ use crate::vector::VectorIcon;
 ///
 /// A fixed table so a loader iterates the closed [`IconKind`] vocabulary
 /// without inventing a second list of kinds.
-pub const ICON_KINDS: [IconKind; 5] = [
+pub const ICON_KINDS: [IconKind; 13] = [
     IconKind::Network,
     IconKind::Volume,
     IconKind::Battery,
     IconKind::Bell,
+    IconKind::Folder,
+    IconKind::FolderOpen,
+    IconKind::File,
+    IconKind::AppBundle,
+    IconKind::Text,
+    IconKind::Image,
+    IconKind::Archive,
+    IconKind::Executable,
     IconKind::Generic,
 ];
 
@@ -46,15 +54,12 @@ pub trait IconAssetSource {
 /// A resolved icon set: the decoded SVG glyph for each [`IconKind`] that the
 /// source supplied, with a built-in fallback for the rest.
 ///
-/// Stored as fixed fields rather than a map so every kind always resolves and
-/// [`icon`](Self::icon) is total.
+/// Stored as one slot per kind, indexed by [`IconKind::index`], so every kind
+/// always resolves and [`icon`](Self::icon) is total — and adding a kind is a
+/// new [`ICON_KINDS`] entry, never a new field here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IconSet {
-    network: Option<VectorIcon>,
-    volume: Option<VectorIcon>,
-    battery: Option<VectorIcon>,
-    bell: Option<VectorIcon>,
-    generic: Option<VectorIcon>,
+    icons: [Option<VectorIcon>; ICON_KINDS.len()],
 }
 
 impl IconSet {
@@ -65,11 +70,7 @@ impl IconSet {
     #[must_use]
     pub const fn builtin() -> Self {
         Self {
-            network: None,
-            volume: None,
-            battery: None,
-            bell: None,
-            generic: None,
+            icons: [const { None }; ICON_KINDS.len()],
         }
     }
 
@@ -79,13 +80,11 @@ impl IconSet {
     /// [`icon`](Self::icon).
     #[must_use]
     pub fn from_assets<S: IconAssetSource + ?Sized>(source: &S) -> Self {
-        Self {
-            network: decoded(source, IconKind::Network),
-            volume: decoded(source, IconKind::Volume),
-            battery: decoded(source, IconKind::Battery),
-            bell: decoded(source, IconKind::Bell),
-            generic: decoded(source, IconKind::Generic),
+        let mut set = Self::builtin();
+        for kind in ICON_KINDS {
+            set.icons[kind.index()] = decoded(source, kind);
         }
+        set
     }
 
     /// The icon for `kind`: the loaded SVG asset if the set supplied one, else
@@ -109,13 +108,7 @@ impl IconSet {
 
     /// The decoded SVG icon stored for `kind`, if any.
     fn loaded(&self, kind: IconKind) -> Option<&VectorIcon> {
-        match kind {
-            IconKind::Network => self.network.as_ref(),
-            IconKind::Volume => self.volume.as_ref(),
-            IconKind::Battery => self.battery.as_ref(),
-            IconKind::Bell => self.bell.as_ref(),
-            IconKind::Generic => self.generic.as_ref(),
-        }
+        self.icons[kind.index()].as_ref()
     }
 }
 

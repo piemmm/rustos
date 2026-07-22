@@ -223,20 +223,24 @@ fn entry_row(entry: &Entry, selected: bool) -> TableRow {
     row
 }
 
-/// Build the [`Card`] tile for one grid entry: the entry's label as the tile
-/// title, carrying the shared selection state when selected. The file-type
-/// icon that will sit above the label is a later stage (`plans/NEW-FILEMANAGER.md`
-/// FM3); the tile is complete without it here.
+/// Build the [`Card`] tile for one grid entry: the entry's file-type icon
+/// above its label, carrying the shared selection state when selected. The
+/// icon is the shared [`icon_for`](crate::icon::icon_for) classification — a
+/// display hint only, decided once here so the manager and picker draw the
+/// same glyph for the same entry (§2.2).
 fn grid_tile(entry: &Entry, selected: bool) -> Card {
     let mut state = ControlState::idle();
     if selected {
         state.selection = SelectionState::Selected;
     }
-    Card::new(entry_label(entry)).with_state(state)
+    Card::new(entry_label(entry))
+        .with_icon(crate::icon::icon_for(entry))
+        .with_state(state)
 }
 
 /// The name shown for an entry: a directory is suffixed with `/` so its kind
-/// reads at a glance even before file-type icons (a later stage) are drawn.
+/// reads at a glance in the list view (whose rows carry no icon), and stays a
+/// familiar cue beneath the grid tile's folder glyph.
 fn entry_label(entry: &Entry) -> String {
     let mut label = String::from(entry.name());
     if entry.is_directory() {

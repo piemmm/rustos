@@ -900,3 +900,56 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
         None
     );
 }
+
+// --- File-type icon classification (FM3) -------------------------------
+
+mod icon_classifier {
+    use tairix_abi::time::Time64;
+    use tairix_icon::IconKind;
+
+    use crate::entry::{Entry, EntryKind};
+    use crate::icon::{icon_for, icon_for_name};
+
+    fn bundle(name: &str) -> Entry {
+        Entry::new(name, EntryKind::Bundle, 0, Time64::UNIX_EPOCH)
+    }
+
+    #[test]
+    fn kind_decides_before_extension() {
+        // A directory is a folder and a bundle an app tile regardless of any
+        // extension-looking name; the file table is only consulted for files.
+        assert_eq!(icon_for(&Entry::directory("Documents")), IconKind::Folder);
+        assert_eq!(icon_for(&bundle("Editor.app")), IconKind::AppBundle);
+        // A directory named like an archive is still a folder.
+        assert_eq!(icon_for(&Entry::directory("backup.zip")), IconKind::Folder);
+    }
+
+    #[test]
+    fn known_extensions_map_to_their_class() {
+        assert_eq!(icon_for(&Entry::file("notes.txt")), IconKind::Text);
+        assert_eq!(icon_for(&Entry::file("main.rs")), IconKind::Text);
+        assert_eq!(icon_for(&Entry::file("photo.PNG")), IconKind::Image);
+        assert_eq!(icon_for(&Entry::file("logo.svg")), IconKind::Image);
+        assert_eq!(icon_for(&Entry::file("dump.tar.gz")), IconKind::Archive);
+        assert_eq!(icon_for(&Entry::file("shell.rxe")), IconKind::Executable);
+        assert_eq!(icon_for(&Entry::file("mod.wasm")), IconKind::Executable);
+    }
+
+    #[test]
+    fn extension_match_is_case_insensitive() {
+        assert_eq!(icon_for_name("READ.MD"), IconKind::Text);
+        assert_eq!(icon_for_name("A.ZiP"), IconKind::Archive);
+    }
+
+    #[test]
+    fn unknown_and_extensionless_fall_back_to_generic_file() {
+        assert_eq!(icon_for_name("blob.qwerty"), IconKind::File);
+        assert_eq!(icon_for_name("Makefile"), IconKind::File);
+        // A dotfile whose only dot starts the name has no extension.
+        assert_eq!(icon_for_name(".profile"), IconKind::File);
+        // A trailing dot with nothing after it is not an extension.
+        assert_eq!(icon_for_name("archive."), IconKind::File);
+        // The last extension wins for a multi-part name.
+        assert_eq!(icon_for_name("a.txt.zip"), IconKind::Archive);
+    }
+}

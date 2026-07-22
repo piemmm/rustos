@@ -465,6 +465,20 @@ fn card_body_renders() {
 }
 
 #[test]
+fn card_icon_draws_above_the_title() {
+    let theme = Theme::dark();
+    let fg = premul(theme.palette().on_surface);
+    let band = ((CW / 2 - 20, CW / 2 + 20), (6, 60));
+    // An empty-title card with no icon leaves the upper-centre band blank.
+    let plain = card_surface(&Card::new(""), &theme);
+    assert!(!region_has(&plain, band.0, band.1, fg));
+    // Adding a file-type icon fills that band with the tinted glyph, above the
+    // (here empty) label.
+    let iconed = card_surface(&Card::new("").with_icon(IconKind::Folder), &theme);
+    assert!(region_has(&iconed, band.0, band.1, fg));
+}
+
+#[test]
 fn card_footer_action_activates_by_pointer() {
     let theme = Theme::dark();
     let mut card = Card::new("Job").with_footer(vec![Button::labelled("Run")]);

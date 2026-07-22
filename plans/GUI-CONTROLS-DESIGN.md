@@ -663,6 +663,10 @@ Cards group state and actions.
 - The bottom edge carries progress.
 - The top trailing corner carries count or alert beads.
 - Footer actions share the card's semantic state but keep their own pointer and focus states.
+- A card may carry an optional identifying glyph above its title (e.g. a file
+  manager grid tile's file-type icon); when present, the title and body centre
+  beneath it. A card with no glyph keeps its title at the top, so
+  notification/resource cards are unaffected.
 
 ### 11.16 Panel
 

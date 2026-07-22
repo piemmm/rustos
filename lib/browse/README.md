@@ -16,6 +16,13 @@ can never diverge in navigation semantics, listing policy, or look.
   file/directory split with the one distinction a manager must make
   structurally: a `<Name>.app` directory is a `Bundle` — a sealed unit the
   user launches, not a folder to descend into.
+- **File-type icons** (`icon`): `icon_for(entry)` / `icon_for_name(name)` —
+  the one classifier both views share, mapping an entry to a `lib/icon`
+  `IconKind` by kind first (folder / app-bundle) then a small, documented
+  filename-extension table (text / image / archive / executable) with the
+  generic file glyph as the fail-closed fallback. A **display hint only**: it
+  decides a glyph, never an operation; authority stays in the VFS and the
+  launcher.
 - **Sort** (`SortMode`/`sort_entries`): the one listing order both views
   share — directories first, then a `Name`/`Size`/`Modified` key with a
   direction, with a case-insensitive name tiebreak so the result never
@@ -47,7 +54,8 @@ can never diverge in navigation semantics, listing policy, or look.
 - **Renderer** (`render`): paints the path bar and the current directory
   into a `lib/raster` `Surface` in the browser's `ViewMode` — list entries
   as shared `lib/controls` `TableRow`s (name/size/modified columns), grid
-  entries as shared `Card` tiles — so the file manager and the trusted
+  entries as shared `Card` tiles, each tile carrying its `icon`-classified
+  file-type glyph above the label — so the file manager and the trusted
   picker render one coherent themed surface, the selected item carrying the
   shared selection state. A vertical `lib/controls` `ScrollBar` is drawn in
   a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
@@ -62,5 +70,5 @@ can never diverge in navigation semantics, listing policy, or look.
   the engine is host-proven end to end without a kernel.
 
 `no_std` (with `alloc`); depends only on `lib/abi`, `lib/geometry`,
-`lib/theme`, `lib/raster`, `lib/font`, and `lib/controls` — never a
-kernel, driver, or window-manager crate. No `unsafe`.
+`lib/theme`, `lib/raster`, `lib/font`, `lib/controls`, and `lib/icon` —
+never a kernel, driver, or window-manager crate. No `unsafe`.

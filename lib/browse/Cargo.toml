@@ -30,6 +30,10 @@ tairix-font = { path = "../font", version = "=0.0.0" }
 # through the one shared `scroll` geometry, so the file manager and the trusted
 # picker share one themed surface rather than a private row painter (§2.2, §17.4).
 tairix-controls = { path = "../controls", version = "=0.0.0" }
+# Shared desktop icon vocabulary: the browser classifies each entry to an
+# `IconKind` (the one file-type classifier the manager and picker share, §2.2),
+# and the grid tile draws that glyph. A display hint only; it gates no operation.
+tairix-icon = { path = "../icon", version = "=0.0.0" }
 
 [lints]
 workspace = true

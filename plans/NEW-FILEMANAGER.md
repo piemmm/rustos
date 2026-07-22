@@ -27,7 +27,7 @@ which the drift guard enforces.
 
 ## Status
 
-`in progress` — **FM1, FM2a, and FM2b are done**; FM3–FM9 are `planned`.
+`in progress` — **FM1, FM2a, FM2b, and FM3 are done**; FM4–FM9 are `planned`.
 The starting point is `plans/APPWIN.md` AW3/AW5 (done): the `files.app` `Run`
 binary composes the shared `lib/browse` `Browser` model + `render` renderer
 over the AW2 window channel, parks on its event mailbox, and navigates by
@@ -187,23 +187,39 @@ dispatch that the renderer and the pointer hit-test share (§2.2):
   FM2a `ListView` tests were updated to the explicit-offset API. Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md`.
 
-### FM3 — file-type icons `[ ]`
+### FM3 — file-type icons `[x]`
 
-`lib/icon` today carries only notification glyphs. File management needs a
-small, themeable, vector file-type icon set — rasterised once per theme/
-scale like every other desktop asset (§10), never on the hot path.
+Done. `lib/icon::IconKind` gained the file-manager kinds `Folder`,
+`FolderOpen`, `File` (generic), `AppBundle`, `Text`, `Image`, `Archive`, and
+`Executable`, each a built-in vector glyph on the shared 24-unit design grid
+resolved (like every kind) through the SVG-first theme-asset path, with
+`Generic` the fail-closed fallback (§2.9). `IconSet` was refactored to store
+one slot per kind indexed by the new `IconKind::index`, so adding a kind is a
+new `ICON_KINDS` entry rather than a new field (§2.2); `builtin()` stays
+`const`. The existing audio `Volume` glyph is left as-is: reusing an audio
+speaker for a *storage* volume would be a semantic defect, so a storage-volume
+icon is deferred to the stage that actually draws one (FM4 breadcrumb/root
+view), not forced onto the audio kind here.
 
-- **Extend `lib/icon::IconKind`** with the file-manager kinds: `Folder`,
-  `FolderOpen`, `File` (generic), `AppBundle`, `Text`, `Image`, `Archive`,
-  `Executable`, and `Volume` (already present). Each is an SVG-first
-  vector glyph (`lib/icon::VectorIcon`) resolved through the theme, with
-  `Generic` the fail-closed fallback for an unknown kind (§2.9).
-- **Kind→icon is a pure classifier** in `lib/browse` (by `EntryKind`
-  first, then a small, documented extension/`.app` table) — one
-  definition shared by manager and picker (§2.2). It is a *hint* for
-  display only; it never gates an operation (authority is the VFS's job).
-- Host tests: classifier table (bundle, known extensions, unknown →
-  generic), icon decode/fallback.
+Kind→icon is the pure `lib/browse::icon` classifier (`icon_for(entry)` /
+`icon_for_name(name)`): by `EntryKind` first (directory→`Folder`,
+bundle→`AppBundle`), then a small, documented, ASCII-case-insensitive
+filename-extension table (text/image/archive/executable) with the generic
+`File` glyph as the fallback for an unknown/extensionless/dotfile name — one
+definition shared by manager and picker (§2.2). It is a display *hint* only; it
+gates no operation (authority stays in the VFS and the launcher, §4/§5.4). The
+glyph is now drawn: `lib/controls::Card` gained an optional `with_icon`
+identifying glyph rendered above a centred title (a card with no icon is
+unchanged, so notification/resource cards are unaffected), and `render`'s grid
+tile sets it from the classifier — so the FM2b grid tile is complete.
+
+Host-tested: `lib/icon` (the new glyphs draw, `index`↔`ICON_KINDS` round-trip,
+`for_asset` mappings, per-kind SVG load/fallback over the full set),
+`lib/controls` (a card icon draws above the label, no-icon card unchanged), and
+`lib/browse` (classifier: kind-before-extension, known extensions per class,
+case-insensitivity, unknown/extensionless/dotfile/trailing-dot → generic,
+last-extension-wins). Docs: `docs/src/desktop/apps.md`,
+`plans/GUI-CONTROLS-DESIGN.md` §11.15, `lib/icon`/`lib/browse` README + rustdoc.
 
 ### FM4 — the chrome: toolbar, breadcrumb path bar, context menu `[ ]`
 

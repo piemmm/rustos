@@ -9,13 +9,17 @@ use crate::vector::{IconLayer, VectorIcon};
 
 const FG: Color = Color::rgb(230, 230, 235);
 
-const ALL_KINDS: [IconKind; 5] = [
-    IconKind::Network,
-    IconKind::Volume,
-    IconKind::Battery,
-    IconKind::Bell,
-    IconKind::Generic,
-];
+/// The tests iterate the one canonical kind table rather than a second copy
+/// (§2.2), so a new kind is covered the moment it enters `ICON_KINDS`.
+const ALL_KINDS: [IconKind; crate::load::ICON_KINDS.len()] = crate::load::ICON_KINDS;
+
+#[test]
+fn index_is_the_position_in_the_kind_table() {
+    for (position, kind) in ALL_KINDS.iter().enumerate() {
+        assert_eq!(kind.index(), position, "{kind:?}");
+        assert_eq!(ALL_KINDS[kind.index()], *kind, "{kind:?}");
+    }
+}
 
 #[test]
 fn for_asset_maps_known_ids() {
@@ -23,6 +27,14 @@ fn for_asset_maps_known_ids() {
     assert_eq!(IconKind::for_asset("volume"), IconKind::Volume);
     assert_eq!(IconKind::for_asset("battery"), IconKind::Battery);
     assert_eq!(IconKind::for_asset("bell"), IconKind::Bell);
+    assert_eq!(IconKind::for_asset("folder"), IconKind::Folder);
+    assert_eq!(IconKind::for_asset("folder-open"), IconKind::FolderOpen);
+    assert_eq!(IconKind::for_asset("file"), IconKind::File);
+    assert_eq!(IconKind::for_asset("app-bundle"), IconKind::AppBundle);
+    assert_eq!(IconKind::for_asset("text"), IconKind::Text);
+    assert_eq!(IconKind::for_asset("image"), IconKind::Image);
+    assert_eq!(IconKind::for_asset("archive"), IconKind::Archive);
+    assert_eq!(IconKind::for_asset("executable"), IconKind::Executable);
 }
 
 #[test]

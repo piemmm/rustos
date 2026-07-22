@@ -30,6 +30,8 @@
 //! # Module map
 //!
 //! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary.
+//! * [`icon`](mod@icon) — the one file-type [`IconKind`](tairix_icon::IconKind)
+//!   classifier the manager and picker share (a display hint, never authority).
 //! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
 //! * [`error`] — [`BrowseError`], the fail-closed navigation outcomes.
 //! * [`source`] — the [`DirectorySource`] seam.
@@ -58,6 +60,7 @@ pub mod browser;
 pub mod entry;
 pub mod error;
 pub mod format;
+pub mod icon;
 pub mod layout;
 pub mod render;
 pub mod sort;
@@ -68,6 +71,7 @@ pub use browser::Browser;
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
 pub use format::{format_date, format_size};
+pub use icon::{icon_for, icon_for_name};
 pub use layout::{GridView, ListView, ViewLayout, ViewMode};
 pub use render::render;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};

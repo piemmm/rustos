@@ -670,6 +670,7 @@ pub enum CardAction {
 pub struct Card {
     title: String,
     body: Option<String>,
+    icon: Option<IconKind>,
     role: ControlRole,
     state: ControlState,
     count: Option<u32>,
@@ -683,11 +684,21 @@ impl Card {
         Self {
             title: title.into(),
             body: None,
+            icon: None,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
             count: None,
             footer: Vec::new(),
         }
+    }
+
+    /// This card with an identifying glyph drawn above the title (e.g. a file
+    /// manager grid tile's file-type icon). A card with no icon keeps its
+    /// title at the top, so status/notification cards are unaffected.
+    #[must_use]
+    pub fn with_icon(mut self, icon: IconKind) -> Self {
+        self.icon = Some(icon);
+        self
     }
 
     /// This card with a body line below the title.
@@ -858,8 +869,11 @@ impl Card {
         let content_left = ix.saturating_add(rail_w).saturating_add(pad);
         let content_right = ix.saturating_add(iw).saturating_sub(pad);
 
-        // The top-trailing count pill / alert bead, then the title and body up
-        // to whatever leading edge the badge left, then the footer actions.
+        // An optional identifying glyph centred in a top band; when present the
+        // title sits below it and both centre under it. The top-trailing count
+        // pill / alert bead follows, then the title and body up to whatever
+        // leading edge the badge left, then the footer actions.
+        let title_top = self.paint_icon(surface, (iy, ih, content_left, content_right), pad, theme);
         let title_right = self.paint_badge(
             surface,
             (ix, iy, iw, ih),
@@ -870,10 +884,11 @@ impl Card {
         );
         self.paint_title(
             surface,
-            (iy, content_left, title_right, content_right),
+            (title_top, content_left, title_right, content_right),
             pad,
             theme,
             font,
+            self.icon.is_some(),
         );
         for (button, rect) in self
             .footer
@@ -939,8 +954,40 @@ impl Card {
         content_right
     }
 
+    /// Paint an optional identifying glyph centred in a band at the top of the
+    /// content, returning the y the title should start at: the icon's bottom
+    /// edge when an icon was drawn, else the content top `iy` unchanged. The
+    /// icon is sized to the content width but capped so the title keeps room
+    /// below it, and is tinted like the title so the tile reads as one unit.
+    fn paint_icon(
+        &self,
+        surface: &mut Surface,
+        inner: (u32, u32, u32, u32),
+        pad: u32,
+        theme: &Theme,
+    ) -> u32 {
+        let (iy, ih, content_left, content_right) = inner;
+        let Some(kind) = self.icon else {
+            return iy;
+        };
+        let avail_w = content_right.saturating_sub(content_left);
+        // Leave at least the lower two-fifths of the tile for the label.
+        let slot = avail_w.min(ih.saturating_mul(3) / 5);
+        if slot == 0 {
+            return iy;
+        }
+        let fg = foreground(theme, self.state.disposition());
+        if let Some(image) = builtin_icon(kind, fg).rasterise(slot) {
+            let ix_icon = content_left.saturating_add((avail_w.saturating_sub(slot)) / 2);
+            surface.blit(to_i32(ix_icon), to_i32(iy.saturating_add(pad)), &image);
+        }
+        iy.saturating_add(pad).saturating_add(slot)
+    }
+
     /// Paint the card title and its optional body line within the content
-    /// columns `(iy, content_left, title_right, content_right)`.
+    /// columns `(title_top, content_left, title_right, content_right)`. When
+    /// `centered` (an icon sits above), the title and body centre under it;
+    /// otherwise they are leading-aligned at the content's left edge.
     fn paint_title(
         &self,
         surface: &mut Surface,
@@ -948,21 +995,24 @@ impl Card {
         pad: u32,
         theme: &Theme,
         font: BitmapFont,
+        centered: bool,
     ) {
-        let (iy, content_left, title_right, content_right) = cols;
+        let (title_top, content_left, title_right, content_right) = cols;
         let fg = foreground(theme, self.state.disposition());
-        let title_y = to_i32(iy) + to_i32(pad);
+        let title_y = to_i32(title_top) + to_i32(pad);
         if title_right > content_left {
             let fitted = font.truncate_to_width(&self.title, title_right - content_left);
-            font.draw_text(surface, to_i32(content_left), title_y, fitted, fg);
+            let tx = text_x(font, fitted, content_left, title_right, centered);
+            font.draw_text(surface, tx, title_y, fitted, fg);
         }
         if let Some(body) = &self.body {
             let body_y = title_y + to_i32(font.line_height()) + to_i32(pad) / 2;
             if content_right > content_left {
                 let fitted = font.truncate_to_width(body, content_right - content_left);
+                let bx = text_x(font, fitted, content_left, content_right, centered);
                 font.draw_text(
                     surface,
-                    to_i32(content_left),
+                    bx,
                     body_y,
                     fitted,
                     Color::from(theme.palette().on_surface_muted),
@@ -1005,6 +1055,17 @@ impl Card {
         }
         action
     }
+}
+
+/// The x at which to draw `text` within the column `[left, right)`: leading
+/// (at `left`) normally, or centred within the column when `centered`.
+fn text_x(font: BitmapFont, text: &str, left: u32, right: u32, centered: bool) -> i32 {
+    if !centered {
+        return to_i32(left);
+    }
+    let avail = right.saturating_sub(left);
+    let tw = font.text_width(text).min(avail);
+    to_i32(left) + (to_i32(avail) - to_i32(tw)) / 2
 }
 
 /// Render a `u32` as decimal into a small stack buffer, `no_std`-friendly.

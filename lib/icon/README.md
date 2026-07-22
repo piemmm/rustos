@@ -3,7 +3,8 @@
 Shared desktop-icon library for the TAIRiX desktop (`lib/icon`, `AGENTS.md`
 §6 / §10 — `PLAN.md` Stage 7).
 
-The status/notification icons here are **scalable vector artwork, not fixed
+The desktop icons here — the taskbar's status/notification glyphs and the file
+manager's file-type glyphs — are **scalable vector artwork, not fixed
 bitmaps**: each `VectorIcon` is a small ordered stack of filled polygon layers
 over a resolution-independent design grid, so the same glyph is
 
@@ -21,9 +22,12 @@ over a resolution-independent design grid, so the same glyph is
 
 - `vector` — `IconLayer`, `VectorIcon`: the vector representation and
   `rasterise(side) -> Surface` / `draw_onto(&mut Surface)`.
-- `glyph` — `IconKind` (the closed glyph set: network, volume, battery, bell,
-  and a generic fallback), `IconKind::for_asset` (theme asset id → kind,
-  falling back to `Generic`, `AGENTS.md` §2.9), and `builtin_icon`.
+- `glyph` — `IconKind` (the closed glyph set: the taskbar's network, volume,
+  battery, and bell; the file manager's folder, folder-open, generic file,
+  app-bundle, text, image, archive, and executable; and a generic fallback),
+  `IconKind::for_asset` (theme asset id → kind, falling back to `Generic`,
+  `AGENTS.md` §2.9), `IconKind::index` (its stable slot in `ICON_KINDS`), and
+  `builtin_icon`.
 - `svg` — `VectorIcon::from_svg` and `decode_svg(bytes)`: build an icon from a
   decoded `lib/svg` `SvgImage` (the SVG-first asset rule, `AGENTS.md` §10). A
   malformed or out-of-subset asset fails closed, so the caller substitutes a
@@ -35,7 +39,9 @@ over a resolution-independent design grid, so the same glyph is
   a kind that loaded an authored SVG asset keeps its own colours, and a kind
   whose asset is missing, malformed, or out of subset falls back to the
   `builtin_icon` glyph tinted with `tint` (`AGENTS.md` §2.9). `ICON_KINDS` is
-  the closed kind list a loader iterates. `IconSet::builtin()` (also
+  the closed kind list a loader iterates, and `IconSet` stores one slot per
+  kind (indexed by `IconKind::index`), so adding a kind is a new `ICON_KINDS`
+  entry, never a new field (`AGENTS.md` §2.2). `IconSet::builtin()` (also
   `Default`) is the all-fallback set the desktop draws before any asset
   loads, so a complete icon set always exists.
 

@@ -112,13 +112,19 @@ one coherent themed surface rather than a browser-private row painter
 is blank for a directory or bundle and otherwise the binary-unit `format_size`
 (`1.5 MiB`); the modified column is `format_date` (an ISO `YYYY-MM-DD`, blank
 at the epoch so a stampless file is never given a fabricated date, §21). In the
-**grid** view each entry is a shared `lib/controls` `Card` tile carrying that
-same label, wrapped into as many columns as fit the width; the two views share
-one selection model, so toggling never moves the selection or re-reads the
-directory (the file-type icon that will sit above each tile's label is a later
-stage, `plans/NEW-FILEMANAGER.md` FM3). The selected item carries the shared
-selection state — the raised surface plus the accent selection rail every
-collection view shares — not a bespoke accent fill.
+**grid** view each entry is a shared `lib/controls` `Card` tile carrying its
+file-type icon above that same label, wrapped into as many columns as fit the
+width; the two views share one selection model, so toggling never moves the
+selection or re-reads the directory. The icon comes from the shared
+`lib/browse::icon` classifier (`icon_for`): a directory is a folder glyph and a
+`<Name>.app` an application tile, and a regular file maps through a small,
+documented filename-extension table to the broad content classes text / image
+/ archive / executable, with the generic file glyph as the fail-closed
+fallback. It is one classification both the file manager and the trusted picker
+draw from (`AGENTS.md` §2.2) and a **display hint only** — it decides a glyph,
+never an operation; authority stays in the VFS and the launcher. The selected
+item carries the shared selection state — the raised surface plus the accent
+selection rail every collection view shares — not a bespoke accent fill.
 
 Where each item is drawn, which items are visible for the current scroll
 offset, and the pixel-to-index pointer hit-test (`entry_index_at`) all come
