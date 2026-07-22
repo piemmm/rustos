@@ -54,8 +54,8 @@ mod program {
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
     use tairix_terminal::render::render;
     use tairix_terminal::{
-        shell_wires, PipeShellSource, ShellSource, Terminal, COLS, ROWS, TERM, WIN_HEIGHT,
-        WIN_WIDTH,
+        shell_load_failure, shell_wires, PipeShellSource, ShellSource, Terminal, COLS, ROWS, TERM,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{event_endpoint_for, WindowClient, WindowTransport};
@@ -119,6 +119,29 @@ mod program {
         let _ = tairix_rt::stderr(reason.as_bytes());
         let _ = tairix_rt::stderr(b"\n");
         code
+    }
+
+    /// Reap the exited hosted shell and, if it was admitted by `spawn` but
+    /// then failed its own asynchronous image load, return the terse reason
+    /// to report (fail loud); `None` for a clean or ordinary exit.
+    ///
+    /// The shell's exit becomes visible on both the output-stream member
+    /// (end-of-stream, as its stdout/stderr write ends close) and the child
+    /// member, and the wait-set may wake on either first — so both arms
+    /// funnel through this one reap so a load-failure diagnosis can never be
+    /// lost to whichever token happened to wake the loop. `shell_pid` is the
+    /// kernel-minted PID, known non-negative here.
+    fn reap_shell(shell_pid: i64) -> Option<&'static str> {
+        let mut status = WaitStatus::Exited(0);
+        let _ = tairix_rt::try_wait(
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            // The kernel-minted PID round-trips through the i32 wait ABI.
+            {
+                shell_pid as i32
+            },
+            &mut status,
+        );
+        shell_load_failure(status)
     }
 
     /// The production [`WindowTransport`]: one synchronous `ipc_call` to
@@ -334,11 +357,21 @@ mod program {
                             return fail(EXIT_CHANNEL_LOST, "present refused");
                         }
                     }
-                    // End-of-stream: the shell exited (a clean `exit`, or
-                    // it was killed). Show what it last wrote is already
-                    // on screen; close and end cleanly.
+                    // End-of-stream: the shell exited (a clean `exit`, it
+                    // was killed, or — admitted by `spawn` but then unable
+                    // to load its own image — it failed asynchronously).
+                    // What it last wrote is already on screen; reap it and,
+                    // if it never got off the ground, state why (fail loud)
+                    // before ending.
                     Err(Errno::NotFound) => {
+                        let reason = reap_shell(shell_pid);
                         let _ = client.close(window);
+                        if let Some(reason) = reason {
+                            return fail(
+                                EXIT_NO_SHELL,
+                                &alloc::format!("shell failed to launch: {reason}"),
+                            );
+                        }
                         return 0;
                     }
                     Err(_) => return fail(EXIT_CHANNEL_LOST, "shell channel lost"),
@@ -346,19 +379,23 @@ mod program {
                 CHILD_TOKEN => {
                     // The shell exited: reap it (non-blocking — the
                     // readiness was a peek), drain and paint whatever
-                    // output it left in the pipe, then end cleanly.
-                    let mut status = WaitStatus::Exited(0);
-                    let _ = tairix_rt::try_wait(
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                        // The kernel-minted PID round-trips through the i32 wait ABI.
-                        {
-                            shell_pid as i32
-                        },
-                        &mut status,
-                    );
+                    // output it left in the pipe, then end. A shell that
+                    // `spawn` admitted but that then failed its own
+                    // asynchronous image load exits with a reserved
+                    // `LOAD_*` status (never a synchronous spawn refusal
+                    // any longer), so the terminal states that reason
+                    // fail-loud here — hosting the shell was its whole
+                    // purpose — rather than closing silently.
+                    let reason = reap_shell(shell_pid);
                     while terminal.pump().is_ok() {}
                     let _ = present_frame(&terminal, theme, &mut client, window, frames, &mode);
                     let _ = client.close(window);
+                    if let Some(reason) = reason {
+                        return fail(
+                            EXIT_NO_SHELL,
+                            &alloc::format!("shell failed to launch: {reason}"),
+                        );
+                    }
                     return 0;
                 }
                 // A token outside the registered members cannot occur (the

@@ -658,3 +658,40 @@ fn pipe_source_write_fails_closed_on_a_wedged_or_failing_channel() {
     );
     assert_eq!(untouched.write(b""), Ok(()));
 }
+
+#[test]
+fn shell_load_failure_classifies_reserved_statuses() {
+    use tairix_abi::{
+        Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
+    };
+
+    use crate::spawned::shell_load_failure;
+
+    // Each reserved asynchronous load-failure status the child can exit with
+    // maps to the terse reason the terminal reports fail-loud when its
+    // hosted shell never got off the ground.
+    assert_eq!(
+        shell_load_failure(WaitStatus::Exited(LOAD_NOT_FOUND)),
+        Some("program not found or not readable")
+    );
+    assert_eq!(
+        shell_load_failure(WaitStatus::Exited(LOAD_UNVERIFIED)),
+        Some("signature or hash verification failed")
+    );
+    assert_eq!(
+        shell_load_failure(WaitStatus::Exited(LOAD_MALFORMED)),
+        Some("executable is malformed or incompatible")
+    );
+    assert_eq!(
+        shell_load_failure(WaitStatus::Exited(LOAD_OOM)),
+        Some("out of memory while loading")
+    );
+    // A clean or ordinary exit ends the terminal silently, and a stop is
+    // never a terminal exit.
+    assert_eq!(shell_load_failure(WaitStatus::Exited(0)), None);
+    assert_eq!(shell_load_failure(WaitStatus::Exited(1)), None);
+    assert_eq!(
+        shell_load_failure(WaitStatus::Stopped(Signal::Terminate)),
+        None
+    );
+}

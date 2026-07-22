@@ -26,9 +26,31 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, FdWire, SpawnAttach, STD_STREAM_COUNT};
+use tairix_abi::{Errno, FdWire, SpawnAttach, WaitStatus, STD_STREAM_COUNT};
 
 use crate::shell::ShellSource;
+
+/// The terse reason to report if the hosted shell's reaped exit `status`
+/// is a reserved asynchronous *load*-failure status, or `None` for a clean
+/// or ordinary exit (which ends the terminal silently).
+///
+/// `spawn` admits a child immediately and the child loads its own image on
+/// its first slice (the asynchronous-launch semantics of
+/// `plans/FIX-DESKTOP.md`), so a shell that cannot be read, verified, or
+/// built no longer fails the terminal's `spawn_attached` call synchronously
+/// — it is admitted and then exits with one of the reserved `LOAD_*`
+/// statuses. The terminal reaps that exit and must still state the reason
+/// (fail loud: the terminal's whole purpose was to host that shell), which
+/// this classifies through the single shared
+/// [`tairix_abi::load_failure_reason`] mapping so every launcher words a
+/// cause identically.
+#[must_use]
+pub fn shell_load_failure(status: WaitStatus) -> Option<&'static str> {
+    match status {
+        WaitStatus::Exited(code) => tairix_abi::load_failure_reason(code),
+        WaitStatus::Stopped(_) => None,
+    }
+}
 
 /// Bytes drained from the shell's output pipe per [`ShellSource::read`]:
 /// one bounded chunk per wait-set wake. A still-readable pipe re-reports

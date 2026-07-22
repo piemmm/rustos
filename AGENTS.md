@@ -1674,6 +1674,7 @@ You are not exempt from any rule above. In addition:
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
+    | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
@@ -1698,6 +1699,7 @@ You are not exempt from any rule above. In addition:
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | TPM / measured boot | `plans/TPM.md` |
+    | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The `vim` app | `plans/VIM.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
