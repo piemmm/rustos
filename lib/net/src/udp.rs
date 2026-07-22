@@ -22,8 +22,7 @@
 //! truncation, or a checksum mismatch rejects the whole datagram (`None`);
 //! nothing partial is surfaced.
 
-use crate::addr::{Ipv4Addr, Ipv6Addr};
-use crate::checksum::Checksum;
+pub use crate::checksum::Pseudo;
 
 /// Length of the fixed UDP header (source/dest port, length, checksum).
 pub const UDP_HEADER_LEN: usize = 8;
@@ -33,51 +32,6 @@ pub const PROTOCOL_UDP: u8 = 17;
 
 /// Largest value the 16-bit UDP `length` field can carry.
 const UDP_LENGTH_MAX: usize = u16::MAX as usize;
-
-/// The pseudo-header a UDP checksum folds over, one variant per family.
-///
-/// Carrying the family this way keeps the [`UdpDatagram::parse`] and
-/// [`write()`] entry points single, dual-stack definitions rather than a v4
-/// path a v6 path would shadow.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Pseudo {
-    /// The IPv4 pseudo-header source and destination.
-    V4 {
-        /// Source address.
-        source: Ipv4Addr,
-        /// Destination address.
-        destination: Ipv4Addr,
-    },
-    /// The IPv6 pseudo-header source and destination.
-    V6 {
-        /// Source address.
-        source: Ipv6Addr,
-        /// Destination address.
-        destination: Ipv6Addr,
-    },
-}
-
-impl Pseudo {
-    /// A checksum accumulator seeded with this pseudo-header for a UDP
-    /// datagram of `udp_len` bytes (header + payload).
-    fn seed(self, udp_len: u16) -> Checksum {
-        match self {
-            Self::V4 {
-                source,
-                destination,
-            } => Checksum::ipv4_pseudo(source, destination, PROTOCOL_UDP, udp_len),
-            Self::V6 {
-                source,
-                destination,
-            } => Checksum::ipv6_pseudo(source, destination, PROTOCOL_UDP, u32::from(udp_len)),
-        }
-    }
-
-    /// True for the IPv6 pseudo-header, whose checksum is mandatory.
-    const fn is_v6(self) -> bool {
-        matches!(self, Self::V6 { .. })
-    }
-}
 
 /// A parsed UDP datagram: the two ports and the payload borrowed from the
 /// input buffer.
@@ -120,7 +74,7 @@ impl<'a> UdpDatagram<'a> {
                 return None;
             }
         } else {
-            let mut sum = pseudo.seed(length_field);
+            let mut sum = pseudo.seed(PROTOCOL_UDP, length_field);
             sum.push(datagram);
             if sum.finish() != 0 {
                 return None;
@@ -173,7 +127,7 @@ pub fn write(
     out[4..6].copy_from_slice(&length.to_be_bytes());
     out[6..8].copy_from_slice(&[0, 0]);
     out[UDP_HEADER_LEN..].copy_from_slice(payload);
-    let mut sum = pseudo.seed(length);
+    let mut sum = pseudo.seed(PROTOCOL_UDP, length);
     sum.push(out);
     let checksum = match sum.finish() {
         0 => 0xFFFF,
@@ -186,6 +140,7 @@ pub fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addr::{Ipv4Addr, Ipv6Addr};
     use alloc::vec;
 
     const V4_SRC: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);

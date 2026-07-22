@@ -105,6 +105,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-net",
+        test: "fuzz_net_tcp",
+        description: "lib/net TCP segment codec (header, options, pseudo-header checksum)",
+    },
+    Target {
+        package: "tairix-net",
         test: "fuzz_net_igmp",
         description: "lib/net IGMPv2 multicast-membership codec (checksum, type, length bounds)",
     },

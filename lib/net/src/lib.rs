@@ -54,8 +54,13 @@
 //!   driven by two protocol providers, exactly as [`neigh`] is one
 //!   cache driven by ARP and Neighbour Discovery.
 //!
-//! Later increments extend this crate in place with `tcp`
-//! (`plans/NETWORK.md` §2.1); none of that surface is speculated here.
+//! - [`tcp`] — the TCP segment codec (RFC 9293): the header, the
+//!   control flags, the recognised options (MSS, window scale,
+//!   timestamps, SACK-permitted, SACK), the mandatory pseudo-header
+//!   checksum, and the modulo-2³² sequence-space arithmetic
+//!   ([`tcp::SeqNumber`]) the state machine's window comparisons use.
+//!   The connection state machine itself is a later increment
+//!   (`plans/NETWORK.md` N5b); none of that surface is speculated here.
 //!
 //! # Security
 //!
@@ -88,6 +93,7 @@ pub mod nd;
 pub mod neigh;
 pub mod route;
 pub mod stack;
+pub mod tcp;
 mod timeutil;
 pub mod udp;
 

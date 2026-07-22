@@ -17,6 +17,7 @@ own the frame buffers, and time enters as explicit monotonic
 which is what lets the unit tests, the property tests, the fuzz
 harnesses (`fuzz_net_eth`, `fuzz_net_addr`, `fuzz_net_ipv4`,
 `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`, `fuzz_net_stack`,
+`fuzz_net_udp`, `fuzz_net_tcp`, `fuzz_net_igmp`, `fuzz_net_mld`,
 registered with `cargo xtask fuzz`), and the live `netstack` service
 all exercise the *same* code.
 
@@ -261,8 +262,37 @@ solicited-node group (formalising ND's listening) and the all-systems
 group, and filters the receive path by membership; `join_multicast` /
 `leave_multicast` expose explicit application membership.
 
+### `tcp` — the TCP segment codec and sequence arithmetic
+
+The RFC 9293 wire layer: the fixed 20-byte header, the eight control
+flags (`TcpFlags`, with named `SYN`/`ACK`/… bits, `contains`, and a
+`|` combinator), and the recognised options — MSS, window scale,
+timestamps (RFC 7323), SACK-permitted, and up to `MAX_SACK_BLOCKS`
+selective-acknowledgement blocks (RFC 2018). `TcpSegment::parse`
+verifies the mandatory pseudo-header checksum in both families (TCP has
+no zero-checksum form, unlike UDP over IPv4), rejects a data offset
+outside `5..=15` words, a header longer than the segment, or any
+malformed option, and is total and bounded (a SACK count over the fixed
+bound is refused rather than allocated for). `write` serialises a
+`TcpSegmentMeta` with canonical, NOP-aligned option ordering and pads to
+a 32-bit boundary.
+
+`SeqNumber` is the checked modulo-2³² sequence-space type every window
+and acknowledgement comparison uses: wrapping `add`/`sub`, unsigned
+`distance_from`, the RFC 1982 windowed ordering (`lt`/`le`/`gt`/`ge`,
+computed from the unsigned gap so no `u32`→`i32` reinterpretation is
+needed), and `in_window` for the RFC 9293 §3.4 acceptance test. It
+deliberately has **no** `Ord`/`PartialOrd`, so a linear comparison on a
+cyclic value cannot compile.
+
+The connection state machine (the TCB, RFC 6298 RTO, retransmission,
+flow control, PAWS, RFC 5961 challenge ACKs) is a later increment
+(`plans/NETWORK.md` N5b) built on this segment layer.
+
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place —
-chiefly `tcp` (the RFC 9293 state machine, congestion control, SACK).
-Each is added with its callers, tests, and fuzz harnesses per increment.
+chiefly the TCP connection state machine (N5b — RFC 9293 transitions,
+RTO, flow control), then listeners + congestion control (N6) and the
+hardware offloads (N7). Each is added with its callers, tests, and fuzz
+harnesses per increment.

@@ -835,17 +835,59 @@ improvement, not test scaffolding):
   stays: it still spawns the in-kernel-floor block driver and the input driver
   for their live single-process verticals — it was never net-only.)
 
-### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[ ]`
-- Connection establishment/teardown (full state machine, simultaneous
-  open/close), sequence-space arithmetic as a checked type, send/recv
-  windows, RFC 6298 RTO with Karn's algorithm, fast retransmit,
-  zero-window probing, RFC 7323 window scaling + timestamps (PAWS),
-  CSPRNG ISNs, RFC 5961 challenge ACKs, user timeout.
-- Deterministic-engine property tests (the state machine never
-  regresses sequence invariants; every segment corpus replayable),
-  fuzz `fuzz_net_tcp` (segment decoder + state-machine driver), QEMU
-  vertical: client connect to a host peer, bulk transfer both
-  directions with loss injection.
+### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[~]`
+
+Split into three tree-green sub-increments (the N3 precedent), because
+the whole is too large for one change and each leaves the tree working.
+
+#### N5a — the TCP segment codec + sequence-space arithmetic `[x]`
+- `lib/net::tcp` is the pure, dual-stack RFC 9293 wire layer: the fixed
+  20-byte header, the eight control flags (`TcpFlags` — named `SYN`/`ACK`/…
+  bits, `contains`, `|`), and the recognised options — MSS, window scale
+  (RFC 7323, raw value surfaced; the §2.3 clamp is state-machine policy),
+  timestamps, SACK-permitted, and up to `MAX_SACK_BLOCKS` (= 4, a fixed
+  bound) SACK blocks (RFC 2018). `TcpSegment::parse` verifies the
+  mandatory pseudo-header checksum in both families (no zero-checksum
+  form, unlike UDP-over-IPv4), rejects a data offset outside `5..=15`
+  words / a header longer than the segment / any malformed or overrunning
+  option / a too-large SACK count, and is total + bounded + fail-closed.
+  `write` serialises a `TcpSegmentMeta` with canonical NOP-aligned option
+  ordering, padding to a 32-bit boundary, failing closed on an
+  over-40-byte options region.
+- `SeqNumber` is the checked modulo-2³² sequence type (RFC 1982 / RFC 9293
+  §3.4): wrapping `add`/`sub`, `distance_from`, the windowed
+  `lt`/`le`/`gt`/`ge` (computed from the unsigned gap, no signed cast),
+  and `in_window`. It has **no** `Ord`/`PartialOrd` so a linear comparison
+  on a cyclic value cannot compile — the type the N5b window/ACK
+  arithmetic is built on.
+- The v4/v6 pseudo-header context was hoisted from `udp` into the shared
+  `checksum::Pseudo` (protocol-neutral `seed(protocol, upper_len)`), so
+  UDP and TCP fold one definition (§2.2); `udp` re-exports it.
+- Tests: the `tcp` unit suite (sequence arithmetic across the wrap,
+  option round-trips incl. SACK + timestamps, and the fail-closed matrix
+  — truncation, bad data offset, malformed/overrunning options, too-many
+  SACK blocks, checksum + wrong-pseudo-header rejection) and the
+  `fuzz_net_tcp` harness (parse never-panics + write→parse round-trip),
+  registered in `cargo xtask fuzz`. Docs: `docs/src/lib/net.md`,
+  `lib/net/README.md`.
+
+#### N5b — the TCP connection state machine `[ ]`
+- Connection establishment/teardown (full RFC 9293 state machine,
+  simultaneous open/close), send/recv windows over `SeqNumber`, RFC 6298
+  RTO with Karn's algorithm, fast retransmit, zero-window probing,
+  RFC 7323 window scaling + timestamps (PAWS), CSPRNG ISNs, RFC 5961
+  challenge ACKs, user timeout — pure and event-driven (`next_deadline`).
+- Deterministic-engine property tests (the state machine never regresses
+  sequence invariants; every segment corpus replayable) and a
+  state-machine-driver arm added to `fuzz_net_tcp`.
+
+#### N5c — the stream socket surface + QEMU vertical `[ ]`
+- `SocketType::Stream` wired through the socket ABI + `netstack`
+  (`listen`/`accept`/`shutdown` are N6); a QEMU vertical: client connect
+  to a host peer, bulk transfer both directions with loss injection.
+  (The shared QEMU peer + wire fixture are v6-link-local-only after the
+  §18.5 scaffold removal — a vertical needing v4 or a bulk campaign
+  re-adds that topology here, not by resurrecting the deleted path.)
 
 ### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[ ]`
 - `listen`/`accept` with bounded accept + SYN queues; overflow ⇒

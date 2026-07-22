@@ -125,6 +125,64 @@ pub fn internet_checksum(data: &[u8]) -> u16 {
     sum.finish()
 }
 
+/// The addressing context a transport checksum folds over — the source
+/// and destination addresses of one family, from which the family's
+/// pseudo-header seed is derived.
+///
+/// This is the one definition of the transport pseudo-header context:
+/// UDP, TCP, and any other protocol whose checksum spans a pseudo-header
+/// name the same `Pseudo` and pass their own protocol number to
+/// [`Pseudo::seed`], rather than each carrying a private copy of the
+/// v4/v6 split.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pseudo {
+    /// The IPv4 pseudo-header source and destination.
+    V4 {
+        /// Source address.
+        source: Ipv4Addr,
+        /// Destination address.
+        destination: Ipv4Addr,
+    },
+    /// The IPv6 pseudo-header source and destination.
+    V6 {
+        /// Source address.
+        source: Ipv6Addr,
+        /// Destination address.
+        destination: Ipv6Addr,
+    },
+}
+
+impl Pseudo {
+    /// A [`Checksum`] accumulator seeded with this pseudo-header for an
+    /// upper-layer datagram of `upper_len` bytes (transport header plus
+    /// payload) carrying IP protocol / next-header `protocol`.
+    ///
+    /// `upper_len` is a 16-bit value for both families: the IPv6
+    /// pseudo-header's 32-bit upper-layer length field is written from
+    /// the widened value, and TAIRiX does not emit jumbograms, so no
+    /// datagram this engine builds exceeds the 16-bit range.
+    #[must_use]
+    pub fn seed(self, protocol: u8, upper_len: u16) -> Checksum {
+        match self {
+            Self::V4 {
+                source,
+                destination,
+            } => Checksum::ipv4_pseudo(source, destination, protocol, upper_len),
+            Self::V6 {
+                source,
+                destination,
+            } => Checksum::ipv6_pseudo(source, destination, protocol, u32::from(upper_len)),
+        }
+    }
+
+    /// True for the IPv6 pseudo-header, whose transport checksum is
+    /// mandatory (RFC 8200 §8.1).
+    #[must_use]
+    pub const fn is_v6(self) -> bool {
+        matches!(self, Self::V6 { .. })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

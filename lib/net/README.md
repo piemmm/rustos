@@ -9,8 +9,8 @@ caller-owned byte slices and explicit monotonic time values, so the exact
 code the live `netstack` service runs is the code the unit tests, property
 tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
 `fuzz_net_ipv4`, `fuzz_net_ipv6`, `fuzz_net_icmp`, `fuzz_net_nd`,
-`fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_igmp`, `fuzz_net_mld`)
-exercise.
+`fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_tcp`, `fuzz_net_igmp`,
+`fuzz_net_mld`) exercise.
 
 ## Contents
 
@@ -90,9 +90,18 @@ exercise.
   "one core, two providers" shape): reference-counted join/leave,
   robustness retransmission, jittered query responses, bounded and
   fail-closed at capacity.
+- `tcp` — the TCP segment codec (RFC 9293): the fixed header, the eight
+  control flags (`TcpFlags`), the recognised options (MSS, window scale,
+  timestamps, SACK-permitted, and up to `MAX_SACK_BLOCKS` SACK blocks),
+  and the mandatory pseudo-header checksum (both families; no zero-
+  checksum form). `SeqNumber` is the checked modulo-2³² sequence-space
+  type — wrapping arithmetic and the RFC 1982 windowed ordering, with no
+  total `Ord` so a linear comparison on a cyclic value cannot slip in.
+  Total, bounded (fixed option and header ceilings), and fail-closed. The
+  connection state machine is a later increment (`plans/NETWORK.md` N5b).
 
-Later increments evolve this crate in place with the socket ABI's
-multicast transmit and `tcp` (`plans/NETWORK.md` §2.1).
+Later increments evolve this crate in place with the TCP connection
+state machine (`plans/NETWORK.md` N5b) built on this segment layer.
 
 ## Security
 
