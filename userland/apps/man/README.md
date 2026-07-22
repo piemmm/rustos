@@ -21,8 +21,8 @@ authority (`tairix_help::load_raw`, the same one locale walk `load`
 wraps) and hands the raw bytes to a minimum-capability parser-sandbox
 worker (`tairix_sandbox::helpdoc` — `man`'s own binary re-spawned,
 `CAP_PROC_SPAWN` in its manifest). Only the whitelist-validated render
-comes back (printable text, line feeds, the bold/underline SGR pairs);
-a crashed or hostile worker costs the page — the typed
+comes back (printable text, line feeds, and the standard colour scheme's
+emphasis and colour SGRs); a crashed or hostile worker costs the page — the typed
 `ManError::Render`, no in-process fallback — and `-h` degrades to the
 usage banner (`docs/src/security/sandbox.md`).
 
@@ -62,19 +62,46 @@ the requested one, `man` emits a `context` advisory record on `stdinfo`
 (fd 3, code `help.locale_fallback`) — advisory only, never affecting output
 or exit status (`AGENTS.md` §20.1).
 
+The **section headings display in the served page's language** (`NOM`,
+`BESCHREIBUNG`, `説明`, …): the document keys stay the language-neutral
+`## NAME` … `## SEE ALSO`, but a reader of a French page sees French
+headings over French prose, and an untranslated language degrades to the
+English keys.
+
+## Rendering and colour
+
+The page is rendered through the one standard TAIRiX terminal colour scheme
+(`tairix_vt::scheme`, `plans/APPS.md` §12.2): headings and sub-headings in
+the heading role, `*emphasis*` in the emphasis role, inline code and fenced
+blocks in the literal role, `**strong**` bold, and table rules in the border
+role. Colour is render-to-terminal only — a redirected or piped page
+(`man ls | cat`) is plain text with no escapes — and degrades through the
+one `tairix_termcap` `TERM`→capability judgement: an attested colour
+terminal gets the full scheme, an attested monochrome one the emphasis
+attributes only, and an unattested output plain text. The information
+survives with every attribute stripped, so colour is never the sole carrier
+of a distinction.
+
 ## Pagination
 
 On a console whose geometry the kernel attests (`terminal_size`), the page
 is shown a screenful at a time: space turns the page, return advances one
 line, `q` stops; local echo is suppressed while the pager can prompt and
-restored on exit. On a serial line, a pipe, or a redirection the whole page
+restored on exit. A screenful is counted in **physical** rows, not
+newlines: a line wider than the terminal wraps onto several rows and the
+pager splits the page at exactly the columns the terminal wraps at
+(measuring display width, skipping the zero-width colour/emphasis escapes),
+so long lines no longer scroll off the top before the `--More--` prompt
+appears. On a serial line, a pipe, or a redirection the whole page
 streams — the remote emulator or consumer owns the scrollback.
 
 ## Seams and tests
 
 The two effectful edges are injected traits: `BundleStore` (bundle probe,
 locale-directory listing, bounded document reads) and `Console` (stdout,
-fd 3, rows, keys). The `Run` binary wires them to the kernel-authorised
+fd 3, terminal geometry — rows and columns — and keys). The `Run` binary
+also reads `TERM` from the environment for the colour decision, and wires
+these to the kernel-authorised
 `fs_*` syscalls and the inherited standard streams; every capability and
 per-inode check stays kernel-side (`AGENTS.md` §5.4) and a candidate probe
 mirrors the shell's launch rule — `NotFound` moves on, any other refusal is

@@ -47,7 +47,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::{DirEntry, OpenFlags};
-    use tairix_abi::{Errno, InputMode, STDOUT};
+    use tairix_abi::{Errno, InputMode, TerminalSize, STDOUT};
     use tairix_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
     use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
     use tairix_sandbox::helpdoc::HelpService;
@@ -206,10 +206,8 @@ mod program {
             let _ = StdInfo.write_all(record);
         }
 
-        fn rows(&self) -> Option<u16> {
-            tairix_rt::terminal_size(STDOUT)
-                .ok()
-                .map(|grid| grid.rows())
+        fn size(&self) -> Option<TerminalSize> {
+            tairix_rt::terminal_size(STDOUT).ok()
         }
 
         fn read_key(&self) -> Result<Option<u8>, Errno> {
@@ -256,7 +254,15 @@ mod program {
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let path = tairix_rt::env_var(b"PATH").and_then(|raw| core::str::from_utf8(raw).ok());
         let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
-        let request = Request { locale, path, home };
+        // `TERM` decides how much colour the rendered page uses (only on an
+        // attested terminal); the shell exports it like `LANG`/`PATH`.
+        let term = tairix_rt::env_var(b"TERM").and_then(|raw| core::str::from_utf8(raw).ok());
+        let request = Request {
+            locale,
+            path,
+            home,
+            term,
+        };
 
         // The parser sandbox the untrusted help document is rendered in:
         // this binary re-spawned in the worker role through the kernel's
@@ -272,7 +278,7 @@ mod program {
         // activity marker may paint over the rendered page. The cooked
         // default is restored before exit so the next program on this
         // console sees normal interactive echo again.
-        let interactive = console.rows().is_some();
+        let interactive = console.size().is_some();
         if interactive {
             let _ = tairix_rt::set_input_mode(InputMode::Raw);
         }

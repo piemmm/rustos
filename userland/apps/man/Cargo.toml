@@ -40,6 +40,15 @@ tairix-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the short/full renderers (plans/APPS.md §6).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The one "should output be coloured, and at what depth?" judgement: `man`
+# resolves the render styling from the console attestation and the `TERM`
+# value through the shared `TERM`→capability database, never a private
+# colour decision (plans/APPS.md §12.2).
+tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
+# The one glyph-width table: the pager measures each rendered line's display
+# width (and skips zero-width escape sequences) to count the physical screen
+# rows it wraps to, so a screenful is exactly a screenful (plans/CURSES.md).
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The parser-sandbox seam: the foreign help document is parsed and
 # rendered in a minimum-capability worker process, never in-process, and
 # only the whitelist-validated render comes back.

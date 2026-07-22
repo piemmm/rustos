@@ -19,8 +19,23 @@
 //! `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop
 //! to a wall-clock budget.
 
-use tairix_help::{render_full, render_short, HelpDoc};
+use tairix_help::{render_full, render_short, HelpDoc, Locale, RenderCtx, Styling};
 use tairix_vt::Op;
+
+/// The served-locale tags the harness renders under, including malformed
+/// spellings that must degrade to the canonical locale, never crash.
+const FUZZ_LOCALES: &[&str] = &[
+    "en-US",
+    "fr-FR",
+    "de-DE",
+    "uk-UA",
+    "zh-CN",
+    "ja-JP",
+    "ar-SA",
+    "he-IL",
+    "",
+    "not a tag",
+];
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -85,11 +100,22 @@ fn bounded(x: u64, max: usize) -> usize {
 
 /// Parse `input` (must not panic); when it parses, render both surfaces
 /// (must not panic) and check the printed characters stay control-free.
-fn exercise(input: &[u8]) {
+///
+/// `sel` selects the styling level and served locale, so every render path
+/// (plain / monochrome / colour, translated / default headings) is fuzzed.
+fn exercise(input: &[u8], sel: u64) {
     let Ok(doc) = HelpDoc::parse(input) else {
         return;
     };
-    for ops in [render_short(&doc), render_full(&doc)] {
+    let styling = match sel % 3 {
+        0 => Styling::Plain,
+        1 => Styling::Monochrome,
+        _ => Styling::Colour,
+    };
+    let tag = FUZZ_LOCALES[bounded(sel >> 2, FUZZ_LOCALES.len() - 1)];
+    let locale = Locale::parse(tag).unwrap_or_default();
+    let ctx = RenderCtx::new(&locale, styling);
+    for ops in [render_short(&doc, &ctx), render_full(&doc, &ctx)] {
         for op in ops {
             if let Op::Print(ch) = op {
                 assert!(!ch.is_control(), "rendered control character {ch:?}");
@@ -126,7 +152,7 @@ fn parse_and_render_never_panic_for_any_input() {
                 *byte ^= low_byte(next() >> 17);
             }
         }
-        exercise(&mutated);
+        exercise(&mutated, next());
 
         // 2. A structured-but-hostile document: structural tokens spliced
         //    together with random letters.
@@ -139,12 +165,12 @@ fn parse_and_render_never_panic_for_any_input() {
                 None => spliced.push(char::from(b'a' + low_byte(next() >> 29) % 26)),
             }
         }
-        exercise(spliced.as_bytes());
+        exercise(spliced.as_bytes(), next());
 
         // 3. Pure byte noise.
         let nlen = bounded(next(), MAX_NOISE);
         let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 23)).collect();
-        exercise(&noise);
+        exercise(&noise, next());
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

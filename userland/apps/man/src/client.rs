@@ -5,14 +5,18 @@
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::stdinfo::{Human, StdInfoKind, StdInfoRecord};
 use tairix_abi::{Errno, BUNDLE_SUFFIX};
 use tairix_cmdres::{bundle_candidates, search_roots};
 use tairix_help::{load_raw, DocumentName, Fallback, LoadError, Locale, RawLoaded};
 use tairix_log::Sink;
-use tairix_sandbox::helpdoc::{render_help, HelpRefusal, HelpRenderFailure, RenderMode};
+use tairix_sandbox::helpdoc::{render_help, HelpRefusal, HelpRenderFailure, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
+use tairix_termcap::{from_term, ColorDepth};
+use tairix_vt::char_width;
 
 use crate::command::Command;
 use crate::error::ManError;
@@ -63,6 +67,11 @@ pub struct Request<'a> {
     /// The `HOME` variable, if set: names the user's own `<home>/Apps`
     /// root for the recursive bundle search (plans/APPS.md §7).
     pub home: Option<&'a str>,
+    /// The `TERM` variable, if set: the terminal type, which decides how
+    /// much colour the rendered page uses (plans/APPS.md §12.2). It is only
+    /// consulted when standard output is an attested terminal; a piped or
+    /// redirected page is always plain regardless of `TERM`.
+    pub term: Option<&'a str>,
 }
 
 /// Run one [`Command`] against the injected store, console, and parser
@@ -107,7 +116,15 @@ fn short_help<L: Launcher, S: Sink>(
         let source = ScopedHelp::new(store, &bundle_dir);
         let raw = load_raw(&source, &active_locale(request.locale), &name)
             .map_err(from_load(OWN_WORD, OWN_WORD))?;
-        render_help(sandbox, RenderMode::Short, &raw.bytes).map_err(from_render)
+        let styling = render_styling(console, request.term);
+        render_help(
+            sandbox,
+            RenderMode::Short,
+            styling,
+            raw.selection.locale_dir.as_str(),
+            &raw.bytes,
+        )
+        .map_err(from_render)
     });
     if let Ok(bytes) = rendered {
         console.write_all(&bytes).map_err(ManError::Output)
@@ -137,8 +154,31 @@ fn page<L: Launcher, S: Sink>(
     let source = ScopedHelp::new(store, &bundle_dir);
     let raw = load_raw(&source, &requested, &name).map_err(from_load(word, name_str))?;
     emit_fallback_record(console, &requested, &raw);
-    let bytes = render_help(sandbox, RenderMode::Full, &raw.bytes).map_err(from_render)?;
+    let styling = render_styling(console, request.term);
+    let bytes = render_help(
+        sandbox,
+        RenderMode::Full,
+        styling,
+        raw.selection.locale_dir.as_str(),
+        &raw.bytes,
+    )
+    .map_err(from_render)?;
     write_paged(&bytes, console)
+}
+
+/// The render styling for this invocation: plain (no escapes) unless
+/// standard output is an attested terminal, and then coloured or, on a
+/// terminal the `TERM` value reports no colour for, attribute-only
+/// monochrome. This is the one `lib/termcap` `TERM`->capability judgement —
+/// `man` invents no private colour policy (plans/APPS.md §12.2).
+fn render_styling(console: &dyn Console, term: Option<&str>) -> Styling {
+    if console.size().is_none() {
+        return Styling::Plain;
+    }
+    match from_term(term.unwrap_or("")).capabilities().color {
+        ColorDepth::None => Styling::Monochrome,
+        _ => Styling::Colour,
+    }
 }
 
 /// The document a command word names inside its bundle: the word itself
@@ -311,20 +351,30 @@ fn emit_fallback_record(console: &dyn Console, requested: &Locale, raw: &RawLoad
 /// The pager is the historical `more` contract: after each screenful the
 /// prompt offers space (next screenful), return (one more line), or `q`
 /// (stop); any other key turns the next screenful too, and end of input
-/// streams the remainder without prompting. A console that reports no row
-/// count (a redirection, a pipe) gets the whole page in order, unprompted.
+/// streams the remainder without prompting. A console that reports no size
+/// (a redirection, a pipe) gets the whole page in order, unprompted.
+///
+/// A screenful is counted in **physical** rows, not newlines: a line longer
+/// than the terminal is wide wraps onto several rows, so the pager splits the
+/// page at the exact points the terminal wraps at ([`physical_rows`]) and
+/// counts each of those. Counting one row per newline is what let long lines
+/// scroll off the top before the prompt appeared.
 fn write_paged(bytes: &[u8], console: &dyn Console) -> Result<(), ManError> {
-    let page_rows = match console.rows() {
-        Some(rows) if rows >= 2 => usize::from(rows) - 1,
+    let size = match console.size() {
+        Some(size) if size.rows() >= 2 => size,
         _ => return console.write_all(bytes).map_err(ManError::Output),
     };
+    let page_rows = usize::from(size.rows()) - 1;
+    let cols = usize::from(size.cols());
+    let rows = physical_rows(bytes, cols);
     let mut written_rows = 0usize;
     let mut paging = true;
-    let mut lines = bytes.split_inclusive(|&byte| byte == b'\n').peekable();
-    while let Some(line) = lines.next() {
-        console.write_all(line).map_err(ManError::Output)?;
+    let mut rows = rows.into_iter().peekable();
+    while let Some(row) = rows.next() {
+        let segment = bytes.get(row).unwrap_or_default();
+        console.write_all(segment).map_err(ManError::Output)?;
         written_rows += 1;
-        if paging && written_rows >= page_rows && lines.peek().is_some() {
+        if paging && written_rows >= page_rows && rows.peek().is_some() {
             match prompt(console)? {
                 PagerStep::Screenful => written_rows = 0,
                 PagerStep::Line => written_rows = page_rows.saturating_sub(1),
@@ -334,6 +384,62 @@ fn write_paged(bytes: &[u8], console: &dyn Console) -> Result<(), ManError> {
         }
     }
     Ok(())
+}
+
+/// Split the rendered page into the byte ranges the terminal draws as one
+/// physical row each: a run ends at a line feed (the newline included) or
+/// where the accumulated display width would exceed `cols` and the terminal
+/// wraps.
+///
+/// Display width is measured with [`char_width`] so a double-width glyph
+/// counts as two columns, and CSI escape sequences (the colour/emphasis SGRs
+/// the render emits) are consumed at zero width — they move the cursor to no
+/// column, so a coloured line wraps at exactly the same place its plain twin
+/// does. `cols` is guaranteed non-zero by `tairix_abi::TerminalSize`.
+fn physical_rows(bytes: &[u8], cols: usize) -> Vec<Range<usize>> {
+    // The render is `lib/vt`-encoded output: printable UTF-8, line feeds, and
+    // well-formed CSI sequences. A non-UTF-8 page cannot come from the
+    // validated render, so it degrades to one whole row rather than guessing.
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        return alloc::vec![0..bytes.len()];
+    };
+    let mut rows = Vec::new();
+    let mut row_start = 0usize;
+    let mut col = 0usize;
+    let mut chars = text.char_indices();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\u{1b}' {
+            // Consume the CSI sequence (`ESC [` … final byte 0x40..=0x7E) at
+            // zero width; a lone or malformed escape consumes only the ESC.
+            if matches!(chars.clone().next(), Some((_, '['))) {
+                chars.next();
+                for (_, c) in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if ch == '\n' {
+            let end = index + 1;
+            rows.push(row_start..end);
+            row_start = end;
+            col = 0;
+            continue;
+        }
+        let width = usize::from(char_width(ch));
+        if col + width > cols {
+            rows.push(row_start..index);
+            row_start = index;
+            col = 0;
+        }
+        col += width;
+    }
+    if row_start < bytes.len() {
+        rows.push(row_start..bytes.len());
+    }
+    rows
 }
 
 /// What the user asked the pager to do next.

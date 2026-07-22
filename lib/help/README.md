@@ -33,15 +33,23 @@ here once and every consumer imports them.
   sub-headings, bullet/ordered lists (with two-space continuation lines),
   fenced code blocks, pipe tables, and `` `code` ``/`**strong**`/`*emphasis*`
   inline spans.
-- `render_short` / `render_full` — the `-h`/`-?` view (`NAME`, `SYNOPSIS`,
-  compact `OPTIONS`) and the whole `man` page, emitted as `lib/vt` operations
-  (bold headings/code, underlined emphasis, width-padded tables via
-  `lib/curses`) that the caller encodes and writes to its own stdout.
+- `render_short(doc, ctx)` / `render_full(doc, ctx)` — the `-h`/`-?` view
+  (`NAME`, `SYNOPSIS`, compact `OPTIONS`) and the whole `man` page, emitted as
+  `lib/vt` operations that the caller encodes and writes to its own stdout.
+  The `RenderCtx { locale, styling }` gives both surfaces their heading
+  language and colour level: headings display in the served page's language
+  (`SectionKind::heading_label` — the document keys stay language-neutral), and
+  the standard colour scheme (`tairix_vt::scheme`) colours headings, emphasis,
+  code, and table rules. `Styling` is `Plain` (no escapes, for a pipe),
+  `Monochrome` (attributes only), or `Colour`; every styled run is flat
+  (open/print/reset) so stripping escapes leaves identical text, and
+  width-padded tables use `lib/curses` widths.
 - `own_short_help` — a command app's own `-h`/`-?` render in one call:
   parse the raw `LANG` preference (malformed or missing degrades to the
-  canonical `en-US/`), load the app's own document, render the short view, and
-  return encoded `lib/vt` bytes — `None` when no document can be served, so
-  the caller falls back to its own usage banner and `-h` never fails.
+  canonical `en-US/`), load the app's own document, render the short view
+  `Plain` (an unattested `-h` emits no escapes), and return encoded `lib/vt`
+  bytes — `None` when no document can be served, so the caller falls back to
+  its own usage banner and `-h` never fails.
 - `BundleHelp` (the `rt` cargo feature) — the production `HelpSource` over
   the running command app's own `/System/Apps/<word>.app/Help/` tree via the
   `tairix-rt` file wrappers, spelled from the shared `lib/abi` store/suffix
@@ -68,8 +76,11 @@ here once and every consumer imports them.
   bounds (`MAX_*`), and any violation, control byte, unknown/duplicate/
   out-of-order section, or malformed structure rejects the whole document with
   a typed `HelpError`. Section headings inside fenced code blocks stay code.
-- The renderers add no second escape vocabulary and no second width table:
-  output is `tairix_vt::Op` values, widths come from `tairix_curses`.
+- The renderers add no second escape vocabulary, no second width table, and
+  no second colour list: output is `tairix_vt::Op` values, widths come from
+  `tairix_curses`, and colour is named by role from the one
+  `tairix_vt::scheme` palette (the terminal's colour depth is decided by the
+  caller, not here).
 - Fuzzed: `tests/fuzz_help.rs` (registered with `cargo xtask fuzz`) holds the
   parser total and the rendered output control-free under hostile bytes.
 

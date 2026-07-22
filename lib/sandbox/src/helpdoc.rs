@@ -18,8 +18,16 @@
 
 use alloc::vec::Vec;
 
-use tairix_help::{render_full, render_short, HelpDoc, HelpError, SectionKind, MAX_DOC_LEN};
+use tairix_help::{
+    render_full, render_short, HelpDoc, HelpError, Locale, RenderCtx, SectionKind, MAX_DOC_LEN,
+    MAX_LOCALE_LEN,
+};
 use tairix_vt::{encode_all_into, Op, Parser, Sgr};
+
+/// The render styling level, re-exported so a caller of [`render_help`] names
+/// one type from this crate's surface (`man` picks it from the terminal's
+/// attested colour capability).
+pub use tairix_help::Styling;
 
 use crate::host::{Launcher, ParserSandbox, SandboxError};
 use crate::wire::{Reader, Writer};
@@ -37,6 +45,30 @@ pub enum RenderMode {
     Short,
     /// The full `man` page: every section.
     Full,
+}
+
+/// Styling wire codes for the [`Styling`] the caller asks the render at.
+const STYLE_PLAIN: u8 = 0;
+const STYLE_MONOCHROME: u8 = 1;
+const STYLE_COLOUR: u8 = 2;
+
+/// A `Styling`'s wire code.
+fn styling_to_wire(styling: Styling) -> u8 {
+    match styling {
+        Styling::Plain => STYLE_PLAIN,
+        Styling::Monochrome => STYLE_MONOCHROME,
+        Styling::Colour => STYLE_COLOUR,
+    }
+}
+
+/// Decode a `Styling` wire code; `None` fails the request closed.
+fn styling_from_wire(raw: u8) -> Option<Styling> {
+    match raw {
+        STYLE_PLAIN => Some(Styling::Plain),
+        STYLE_MONOCHROME => Some(Styling::Monochrome),
+        STYLE_COLOUR => Some(Styling::Colour),
+        _ => None,
+    }
 }
 
 /// Request opcode.
@@ -219,6 +251,14 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, HelpRefusal> {
     }
     let mode = RenderMode::from_wire(r.u8().map_err(|_| HelpRefusal::MalformedRequest)?)
         .ok_or(HelpRefusal::MalformedRequest)?;
+    let styling = styling_from_wire(r.u8().map_err(|_| HelpRefusal::MalformedRequest)?)
+        .ok_or(HelpRefusal::MalformedRequest)?;
+    // The served-locale tag decides the displayed heading language. It is a
+    // spelling `lib/help` validates; a missing or malformed tag degrades to
+    // the canonical locale (English headings) rather than refusing the page.
+    let locale = r
+        .string(MAX_LOCALE_LEN)
+        .map_err(|_| HelpRefusal::MalformedRequest)?;
     let bytes = r
         .bytes(MAX_DOC_LEN)
         .map_err(|_| HelpRefusal::MalformedRequest)?;
@@ -226,9 +266,11 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, HelpRefusal> {
         return Err(HelpRefusal::MalformedRequest);
     }
     let doc = HelpDoc::parse(bytes).map_err(HelpRefusal::Document)?;
+    let locale = Locale::parse(&locale).unwrap_or_default();
+    let ctx = RenderCtx::new(&locale, styling);
     let ops = match mode {
-        RenderMode::Short => render_short(&doc),
-        RenderMode::Full => render_full(&doc),
+        RenderMode::Short => render_short(&doc, &ctx),
+        RenderMode::Full => render_full(&doc, &ctx),
     };
     let mut rendered = Vec::new();
     encode_all_into(&ops, &mut rendered);
@@ -239,14 +281,19 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, HelpRefusal> {
 }
 
 /// Ask the sandboxed worker to parse `document` and render its `mode`
-/// surface, returning the validated vt-encoded render.
+/// surface at `styling`, with headings in `locale`'s language, returning
+/// the validated vt-encoded render.
+///
+/// `locale` is the served-locale tag (e.g. `fr-FR`); the worker validates
+/// it and degrades a missing or malformed tag to the canonical locale, so
+/// headings simply display in English rather than the page failing.
 ///
 /// The reply is never trusted as-is: the returned bytes are re-parsed
 /// through the `lib/vt` streaming parser and every op is checked against
 /// the closed set a help render can contain — printable text, line feeds,
-/// and the bold/underline SGR pairs. The validated ops are re-encoded
-/// canonically, so the caller writes bytes this process produced, not
-/// bytes the worker chose.
+/// and the standard colour scheme's emphasis and colour SGRs. The
+/// validated ops are re-encoded canonically, so the caller writes bytes
+/// this process produced, not bytes the worker chose.
 ///
 /// # Errors
 ///
@@ -256,6 +303,8 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, HelpRefusal> {
 pub fn render_help<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     mode: RenderMode,
+    styling: Styling,
+    locale: &str,
     document: &[u8],
 ) -> Result<Vec<u8>, HelpRenderFailure> {
     if document.len() > MAX_DOC_LEN {
@@ -266,6 +315,8 @@ pub fn render_help<L: Launcher, S: tairix_log::Sink>(
     let mut w = Writer::new();
     w.u8(OP_RENDER);
     w.u8(mode.to_wire());
+    w.u8(styling_to_wire(styling));
+    w.str(locale);
     w.bytes(document);
     let reply = sandbox
         .request(&w.finish())
@@ -328,13 +379,26 @@ fn validate_render(rendered: &[u8]) -> Result<Vec<u8>, HelpRenderFailure> {
     Ok(out)
 }
 
-/// The closed op whitelist of `tairix_help::render_short`/`render_full`.
+/// The closed op whitelist of `tairix_help::render_short`/`render_full`:
+/// printable text, line feeds, and the standard colour scheme's rendition
+/// operations — the emphasis attributes each styled run opens (bold, dim,
+/// italic, underline) and its foreground colour, plus the single reset that
+/// closes it. Anything else — cursor movement, screen clears, OSC/DCS
+/// strings, background colour, a truncated escape — is not something a help
+/// render emits and fails the reply closed.
 fn is_render_op(op: &Op) -> bool {
     matches!(
         op,
         Op::Print(_)
             | Op::LineFeed
-            | Op::Sgr(Sgr::Bold | Sgr::ResetIntensity | Sgr::Underline | Sgr::ResetUnderline)
+            | Op::Sgr(
+                Sgr::Reset
+                    | Sgr::Bold
+                    | Sgr::Dim
+                    | Sgr::Italic
+                    | Sgr::Underline
+                    | Sgr::Foreground(_)
+            )
     )
 }
 
@@ -343,7 +407,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use tairix_help::{render_full, render_short, HelpDoc, HelpError};
+    use tairix_help::{render_full, render_short, HelpDoc, HelpError, Locale, RenderCtx, Styling};
     use tairix_vt::encode_all_into;
 
     use super::{render_help, HelpRefusal, HelpRenderFailure, HelpService, RenderMode};
@@ -366,12 +430,15 @@ mod tests {
         ParserSandbox::new(LoopbackLauncher::new(HelpService::default as _), NullSink)
     }
 
-    /// The locally-computed expected render for `mode`.
-    fn local_render(mode: RenderMode, doc: &str) -> Vec<u8> {
+    /// The locally-computed expected render for `mode` at `styling` in
+    /// `locale`.
+    fn local_render(mode: RenderMode, styling: Styling, locale: &str, doc: &str) -> Vec<u8> {
         let parsed = HelpDoc::parse(doc.as_bytes()).expect("valid document");
+        let locale = Locale::parse(locale).unwrap_or_default();
+        let ctx = RenderCtx::new(&locale, styling);
         let ops = match mode {
-            RenderMode::Short => render_short(&parsed),
-            RenderMode::Full => render_full(&parsed),
+            RenderMode::Short => render_short(&parsed, &ctx),
+            RenderMode::Full => render_full(&parsed, &ctx),
         };
         let mut out = Vec::new();
         encode_all_into(&ops, &mut out);
@@ -381,10 +448,68 @@ mod tests {
     #[test]
     fn renders_both_surfaces_identically_to_a_local_render() {
         let mut sandbox = sandbox();
+        // Full colour exercises the SGR whitelist round-trip end to end.
         for mode in [RenderMode::Short, RenderMode::Full] {
-            let rendered = render_help(&mut sandbox, mode, MINIMAL.as_bytes()).expect("renders");
-            assert_eq!(rendered, local_render(mode, MINIMAL), "mode {mode:?}");
+            let rendered = render_help(
+                &mut sandbox,
+                mode,
+                Styling::Colour,
+                "en-US",
+                MINIMAL.as_bytes(),
+            )
+            .expect("renders");
+            assert_eq!(
+                rendered,
+                local_render(mode, Styling::Colour, "en-US", MINIMAL),
+                "mode {mode:?}"
+            );
         }
+    }
+
+    #[test]
+    fn plain_styling_carries_no_escape_and_colour_styling_does() {
+        let mut sandbox = sandbox();
+        let plain = render_help(
+            &mut sandbox,
+            RenderMode::Full,
+            Styling::Plain,
+            "en-US",
+            MINIMAL.as_bytes(),
+        )
+        .expect("renders");
+        assert!(!plain.contains(&0x1b), "plain output has no escapes");
+        let colour = render_help(
+            &mut sandbox,
+            RenderMode::Full,
+            Styling::Colour,
+            "en-US",
+            MINIMAL.as_bytes(),
+        )
+        .expect("renders");
+        assert!(colour.contains(&0x1b), "colour output carries escapes");
+    }
+
+    #[test]
+    fn the_served_locale_localises_the_headings() {
+        let mut sandbox = sandbox();
+        let rendered = render_help(
+            &mut sandbox,
+            RenderMode::Full,
+            Styling::Plain,
+            "fr-FR",
+            MINIMAL.as_bytes(),
+        )
+        .expect("renders");
+        let text = alloc::string::String::from_utf8(rendered).expect("utf-8");
+        assert!(text.contains("NOM"), "French NAME heading: {text}");
+        assert!(
+            text.contains("DESCRIPTION"),
+            "French DESCRIPTION heading: {text}"
+        );
+        assert!(
+            !text.contains("NAME"),
+            "English NAME must not appear: {text}"
+        );
     }
 
     #[test]
@@ -395,6 +520,8 @@ mod tests {
             render_help(
                 &mut sandbox,
                 RenderMode::Full,
+                Styling::Plain,
+                "en-US",
                 b"garbage before any heading\n"
             ),
             Err(HelpRenderFailure::Refused(HelpRefusal::Document(direct)))
@@ -408,7 +535,7 @@ mod tests {
         let direct = HelpDoc::parse(doc).unwrap_err();
         assert!(matches!(direct, HelpError::MissingSection(_)));
         assert_eq!(
-            render_help(&mut sandbox, RenderMode::Full, doc),
+            render_help(&mut sandbox, RenderMode::Full, Styling::Plain, "en-US", doc),
             Err(HelpRenderFailure::Refused(HelpRefusal::Document(direct)))
         );
     }
@@ -418,7 +545,13 @@ mod tests {
         let mut sandbox = sandbox();
         let oversize = vec![b'a'; tairix_help::MAX_DOC_LEN + 1];
         assert_eq!(
-            render_help(&mut sandbox, RenderMode::Full, &oversize),
+            render_help(
+                &mut sandbox,
+                RenderMode::Full,
+                Styling::Plain,
+                "en-US",
+                &oversize
+            ),
             Err(HelpRenderFailure::Refused(HelpRefusal::Document(
                 HelpError::TooLarge
             )))
@@ -463,16 +596,25 @@ mod tests {
 
     #[test]
     fn a_forbidden_escape_in_the_reply_fails_closed() {
-        // A screen clear, an OSC title change, and a colour SGR: none may
-        // pass the whitelist, however plausible the surrounding text.
+        // A screen clear, an OSC title change, a background colour, and
+        // reverse video: none is an operation a help render emits, so each
+        // must fail the reply closed however plausible the surrounding text.
+        // (A *foreground* colour, by contrast, is now a legitimate render op.)
         for evil in [
             b"safe\x1b[2Jtext".as_slice(),
             b"safe\x1b]0;owned\x07text".as_slice(),
-            b"safe\x1b[31mtext".as_slice(),
+            b"safe\x1b[41mtext".as_slice(),
+            b"safe\x1b[7mtext".as_slice(),
         ] {
             let mut sandbox = evil_sandbox(evil);
             assert_eq!(
-                render_help(&mut sandbox, RenderMode::Full, MINIMAL.as_bytes()),
+                render_help(
+                    &mut sandbox,
+                    RenderMode::Full,
+                    Styling::Colour,
+                    "en-US",
+                    MINIMAL.as_bytes()
+                ),
                 Err(HelpRenderFailure::ReplyMalformed),
                 "reply {evil:?}"
             );
@@ -483,17 +625,32 @@ mod tests {
     fn a_truncated_trailing_escape_fails_closed() {
         let mut sandbox = evil_sandbox(b"text\x1b[");
         assert_eq!(
-            render_help(&mut sandbox, RenderMode::Full, MINIMAL.as_bytes()),
+            render_help(
+                &mut sandbox,
+                RenderMode::Full,
+                Styling::Colour,
+                "en-US",
+                MINIMAL.as_bytes()
+            ),
             Err(HelpRenderFailure::ReplyMalformed)
         );
     }
 
     #[test]
     fn a_clean_styled_reply_is_re_encoded_canonically() {
-        // Bold on/off around text, exactly what a genuine render emits.
-        let mut sandbox = evil_sandbox(b"\x1b[1mNAME\x1b[22m\nbody");
-        let out = render_help(&mut sandbox, RenderMode::Full, MINIMAL.as_bytes())
-            .expect("whitelisted ops pass");
-        assert_eq!(out, b"\x1b[1mNAME\x1b[22m\nbody");
+        // A coloured, bold heading closed by a single reset — exactly the
+        // shape a genuine render emits, in the canonical one-CSI-per-op form
+        // the emitter produces: bold (SGR 1), bright-blue foreground (SGR 94),
+        // the text, then reset (SGR 0).
+        let mut sandbox = evil_sandbox(b"\x1b[1m\x1b[94mNAME\x1b[0m\nbody");
+        let out = render_help(
+            &mut sandbox,
+            RenderMode::Full,
+            Styling::Colour,
+            "en-US",
+            MINIMAL.as_bytes(),
+        )
+        .expect("whitelisted ops pass");
+        assert_eq!(out, b"\x1b[1m\x1b[94mNAME\x1b[0m\nbody");
     }
 }

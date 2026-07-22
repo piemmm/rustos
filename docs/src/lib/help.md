@@ -69,16 +69,41 @@ parser is fuzzed (`fuzz_help`, run by `cargo xtask fuzz`).
 
 ## The two render surfaces
 
-- `render_short` — the `-h`/`-?` view: the `NAME` and `SYNOPSIS` content plus
-  the `OPTIONS` list, compactly and without headings.
-- `render_full` — the whole `man` page: every section in order, bold
-  headings, bold code/strong, underlined emphasis, verbatim indented code
-  blocks, and width-padded tables honouring the declared column alignment.
+Both renderers take a `RenderCtx { locale, styling }`:
+
+- `render_short(doc, ctx)` — the `-h`/`-?` view: the `NAME` and `SYNOPSIS`
+  content plus the `OPTIONS` list, compactly and without headings.
+- `render_full(doc, ctx)` — the whole `man` page: every section in order, with
+  its heading, verbatim indented code blocks, and width-padded tables honouring
+  the declared column alignment.
+
+**Localised headings.** The document keys stay the language-neutral `## NAME`
+… `## SEE ALSO`, but the reader sees each heading in the *served* page's
+language (`SectionKind::heading_label(locale)` — `NOM`/`BESCHREIBUNG`/`説明`
+…, selected by primary language subtag, English for any untranslated
+language). `man` passes the served locale (which may differ from the request
+after a fallback) so the headings match the prose.
+
+**Colour.** Styling follows the one standard scheme (`tairix_vt::scheme`):
+headings and sub-headings in the heading role, `*emphasis*` in the emphasis
+role, inline code and fenced blocks in the literal role, `**strong**` bold, and
+table rules in the border role. Each styled run is emitted flat (open the
+style, print, single reset), so stripping every escape leaves the exact same
+text — the information never rests on colour alone. The `Styling` level chooses
+how much of it to emit:
+
+- `Styling::Plain` — no escape sequences at all, for a redirected or piped
+  consumer (`man ls | cat` is clean text).
+- `Styling::Monochrome` — the emphasis attributes but no colour, for a terminal
+  that renders none.
+- `Styling::Colour` — the full scheme.
 
 Both emit `tairix_vt::Op` sequences (widths from `tairix_curses`), so the
 escape vocabulary stays the one `lib/vt` definition and the output prints no
-control bytes. Paging and terminal probing belong to the `man` app; the
-active locale is resolved once by the session/shell and passed in.
+control bytes. Paging and the plain/monochrome/colour decision belong to the
+`man` app (it resolves them from the console attestation and `TERM` through the
+one `tairix_termcap` judgement); the active locale is resolved once by the
+session/shell and passed in.
 
 ## A command's own short help, in one place
 
@@ -88,8 +113,11 @@ that sequence lives here once rather than per tool:
 - `own_short_help(source, locale, word)` — the pure helper: parse the raw
   `LANG` preference (a malformed or missing tag degrades to `en-US/`),
   load `word`'s document through the fallback chain, render the short view,
-  and return it as encoded `lib/vt` bytes. `None` when no document can be
-  served — the caller then prints its own usage banner, so `-h` never fails.
+  and return it as encoded `lib/vt` bytes. It renders `Styling::Plain` (no
+  escapes): the short view carries no headings, and a program emitting `-h`
+  has not attested its standard output as a terminal, so a piped or captured
+  `-h` is clean text. `None` when no document can be served — the caller then
+  prints its own usage banner, so `-h` never fails.
 - `BundleHelp` (the `rt` cargo feature) — the production `HelpSource`: the
   running command app's own `/System/Apps/<word>.app/Help/` tree, read
   through the `tairix-rt` file wrappers. It adds no authority (every

@@ -77,7 +77,7 @@ pub use locale::{
 pub use own::own_short_help;
 #[cfg(feature = "rt")]
 pub use own::BundleHelp;
-pub use render::{render_full, render_short};
+pub use render::{render_full, render_short, RenderCtx, Styling};
 
 #[cfg(test)]
 mod tests;

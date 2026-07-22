@@ -1053,9 +1053,9 @@ deliberately staged behind the floor work below).
 ## 12.2 Terminal colour, the standard scheme, and box drawing
 
 **Status: in progress** (deliverable 9): the shared `tairix_vt::scheme`
-palette, the one `tairix_termcap::resolve_color` `--color[=WHEN]` decision, and
-the first adoption (`ls` file kinds) have landed; `lib/help`'s coloured renders,
-`fstree`, and box drawing remain. Binding design for how command apps and
+palette, the one `tairix_termcap::resolve_color` `--color[=WHEN]` decision, the
+first adoption (`ls` file kinds), and `lib/help`'s coloured `man`/short-help
+renders have landed; `fstree` and box drawing remain. Binding design for how command apps and
 full-screen curses apps use colour, emphasis, and box drawing. Everything here
 rides the one terminal vocabulary (`lib/vt`), capability database
 (`lib/termcap`), and screen model (`lib/curses`) of `plans/CURSES.md` — no
@@ -1315,10 +1315,24 @@ both landed; `plans/SHELL.md` command execution):
      and tests assert the piped render is byte-identical minus the SGR
      sequences. All thirteen `Help/*/ls.md`, the switch-drift pin, and
      `docs/src/userland/utilities.md` document `--color`.
-   - **Remaining.** `lib/help`'s coloured `render_full`/`render_short`
-     (headings, emphasis, literal/code, switch keys through the scheme's
-     roles), inherited by `man` and every command's short help at once;
-     and adoption in the other colour-appropriate tools (`fstree`
+   - **Done — `lib/help`'s coloured `render_full`/`render_short`.** Both
+     renderers take a `RenderCtx { locale, styling }` and colour through the
+     scheme's roles (headings/sub-headings heading, `*emphasis*` emphasis,
+     inline code + fenced blocks literal, `**strong**` bold, table rules
+     border), emitting each run flat (open/print/reset) so the plain render is
+     byte-identical minus the SGRs. `Styling` is `Plain` (no escapes, for a
+     pipe), `Monochrome` (attributes only), or `Colour`; `man` resolves it
+     from the console attestation and `TERM` through the one
+     `tairix_termcap` judgement (a piped `man ls` is plain) and threads it,
+     with the served locale, across the parser-sandbox render boundary (the
+     render reply whitelist admits the scheme's SGRs). The same change gave
+     `man` (§7) its two other fixes: section headings now **display in the
+     served page's language** (`SectionKind::heading_label`, the document keys
+     staying language-neutral), and the pager counts **physical** wrapped rows
+     (display width, skipping zero-width escapes) so a long line no longer
+     scrolls off before `--More--`. `own_short_help` renders `Plain` (an
+     unattested `-h` emits no escapes).
+   - **Remaining.** Adoption in the other colour-appropriate tools (`fstree`
      structure and its tree rules through `lib/curses`'s U+2500–U+257F box
      glyphs, and each future tool — e.g. `grep`), each in the change that
      lands it, with the same piped-render-is-plain tests and its `Help/`

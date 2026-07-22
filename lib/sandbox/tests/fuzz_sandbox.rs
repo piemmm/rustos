@@ -27,7 +27,7 @@ use std::rc::Rc;
 use tairix_sandbox::decode::{
     container_summary, disassemble, manifest_summary, DecodeService, Isa,
 };
-use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode};
+use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::proto::Channel;
@@ -231,10 +231,19 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         } else {
             RenderMode::Full
         };
-        let _ = render_help(&mut honest_help, mode, &help);
+        // Vary the styling level and the served-locale tag (including
+        // malformed spellings) so the render request grammar is fuzzed too.
+        let styling = match bounded(next(), 2) {
+            0 => Styling::Plain,
+            1 => Styling::Monochrome,
+            _ => Styling::Colour,
+        };
+        let locales = ["en-US", "fr-FR", "zh-CN", "", "not a tag", "xx-XX"];
+        let locale = locales[bounded(next(), locales.len() - 1)];
+        let _ = render_help(&mut honest_help, mode, styling, locale, &help);
         let cut = bounded(next(), help.len());
-        let _ = render_help(&mut honest_help, mode, &help[..cut]);
-        let _ = render_help(&mut honest_help, mode, &noise);
+        let _ = render_help(&mut honest_help, mode, styling, locale, &help[..cut]);
+        let _ = render_help(&mut honest_help, mode, styling, locale, &noise);
 
         // 5. The hostile worker: framed noise replies into every client
         //    decoder. Each request crashes and replaces the worker, so
@@ -242,7 +251,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = container_summary(&mut hostile, &rxe);
         let _ = manifest_summary(&mut hostile, &noise[..bounded(next(), noise.len())]);
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
-        let _ = render_help(&mut hostile, mode, HELP_TEMPLATE);
+        let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

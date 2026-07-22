@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use tairix_vt::encode_all_into;
 
 use crate::locale::{load, DocumentName, HelpSource, Locale};
-use crate::render::render_short;
+use crate::render::{render_short, RenderCtx, Styling};
 
 /// Render `word`'s own short help — the `NAME`, `SYNOPSIS`, and compact
 /// `OPTIONS` of its Help document — as encoded `lib/vt` output bytes.
@@ -41,8 +41,13 @@ pub fn own_short_help(
         .and_then(|tag| Locale::parse(tag).ok())
         .unwrap_or_default();
     let loaded = load(source, &requested, &name).ok()?;
+    // Short help is emitted by a program that has not attested its standard
+    // output as a terminal, so it renders plain — no escape sequences — which
+    // is what a piped or captured `-h` must see. (The short view carries no
+    // section headings, so the served locale does not affect its bytes.)
+    let ctx = RenderCtx::new(&requested, Styling::Plain);
     let mut bytes = Vec::new();
-    encode_all_into(&render_short(&loaded.doc), &mut bytes);
+    encode_all_into(&render_short(&loaded.doc, &ctx), &mut bytes);
     Some(bytes)
 }
 

@@ -1715,6 +1715,8 @@ dependencies = [
  "tairix-log",
  "tairix-rt",
  "tairix-sandbox",
+ "tairix-termcap",
+ "tairix-vt",
 ]
 
 [[package]]

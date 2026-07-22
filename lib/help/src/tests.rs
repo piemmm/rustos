@@ -17,9 +17,20 @@ fn encode_all(ops: &[Op]) -> Vec<u8> {
 
 use crate::{
     load, load_raw, render_full, render_short, Align, Block, DocumentName, Fallback, HelpDoc,
-    HelpError, HelpSource, LoadError, Locale, NameError, SectionKind, SourceError, Span, TagError,
-    MAX_DOC_LEN, MAX_LINES, MAX_LIST_ITEMS, MAX_LOCALE_DIRS, MAX_TABLE_ROWS,
+    HelpError, HelpSource, LoadError, Locale, NameError, RenderCtx, SectionKind, SourceError, Span,
+    Styling, TagError, MAX_DOC_LEN, MAX_LINES, MAX_LIST_ITEMS, MAX_LOCALE_DIRS, MAX_TABLE_ROWS,
 };
+
+/// The full-view ops for `doc`, rendered plain in the canonical locale — the
+/// shape most render tests assert visible text against.
+fn full_ops(doc: &HelpDoc) -> Vec<Op> {
+    render_full(doc, &RenderCtx::new(&Locale::default(), Styling::Plain))
+}
+
+/// The short-view ops for `doc`, rendered plain in the canonical locale.
+fn short_ops(doc: &HelpDoc) -> Vec<Op> {
+    render_short(doc, &RenderCtx::new(&Locale::default(), Styling::Plain))
+}
 
 /// A minimal valid document.
 const MINIMAL: &str = "## NAME\n\ntop — display tasks\n\n## SYNOPSIS\n\n`top [-d seconds]`\n\n## DESCRIPTION\n\nShows tasks.\n";
@@ -463,14 +474,14 @@ fn short_render_is_compact_and_full_render_is_complete() {
     )
     .expect("parses");
 
-    let short = plain(&render_short(&doc));
+    let short = plain(&short_ops(&doc));
     assert!(short.contains("top — display tasks"));
     assert!(short.contains("top [-d seconds]"));
     assert!(short.contains("-h"));
     assert!(!short.contains("Long body."));
     assert!(!short.contains("DESCRIPTION"));
 
-    let full = plain(&render_full(&doc));
+    let full = plain(&full_ops(&doc));
     for heading in ["NAME", "SYNOPSIS", "DESCRIPTION", "OPTIONS"] {
         assert!(full.contains(heading), "missing {heading}");
     }
@@ -486,7 +497,7 @@ fn full_render_pads_tables_and_numbers_ordered_lists() {
             .as_bytes(),
     )
     .expect("parses");
-    let full = plain(&render_full(&doc));
+    let full = plain(&full_ops(&doc));
     assert!(full.contains("  1. first\n  2. second\n"));
     assert!(full.contains("  Code  Meaning\n"));
     assert!(full.contains("  ----  -------\n"));
@@ -496,7 +507,10 @@ fn full_render_pads_tables_and_numbers_ordered_lists() {
 #[test]
 fn rendered_output_contains_no_stray_control_bytes() {
     let doc = HelpDoc::parse(MINIMAL.as_bytes()).expect("parses");
-    for ops in [render_short(&doc), render_full(&doc)] {
+    // Full colour so the escape-emitting paths are exercised, not just text.
+    let default = Locale::default();
+    let ctx = RenderCtx::new(&default, Styling::Colour);
+    for ops in [render_short(&doc, &ctx), render_full(&doc, &ctx)] {
         let bytes = encode_all(&ops);
         let mut rest = bytes.as_slice();
         while let Some((byte, tail)) = rest.split_first() {
@@ -517,4 +531,80 @@ fn rendered_output_contains_no_stray_control_bytes() {
             }
         }
     }
+}
+
+#[test]
+fn heading_labels_follow_the_served_locale_and_default_to_english() {
+    // English (the default and any untranslated language) shows the key.
+    assert_eq!(SectionKind::Name.heading_label(&Locale::default()), "NAME");
+    assert_eq!(
+        SectionKind::Description.heading_label(&locale("haw-US")),
+        "DESCRIPTION"
+    );
+    // A translated language shows its conventional heading, chosen by the
+    // primary language subtag (so a region variant still translates).
+    assert_eq!(SectionKind::Name.heading_label(&locale("fr-FR")), "NOM");
+    assert_eq!(SectionKind::Name.heading_label(&locale("fr")), "NOM");
+    assert_eq!(
+        SectionKind::SeeAlso.heading_label(&locale("de-DE")),
+        "SIEHE AUCH"
+    );
+    assert_eq!(
+        SectionKind::Description.heading_label(&locale("uk-UA")),
+        "ОПИС"
+    );
+    assert_eq!(
+        SectionKind::Options.heading_label(&locale("ja-JP")),
+        "オプション"
+    );
+    // Every required locale has a full, non-empty heading for every section.
+    for tag in crate::REQUIRED_LOCALES {
+        let loc = locale(tag);
+        for kind in SectionKind::ALL {
+            assert!(
+                !kind.heading_label(&loc).is_empty(),
+                "empty heading for {tag} {kind:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_full_render_localises_headings_but_never_the_document_keys() {
+    let doc = HelpDoc::parse(MINIMAL.as_bytes()).expect("parses");
+    let fr = locale("fr-FR");
+    let out = plain(&render_full(&doc, &RenderCtx::new(&fr, Styling::Plain)));
+    // The reader sees French headings…
+    assert!(out.contains("NOM"), "French NAME heading: {out}");
+    assert!(out.contains("DESCRIPTION"), "French DESCRIPTION: {out}");
+    // …and never the English key the document is still written with.
+    assert!(!out.contains("NAME"), "English key leaked: {out}");
+}
+
+#[test]
+fn colour_styling_wraps_headings_and_plain_styling_does_not() {
+    let doc = HelpDoc::parse(MINIMAL.as_bytes()).expect("parses");
+    let default = Locale::default();
+    let coloured = encode_all(&render_full(
+        &doc,
+        &RenderCtx::new(&default, Styling::Colour),
+    ));
+    // The heading role opens bold + a bright-blue foreground and closes with a
+    // reset; a plain render carries none of that.
+    assert!(coloured.contains(&0x1b), "colour render carries escapes");
+    let plain_bytes = encode_all(&render_full(
+        &doc,
+        &RenderCtx::new(&default, Styling::Plain),
+    ));
+    assert!(
+        !plain_bytes.contains(&0x1b),
+        "plain render carries no escapes"
+    );
+    // Monochrome keeps the bold attribute but drops colour, so it still has
+    // escapes yet no `38`/`9x` foreground sequence.
+    let mono = encode_all(&render_full(
+        &doc,
+        &RenderCtx::new(&default, Styling::Monochrome),
+    ));
+    assert!(mono.contains(&0x1b), "monochrome keeps attribute escapes");
 }

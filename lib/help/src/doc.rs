@@ -96,6 +96,36 @@ impl SectionKind {
         Self::ALL.into_iter().find(|kind| kind.as_str() == key)
     }
 
+    /// The section heading *displayed* to a reader, in `locale`'s language.
+    ///
+    /// The document key ([`Self::as_str`]) is language-neutral and never
+    /// translated — that is what lets one parser serve every language — but a
+    /// reader sees the heading in the language of the document they are shown.
+    /// A served `fr-FR` page therefore shows `DESCRIPTION` as `DESCRIPTION` in
+    /// French prose under a `NOM` heading, not an English `NAME`. Selection is
+    /// by primary language subtag (`fr` of `fr-FR`); a language without a
+    /// translation here degrades to the canonical English key, never to a
+    /// blank or a fabricated word.
+    #[must_use]
+    pub fn heading_label(self, locale: &crate::locale::Locale) -> &'static str {
+        let table: &[&'static str; 8] = match locale.language() {
+            "fr" => &HEADINGS_FR,
+            "de" => &HEADINGS_DE,
+            "es" => &HEADINGS_ES,
+            "uk" => &HEADINGS_UK,
+            "it" => &HEADINGS_IT,
+            "pt" => &HEADINGS_PT,
+            "cy" => &HEADINGS_CY,
+            "zh" => &HEADINGS_ZH,
+            "ja" => &HEADINGS_JA,
+            "ko" => &HEADINGS_KO,
+            "ar" => &HEADINGS_AR,
+            "he" => &HEADINGS_HE,
+            _ => return self.as_str(),
+        };
+        table.get(self.rank()).copied().unwrap_or(self.as_str())
+    }
+
     /// Whether every document must carry this section.
     #[must_use]
     pub const fn is_required(self) -> bool {
@@ -113,6 +143,133 @@ impl SectionKind {
             .unwrap_or(Self::ALL.len())
     }
 }
+
+// The displayed section headings per language, in [`SectionKind::ALL`] order:
+// NAME, SYNOPSIS, DESCRIPTION, OPTIONS, EXAMPLES, EXIT STATUS, ENVIRONMENT,
+// SEE ALSO. English is the canonical [`SectionKind::as_str`] key itself, so it
+// needs no table. These are the display labels a reader sees, following the
+// conventional section names of each language's manual pages; the document
+// keys stay the untranslated English of `## NAME`.
+const HEADINGS_FR: [&str; 8] = [
+    "NOM",
+    "SYNOPSIS",
+    "DESCRIPTION",
+    "OPTIONS",
+    "EXEMPLES",
+    "ÉTAT DE SORTIE",
+    "ENVIRONNEMENT",
+    "VOIR AUSSI",
+];
+const HEADINGS_DE: [&str; 8] = [
+    "BEZEICHNUNG",
+    "ÜBERSICHT",
+    "BESCHREIBUNG",
+    "OPTIONEN",
+    "BEISPIELE",
+    "EXIT-STATUS",
+    "UMGEBUNG",
+    "SIEHE AUCH",
+];
+const HEADINGS_ES: [&str; 8] = [
+    "NOMBRE",
+    "SINOPSIS",
+    "DESCRIPCIÓN",
+    "OPCIONES",
+    "EJEMPLOS",
+    "ESTADO DE SALIDA",
+    "ENTORNO",
+    "VÉASE TAMBIÉN",
+];
+const HEADINGS_UK: [&str; 8] = [
+    "НАЗВА",
+    "КОРОТКИЙ ОПИС",
+    "ОПИС",
+    "ПАРАМЕТРИ",
+    "ПРИКЛАДИ",
+    "СТАН ВИХОДУ",
+    "СЕРЕДОВИЩЕ",
+    "ДИВ. ТАКОЖ",
+];
+const HEADINGS_IT: [&str; 8] = [
+    "NOME",
+    "SINTASSI",
+    "DESCRIZIONE",
+    "OPZIONI",
+    "ESEMPI",
+    "STATO DI USCITA",
+    "AMBIENTE",
+    "VEDERE ANCHE",
+];
+const HEADINGS_PT: [&str; 8] = [
+    "NOME",
+    "SINOPSE",
+    "DESCRIÇÃO",
+    "OPÇÕES",
+    "EXEMPLOS",
+    "ESTADO DE SAÍDA",
+    "AMBIENTE",
+    "VEJA TAMBÉM",
+];
+const HEADINGS_CY: [&str; 8] = [
+    "ENW",
+    "CRYNODEB",
+    "DISGRIFIAD",
+    "DEWISIADAU",
+    "ENGHREIFFTIAU",
+    "STATWS GADAEL",
+    "AMGYLCHEDD",
+    "GWELER HEFYD",
+];
+const HEADINGS_ZH: [&str; 8] = [
+    "名称",
+    "总览",
+    "描述",
+    "选项",
+    "示例",
+    "退出状态",
+    "环境",
+    "参见",
+];
+const HEADINGS_JA: [&str; 8] = [
+    "名前",
+    "書式",
+    "説明",
+    "オプション",
+    "例",
+    "終了ステータス",
+    "環境変数",
+    "関連項目",
+];
+const HEADINGS_KO: [&str; 8] = [
+    "이름",
+    "요약",
+    "설명",
+    "옵션",
+    "예제",
+    "종료 상태",
+    "환경",
+    "관련 항목",
+];
+const HEADINGS_AR: [&str; 8] = [
+    "الاسم",
+    "ملخص",
+    "الوصف",
+    "الخيارات",
+    "أمثلة",
+    "حالة الخروج",
+    "البيئة",
+    "انظر أيضا",
+];
+const HEADINGS_HE: [&str; 8] = [
+    "שם",
+    "תקציר",
+    "תיאור",
+    "אפשרויות",
+    "דוגמאות",
+    "קוד יציאה",
+    "סביבה",
+    "ראה גם",
+];
 
 /// One inline span of styled text.
 #[derive(Clone, Debug, Eq, PartialEq)]

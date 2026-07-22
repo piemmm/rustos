@@ -11,7 +11,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, TerminalSize};
 
 /// Read-only access to installed application bundles and their `Help/`
 /// trees.
@@ -85,10 +85,17 @@ pub trait Console {
     /// return and an unattached fd 3 is a no-op.
     fn info(&self, record: &[u8]);
 
-    /// The terminal's row count, or `None` when standard output is not an
-    /// interactive terminal of known height (a redirection, a pipe, a serial
-    /// line) — the page is then streamed without pagination.
-    fn rows(&self) -> Option<u16>;
+    /// The terminal's character-cell geometry, or `None` when standard output
+    /// is not an interactive terminal of known size (a redirection, a pipe, a
+    /// serial line) — the page is then streamed without pagination and
+    /// rendered plain (no colour), and `None` is the attestation that decides
+    /// both.
+    ///
+    /// The pager needs both dimensions: the row count sizes a screenful, and
+    /// the column count is what a rendered line wraps at, so the pager counts
+    /// the *physical* rows a line actually occupies rather than assuming one
+    /// row per newline.
+    fn size(&self) -> Option<TerminalSize>;
 
     /// Block until one key of input arrives and return it, or `None` when
     /// input has ended (the pager then stops prompting and streams the

@@ -8,7 +8,7 @@ use core::cell::RefCell;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, TerminalSize};
 use tairix_log::{Event, Sink};
 use tairix_sandbox::helpdoc::{HelpRenderFailure, HelpService};
 use tairix_sandbox::host::ParserSandbox;
@@ -160,34 +160,42 @@ impl BundleStore for FixtureStore {
 }
 
 /// The in-memory [`Console`]: captured output, captured fd-3 records, a
-/// configurable row count, and a scripted key queue.
+/// configurable geometry, and a scripted key queue.
 struct FixtureConsole {
     out: RefCell<Vec<u8>>,
     info: RefCell<Vec<Vec<u8>>>,
-    rows: Option<u16>,
+    size: Option<TerminalSize>,
     keys: RefCell<Vec<u8>>,
 }
 
 impl FixtureConsole {
-    /// A non-interactive console (no row count): the page streams whole.
+    /// A non-interactive console (no geometry): the page streams whole.
     fn stream() -> Self {
         FixtureConsole {
             out: RefCell::new(Vec::new()),
             info: RefCell::new(Vec::new()),
-            rows: None,
+            size: None,
             keys: RefCell::new(Vec::new()),
         }
     }
 
-    /// An interactive console `rows` high whose user will press `keys` in
+    /// An interactive console `rows` high (a comfortably wide 80 columns,
+    /// so short fixture lines never wrap) whose user will press `keys` in
     /// order (the queue's front is `keys[0]`).
     fn interactive(rows: u16, keys: &[u8]) -> Self {
+        Self::interactive_size(rows, 80, keys)
+    }
+
+    /// An interactive console of an explicit `rows`×`cols` geometry — used to
+    /// exercise line wrapping, where the column count decides how many
+    /// physical rows a long line occupies.
+    fn interactive_size(rows: u16, cols: u16, keys: &[u8]) -> Self {
         let mut queue = keys.to_vec();
         queue.reverse();
         FixtureConsole {
             out: RefCell::new(Vec::new()),
             info: RefCell::new(Vec::new()),
-            rows: Some(rows),
+            size: Some(TerminalSize::new(rows, cols).expect("non-zero geometry")),
             keys: RefCell::new(queue),
         }
     }
@@ -215,8 +223,8 @@ impl Console for FixtureConsole {
         self.info.borrow_mut().push(record.to_vec());
     }
 
-    fn rows(&self) -> Option<u16> {
-        self.rows
+    fn size(&self) -> Option<TerminalSize> {
+        self.size
     }
 
     fn read_key(&self) -> Result<Option<u8>, Errno> {
@@ -273,6 +281,7 @@ fn the_store_bundle_shadows_a_path_bundle_of_the_same_name() {
         locale: None,
         path: Some("/Users/eve/tools"),
         home: None,
+        term: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("list processes"));
@@ -295,6 +304,7 @@ fn a_path_bundle_serves_a_word_the_store_lacks() {
         locale: None,
         path: Some("/Users/root/tools"),
         home: None,
+        term: None,
     };
     run(&page("mine"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("my tool"));
@@ -317,6 +327,7 @@ fn a_final_refusal_stops_the_probe_rather_than_skipping_it() {
         locale: None,
         path: Some("/Users/root/tools"),
         home: None,
+        term: None,
     };
     let err = run(&page("hidden"), &request, &store, &console).unwrap_err();
     assert_eq!(err, ManError::Store(Errno::PermissionDenied));
@@ -409,6 +420,7 @@ fn an_exact_locale_serves_its_translation_with_no_advisory() {
         locale: Some("fr-FR"),
         path: None,
         home: None,
+        term: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("lister les processus"));
@@ -426,6 +438,7 @@ fn a_locale_fallback_serves_default_and_emits_the_advisory() {
         locale: Some("de-DE"),
         path: None,
         home: None,
+        term: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("list processes"));
@@ -447,6 +460,7 @@ fn a_malformed_locale_preference_degrades_to_default_silently() {
         locale: Some("not a tag"),
         path: None,
         home: None,
+        term: None,
     };
     run(&page("ps"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("list processes"));
@@ -481,6 +495,7 @@ fn the_users_own_apps_folder_is_searched_after_the_shared_store() {
         locale: None,
         path: None,
         home: Some("/Users/ada"),
+        term: None,
     };
     run(&page("moose"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("filed-away app"));
@@ -511,6 +526,7 @@ fn a_shared_store_match_wins_over_the_users_own() {
         locale: None,
         path: None,
         home: Some("/Users/ada"),
+        term: None,
     };
     run(&page("moose"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("filed-away app"));
@@ -625,6 +641,57 @@ fn a_non_interactive_console_streams_without_prompting() {
     let out = console.output();
     assert!(!out.contains("--More--"), "no prompt when streaming: {out}");
     assert!(out.contains("DESCRIPTION"));
+}
+
+#[test]
+fn a_line_longer_than_the_terminal_pages_by_wrapped_rows() {
+    // Regression: a single logical line wider than the terminal wraps onto
+    // several physical rows. The pager must count those, so the `--More--`
+    // prompt appears *within* the long line rather than after it has already
+    // scrolled off the top. The NAME summary is one long line ending in a
+    // unique marker; on a 20-column, 4-row screen it wraps to four physical
+    // rows, so `q` at the first prompt must stop before the marker is shown.
+    let mut store = FixtureStore::with_ps();
+    let long = "## NAME\n\ncmd — aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaEND_OF_LINE_MARKER\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nBody.\n";
+    store.bundles.push(Bundle {
+        dir: "/System/Apps/wide.app",
+        docs: alloc::vec![("en-US", "wide.md", long)],
+    });
+    // 4 rows → 3 physical page rows; 20 columns forces the summary to wrap.
+    let console = FixtureConsole::interactive_size(4, 20, b"q");
+    run(&page("wide"), &Request::default(), &store, &console).expect("page renders");
+    let out = console.output();
+    assert!(out.contains("--More--"), "prompt missing: {out}");
+    assert!(
+        !out.contains("END_OF_LINE_MARKER"),
+        "the wrapped tail must not have been written before the prompt: {out}"
+    );
+}
+
+#[test]
+fn the_full_page_shows_headings_in_the_requested_language() {
+    // A French page shows French section headings ("NOM"), never the English
+    // key ("NAME"), while its prose is French too. Streamed (non-interactive)
+    // so the whole page is emitted plain, without pagination.
+    let store = FixtureStore::with_ps();
+    let console = FixtureConsole::stream();
+    let request = Request {
+        locale: Some("fr-FR"),
+        path: None,
+        home: None,
+        term: None,
+    };
+    run(&page("ps"), &request, &store, &console).expect("page renders");
+    let out = console.output();
+    assert!(out.contains("NOM"), "French NAME heading missing: {out}");
+    assert!(
+        out.contains("lister les processus"),
+        "French prose missing: {out}"
+    );
+    assert!(
+        !out.contains("NAME"),
+        "the English heading key must not leak: {out}"
+    );
 }
 
 #[test]
