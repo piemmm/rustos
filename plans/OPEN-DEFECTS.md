@@ -343,37 +343,46 @@ storm, then a kernel `#PF` in `syscall_entry_stub` with `RSP=0` /
    the free external vectors as MSI lines; `root_unlock` allocates a
    dedicated `(vector, line)`.
 
-## D8 — x86_64 encrypted-root / users-DB read loop stalls the interactive unlock
+## D8 — x86_64 encrypted-root / users-DB read loop stalls the interactive unlock — DONE
 
-**State:** open, uncovered by the D7 fix (the disk interrupt now works, so
-boot proceeds far enough to hit this). **Not** an interrupt defect.
+**State:** resolved. `root_unlock_admission_qemu_x86_64` now boots the full
+two-kthread admission path through the interactive encrypted-root unlock and
+keys PASS on `unlock_service::USERS_DB_INSTALLED_MESSAGE`, with the scripted
+`ARXFS passphrase:` step restored — the kthread-admission install witness the
+vertical was scoped to reach. The former deterministic stall does not
+reproduce; the install completes deterministically (confirmed over repeated
+untraced guest boots).
 
-**Symptom.** With the disk interrupt fixed,
-`root_unlock_admission_qemu_x86_64` reaches the `ARXFS passphrase:` prompt,
-accepts the passphrase, and mounts the read-only `/System` volume, then
-stalls **deterministically** (identical at 120 s and 300 s — not slowness)
-before `USERS_DB_INSTALLED_MESSAGE`. Tracing shows the disk `notify_wait`
-enters and *returns* thousands of times (5000+, each completion woken
-cleanly — the interrupt path is solid) with **no** log-visible forward
-progress: an unbounded disk-read loop in the encrypted-root / users-DB
-read path (the interactive unlock kthread). `devmgr` is not the culprit
-(it logs its catalogue-retry once and parks on `hw_tree_wait`).
+**Root cause.** D8 was a consequence of the pre-fix kernel-heap OOM/pressure
+condition, not a logic loop in the read path. On the 256 MiB admission guest
+the two concurrent disk kthreads (the interactive-unlock kthread and the
+driver-store serve kthread) drove the pressure-governed
+`BlockCache`/`SharedBlock` while the kernel heap could not grow past the old
+8 MiB `MAX_ORDER` granule: allocations for the encrypted-root/users-DB read
+path met sustained memory pressure that both starved the clean-block cache
+(so the hot metadata blocks were re-read from the device instead of served)
+and, at the OOM edge, prevented net forward progress within any budget —
+hence "5000+ `notify_wait` returns, no log-visible progress, identical at
+120 s and 300 s". The `kernel/mem` `frame::MAX_ORDER` 11 → 13 (8 MiB → 32 MiB)
+growth plus the `appspawn::read_file` fallible-reserve read (landed for the
+kernel-heap OOM defect after D8 was filed) removed that condition: the heap
+now grows to back the read path, the pressure that drained the cache and
+blocked progress no longer arises, and the admission install terminates.
 
-**Not the observer path.** `root_unlock_login_qemu_x86_64` reads the same
-users DB over the same fixture and PASSES, so the loop is specific to the
-full-pipeline admission path (concurrency between the interactive-unlock
-kthread and the driver-store serve kthread over the shared disk, and/or
-the block/transform-cache behaviour under the production scheduler on a
-256 MiB guest), not the users-DB read itself.
+**Evidence (traced boot).** A temporary per-read LBA trace on the boot
+`BlockCache` device path confirmed the admission boot now makes monotonic
+forward progress to `id=4139 root-unlock: users database installed` and on
+to the login screen — two interleaved *advancing* read streams (the two
+kthreads), not a single block re-read forever. Residual re-reading of hot
+metadata blocks under the tight guest is the memory-pressure cache design
+working as intended (drop clean, rebuildable blocks under pressure, re-read
+on demand) — bounded, forward-progressing, and fail-closed, not the D8 loop.
 
-**What remains.** Root-cause the read loop (add a per-read LBA trace to
-confirm same-block re-read vs. advancing thrash; audit the `block_cache` /
-`transform_cache` and the two-kthread disk sharing under memory pressure),
-fix it, then extend `root_unlock_admission_qemu_x86_64` to key PASS on the
-users-DB install (`unlock_service::USERS_DB_INSTALLED_MESSAGE`) with the
-`serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]` step
-restored — the full kthread-admission witness the vertical is scoped to
-reach once D8 is closed.
+**Regression.** `root_unlock_admission_qemu_x86_64` is extended to the
+users-DB-install witness (was: the `/System` mount), so a re-introduction of
+either the D7 triple fault or a D8-class admission stall fails the run loud;
+the observer `root_unlock_login_qemu_x86_64` never drives this concurrent
+two-kthread path, so this vertical is its only guard.
 
 ## D9 — x86_64 `spawn-session` login never exits on the (now live) console — DONE
 
@@ -454,9 +463,11 @@ whole-project-green gate:
   root-caused (external-IRQ frame offset + shared IO-APIC-pin MSI vector)
   and fixed; `root_unlock_admission_qemu_x86_64` reaches the `/System`
   mount over the dedicated MSI-X vector.
-- D8: the x86_64 encrypted-root / users-DB read loop root-caused and
-  fixed; `root_unlock_admission_qemu_x86_64` extended to key on the
-  users-DB install.
+- D8: **DONE** — the x86_64 encrypted-root / users-DB admission stall
+  root-caused to the pre-fix kernel-heap OOM/pressure condition (removed by
+  the `kernel/mem` `MAX_ORDER` growth + `appspawn` fallible-reserve read);
+  `root_unlock_admission_qemu_x86_64` extended to key PASS on the users-DB
+  install and confirmed deterministic over repeated guest boots.
 - D9: **DONE** — root-caused to a stale dead-console test model *and* a real
   production bug it exposed: the x86_64 COM1 log sink / console-write backing
   re-ran `Serial::init` per write, clearing `IER` and flushing the receive

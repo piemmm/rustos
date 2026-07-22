@@ -214,17 +214,18 @@ MSI-X defect), not on the console work. Done-state:
   `root_unlock_admission_qemu_aarch64` (which types a passphrase over the
   interrupt-driven PL011 console) still passes on a real guest boot.
 
-**Blocked (D7).** The x86_64 live verticals
-(`root_unlock_admission_qemu_x86_64`, and the `pipeline`/`uart_console`
-siblings) exercise the production x86_64 kthread-admission disk bring-up,
-which stalls on a live boot: the virtio-blk-PCI completion MSI-X never wakes
-the scheduler-parked unlock kthread (`plans/OPEN-DEFECTS.md` D7), so the
-passphrase prompt is never reached. This is the never-live-confirmed A2
-production path, not the console. The `root_unlock_admission_qemu_x86_64`
-bin + enrolment were authored and then removed this session to keep the gate
-green; recreate them once D7 is fixed (thin bin over `tairix_kernel::boot`
-with an `UnlockAdmissionSink` on `USERS_DB_INSTALLED_MESSAGE`, `EncryptedRootDisk`,
-`serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]`).
+**`root_unlock_admission_qemu_x86_64` is landed and passes a real guest boot
+(D7 + D8 closed).** It is a thin bin over `tairix_kernel::boot` with an
+`UnlockAdmissionSink` on `USERS_DB_INSTALLED_MESSAGE`, over `EncryptedRootDisk`
+with `serial: &[("ARXFS passphrase: ", …, UNLOCK_PASSPHRASE_LINE)]`. The
+production x86_64 kthread-admission bring-up now delivers the virtio-blk-PCI
+completion MSI-X on its dedicated vector (D7), wakes the scheduler-parked
+unlock kthread across the interactive passphrase read, mounts the read-only
+`/System` volume, unlocks the encrypted user-data root, and installs the users
+database — the full two-kthread admission witness the vertical is scoped to
+reach. The former D8 admission read stall (a consequence of the pre-fix
+kernel-heap OOM/pressure condition) does not reproduce; the install completes
+deterministically over repeated boots.
 
 **Also landed this increment (a live-confirmed A2/A4 discovery fix).** The
 production x86_64 PCI discovery (`boot_x86_64::seed_virtio_pci`) had never
