@@ -68,12 +68,21 @@ pub const DRIVER_BIND_FAILED: EventId = EventId(16_011);
 /// handled end to end (the two-process live-boot vertical gates on it).
 pub const INBOUND_ECHO_SERVED: EventId = EventId(16_012);
 
+/// A stream socket was placed into the passive LISTEN state on its bound
+/// local port (recorded at `Info`): a new service is now reachable.
+pub const SOCKET_LISTENING: EventId = EventId(16_013);
+/// An inbound connection was claimed off a listener by
+/// [`Accept`](tairix_abi::net::SocketRequest::Accept), creating a child
+/// stream socket (recorded at `Info`).
+pub const SOCKET_ACCEPTED: EventId = EventId(16_014);
+
 #[cfg(test)]
 mod tests {
     use super::{
         ADMIN_APPLIED, ADMIN_REFUSED, DRIVER_BIND_DENIED, DRIVER_BIND_FAILED, DRIVER_BOUND,
         INBOUND_ECHO_SERVED, NETSTACK_RANGE_END, NETSTACK_RANGE_START, REQUEST_DENIED,
-        REQUEST_MALFORMED, SOCKET_DENIED, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
+        REQUEST_MALFORMED, SOCKET_ACCEPTED, SOCKET_DENIED, SOCKET_LISTENING, SOCKET_MALFORMED,
+        SOCKET_OPENED, SOCKET_REFUSED,
     };
 
     #[test]
@@ -91,6 +100,8 @@ mod tests {
             DRIVER_BIND_DENIED,
             DRIVER_BIND_FAILED,
             INBOUND_ECHO_SERVED,
+            SOCKET_LISTENING,
+            SOCKET_ACCEPTED,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -111,6 +122,8 @@ mod tests {
             DRIVER_BIND_DENIED.0,
             DRIVER_BIND_FAILED.0,
             INBOUND_ECHO_SERVED.0,
+            SOCKET_LISTENING.0,
+            SOCKET_ACCEPTED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

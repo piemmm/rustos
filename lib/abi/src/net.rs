@@ -73,6 +73,16 @@ pub const SOCKET_VERSION_V1: u16 = 1;
 /// larger inline buffer.
 pub const SOCKET_MAX_DATAGRAM: usize = 8192;
 
+/// Highest port in the privileged (well-known) range.
+///
+/// Binding a *listening* socket to a port at or below this bound requires
+/// [`CAP_NET_BIND_PRIVILEGED`](crate::CapabilityId::NET_BIND_PRIVILEGED):
+/// the low ports name well-known services, so squatting one lets an
+/// unprivileged process impersonate a system service. A `0` (ephemeral)
+/// request is never privileged; an outbound (active) socket's local port
+/// is unrestricted. Matches the historical Unix 1024 boundary.
+pub const SOCKET_PRIVILEGED_PORT_MAX: u16 = 1023;
+
 /// The transport type of a socket.
 ///
 /// Datagram (UDP) and stream (TCP) sockets are served. The raw socket type
@@ -176,6 +186,10 @@ const OP_CLOSE: u16 = 5;
 const OP_JOIN: u16 = 6;
 /// Wire operation discriminant of [`SocketRequest::LeaveMulticast`].
 const OP_LEAVE: u16 = 7;
+/// Wire operation discriminant of [`SocketRequest::Listen`].
+const OP_LISTEN: u16 = 8;
+/// Wire operation discriminant of [`SocketRequest::Accept`].
+const OP_ACCEPT: u16 = 9;
 
 /// A server-assigned socket handle, scoped to the creating principal.
 ///
@@ -247,6 +261,29 @@ pub enum SocketRequest<'a> {
         socket: SocketId,
         /// The multicast group address.
         group: SocketAddr,
+    },
+    /// Convert a bound stream socket into a passive listener: it accepts
+    /// inbound connections on its bound local port instead of originating
+    /// one. The socket must be a bound (`Bind`ed) stream socket. Binding a
+    /// port at or below [`SOCKET_PRIVILEGED_PORT_MAX`] required
+    /// [`CAP_NET_BIND_PRIVILEGED`](crate::CapabilityId::NET_BIND_PRIVILEGED)
+    /// at bind time.
+    Listen {
+        /// The bound stream socket handle to make passive.
+        socket: SocketId,
+    },
+    /// Claim the next established connection queued on a listening socket,
+    /// creating a new child stream socket for it. The child delivers its
+    /// stream events ([`Connected`](SocketStreamEvent::Connected)/`Data`/
+    /// `Closed`) to `deliver_port`. On success the reply carries the new
+    /// child [`SocketId`]; when no connection is ready the stack replies
+    /// [`Errno::WouldBlock`] (the client waits for the next
+    /// [`Accepted`](SocketStreamEvent::Accepted) readiness event).
+    Accept {
+        /// The listening socket handle.
+        socket: SocketId,
+        /// The async port the new child socket's stream events go to.
+        deliver_port: u64,
     },
 }
 
@@ -329,6 +366,18 @@ impl<'a> SocketRequest<'a> {
                 put_u32(out, SOCKET_OFFSET, socket);
                 group.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
             }
+            Self::Listen { socket } => {
+                put_u16(out, 6, OP_LISTEN);
+                put_u32(out, SOCKET_OFFSET, socket);
+            }
+            Self::Accept {
+                socket,
+                deliver_port,
+            } => {
+                put_u16(out, 6, OP_ACCEPT);
+                put_u32(out, SOCKET_OFFSET, socket);
+                put_u64(out, DELIVER_OFFSET, deliver_port);
+            }
         }
         Ok(total)
     }
@@ -367,24 +416,7 @@ impl<'a> SocketRequest<'a> {
         let socket = read_u32(bytes, SOCKET_OFFSET);
         let addr_block = &bytes[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN];
         match op {
-            OP_SOCKET => {
-                // Socket carries its type and family in dedicated bytes and a
-                // delivery port; the handle and address block are unused.
-                if read_u32(bytes, SOCKET_OFFSET) != 0
-                    || bytes[14] != 0
-                    || bytes[15] != 0
-                    || addr_block.iter().any(|&b| b != 0)
-                {
-                    return Err(Errno::BadMagic);
-                }
-                let sock_type = SocketType::from_u8(bytes[TYPE_OFFSET])?;
-                let family = NetAddrFamily::from_u8(bytes[FAMILY_OFFSET])?;
-                Ok(Self::Socket {
-                    family,
-                    sock_type,
-                    deliver_port: read_u64(bytes, DELIVER_OFFSET),
-                })
-            }
+            OP_SOCKET => Self::decode_socket_op(bytes, addr_block),
             OP_BIND | OP_CONNECT | OP_JOIN | OP_LEAVE => {
                 reserved_addr_op(bytes)?;
                 let addr = SocketAddr::read(addr_block)?;
@@ -428,7 +460,9 @@ impl<'a> SocketRequest<'a> {
                     payload,
                 })
             }
-            OP_CLOSE => {
+            OP_CLOSE | OP_LISTEN => {
+                // Close and Listen use only the socket handle; every other
+                // field (type, family, address, delivery port) is reserved.
                 if bytes[TYPE_OFFSET] != 0
                     || bytes[13] != 0
                     || bytes[14] != 0
@@ -438,10 +472,50 @@ impl<'a> SocketRequest<'a> {
                 {
                     return Err(Errno::BadMagic);
                 }
-                Ok(Self::Close { socket })
+                if op == OP_CLOSE {
+                    Ok(Self::Close { socket })
+                } else {
+                    Ok(Self::Listen { socket })
+                }
+            }
+            OP_ACCEPT => {
+                // Accept carries the listener handle and the child's
+                // delivery port; the type/family/address fields are unused.
+                if bytes[TYPE_OFFSET] != 0
+                    || bytes[13] != 0
+                    || bytes[14] != 0
+                    || bytes[15] != 0
+                    || addr_block.iter().any(|&b| b != 0)
+                {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Accept {
+                    socket,
+                    deliver_port: read_u64(bytes, DELIVER_OFFSET),
+                })
             }
             _ => Err(Errno::OutOfRange),
         }
+    }
+
+    /// Decode an [`OP_SOCKET`] header: the socket type and family live in
+    /// dedicated bytes and the delivery port in its field; the handle and
+    /// address block must be zero (a dirty one is refused).
+    fn decode_socket_op(bytes: &[u8], addr_block: &[u8]) -> Result<Self, Errno> {
+        if read_u32(bytes, SOCKET_OFFSET) != 0
+            || bytes[14] != 0
+            || bytes[15] != 0
+            || addr_block.iter().any(|&b| b != 0)
+        {
+            return Err(Errno::BadMagic);
+        }
+        let sock_type = SocketType::from_u8(bytes[TYPE_OFFSET])?;
+        let family = NetAddrFamily::from_u8(bytes[FAMILY_OFFSET])?;
+        Ok(Self::Socket {
+            family,
+            sock_type,
+            deliver_port: read_u64(bytes, DELIVER_OFFSET),
+        })
     }
 }
 
@@ -786,6 +860,15 @@ pub enum SocketStreamEvent<'a> {
         /// Why it closed.
         reason: StreamCloseReason,
     },
+    /// A listening socket has at least one established connection ready to
+    /// [`Accept`](SocketRequest::Accept). Delivered to the *listener's*
+    /// delivery port (edge-triggered, one per newly ready connection); the
+    /// client responds by calling [`Accept`](SocketRequest::Accept) on
+    /// `socket` until it replies [`Errno::WouldBlock`].
+    Accepted {
+        /// The listening socket a connection is ready on.
+        socket: SocketId,
+    },
 }
 
 /// Wire event discriminant of [`SocketStreamEvent::Connected`].
@@ -794,6 +877,8 @@ const STREAM_EV_CONNECTED: u16 = 1;
 const STREAM_EV_DATA: u16 = 2;
 /// Wire event discriminant of [`SocketStreamEvent::Closed`].
 const STREAM_EV_CLOSED: u16 = 3;
+/// Wire event discriminant of [`SocketStreamEvent::Accepted`].
+const STREAM_EV_ACCEPTED: u16 = 4;
 
 impl<'a> SocketStreamEvent<'a> {
     /// Byte length of the fixed event header preceding any payload.
@@ -848,6 +933,10 @@ impl<'a> SocketStreamEvent<'a> {
                 put_u32(out, 8, socket);
                 out[12] = reason.as_u8();
             }
+            Self::Accepted { socket } => {
+                put_u16(out, 6, STREAM_EV_ACCEPTED);
+                put_u32(out, 8, socket);
+            }
         }
         Ok(total)
     }
@@ -901,6 +990,12 @@ impl<'a> SocketStreamEvent<'a> {
                     return Err(Errno::BadMagic);
                 }
                 Ok(Self::Closed { socket, reason })
+            }
+            STREAM_EV_ACCEPTED => {
+                if bytes[12] != 0 || bytes[13..Self::HEADER_LEN].iter().any(|&b| b != 0) {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Accepted { socket })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -1000,6 +1095,7 @@ mod tests {
                 socket: 7,
                 reason: StreamCloseReason::PeerClosed,
             },
+            SocketStreamEvent::Accepted { socket: 42 },
         ];
         for event in events {
             let mut out = [0u8; SocketStreamEvent::MAX_WIRE_LEN];
@@ -1092,6 +1188,42 @@ mod tests {
             socket: 4,
             group: v6(0),
         });
+        round_trip(SocketRequest::Listen { socket: 8 });
+        round_trip(SocketRequest::Accept {
+            socket: 8,
+            deliver_port: 0x1234_5678_9ABC,
+        });
+        round_trip(SocketRequest::Accept {
+            socket: 8,
+            deliver_port: 0,
+        });
+    }
+
+    #[test]
+    fn listen_rejects_a_dirty_reserved_field() {
+        let mut buf = [0u8; SocketRequest::HEADER_LEN];
+        let n = SocketRequest::Listen { socket: 8 }
+            .encode(&mut buf)
+            .expect("encode");
+        // A Listen frame with a non-zero delivery field is corruption.
+        let mut dirty = buf;
+        dirty[36] = 1;
+        assert_eq!(SocketRequest::from_bytes(&dirty[..n]), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn accept_rejects_a_dirty_address_field() {
+        let mut buf = [0u8; SocketRequest::HEADER_LEN];
+        let n = SocketRequest::Accept {
+            socket: 8,
+            deliver_port: 5,
+        }
+        .encode(&mut buf)
+        .expect("encode");
+        // Accept must not carry an address; a dirty address block is refused.
+        let mut dirty = buf;
+        dirty[ADDR_OFFSET] = 1;
+        assert_eq!(SocketRequest::from_bytes(&dirty[..n]), Err(Errno::BadMagic));
     }
 
     #[test]

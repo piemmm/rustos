@@ -62,6 +62,26 @@ impl SortMode {
             direction: SortDirection::Ascending,
         }
     }
+
+    /// The next order in the fixed cycle the toolbar's Sort command steps
+    /// through: name ↑, name ↓, size ↑, size ↓, modified ↑, modified ↓, then
+    /// back to name ↑. A single command that walks every mode in a
+    /// well-understood order (a menu of the same modes is the later, richer
+    /// surface); the wrap makes it total.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        use SortDirection::{Ascending, Descending};
+        use SortKey::{Modified, Name, Size};
+        let (key, direction) = match (self.key, self.direction) {
+            (Name, Ascending) => (Name, Descending),
+            (Name, Descending) => (Size, Ascending),
+            (Size, Ascending) => (Size, Descending),
+            (Size, Descending) => (Modified, Ascending),
+            (Modified, Ascending) => (Modified, Descending),
+            (Modified, Descending) => (Name, Ascending),
+        };
+        Self { key, direction }
+    }
 }
 
 /// Sort `entries` in place into the shared listing order for `mode`.

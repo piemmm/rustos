@@ -479,6 +479,26 @@ impl CapabilityId {
     /// boundary and audited per call.
     pub const SCHED_REALTIME: Self = Self(37);
 
+    /// Bind a *listening* socket to a privileged (well-known) port
+    /// (`plans/NETWORK.md` §0, N6b-2).
+    ///
+    /// Gates the one operation the ordinary [`NET`](Self::NET) grant does
+    /// not confer: binding a socket to a local port at or below
+    /// [`SOCKET_PRIVILEGED_PORT_MAX`](crate::net::SOCKET_PRIVILEGED_PORT_MAX)
+    /// so it may passively accept connections there. The low ports name
+    /// well-known services, so squatting one lets a process impersonate a
+    /// system service; this capability guards that whole class of
+    /// authority (every privileged port, not one), and no existing
+    /// capability expresses it — `CAP_NET` grants ordinary transport use
+    /// (outbound flows and ephemeral binds) but is deliberately *not*
+    /// sufficient to claim a well-known port, exactly as the `CAP_NET`
+    /// docs state. Enforced by the `netstack` socket dispatcher against
+    /// the caller's kernel-attested origin before any bind state is
+    /// touched; every refusal is a typed error and an audited event. Its
+    /// intended holders are the system network services, granted through
+    /// their signed manifests.
+    pub const NET_BIND_PRIVILEGED: Self = Self(38);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -526,6 +546,7 @@ impl CapabilityId {
         (Self::NET_ADMIN, "CAP_NET_ADMIN"),
         (Self::NET, "CAP_NET"),
         (Self::SCHED_REALTIME, "CAP_SCHED_REALTIME"),
+        (Self::NET_BIND_PRIVILEGED, "CAP_NET_BIND_PRIVILEGED"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -657,6 +678,7 @@ mod tests {
         assert_eq!(CapabilityId::NET_ADMIN.as_u16(), 35);
         assert_eq!(CapabilityId::NET.as_u16(), 36);
         assert_eq!(CapabilityId::SCHED_REALTIME.as_u16(), 37);
+        assert_eq!(CapabilityId::NET_BIND_PRIVILEGED.as_u16(), 38);
     }
 
     #[test]
@@ -690,9 +712,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=37 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=38 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=37 {
+        for raw in 1..=38 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

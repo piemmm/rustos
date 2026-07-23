@@ -55,8 +55,8 @@ mod program {
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_browse::render::render;
     use tairix_browse::{
-        validate_new_name, Browser, DirectorySource, RenameError, VfsDirectorySource, WIN_HEIGHT,
-        WIN_WIDTH,
+        validate_new_name, Browser, DirectorySource, RenameError, ToolbarCommand,
+        VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::text::{TextAction, TextField};
     use tairix_font::BitmapFont;
@@ -264,9 +264,25 @@ mod program {
 
         match event {
             WindowEvent::Key {
-                key: KeyInput::Pressed { key, .. },
+                key: KeyInput::Pressed { key, modifiers },
                 ..
             } => match key {
+                // Toolbar-command accelerators: Alt+←/→/↑ drive the history and
+                // climb commands, F5 refreshes — the same shared dispatch a
+                // toolbar click uses, so the keyboard and the toolbar can never
+                // disagree about what a command does (§2.2).
+                KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => {
+                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Back)
+                }
+                KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => {
+                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Forward)
+                }
+                KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => {
+                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Up)
+                }
+                KeyValue::Named(NamedKeyCode::F5) => {
+                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Refresh)
+                }
                 KeyValue::Named(NamedKeyCode::Down) => {
                     browser.select_next();
                     tairix_browse::render::reveal_selection(browser, font, theme, viewport);
@@ -364,7 +380,16 @@ mod program {
             i32::try_from(x).unwrap_or(i32::MAX),
             i32::try_from(y).unwrap_or(i32::MAX),
         );
-        if let Some(depth) = tairix_browse::render::crumb_at(browser, font, viewport, point) {
+        // A click on a toolbar command runs it through the same shared dispatch
+        // the keyboard accelerators use; a disabled command resolves to nothing
+        // (`toolbar_command_at` fails closed) and repaints nothing.
+        if let Some(command) =
+            tairix_browse::render::toolbar_command_at(browser, theme, viewport, point)
+        {
+            return apply_toolbar_command(browser, font, theme, viewport, command);
+        }
+        if let Some(depth) = tairix_browse::render::crumb_at(browser, font, theme, viewport, point)
+        {
             let moved = browser.navigate_to_depth(depth).unwrap_or(false);
             if moved {
                 tairix_browse::render::reveal_selection(browser, font, theme, viewport);
@@ -377,6 +402,28 @@ mod program {
             return (browser.select(index).is_ok(), false);
         }
         (false, false)
+    }
+
+    /// Run a toolbar `command` against the browser through the one shared
+    /// [`tairix_browse::apply_command`] dispatch (so a toolbar click and its
+    /// keyboard accelerator can never diverge), revealing the selection and
+    /// reporting a repaint when the view changed. A navigation refused by the
+    /// VFS leaves the browser exactly where it was (fail closed) and repaints
+    /// nothing.
+    fn apply_toolbar_command<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        command: ToolbarCommand,
+    ) -> (bool, bool) {
+        match tairix_browse::apply_command(browser, command) {
+            Ok(true) => {
+                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                (true, false)
+            }
+            Ok(false) | Err(_) => (false, false),
+        }
     }
 
     /// Begin an in-place rename of the selected item: reveal the row so the

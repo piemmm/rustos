@@ -252,31 +252,36 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(1).expect("select second entry");
     let theme = Theme::dark();
+    let font = tairix_font::BitmapFont::inconsolata();
+    let row_height = font.glyph_height() + 4;
+    let header = crate::render::chrome_height(font, &theme);
     let surface = crate::render(
         &browser,
         &theme,
-        tairix_font::BitmapFont::inconsolata(),
-        Rect::new(0, 0, 200, 120),
+        font,
+        Rect::new(0, 0, 200, header + row_height * 3),
     )
     .expect("surface");
 
     let accent = Color::from(theme.palette().accent).premultiply();
     let raised = Color::from(theme.palette().surface_raised).premultiply();
     let base = Color::from(theme.palette().surface).premultiply();
-    // The path bar (top-left) carries the raised role.
+    // The chrome strip (toolbar over the path bar, top-left) carries the
+    // raised role.
     assert_eq!(surface.get(0, 0), Some(raised));
 
-    // The list is drawn through the shared `TableRow` chrome: the path bar is
-    // the top row, so entry index 0 is one row down and the selected entry
-    // index 1 is two rows down. The selected row lifts to the raised surface
+    // The list is drawn through the shared `TableRow` chrome below the toolbar
+    // and path bar, so entry index 0 is the first content row and the selected
+    // entry index 1 the next. The selected row lifts to the raised surface
     // and shows the accent *selection rail* in its leading gutter (not a full
     // accent fill), and an unselected row stays the base surface — the one
     // selection look every collection view shares. We sample inside the
     // content column (x = 100), clear of the leading rail gutter and of the
     // reserved right-edge scrollbar gutter.
-    let row_height = tairix_font::BitmapFont::inconsolata().glyph_height() + 4;
-    let unselected_y = row_height + 1;
-    let selected_y = row_height * 2 + 1;
+    // Entry rows begin below the chrome (toolbar + path bar): entry 0 is the
+    // first content row and the selected entry 1 the second.
+    let unselected_y = header + 1;
+    let selected_y = header + row_height + 1;
     // The unselected row's body is the base surface.
     assert_eq!(surface.get(100, unselected_y), Some(base));
     // The selected row's body lifts to the raised surface.
@@ -450,15 +455,17 @@ fn a_browser_navigates_the_vfs_source_end_to_end() {
 
 #[test]
 fn entry_index_at_mirrors_the_rendered_rows() {
-    use crate::render::{entry_index_at, row_height};
+    use crate::render::{chrome_height, entry_index_at, row_height};
     use tairix_geometry::Point;
 
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
     let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(font);
-    // A window wide enough for content beside the scrollbar gutter, the path
-    // bar plus three entry rows tall. Clicks land in the content column (x=4).
+    // The chrome (toolbar + path bar) reserved above the first entry row.
+    let header = chrome_height(font, &theme);
+    // A window wide enough for content beside the scrollbar gutter, the chrome
+    // plus several entry rows tall. Clicks land in the content column (x=4).
     let vp = |h: u32| Rect::new(0, 0, 200, h);
     let at = |b: &Browser<MockFs>, h: u32, y: u32| {
         entry_index_at(
@@ -469,20 +476,26 @@ fn entry_index_at_mirrors_the_rendered_rows() {
             Point::new(4, i32::try_from(y).unwrap()),
         )
     };
-    let viewport_height = row * 4;
+    let viewport_height = header + row * 4;
 
-    // The path bar resolves to no entry; the first list row is entry 0.
+    // The chrome resolves to no entry; the first list row is entry 0.
     assert_eq!(at(&browser, viewport_height, 0), None);
-    assert_eq!(at(&browser, viewport_height, row - 1), None);
-    assert_eq!(at(&browser, viewport_height, row), Some(0));
-    assert_eq!(at(&browser, viewport_height, row * 2 + row / 2), Some(1));
+    assert_eq!(at(&browser, viewport_height, header - 1), None);
+    assert_eq!(at(&browser, viewport_height, header), Some(0));
+    assert_eq!(
+        at(&browser, viewport_height, header + row + row / 2),
+        Some(1)
+    );
     // A row past the listing's end and a coordinate outside the viewport
     // resolve to nothing rather than a clamped guess.
     let last = u32::try_from(browser.entries().len()).expect("a tiny fixture listing");
-    assert_eq!(at(&browser, row * (last + 2), row * (last + 1)), None);
+    assert_eq!(
+        at(&browser, header + row * (last + 1), header + row * last),
+        None
+    );
     assert_eq!(at(&browser, viewport_height, viewport_height), None);
-    // A degenerate viewport (path bar only) has no clickable rows.
-    assert_eq!(at(&browser, row, row), None);
+    // A degenerate viewport (chrome only) has no clickable rows.
+    assert_eq!(at(&browser, header, header), None);
     // A click in the reserved scrollbar gutter resolves to no row.
     assert_eq!(
         entry_index_at(
@@ -490,7 +503,7 @@ fn entry_index_at_mirrors_the_rendered_rows() {
             font,
             &theme,
             vp(viewport_height),
-            Point::new(199, i32::try_from(row).unwrap())
+            Point::new(199, i32::try_from(header).unwrap())
         ),
         None
     );
@@ -498,16 +511,17 @@ fn entry_index_at_mirrors_the_rendered_rows() {
 
 #[test]
 fn entry_index_at_accounts_for_the_scroll_anchor() {
-    use crate::render::{entry_index_at, reveal_selection, row_height};
+    use crate::render::{chrome_height, entry_index_at, reveal_selection, row_height};
     use tairix_geometry::Point;
 
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(font);
-    // Two visible entry rows; select the last entry and reveal it so the list
-    // scrolls to keep it on the bottom row — exactly what the app does.
-    let viewport_height = row * 3;
+    let header = chrome_height(font, &theme);
+    // Two visible entry rows below the chrome; select the last entry and reveal
+    // it so the list scrolls to keep it on the bottom row — as the app does.
+    let viewport_height = header + row * 2;
     let vp = Rect::new(0, 0, 200, viewport_height);
     let last = browser.entries().len() - 1;
     browser.select(last).expect("selectable");
@@ -520,7 +534,7 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
             font,
             &theme,
             vp,
-            Point::new(4, i32::try_from(row * 2).unwrap())
+            Point::new(4, i32::try_from(header + row).unwrap())
         ),
         Some(last)
     );
@@ -530,7 +544,7 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
             font,
             &theme,
             vp,
-            Point::new(4, i32::try_from(row).unwrap())
+            Point::new(4, i32::try_from(header).unwrap())
         ),
         Some(last - 1)
     );
@@ -608,17 +622,27 @@ fn breadcrumb_crumb_at_ignores_crumbs_clipped_off_the_left() {
 #[test]
 fn render_crumb_at_mirrors_the_drawn_path_bar() {
     use crate::breadcrumb::SEPARATOR;
-    use crate::render::{crumb_at, row_height};
+    use crate::render::{chrome_height, crumb_at, toolbar_height};
     use tairix_geometry::Point;
 
     let font = tairix_font::BitmapFont::inconsolata();
-    let header = row_height(font);
-    let vp = Rect::new(0, 0, 200, header * 4);
+    let theme = Theme::dark();
+    // The path bar sits below the toolbar strip; a click lands on a crumb only
+    // within that band, so hit-test at its vertical middle.
+    let bar_top = toolbar_height(&theme);
+    let bar_y = i32::try_from(bar_top + 1).unwrap();
+    let vp = Rect::new(0, 0, 200, chrome_height(font, &theme) * 4);
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
+
+    // A click in the toolbar strip (above the path bar) is never a crumb.
+    assert_eq!(crumb_at(&browser, font, &theme, vp, Point::new(4, 0)), None);
 
     // At the root the only crumb is the current directory, which is inert:
     // no click in the path bar resolves to a navigable crumb.
-    assert_eq!(crumb_at(&browser, font, vp, Point::new(4, 0)), None);
+    assert_eq!(
+        crumb_at(&browser, font, &theme, vp, Point::new(4, bar_y)),
+        None
+    );
 
     // Descend into /System; now "/" is a navigable ancestor at depth 0 and
     // "System" is the inert current crumb.
@@ -630,19 +654,26 @@ fn render_crumb_at_mirrors_the_drawn_path_bar() {
     browser.open_index(sys).expect("descend into /System");
     assert_eq!(browser.path(), "/System");
     // The root crumb is drawn at the left inset (x = 4).
-    assert_eq!(crumb_at(&browser, font, vp, Point::new(4, 0)), Some(0));
+    assert_eq!(
+        crumb_at(&browser, font, &theme, vp, Point::new(4, bar_y)),
+        Some(0)
+    );
     // A click on the current "System" crumb (drawn after "/" and the
     // separator) is inert.
     let system_x =
         4 + i32::try_from(font.text_width("/") + font.text_width(SEPARATOR)).unwrap() + 1;
-    assert_eq!(crumb_at(&browser, font, vp, Point::new(system_x, 0)), None);
+    assert_eq!(
+        crumb_at(&browser, font, &theme, vp, Point::new(system_x, bar_y)),
+        None
+    );
     // A click below the path bar row is never a crumb (it is the item area).
     assert_eq!(
         crumb_at(
             &browser,
             font,
+            &theme,
             vp,
-            Point::new(4, i32::try_from(header).unwrap())
+            Point::new(4, i32::try_from(chrome_height(font, &theme)).unwrap())
         ),
         None
     );
@@ -946,8 +977,13 @@ fn wheel_scroll_moves_the_offset_and_clamps_at_the_ends() {
     let theme = Theme::dark();
     let mut browser = many_files(20);
     let row = row_height(font);
-    // The path bar plus four visible rows.
-    let vp = Rect::new(0, 0, 200, row * 5);
+    // The chrome (toolbar + path bar) plus four visible rows.
+    let vp = Rect::new(
+        0,
+        0,
+        200,
+        crate::render::chrome_height(font, &theme) + row * 4,
+    );
 
     // Scrolling up at the top does nothing (already clamped).
     assert!(!scroll_lines(&mut browser, font, &theme, vp, -1));
@@ -1002,14 +1038,14 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
 
 #[test]
 fn the_grid_view_renders_and_hit_tests_the_first_tile() {
-    use crate::render::{entry_index_at, row_height};
+    use crate::render::entry_index_at;
     use tairix_geometry::Point;
 
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
     let mut browser = many_files(20);
     browser.set_view_mode(ViewMode::Grid);
-    let header = row_height(font);
+    let header = crate::render::chrome_height(font, &theme);
     // A window wide and tall enough for several tiles.
     let vp = Rect::new(0, 0, 400, 400);
     let surface = crate::render(&browser, &theme, font, vp).expect("grid surface");
@@ -2234,4 +2270,182 @@ fn a_breadcrumb_depth_climbs_to_exactly_the_ancestor_it_names() {
     };
     assert_eq!(browser.navigate_to_depth(system_depth), Ok(true));
     assert_eq!(browser.path(), "/System");
+}
+
+// ---------------------------------------------------------------------------
+// FM4b — the drawn toolbar: command dispatch, glyphs, and pointer resolution.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn view_mode_toggled_swaps_list_and_grid() {
+    use crate::layout::ViewMode;
+    assert_eq!(ViewMode::List.toggled(), ViewMode::Grid);
+    assert_eq!(ViewMode::Grid.toggled(), ViewMode::List);
+}
+
+#[test]
+fn sort_mode_next_cycles_through_all_six_modes_and_wraps() {
+    use crate::sort::SortMode;
+    // The Sort command walks every (key, direction) once, in a fixed order,
+    // then returns to the start — a total cycle with no unreachable mode.
+    let start = SortMode::default_order();
+    let mut mode = start;
+    let mut seen = Vec::new();
+    for _ in 0..6 {
+        seen.push(mode);
+        mode = mode.next();
+    }
+    // Back to the start after six steps.
+    assert_eq!(mode, start);
+    // All six are distinct.
+    for (i, a) in seen.iter().enumerate() {
+        for b in &seen[i + 1..] {
+            assert_ne!(a, b, "sort cycle repeated a mode early");
+        }
+    }
+    assert_eq!(seen.len(), 6);
+}
+
+#[test]
+fn toolbar_command_icon_maps_each_command_to_a_distinct_glyph() {
+    use crate::chrome::{ToolbarCommand, TOOLBAR_COMMANDS};
+    use tairix_icon::IconKind;
+
+    // Each command draws its own glyph and no two share one, so the toolbar
+    // reads unambiguously.
+    assert_eq!(ToolbarCommand::Back.icon(), IconKind::NavBack);
+    assert_eq!(ToolbarCommand::Forward.icon(), IconKind::NavForward);
+    assert_eq!(ToolbarCommand::Up.icon(), IconKind::NavUp);
+    assert_eq!(ToolbarCommand::Refresh.icon(), IconKind::Refresh);
+    assert_eq!(ToolbarCommand::ToggleView.icon(), IconKind::ViewToggle);
+    assert_eq!(ToolbarCommand::Sort.icon(), IconKind::Sort);
+
+    let icons: Vec<IconKind> = TOOLBAR_COMMANDS.iter().map(|c| c.icon()).collect();
+    for (i, a) in icons.iter().enumerate() {
+        for b in &icons[i + 1..] {
+            assert_ne!(a, b, "two toolbar commands share a glyph");
+        }
+    }
+}
+
+#[test]
+fn apply_command_drives_navigation_view_and_sort() {
+    use crate::apply_command;
+    use crate::chrome::ToolbarCommand;
+    use crate::layout::ViewMode;
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    // Back at the root has no history: a no-op, not an error, and no change.
+    assert_eq!(apply_command(&mut browser, ToolbarCommand::Back), Ok(false));
+
+    // Toggle view flips list ↔ grid and reports a change.
+    assert_eq!(browser.view_mode(), ViewMode::List);
+    assert_eq!(
+        apply_command(&mut browser, ToolbarCommand::ToggleView),
+        Ok(true)
+    );
+    assert_eq!(browser.view_mode(), ViewMode::Grid);
+
+    // Sort advances to the next mode in the cycle.
+    let before = browser.sort_mode();
+    assert_eq!(apply_command(&mut browser, ToolbarCommand::Sort), Ok(true));
+    assert_eq!(browser.sort_mode(), before.next());
+
+    // Descend, then Up climbs back to the root. (The Sort above re-ordered the
+    // listing, so find System by name rather than a fixed index.)
+    let sys = browser
+        .entries()
+        .iter()
+        .position(|e| e.name() == "System")
+        .expect("fixture has System");
+    browser.open_index(sys).expect("enter System");
+    assert_eq!(browser.path(), "/System");
+    assert_eq!(apply_command(&mut browser, ToolbarCommand::Up), Ok(true));
+    assert!(browser.is_root());
+
+    // Back now returns to /System (there is history), reporting a change.
+    assert_eq!(apply_command(&mut browser, ToolbarCommand::Back), Ok(true));
+    assert_eq!(browser.path(), "/System");
+}
+
+#[test]
+fn apply_command_refresh_fails_closed_and_leaves_the_browser_put() {
+    use crate::apply_command;
+    use crate::chrome::ToolbarCommand;
+
+    // The root lists once (at open) and is refused on every later read.
+    let mut fs = MockFs::fixture();
+    fs.deny_after_first.insert("/".to_string());
+    let mut browser = Browser::open_root(fs).expect("root lists once");
+    let before: Vec<String> = names(&browser).iter().map(ToString::to_string).collect();
+
+    // Refresh re-reads the root, which now fails closed; the error is surfaced
+    // and the previously loaded listing is left exactly as it was.
+    assert!(matches!(
+        apply_command(&mut browser, ToolbarCommand::Refresh),
+        Err(BrowseError::Source(_))
+    ));
+    assert_eq!(names(&browser), before);
+}
+
+#[test]
+fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
+    use crate::chrome::ToolbarCommand;
+    use crate::render::{chrome_height, toolbar_command_at, toolbar_height};
+    use tairix_geometry::Point;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, chrome_height(font, &theme) + 40);
+
+    // Scan the toolbar strip's middle row and collect every command a click
+    // resolves to, so the test does not depend on each tool's exact pixel x.
+    let commands_along_toolbar = |browser: &Browser<MockFs>| -> Vec<ToolbarCommand> {
+        let y = i32::try_from(toolbar_height(&theme) / 2).unwrap();
+        let mut found = Vec::new();
+        for x in 0..vp.width {
+            if let Some(cmd) = toolbar_command_at(
+                browser,
+                &theme,
+                vp,
+                Point::new(i32::try_from(x).unwrap(), y),
+            ) {
+                if !found.contains(&cmd) {
+                    found.push(cmd);
+                }
+            }
+        }
+        found
+    };
+
+    // At the root the three navigation tools are disabled, so a click on them
+    // resolves to nothing (fail closed); the always-enabled tools resolve.
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let at_root = commands_along_toolbar(&browser);
+    assert!(!at_root.contains(&ToolbarCommand::Back));
+    assert!(!at_root.contains(&ToolbarCommand::Forward));
+    assert!(!at_root.contains(&ToolbarCommand::Up));
+    assert!(at_root.contains(&ToolbarCommand::Refresh));
+    assert!(at_root.contains(&ToolbarCommand::ToggleView));
+    assert!(at_root.contains(&ToolbarCommand::Sort));
+
+    // After descending, Back and Up become enabled and now resolve.
+    let mut deep = Browser::open_root(MockFs::fixture()).expect("root");
+    deep.open_index(2).expect("enter System");
+    let at_deep = commands_along_toolbar(&deep);
+    assert!(at_deep.contains(&ToolbarCommand::Back));
+    assert!(at_deep.contains(&ToolbarCommand::Up));
+    assert!(!at_deep.contains(&ToolbarCommand::Forward));
+
+    // A click below the toolbar strip (the path bar / item area) is never a
+    // toolbar command.
+    assert_eq!(
+        toolbar_command_at(
+            &browser,
+            &theme,
+            vp,
+            Point::new(4, i32::try_from(toolbar_height(&theme)).unwrap())
+        ),
+        None
+    );
 }

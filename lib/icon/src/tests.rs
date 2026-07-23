@@ -35,6 +35,12 @@ fn for_asset_maps_known_ids() {
     assert_eq!(IconKind::for_asset("image"), IconKind::Image);
     assert_eq!(IconKind::for_asset("archive"), IconKind::Archive);
     assert_eq!(IconKind::for_asset("executable"), IconKind::Executable);
+    assert_eq!(IconKind::for_asset("nav-back"), IconKind::NavBack);
+    assert_eq!(IconKind::for_asset("nav-forward"), IconKind::NavForward);
+    assert_eq!(IconKind::for_asset("nav-up"), IconKind::NavUp);
+    assert_eq!(IconKind::for_asset("refresh"), IconKind::Refresh);
+    assert_eq!(IconKind::for_asset("view-toggle"), IconKind::ViewToggle);
+    assert_eq!(IconKind::for_asset("sort"), IconKind::Sort);
 }
 
 #[test]

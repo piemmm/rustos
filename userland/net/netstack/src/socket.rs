@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 use tairix_abi::net::{
     encode_bind_reply, encode_send_reply, encode_socket_reply, SocketAddr, SocketDatagram,
     SocketId, SocketRequest, SocketStreamEvent, SocketType, StreamCloseReason, SOCKET_MAX_DATAGRAM,
+    SOCKET_PRIVILEGED_PORT_MAX,
 };
 use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
 use tairix_abi::origin::ProcId;
@@ -42,6 +43,7 @@ use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::checksum::Pseudo;
 use tairix_net::stack::StackEvent;
 use tairix_net::tcp::conn::{ResetReason, State, Tcb, TcpConfig};
+use tairix_net::tcp::listen::{CookieSecret, ListenConfig, Listener, Peer};
 use tairix_net::tcp::{TcpSegment, TcpSegmentMeta};
 
 use crate::events;
@@ -89,14 +91,35 @@ struct StreamConn {
     peer: SocketAddr,
     /// The egress interface the connection is bound to for its life.
     iface: [u8; IF_NAME_LEN],
-    /// Whether the client has been told the handshake completed.
-    connected_notified: bool,
-    /// Whether the client has been told the connection ended.
-    closed_notified: bool,
+    /// Which one-shot client lifecycle events have already been delivered,
+    /// so `Connected` and `Closed` are each sent exactly once and no event
+    /// follows `Closed`.
+    notified: Notified,
     /// Whether the client has issued `close`: the connection is being
     /// torn down in the background and is reaped once fully closed. No
     /// further events are delivered (the client is gone).
     client_closed: bool,
+    /// Whether this connection has been claimed by the client. A connection
+    /// opened actively (via [`SocketRequest::Connect`]) is accepted at
+    /// birth; a connection produced passively by a [`Listener`] starts
+    /// **unaccepted** and delivers no client events until an
+    /// [`SocketRequest::Accept`] claims it (its received bytes buffer in the
+    /// bounded [`Tcb`] meanwhile), so the client never sees data for a
+    /// connection it has not yet taken.
+    accepted: bool,
+}
+
+/// The one-shot client-facing lifecycle events already delivered for a
+/// connection. The lifecycle is monotonic: `Nothing` → `Connected` →
+/// `Closed`, so each event is delivered once and none follows `Closed`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Notified {
+    /// No lifecycle event delivered yet.
+    Nothing,
+    /// The one-shot `Connected` has been delivered.
+    Connected,
+    /// The one-shot `Closed` has been delivered; no event follows.
+    Closed,
 }
 
 /// The transport-specific state of one socket.
@@ -107,6 +130,13 @@ enum Proto {
     /// The connection (which carries the sizeable [`Tcb`]) is boxed so a
     /// datagram socket's table entry stays small.
     Stream(Option<Box<StreamConn>>),
+    /// A passive TCP listener demultiplexing inbound connections on the
+    /// socket's bound local port. Each completed handshake becomes a
+    /// separate child stream socket in the table (`Proto::Stream`), keyed
+    /// to the same principal; the [`Listener`] carries the SYN-flood
+    /// defence (bounded half-open backlog, stateless SYN cookies on
+    /// overflow) and is boxed so a non-listening entry stays small.
+    Listen(Box<Listener>),
 }
 
 /// One open socket, owned by exactly one principal.
@@ -137,6 +167,11 @@ pub struct SocketReply {
     /// Frames to queue onto each named interface's TX ring (empty for a
     /// request that transmits nothing).
     pub tx: FrameBatch,
+    /// Stream events to deliver to clients' async ports as a *result of
+    /// serving the request itself* (the buffered `Connected`/`Data` a
+    /// newly [`Accept`](SocketRequest::Accept)ed connection already holds).
+    /// Empty for every other operation; the glue `ipc_send`s each.
+    pub deliveries: Vec<Delivery>,
 }
 
 /// One message to deliver to a socket's client: the async port to
@@ -243,6 +278,25 @@ impl SocketService {
                 deliver_port,
             } => self.open(audit, owner, family, sock_type, deliver_port, response),
             SocketRequest::Bind { socket, local } => {
+                // Claiming a specific privileged (well-known) local port is
+                // a further gate beyond CAP_NET: an unprivileged process
+                // must not squat a low port and impersonate a system
+                // service. A `0` (ephemeral) request is never privileged.
+                if local.port != 0
+                    && local.port <= SOCKET_PRIVILEGED_PORT_MAX
+                    && !caller
+                        .capabilities()
+                        .holds(CapabilityId::NET_BIND_PRIVILEGED)
+                {
+                    emit(
+                        audit,
+                        Level::Warn,
+                        events::SOCKET_DENIED,
+                        "socket bind denied: privileged port needs CAP_NET_BIND_PRIVILEGED",
+                        &[op_field(&decoded)],
+                    );
+                    return Err(Errno::PermissionDenied);
+                }
                 self.bind(interfaces, entropy, owner, socket, local, response)
             }
             SocketRequest::Connect { socket, peer } => {
@@ -262,6 +316,19 @@ impl SocketService {
             SocketRequest::LeaveMulticast { socket, group } => {
                 self.leave(interfaces, owner, socket, group, now, response)
             }
+            SocketRequest::Listen { socket } => self.listen(audit, owner, socket, response),
+            SocketRequest::Accept {
+                socket,
+                deliver_port,
+            } => self.accept_socket(
+                interfaces,
+                audit,
+                owner,
+                socket,
+                deliver_port,
+                now,
+                response,
+            ),
         }
     }
 
@@ -320,6 +387,7 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx: Vec::new(),
+            deliveries: Vec::new(),
         })
     }
 
@@ -349,6 +417,7 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx: Vec::new(),
+            deliveries: Vec::new(),
         })
     }
 
@@ -381,6 +450,9 @@ impl SocketService {
                 status_reply(response)
             }
             Proto::Stream(Some(_)) => Err(Errno::AlreadyExists),
+            // A passive listener cannot actively open a connection: it is
+            // in the wrong state for a connect, not a duplicate of one.
+            Proto::Listen(_) => Err(Errno::OutOfRange),
             Proto::Stream(None) => {
                 self.connect_stream(interfaces, entropy, index, peer, now, response)
             }
@@ -413,6 +485,9 @@ impl SocketService {
                 }
                 self.send_stream(interfaces, index, payload, now, response)
             }
+            // A listening socket is passive: it originates no data. The
+            // client sends on the accepted child sockets instead.
+            Proto::Listen(_) => Err(Errno::NotConnected),
         }
     }
 
@@ -439,11 +514,26 @@ impl SocketService {
             // is reaped once fully closed.
             tx = self.pump_stream(interfaces, index, now);
             self.reap_if_done(index);
+        } else if matches!(self.sockets[index].proto, Proto::Listen(_)) {
+            // Closing a listener drops it and abandons any connection it had
+            // completed but the client never accepted (an unclaimed child on
+            // the same port): the client is walking away from the port, so
+            // those connections have no owner to serve them.
+            let family = self.sockets[index].family;
+            let port = self.sockets[index].local_port;
+            let listener_owner = self.sockets[index].owner;
+            self.sockets.swap_remove(index);
+            self.sockets.retain(|e| {
+                !(e.owner == listener_owner
+                    && e.family == family
+                    && e.local_port == port
+                    && matches!(&e.proto, Proto::Stream(Some(c)) if !c.accepted))
+            });
         } else {
             let family = self.sockets[index].family;
             let groups = match &mut self.sockets[index].proto {
                 Proto::Datagram(dg) => core::mem::take(&mut dg.groups),
-                Proto::Stream(_) => Vec::new(),
+                _ => Vec::new(),
             };
             for group in &groups {
                 let ip = family_addr_to_ip(family, *group);
@@ -452,7 +542,127 @@ impl SocketService {
             self.sockets.swap_remove(index);
         }
         let len = status_reply(response)?.len;
-        Ok(SocketReply { len, tx })
+        Ok(SocketReply {
+            len,
+            tx,
+            deliveries: Vec::new(),
+        })
+    }
+
+    /// Make a bound stream socket passive (LISTEN): it accepts inbound
+    /// connections on its bound local port instead of originating one.
+    ///
+    /// The socket must be a bound, not-yet-connected stream socket. The
+    /// privileged-port check was applied at [`bind`](Self::bind) time.
+    fn listen(
+        &mut self,
+        audit: &dyn Sink,
+        owner: ProcId,
+        socket: SocketId,
+        response: &mut [u8],
+    ) -> Result<SocketReply, Errno> {
+        let index = self.owned_index(owner, socket)?;
+        // Only an unconnected stream socket can be made to listen.
+        if !matches!(self.sockets[index].proto, Proto::Stream(None)) {
+            return refuse(
+                audit,
+                "socket listen refused: not an unconnected stream socket",
+                Errno::OutOfRange,
+            );
+        }
+        if self.sockets[index].local_port == 0 {
+            return refuse(
+                audit,
+                "socket listen refused: socket not bound to a local port",
+                Errno::AddressUnavailable,
+            );
+        }
+        let local_port = self.sockets[index].local_port;
+        self.sockets[index].proto =
+            Proto::Listen(Box::new(Listener::new(local_port, ListenConfig::default())));
+        emit(
+            audit,
+            Level::Info,
+            events::SOCKET_LISTENING,
+            "socket listening",
+            &[],
+        );
+        status_reply(response)
+    }
+
+    /// Claim the next established connection queued on a listening socket:
+    /// find the oldest connection the listener has completed but the client
+    /// has not yet taken (an unaccepted child stream socket on the same
+    /// port), rebind it to the caller-supplied delivery port, mark it
+    /// claimed, and hand back its new [`SocketId`]. Any bytes the peer
+    /// already sent are delivered on this reply.
+    ///
+    /// Replies [`Errno::WouldBlock`] when no connection is ready (the client
+    /// waits for the next [`Accepted`](SocketStreamEvent::Accepted) event).
+    #[allow(clippy::too_many_arguments)]
+    fn accept_socket(
+        &mut self,
+        interfaces: &mut Netstack,
+        audit: &dyn Sink,
+        owner: ProcId,
+        socket: SocketId,
+        deliver_port: u64,
+        now: Duration64,
+        response: &mut [u8],
+    ) -> Result<SocketReply, Errno> {
+        if deliver_port == 0 {
+            return refuse(
+                audit,
+                "socket accept refused: zero delivery port",
+                Errno::OutOfRange,
+            );
+        }
+        let lindex = self.owned_index(owner, socket)?;
+        if !matches!(self.sockets[lindex].proto, Proto::Listen(_)) {
+            return refuse(
+                audit,
+                "socket accept refused: not a listening socket",
+                Errno::OutOfRange,
+            );
+        }
+        let family = self.sockets[lindex].family;
+        let local_port = self.sockets[lindex].local_port;
+        // The oldest unaccepted child of this listener owned by the caller.
+        let Some(child) = self.sockets.iter().position(|e| {
+            e.owner == owner
+                && e.family == family
+                && e.local_port == local_port
+                && matches!(&e.proto, Proto::Stream(Some(c)) if !c.accepted)
+        }) else {
+            // Nothing ready — a non-error "try again" the client waits on.
+            return Err(Errno::WouldBlock);
+        };
+        let child_id = self.sockets[child].id;
+        self.sockets[child].deliver_port = deliver_port;
+        if let Proto::Stream(Some(conn)) = &mut self.sockets[child].proto {
+            conn.accepted = true;
+        }
+        emit(
+            audit,
+            Level::Info,
+            events::SOCKET_ACCEPTED,
+            "socket connection accepted",
+            &[],
+        );
+        // Deliver whatever the connection already holds (the one-shot
+        // Connected, any buffered received bytes, a close it already saw)
+        // now that it has an owner and a delivery port.
+        let deliveries = self.collect_stream_events(child);
+        // Draining the receive buffer may have opened the window; pump any
+        // resulting ACK. `reap_if_done` never fires here (the client just
+        // took it and has not closed).
+        let tx = self.pump_stream(interfaces, child, now);
+        let len = encode_socket_reply(Ok(child_id), response)?;
+        Ok(SocketReply {
+            len,
+            tx,
+            deliveries,
+        })
     }
 }
 
@@ -474,7 +684,7 @@ impl SocketService {
         let family = self.sockets[index].family;
         let peer = match &self.sockets[index].proto {
             Proto::Datagram(dg) => dg.peer,
-            Proto::Stream(_) => None,
+            Proto::Stream(_) | Proto::Listen(_) => None,
         };
         let Some(target) = dest.or(peer) else {
             return refuse(
@@ -494,7 +704,11 @@ impl SocketService {
         match interfaces.originate(ip_of(target), source_port, target.port, payload, now) {
             Ok(tx) => {
                 let len = status_reply(response)?.len;
-                Ok(SocketReply { len, tx })
+                Ok(SocketReply {
+                    len,
+                    tx,
+                    deliveries: Vec::new(),
+                })
             }
             Err(err) => refuse(audit, "socket send refused", err),
         }
@@ -543,9 +757,10 @@ impl SocketService {
             tcb,
             peer,
             iface,
-            connected_notified: false,
-            closed_notified: false,
+            notified: Notified::Nothing,
             client_closed: false,
+            // An actively-opened connection is the client's from birth.
+            accepted: true,
         })));
         let tx = if frames.is_empty() {
             FrameBatch::new()
@@ -553,7 +768,11 @@ impl SocketService {
             alloc::vec![(iface, frames)]
         };
         let len = status_reply(response)?.len;
-        Ok(SocketReply { len, tx })
+        Ok(SocketReply {
+            len,
+            tx,
+            deliveries: Vec::new(),
+        })
     }
 
     /// Enqueue bytes onto a stream's send buffer (accepting as many as the
@@ -577,7 +796,11 @@ impl SocketService {
         let tx = self.pump_stream(interfaces, index, now);
         let accepted = u32::try_from(accepted).unwrap_or(u32::MAX);
         let len = encode_send_reply(Ok(accepted), response)?;
-        Ok(SocketReply { len, tx })
+        Ok(SocketReply {
+            len,
+            tx,
+            deliveries: Vec::new(),
+        })
     }
 
     /// Drain a connected stream's outbound segments through its bound
@@ -610,12 +833,15 @@ impl SocketService {
     }
 
     /// Feed one inbound TCP segment (already checksum-verified by the
-    /// engine) to the connection its four-tuple names, driving the
-    /// resulting egress segments and client-visible stream events.
+    /// engine) to the socket its four-tuple names, driving the resulting
+    /// egress segments and client-visible stream events.
     ///
-    /// A segment matching no connected stream is dropped (this increment
-    /// serves only active opens; passive listeners and stateless RSTs are
-    /// N6). It never panics and returns bounded output.
+    /// The segment is routed to, in order: an established connection
+    /// (active or an accepted child) matching the full four-tuple; else a
+    /// passive listener on the destination port, which demultiplexes it
+    /// (SYN handshake, SYN-cookie validation, or RST). `secret`
+    /// authenticates SYN cookies. A segment matching neither is dropped.
+    /// It never panics and returns bounded output.
     #[must_use]
     pub fn on_tcp_segment(
         &mut self,
@@ -624,6 +850,7 @@ impl SocketService {
         destination: IpAddr,
         segment: &[u8],
         now: Duration64,
+        secret: &dyn CookieSecret,
     ) -> StreamIo {
         let pseudo = pseudo_for(source, destination);
         let Some(seg) = TcpSegment::parse(pseudo, segment) else {
@@ -631,21 +858,167 @@ impl SocketService {
         };
         let (fam, src_bytes) = parts_of(source);
         let (dst_port, src_port) = (seg.destination_port, seg.source_port);
-        let Some(index) = self.sockets.iter().position(|e| {
+        // 1. An established connection (active open, or a child accepted off
+        //    a listener) claims the segment by its full four-tuple.
+        if let Some(index) = self.sockets.iter().position(|e| {
             e.family == fam
                 && e.local_port == dst_port
                 && matches!(&e.proto, Proto::Stream(Some(c))
                     if c.peer.port == src_port && c.peer.addr == src_bytes)
-        }) else {
-            return StreamIo::default();
-        };
-        if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
-            conn.tcb.on_segment(&seg, now);
+        }) {
+            if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
+                conn.tcb.on_segment(&seg, now);
+            }
+            let tx = self.pump_stream(interfaces, index, now);
+            let deliveries = self.collect_stream_events(index);
+            self.reap_if_done(index);
+            return StreamIo { tx, deliveries };
         }
-        let tx = self.pump_stream(interfaces, index, now);
-        let deliveries = self.collect_stream_events(index);
-        self.reap_if_done(index);
-        StreamIo { tx, deliveries }
+        // 2. A passive listener on the destination port demultiplexes it.
+        if let Some(lindex) = self.sockets.iter().position(|e| {
+            e.family == fam && e.local_port == dst_port && matches!(&e.proto, Proto::Listen(_))
+        }) {
+            return self.drive_listener(interfaces, lindex, source, destination, &seg, now, secret);
+        }
+        StreamIo::default()
+    }
+
+    /// Feed one inbound segment to the listener at `lindex`, route the
+    /// segments it emits (SYN-ACK, cookie SYN-ACK, RST) back to the peer,
+    /// and drain any newly completed connection into a pending child
+    /// socket. `local` is the local address the segment arrived on.
+    #[allow(clippy::too_many_arguments)]
+    fn drive_listener(
+        &mut self,
+        interfaces: &mut Netstack,
+        lindex: usize,
+        source: IpAddr,
+        destination: IpAddr,
+        seg: &TcpSegment<'_>,
+        now: Duration64,
+        secret: &dyn CookieSecret,
+    ) -> StreamIo {
+        let peer = Peer {
+            addr: source,
+            port: seg.source_port,
+        };
+        let mut emitted: Vec<(TcpSegmentMeta, Vec<u8>)> = Vec::new();
+        if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
+            listener.on_segment(destination, peer, seg, now, secret, |_peer, out| {
+                emitted.push((out.meta, out.payload.to_vec()));
+                true
+            });
+        }
+        let mut io = StreamIo::default();
+        io.tx
+            .extend(route_segments_to(interfaces, source, &emitted, now));
+        io.deliveries
+            .extend(self.drain_listener_accepts(interfaces, lindex, now));
+        io
+    }
+
+    /// Advance a listener's timers (retransmit owed SYN-ACKs, expire stale
+    /// half-open handshakes), routing each retransmitted segment back to
+    /// its peer.
+    fn advance_listener(
+        &mut self,
+        interfaces: &mut Netstack,
+        lindex: usize,
+        now: Duration64,
+    ) -> FrameBatch {
+        let mut emitted: Vec<(IpAddr, TcpSegmentMeta, Vec<u8>)> = Vec::new();
+        if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
+            listener.advance(now, |peer, out| {
+                emitted.push((peer.addr, out.meta, out.payload.to_vec()));
+                true
+            });
+        }
+        let mut tx = FrameBatch::new();
+        for (peer_ip, meta, payload) in &emitted {
+            if let Ok((iface, _mss)) = interfaces.egress_mss_for(*peer_ip, now) {
+                if let Ok(frames) = interfaces.send_tcp_on(iface, *peer_ip, meta, payload, now) {
+                    if !frames.is_empty() {
+                        tx.push((iface, frames));
+                    }
+                }
+            }
+        }
+        tx
+    }
+
+    /// Drain every connection the listener at `lindex` has completed into a
+    /// new **pending** child stream socket (owned by the same principal,
+    /// on the same local port), and deliver one
+    /// [`Accepted`](SocketStreamEvent::Accepted) readiness event per child
+    /// to the listener's port. Child creation is bounded by the socket
+    /// quota: at the ceiling the completed connections stay queued in the
+    /// listener (which itself RSTs further completions once its bounded
+    /// accept queue fills) — fail closed, never an unbounded table.
+    fn drain_listener_accepts(
+        &mut self,
+        interfaces: &mut Netstack,
+        lindex: usize,
+        now: Duration64,
+    ) -> Vec<Delivery> {
+        let owner = self.sockets[lindex].owner;
+        let deliver_port = self.sockets[lindex].deliver_port;
+        let family = self.sockets[lindex].family;
+        let local_port = self.sockets[lindex].local_port;
+        let listener_id = self.sockets[lindex].id;
+        let mut out = Vec::new();
+        loop {
+            if self.sockets.len() >= MAX_SOCKETS_TOTAL
+                || self.count_owned(owner) >= MAX_SOCKETS_PER_PRINCIPAL
+            {
+                break;
+            }
+            let conn = match &mut self.sockets[lindex].proto {
+                Proto::Listen(listener) => listener.accept(),
+                _ => break,
+            };
+            let Some(conn) = conn else {
+                break;
+            };
+            // Bind the child to the interface that reaches its peer; a
+            // connection with no route home is dropped (it times out
+            // remotely) rather than parked forever.
+            let Ok((iface, _mss)) = interfaces.egress_mss_for(conn.peer.addr, now) else {
+                continue;
+            };
+            let (pfam, paddr) = parts_of(conn.peer.addr);
+            let peer = SocketAddr {
+                family: pfam,
+                addr: paddr,
+                port: conn.peer.port,
+            };
+            let id = self.alloc_id();
+            self.sockets.push(SocketEntry {
+                id,
+                owner,
+                // Inherited until `Accept` rebinds it to the client's port.
+                deliver_port,
+                family,
+                local_addr: [0u8; 16],
+                local_port,
+                proto: Proto::Stream(Some(Box::new(StreamConn {
+                    tcb: conn.tcb,
+                    peer,
+                    iface,
+                    notified: Notified::Nothing,
+                    client_closed: false,
+                    // Passive: the client must claim it with `Accept`.
+                    accepted: false,
+                }))),
+            });
+            push_stream_event(
+                &mut out,
+                deliver_port,
+                &SocketStreamEvent::Accepted {
+                    socket: listener_id,
+                },
+            );
+        }
+        out
     }
 
     /// Drive every connected stream's timers at `now` (retransmit, delayed
@@ -657,16 +1030,26 @@ impl SocketService {
         let mut io = StreamIo::default();
         let mut i = 0;
         while i < self.sockets.len() {
-            if matches!(self.sockets[i].proto, Proto::Stream(Some(_))) {
-                if let Proto::Stream(Some(conn)) = &mut self.sockets[i].proto {
-                    conn.tcb.advance(now);
+            match &self.sockets[i].proto {
+                Proto::Stream(Some(_)) => {
+                    if let Proto::Stream(Some(conn)) = &mut self.sockets[i].proto {
+                        conn.tcb.advance(now);
+                    }
+                    io.tx.extend(self.pump_stream(interfaces, i, now));
+                    io.deliveries.extend(self.collect_stream_events(i));
+                    if self.reap_if_done(i) {
+                        // A reap swap-removed this slot; re-examine it.
+                        continue;
+                    }
                 }
-                io.tx.extend(self.pump_stream(interfaces, i, now));
-                io.deliveries.extend(self.collect_stream_events(i));
-                if self.reap_if_done(i) {
-                    // A reap swap-removed this slot; re-examine it.
-                    continue;
+                Proto::Listen(_) => {
+                    io.tx.extend(self.advance_listener(interfaces, i, now));
+                    io.deliveries
+                        .extend(self.drain_listener_accepts(interfaces, i, now));
                 }
+                // A datagram socket and an unconnected stream socket have no
+                // timers to advance.
+                Proto::Datagram(_) | Proto::Stream(None) => {}
             }
             i += 1;
         }
@@ -681,6 +1064,7 @@ impl SocketService {
             .iter()
             .filter_map(|e| match &e.proto {
                 Proto::Stream(Some(c)) => c.tcb.next_deadline(),
+                Proto::Listen(l) => l.next_deadline(),
                 _ => None,
             })
             .min_by_key(|d| (d.secs(), d.subsec_nanos()))
@@ -696,11 +1080,18 @@ impl SocketService {
         let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto else {
             return out;
         };
-        if conn.closed_notified {
+        // A connection produced by a listener but not yet claimed with
+        // `Accept` has no owner to hear its events: hold them (its received
+        // bytes buffer in the bounded TCB) until it is accepted, so the
+        // client never sees data for a connection it has not taken.
+        if !conn.accepted {
             return out;
         }
-        if conn.tcb.is_established() && !conn.connected_notified {
-            conn.connected_notified = true;
+        if conn.notified == Notified::Closed {
+            return out;
+        }
+        if conn.tcb.is_established() && conn.notified == Notified::Nothing {
+            conn.notified = Notified::Connected;
             push_stream_event(
                 &mut out,
                 deliver_port,
@@ -733,7 +1124,7 @@ impl SocketService {
             None
         };
         if let Some(reason) = reason {
-            conn.closed_notified = true;
+            conn.notified = Notified::Closed;
             push_stream_event(
                 &mut out,
                 deliver_port,
@@ -786,7 +1177,11 @@ impl SocketService {
             dg.groups.push(group.addr);
         }
         let len = status_reply(response)?.len;
-        Ok(SocketReply { len, tx })
+        Ok(SocketReply {
+            len,
+            tx,
+            deliveries: Vec::new(),
+        })
     }
 
     /// Leave a multicast group a datagram socket had joined.
@@ -819,7 +1214,11 @@ impl SocketService {
         }
         let tx = interfaces.leave_multicast_all(ip_of(group), now);
         let len = status_reply(response)?.len;
-        Ok(SocketReply { len, tx })
+        Ok(SocketReply {
+            len,
+            tx,
+            deliveries: Vec::new(),
+        })
     }
 
     /// Route one engine [`StackEvent::UdpDatagram`] to the datagram
@@ -952,6 +1351,36 @@ fn drain_segments(tcb: &mut Tcb, now: Duration64) -> Vec<(TcpSegmentMeta, Vec<u8
     segs
 }
 
+/// Route a batch of listener-emitted `(header, payload)` segments to a
+/// single peer, choosing the egress interface by the route to that peer,
+/// and return the produced frames tagged by that interface's alias. An
+/// empty batch, or a peer with no route home, yields nothing (the listener
+/// is passive; a lost SYN-ACK is retransmitted by `advance`).
+fn route_segments_to(
+    interfaces: &mut Netstack,
+    peer_ip: IpAddr,
+    segs: &[(TcpSegmentMeta, Vec<u8>)],
+    now: Duration64,
+) -> FrameBatch {
+    if segs.is_empty() {
+        return FrameBatch::new();
+    }
+    let Ok((iface, _mss)) = interfaces.egress_mss_for(peer_ip, now) else {
+        return FrameBatch::new();
+    };
+    let mut frames = Vec::new();
+    for (meta, payload) in segs {
+        if let Ok(more) = interfaces.send_tcp_on(iface, peer_ip, meta, payload, now) {
+            frames.extend(more);
+        }
+    }
+    if frames.is_empty() {
+        FrameBatch::new()
+    } else {
+        alloc::vec![(iface, frames)]
+    }
+}
+
 /// Encode a stream event and push it as a delivery to `deliver_port`. A
 /// bounded, valid event always encodes; an encode failure is dropped
 /// rather than delivering a malformed frame (fail closed).
@@ -1015,6 +1444,7 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
     Ok(SocketReply {
         len: STATUS_REPLY_LEN,
         tx: Vec::new(),
+        deliveries: Vec::new(),
     })
 }
 
@@ -1072,6 +1502,8 @@ fn op_field(request: &SocketRequest<'_>) -> Field<'static> {
         SocketRequest::Close { .. } => "close",
         SocketRequest::JoinMulticast { .. } => "join",
         SocketRequest::LeaveMulticast { .. } => "leave",
+        SocketRequest::Listen { .. } => "listen",
+        SocketRequest::Accept { .. } => "accept",
     };
     Field {
         key: "op",

@@ -563,11 +563,15 @@ fn duplicate_interface_aliases_are_refused() {
 
 // --- The socket service ---------------------------------------------
 
-/// A caller holding `CAP_NET`, keyed to process instance `proc_byte` so
-/// tests can model distinct principals.
+/// A caller holding `CAP_NET` **and** `CAP_NET_BIND_PRIVILEGED`, keyed to
+/// process instance `proc_byte` so tests can model distinct principals.
+/// The privileged-bind grant lets these tests bind well-known ports (e.g.
+/// the echo port 7); the *denial* of an unprivileged bind is covered by
+/// its own test with a bare `CAP_NET` caller.
 fn net_caller(proc_byte: u8) -> Caller {
     let mut summary = CapabilitySummary::EMPTY;
     summary.insert(CapabilityId::NET);
+    summary.insert(CapabilityId::NET_BIND_PRIVILEGED);
     Caller::new(Origin::new(
         TrustDomain::User,
         1000,
@@ -1151,6 +1155,200 @@ fn local_group(addr: Ipv4Addr) -> SocketAddr {
     }
 }
 
+/// Open a socket of `sock_type` for `who`, returning its handle.
+fn open_socket(
+    svc: &mut SocketService,
+    stack: &mut Netstack,
+    who: &Caller,
+    sock_type: SocketType,
+) -> Result<u32, Errno> {
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type,
+        deliver_port: 0x5000,
+    });
+    let out = svc.serve(stack, who, &sink, &mut ent, &request, &mut reply, t(2))?;
+    decode_socket_reply(&reply[..out.len])
+}
+
+/// Serve one already-built request for `who`, discarding the reply frame.
+fn serve_req(
+    svc: &mut SocketService,
+    stack: &mut Netstack,
+    who: &Caller,
+    request: &SocketRequest<'_>,
+) -> Result<(), Errno> {
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let bytes = encode_request(request);
+    svc.serve(stack, who, &sink, &mut ent, &bytes, &mut reply, t(2))
+        .map(|_| ())
+}
+
+#[test]
+fn binding_a_privileged_port_requires_the_capability() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    // A bare CAP_NET principal; `caller` keys every summary to one ProcId,
+    // so the privileged caller below owns the same socket.
+    let bare = caller(&[CapabilityId::NET]);
+    let id = open_socket(&mut svc, &mut stack, &bare, SocketType::Stream).expect("open");
+
+    // Binding a well-known port without CAP_NET_BIND_PRIVILEGED is denied.
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &bare,
+            &SocketRequest::Bind {
+                socket: id,
+                local: v4_addr(0, 0, 0, 0, 80),
+            },
+        ),
+        Err(Errno::PermissionDenied),
+    );
+    // An ephemeral (port 0) bind is never privileged.
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &bare,
+        &SocketRequest::Bind {
+            socket: id,
+            local: v4_addr(0, 0, 0, 0, 0),
+        },
+    )
+    .expect("ephemeral bind is unprivileged");
+
+    // The same well-known bind succeeds for a principal holding the cap.
+    let privd = caller(&[CapabilityId::NET, CapabilityId::NET_BIND_PRIVILEGED]);
+    let id2 = open_socket(&mut svc, &mut stack, &privd, SocketType::Stream).expect("open");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &privd,
+        &SocketRequest::Bind {
+            socket: id2,
+            local: v4_addr(0, 0, 0, 0, 80),
+        },
+    )
+    .expect("privileged bind allowed with the capability");
+}
+
+#[test]
+fn listen_requires_a_bound_stream_socket() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let who = net_caller(1);
+
+    // A datagram socket cannot listen.
+    let dg = open_socket(&mut svc, &mut stack, &who, SocketType::Datagram).expect("open dg");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Listen { socket: dg }
+        ),
+        Err(Errno::OutOfRange),
+    );
+
+    // An unbound stream socket cannot listen.
+    let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open st");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Listen { socket: st }
+        ),
+        Err(Errno::AddressUnavailable),
+    );
+
+    // Bound, it listens; a second listen is refused (no longer a stream).
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Bind {
+            socket: st,
+            local: v4_addr(0, 0, 0, 0, 8080),
+        },
+    )
+    .expect("bind");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Listen { socket: st },
+    )
+    .expect("listen");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Listen { socket: st }
+        ),
+        Err(Errno::OutOfRange),
+    );
+}
+
+#[test]
+fn accept_without_a_ready_connection_would_block() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let who = net_caller(1);
+    let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Bind {
+            socket: st,
+            local: v4_addr(0, 0, 0, 0, 8080),
+        },
+    )
+    .expect("bind");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Listen { socket: st },
+    )
+    .expect("listen");
+    // Nothing has connected: accept is the retryable WouldBlock, not an error.
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Accept {
+                socket: st,
+                deliver_port: 0x6000,
+            },
+        ),
+        Err(Errno::WouldBlock),
+    );
+    // Accept on a non-listening socket is refused.
+    let dg = open_socket(&mut svc, &mut stack, &who, SocketType::Datagram).expect("open dg");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Accept {
+                socket: dg,
+                deliver_port: 0x6000,
+            },
+        ),
+        Err(Errno::OutOfRange),
+    );
+}
+
 // --- NetChannelClient ↔ NetChannelServer round-trip -----------------
 //
 // The cross-process `netchan-v1` control plane, proven in-process: the
@@ -1500,6 +1698,7 @@ fn pump_client(
     fs: &mut LocalFrameService<'_, PeerTcpNet>,
     now: Duration64,
 ) -> Vec<Delivery> {
+    let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
     let mut deliveries = Vec::new();
     for _ in 0..64 {
         let events = ns.service_interface(name("wan"), fs, now).expect("pump");
@@ -1514,7 +1713,7 @@ fn pump_client(
                     destination,
                     segment,
                 } => {
-                    let io = svc.on_tcp_segment(ns, *source, *destination, segment, now);
+                    let io = svc.on_tcp_segment(ns, *source, *destination, segment, now, &secret);
                     stage_batch(fs, &io.tx);
                     deliveries.extend(io.deliveries);
                 }

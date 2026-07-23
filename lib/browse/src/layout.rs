@@ -42,6 +42,17 @@ pub enum ViewMode {
     Grid,
 }
 
+impl ViewMode {
+    /// The other view — the mode the list/grid toggle switches to.
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::List => Self::Grid,
+            Self::Grid => Self::List,
+        }
+    }
+}
+
 /// The layout of the scrolling entry list within a content viewport.
 ///
 /// Constructed per paint/hit-test from the viewport dimensions, the row

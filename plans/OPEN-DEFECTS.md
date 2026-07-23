@@ -43,12 +43,25 @@ The open items, in priority order:
   tairix_abi::driver::virtio_pci::virtio_pci_window_resource`); it does
   not reproduce on the pinned toolchain from a full `cargo clean`. Kept on
   record with its reproduction procedure in case it recurs.
+- **D10 — `autoload-input-qemu-aarch64` desktop focus-change lost-wakeup
+  deadlock — OPEN.** The `cargo xtask ci` QEMU vertical hangs: the guest
+  goes fully idle (all tasks parked, clock frozen at guest-t≈36s) partway
+  through the AW4 terminal stage, after the desktop routes exactly one
+  app-ward window-event delivery (5 of 16) for the terminal-window focus
+  click and before it emits the focus/press deliveries. Proven a hard
+  lost-wakeup, not a slow budget (raising the budget 240s→900s froze at
+  the identical point). Working notes + repro live in
+  `.junie/defect-hunt.md`. Same *class* as D5 (a lost-wakeup) but in the
+  desktop-session/`lib/window` focus-routing / IPC-wake path, not a test
+  harness idle loop. (D7–D9 below are already-closed x86_64 defects; this
+  new one is D10.)
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
-parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), and D6
-is a rustdoc/docs-build failure. Do not collapse them into one change;
-land each on its own whole-project-green gate (§7).
+parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
+is a rustdoc/docs-build failure, and D10 is a desktop-session focus-change
+lost-wakeup deadlock. Do not collapse them into one change; land each on
+its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -482,6 +495,59 @@ whole-project-green gate:
   README support matrix updated where a per-arch mark changes, and a row
   added to the `AGENTS.md` §15.18 jump-sheet:
   `Open core-kernel defect tracking → plans/OPEN-DEFECTS.md`.
+
+## D10 — `autoload-input-qemu-aarch64` desktop focus-change lost-wakeup deadlock
+
+**State:** OPEN. Pre-existing, deterministic, and unrelated to the
+`spawn-session` over-long-username flaky fix that surfaced it (proven: it
+reproduces identically on the pristine baseline with those changes
+stashed). It was masked while the QEMU matrix stopped at the earlier
+`spawn-session-qemu-aarch64` failure.
+
+**Symptom.** The vertical (`tests/integration/autoload_input_qemu_aarch64`)
+times out. The guest reaches guest-t≈36s and then goes **fully idle** —
+every task parked, the CPU in `wfi`, the guest monotonic clock frozen —
+and never progresses. Raising the harness budget 240s→900s changed
+nothing (still frozen at the identical guest-t≈36s / same event), so it is
+a **hard lost-wakeup/deadlock, not a slow budget** (never fix it with a
+timeout bump — §2.17).
+
+**How far it gets (4 of 5 PASS witnesses met).** Boot → both virtio-input
+drivers autoload and arm (`irq_bind` ×2) → passphrase unlocks the root
+(`UsersDbLoaded`) → display service binds `DISPLAY_ENDPOINT` → text login
+(`root`/`root`) → `desktop` launches → Files window served → appearance
+toggled → all **three** screendumps (desktop / window / light) captured →
+Terminal bundle spawns, its window is served, its shell (`elsh`) spawns.
+The fifth witness (`shell_round_trip`) is the one never reached.
+
+**Where it wedges.** The PASS gate needs app-ward window-event
+`MessageDelivered` (kernel/ipc id 3010) to reach
+`TERMINAL_ROUND_TRIP_DELIVERIES = 16`; the log stops at **5**. Delivery 5
+is the files-window *unfocus* from the terminal-window focus click. The
+desktop emits that one delivery and then the whole guest goes idle —
+it never emits delivery 6 (focus → the terminal app's event port) or 7
+(the press). So the desktop session wedges *mid* processing a single
+focus-change input event, between unfocusing the old window and focusing
+/ delivering to the newly-spawned terminal's window.
+
+**Leading hypothesis (to verify, not yet proven).** A lost-wakeup /
+blocking wait in the desktop-session focus-routing across the
+`lib/window` `WindowServer::deliver_event` → per-app event endpoint
+(`event_endpoint_for`) path, or the kernel IPC/`waitq` wake that should
+re-ready the desktop (or the just-spawned terminal draining its event
+port). Same *class* as the closed D5 lost-wakeup, but in the
+desktop/window path rather than a test idle loop. The detailed hunt lives
+in `.junie/defect-hunt.md`.
+
+**Do NOT** "fix" it by bumping the timeout, disabling/`#[ignore]`-ing the
+vertical, or weakening the PASS gate (§2.5/§2.17/§7). The fix is the
+structural wake/ordering correction; land it on its own whole-project-green
+gate.
+
+**Done when:** `autoload-input-qemu-aarch64` (and its riscv64/x86_64
+siblings, which share the path) reach all five witnesses deterministically
+over repeated runs, root cause documented, a regression guard in place,
+and a full `cargo xtask ci` is whole-project-green.
 
 ## Non-goals / do not do
 

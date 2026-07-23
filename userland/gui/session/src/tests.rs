@@ -1771,7 +1771,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 
 use crate::picker::{PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
-use tairix_browse::render::row_height;
+use tairix_browse::render::chrome_height;
 use tairix_browse::{DirectorySource, Entry};
 
 /// An in-memory directory tree keyed by the joined component path, the
@@ -1918,11 +1918,12 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
 
     // The picker resolves its font from the active theme's UI size; the
     // click row must be computed from the same font so it lands on row 0.
-    let font = tairix_font::BitmapFont::with_pixel_height(u32::from(
-        shell.session().active_theme().fonts().ui.size_px,
-    ));
-    let row = i32::try_from(row_height(font)).expect("a small row height");
-    // The first entry row sits directly below the path bar.
+    let theme = shell.session().active_theme();
+    let font = tairix_font::BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
+    // The first entry row sits directly below the chrome (the command toolbar
+    // strip over the breadcrumb path bar), so compute it from the shared
+    // `chrome_height` the renderer reserves.
+    let row = i32::try_from(chrome_height(font, theme)).expect("a small chrome height");
     let first_row = Point::new(4, row);
     assert_eq!(
         picker.handle_click(first_row, &mut shell, &mut comp),
@@ -1943,6 +1944,36 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
         picker.handle_click(Point::new(4, 0), &mut shell, &mut comp),
         None
     );
+}
+
+/// A click anywhere on the shared command toolbar strip runs a read-only
+/// navigation command (the same toolbar the file manager draws) — it never
+/// concludes or cancels the pick, and the picker window stays showing.
+#[test]
+fn picker_toolbar_clicks_never_conclude_the_pick() {
+    use tairix_browse::render::toolbar_height;
+    use tairix_browse::WIN_WIDTH;
+
+    let (mut shell, mut comp) = picker_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+
+    // Sweep the toolbar strip's middle row: every click is a read-only
+    // command (or an inert gap / disabled tool), so none may conclude the
+    // pick or tear the window down.
+    let y = i32::try_from(toolbar_height(shell.session().active_theme()) / 2)
+        .expect("a small strip height");
+    let width = i32::try_from(WIN_WIDTH).expect("a bounded window width");
+    let mut x = 0;
+    while x < width {
+        assert_eq!(
+            picker.handle_click(Point::new(x, y), &mut shell, &mut comp),
+            None,
+            "a toolbar-strip click must not conclude the pick"
+        );
+        assert!(picker.wm_id().is_some(), "the picker stays showing");
+        x += 4;
+    }
 }
 
 /// Escape cancels: the conclusion is `Cancelled`, the window is closed,

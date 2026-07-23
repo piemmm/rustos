@@ -31,7 +31,10 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_icon::IconKind;
+
 use crate::browser::Browser;
+use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::sort::SortMode;
 use crate::source::DirectorySource;
@@ -74,6 +77,59 @@ pub const TOOLBAR_COMMANDS: &[ToolbarCommand] = &[
     ToolbarCommand::ToggleView,
     ToolbarCommand::Sort,
 ];
+
+impl ToolbarCommand {
+    /// The built-in glyph the drawn toolbar paints for this command.
+    ///
+    /// One definition so the toolbar's icon set and the icon vocabulary can
+    /// never drift; adding a command adds its glyph here.
+    #[must_use]
+    pub const fn icon(self) -> IconKind {
+        match self {
+            Self::Back => IconKind::NavBack,
+            Self::Forward => IconKind::NavForward,
+            Self::Up => IconKind::NavUp,
+            Self::Refresh => IconKind::Refresh,
+            Self::ToggleView => IconKind::ViewToggle,
+            Self::Sort => IconKind::Sort,
+        }
+    }
+}
+
+/// Apply the toolbar `command` to `browser`, returning whether the view
+/// changed (and must be re-presented).
+///
+/// Every command is a read-only navigation or presentation action, so the
+/// trusted read-only picker composes the same [`Browser`] and can invoke this
+/// too — it grants no authority. Back/Forward/Up/Refresh are the browser's own
+/// transactional, fail-closed navigation (a refused re-listing leaves the
+/// browser exactly where it was); the view toggle and the sort cycle are pure
+/// rearrangements that always change the view. The caller reveals the
+/// selection and repaints when this reports a change.
+///
+/// # Errors
+///
+/// Returns [`BrowseError::Source`] when a navigation command's target
+/// directory can no longer be listed; the browser is left untouched.
+pub fn apply_command<S: DirectorySource>(
+    browser: &mut Browser<S>,
+    command: ToolbarCommand,
+) -> Result<bool, BrowseError> {
+    match command {
+        ToolbarCommand::Back => browser.go_back(),
+        ToolbarCommand::Forward => browser.go_forward(),
+        ToolbarCommand::Up => browser.go_up(),
+        ToolbarCommand::Refresh => browser.refresh().map(|()| true),
+        ToolbarCommand::ToggleView => {
+            browser.set_view_mode(browser.view_mode().toggled());
+            Ok(true)
+        }
+        ToolbarCommand::Sort => {
+            browser.set_sort_mode(browser.sort_mode().next());
+            Ok(true)
+        }
+    }
+}
 
 /// The enable state and pressed state of the file-manager toolbar, taken from
 /// a [`Browser`].

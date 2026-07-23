@@ -152,6 +152,25 @@ exist are modelled — the context menu is built with the verbs it invokes
 (rename, open, the clipboard verbs, new folder), never ahead of them
 (`AGENTS.md` §2.4).
 
+The **toolbar is now drawn and clickable**. `render` paints the
+`TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in
+the top strip, each glyph from `ToolbarCommand::icon()` and each rendered
+enabled or disabled from the `ToolbarModel` (a disabled tool reads muted, not
+hidden). A primary-button press resolves through `render::toolbar_command_at`
+— which mirrors the drawn toolbar's own layout and returns **only an enabled
+command** (a click on a disabled tool or a group gutter resolves to nothing,
+failing closed) — and runs through the one shared `apply_command(browser,
+command)`. `apply_command` is a **read-only** dispatch (history / climb /
+refresh / view toggle / sort cycle), so the trusted picker can drive the same
+toolbar; Back/Forward/Up/Refresh are the browser's transactional, fail-closed
+navigation, and the view toggle and sort each step to the next mode
+(`ViewMode::toggled`, `SortMode::next` — a fixed six-mode cycle). The
+keyboard drives the same dispatch through accelerators: **Alt+←/→** (Back /
+Forward), **Alt+↑** (Up), and **F5** (Refresh), so a shortcut and a toolbar
+click can never diverge (`AGENTS.md` §2.2). The view toggle and sort are
+toolbar (pointer) commands; a conventional single-key accelerator for them
+awaits the later toolbar keyboard-focus pass.
+
 ### Activating an entry
 
 Opening an entry — a double-click, or `Enter` on the selection — is one
@@ -214,9 +233,14 @@ picker composes the same engine and never launches.
 
 ### Rendering
 
-`render(browser, theme, font, viewport)` paints a path bar plus the current
-directory into a `tairix-raster` `Surface` sized to the viewport, in whichever
-of the two views the browser holds (`ViewMode::List` or `ViewMode::Grid`). The
+`render(browser, theme, font, viewport)` paints a command toolbar strip, a
+path bar, and the current directory into a `tairix-raster` `Surface` sized to
+the viewport, in whichever of the two views the browser holds
+(`ViewMode::List` or `ViewMode::Grid`). The toolbar strip is drawn at the top
+(see the frame model above); the item area sits below the combined chrome
+(`chrome_height` = the toolbar strip plus the path bar), the one header offset
+the item views, the scrollbar gutter, and every hit-test share so paint and
+hit-test can never disagree (`AGENTS.md` §2.2). The
 path bar takes the theme's raised role and draws the current directory as a
 clickable **breadcrumb trail** (`plans/NEW-FILEMANAGER.md` FM4b): the root
 crumb followed by one crumb per path component. Ancestor crumbs are drawn in
@@ -273,10 +297,13 @@ panicking (`AGENTS.md` §2.9).
 over `tairix_rt::read_dir_all`, creates and grants the zero-copy window
 frame region, parks on its window-event mailbox, and drives the browser
 with the keyboard (`Down`/`Up` select, `Enter` opens a directory,
-`Backspace` climbs, `F2` renames the selected item) and the pointer: a
-primary-button press on a path-bar crumb climbs to that ancestor through the
-same transactional `Browser::navigate_to_depth` the keyboard uses, and a press
-on an item selects it (`Browser::select`) — the GUI is a spelling of the user's
+`Backspace` climbs, `F2` renames the selected item, and the toolbar
+accelerators `Alt+←/→/↑` and `F5`) and the pointer: a primary-button press
+first checks the command toolbar (`render::toolbar_command_at` → the shared
+`apply_command`, so a click on a disabled tool does nothing), then a path-bar
+crumb climbs to that ancestor through the same transactional
+`Browser::navigate_to_depth` the keyboard uses, and a press on an item selects
+it (`Browser::select`) — the GUI is a spelling of the user's
 intent, never an escalation, so a refused re-listing leaves the browser exactly
 where it was. A `CloseRequested` from the desktop ends it cleanly, and every
 bring-up refusal exits fail-loud with its reason on `stderr`. The desktop

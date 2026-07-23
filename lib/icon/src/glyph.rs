@@ -1,9 +1,11 @@
 //! The closed set of built-in icon glyphs.
 //!
 //! [`IconKind`] is the vocabulary of glyphs the desktop draws: the taskbar's
-//! status/notification area (network, volume, battery, bell) and the file
+//! status/notification area (network, volume, battery, bell), the file
 //! manager's file-type icons (folder, document, application bundle, and the
-//! broad content classes text/image/archive/executable). A theme asset id
+//! broad content classes text/image/archive/executable), and the file
+//! manager's toolbar command icons (back/forward/up navigation, refresh, the
+//! view toggle, and sort). A theme asset id
 //! resolves to a kind through [`IconKind::for_asset`]; an unrecognised id
 //! falls back to [`IconKind::Generic`] rather than failing, so an unknown
 //! asset still shows a placeholder instead of nothing. [`builtin_icon`] turns
@@ -52,6 +54,18 @@ pub enum IconKind {
     Archive,
     /// A run/bolt mark, for an executable.
     Executable,
+    /// A left arrow, for the file manager's Back navigation command.
+    NavBack,
+    /// A right arrow, for the file manager's Forward navigation command.
+    NavForward,
+    /// An up arrow, for the file manager's Up (climb-to-parent) command.
+    NavUp,
+    /// A circular arrow, for the file manager's Refresh command.
+    Refresh,
+    /// A grid of tiles, for the file manager's list/grid view toggle.
+    ViewToggle,
+    /// Descending horizontal bars, for the file manager's sort command.
+    Sort,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
 }
@@ -75,6 +89,12 @@ impl IconKind {
             "image" => Self::Image,
             "archive" => Self::Archive,
             "executable" => Self::Executable,
+            "nav-back" => Self::NavBack,
+            "nav-forward" => Self::NavForward,
+            "nav-up" => Self::NavUp,
+            "refresh" => Self::Refresh,
+            "view-toggle" => Self::ViewToggle,
+            "sort" => Self::Sort,
             _ => Self::Generic,
         }
     }
@@ -101,7 +121,13 @@ impl IconKind {
             Self::Image => 9,
             Self::Archive => 10,
             Self::Executable => 11,
-            Self::Generic => 12,
+            Self::NavBack => 12,
+            Self::NavForward => 13,
+            Self::NavUp => 14,
+            Self::Refresh => 15,
+            Self::ViewToggle => 16,
+            Self::Sort => 17,
+            Self::Generic => 18,
         }
     }
 
@@ -127,6 +153,12 @@ impl IconKind {
             Self::Image => "image",
             Self::Archive => "archive",
             Self::Executable => "executable",
+            Self::NavBack => "nav-back",
+            Self::NavForward => "nav-forward",
+            Self::NavUp => "nav-up",
+            Self::Refresh => "refresh",
+            Self::ViewToggle => "view-toggle",
+            Self::Sort => "sort",
             Self::Generic => "generic",
         }
     }
@@ -151,6 +183,12 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Image => image(color),
         IconKind::Archive => archive(color),
         IconKind::Executable => executable(color),
+        IconKind::NavBack => nav_back(color),
+        IconKind::NavForward => nav_forward(color),
+        IconKind::NavUp => nav_up(color),
+        IconKind::Refresh => refresh(color),
+        IconKind::ViewToggle => view_toggle(color),
+        IconKind::Sort => sort(color),
         IconKind::Generic => generic(color),
     };
     VectorIcon::new(DESIGN, layers)
@@ -275,6 +313,100 @@ fn archive(color: Color) -> alloc::vec::Vec<IconLayer> {
 fn executable(color: Color) -> alloc::vec::Vec<IconLayer> {
     const BOLT: &[(i32, i32)] = &[(13, 3), (7, 13), (11, 13), (9, 21), (17, 10), (12, 10)];
     vec![IconLayer::from_points(color, BOLT)]
+}
+
+/// A left-pointing arrow (a shaft ending in a head), for Back.
+fn nav_back(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const ARROW: &[(i32, i32)] = &[
+        (4, 12),
+        (11, 5),
+        (11, 9),
+        (20, 9),
+        (20, 15),
+        (11, 15),
+        (11, 19),
+    ];
+    vec![IconLayer::from_points(color, ARROW)]
+}
+
+/// A right-pointing arrow, the mirror of [`nav_back`], for Forward.
+fn nav_forward(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const ARROW: &[(i32, i32)] = &[
+        (20, 12),
+        (13, 5),
+        (13, 9),
+        (4, 9),
+        (4, 15),
+        (13, 15),
+        (13, 19),
+    ];
+    vec![IconLayer::from_points(color, ARROW)]
+}
+
+/// An up-pointing arrow, for Up (climb to parent).
+fn nav_up(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const ARROW: &[(i32, i32)] = &[
+        (12, 4),
+        (19, 11),
+        (15, 11),
+        (15, 20),
+        (9, 20),
+        (9, 11),
+        (5, 11),
+    ];
+    vec![IconLayer::from_points(color, ARROW)]
+}
+
+/// A circular arrow, for Refresh: an annular sector (a ring with a gap at the
+/// top) plus an arrowhead at the gap so it reads as a rotation.
+fn refresh(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const RING: &[(i32, i32)] = &[
+        (18, 6),
+        (21, 12),
+        (18, 18),
+        (12, 21),
+        (6, 18),
+        (3, 12),
+        (6, 6),
+        (8, 8),
+        (7, 12),
+        (8, 16),
+        (12, 17),
+        (16, 16),
+        (17, 12),
+        (16, 8),
+    ];
+    const HEAD: &[(i32, i32)] = &[(18, 2), (22, 8), (14, 8)];
+    vec![
+        IconLayer::from_points(color, RING),
+        IconLayer::from_points(color, HEAD),
+    ]
+}
+
+/// A two-by-two grid of tiles, for the list/grid view toggle.
+fn view_toggle(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const TL: &[(i32, i32)] = &[(4, 4), (10, 4), (10, 10), (4, 10)];
+    const TR: &[(i32, i32)] = &[(14, 4), (20, 4), (20, 10), (14, 10)];
+    const BL: &[(i32, i32)] = &[(4, 14), (10, 14), (10, 20), (4, 20)];
+    const BR: &[(i32, i32)] = &[(14, 14), (20, 14), (20, 20), (14, 20)];
+    vec![
+        IconLayer::from_points(color, TL),
+        IconLayer::from_points(color, TR),
+        IconLayer::from_points(color, BL),
+        IconLayer::from_points(color, BR),
+    ]
+}
+
+/// Three left-aligned horizontal bars of decreasing length, for Sort.
+fn sort(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BAR1: &[(i32, i32)] = &[(4, 6), (20, 6), (20, 9), (4, 9)];
+    const BAR2: &[(i32, i32)] = &[(4, 11), (16, 11), (16, 14), (4, 14)];
+    const BAR3: &[(i32, i32)] = &[(4, 16), (11, 16), (11, 19), (4, 19)];
+    vec![
+        IconLayer::from_points(color, BAR1),
+        IconLayer::from_points(color, BAR2),
+        IconLayer::from_points(color, BAR3),
+    ]
 }
 
 /// The fallback placeholder: a filled diamond.
