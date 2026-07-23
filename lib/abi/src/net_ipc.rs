@@ -23,6 +23,7 @@
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::reply::{decode_status_reply, encode_status_reply, STATUS_REPLY_LEN};
+use crate::time::Duration64;
 use crate::Errno;
 
 /// Reserved well-known call-endpoint id of the network-stack service
@@ -176,6 +177,18 @@ pub enum NetstackRequest {
         /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
         limit: u16,
     },
+    /// Page the whole system's live per-interface throughput rates over a
+    /// caller-requested window (sysinfo broker). Each record reports the
+    /// rates averaged over the window that *actually* elapsed, which may be
+    /// shorter than `window` when an interface's history is younger.
+    InterfaceRates {
+        /// First interface index to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
+        /// The rate-averaging window the caller requests.
+        window: Duration64,
+    },
     /// Bind a live NIC driver process's device channel to a new managed
     /// interface (admin surface).
     ///
@@ -213,6 +226,8 @@ const OP_IF_FACTS: u16 = 5;
 const OP_IF_STATE: u16 = 6;
 /// Wire operation discriminant of [`NetstackRequest::BindDriver`].
 const OP_BIND_DRIVER: u16 = 7;
+/// Wire operation discriminant of [`NetstackRequest::InterfaceRates`].
+const OP_IF_RATES: u16 = 8;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -272,6 +287,16 @@ impl NetstackRequest {
                 put_u16(&mut out, 6, OP_IF_STATE);
                 put_u32(&mut out, 8, offset);
                 put_u16(&mut out, 12, limit);
+            }
+            Self::InterfaceRates {
+                offset,
+                limit,
+                window,
+            } => {
+                put_u16(&mut out, 6, OP_IF_RATES);
+                put_u32(&mut out, 8, offset);
+                put_u16(&mut out, 12, limit);
+                out[14..26].copy_from_slice(&window.to_le_bytes());
             }
             Self::BindDriver { endpoint_id, iface } => {
                 put_u16(&mut out, 6, OP_BIND_DRIVER);
@@ -365,6 +390,20 @@ impl NetstackRequest {
                     OP_IF_FACTS => Self::InterfaceFacts { offset, limit },
                     OP_IF_STATE => Self::InterfaceState { offset, limit },
                     _ => Self::InterfaceCounters { offset, limit },
+                })
+            }
+            OP_IF_RATES => {
+                reserved_zero(bytes, 26)?;
+                let offset = read_u32(bytes, 8);
+                let limit = read_u16(bytes, 12);
+                if limit == 0 || limit > NETSTACK_LIST_LIMIT_MAX {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                let window = Duration64::from_bytes(&bytes[14..26])?;
+                Ok(Self::InterfaceRates {
+                    offset,
+                    limit,
+                    window,
                 })
             }
             OP_BIND_DRIVER => {
@@ -817,6 +856,78 @@ impl NetInterfaceCountersRecord {
     }
 }
 
+/// One interface's live throughput rates keyed by its name
+/// (`stats:net/<iface>/{rx,tx}.{pps,bps}`, plan §5): the response record of
+/// the interface-rates page.
+///
+/// Each rate is an average over [`window`](Self::window) — the span that
+/// *actually* elapsed, which may be shorter than the caller requested when
+/// the interface's history is younger. A [`Duration64::ZERO`] window means
+/// there was no usable baseline yet and every rate is `0`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceRatesRecord {
+    /// The interface's admin-chosen alias, NUL-padded.
+    pub name: [u8; IF_NAME_LEN],
+    /// The span the rates were averaged over.
+    pub window: Duration64,
+    /// Received packets per second.
+    pub rx_pps: u64,
+    /// Received bits per second.
+    pub rx_bps: u64,
+    /// Transmitted packets per second.
+    pub tx_pps: u64,
+    /// Transmitted bits per second.
+    pub tx_bps: u64,
+}
+
+impl NetInterfaceRatesRecord {
+    /// Encoded size: the name (16), the window (12), then four
+    /// little-endian `u64` rates.
+    pub const WIRE_LEN: usize = IF_NAME_LEN + Duration64::WIRE_LEN + 4 * 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..IF_NAME_LEN].copy_from_slice(&self.name);
+        out[IF_NAME_LEN..IF_NAME_LEN + Duration64::WIRE_LEN]
+            .copy_from_slice(&self.window.to_le_bytes());
+        let base = IF_NAME_LEN + Duration64::WIRE_LEN;
+        put_u64(&mut out, base, self.rx_pps);
+        put_u64(&mut out, base + 8, self.rx_bps);
+        put_u64(&mut out, base + 16, self.tx_pps);
+        put_u64(&mut out, base + 24, self.tx_bps);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::OutOfRange`] — an invalid interface name.
+    /// * [`Errno::TimestampOutOfRange`] — a non-canonical window.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut name = [0u8; IF_NAME_LEN];
+        name.copy_from_slice(&bytes[..IF_NAME_LEN]);
+        validate_if_name(&name)?;
+        let window =
+            Duration64::from_bytes(&bytes[IF_NAME_LEN..IF_NAME_LEN + Duration64::WIRE_LEN])?;
+        let base = IF_NAME_LEN + Duration64::WIRE_LEN;
+        Ok(Self {
+            name,
+            window,
+            rx_pps: read_u64(bytes, base),
+            rx_bps: read_u64(bytes, base + 8),
+            tx_pps: read_u64(bytes, base + 16),
+            tx_bps: read_u64(bytes, base + 24),
+        })
+    }
+}
+
 /// Largest reply the [`NETSTACK_ENDPOINT`] emits: the status word, the
 /// page header, and a full page of state records (the widest reply).
 pub const NETSTACK_MAX_REPLY: usize = STATUS_REPLY_LEN
@@ -953,10 +1064,72 @@ mod tests {
                 offset: 0,
                 limit: NETSTACK_LIST_LIMIT_MAX,
             },
+            NetstackRequest::InterfaceRates {
+                offset: 2,
+                limit: 4,
+                window: Duration64::from_secs(1),
+            },
+            NetstackRequest::InterfaceRates {
+                offset: 0,
+                limit: NETSTACK_LIST_LIMIT_MAX,
+                window: Duration64::from_nanos(500_000_000),
+            },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn interface_rates_bounds_are_enforced() {
+        let good = NetstackRequest::InterfaceRates {
+            offset: 0,
+            limit: 4,
+            window: Duration64::from_secs(1),
+        }
+        .to_le_bytes();
+        // A zero limit is refused.
+        let mut zero_limit = good;
+        zero_limit[12] = 0;
+        zero_limit[13] = 0;
+        assert_eq!(
+            NetstackRequest::from_bytes(&zero_limit),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A dirty reserved tail is refused.
+        let mut dirty_tail = good;
+        dirty_tail[26] = 1;
+        assert_eq!(
+            NetstackRequest::from_bytes(&dirty_tail),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn rates_record_round_trips_and_fails_closed() {
+        let mut name = [0u8; IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        let record = NetInterfaceRatesRecord {
+            name,
+            window: Duration64::from_secs(1),
+            rx_pps: 1000,
+            rx_bps: 12_000_000,
+            tx_pps: 800,
+            tx_bps: 9_600_000,
+        };
+        let bytes = record.to_le_bytes();
+        assert_eq!(NetInterfaceRatesRecord::from_bytes(&bytes), Ok(record));
+        assert_eq!(
+            NetInterfaceRatesRecord::from_bytes(&bytes[..NetInterfaceRatesRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A name whose padding is dirty is refused.
+        let mut dirty_name = bytes;
+        dirty_name[IF_NAME_LEN - 1] = 0xFF;
+        assert_eq!(
+            NetInterfaceRatesRecord::from_bytes(&dirty_name),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

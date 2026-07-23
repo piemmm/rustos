@@ -97,6 +97,10 @@ pub enum MetricKind {
     Gauge,
     /// A monotonically increasing accumulator (uptime since boot).
     Counter,
+    /// An average over a sampling window (a throughput rate). A [`Metric`]
+    /// of this kind must carry a non-[`None`] [`window`](Metric::window):
+    /// a rate without a window is undefined (`plans/ALIAS.md` §14.3).
+    Rate,
 }
 
 /// The unit of a [`Metric::value`] (`plans/ALIAS.md` §14.3).
@@ -111,6 +115,10 @@ pub enum Unit {
     /// A share expressed as whole percentage points (0–100), e.g. the
     /// CPU busy share.
     Percent,
+    /// Packets per second (`packets/s`): a packet throughput rate.
+    PacketsPerSecond,
+    /// Bits per second (`bits/s`): a bandwidth throughput rate.
+    BitsPerSecond,
 }
 
 /// When a [`Metric`]'s accumulator resets (`plans/ALIAS.md` §14.3).

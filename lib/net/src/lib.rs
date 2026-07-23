@@ -54,6 +54,11 @@
 //!   driven by two protocol providers, exactly as [`neigh`] is one
 //!   cache driven by ARP and Neighbour Discovery.
 //!
+//! - [`rate`] — the pure, tickless windowed-throughput meter that turns
+//!   an interface's byte/packet counters into the live `rx.pps`/`tx.bps`
+//!   rates the observability surface (`stats:net/<iface>/…`, plan §5)
+//!   reports, averaged over the window that actually elapsed.
+//!
 //! - [`tcp`] — the TCP segment codec (RFC 9293): the header, the
 //!   control flags, the recognised options (MSS, window scale,
 //!   timestamps, SACK-permitted, SACK), the mandatory pseudo-header
@@ -108,6 +113,7 @@ pub mod mcast;
 pub mod mld;
 pub mod nd;
 pub mod neigh;
+pub mod rate;
 pub mod route;
 pub mod stack;
 pub mod tcp;

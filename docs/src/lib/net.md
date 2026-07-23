@@ -273,6 +273,27 @@ solicited-node group (formalising ND's listening) and the all-systems
 group, and filters the receive path by membership; `join_multicast` /
 `leave_multicast` expose explicit application membership.
 
+### `rate` — the tickless windowed throughput meter
+
+`RateMeter` turns an interface's monotonic byte/packet counters into the
+live rates (`stats:net/<iface>/rx.pps`, `tx.bps`, …) an operator reads to
+see a link's load or a flood in progress. It is pure and integer-only,
+like everything else here: it holds no clock and does no I/O — the caller
+feeds explicit monotonic time and the live counters. It is **tickless by
+construction**: it keeps a small bounded ring of coalesced counter
+snapshots that the service records opportunistically whenever it wakes for
+other work, so a quiet interface costs nothing and no timer is armed
+merely to measure a rate. A read computes the average from the live
+counters and the retained snapshot nearest the requested window, and
+reports the window that *actually* elapsed — never inventing coverage the
+history does not have (a just-created or long-idle interface reports a
+shorter, possibly zero, window). Bit rates multiply bytes by eight and
+the arithmetic widens through `u128` so it never overflows or wraps; a
+counter that appears to move backwards saturates its delta to zero. The
+ring depth and sampling gap are a fixed measurement *resolution*, not a
+per-device capacity. `netstack` owns one meter per interface and answers
+the `NET_INTERFACE_RATES` broker read from it.
+
 ### `tcp` — the TCP segment codec and sequence arithmetic
 
 The RFC 9293 wire layer: the fixed 20-byte header, the eight control

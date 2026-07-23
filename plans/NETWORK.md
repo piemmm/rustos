@@ -1298,12 +1298,25 @@ the whole is too large for one change and each leaves the tree working.
   fail-closed and host-tested; the engine keeps one honest per-direction
   `dropped` bucket rather than a fabricated errors/dropped split.
 
-#### N8b — `ping`/`ss`-class command apps + rates + posture docs `[ ]`
+#### N8b-1 — windowed throughput rate queries `[x]`
+- The live `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…` rates exposed
+  through the System Information API (§16.6) — never a `/proc` shape. The
+  pure tickless `tairix_net::rate::RateMeter` (a bounded ring of coalesced
+  counter snapshots, integer-only, no periodic timer) averages each rate
+  over the window that *actually* elapsed; `netstack` owns one per
+  interface and answers the new `NET_INTERFACE_RATES` broker query
+  (`CAP_SYSINFO_GLOBAL`, audited), which `lib/procinfo` resolves. The
+  `?window=` decoration (mandatory, fail-closed, `500ms`/`1s`/`2m`) is the
+  one `stats:` query that carries one; `MetricKind::Rate` + the
+  `packets/s`/`bits/s` units land with it. Host-tested at every layer; no
+  new QEMU vertical (guest-driven, the N8a precedent). Docs: `sysinfo.md`,
+  `netstack.md`, `lib/net.md`.
+
+#### N8b-2 — `ping`/`ss`-class command apps + posture docs `[ ]`
 - System command apps (`ping` — v4+v6, coreutils/iputils-familiar
   surface per §16.7; a socket/interface inspection tool following `ss`
   conventions) as `.app` bundles with Help/ trees; socket tables and the
-  windowed rate queries (`stats:net/<iface>/rx.pps?window=1s`) exposed
-  through the System Information API (§16.6) — never a `/proc` shape.
+  windowed rate queries (now live, N8b-1) surfaced to the terminal.
 - Docs: user-facing `docs/src/userland/networking.md`; the security
   posture page `docs/src/security/network.md` (threat model ↔ defence
   table, the §19.4 event-id registry for network events).

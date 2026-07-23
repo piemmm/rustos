@@ -15,12 +15,13 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState};
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetIfKind,
-    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN,
-    NET_IF_MAX_ADDRS,
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+    NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::internet_checksum;
+use tairix_net::rate::{RateCounters, RateMeter, RateSelector};
 use tairix_net::stack::{RxMeta, SendError, Stack, StackConfig, StackEvent, TxFrame, TxOffload};
 use tairix_net::tcp::TcpSegmentMeta;
 
@@ -39,6 +40,8 @@ pub struct Interface {
     kind: NetIfKind,
     facts: DeviceFacts,
     stack: Stack,
+    /// The tickless windowed-throughput meter (`stats:net/<iface>/…`).
+    rates: RateMeter,
 }
 
 impl Interface {
@@ -125,6 +128,7 @@ impl Netstack {
             kind,
             facts,
             stack,
+            rates: RateMeter::new(),
         });
         Ok(())
     }
@@ -226,6 +230,46 @@ impl Netstack {
                         reassembly_expired: c.reassembly_expired,
                         pending_dropped: c.pending_dropped,
                     },
+                }
+            })
+            .collect()
+    }
+
+    /// The whole table's live throughput rates over `window`, one record
+    /// per interface, from `offset` in table order.
+    ///
+    /// Reading also records a fresh counter snapshot, so repeated polling
+    /// builds a usable window even on an interface the frame pump is not
+    /// otherwise servicing. Each record carries the window that *actually*
+    /// elapsed for that interface (a just-created or long-idle interface
+    /// reports a shorter — possibly zero — window rather than a fabricated
+    /// figure).
+    pub fn rates_records(
+        &mut self,
+        offset: u32,
+        limit: u16,
+        window: Duration64,
+        now: Duration64,
+    ) -> Vec<NetInterfaceRatesRecord> {
+        self.interfaces
+            .iter_mut()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|i| {
+                let current = rate_counters_of(&i.stack);
+                i.rates.record(now, current);
+                let rx_pps = i.rates.rate(now, current, window, RateSelector::RxPackets);
+                let tx_pps = i.rates.rate(now, current, window, RateSelector::TxPackets);
+                let rx_bps = i.rates.rate(now, current, window, RateSelector::RxBits);
+                let tx_bps = i.rates.rate(now, current, window, RateSelector::TxBits);
+                NetInterfaceRatesRecord {
+                    name: i.name,
+                    // Every selector shares one baseline, so one window.
+                    window: rx_pps.window,
+                    rx_pps: rx_pps.value,
+                    rx_bps: rx_bps.value,
+                    tx_pps: tx_pps.value,
+                    tx_bps: tx_bps.value,
                 }
             })
             .collect()
@@ -587,6 +631,10 @@ impl Netstack {
         if replied {
             fs.service()?;
         }
+        // Snapshot the post-pump counters for the throughput meter. Cheap
+        // and self-throttling: the meter drops a sample taken within its
+        // sampling gap of the last.
+        iface.rates.record(now, rate_counters_of(&iface.stack));
         Ok(events)
     }
 
@@ -598,6 +646,18 @@ impl Netstack {
             .iter()
             .filter_map(|i| i.stack.next_deadline())
             .min_by_key(|d| (d.secs(), d.subsec_nanos()))
+    }
+}
+
+/// Map the engine's monotonic stack counters onto the four accumulators
+/// the [`RateMeter`] takes throughput rates over.
+fn rate_counters_of(stack: &Stack) -> RateCounters {
+    let c = stack.counters();
+    RateCounters {
+        rx_packets: c.rx_frames,
+        rx_bytes: c.rx_bytes,
+        tx_packets: c.tx_frames,
+        tx_bytes: c.tx_bytes,
     }
 }
 

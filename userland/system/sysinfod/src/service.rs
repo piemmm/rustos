@@ -3,14 +3,15 @@
 
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
-    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord,
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+    NetInterfaceStateRecord,
 };
 use tairix_abi::sysinfo::{
     spec_for, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashRecord,
     CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest,
-    MountRecord, NetInterfaceListRequest, ProcessListRequest, ProcessRecord, ReclaimClassRecord,
-    ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-    SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+    MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest,
+    ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
+    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -181,6 +182,8 @@ fn dispatch(
         net_state_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_INTERFACE_COUNTERS {
         net_counters_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::NET_INTERFACE_RATES {
+        net_rates_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::IRQ_LIST {
         irq_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::CRASH_RECORD {
@@ -362,6 +365,26 @@ fn net_counters_list(
         request.limit as usize,
         records.len(),
         NetInterfaceCountersRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`NetInterfaceRatesRequest`] (carrying the averaging window)
+/// and page the interface-rates records into `response`.
+fn net_rates_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = NetInterfaceRatesRequest::from_bytes(payload)?;
+    let records = source.net_interface_rates(caller, request.window)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        NetInterfaceRatesRecord::WIRE_LEN,
         |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
     )
 }
@@ -575,9 +598,9 @@ mod tests {
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
-        NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord,
+        NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+        NetInterfaceStateRecord,
     };
-    use tairix_abi::sysinfo::NetInterfaceListRequest;
     use tairix_abi::sysinfo::{
         CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, CrashFaultBucket,
         CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest, IrqListRequest,
@@ -590,6 +613,7 @@ mod tests {
         SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT,
     };
+    use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{
         CapabilityId, CapabilitySummary, Errno, LimitKind, Origin, ProcId, ResourceLimit,
@@ -928,6 +952,13 @@ mod tests {
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<NetInterfaceCountersRecord>, Errno> {
             Ok(alloc::vec![fixture_net_counters()])
+        }
+        fn net_interface_rates(
+            &self,
+            _caller: &Caller,
+            window: tairix_abi::time::Duration64,
+        ) -> Result<alloc::vec::Vec<NetInterfaceRatesRecord>, Errno> {
+            Ok(alloc::vec![fixture_net_rates(window)])
         }
         fn irqs(&self, _caller: &Caller) -> Result<alloc::vec::Vec<IrqRecord>, Errno> {
             Ok(alloc::vec![
@@ -1499,6 +1530,62 @@ mod tests {
                 pending_dropped: 0,
             },
         }
+    }
+
+    /// The interface-rates record the fixture serves; it echoes the
+    /// requested window so a test can confirm the window threaded through.
+    fn fixture_net_rates(window: Duration64) -> NetInterfaceRatesRecord {
+        let mut name = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        NetInterfaceRatesRecord {
+            name,
+            window,
+            rx_pps: 1000,
+            rx_bps: 12_000_000,
+            tx_pps: 800,
+            tx_bps: 9_600_000,
+        }
+    }
+
+    #[test]
+    fn net_interface_rates_is_gated_audited_and_threads_the_window() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let window = Duration64::from_secs(1);
+        let nrr = NetInterfaceRatesRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+            window,
+        };
+        let req = request_bytes(SysinfoQueryId::NET_INTERFACE_RATES, &nrr.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_GLOBAL`; the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder; the
+        // requested window threads through to the record.
+        let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, NetInterfaceRatesRecord::WIRE_LEN);
+        let record = NetInterfaceRatesRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(record, fixture_net_rates(window));
+        assert_eq!(record.window, window);
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
     }
 
     #[test]

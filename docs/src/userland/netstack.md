@@ -62,8 +62,8 @@ structured audit record (event range `16000..17000`).
 |---|---|---|
 | `InterfaceList` | `CAP_NET_ADMIN` | paged interface aliases |
 | `AddrAdd` / `RouteAdd` | `CAP_NET_ADMIN` | status frame |
-| `Counters` | `CAP_NET_ADMIN` | the interface's monotonic stack counters |
-| `InterfaceFacts` / `InterfaceState` | `CAP_SYSINFO_INTROSPECT` | paged facts / link+address records |
+| `InterfaceFacts` / `InterfaceState` / `InterfaceCounters` | `CAP_SYSINFO_INTROSPECT` | paged facts / link+address / monotonic-counter records |
+| `InterfaceRates` | `CAP_SYSINFO_INTROSPECT` | paged windowed throughput-rate records (carries the caller's averaging window) |
 | `BindDriver` | `CAP_NET_ADMIN` | status frame (the device manager hands the stack a discovered NIC driver's device-channel endpoint under a `netN` alias) |
 
 The facts/state reads are the *broker* surface: `netstack` answers
@@ -95,11 +95,17 @@ event-driven with no polling.
 ## Observability
 
 `info:net/<iface>/{mac,mtu,kind}`,
-`state:net/<iface>/{link,address}`, and
-`stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}` resolve through
-`lib/procinfo`'s userspace resolver onto the `NET_INTERFACE_FACTS` /
-`NET_INTERFACE_STATE` / `NET_INTERFACE_COUNTERS` sysinfo queries — never
-a `/proc` shape, never text scraping (`plans/NETWORK.md` §5). Addresses
+`state:net/<iface>/{link,address}`,
+`stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}`, and the windowed
+throughput rates `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…` resolve
+through `lib/procinfo`'s userspace resolver onto the `NET_INTERFACE_FACTS`
+/ `NET_INTERFACE_STATE` / `NET_INTERFACE_COUNTERS` / `NET_INTERFACE_RATES`
+sysinfo queries — never a `/proc` shape, never text scraping
+(`plans/NETWORK.md` §5). A rate is the average over the window that
+*actually* elapsed (an interface with too little history reports a
+shorter, possibly zero, window rather than a fabricated figure); the meter
+is tickless — it snapshots counters opportunistically as the service
+wakes, never on a periodic timer. Addresses
 render canonically (dotted-quad v4; RFC 5952 v6) with their SLAAC/DAD
 state annotated. The per-interface counters are monotonic since boot; a
 denial-of-service in progress is visible through the stack-wide

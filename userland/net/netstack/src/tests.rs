@@ -14,8 +14,8 @@ use tairix_abi::net::{
 };
 use tairix_abi::net_ipc::{
     decode_page_reply, NetAddrFamily, NetIfKind, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceStateRecord, NetstackRequest, IF_NAME_LEN,
-    NETSTACK_MAX_REPLY,
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetstackRequest,
+    IF_NAME_LEN, NETSTACK_MAX_REPLY,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{
@@ -385,6 +385,11 @@ fn broker_reads_are_denied_without_sysinfo_introspect() {
             offset: 0,
             limit: 8,
         },
+        NetstackRequest::InterfaceRates {
+            offset: 0,
+            limit: 8,
+            window: Duration64::from_secs(1),
+        },
     ] {
         // An admin capability does not open the whole-state reads.
         assert_eq!(
@@ -399,7 +404,7 @@ fn broker_reads_are_denied_without_sysinfo_introspect() {
             Err(Errno::PermissionDenied)
         );
     }
-    assert_eq!(sink.ids(), vec![16_002; 3]);
+    assert_eq!(sink.ids(), vec![16_002; 4]);
 }
 
 #[test]
@@ -561,6 +566,30 @@ fn counters_page_round_trips() {
     assert_eq!(record.name, name("wan"));
     assert_eq!(record.counters.rx_frames, 0);
     assert_eq!(record.counters.tx_frames, 0);
+}
+
+#[test]
+fn rates_page_round_trips_and_a_fresh_interface_reports_zero() {
+    let mut stack = managed_stack();
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+    // Rates are a broker read (SYSINFO_INTROSPECT), paged like counters.
+    let request = NetstackRequest::InterfaceRates {
+        offset: 0,
+        limit: 8,
+        window: Duration64::from_secs(1),
+    };
+    let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
+    let (count, body) =
+        decode_page_reply(&reply[..len], NetInterfaceRatesRecord::WIRE_LEN).expect("page");
+    assert_eq!(count, 1);
+    let record = NetInterfaceRatesRecord::from_bytes(body).expect("record");
+    assert_eq!(record.name, name("wan"));
+    // A single query on a just-created interface has no earlier baseline,
+    // so it reports a zero window and zero rates rather than a fabricated
+    // figure.
+    assert_eq!(record.window, Duration64::ZERO);
+    assert_eq!(record.rx_pps, 0);
+    assert_eq!(record.tx_bps, 0);
 }
 
 #[test]

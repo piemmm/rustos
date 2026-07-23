@@ -50,8 +50,8 @@ mod program {
 
     use tairix_abi::net_ipc::{
         decode_page_reply, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceStateRecord, NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX,
-        NETSTACK_MAX_REPLY,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetstackRequest, NETSTACK_ENDPOINT,
+        NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuLoadRecord, CpuTimeRecord, CrashRecord,
@@ -60,6 +60,7 @@ mod program {
         SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord, RESOURCE_LIMITS_REPORT_LEN,
         SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
+    use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
@@ -272,6 +273,14 @@ mod program {
             page_netstack(NetstackCountersPage)
         }
 
+        fn net_interface_rates(
+            &self,
+            _caller: &Caller,
+            window: Duration64,
+        ) -> Result<Vec<NetInterfaceRatesRecord>, Errno> {
+            page_netstack(NetstackRatesPage { window })
+        }
+
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
             let mut records = Vec::new();
@@ -330,8 +339,9 @@ mod program {
         type Record;
         /// The record's fixed wire length.
         const RECORD_LEN: usize;
-        /// Build the request frame for one page window.
-        fn request(offset: u32, limit: u16) -> NetstackRequest;
+        /// Build the request frame for one page window. Takes `&self` so a
+        /// page can carry per-query parameters (the rates page's window).
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest;
         /// Decode one record, failing closed on malformed bytes.
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno>;
     }
@@ -341,7 +351,7 @@ mod program {
     impl NetstackPage for NetstackFactsPage {
         type Record = NetInterfaceFactsRecord;
         const RECORD_LEN: usize = NetInterfaceFactsRecord::WIRE_LEN;
-        fn request(offset: u32, limit: u16) -> NetstackRequest {
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
             NetstackRequest::InterfaceFacts { offset, limit }
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
@@ -354,7 +364,7 @@ mod program {
     impl NetstackPage for NetstackStatePage {
         type Record = NetInterfaceStateRecord;
         const RECORD_LEN: usize = NetInterfaceStateRecord::WIRE_LEN;
-        fn request(offset: u32, limit: u16) -> NetstackRequest {
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
             NetstackRequest::InterfaceState { offset, limit }
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
@@ -367,11 +377,30 @@ mod program {
     impl NetstackPage for NetstackCountersPage {
         type Record = NetInterfaceCountersRecord;
         const RECORD_LEN: usize = NetInterfaceCountersRecord::WIRE_LEN;
-        fn request(offset: u32, limit: u16) -> NetstackRequest {
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
             NetstackRequest::InterfaceCounters { offset, limit }
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
             NetInterfaceCountersRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The interface-rates page, carrying the caller's averaging window.
+    struct NetstackRatesPage {
+        window: Duration64,
+    }
+    impl NetstackPage for NetstackRatesPage {
+        type Record = NetInterfaceRatesRecord;
+        const RECORD_LEN: usize = NetInterfaceRatesRecord::WIRE_LEN;
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::InterfaceRates {
+                offset,
+                limit,
+                window: self.window,
+            }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetInterfaceRatesRecord::from_bytes(chunk)
         }
     }
 
@@ -382,12 +411,12 @@ mod program {
     /// narrowing already happened in the dispatcher before this runs. A
     /// system without a running `netstack` fails closed with the
     /// transport's typed error, never a fabricated empty table.
-    fn page_netstack<P: NetstackPage>(_page: P) -> Result<Vec<P::Record>, Errno> {
+    fn page_netstack<P: NetstackPage>(page: P) -> Result<Vec<P::Record>, Errno> {
         let mut records = Vec::new();
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
         let mut offset: u32 = 0;
         loop {
-            let request = P::request(offset, NETSTACK_LIST_LIMIT_MAX);
+            let request = page.request(offset, NETSTACK_LIST_LIMIT_MAX);
             let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
                 .map_err(errno_from)?;
             let (count, body) = decode_page_reply(&reply[..n], P::RECORD_LEN)?;

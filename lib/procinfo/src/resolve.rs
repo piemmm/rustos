@@ -23,8 +23,9 @@
 //! `stats:limits/<kind>`) plus the network-interface queries `netstack`
 //! answers through the broker (`info:net/<iface>/{mac,mtu,kind}`,
 //! `state:net/<iface>/{link,address}`, and
-//! `stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}` plus the
-//! stack-wide `stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`
+//! `stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}`, the windowed
+//! throughput rates `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…`, plus
+//! the stack-wide `stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`
 //! defence aggregates, `plans/NETWORK.md` §5).
 
 use alloc::string::{String, ToString};
@@ -34,16 +35,17 @@ use tairix_abi::origin::{Origin, TrustDomain};
 
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN,
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuLoadRecord, IrqRecord, KernelMemoryStats, MemoryPressureStats,
-    NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId,
-    SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
+    NetInterfaceListRequest, NetInterfaceRatesRequest, RamzipStats, ReclaimClassRecord,
+    ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime, PRESSURE_BAND_NAMES,
+    RESOURCE_LIMITS_REPORT_LEN,
 };
-use tairix_abi::time::Time64;
+use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
-use tairix_resref::{KnownNamespace, ResourceRef};
+use tairix_resref::{KnownNamespace, Op, ResourceRef};
 
 use crate::cputime::for_each_cpu_time;
 use crate::kstats;
@@ -336,6 +338,15 @@ fn resolve_stats(
     now: Time64,
     transport: &dyn Transport,
 ) -> Result<ResourceResponse, ResolveInfoError> {
+    // Windowed throughput rates are the one `stats:` query that carries a
+    // decoration — the `?window=` sampling window — so they are handled
+    // before the blanket decoration rejection below. Every other metric
+    // rejects any guard/facet/param.
+    if let ["net", iface, leaf] = selector(reference).as_slice() {
+        if let Some(unit) = rate_unit(leaf) {
+            return net_iface_rate(reference, now, transport, iface, leaf, unit);
+        }
+    }
     reject_decoration(reference)?;
     match selector(reference).as_slice() {
         ["uptime"] => {
@@ -1065,6 +1076,141 @@ fn net_counters_for(
     )
 }
 
+/// The metric unit a rate leaf reports, or `None` if `leaf` is not a rate.
+fn rate_unit(leaf: &str) -> Option<Unit> {
+    match leaf {
+        "rx.pps" | "tx.pps" => Some(Unit::PacketsPerSecond),
+        "rx.bps" | "tx.bps" => Some(Unit::BitsPerSecond),
+        _ => None,
+    }
+}
+
+/// Resolve one interface's windowed throughput rate
+/// (`stats:net/<iface>/{rx,tx}.{pps,bps}?window=…`) to a
+/// [`MetricKind::Rate`] metric.
+///
+/// The `?window=` decoration is mandatory (a rate is undefined without a
+/// window); the metric reports the window the service *actually* measured
+/// over, which the engine clamps to the history it holds.
+fn net_iface_rate(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+    iface: &str,
+    leaf: &str,
+    unit: Unit,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let window = rate_window(reference)?;
+    let record = net_rates_for(transport, iface, window)?;
+    let value = match leaf {
+        "rx.pps" => record.rx_pps,
+        "tx.pps" => record.tx_pps,
+        "rx.bps" => record.rx_bps,
+        // The remaining rate leaf is `tx.bps`.
+        _ => record.tx_bps,
+    };
+    let mut name = String::from("net/");
+    name.push_str(iface);
+    name.push('/');
+    name.push_str(leaf);
+    let metric = Metric::new(
+        &name,
+        MetricKind::Rate,
+        unit,
+        value,
+        now,
+        Some(record.window),
+        ResetBehavior::Never,
+    )
+    .map_err(|_| ResolveInfoError::Malformed)?;
+    envelope(
+        reference,
+        now,
+        Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+        ResponsePayload::Metric(metric),
+    )
+}
+
+/// Extract the mandatory `?window=<duration>` decoration of a rate query.
+///
+/// A rate query accepts exactly one decoration — the `window` parameter with
+/// an `=` operator — and no guard or facet. A missing window, a guard/facet,
+/// an unknown parameter, a non-`=` operator, a duplicate `window`, or an
+/// unparseable duration all fail closed as an unserviceable request.
+fn rate_window(reference: &ResourceRef) -> Result<Duration64, ResolveInfoError> {
+    if reference.guard().is_some() || reference.facet().is_some() {
+        return Err(ResolveInfoError::UnsupportedRequest);
+    }
+    let mut window = None;
+    for param in reference.params() {
+        if param.key() != "window" || param.op() != Op::Eq || window.is_some() {
+            return Err(ResolveInfoError::UnsupportedRequest);
+        }
+        window = Some(parse_window(param.value()).ok_or(ResolveInfoError::UnsupportedRequest)?);
+    }
+    window.ok_or(ResolveInfoError::UnsupportedRequest)
+}
+
+/// Parse a rate window: a positive integer with an optional `ms`, `s`
+/// (default), or `m` unit (`500ms`, `1s`, `10s`, `2m`). A zero, empty,
+/// non-numeric, or overflowing value fails closed as `None`.
+fn parse_window(text: &str) -> Option<Duration64> {
+    let (digits, scale_ns): (&str, u64) = if let Some(n) = text.strip_suffix("ms") {
+        (n, 1_000_000)
+    } else if let Some(n) = text.strip_suffix('s') {
+        (n, 1_000_000_000)
+    } else if let Some(n) = text.strip_suffix('m') {
+        (n, 60_000_000_000)
+    } else {
+        (text, 1_000_000_000)
+    };
+    let count: u64 = digits.parse().ok()?;
+    if count == 0 {
+        return None;
+    }
+    Some(Duration64::from_nanos(count.checked_mul(scale_ns)?))
+}
+
+/// Page [`SysinfoQueryId::NET_INTERFACE_RATES`] (carrying the averaging
+/// `window`) until the record whose alias is `iface` is found.
+fn net_rates_for(
+    transport: &dyn Transport,
+    iface: &str,
+    window: Duration64,
+) -> Result<NetInterfaceRatesRecord, ResolveInfoError> {
+    let record_len = NetInterfaceRatesRecord::WIRE_LEN;
+    let mut offset: u32 = 0;
+    loop {
+        let request = NetInterfaceRatesRequest {
+            offset,
+            limit: NET_PAGE_LIMIT,
+            flags: 0,
+            window,
+        };
+        let reply = call(
+            transport,
+            SysinfoQueryId::NET_INTERFACE_RATES,
+            &request.to_le_bytes(),
+        )
+        .map_err(map_call_error)?;
+        if reply.len() % record_len != 0 {
+            return Err(ResolveInfoError::Malformed);
+        }
+        let count = reply.len() / record_len;
+        for chunk in reply.chunks_exact(record_len) {
+            let record = NetInterfaceRatesRecord::from_bytes(chunk)
+                .map_err(|_| ResolveInfoError::Malformed)?;
+            if if_name_matches(&record.name, iface) {
+                return Ok(record);
+            }
+        }
+        if count < NET_PAGE_LIMIT as usize {
+            return Err(ResolveInfoError::UnknownSelector);
+        }
+        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
+    }
+}
+
 /// Collect every interface's counters record (for a stack-wide sum).
 fn all_net_counters(
     transport: &dyn Transport,
@@ -1415,7 +1561,8 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::net_ipc::{
         NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
-        NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+        NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, IF_NAME_LEN,
+        NET_IF_MAX_ADDRS,
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
@@ -1707,6 +1854,17 @@ mod tests {
                 SysinfoQueryId::NET_INTERFACE_COUNTERS => {
                     let req = NetInterfaceListRequest::from_bytes(payload)?;
                     let records = alloc::vec![fixture_net_counters()];
+                    let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_INTERFACE_RATES => {
+                    let req = super::NetInterfaceRatesRequest::from_bytes(payload)?;
+                    // Echo the requested window back so a test can prove it
+                    // threaded through.
+                    let records = alloc::vec![fixture_net_rates(req.window)];
                     let encoders: Vec<_> = records
                         .iter()
                         .map(|record| move || record.to_le_bytes())
@@ -2490,6 +2648,114 @@ mod tests {
                 pending_dropped: 4,
             },
         }
+    }
+
+    /// The interface-rates record the fixture serves for `wan`, echoing the
+    /// requested `window` so a test can prove the decoration threaded through.
+    fn fixture_net_rates(window: Duration64) -> NetInterfaceRatesRecord {
+        let mut name = [0u8; IF_NAME_LEN];
+        name[..3].copy_from_slice(b"wan");
+        NetInterfaceRatesRecord {
+            name,
+            window,
+            rx_pps: 1000,
+            rx_bps: 12_000_000,
+            tx_pps: 800,
+            tx_bps: 9_600_000,
+        }
+    }
+
+    #[test]
+    fn stats_net_rates_are_global_gated_windowed_and_render() {
+        let fixture = Fixture::new();
+        for (selector, expected, unit) in [
+            (
+                "stats:net/wan/rx.pps?window=1s",
+                1000u64,
+                Unit::PacketsPerSecond,
+            ),
+            (
+                "stats:net/wan/tx.pps?window=1s",
+                800,
+                Unit::PacketsPerSecond,
+            ),
+            (
+                "stats:net/wan/rx.bps?window=500ms",
+                12_000_000,
+                Unit::BitsPerSecond,
+            ),
+            (
+                "stats:net/wan/tx.bps?window=2m",
+                9_600_000,
+                Unit::BitsPerSecond,
+            ),
+        ] {
+            let r = resolve_str(selector, &fixture).expect("ok");
+            assert_eq!(
+                r.authorization,
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL)
+            );
+            assert_eq!(r.query(), selector);
+            match r.payload {
+                ResponsePayload::Metric(m) => {
+                    assert_eq!(m.value, expected);
+                    assert_eq!(m.unit, unit);
+                    assert_eq!(m.kind, MetricKind::Rate);
+                    // The fixture echoes the requested window into the record.
+                    assert!(m.window.is_some());
+                }
+                _ => panic!("expected metric"),
+            }
+        }
+    }
+
+    #[test]
+    fn stats_net_rate_windows_parse_and_convert() {
+        let fixture = Fixture::new();
+        for (selector, secs, nanos) in [
+            ("stats:net/wan/rx.pps?window=1s", 1i64, 0u32),
+            ("stats:net/wan/rx.pps?window=250ms", 0, 250_000_000),
+            ("stats:net/wan/rx.pps?window=2m", 120, 0),
+        ] {
+            let r = resolve_str(selector, &fixture).expect("ok");
+            let ResponsePayload::Metric(m) = r.payload else {
+                panic!("expected metric");
+            };
+            let window = m.window.expect("a rate has a window");
+            assert_eq!(window.secs(), secs);
+            assert_eq!(window.subsec_nanos(), nanos);
+        }
+    }
+
+    #[test]
+    fn stats_net_rate_requires_a_valid_window() {
+        let fixture = Fixture::new();
+        // A rate without a window is undefined and unserviceable.
+        assert_eq!(
+            resolve_str("stats:net/wan/rx.pps", &fixture),
+            Err(ResolveInfoError::UnsupportedRequest)
+        );
+        // A zero, unparseable, or unknown-parameter decoration fails closed.
+        for bad in [
+            "stats:net/wan/rx.pps?window=0s",
+            "stats:net/wan/rx.pps?window=abc",
+            "stats:net/wan/rx.pps?interval=1s",
+        ] {
+            assert_eq!(
+                resolve_str(bad, &fixture),
+                Err(ResolveInfoError::UnsupportedRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn stats_net_rate_denial_maps_to_capability_denied() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_RATES);
+        assert_eq!(
+            resolve_str("stats:net/wan/rx.pps?window=1s", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
     }
 
     #[test]

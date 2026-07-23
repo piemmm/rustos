@@ -13,13 +13,15 @@
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{
-    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceStateRecord,
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+    NetInterfaceStateRecord,
 };
 use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats, LoadAverage,
     MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
     ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
 };
+use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin};
 
 /// The authenticated principal on whose behalf a request is served.
@@ -257,6 +259,23 @@ pub trait SysinfoSource {
         &self,
         caller: &Caller,
     ) -> Result<Vec<NetInterfaceCountersRecord>, Errno>;
+
+    /// Return every managed network interface's live throughput rates over
+    /// `window`, in the stack's stable table order (`plans/NETWORK.md` §5:
+    /// `stats:net/<iface>/{rx,tx}.{pps,bps}`).
+    ///
+    /// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed: the
+    /// rates derive from the same system-wide counters as
+    /// [`net_interface_counters`](Self::net_interface_counters). Each
+    /// record reports the window it was *actually* averaged over. On a
+    /// running system the source forwards to the `netstack` service's
+    /// broker read; the owned list is returned whole and [`crate::serve`]
+    /// applies the `offset`/`limit` paging.
+    fn net_interface_rates(
+        &self,
+        caller: &Caller,
+        window: Duration64,
+    ) -> Result<Vec<NetInterfaceRatesRecord>, Errno>;
 
     /// Return the kernel IRQ table: one record per bound interrupt line,
     /// in ascending line order.

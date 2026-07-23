@@ -95,7 +95,8 @@ pub fn serve(
     let required = match decoded {
         NetstackRequest::InterfaceFacts { .. }
         | NetstackRequest::InterfaceState { .. }
-        | NetstackRequest::InterfaceCounters { .. } => CapabilityId::SYSINFO_INTROSPECT,
+        | NetstackRequest::InterfaceCounters { .. }
+        | NetstackRequest::InterfaceRates { .. } => CapabilityId::SYSINFO_INTROSPECT,
         _ => CapabilityId::NET_ADMIN,
     };
     if !caller.capabilities().holds(required) {
@@ -156,6 +157,18 @@ pub fn serve(
                 .state_records(offset, limit)
                 .iter()
                 .map(tairix_abi::net_ipc::NetInterfaceStateRecord::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, response)
+        }
+        NetstackRequest::InterfaceRates {
+            offset,
+            limit,
+            window,
+        } => {
+            let records: alloc::vec::Vec<_> = stack
+                .rates_records(offset, limit, window, now)
+                .iter()
+                .map(tairix_abi::net_ipc::NetInterfaceRatesRecord::to_le_bytes)
                 .collect();
             encode_page_reply(&records, response)
         }
@@ -231,6 +244,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::InterfaceCounters { .. } => "interface counters",
         NetstackRequest::InterfaceFacts { .. } => "interface facts",
         NetstackRequest::InterfaceState { .. } => "interface state",
+        NetstackRequest::InterfaceRates { .. } => "interface rates",
         NetstackRequest::BindDriver { .. } => "bind driver",
     };
     Field {

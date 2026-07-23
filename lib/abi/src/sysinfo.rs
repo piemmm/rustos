@@ -246,6 +246,20 @@ impl SysinfoQueryId {
     /// becomes visible on (`plans/NETWORK.md` §5: `stats:net`).
     pub const NET_INTERFACE_COUNTERS: Self = Self(21);
 
+    /// List every managed network interface's live throughput rates over a
+    /// caller-supplied window: one
+    /// [`NetInterfaceRatesRecord`](crate::net_ipc::NetInterfaceRatesRecord)
+    /// per interface (received/transmitted packets- and bits-per-second and
+    /// the window each was actually averaged over), paged by a
+    /// [`NetInterfaceRatesRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: rates are derived from
+    /// the same system-wide, cross-principal counters as
+    /// [`Self::NET_INTERFACE_COUNTERS`] and are the surface a
+    /// denial-of-service in progress (a traffic flood) becomes visible on
+    /// (`plans/NETWORK.md` §5: `stats:net/<iface>/{rx,tx}.{pps,bps}`).
+    pub const NET_INTERFACE_RATES: Self = Self(22);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -549,6 +563,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::NET_INTERFACE_COUNTERS,
         name: "net_interface_stats",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_INTERFACE_RATES,
+        name: "net_interface_rates",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
@@ -2017,6 +2037,61 @@ impl NetInterfaceListRequest {
             offset: read_u32(bytes, 0),
             limit: read_u16(bytes, 4),
             flags,
+        })
+    }
+}
+
+/// Request payload for [`SysinfoQueryId::NET_INTERFACE_RATES`]: the record
+/// window to return (in the stack's stable interface-table order) plus the
+/// rate-averaging window the caller requests.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceRatesRequest {
+    /// Index of the first interface to return.
+    pub offset: u32,
+    /// Maximum number of records the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+    /// The rate-averaging window the caller requests.
+    pub window: Duration64,
+}
+
+impl NetInterfaceRatesRequest {
+    /// Encoded size of a [`NetInterfaceRatesRequest`] on the wire: the
+    /// paging header (8) followed by the window (12).
+    pub const WIRE_LEN: usize = 8 + Duration64::WIRE_LEN;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out[8..8 + Duration64::WIRE_LEN].copy_from_slice(&self.window.to_le_bytes());
+        out
+    }
+
+    /// Decode `bytes` into a [`NetInterfaceRatesRequest`].
+    ///
+    /// Returns:
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
+    /// * [`Errno::TimestampOutOfRange`] if the window is non-canonical.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let window = Duration64::from_bytes(&bytes[8..8 + Duration64::WIRE_LEN])?;
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+            window,
         })
     }
 }
@@ -4700,6 +4775,31 @@ mod tests {
 
         assert_eq!(
             RamzipStats::from_bytes(&[0u8; RamzipStats::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn net_interface_rates_request_round_trips_and_rejects_reserved() {
+        use super::NetInterfaceRatesRequest;
+        let req = NetInterfaceRatesRequest {
+            offset: 3,
+            limit: 8,
+            flags: 0,
+            window: Duration64::from_secs(1),
+        };
+        assert_eq!(
+            NetInterfaceRatesRequest::from_bytes(&req.to_le_bytes()),
+            Ok(req)
+        );
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(
+            NetInterfaceRatesRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            NetInterfaceRatesRequest::from_bytes(&[0u8; NetInterfaceRatesRequest::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
     }

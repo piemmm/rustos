@@ -50,6 +50,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_INTERFACE_FACTS`   | `CAP_SYSINFO_HW`       | yes     |
 | `NET_INTERFACE_STATE`   | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_INTERFACE_COUNTERS`| `CAP_SYSINFO_GLOBAL`   | yes     |
+| `NET_INTERFACE_RATES`   | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
@@ -133,6 +134,18 @@ total, not reset when a line is re-bound), and `flags` reports the line's
 containment state (`IRQ_FLAG_QUARANTINED` for a line the kernel's
 runaway-interrupt safety net has disabled). It exposes no per-principal
 secret beyond the ownership the hardware view already carries.
+
+`NET_INTERFACE_RATES` shares `NET_INTERFACE_COUNTERS`'s boundary —
+`CAP_SYSINFO_GLOBAL` and audited — because it derives from the same
+system-wide counters. It is the one query that carries a *decoration*: a
+`NetInterfaceRatesRequest` adds a caller-supplied averaging window to the
+paging header, and each `NetInterfaceRatesRecord` reports the received /
+transmitted packets- and bits-per-second **averaged over the window that
+actually elapsed** — which may be shorter than requested when an
+interface's history is younger, and is `0` over a zero window when there
+is no usable baseline yet. The rates are the surface a traffic flood
+becomes visible on; the `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…`
+selectors resolve through it (`plans/NETWORK.md` §5).
 
 ## Wire framing
 
