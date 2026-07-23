@@ -3774,3 +3774,159 @@ fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
     draw_owner_control(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2), None);
 }
+
+// --- FM7b: the delete-confirmation dialog ---------------------------------
+
+use crate::render::{
+    build_delete_dialog, delete_dialog_action_at, delete_dialog_rect, draw_delete_dialog,
+    DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+};
+
+/// A plan removing a single regular file.
+fn one_file_plan() -> DeletePlan {
+    DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("a plan")
+}
+
+/// A plan removing two items, one of them a directory.
+fn folder_plan() -> DeletePlan {
+    DeletePlan::new(vec![
+        (comps(&["System", "Fonts"]), true),
+        (comps(&["System", "Kernel"]), false),
+    ])
+    .expect("a plan")
+}
+
+#[test]
+fn delete_dialog_titles_a_single_target_by_its_name() {
+    let dialog = build_delete_dialog(&one_file_plan());
+    // A single target is named, so the user sees exactly what they are about
+    // to remove.
+    assert!(dialog.title().contains("Kernel"));
+    // A files-only removal warns only that it cannot be undone.
+    let message = dialog.message().expect("a message");
+    assert!(message.contains("cannot be undone"));
+    assert!(!message.to_ascii_lowercase().contains("folder"));
+}
+
+#[test]
+fn delete_dialog_reports_the_honest_count_and_folder_warning() {
+    let dialog = build_delete_dialog(&folder_plan());
+    // More than one target: the honest count, not a single name (§2.24).
+    assert!(dialog.title().contains('2'));
+    // A plan that includes a directory warns that folders (and their contents)
+    // are removed, so the confirmation is not misleading (§2.24).
+    let message = dialog.message().expect("a message");
+    assert!(message.to_ascii_lowercase().contains("folder"));
+}
+
+#[test]
+fn delete_dialog_offers_a_destructive_delete_and_a_recommended_cancel() {
+    use tairix_controls::state::ControlRole;
+    let dialog = build_delete_dialog(&one_file_plan());
+    let actions = dialog.actions();
+    assert_eq!(actions.len(), 2);
+    // The honest warmth is on the safe Cancel, never on the destructive Delete
+    // (§2.24): the delete carries the Destructive role, Cancel the Recommended.
+    assert_eq!(
+        actions[DELETE_CONFIRM_INDEX].role(),
+        ControlRole::Destructive
+    );
+    assert_eq!(
+        actions[DELETE_CANCEL_INDEX].role(),
+        ControlRole::Recommended
+    );
+}
+
+#[test]
+fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+
+    let vp = Rect::new(0, 0, 480, 320);
+    let rect = delete_dialog_rect(vp, font, &theme);
+    assert!(rect.width > 0 && rect.height > 0);
+    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
+    assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
+    assert!(
+        rect.origin.y + i32::try_from(rect.height).unwrap() <= i32::try_from(vp.height).unwrap()
+    );
+    // Centered on each axis (within one pixel of the integer split).
+    let right_margin =
+        i32::try_from(vp.width).unwrap() - (rect.origin.x + i32::try_from(rect.width).unwrap());
+    assert!((rect.origin.x - right_margin).abs() <= 1);
+
+    // A window smaller than the dialog would like still yields a drawable rect
+    // clamped to the window, never a zero or over-size rectangle (no panic).
+    let tiny = Rect::new(0, 0, 20, 16);
+    let small = delete_dialog_rect(tiny, font, &theme);
+    assert!(small.width >= 1 && small.width <= tiny.width);
+    assert!(small.height >= 1 && small.height <= tiny.height);
+}
+
+#[test]
+fn draw_delete_dialog_paints_into_the_surface_without_panicking() {
+    use tairix_raster::Surface;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let dialog = build_delete_dialog(&folder_plan());
+
+    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    let before = surface.pixels().to_vec();
+    draw_delete_dialog(&mut surface, &dialog, &theme, font, vp);
+    assert_ne!(surface.pixels().to_vec(), before);
+
+    // A degenerate viewport draws nothing and does not panic.
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    draw_delete_dialog(&mut tiny, &dialog, &theme, font, Rect::new(0, 0, 2, 2));
+}
+
+#[test]
+fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let dialog = build_delete_dialog(&folder_plan());
+
+    // Scanning the whole window, every index the hit-test resolves is one of
+    // the two action buttons, and both are reachable — so the drawn buttons
+    // and the hit-test cover exactly the same two distinct actions (§2.2).
+    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    let mut y = 0;
+    while y < i32::try_from(vp.height).unwrap() {
+        let mut x = 0;
+        while x < i32::try_from(vp.width).unwrap() {
+            if let Some(index) =
+                delete_dialog_action_at(&dialog, vp, font, &theme, Point::new(x, y))
+            {
+                assert!(
+                    index == DELETE_CONFIRM_INDEX || index == DELETE_CANCEL_INDEX,
+                    "resolved a non-action index"
+                );
+                seen.insert(index);
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    assert_eq!(
+        seen,
+        [DELETE_CONFIRM_INDEX, DELETE_CANCEL_INDEX]
+            .into_iter()
+            .collect()
+    );
+
+    // A click well outside the dialog resolves nothing (fail closed).
+    assert_eq!(
+        delete_dialog_action_at(&dialog, vp, font, &theme, Point::new(-5, -5)),
+        None
+    );
+    // On a window too small for the dialog buttons, nothing resolves (fail
+    // closed) rather than placing a phantom button.
+    let tiny = Rect::new(0, 0, 20, 16);
+    assert_eq!(
+        delete_dialog_action_at(&dialog, tiny, font, &theme, Point::new(5, 5)),
+        None
+    );
+}

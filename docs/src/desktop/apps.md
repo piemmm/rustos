@@ -488,6 +488,29 @@ not one algorithm copied twice (`AGENTS.md` §2.2). The engine does no I/O; the
 app performs every read and unlink under the launching user's own identity, so
 the read-only picker never runs a walk.
 
+The Delete verb is wired in the `files.app` `Run` binary. Pressing `Delete` on
+a selection opens a modal confirmation `lib/controls` `Dialog`, built by the
+shared `render::build_delete_dialog` from the captured `DeletePlan`: the title
+names a single target or reports the honest count, and the message warns that
+folders (and their contents) are removed when the plan includes a directory
+(`AGENTS.md` §2.24). The honest Action Warmth sits on the safe **Cancel**
+(recommended), never on the destructive **Delete**. `render::delete_dialog_rect`
+centres and clamps the dialog to the window and `render::delete_dialog_action_at`
+mirrors its button geometry so a click resolves to exactly the button pressed
+(`AGENTS.md` §2.2); `Escape` (or Cancel) dismisses it, `Enter` (or Delete)
+confirms. On confirm the app drives a `DeleteWalk` to completion — reading each
+directory with the same capability-checked listing call and shared decode the
+browser navigates with, and `fs_unlink`-ing each node depth-first (with
+`UnlinkFlags::DIRECTORY` for a directory-backed target) under the launching
+user's own identity, no new capability. The removal is bounded and fail closed:
+the first refused read or unlink stops it, states the reason on `stderr` (fail
+loud, `AGENTS.md` §2.24), and leaves whatever was already removed removed rather
+than a fabricated success; the view is then re-listed so a partial removal is
+shown honestly (`AGENTS.md` §5.4). Only the file manager builds and drives this
+— the read-only picker never deletes. (A bounded progress indicator and a
+mid-run Cancel for a long removal are a separately-staged follow-up; the verb
+itself is complete.)
+
 ### The new-folder model
 
 Creating a folder (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in

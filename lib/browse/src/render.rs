@@ -26,8 +26,10 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_controls::button::{Button, ButtonContent};
+use tairix_controls::decision::Dialog;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
-use tairix_controls::state::{ControlRole, ControlState, SelectionState};
+use tairix_controls::state::{AuthorityState, ControlRole, ControlState, SelectionState};
 use tairix_controls::text::TextField;
 use tairix_controls::{Card, Checkbox, IconButton, Panel, ScrollBar, TableCell, TableRow, Toolbar};
 use tairix_font::BitmapFont;
@@ -38,6 +40,7 @@ use tairix_theme::{Palette, Theme};
 use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
 use crate::chrome::{self, ManagerTool, ToolbarCommand, ToolbarModel};
+use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
@@ -1136,4 +1139,140 @@ pub fn draw_owner_control(
 /// Saturating `u32` → `i32`.
 fn to_i32(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// The action-button index of the destructive **Delete** action in the
+/// delete-confirmation [`Dialog`] [`build_delete_dialog`] produces.
+pub const DELETE_CONFIRM_INDEX: usize = 0;
+
+/// The action-button index of the safe **Cancel** action in the
+/// delete-confirmation [`Dialog`] [`build_delete_dialog`] produces.
+pub const DELETE_CANCEL_INDEX: usize = 1;
+
+/// Build the modal delete-confirmation [`Dialog`] for `plan`: an honest
+/// question naming what would be removed, a warning appropriate to whether
+/// folders (removed recursively) are involved, a destructive **Delete**
+/// action, and a safe recommended **Cancel** action (§2.24).
+///
+/// The [`DeleteTarget`](crate::DeleteTarget) count and
+/// [`has_directories`](DeletePlan::has_directories) come straight from the
+/// already-captured [`DeletePlan`], so the confirmation reports the true scope
+/// of the removal rather than a fabricated figure. The dialog performs nothing
+/// itself — the caller drives the removal in its own capability-checked tail
+/// once the user confirms — so composing it grants no authority. Both the
+/// file manager (which builds one) and, in principle, any other write-capable
+/// consumer share this one definition; the read-only picker never deletes, so
+/// it never builds one.
+#[must_use]
+pub fn build_delete_dialog(plan: &DeletePlan) -> Dialog {
+    let title = if plan.len() == 1 {
+        alloc::format!("Delete \u{201c}{}\u{201d}?", plan.targets()[0].name())
+    } else {
+        alloc::format!("Delete {} items?", plan.len())
+    };
+    let message = if plan.has_directories() {
+        "Folders and everything inside them will be removed. This cannot be undone."
+    } else {
+        "This cannot be undone."
+    };
+    // The destructive action carries the Destructive role and the
+    // confirmation posture; Cancel is the recommended (safe, trailing) action
+    // so the honest warmth sits on the safe choice, never on the delete.
+    let mut delete = Button::new(
+        ButtonContent::Label(String::from("Delete")),
+        ControlRole::Destructive,
+    );
+    delete.set_state(ControlState::idle().with_authority(AuthorityState::NeedsConfirmation));
+    let cancel = Button::new(
+        ButtonContent::Label(String::from("Cancel")),
+        ControlRole::Recommended,
+    );
+    Dialog::new(title)
+        .with_message(message)
+        .with_actions(vec![delete, cancel])
+}
+
+/// The centered, clamped bounds of the delete-confirmation dialog within
+/// `viewport`.
+///
+/// Sized to comfortably show the title, the warning message, and the action
+/// button band, and clamped to the window so a small window still yields a
+/// drawable — if clipped — dialog rather than a panic (§2.9). One definition so
+/// [`draw_delete_dialog`] and [`delete_dialog_action_at`] place and hit-test
+/// the same rectangle (§2.2).
+#[must_use]
+pub fn delete_dialog_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+    let line = row_height(font);
+    let title = Scale::ONE
+        .scale_length(theme.metrics().title_bar_height)
+        .max(1);
+    // Title bar, up to two message lines, and the action-button band, with
+    // margins — generous so the buttons are not clipped at a normal size.
+    let content = line.saturating_mul(6);
+    let height = title.saturating_add(content).min(viewport.height.max(1));
+    let width = viewport
+        .width
+        .saturating_mul(4)
+        .checked_div(5)
+        .unwrap_or(viewport.width)
+        .clamp(1, viewport.width.max(1));
+    let x = viewport
+        .origin
+        .x
+        .saturating_add(to_i32(viewport.width.saturating_sub(width) / 2));
+    let y = viewport
+        .origin
+        .y
+        .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
+    Rect::new(x, y, width, height)
+}
+
+/// Draw the delete-confirmation `dialog` centered in `viewport`, on top of the
+/// current view.
+///
+/// Every blit clips, so a window too small for the whole dialog simply shows
+/// what fits rather than panicking. It reads only the passed-in dialog and
+/// draws — it performs no I/O and holds no authority (§4, §5.4).
+pub fn draw_delete_dialog(
+    surface: &mut Surface,
+    dialog: &Dialog,
+    theme: &Theme,
+    font: BitmapFont,
+    viewport: Rect,
+) {
+    let bounds = delete_dialog_rect(viewport, font, theme);
+    dialog.render(surface, bounds, Scale::ONE, theme, font);
+}
+
+/// The action-button index the delete-confirmation `dialog` draws at
+/// window-local pixel `point`, or `None` when the click is not on a button.
+///
+/// This mirrors [`draw_delete_dialog`]'s placement through the shared
+/// [`delete_dialog_rect`] and the dialog's own
+/// [`action_rects`](Dialog::action_rects) geometry, so a click resolves to
+/// exactly the button the user pressed (§2.2) — [`DELETE_CONFIRM_INDEX`] for
+/// Delete, [`DELETE_CANCEL_INDEX`] for Cancel. Only the file manager calls it;
+/// a click anywhere but a button returns `None`, changing nothing (fail
+/// closed, §5.4).
+#[must_use]
+pub fn delete_dialog_action_at(
+    dialog: &Dialog,
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    point: Point,
+) -> Option<usize> {
+    let bounds = delete_dialog_rect(viewport, font, theme);
+    let rects = dialog.action_rects(bounds, Scale::ONE, theme, font);
+    for (i, rect) in rects.iter().enumerate() {
+        if rect.width == 0 {
+            continue;
+        }
+        let right = rect.left().saturating_add(to_i32(rect.width));
+        let bottom = rect.top().saturating_add(to_i32(rect.height));
+        if point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom {
+            return Some(i);
+        }
+    }
+    None
 }

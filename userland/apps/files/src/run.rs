@@ -25,7 +25,10 @@
 //! opens a directory, `Backspace` goes up); `F2` renames the selected
 //! item through an inline `lib/controls` text field, committing over
 //! `fs_rename` under the user's own identity (a refusal is stated in the
-//! field, never a silent failure or a fabricated success); a
+//! field, never a silent failure or a fabricated success); `Delete` opens
+//! a modal confirmation `Dialog` and, on confirm, removes the selection
+//! (recursively for a folder) over the user's own `fs_unlink`s, stopping
+//! and stating the reason on `stderr` on the first refusal; a
 //! `CloseRequested` from the desktop closes the window and ends the
 //! program cleanly. Every bring-up refusal exits fail-loud with a
 //! reserved code and a stated reason on `stderr`.
@@ -53,17 +56,20 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
-        CapabilityId, Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
+        CapabilityId, Errno, Origin, ProcId, UnlinkFlags, WaitSetOp, WaitSourceKind,
+        ORIGIN_WIRE_LEN,
     };
     use tairix_browse::render::{
-        draw_owner_control, draw_properties_editable, manager_tool_at, owner_field_at,
-        permission_cell_at, render, OwnerField,
+        build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_owner_control,
+        draw_properties_editable, manager_tool_at, owner_field_at, permission_cell_at, render,
+        OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        suggest_new_dir_name, validate_new_name, Browser, DirectorySource, EntryKind, ManagerTool,
-        OwnerChange, Properties, RenameError, ToolbarCommand, VfsDirectorySource, MANAGER_TOOLS,
-        WIN_HEIGHT, WIN_WIDTH,
+        suggest_new_dir_name, validate_new_name, Browser, DeleteAction, DeletePlan, DeleteWalk,
+        DirectorySource, EntryKind, ManagerTool, OwnerChange, Properties, RenameError,
+        ToolbarCommand, VfsDirectorySource, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
     };
+    use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
@@ -210,10 +216,25 @@ mod program {
         editor: TextField,
     }
 
+    /// The open delete-confirmation dialog and the plan it would carry out.
+    ///
+    /// `None` unless the user pressed `Delete` on a selection; the event loop
+    /// threads it so the painted modal dialog and the pending removal stay in
+    /// step. It owns the window while open: keys and clicks either confirm or
+    /// cancel and nothing navigates the view behind it. The plan is captured
+    /// when the dialog opens, so a listing change while it is up cannot move
+    /// what the confirmed delete targets.
+    struct DeleteConfirm {
+        /// The modal confirmation dialog (Delete / Cancel).
+        dialog: Dialog,
+        /// What the confirmed delete would remove, captured at open time.
+        plan: DeletePlan,
+    }
+
     /// The transient overlay state layered over the browser view, threaded
     /// through the event loop so the painted overlays and the state they
-    /// reflect stay in step. At most one of `rename`/`properties` is open at a
-    /// time; `owner` is nested inside `properties`.
+    /// reflect stay in step. At most one of `rename`/`properties`/`delete` is
+    /// open at a time; `owner` is nested inside `properties`.
     struct Overlays {
         /// The in-place rename editor, when open (`F2`).
         rename: Option<TextField>,
@@ -221,6 +242,8 @@ mod program {
         properties: Option<Properties>,
         /// The inline owner/group id editor on the Properties overlay.
         owner: Option<OwnerEditor>,
+        /// The delete-confirmation dialog, when open (`Delete`).
+        delete: Option<DeleteConfirm>,
         /// Whether the launching user holds `CAP_FS_CHOWN` — the one gate on
         /// offering the ownership control (read once at start-up).
         can_chown: bool,
@@ -282,6 +305,11 @@ mod program {
                 let active = owner.map(|ed| (ed.field, &ed.editor));
                 draw_owner_control(&mut surface, props, theme, font, viewport, active);
             }
+        }
+        // The delete-confirmation dialog is modal: drawn last, on top of the
+        // view, and never open together with the rename/Properties overlays.
+        if let Some(confirm) = overlays.delete.as_ref() {
+            draw_delete_dialog(&mut surface, &confirm.dialog, theme, font, viewport);
         }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
@@ -348,11 +376,14 @@ mod program {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
             } => {
-                // Alt+Enter opens the Properties overlay (it needs the overlay
-                // state); every other navigation-mode key is handled by the
-                // shared `apply_nav_key`.
+                // Alt+Enter opens the Properties overlay and Delete opens the
+                // delete confirmation (both need the overlay state); every
+                // other navigation-mode key is handled by the shared
+                // `apply_nav_key`.
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     begin_properties(browser, &mut overlays.properties)
+                } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
+                    begin_delete(browser, &mut overlays.delete)
                 } else {
                     apply_nav_key(
                         browser,
@@ -446,6 +477,13 @@ mod program {
         viewport: Rect,
         event: &WindowEvent,
     ) -> Option<(bool, bool)> {
+        // The delete-confirmation dialog is the topmost modal: while it is up
+        // it owns the window, so it is handled before anything else.
+        if overlays.delete.is_some() {
+            return Some(apply_delete_event(
+                browser, overlays, font, theme, viewport, event,
+            ));
+        }
         if overlays.owner.is_some() {
             return Some(match event {
                 WindowEvent::Key {
@@ -546,6 +584,176 @@ mod program {
             }
             _ => (false, false),
         }
+    }
+
+    /// Open the delete-confirmation dialog for the current selection, reporting
+    /// a repaint. With nothing selected (an empty directory, or a cleared
+    /// selection) [`Browser::plan_delete`] yields no plan and this is a no-op —
+    /// the Delete verb is simply unavailable rather than a catastrophic empty
+    /// or root removal (fail closed, §5.4). The plan is captured now, so a
+    /// listing change while the dialog is up cannot move what a confirmed
+    /// delete removes.
+    fn begin_delete<S: DirectorySource>(
+        browser: &Browser<S>,
+        delete: &mut Option<DeleteConfirm>,
+    ) -> (bool, bool) {
+        let Some(plan) = browser.plan_delete() else {
+            return (false, false);
+        };
+        let dialog = build_delete_dialog(&plan);
+        *delete = Some(DeleteConfirm { dialog, plan });
+        (true, false)
+    }
+
+    /// Handle one event while the delete-confirmation dialog owns the window.
+    ///
+    /// `Escape` (or a click on Cancel) dismisses the dialog and changes
+    /// nothing; `Enter` (or a click on Delete) carries out the captured plan
+    /// under the user's own identity and re-lists. A click that lands on
+    /// neither button, and every non-decision event, leaves the dialog open
+    /// (fail closed). The removal is the user's own capability-checked
+    /// `fs_unlink`s — no new capability, no ambient authority (§4, §5.4).
+    fn apply_delete_event<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        event: &WindowEvent,
+    ) -> (bool, bool) {
+        // Resolve the decision: `Some(true)` confirms, `Some(false)` cancels,
+        // `None` leaves the dialog open.
+        let decision = match event {
+            WindowEvent::Key {
+                key: KeyInput::Pressed { key, .. },
+                ..
+            } => match key {
+                KeyValue::Named(NamedKeyCode::Escape) => Some(false),
+                KeyValue::Named(NamedKeyCode::Enter) => Some(true),
+                _ => None,
+            },
+            WindowEvent::Pointer { x, y, action, .. } => {
+                press_point(*action, *x, *y).and_then(|point| {
+                    let confirm = overlays.delete.as_ref()?;
+                    let index =
+                        delete_dialog_action_at(&confirm.dialog, viewport, font, theme, point);
+                    if index == Some(DELETE_CONFIRM_INDEX) {
+                        Some(true)
+                    } else if index == Some(DELETE_CANCEL_INDEX) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        };
+        match decision {
+            None => (false, false),
+            Some(false) => {
+                overlays.delete = None;
+                (true, false)
+            }
+            Some(true) => {
+                let Some(confirm) = overlays.delete.take() else {
+                    return (false, false);
+                };
+                run_delete(&confirm.plan);
+                // Re-list so the view reflects what actually remains — a partial
+                // removal left by a refusal is shown honestly (§2.24). A failed
+                // re-list leaves the browser where it was (fail closed).
+                let _ = browser.refresh();
+                (true, false)
+            }
+        }
+    }
+
+    /// Carry out `plan` by driving a [`DeleteWalk`] to completion: read each
+    /// directory (`fs_readdir`) and unlink each node (`fs_unlink`,
+    /// depth-first, so contents go before their container) under the user's
+    /// own identity.
+    ///
+    /// It is bounded and fail closed: the walk caps its recursion depth, and
+    /// the first refused read or unlink stops the removal, states the reason on
+    /// `stderr` (fail loud, §2.24), and returns — leaving the walk's own
+    /// position untouched and whatever was already removed removed, never a
+    /// fabricated success (§5.4). No new capability is involved: every syscall
+    /// is the ordinary §5.3-checked write the user could perform themselves.
+    fn run_delete(plan: &DeletePlan) {
+        let mut walk = DeleteWalk::from_plan(plan);
+        loop {
+            // Copy the current step out so the walk is free to be mutated.
+            let step = walk.next_action().map(|action| match action {
+                DeleteAction::List(path) => (true, path.to_vec(), false),
+                DeleteAction::Remove { path, is_directory } => (false, path.to_vec(), is_directory),
+            });
+            let Some((is_list, path, is_directory)) = step else {
+                return;
+            };
+            if is_list {
+                let Ok(children) = read_children(&path) else {
+                    report_delete_refused(&path);
+                    return;
+                };
+                if walk.expand(&children).is_err() {
+                    report_delete_stop("delete stopped: a folder is nested too deep");
+                    return;
+                }
+            } else {
+                let Ok(spelled) = tairix_browse::vfs::absolute_path(&path) else {
+                    report_delete_stop("delete stopped: a path could not be spelled");
+                    return;
+                };
+                let flags = if is_directory {
+                    UnlinkFlags::DIRECTORY
+                } else {
+                    UnlinkFlags::empty()
+                };
+                if tairix_rt::fs_unlink(spelled.as_bytes(), flags) != 0 {
+                    report_delete_refused(&path);
+                    return;
+                }
+                if walk.complete_removal().is_err() {
+                    report_delete_stop("delete stopped: internal walk error");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Read the children of the directory at `path` for a [`DeleteWalk`]
+    /// expansion: each child's leaf name and whether it is directory-backed,
+    /// through the same capability-checked listing call and shared decode the
+    /// browser navigates with, so the delete sees exactly what the browser
+    /// would.
+    fn read_children(path: &[String]) -> Result<alloc::vec::Vec<(String, bool)>, Errno> {
+        let spelled = tairix_browse::vfs::absolute_path(path)?;
+        let stream = tairix_rt::read_dir_all(spelled.as_bytes()).map_err(errno_from)?;
+        let entries = tairix_browse::vfs::entries_from_dir_stream(&stream)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| (entry.name().to_string(), entry.is_directory_backed()))
+            .collect())
+    }
+
+    /// State on `stderr` that the item at `path` could not be removed — an
+    /// honest, fail-loud diagnosis naming the item, never a silent failure or
+    /// a fabricated success (§2.24). Carries no path prefix or token beyond the
+    /// leaf name the user already sees.
+    fn report_delete_refused(path: &[String]) {
+        let name = path.last().map_or("", String::as_str);
+        let _ = tairix_rt::stderr(b"files: could not delete ");
+        let _ = tairix_rt::stderr(name.as_bytes());
+        let _ = tairix_rt::stderr(b"\n");
+    }
+
+    /// State on `stderr` that the delete stopped for the given reason — a
+    /// fail-loud diagnosis for a refusal that is not a single item's unlink
+    /// (a too-deep tree, an unspellable path, an internal step error).
+    fn report_delete_stop(reason: &str) {
+        let _ = tairix_rt::stderr(b"files: ");
+        let _ = tairix_rt::stderr(reason.as_bytes());
+        let _ = tairix_rt::stderr(b"\n");
     }
 
     /// The window-local [`Point`] of a primary-button press, or `None` for any
@@ -1212,6 +1420,7 @@ mod program {
             rename: None,
             properties: None,
             owner: None,
+            delete: None,
             can_chown: tairix_rt::self_origin()
                 .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
         };

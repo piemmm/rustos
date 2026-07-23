@@ -178,7 +178,16 @@ can never diverge in navigation semantics, listing policy, or look.
   indicator shows; the total is unknown until the reads reveal it, so no
   fabricated percentage. This is the browser engine's own component-path
   traversal, distinct from `rm`'s coreutils removal engine — two consumers with
-  two data models, not one algorithm copied twice.
+  two data models, not one algorithm copied twice. The drawn verb is the
+  renderer's `build_delete_dialog` (a `lib/controls` `Dialog` naming the honest
+  target count and warning about folders, with the Action Warmth on the safe
+  Cancel, never the destructive Delete), `delete_dialog_rect` (centred/clamped
+  bounds), `draw_delete_dialog`, and the mirror `delete_dialog_action_at`
+  hit-test resolving a press to the Delete or Cancel button (`DELETE_CONFIRM_INDEX`
+  / `DELETE_CANCEL_INDEX`); the files app opens it on `Delete`, confirms with
+  `Enter`/Delete and cancels with `Escape`/Cancel, then drives the `DeleteWalk`
+  to completion over the user's own `fs_readdir`/`fs_unlink`. Only the write-capable
+  file manager builds and drives it — the read-only picker never deletes.
 - **New folder** (`mkdir`, `Browser::create_directory`,
   `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
   current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`

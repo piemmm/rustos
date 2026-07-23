@@ -201,6 +201,45 @@ fn dialog_action_activates_by_keyboard() {
 }
 
 #[test]
+fn dialog_action_rects_match_the_pointer_hit_geometry() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, DW, DH);
+    let mut dialog = Dialog::new("Confirm")
+        .with_actions(vec![Button::labelled("Cancel"), Button::labelled("OK")]);
+    let rects = dialog.action_rects(bounds, Scale::ONE, &theme, font());
+    // One rect per action, in action order.
+    assert_eq!(rects.len(), 2);
+    // A move-then-press-then-release at the reported centre of action 1
+    // activates action 1, proving `action_rects` reports the same geometry
+    // `on_pointer` routes clicks through (one definition, no divergence).
+    let target = rects[1];
+    let cx = target.origin.x + iv(target.width) / 2;
+    let cy = target.origin.y + iv(target.height) / 2;
+    assert_eq!(
+        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, font()),
+        None
+    );
+    assert_eq!(
+        dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font()),
+        None
+    );
+    assert_eq!(
+        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
+        Some(DialogAction::ActionActivated { index: 1 })
+    );
+}
+
+#[test]
+fn dialog_action_rects_are_empty_when_the_plate_has_no_interior() {
+    let theme = Theme::dark();
+    let dialog = Dialog::new("Confirm").with_actions(vec![Button::labelled("OK")]);
+    // A zero-area plate has no drawable interior, so there are no button rects
+    // (fail closed) rather than a phantom placement.
+    let rects = dialog.action_rects(Rect::new(0, 0, 0, 0), Scale::ONE, &theme, font());
+    assert!(rects.is_empty());
+}
+
+#[test]
 fn dialog_actions_are_right_aligned() {
     let theme = Theme::dark();
     let dialog = Dialog::new("Q").with_actions(vec![Button::new(

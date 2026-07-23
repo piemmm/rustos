@@ -162,6 +162,12 @@ impl Dialog {
         &self.title
     }
 
+    /// The dialog's message body, if any.
+    #[must_use]
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
     /// The dialog's inline reason, if any.
     #[must_use]
     pub fn reason(&self) -> Option<&str> {
@@ -274,6 +280,28 @@ impl Dialog {
         }
     }
 
+    /// The surface-pixel rectangles of the action buttons for `bounds`, in
+    /// action order (index `0` first).
+    ///
+    /// An empty vector when the plate has no drawable interior, and a
+    /// zero-width rect for any trailing button that did not fit the action
+    /// band. One definition so [`on_pointer`](Self::on_pointer) and an owner
+    /// that routes clicks through its own press-point hit-test resolve the
+    /// exact same button geometry rather than each re-deriving it.
+    #[must_use]
+    pub fn action_rects(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Vec<Rect> {
+        match Self::inner(bounds, scale, theme) {
+            Some(inner) => action_row_rects(&self.actions, inner, scale, theme, font),
+            None => Vec::new(),
+        }
+    }
+
     /// Feed a pointer event; an action that completes a click reports
     /// [`DialogAction::ActionActivated`].
     pub fn on_pointer(
@@ -284,8 +312,7 @@ impl Dialog {
         theme: &Theme,
         font: BitmapFont,
     ) -> Option<DialogAction> {
-        let inner = Self::inner(bounds, scale, theme)?;
-        let rects = action_row_rects(&self.actions, inner, scale, theme, font);
+        let rects = self.action_rects(bounds, scale, theme, font);
         let mut action = None;
         for (i, button) in self.actions.iter_mut().enumerate() {
             if let Some(rect) = rects.get(i) {

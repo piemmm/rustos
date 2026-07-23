@@ -40,9 +40,12 @@ FM8b's drawn permission (mode) control + its click-to-toggle/commit app wiring,
 FM8b's ownership-change model + its privileged `fs_set_owner`/`CAP_FS_CHOWN`
 kernel primitive, FM8b's drawn ownership control + its click-to-edit/commit app
 wiring,
-and FM4b's pure context-menu chrome model
+FM4b's pure context-menu chrome model,
+and FM7b's app-side Delete verb (the `Delete`-key modal confirmation `Dialog`
++ the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`)
 are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
-FM6b app-side spawn/delegation, the FM7b app-side move/copy/delete verbs,
+FM6b app-side spawn/delegation, the FM7b app-side move/copy verbs (and the
+delete progress-indicator + mid-run cancel follow-up),
 and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
@@ -642,6 +645,34 @@ multiple targets in listing order, the `TooDeep` bound, out-of-step fail-closed
 refusals leaving the walk put, and the interruption/resume holding its exact
 position). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
+**The app-side Delete verb is done.** The `files.app` `Run` binary binds the
+`Delete` key to a modal confirmation before any removal. `begin_delete` captures
+the selection with `Browser::plan_delete` (a no-op when nothing is selected —
+the plan is `None`, fail closed) and opens a `lib/controls::Dialog` built by the
+shared `render::build_delete_dialog`: the title names a single target or reports
+the honest count, the message warns when folders (and their contents) are among
+the removals, and the honest Action Warmth sits on the safe recommended
+**Cancel**, never the destructive **Delete** (§2.24). While the dialog is up it
+owns the window (`apply_modal_event` handles it first): `Escape`/Cancel dismiss,
+`Enter`/Delete confirm; a primary press routes through the mirror
+`render::delete_dialog_action_at` (over the dialog's own `Dialog::action_rects`),
+fail closed off a button. On confirm the app drives a `DeleteWalk` to completion
+— reading each directory with the same capability-checked listing call and
+shared decode the browser navigates with (`tairix_browse::vfs`), and
+`fs_unlink`ing each node depth-first (with `UnlinkFlags::DIRECTORY` for a
+directory-backed target) under the user's own identity, **no new capability** —
+then re-lists so a partial removal is shown honestly. It is bounded and fail
+closed: the first refused read or unlink stops the removal, states the reason on
+`stderr` (fail loud, §2.24), and leaves what was already removed removed rather
+than a fabricated success (§5.4). Only the write-capable file manager builds and
+drives this; the read-only picker never deletes. Host-tested in `lib/browse`
+(the confirm dialog's honest title/count + folder warning, the destructive/
+recommended action roles, `delete_dialog_rect` centering/clamp,
+`draw_delete_dialog` paint/degenerate-no-panic, and the `delete_dialog_action_at`
+full-window mirror + fail-closed) and `lib/controls` (`Dialog::action_rects`
+matching `on_pointer`'s geometry). Docs: `docs/src/desktop/apps.md`,
+`lib/browse`/`lib/controls` README + rustdoc.
+
 The remaining app-side verbs (still `planned`):
 
 - **Move** = `fs_rename` when source and target share a volume (the
@@ -654,20 +685,18 @@ The remaining app-side verbs (still `planned`):
   directory copy recurses depth-bounded; an error mid-copy stops, reports,
   and leaves a partial-copy marker rather than a silent half-result
   (§2.24, §5.4).
-- **Delete** (the pure `plan_delete` *and* `DeleteWalk` recursive-removal
-  models above are done): the app asks once (a `lib/controls::Dialog`, honest
-  warmth, using the plan's count and `has_directories`), then drives a
-  `DeleteWalk` over the `DeletePlan` — reading each directory (`fs_readdir`) and
-  `fs_unlink`ing each node depth-first — under the user's identity; a refusal is
-  an in-UI answer and the walk holds its position for Cancel.
-- **Progress + cancel** for long operations: a bounded progress indicator
-  (`lib/controls` `Progress`), a Cancel that stops at the next chunk
-  boundary; the window stays parked/responsive throughout (§2.23).
+- **Progress + cancel** for long operations (delete and copy alike): a bounded
+  progress indicator (`lib/controls` `Progress`) driven by `DeleteWalk::removed`
+  / the copy cursor, and a Cancel that stops at the next step/chunk boundary
+  with the window staying parked/responsive throughout (§2.23). The Delete verb
+  drives its walk to completion synchronously today; interleaving the drive with
+  the event loop (an incremental step budget per wake) and drawing the progress/
+  cancel surface is this separately-staged increment — the walk already holds
+  its exact position between steps, so no engine change is needed.
 - Host tests: the engine-side selection ranges, clipboard state machine,
   move-vs-copy volume decision, and chunked-copy resume/cancel/overrun are
   **done** in `lib/browse` (FM7a + the `execute` model above); the app-side
-  work adds partial-failure recovery and delete confirm/refuse over the VFS
-  seams.
+  move/copy work adds partial-failure recovery over the VFS seams.
 
 (**New Folder is done** — its drawn manager-only tool + `Ctrl+Shift+N` +
 create-then-inline-rename wiring landed with FM4b's chrome; see that stage.)
