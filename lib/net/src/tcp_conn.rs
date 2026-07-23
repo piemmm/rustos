@@ -11,26 +11,34 @@
 //! deterministic and replayable — the property tests and the fuzz
 //! state-machine driver exercise the exact code the live service runs.
 //!
-//! What is implemented here (N5b): the full RFC 9293 state machine
+//! What is implemented here (N5b + N6a congestion control + N6b-1 SACK loss
+//! recovery): the full RFC 9293 state machine
 //! (active and passive open, simultaneous open/close, teardown), send and
 //! receive windows over [`SeqNumber`], RFC 7323 window scaling and
 //! timestamps with PAWS, RFC 2018 SACK generation, RFC 6298 retransmission
-//! timeout with Karn's algorithm, fast retransmit on duplicate ACKs, zero-
-//! window (persist) probing, RFC 5961 in-window RST/SYN/ACK checks with
-//! rate-limited challenge ACKs, delayed ACKs, and the RFC 9293 user
-//! timeout. Congestion control (a pluggable policy), listeners with an
-//! accept queue, and SYN cookies are the next increment (N6); the send
-//! path here is flow-control-bounded only.
+//! timeout with Karn's algorithm, RFC 6675 SACK-based selective loss
+//! recovery (a bounded scoreboard drives `IsLost`/`SetPipe`/`NextSeg`,
+//! replacing go-back-N when the peer negotiated SACK; go-back-N remains the
+//! fallback after a timeout and when SACK is absent), fast retransmit on
+//! duplicate ACKs, zero-window (persist) probing, RFC 5961 in-window
+//! RST/SYN/ACK checks with rate-limited challenge ACKs, delayed ACKs, the
+//! RFC 9293 user timeout, and pluggable congestion control
+//! ([`crate::tcp::cc`]): the send path is bounded by both the peer's
+//! advertised window and the congestion window.
+//! Listeners with an accept queue and stateless SYN cookies are the next
+//! increment (N6b-2).
 //!
 //! Every table is bounded: the send and receive buffers and the
 //! out-of-order reassembly set are capped at construction (fail closed on
 //! overflow, never an attacker-sized allocation).
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 
+use crate::tcp::cc::{CongestionAlgorithm, CongestionControl};
 use crate::tcp::{SackBlock, SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
 use crate::timeutil::{from_nanos, nanos, NEVER};
 
@@ -161,6 +169,9 @@ pub struct TcpConfig {
     /// Minimum spacing between challenge ACKs (RFC 5961 §10 rate limit),
     /// so a hostile peer cannot induce an ACK storm.
     pub challenge_ack_interval: Duration64,
+    /// The congestion-control algorithm this connection uses (RFC 9438
+    /// CUBIC by default; see [`crate::tcp::cc`]).
+    pub congestion: CongestionAlgorithm,
 }
 
 impl Default for TcpConfig {
@@ -181,6 +192,7 @@ impl Default for TcpConfig {
             delayed_ack: millis(100),
             maximum_segment_lifetime: Duration64::from_secs(30),
             challenge_ack_interval: millis(500),
+            congestion: CongestionAlgorithm::Cubic,
         }
     }
 }
@@ -355,6 +367,204 @@ impl Reassembly {
     }
 }
 
+/// The RFC 6675 duplicate-acknowledgement threshold: three discontiguous
+/// SACK blocks above a byte (or the equivalent SACKed volume) mark it lost.
+const DUP_THRESH: u32 = 3;
+
+/// The maximum number of distinct SACKed ranges the loss-recovery
+/// scoreboard tracks. A coalesced scoreboard needs at most one range per
+/// hole in one window of in-flight data, but a reordering or hostile peer
+/// can fragment its selective acknowledgements; the count is capped so the
+/// state can never grow with attacker input (fail closed — extra ranges
+/// are dropped, which only makes recovery more conservative, never unsafe).
+const MAX_SACK_RANGES: usize = 64;
+
+/// The RFC 6675 SACK scoreboard: the set of send-sequence ranges the peer
+/// has selectively acknowledged, held as sorted, non-overlapping,
+/// non-adjacent `[left, right)` intervals within `(snd_una, snd_max]`.
+///
+/// This is the state RFC 6675 loss recovery reasons over: `is_lost`
+/// classifies a byte as lost from the SACK pattern above it, `pipe`
+/// estimates the bytes actually in flight, and `next_hole` walks the gaps
+/// the sender must fill. The scoreboard holds no payload — only sequence
+/// extents — so its footprint is a bounded list of range pairs, never a
+/// copy of the data.
+struct Scoreboard {
+    /// `(left, right)` SACKed ranges, sorted ascending by distance from a
+    /// reference (`snd_una`) and kept non-overlapping / non-adjacent.
+    ranges: Vec<(SeqNumber, SeqNumber)>,
+}
+
+impl Scoreboard {
+    fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
+
+    fn clear(&mut self) {
+        self.ranges.clear();
+    }
+
+    /// Fold the peer's SACK blocks into the board, clamped to the currently
+    /// outstanding window `(snd_una, snd_max]`, then coalesce and bound.
+    /// A block outside the window, empty, or with `right <= left` (modular)
+    /// is ignored — a hostile SACK can never inject state outside the data
+    /// actually in flight.
+    fn record(&mut self, blocks: &[SackBlock], snd_una: SeqNumber, snd_max: SeqNumber) {
+        // Drop everything at or below the cumulative ACK first: those bytes
+        // are delivered and no longer part of the board.
+        self.retain_above(snd_una);
+        for block in blocks {
+            let mut left = block.left;
+            let right = block.right;
+            // A well-formed block covers a non-empty forward range that lies
+            // within the bytes we have sent but not yet had cumulatively
+            // acknowledged.
+            if !left.lt(right) {
+                continue;
+            }
+            if left.lt(snd_una) {
+                left = snd_una;
+            }
+            if !left.lt(right) || right.gt(snd_max) || left.lt(snd_una) {
+                continue;
+            }
+            self.insert(left, right);
+        }
+        self.coalesce();
+        while self.ranges.len() > MAX_SACK_RANGES {
+            // Drop the highest range: the lowest holes drive retransmission,
+            // so keeping the ranges nearest `snd_una` preserves the
+            // decisions that matter (fail closed — a dropped range is simply
+            // treated as not-yet-SACKed).
+            self.ranges.pop();
+        }
+    }
+
+    /// Remove any SACKed range wholly at or below `snd_una`, trimming a
+    /// range that straddles it.
+    fn retain_above(&mut self, snd_una: SeqNumber) {
+        self.ranges.retain_mut(|(l, r)| {
+            if r.le(snd_una) {
+                return false;
+            }
+            if l.lt(snd_una) {
+                *l = snd_una;
+            }
+            true
+        });
+    }
+
+    fn insert(&mut self, left: SeqNumber, right: SeqNumber) {
+        self.ranges.push((left, right));
+    }
+
+    /// Sort and merge overlapping/adjacent ranges so the board is a set of
+    /// disjoint, non-touching intervals. Sorted by forward distance from the
+    /// lowest left edge, which is a valid ascending key within one window.
+    fn coalesce(&mut self) {
+        if self.ranges.is_empty() {
+            return;
+        }
+        let base = self
+            .ranges
+            .iter()
+            .map(|(l, _)| *l)
+            .reduce(|a, b| if a.lt(b) { a } else { b })
+            .unwrap_or_else(|| SeqNumber::new(0));
+        self.ranges.sort_by_key(|(l, _)| l.distance_from(base));
+        let mut merged: Vec<(SeqNumber, SeqNumber)> = Vec::with_capacity(self.ranges.len());
+        for (l, r) in self.ranges.drain(..) {
+            match merged.last_mut() {
+                Some((_, pr)) if l.le(*pr) => {
+                    if pr.lt(r) {
+                        *pr = r;
+                    }
+                }
+                _ => merged.push((l, r)),
+            }
+        }
+        self.ranges = merged;
+    }
+
+    /// Whether `seq` lies inside a SACKed range.
+    #[cfg(test)]
+    fn is_sacked(&self, seq: SeqNumber) -> bool {
+        self.ranges.iter().any(|(l, r)| seq.ge(*l) && seq.lt(*r))
+    }
+
+    /// The highest sequence number the peer has selectively acknowledged
+    /// (the right edge of the last range), or `None` when the board is empty.
+    fn high_sack(&self) -> Option<SeqNumber> {
+        self.ranges.last().map(|(_, r)| *r)
+    }
+
+    /// The number of SACKed bytes strictly above `seq` (RFC 6675 rule (2)).
+    fn sacked_bytes_above(&self, seq: SeqNumber) -> u32 {
+        let mut total = 0u32;
+        for (l, r) in &self.ranges {
+            let left = if l.gt(seq) { *l } else { seq };
+            if left.lt(*r) {
+                total = total.saturating_add(r.distance_from(left));
+            }
+        }
+        total
+    }
+
+    /// The number of discontiguous SACKed ranges that lie entirely above
+    /// `seq` (RFC 6675 rule (1) — the reordering-robust duplicate count).
+    fn ranges_above(&self, seq: SeqNumber) -> u32 {
+        u32::try_from(self.ranges.iter().filter(|(l, _)| l.gt(seq)).count()).unwrap_or(u32::MAX)
+    }
+
+    /// RFC 6675 `IsLost`: `seq` is lost when at least [`DUP_THRESH`]
+    /// discontiguous SACK ranges lie above it, or more than
+    /// `(DUP_THRESH − 1)·SMSS` bytes above it have been SACKed. Both terms
+    /// are computed from the ranges strictly above `seq`, so — because a
+    /// hole contains no SACK edges — the verdict is constant across a hole.
+    fn is_lost(&self, seq: SeqNumber, smss: u32) -> bool {
+        self.ranges_above(seq) >= DUP_THRESH
+            || self.sacked_bytes_above(seq) > (DUP_THRESH - 1).saturating_mul(smss)
+    }
+
+    /// Visit the unSACKed holes within `[from, to)` in ascending order,
+    /// calling `f(hole_left, hole_right)`. Stops early if `f` returns
+    /// `false`. Ranges are disjoint and sorted, so this is one linear walk.
+    fn for_each_hole<F: FnMut(SeqNumber, SeqNumber) -> bool>(
+        &self,
+        from: SeqNumber,
+        to: SeqNumber,
+        mut f: F,
+    ) {
+        if !from.lt(to) {
+            return;
+        }
+        let mut cursor = from;
+        for (l, r) in &self.ranges {
+            if r.le(cursor) {
+                continue;
+            }
+            if l.ge(to) {
+                break;
+            }
+            if l.gt(cursor) {
+                let hole_right = if l.lt(to) { *l } else { to };
+                if !f(cursor, hole_right) {
+                    return;
+                }
+            }
+            if r.gt(cursor) {
+                cursor = *r;
+            }
+            if cursor.ge(to) {
+                return;
+            }
+        }
+        if cursor.lt(to) {
+            f(cursor, to);
+        }
+    }
+}
+
 /// One segment the engine wants transmitted: the header metadata and the
 /// payload bytes (borrowed from the caller-visible `emit` scratch). The
 /// caller frames it (IP + Ethernet) and folds the checksum via
@@ -433,9 +643,31 @@ pub struct Tcb {
     /// segment sent exactly once is ever measured.
     rtt_sample: Option<(SeqNumber, u128)>,
 
-    // Fast retransmit (RFC 5681 §3.2, the trigger only; recovery is N6).
+    // Fast retransmit (RFC 5681 §3.2): three duplicate ACKs trigger an
+    // early retransmit and a congestion-control loss event.
     last_ack: SeqNumber,
     dup_ack_count: u32,
+
+    // Congestion control (RFC 5681 / RFC 9438). The policy owns `cwnd`; the
+    // TCB bounds every send by `min(snd_wnd, cwnd)` and feeds it the
+    // ACK/loss/timeout signals. `recover` is the RFC 6582 high-water mark:
+    // one multiplicative decrease per loss episode, cleared once the
+    // cumulative ACK passes it, so a burst of losses in one window cannot
+    // halve the window repeatedly.
+    cc: Box<dyn CongestionControl>,
+    recover: SeqNumber,
+    in_recovery: bool,
+
+    // RFC 6675 SACK-based loss recovery. Active only when the peer agreed to
+    // SACK; otherwise the connection uses the RFC 6582 NewReno go-back-N
+    // fast-retransmit path above. `scoreboard` is the set of selectively
+    // acknowledged send ranges; `high_rxt` is the highest sequence a
+    // rule-(1) retransmission has covered; `rescue_rxt` guards the single
+    // rule-(3) rescue retransmission per recovery episode.
+    scoreboard: Scoreboard,
+    sack_recovery: bool,
+    high_rxt: SeqNumber,
+    rescued: bool,
 
     // Zero-window persist (RFC 9293 §3.8.6.1).
     persist_deadline: u128,
@@ -472,6 +704,10 @@ enum Plan {
     /// A data and/or FIN segment: `len` payload bytes from `snd_nxt`, plus
     /// FIN when `fin` is set.
     Data { len: usize, fin: bool, probe: bool },
+    /// An RFC 6675 selective retransmission: `len` payload bytes from the
+    /// explicit `seq` (a hole in the SACK scoreboard), which — unlike
+    /// [`Plan::Data`] — does not advance `snd_nxt`/`snd_max`.
+    Retransmit { seq: SeqNumber, len: usize },
     /// A pure acknowledgement (no sequence-space consumption).
     Ack,
 }
@@ -483,11 +719,19 @@ impl Tcb {
         let zero = SeqNumber::new(0);
         let rto = RtoEstimator::new(&config);
         let ooo = Reassembly::new(config.max_reassembly_segments);
+        let cc = config.congestion.build(u32::from(DEFAULT_SEND_MSS));
         Self {
             config,
             state: State::Closed,
             local_port,
             remote_port,
+            cc,
+            recover: zero,
+            in_recovery: false,
+            scoreboard: Scoreboard::new(),
+            sack_recovery: false,
+            high_rxt: zero,
+            rescued: false,
             iss: zero,
             snd_una: zero,
             snd_nxt: zero,
@@ -786,6 +1030,7 @@ impl Tcb {
         // MTU once the 40-byte IPv6 header is added, and every full-size
         // segment would be silently dropped by the network layer.
         self.send_mss = self.peer_mss.min(self.config.local_mss.max(1));
+        self.cc.set_mss(u32::from(self.send_mss));
         if let Some(ws) = seg.options.window_scale {
             self.snd_wnd_shift = ws.min(MAX_WINDOW_SCALE);
         } else {
@@ -919,6 +1164,7 @@ impl Tcb {
             self.snd_wnd = u32::from(seg.window) << self.snd_wnd_shift;
             self.state = State::Established;
             self.became_established = true;
+            self.cc.init(u32::from(self.send_mss));
             if self.snd_una == self.snd_nxt {
                 self.rtx_deadline = NEVER;
             } else {
@@ -1006,6 +1252,7 @@ impl Tcb {
             self.drop_acked_data();
             self.state = State::Established;
             self.became_established = true;
+            self.cc.init(u32::from(self.send_mss));
             self.snd_wnd = u32::from(seg.window) << self.snd_wnd_shift;
             self.snd_wl1 = seg.seq;
             self.snd_wl2 = seg.ack;
@@ -1051,24 +1298,40 @@ impl Tcb {
     /// when the segment must be dropped without further processing.
     fn process_ack(&mut self, seg: &TcpSegment<'_>, now_ns: u128) -> bool {
         let ack = seg.ack;
+        let prev_una = self.snd_una;
+        let flight_before = self.snd_max.distance_from(prev_una);
         // ACK for something not yet sent: challenge and drop (RFC 5961 §5).
         if ack.gt(self.snd_nxt) {
             self.challenge_ack(now_ns);
             return false;
         }
+        // Fold the peer's selective acknowledgements into the scoreboard,
+        // clamped to the bytes actually in flight (RFC 6675). Only when SACK
+        // was negotiated; otherwise the connection uses NewReno go-back-N.
+        let use_sack = self.sack_permitted && self.config.enable_sack;
+        if use_sack {
+            self.scoreboard
+                .record(seg.options.sack(), prev_una, self.snd_max);
+        }
         if ack.le(self.snd_una) {
-            // Duplicate or stale ACK. Count pure duplicates for fast
-            // retransmit (RFC 5681 §3.2): same ack, no data, no window move,
-            // data still outstanding.
-            let outstanding = self.snd_una != self.snd_nxt;
-            if ack == self.snd_una
+            // Duplicate or stale ACK. Count pure duplicates (RFC 5681 §3.2):
+            // same ack, no data, no window move, data still outstanding.
+            let outstanding = self.snd_una.lt(self.snd_max);
+            let pure_dup = ack == self.snd_una
                 && seg.payload.is_empty()
                 && !seg.flags.fin()
                 && outstanding
-                && u32::from(seg.window) << self.snd_wnd_shift == self.snd_wnd
-            {
+                && u32::from(seg.window) << self.snd_wnd_shift == self.snd_wnd;
+            if pure_dup {
                 self.dup_ack_count = self.dup_ack_count.saturating_add(1);
-                if self.dup_ack_count == 3 {
+            }
+            if outstanding {
+                if use_sack {
+                    // RFC 6675 §5: enter recovery on the duplicate-ACK
+                    // threshold or as soon as the scoreboard marks the oldest
+                    // unacknowledged byte lost.
+                    self.maybe_enter_sack_recovery(now_ns);
+                } else if pure_dup && self.dup_ack_count == DUP_THRESH {
                     self.fast_retransmit(now_ns);
                 }
             }
@@ -1077,9 +1340,38 @@ impl Tcb {
             self.take_rtt_sample(ack, now_ns);
             self.snd_una = ack;
             self.drop_acked_data();
+            if use_sack {
+                self.scoreboard.retain_above(self.snd_una);
+                // Keep HighRxt at least at the highest acknowledged octet.
+                let acked_octet = self.snd_una.sub(1);
+                if self.high_rxt.lt(acked_octet) {
+                    self.high_rxt = acked_octet;
+                }
+            }
             self.dup_ack_count = 0;
             self.rtx_count = 0;
-            if self.snd_una == self.snd_nxt {
+            // Congestion control: a loss episode ends once the cumulative
+            // ACK passes the high-water mark recorded at the loss (RFC 6582
+            // NewReno / RFC 6675). Grow the window only outside an episode;
+            // during recovery the window stays at the reduced value.
+            let acked = ack.distance_from(prev_una).min(flight_before);
+            if self.in_recovery {
+                if self.recover.le(ack) {
+                    self.in_recovery = false;
+                    self.sack_recovery = false;
+                    self.rescued = false;
+                    self.scoreboard.clear();
+                }
+            } else {
+                self.cc.on_ack(acked, flight_before, now_ns);
+                // A cumulative ACK that still leaves the scoreboard marking a
+                // hole lost starts SACK recovery even without three bare
+                // duplicates (RFC 6675 §5's IsLost trigger).
+                if use_sack {
+                    self.maybe_enter_sack_recovery(now_ns);
+                }
+            }
+            if self.snd_una == self.snd_max {
                 self.rtx_deadline = NEVER;
                 self.user_timeout_deadline = NEVER;
             } else {
@@ -1124,13 +1416,211 @@ impl Tcb {
     }
 
     /// Retransmit the oldest unacknowledged segment now (RFC 5681 fast
-    /// retransmit). Congestion-window recovery is N6; this only re-sends.
+    /// retransmit) and, on the first entry per loss window, drive the
+    /// congestion-control multiplicative decrease (RFC 6582 fast recovery).
     fn fast_retransmit(&mut self, now_ns: u128) {
+        // Enter fast recovery at most once per loss window (RFC 6582): apply
+        // the multiplicative decrease and remember the highest sequence sent
+        // so the episode ends when it is cumulatively acknowledged.
+        if !self.in_recovery {
+            let flight = self.snd_max.distance_from(self.snd_una);
+            self.cc.on_loss(flight, now_ns);
+            self.recover = self.snd_max;
+            self.in_recovery = true;
+        }
         self.snd_nxt = self.snd_una;
         // Karn: cancel any in-flight sample so the retransmitted range is
         // never measured.
         self.rtt_sample = None;
         self.restart_rtx(now_ns);
+    }
+
+    /// The effective send MSS in bytes (at least one), used as `SMSS`
+    /// throughout the RFC 6675 loss-recovery arithmetic.
+    fn smss(&self) -> u32 {
+        u32::from(self.send_mss).max(1)
+    }
+
+    /// Enter RFC 6675 SACK-based fast recovery if the loss condition holds
+    /// and we are not already recovering: at least [`DUP_THRESH`] duplicate
+    /// acknowledgements, or the scoreboard marking the oldest unacknowledged
+    /// byte lost. Applies the one multiplicative decrease per episode and
+    /// records the RFC 6582 recovery high-water mark.
+    fn maybe_enter_sack_recovery(&mut self, now_ns: u128) {
+        if self.sack_recovery || self.in_recovery {
+            return;
+        }
+        if !self.snd_una.lt(self.snd_max) {
+            return;
+        }
+        let trigger =
+            self.dup_ack_count >= DUP_THRESH || self.scoreboard.is_lost(self.snd_una, self.smss());
+        if !trigger {
+            return;
+        }
+        let flight = self.snd_max.distance_from(self.snd_una);
+        self.cc.on_loss(flight, now_ns);
+        self.recover = self.snd_max;
+        self.in_recovery = true;
+        self.sack_recovery = true;
+        // HighRxt is the highest octet retransmitted this episode; before any
+        // retransmission that is the highest *acknowledged* octet
+        // (`snd_una - 1`), so NextSeg's `S2 > HighRxt` makes `snd_una` itself
+        // — the first hole byte — eligible to retransmit.
+        self.high_rxt = self.snd_una.sub(1);
+        self.rescued = false;
+        // Karn: a retransmission is about to cover this window, so no
+        // in-flight sample may be measured from it.
+        self.rtt_sample = None;
+        self.restart_rtx(now_ns);
+    }
+
+    /// RFC 6675 `SetPipe`: the estimate of bytes currently in flight. Walks
+    /// the unSACKed holes in `[snd_una, snd_max)`; a hole's octets count
+    /// once if not lost (still expected in the network) and once if they
+    /// have been retransmitted (`<= high_rxt`). SACKed octets are not in
+    /// flight and are skipped by construction.
+    fn set_pipe(&self) -> u32 {
+        let smss = self.smss();
+        let high_rxt = self.high_rxt;
+        let mut pipe = 0u32;
+        self.scoreboard
+            .for_each_hole(self.snd_una, self.snd_max, |hl, hr| {
+                if !self.scoreboard.is_lost(hl, smss) {
+                    pipe = pipe.saturating_add(hr.distance_from(hl));
+                }
+                if hl.le(high_rxt) {
+                    let rtx_end = high_rxt.add(1);
+                    let end = if rtx_end.lt(hr) { rtx_end } else { hr };
+                    if end.gt(hl) {
+                        pipe = pipe.saturating_add(end.distance_from(hl));
+                    }
+                }
+                true
+            });
+        pipe
+    }
+
+    /// The number of buffered bytes available to (re)send starting at `seq`,
+    /// capped by the negotiated payload size and the exclusive upper bound
+    /// `limit` (a hole edge or a flow-control edge).
+    fn segment_len(&self, seq: SeqNumber, limit: SeqNumber, max_payload: usize) -> usize {
+        if !seq.lt(limit) {
+            return 0;
+        }
+        let offset = seq.distance_from(self.send_data_start) as usize;
+        let buffered = self.tx.len().saturating_sub(offset);
+        buffered
+            .min(limit.distance_from(seq) as usize)
+            .min(max_payload)
+    }
+
+    /// RFC 6675 §5 transmission during SACK recovery: bounded by the
+    /// congestion window through the `pipe` estimate, choose the next
+    /// segment via `NextSeg` — a lost hole to retransmit (rule 1), fresh
+    /// data (rule 2), or a single rescue retransmission (rule 3).
+    fn plan_sack(&self, now_ns: u128) -> Option<Plan> {
+        let cwnd = self.cc.cwnd();
+        let pipe = self.set_pipe();
+        if pipe >= cwnd {
+            return None;
+        }
+        let max_payload = (self.send_mss as usize)
+            .saturating_sub(self.data_option_len())
+            .max(1);
+        let smss = self.smss();
+
+        // NextSeg rule (1): the lowest lost hole that extends above HighRxt,
+        // below the highest SACKed byte (there must be SACKed data above it).
+        if let Some(high_sack) = self.scoreboard.high_sack() {
+            let mut chosen: Option<(SeqNumber, SeqNumber)> = None;
+            self.scoreboard
+                .for_each_hole(self.snd_una, high_sack, |hl, hr| {
+                    if !self.scoreboard.is_lost(hl, smss) {
+                        return true;
+                    }
+                    let start = if hl.gt(self.high_rxt) {
+                        hl
+                    } else {
+                        self.high_rxt.add(1)
+                    };
+                    if start.lt(hr) {
+                        chosen = Some((start, hr));
+                        return false;
+                    }
+                    true
+                });
+            if let Some((start, hole_end)) = chosen {
+                let len = self.segment_len(start, hole_end, max_payload);
+                if len > 0 {
+                    return Some(Plan::Retransmit { seq: start, len });
+                }
+            }
+        }
+
+        // NextSeg rule (2): send fresh data from the frontier, bounded by the
+        // flow-control window and the room the congestion window still has.
+        if let Some(plan) = self.plan_new_data(pipe, cwnd, max_payload) {
+            return Some(plan);
+        }
+
+        // NextSeg rule (3): a single rescue retransmission per episode of the
+        // lowest not-yet-retransmitted hole below the highest SACKed byte,
+        // so a hole the `is_lost` test has not (yet) condemned need not wait
+        // for the retransmission timeout. Searching from `high_rxt + 1` (not
+        // `snd_una`) guarantees it never re-sends data rule (1) already
+        // retransmitted.
+        let _ = now_ns;
+        if !self.rescued {
+            if let Some(high_sack) = self.scoreboard.high_sack() {
+                let from = self.high_rxt.add(1);
+                if from.lt(high_sack) {
+                    let mut rescue: Option<(SeqNumber, SeqNumber)> = None;
+                    self.scoreboard.for_each_hole(from, high_sack, |hl, hr| {
+                        rescue = Some((hl, hr));
+                        false
+                    });
+                    if let Some((start, hole_end)) = rescue {
+                        let len = self.segment_len(start, hole_end, max_payload);
+                        if len > 0 {
+                            return Some(Plan::Retransmit { seq: start, len });
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Plan a fresh-data (or FIN) segment from the send frontier while in
+    /// SACK recovery, bounded by both the peer's advertised window and the
+    /// congestion room `cwnd - pipe`.
+    fn plan_new_data(&self, pipe: u32, cwnd: u32, max_payload: usize) -> Option<Plan> {
+        let offset = self.snd_nxt.distance_from(self.send_data_start) as usize;
+        let avail = self.tx.len().saturating_sub(offset);
+        let fc_edge = self.snd_una.add(self.snd_wnd);
+        let fc_room = if fc_edge.gt(self.snd_nxt) {
+            fc_edge.distance_from(self.snd_nxt) as usize
+        } else {
+            0
+        };
+        let cc_room = cwnd.saturating_sub(pipe) as usize;
+        let len = avail.min(fc_room).min(cc_room).min(max_payload);
+        let mut fin = false;
+        if let Some(fseq) = self.fin_seq {
+            if self.snd_nxt.add(as_u32(len)) == fseq && self.snd_nxt.le(fseq) {
+                fin = true;
+            }
+        }
+        if len > 0 || fin {
+            Some(Plan::Data {
+                len,
+                fin,
+                probe: false,
+            })
+        } else {
+            None
+        }
     }
 
     /// Accept the segment's payload and/or FIN (RFC 9293 §3.10.7.4 seventh
@@ -1262,11 +1752,31 @@ impl Tcb {
             });
         }
 
+        // During RFC 6675 SACK recovery the segmentizer is scoreboard-driven
+        // (retransmit lost holes, then fresh data, then a rescue) rather than
+        // the linear-from-`snd_nxt` path below.
+        if self.sack_recovery {
+            if let Some(plan) = self.plan_sack(now_ns) {
+                return Some(plan);
+            }
+            if self.ack_pending
+                && (self.ack_immediate
+                    || (self.delayed_ack_deadline != NEVER && now_ns >= self.delayed_ack_deadline))
+            {
+                return Some(Plan::Ack);
+            }
+            return None;
+        }
+
         // Data and/or FIN.
         let offset = self.snd_nxt.distance_from(self.send_data_start) as usize;
         let avail = self.tx.len().saturating_sub(offset);
         let in_flight = self.snd_nxt.distance_from(self.snd_una);
-        let usable = self.snd_wnd.saturating_sub(in_flight) as usize;
+        // The sender is bounded by both the peer's advertised (flow-control)
+        // window and the congestion window (RFC 5681 §4.1): it may keep at
+        // most `min(snd_wnd, cwnd)` bytes in flight.
+        let window = self.snd_wnd.min(self.cc.cwnd());
+        let usable = window.saturating_sub(in_flight) as usize;
         // A data segment's payload is the negotiated MSS *minus* the TCP
         // options it carries (RFC 6691): the MSS counts data only, so
         // timestamps/SACK bytes must come out of the payload or the whole
@@ -1359,6 +1869,26 @@ impl Tcb {
                     source_port: self.local_port,
                     destination_port: self.remote_port,
                     seq: self.snd_nxt,
+                    ack: self.rcv_nxt,
+                    flags,
+                    window: self.advertised_window(),
+                    urgent: 0,
+                    options: self.data_options(ts),
+                };
+                (meta, payload)
+            }
+            Plan::Retransmit { seq, len } => {
+                let offset = seq.distance_from(self.send_data_start) as usize;
+                let payload: alloc::vec::Vec<u8> =
+                    self.tx.iter().skip(offset).take(*len).copied().collect();
+                let mut flags = TcpFlags::ACK;
+                if *len > 0 && offset + *len >= self.tx.len() {
+                    flags = flags | TcpFlags::PSH;
+                }
+                let meta = TcpSegmentMeta {
+                    source_port: self.local_port,
+                    destination_port: self.remote_port,
+                    seq: *seq,
                     ack: self.rcv_nxt,
                     flags,
                     window: self.advertised_window(),
@@ -1461,6 +1991,27 @@ impl Tcb {
                 }
                 self.clear_ack_owed();
             }
+            Plan::Retransmit { seq, len } => {
+                // A selective retransmission never advances the send frontier
+                // (`snd_nxt`/`snd_max`) and — by Karn's algorithm — is never
+                // timed for an RTT sample. It advances `high_rxt` (the highest
+                // octet a rule-(1) retransmit has covered); a retransmission
+                // of already-covered data (`seq <= high_rxt`) is the one
+                // rule-(3) rescue this episode allows.
+                if !seq.gt(self.high_rxt) {
+                    self.rescued = true;
+                }
+                let last = seq.add(as_u32(*len)).sub(1);
+                if last.gt(self.high_rxt) {
+                    self.high_rxt = last;
+                }
+                self.arm_rtx(now_ns);
+                if self.user_timeout_deadline == NEVER {
+                    self.user_timeout_deadline =
+                        now_ns.saturating_add(nanos(self.config.user_timeout));
+                }
+                self.clear_ack_owed();
+            }
             Plan::Ack => self.clear_ack_owed(),
         }
     }
@@ -1499,7 +2050,7 @@ impl Tcb {
             return;
         }
 
-        let outstanding = self.snd_una != self.snd_nxt;
+        let outstanding = self.snd_una.lt(self.snd_max);
 
         if outstanding
             && self.user_timeout_deadline != NEVER
@@ -1518,7 +2069,19 @@ impl Tcb {
                 return;
             }
             self.rto.backoff();
-            // Go-back-N: resend from the oldest unacknowledged byte.
+            // RFC 5681 §3.1: a timeout collapses the congestion window to
+            // one segment and restarts slow start, ending any fast recovery.
+            let flight = self.snd_max.distance_from(self.snd_una);
+            self.cc.on_rto(flight, now_ns);
+            self.in_recovery = false;
+            // A timeout abandons SACK recovery: the scoreboard is cleared and
+            // the sender falls back to go-back-N from the oldest
+            // unacknowledged byte (RFC 6675 §5.1). Future selective
+            // acknowledgements rebuild the board.
+            self.sack_recovery = false;
+            self.scoreboard.clear();
+            self.high_rxt = self.snd_una.sub(1);
+            self.rescued = false;
             self.snd_nxt = self.snd_una;
             self.rtt_sample = None;
             self.dup_ack_count = 0;
@@ -1533,7 +2096,7 @@ impl Tcb {
     #[must_use]
     pub fn next_deadline(&self) -> Option<Duration64> {
         let mut earliest = NEVER;
-        let outstanding = self.snd_una != self.snd_nxt;
+        let outstanding = self.snd_una.lt(self.snd_max);
         if outstanding {
             earliest = earliest.min(self.rtx_deadline);
             earliest = earliest.min(self.user_timeout_deadline);

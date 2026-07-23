@@ -24,16 +24,19 @@
 
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::state::{ControlState, SelectionState};
 use tairix_controls::{Card, ScrollBar, TableCell, TableRow};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_raster::{Color, Surface};
+use tairix_raster::Surface;
 use tairix_theme::{Palette, Theme};
 
+use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
+use crate::chrome;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
@@ -72,7 +75,7 @@ pub fn render<S: DirectorySource>(
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
-    draw_path_bar(&mut surface, font, palette, &browser.path(), row_height);
+    draw_path_bar(&mut surface, font, palette, browser, row_height);
 
     let content = content_viewport(viewport, theme);
     match browser.view_mode() {
@@ -83,12 +86,21 @@ pub fn render<S: DirectorySource>(
     Some(surface)
 }
 
-/// Fill the top path bar and draw the current directory's path into it.
-fn draw_path_bar(
+/// Fill the top path bar and draw the current directory as a clickable
+/// breadcrumb trail: the root crumb followed by one crumb per path component,
+/// right-anchored so the current directory stays visible when the trail
+/// overflows (`plans/NEW-FILEMANAGER.md` `FM4b`).
+///
+/// Ancestor crumbs are drawn in the accent colour to read as navigable; the
+/// terminal crumb (the current directory) is drawn solid to read as "you are
+/// here" and is inert; the separators between them are muted. The placement is
+/// the shared [`breadcrumb::layout`], so the hit-test ([`crumb_at`]) resolves a
+/// click to exactly the crumb painted here (§2.2).
+fn draw_path_bar<S: DirectorySource>(
     surface: &mut Surface,
     font: BitmapFont,
     palette: &Palette,
-    path: &str,
+    browser: &Browser<S>,
     row_height: u32,
 ) {
     surface.fill_rect(
@@ -98,14 +110,79 @@ fn draw_path_bar(
         row_height,
         palette.surface_raised.into(),
     );
-    draw_label(
-        surface,
-        font,
-        0,
-        row_height,
-        path,
-        palette.on_surface.into(),
+    let crumbs = chrome::breadcrumbs(browser);
+    let widths = crumb_widths(&crumbs, font);
+    let sep_width = font.text_width(SEPARATOR);
+    let placed = breadcrumb::layout(&widths, surface.width(), LABEL_PADDING, sep_width);
+    let y = row_height.saturating_sub(font.glyph_height()) / 2;
+    let y = to_i32(y);
+    for (position, crumb) in placed.iter().zip(crumbs.iter()) {
+        // The separator sits in the gap before every crumb but the first,
+        // drawn from the previous crumb's right edge so it lands exactly in
+        // the space the layout reserved for it.
+        if position.index > 0 {
+            let sep_x = position.x.saturating_sub(to_i32(sep_width));
+            font.draw_text(
+                surface,
+                sep_x,
+                y,
+                SEPARATOR,
+                palette.on_surface_muted.into(),
+            );
+        }
+        let color = if crumb.is_current() {
+            palette.on_surface
+        } else {
+            palette.accent
+        };
+        font.draw_text(surface, position.x, y, crumb.label(), color.into());
+    }
+}
+
+/// The rendered pixel width of each crumb's label, in crumb order — the
+/// per-crumb measurement the shared [`breadcrumb::layout`] places from.
+fn crumb_widths(crumbs: &[chrome::Crumb], font: BitmapFont) -> Vec<u32> {
+    crumbs
+        .iter()
+        .map(|crumb| font.text_width(crumb.label()))
+        .collect()
+}
+
+/// The ancestor depth to [`navigate_to_depth`](Browser::navigate_to_depth) for
+/// a click at window-local pixel `point`, or `None` when the click is not on a
+/// navigable crumb — outside the path bar row, on a separator gap, on the
+/// inert current crumb, or past a crumb clipped off the trail's left edge.
+///
+/// This mirrors the drawn path bar's own placement through the shared
+/// [`breadcrumb::layout`], so a pointer-driven jump lands on exactly the crumb
+/// the user clicked (§2.2). Unlike [`entry_index_at`] it needs no theme: the
+/// path bar spans the whole window width, not the scrollbar-inset content area.
+#[must_use]
+pub fn crumb_at<S: DirectorySource>(
+    browser: &Browser<S>,
+    font: BitmapFont,
+    viewport: Rect,
+    point: Point,
+) -> Option<usize> {
+    let y = u32::try_from(point.y).ok()?;
+    if y >= row_height(font) {
+        return None;
+    }
+    let crumbs = chrome::breadcrumbs(browser);
+    let widths = crumb_widths(&crumbs, font);
+    let placed = breadcrumb::layout(
+        &widths,
+        viewport.width,
+        LABEL_PADDING,
+        font.text_width(SEPARATOR),
     );
+    let index = breadcrumb::crumb_at(&placed, point.x, viewport.width)?;
+    let crumb = crumbs.get(index)?;
+    if crumb.is_current() {
+        None
+    } else {
+        Some(crumb.depth())
+    }
 }
 
 /// Draw the visible list rows below the path bar as shared [`TableRow`]s,
@@ -429,37 +506,6 @@ fn view_layout_for<S: DirectorySource>(
         ViewMode::List => ViewLayout::List(list_view(browser, font, content)),
         ViewMode::Grid => ViewLayout::Grid(grid_view(browser, font, content)),
     }
-}
-
-/// Draw `text` leading-aligned and vertically centred within the row spanning
-/// the full surface width at top `y` with height `row_height`. Text wider than
-/// the row is truncated to what fits.
-fn draw_label(
-    surface: &mut Surface,
-    font: BitmapFont,
-    y: u32,
-    row_height: u32,
-    text: &str,
-    color: Color,
-) {
-    if text.is_empty() {
-        return;
-    }
-    let usable = surface
-        .width()
-        .saturating_sub(LABEL_PADDING.saturating_mul(2));
-    let fitted = font.truncate_to_width(text, usable);
-    if fitted.is_empty() {
-        return;
-    }
-    let y_offset = row_height.saturating_sub(font.glyph_height()) / 2;
-    font.draw_text(
-        surface,
-        to_i32(LABEL_PADDING),
-        to_i32(y.saturating_add(y_offset)),
-        fitted,
-        color,
-    );
 }
 
 /// Saturating `u32` → `i32`.

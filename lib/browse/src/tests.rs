@@ -546,6 +546,108 @@ fn a_missing_directory_surfaces_the_fetch_refusal() {
     );
 }
 
+// --- FM4b: the clickable breadcrumb path bar -----------------------------
+
+#[test]
+fn breadcrumb_layout_left_aligns_when_the_trail_fits() {
+    use crate::breadcrumb::layout;
+    // widths 10/20/30, pad 4, sep 6: full = 10+6+20+6+30 = 72 ≤ usable
+    // (200-8 = 192), so the strip starts at `pad` and runs left to right.
+    let placed = layout(&[10, 20, 30], 200, 4, 6);
+    assert_eq!(placed.len(), 3);
+    assert_eq!((placed[0].x, placed[0].width), (4, 10));
+    assert_eq!((placed[1].x, placed[1].width), (20, 20));
+    assert_eq!((placed[2].x, placed[2].width), (46, 30));
+}
+
+#[test]
+fn breadcrumb_layout_right_anchors_when_the_trail_overflows() {
+    use crate::breadcrumb::layout;
+    // The same strip (full = 72) in a 40-wide bar (usable = 32) cannot fit,
+    // so the trail slides left: the leading crumbs go off-screen (negative x)
+    // and the terminal crumb's right edge sits flush at bar_width - pad = 36.
+    let placed = layout(&[10, 20, 30], 40, 4, 6);
+    assert_eq!(placed[0].x, -36);
+    assert_eq!(placed[1].x, -20);
+    assert_eq!(placed[2].x, 6);
+    assert_eq!(placed[2].x + i32::try_from(placed[2].width).unwrap(), 36);
+}
+
+#[test]
+fn breadcrumb_layout_is_empty_for_no_crumbs() {
+    assert!(crate::breadcrumb::layout(&[], 200, 4, 6).is_empty());
+}
+
+#[test]
+fn breadcrumb_crumb_at_resolves_labels_and_rejects_gaps() {
+    use crate::breadcrumb::{crumb_at, layout};
+    let placed = layout(&[10, 20, 30], 200, 4, 6);
+    // A column inside a crumb resolves to it; the right edge is exclusive.
+    assert_eq!(crumb_at(&placed, 5, 200), Some(0));
+    assert_eq!(crumb_at(&placed, 13, 200), Some(0));
+    assert_eq!(crumb_at(&placed, 14, 200), None); // separator gap
+    assert_eq!(crumb_at(&placed, 20, 200), Some(1));
+    assert_eq!(crumb_at(&placed, 75, 200), Some(2));
+    assert_eq!(crumb_at(&placed, 76, 200), None); // just past the last crumb
+                                                  // A negative column and a column at/after the bar width never resolve.
+    assert_eq!(crumb_at(&placed, -1, 200), None);
+    assert_eq!(crumb_at(&placed, 200, 200), None);
+}
+
+#[test]
+fn breadcrumb_crumb_at_ignores_crumbs_clipped_off_the_left() {
+    use crate::breadcrumb::{crumb_at, layout};
+    // In the overflow case only the terminal crumb ([6, 36)) is on screen;
+    // the off-screen ancestors (negative x) never answer a click.
+    let placed = layout(&[10, 20, 30], 40, 4, 6);
+    assert_eq!(crumb_at(&placed, 10, 40), Some(2));
+    assert_eq!(crumb_at(&placed, 5, 40), None); // gap before the visible crumb
+    assert_eq!(crumb_at(&placed, 0, 40), None); // where an off-screen crumb ends
+}
+
+#[test]
+fn render_crumb_at_mirrors_the_drawn_path_bar() {
+    use crate::breadcrumb::SEPARATOR;
+    use crate::render::{crumb_at, row_height};
+    use tairix_geometry::Point;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let header = row_height(font);
+    let vp = Rect::new(0, 0, 200, header * 4);
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
+
+    // At the root the only crumb is the current directory, which is inert:
+    // no click in the path bar resolves to a navigable crumb.
+    assert_eq!(crumb_at(&browser, font, vp, Point::new(4, 0)), None);
+
+    // Descend into /System; now "/" is a navigable ancestor at depth 0 and
+    // "System" is the inert current crumb.
+    let sys = browser
+        .entries()
+        .iter()
+        .position(|e| e.name() == "System")
+        .expect("fixture has System");
+    browser.open_index(sys).expect("descend into /System");
+    assert_eq!(browser.path(), "/System");
+    // The root crumb is drawn at the left inset (x = 4).
+    assert_eq!(crumb_at(&browser, font, vp, Point::new(4, 0)), Some(0));
+    // A click on the current "System" crumb (drawn after "/" and the
+    // separator) is inert.
+    let system_x =
+        4 + i32::try_from(font.text_width("/") + font.text_width(SEPARATOR)).unwrap() + 1;
+    assert_eq!(crumb_at(&browser, font, vp, Point::new(system_x, 0)), None);
+    // A click below the path bar row is never a crumb (it is the item area).
+    assert_eq!(
+        crumb_at(
+            &browser,
+            font,
+            vp,
+            Point::new(4, i32::try_from(header).unwrap())
+        ),
+        None
+    );
+}
+
 // --- FM1: richer entries, bundle recognition, and the shared sort --------
 
 use crate::entry::{is_bundle_name, EntryKind};

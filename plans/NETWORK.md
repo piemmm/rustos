@@ -968,17 +968,103 @@ the whole is too large for one change and each leaves the tree working.
   `tcp_bulk_transfer_over_ipv6_respects_the_link_mtu` drives a multi-segment
   transfer over a real v6 link and asserts every byte arrives in order.
 
-### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[ ]`
-- `listen`/`accept` with bounded accept + SYN queues; overflow ⇒
-  stateless SYN cookies (RFC 4987) with the documented option-loss
-  trade-off; `CAP_NET_BIND_PRIVILEGED` introduced + enforced.
-- Congestion control behind a pluggable `CongestionControl` trait
-  (§17.1 scheduler-policy precedent): CUBIC (RFC 9438) default,
-  NewReno (RFC 6582) sibling — conformance suite both must pass; RFC
-  2018 SACK + RFC 6675 loss recovery.
-- Adversarial tests: SYN flood soak (bounded memory asserted), RST/data
-  injection corpus (RFC 5961 behaviour), connection-exhaustion
-  fail-closed, cookie round-trip property tests.
+### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[~]`
+
+#### N6a — pluggable congestion control `[x]`
+- `lib/net::tcp::cc` is the pluggable congestion-control policy layer, the
+  §17.1 scheduler-policy precedent applied to TCP: a `CongestionControl`
+  trait the connection consults for its send window, RFC 9438 **CUBIC**
+  (the default) and RFC 6582 **NewReno** siblings, and a shared conformance
+  suite both must pass (RFC 6928 initial window, slow-start vs.
+  congestion-avoidance growth, multiplicative decrease on loss, one-segment
+  collapse on timeout, monotonic growth under a pure ACK stream). Windows
+  are byte counts; all arithmetic — including CUBIC's `K` and window target
+  over an integer cube root (`icbrt`) — is exact integer fixed-point, so the
+  `no_std` crate needs no floating point or libm (§2.12).
+- `TcpConfig.congestion` selects the algorithm; `Tcb` stores the boxed
+  policy, bounds every send by `min(snd_wnd, cwnd)` in `plan_segment`, and
+  feeds it `on_ack`/`on_loss`/`on_rto`. Fast retransmit (three duplicate
+  ACKs) drives the decrease **once per loss window** through the RFC 6582
+  `recover` high-water mark; an RTO collapses to one segment and restarts
+  slow start. Retransmission stays the existing go-back-N.
+- Covered by the `tcp::cc` conformance + unit suite (both policies, the
+  cube root, CUBIC's Reno-friendliness and convex overshoot) and the
+  `tcp::conn` end-to-end tests (initial-window bound, cwnd opening on ACKs,
+  a full bulk transfer under each policy); the existing lossy/reordering
+  property test now also exercises cwnd + go-back-N together. Docs in
+  `lib/net` lib.rs, `lib/net/README.md`, `docs/src/lib/net.md`.
+
+#### N6b-1 — RFC 6675 SACK-based selective loss recovery `[x]`
+- `lib/net::tcp::conn` now recovers loss selectively when the peer
+  negotiated SACK, replacing go-back-N. A bounded `Scoreboard` records the
+  peer's SACKed send ranges — coalesced, capped at `MAX_SACK_RANGES`, and
+  clamped to the outstanding window `(snd_una, snd_max]`, so a reordering
+  or hostile peer can neither grow the state nor inject ranges outside the
+  data actually in flight (fail closed; the board holds only sequence
+  extents, never payload).
+- From the board the engine computes RFC 6675's three functions:
+  `is_lost` (a byte is lost once ≥ `DUP_THRESH` discontiguous SACK ranges,
+  or > `(DUP_THRESH−1)·SMSS` SACKed bytes, lie above it — constant across a
+  hole because a hole contains no SACK edges), `set_pipe` (the in-flight
+  estimate bounding transmission against `cwnd`), and the `NextSeg` walk in
+  `plan_sack` (rule 1: the lowest lost hole above `HighRxt`; rule 2: fresh
+  data; rule 3: one rescue retransmission per episode). `Plan::Retransmit`
+  carries an explicit `seq` and never advances the send frontier.
+- Recovery entry is RFC 6675 §5 (`DUP_THRESH` duplicate ACKs **or**
+  `is_lost(snd_una)`); the one multiplicative decrease per episode uses the
+  RFC 6582 `recover` high-water mark. A retransmission timeout clears the
+  board and falls back to go-back-N (§5.1); `HighRxt` initialises to
+  `snd_una − 1` so the first hole byte is eligible. SACK stays negotiated
+  via the existing SYN option; go-back-N remains the fallback when the peer
+  did not permit SACK.
+- Covered by `tcp::conn::tests`: scoreboard unit tests (lost-by-count,
+  lost-by-volume, coalescing, out-of-window/hostile-block rejection,
+  bounded-under-fragmentation), and end-to-end recovery tests
+  (selective retransmit of a single lost segment with no RTO and no
+  go-back-N amplification; two-hole recovery with no RTO). The
+  `fuzz_net_tcp` state-machine driver gained hostile SACK-bearing ACK
+  injection at the sender. Docs: `lib/net` lib.rs, `README.md`,
+  `docs/src/lib/net.md`.
+
+#### N6b-2 — listeners, SYN-flood defence `[~]`
+
+##### N6b-2-α — the pure `lib/net` listener + SYN-cookie engine `[x]`
+- `lib/net::tcp::listen` is the demultiplexing server-side `Listener`
+  above `tcp::conn`: it demuxes inbound segments by `Peer`, holds a
+  bounded backlog of half-open (SYN-RECEIVED) handshakes with a timeout,
+  and moves completed connections onto a bounded accept queue (`accept`).
+  Both queues are fixed capacity and fail closed — an accept-queue-full
+  handshake is refused with a RST, a stale half-open is expired by
+  `advance` (which also retransmits owed SYN-ACKs; `next_deadline` folds
+  the one-shot timer).
+- Overflow of the half-open backlog ⇒ **stateless RFC 4987 SYN cookies**:
+  the server ISN is a keyed MAC over the connection 4-tuple and a rotating
+  counter (5-bit tick + 3-bit MSS index + 24-bit MAC), so the handshake is
+  reconstructed from the client's returning ACK holding no per-connection
+  memory. The documented trade-off is option loss (a cookie carries only
+  the MSS; a cookie-accepted connection negotiates no window scale/SACK/
+  timestamps). The keyed MAC is an injected `CookieSecret` seam — the
+  engine hand-rolls no crypto (§2.12); `netstack` backs it with
+  `lib/crypto`. Reconstruction replays the existing state machine (build
+  `Tcb::listen` with options disabled, synthesize the SYN, commit the
+  SYN-ACK, feed the ACK), so no new `Tcb` surface was added.
+- Covered by `tcp::listen::tests` (handshake→accept, SYN-flood→bounded
+  cookies, cookie round-trip, tampered + stale cookie → RST, accept-queue
+  exhaustion fail-closed, half-open expiry, peer-RST reap, data-only drop,
+  IPv6 handshake) plus the `fuzz_net_tcp` listener driver (hostile
+  SYN/ACK/RST flood asserting no panic + bounded queues + every emitted
+  segment parses). Docs: `lib/net` lib.rs, `README.md`, `docs/src/lib/net.md`.
+
+##### N6b-2-β — the socket surface + capability + live vertical `[ ]`
+- Expose `tcp::listen` through `netstack`: `SocketType::Stream`
+  `listen`/`accept` on the socket ABI (`lib/abi/src/net.rs`), the
+  demultiplexing listener table in `SocketService`, the accepted-connection
+  delivery event, and the `lib/rt::net` wrappers.
+- `CAP_NET_BIND_PRIVILEGED` introduced **with** its enforcement point
+  (binding a listening port below the privileged bound), audited and
+  fail-closed (§5.2). A live two-process QEMU vertical (a listener served,
+  a peer connects and is accepted) plus the connection-exhaustion/SYN-flood
+  behaviour observed end to end.
 
 ### N7 — hardware offloads + performance hardening `[ ]`
 - The offload vocabulary negotiated end to end: `virtio_net` maps

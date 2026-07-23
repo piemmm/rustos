@@ -315,26 +315,113 @@ open; the complete teardown lattice through TIME-WAIT (2·MSL) — plus the
 send and receive windows over `SeqNumber`, RFC 7323 window scaling and
 timestamps with PAWS, RFC 2018 SACK generation from a bounded
 out-of-order reassembly set, RFC 6298 retransmission (SRTT/RTTVAR/RTO)
-with Karn's algorithm and go-back-N recovery, fast retransmit on three
-duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
+with Karn's algorithm, RFC 6675 SACK-based selective loss recovery (a
+bounded scoreboard drives `IsLost`/`SetPipe`/`NextSeg`, replacing
+go-back-N when the peer negotiated SACK; go-back-N remains the fallback
+after a retransmission timeout and when SACK is absent), fast retransmit on
+three duplicate ACKs, zero-window persist probing, RFC 5961 in-window RST/SYN
 handling with rate-limited challenge ACKs (so a hostile peer cannot
 induce an ACK storm), delayed ACKs, and the RFC 9293 user timeout. Every
 buffer and the reassembly set are capacity-bounded and fail closed;
 addresses never enter the TCB (the caller folds the pseudo-header
-checksum through `tcp::write`), so it is address-family agnostic.
-Congestion control (a pluggable policy), listeners with an accept queue,
-and SYN cookies are the next increment (N6). The connection engine is
+checksum through `tcp::write`), so it is address-family agnostic. The
+send path is bounded by both the peer's advertised window and the
+congestion window (`tcp::cc`, below). The demultiplexing server-side
+listener sits one level above it (`tcp::listen`, below). The connection engine is
 driven end to end through the `Stack` demux/originate paths above by the
 `netstack` `SocketService` stream sockets (N5c): the service owns one `Tcb`
 per connection and turns `Connect`/`Send`/`Close` and inbound
 `StackEvent::TcpSegment`s into segment egress and client-visible
 `SocketStreamEvent`s.
 
+### `tcp::cc` — pluggable congestion control
+
+Congestion control is a policy, the same shape as the pluggable kernel
+scheduler: the connection owns the sequence space and loss detection and
+consults a `CongestionControl` object for the one value it does not own,
+the congestion window `cwnd` (in bytes). `plan_segment` bounds every send
+by `min(snd_wnd, cwnd)` — the peer's flow-control window *and* the
+congestion window (RFC 5681 §4.1). Adding an algorithm is implementing the
+trait and adding a `CongestionAlgorithm` variant; nothing else changes.
+
+Two policies ship, held to one shared conformance suite (RFC 6928 initial
+window, slow-start vs. congestion-avoidance growth rates, multiplicative
+decrease on loss, collapse to one segment on timeout, monotonic growth
+under a pure ACK stream):
+
+- **CUBIC** (RFC 9438), the default: after a congestion event the window
+  follows a cubic curve of the time since that event — concave as it
+  approaches the pre-loss peak, convex as it probes beyond it — with a
+  Reno-friendly floor so it is never *slower* than NewReno on a short-RTT
+  path. The cubic term and its `K` are computed in exact integer
+  fixed-point over an integer cube root, so the crate needs no floating
+  point or libm (the charter's roll-your-own rule).
+- **NewReno** (RFC 6582 / RFC 5681): classic AIMD — slow-start doubling
+  below `ssthresh`, one-MSS-per-RTT additive increase above it, halve on
+  loss.
+
+The connection feeds the policy three signals: `on_ack` (new data
+acknowledged — grow), `on_loss` (loss detected by duplicate/selective
+ACKs — multiplicative decrease, applied once per loss window through the
+RFC 6582 `recover` high-water mark so a burst cannot halve the window
+repeatedly), and `on_rto` (a timeout — collapse to one segment and restart
+slow start). During recovery the send rate is governed by the RFC 6675
+`pipe` estimate against `cwnd`, not by window inflation.
+
+### RFC 6675 SACK-based loss recovery
+
+When the peer negotiated SACK, the connection retransmits selectively
+rather than by go-back-N. A bounded scoreboard records the SACKed send
+ranges (coalesced, capped, and clamped to the outstanding window, so a
+reordering or hostile peer can never grow the state or inject ranges
+outside the data in flight). From it the engine computes RFC 6675's three
+functions: `IsLost` (a byte is lost once at least three discontiguous SACK
+ranges — or more than `2·SMSS` bytes — lie above it), `SetPipe` (the
+in-flight estimate that bounds transmission against `cwnd`), and `NextSeg`
+(the next segment to send: a lost hole to retransmit, then fresh data,
+then a single rescue retransmission per episode). A retransmission timeout
+clears the scoreboard and falls back to go-back-N (RFC 6675 §5.1); future
+selective acknowledgements rebuild it.
+
+### `tcp::listen` — the demultiplexing listener and SYN-flood defence
+
+`Tcb` models one connection; `Listener` models the *server* side of
+connection establishment for one local port and sits above it. It
+demultiplexes inbound segments by peer identity (the peer address/port the
+TCB itself does not carry), holds a bounded backlog of half-open
+(SYN-RECEIVED) handshakes with a timeout, and moves each completed
+handshake onto a bounded accept queue that `accept` drains. Both queues are
+fixed capacity: a completed handshake that finds the accept queue full is
+refused with a RST rather than growing it, and a half-open connection whose
+client never returns its ACK is expired by `advance` (which also retransmits
+owed SYN-ACKs; `next_deadline` folds the one-shot timer). It is pure and
+event-driven like the rest of the crate.
+
+When the half-open backlog is full — exactly the SYN-flood condition — the
+listener stops allocating state and answers further SYNs with **stateless
+SYN cookies** (RFC 4987). The server ISN it returns is a keyed MAC over the
+connection 4-tuple and a slowly-rotating counter, with a 3-bit MSS index and
+the counter tick packed into the top bits, so the whole handshake can be
+reconstructed from the client's returning ACK holding *no* per-connection
+memory between the SYN and the ACK — a flood of spoofed SYNs therefore costs
+nothing. The documented trade-off is option loss: a cookie carries only the
+MSS, so a connection accepted via a cookie negotiates no window scaling,
+SACK, or timestamps (cookies are the overflow path, not the default — while
+the backlog has room a full-state half-open with options is kept instead).
+The keyed MAC is an injected `CookieSecret` seam: the engine hand-rolls no
+cryptography (the charter's rule), so the live `netstack` service backs it
+with `lib/crypto` over a per-boot secret while the tests inject a
+deterministic MAC. A returning ACK whose cookie was not minted by this
+secret — or minted under an expired counter — is refused with a RST and
+reconstructs nothing (fail closed). The `fuzz_net_tcp` listener driver
+floods a bounded listener with hostile SYN/ACK/RST traffic and asserts no
+panic, bounded half-open and accept queues, and that every emitted segment
+parses.
+
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place —
-the stream-socket surface is landed (N5c: `Stack` TCP demux/`send_tcp` and
-the `netstack` stream sockets), with its live QEMU connect/bulk-transfer
-vertical still to come; then listeners + congestion control (N6) and the
+the socket-surface wiring that exposes `tcp::listen` through `netstack`
+(`listen`/`accept` ABI, `CAP_NET_BIND_PRIVILEGED`; N6b-2-β), then the
 hardware offloads (N7). Each is added with its callers, tests, and fuzz
 harnesses per increment.
