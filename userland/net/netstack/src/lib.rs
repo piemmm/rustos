@@ -29,12 +29,14 @@
 extern crate alloc;
 
 mod channel;
+mod cookie;
 pub mod events;
 mod iface;
 mod service;
 mod socket;
 
 pub use channel::{FrameService, LocalFrameService, NetChannelClient, NetChannelTransport};
+pub use cookie::CryptoCookieSecret;
 pub use iface::{queue_tx, FrameBatch, Interface, Netstack};
 pub use service::{serve, Caller};
 pub use socket::{

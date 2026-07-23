@@ -100,6 +100,8 @@ fields.
 | `Send` | socket, optional dest (`None` ⇒ connected peer), payload | status |
 | `Close` | socket | status |
 | `JoinMulticast` / `LeaveMulticast` | socket, group `SocketAddr` (port must be `0`) | status |
+| `Listen` | socket (a bound stream socket) | status |
+| `Accept` | listening socket, child delivery-port endpoint id | child `SocketId` (`encode_socket_reply`), or `WouldBlock` |
 
 `SocketType` serves `Datagram` (`2`) and `Stream` (`1`); the reserved raw
 (`3`) value fails closed at decode. A `SocketAddr` is a family, a 16-byte
@@ -119,8 +121,31 @@ runs asynchronously in the stack, driving the pure RFC 9293
 CSPRNG initial sequence number and its egress interface are chosen by the
 stack at `Connect`. `Send` enqueues bytes onto the connection's bounded send
 buffer; `Close` begins an orderly teardown (FIN) and the connection is reaped
-in the background once fully closed. `listen`/`accept` (passive open) are a
-later increment (N6).
+in the background once fully closed.
+
+### Passive open — `Listen` / `Accept` (N6b-2)
+
+A server binds the socket to its local port, then `Listen` makes it passive:
+the stack drives a demultiplexing `tairix_net::tcp::listen::Listener` on that
+port, with the SYN-flood defence (a bounded half-open backlog and stateless
+RFC 4987 SYN cookies on overflow, keyed by an HMAC-SHA256 per-boot secret
+drawn from the platform RNG — `lib/crypto`, never hand-rolled). Each completed
+handshake becomes a **pending** child stream socket keyed to the same
+principal; the stack delivers an `Accepted` readiness event to the listener's
+delivery port. The server responds with `Accept`, which claims the oldest
+pending connection, binds it to a caller-supplied delivery port, hands back a
+new child `SocketId`, and delivers any bytes the peer already sent. `Accept`
+with no connection ready replies the retryable `WouldBlock`. Until a
+connection is accepted its received bytes buffer in the bounded TCB, so the
+server never sees data for a connection it has not taken.
+
+Binding a **privileged** (well-known) local port — at or below
+`SOCKET_PRIVILEGED_PORT_MAX` (1023) — requires the
+`CapabilityId::NET_BIND_PRIVILEGED` capability (id 38), a further gate beyond
+`CAP_NET`: an unprivileged process cannot squat a low port and impersonate a
+system service. An ephemeral (`0`) bind is never privileged. The check is at
+`Bind` time, matching the Unix `CAP_NET_BIND_SERVICE` model, and a refusal is
+audited and fails closed.
 
 The stack reports the connection lifecycle to the client's delivery port as
 `SocketStreamEvent` frames (magic `"NSKS"`), the connection-oriented analogue
@@ -132,11 +157,15 @@ of `SocketDatagram` — carrying no per-message peer (the peer is fixed):
 - `Closed` — exactly once at the end, carrying a `StreamCloseReason`
   (`PeerClosed` orderly EOF, `Reset`, `TimedOut`, or `Refused`), so a
   `recv` reaching end-of-stream can tell an orderly close from an abortive
-  one (the receive half never ends silently). No event follows `Closed`.
+  one (the receive half never ends silently). No event follows `Closed`;
+- `Accepted` — delivered to a *listening* socket's port, edge-triggered, one
+  per newly ready connection: the client responds by calling `Accept` on the
+  listener until it replies `WouldBlock`.
 
 The client links `tairix_rt::net::stream_socket` / `connect` / `stream_send`
-/ `close` and drains events with `stream_recv` (which, like `recv`, returns
-the kernel-attested sender `Origin` for fail-closed authentication).
+/ `listen` / `accept` / `close` and drains events with `stream_recv` (which,
+like `recv`, returns the kernel-attested sender `Origin` for fail-closed
+authentication).
 
 ## Delivery (`SocketDatagram`)
 

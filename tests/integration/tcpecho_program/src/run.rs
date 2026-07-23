@@ -187,6 +187,9 @@ mod program {
                 Ok((SocketStreamEvent::Closed { .. }, _)) => {
                     return Err("tcpecho: connection closed before it established")
                 }
+                Ok((SocketStreamEvent::Accepted { .. }, _)) => {
+                    return Err("tcpecho: unexpected Accepted event on a client socket")
+                }
                 Err(Errno::WouldBlock) => park_for_event(set, deadline)?,
                 Err(_) => return Err("tcpecho: event receive failed"),
             }
@@ -249,6 +252,9 @@ mod program {
                         }
                         SocketStreamEvent::Connected { .. } => {
                             return Err("tcpecho: a second Connected event")
+                        }
+                        SocketStreamEvent::Accepted { .. } => {
+                            return Err("tcpecho: unexpected Accepted event on a client socket")
                         }
                     }
                 }

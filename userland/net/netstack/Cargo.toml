@@ -42,6 +42,9 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The pure dual-stack protocol engine (`plans/NETWORK.md` §2.1) this
 # service is the thin glue around: one `Stack` per managed interface.
 tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+# Audited crypto (§2.12): the per-boot HMAC-SHA256 SYN-cookie secret
+# backing the listener's `CookieSecret` seam (`plans/NETWORK.md` N6b-2).
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime (`AGENTS.md` §1):
 # `tairix-rt` provides `_start`, the stack canary, the panic handler, the

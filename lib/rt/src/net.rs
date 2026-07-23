@@ -131,6 +131,50 @@ pub fn stream_recv(
     Ok((event, origin))
 }
 
+/// Make a bound stream `socket` passive (LISTEN): it accepts inbound
+/// connections on its bound local port instead of originating one.
+///
+/// [`bind`] the socket to its local port first; binding a privileged
+/// (well-known) port needs `CAP_NET_BIND_PRIVILEGED`. When a connection is
+/// ready the stack delivers a [`SocketStreamEvent::Accepted`] readiness
+/// event to the socket's delivery port; drain it with [`stream_recv`] and
+/// claim the connection with [`accept`].
+///
+/// # Errors
+///
+/// The typed [`Errno`] the stack returned — [`Errno::OutOfRange`] if the
+/// socket is not an unconnected stream socket, [`Errno::AddressUnavailable`]
+/// if it is not bound, or a transport error.
+pub fn listen(socket: SocketId) -> Result<(), Errno> {
+    status_call(&SocketRequest::Listen { socket })
+}
+
+/// Claim the next established connection queued on a listening `socket`,
+/// returning a new child stream [`SocketId`] whose stream events
+/// ([`Connected`](SocketStreamEvent::Connected)/`Data`/`Closed`) are
+/// delivered to `deliver_port` (an endpoint the caller has already bound).
+///
+/// Call this after a [`SocketStreamEvent::Accepted`] readiness event on the
+/// listener's port, and repeat until it returns [`Errno::WouldBlock`] (no
+/// more connections are ready).
+///
+/// # Errors
+///
+/// The typed [`Errno`] the stack returned — [`Errno::WouldBlock`] when no
+/// connection is ready, [`Errno::OutOfRange`] if `socket` is not a
+/// listener, [`Errno::LimitExceeded`] at the socket quota, or a transport
+/// error.
+pub fn accept(socket: SocketId, deliver_port: u64) -> Result<SocketId, Errno> {
+    let request = SocketRequest::Accept {
+        socket,
+        deliver_port,
+    };
+    let mut buf = [0u8; REQUEST_HEADER_MAX];
+    let mut reply = [0u8; SOCKET_MAX_REPLY];
+    let len = call(&request, &mut buf, &mut reply)?;
+    decode_socket_reply(&reply[..len])
+}
+
 /// Bind `socket` to a local address and port; a `port` of `0` requests a
 /// CSPRNG-drawn ephemeral port. Returns the bound port.
 ///

@@ -1055,16 +1055,44 @@ the whole is too large for one change and each leaves the tree working.
   SYN/ACK/RST flood asserting no panic + bounded queues + every emitted
   segment parses). Docs: `lib/net` lib.rs, `README.md`, `docs/src/lib/net.md`.
 
-##### N6b-2-β — the socket surface + capability + live vertical `[ ]`
-- Expose `tcp::listen` through `netstack`: `SocketType::Stream`
-  `listen`/`accept` on the socket ABI (`lib/abi/src/net.rs`), the
-  demultiplexing listener table in `SocketService`, the accepted-connection
-  delivery event, and the `lib/rt::net` wrappers.
-- `CAP_NET_BIND_PRIVILEGED` introduced **with** its enforcement point
-  (binding a listening port below the privileged bound), audited and
-  fail-closed (§5.2). A live two-process QEMU vertical (a listener served,
-  a peer connects and is accepted) plus the connection-exhaustion/SYN-flood
-  behaviour observed end to end.
+##### N6b-2-β-1 — the socket surface + capability + cookie secret `[x]`
+- `tcp::listen` is exposed through `netstack`: the socket ABI
+  (`lib/abi/src/net.rs`) carries `SocketRequest::Listen` (op 8) and
+  `SocketRequest::Accept { deliver_port }` (op 9) and the
+  `SocketStreamEvent::Accepted` readiness event; `SocketService` holds a
+  `Proto::Listen(Box<Listener>)` per listening socket and drives it from
+  `on_tcp_segment`/`advance_streams`/`stream_next_deadline`. Each completed
+  handshake is drained into a **pending** child stream socket keyed to the
+  owner on the listening port (its received bytes buffer in the bounded TCB;
+  no client events until claimed); `Accepted` is delivered to the listener's
+  port and `Accept` claims the oldest pending child, rebinds its delivery
+  port, returns the child `SocketId`, and flushes its buffered
+  Connected/Data — or replies `WouldBlock` when none is ready. Child
+  creation is socket-quota-bounded (fail closed). `lib/rt::net` gains
+  `listen`/`accept`.
+- `CAP_NET_BIND_PRIVILEGED` (id 38) landed **with** its enforcement point:
+  binding a local port at or below `SOCKET_PRIVILEGED_PORT_MAX` (1023)
+  requires it (checked at `Bind`, Unix `CAP_NET_BIND_SERVICE` model),
+  audited and fail-closed (§5.2). The frozen-id/name tests extend to `38`.
+- The `CookieSecret` seam is backed by `netstack`'s `CryptoCookieSecret`:
+  HMAC-SHA256 (`lib/crypto`, §2.12) over a per-boot key drawn from the
+  platform CSPRNG at service start and never persisted; threaded into
+  `on_tcp_segment` through the `run.rs` pump.
+- Covered by the socket-service unit suite (privileged-bind
+  allow/deny/ephemeral, listen state/errors, accept-`WouldBlock`, accept on
+  a non-listener), the `CryptoCookieSecret` unit tests, and the ABI
+  round-trip/fail-closed tests for the new ops and event. Docs:
+  `docs/src/abi/net-sockets.md`.
+
+##### N6b-2-β-2 — the live two-process QEMU listener vertical `[ ]`
+- A guest **server** `.app` (bind a port, `listen`, `accept`, echo) plus a
+  host-side **client** peer (`netpeer` connect + stream + verify echo, with
+  bounded loss), a runner bin, `qemu_tests.rs` enrolment, wire consts, and
+  image planting — the role-swapped mirror of the N5c stream vertical, which
+  runs a guest client against a host echo server. Observe the
+  connection-exhaustion/SYN-flood behaviour end to end. The engine and the
+  service surface are already proven by the `lib/net` listener tests
+  (β-α) and the β-1 socket-service tests; this adds the live boot witness.
 
 ### N7 — hardware offloads + performance hardening `[ ]`
 - The offload vocabulary negotiated end to end: `virtio_net` maps

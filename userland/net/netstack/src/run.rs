@@ -63,8 +63,8 @@ mod program {
     use tairix_net::iface::eui64_interface_id;
     use tairix_net::stack::StackEvent;
     use tairix_netstack::{
-        events, queue_tx, serve, Caller, Delivery, FrameBatch, NetChannelClient,
-        NetChannelTransport, Netstack, SocketService, StreamIo,
+        events, queue_tx, serve, Caller, CryptoCookieSecret, Delivery, FrameBatch,
+        NetChannelClient, NetChannelTransport, Netstack, SocketService, StreamIo,
     };
     use tairix_rt::LogSink;
 
@@ -252,6 +252,14 @@ mod program {
         };
         let pid = origin.pid();
 
+        // Draw the per-boot SYN-cookie key from the platform CSPRNG (a
+        // blocking draw — the key is long-lived and must be unpredictable).
+        // It is never persisted and is dropped at shutdown, so paged-out or
+        // captured cookies cannot be forged after a reboot.
+        let mut cookie_key = [0u8; 32];
+        let _ = tairix_rt::random_get(&mut cookie_key, RandomFlags::empty());
+        let secret = CryptoCookieSecret::new(cookie_key);
+
         let mut stack = Netstack::new();
         let mut sockets = SocketService::new();
         // The bound NIC channels, one per slot in the reserved endpoint
@@ -272,7 +280,7 @@ mod program {
             let mut token = 0u64;
             let woke = tairix_rt::waitset_wait(set, timeout_ns(&stack, &sockets), &mut token);
             if woke != 0 {
-                pump_all(&mut stack, &mut sockets, &mut channels, now());
+                pump_all(&mut stack, &mut sockets, &mut channels, &secret, now());
                 continue;
             }
             match token {
@@ -289,11 +297,12 @@ mod program {
                     &mut stack,
                     &mut sockets,
                     &mut channels,
+                    &secret,
                     &mut socket_request,
                     &mut origin_buf,
                     &mut socket_reply,
                 ),
-                other => serve_notify(&mut stack, &mut sockets, &mut channels, other),
+                other => serve_notify(&mut stack, &mut sockets, &mut channels, &secret, other),
             }
         }
     }
@@ -306,6 +315,7 @@ mod program {
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
         token: u64,
     ) {
         let Some(index) = token.checked_sub(CHANNEL_TOKEN_BASE) else {
@@ -321,7 +331,7 @@ mod program {
         // immediately ready again; the notify carries no data, only "there
         // is receive work", which the pump discovers itself.
         drain_notify(channel.notify);
-        pump_channel(stack, sockets, channel, now());
+        pump_channel(stack, sockets, channel, secret, now());
     }
 
     /// Serve one waiting admin request on [`NETSTACK_ENDPOINT`].
@@ -424,6 +434,7 @@ mod program {
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
         request: &mut [u8],
         origin_buf: &mut [u8; ORIGIN_WIRE_LEN],
         reply: &mut [u8],
@@ -456,11 +467,16 @@ mod program {
         ) {
             Ok(out) => {
                 let _ = tairix_rt::call_reply(NETSTACK_SOCKET_ENDPOINT, ticket, &reply[..out.len]);
+                // An `Accept` hands back the bytes the connection already
+                // buffered (its one-shot Connected and any early data); send
+                // them to the new child's delivery port.
+                emit_deliveries(&out.deliveries);
                 // Transmit any frames the operation produced (the datagram
-                // itself, a neighbour resolution, an IGMP/MLD report) out
-                // their interfaces and pump so the driver doorbell sends
-                // them and any received reply is delivered.
-                transmit_batch(stack, sockets, channels, &out.tx);
+                // itself, a neighbour resolution, an IGMP/MLD report, or an
+                // ACK opened by an accept) out their interfaces and pump so
+                // the driver doorbell sends them and any received reply is
+                // delivered.
+                transmit_batch(stack, sockets, channels, secret, &out.tx);
             }
             Err(err) => reply_error(NETSTACK_SOCKET_ENDPOINT, ticket, err),
         }
@@ -679,6 +695,7 @@ mod program {
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
         batch: &FrameBatch,
     ) {
         for (name, frames) in batch {
@@ -686,7 +703,7 @@ mod program {
                 continue;
             };
             let _ = queue_tx(&mut channel.client, frames);
-            pump_channel(stack, sockets, channel, now());
+            pump_channel(stack, sockets, channel, secret, now());
         }
     }
 
@@ -697,10 +714,11 @@ mod program {
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
         io: &StreamIo,
     ) {
         emit_deliveries(&io.deliveries);
-        transmit_batch(stack, sockets, channels, &io.tx);
+        transmit_batch(stack, sockets, channels, secret, &io.tx);
     }
 
     /// `ipc_send` each stream/datagram delivery to its socket's async port
@@ -721,6 +739,7 @@ mod program {
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channel: &mut Channel,
+        secret: &CryptoCookieSecret,
         now: Duration64,
     ) {
         for _ in 0..PUMP_ROUNDS {
@@ -744,7 +763,14 @@ mod program {
                         destination,
                         segment,
                     } => {
-                        let io = sockets.on_tcp_segment(stack, *source, *destination, segment, now);
+                        let io = sockets.on_tcp_segment(
+                            stack,
+                            *source,
+                            *destination,
+                            segment,
+                            now,
+                            secret,
+                        );
                         emit_deliveries(&io.deliveries);
                         for (name, frames) in &io.tx {
                             if *name == channel.iface && !frames.is_empty() {
@@ -771,12 +797,13 @@ mod program {
         stack: &mut Netstack,
         sockets: &mut SocketService,
         channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
         now: Duration64,
     ) {
         let io = sockets.advance_streams(stack, now);
-        distribute(stack, sockets, channels, &io);
+        distribute(stack, sockets, channels, secret, &io);
         for channel in channels.iter_mut().flatten() {
-            pump_channel(stack, sockets, channel, now);
+            pump_channel(stack, sockets, channel, secret, now);
         }
     }
 
