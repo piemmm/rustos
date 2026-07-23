@@ -54,16 +54,17 @@ The open items, in priority order:
   `sc=shm_map`), which no repaint can inflate; a host regression test
   locks the creation-based gate in. (D7–D9 below are already-closed
   x86_64 defects.)
-- **D11 — `netstack-listener-qemu-aarch64` intermittent lost-wakeup in the
-  netstack↔virtio-net-driver IPC — OPEN.** The QEMU vertical intermittently
-  (~1/3 of runs) times out (300s): the single-CPU guest goes **fully idle**
-  (guest clock frozen) for a full TCP-RTO interval at a time and only
-  progresses when the host's retransmit raises a device IRQ, so the transfer
-  crawls at the RTO cadence and the client eventually aborts. Pre-existing on
-  the pristine baseline (not introduced by the virtio-net TX rework below);
-  root cause not yet pinned (the CFQ park/unpark wake-pending handshake is
-  correct, so it is subtler than a scan→park race). A separate, focused
-  follow-up; **do not** conflate it with the TX-doorbell fix that landed.
+- **D11 — `netstack-listener-qemu-aarch64` RTO-cadence crawl — DONE.** The
+  QEMU vertical intermittently (~1/3 of runs) timed out (300s): the single-CPU
+  guest went **fully idle** (guest clock frozen) for a full TCP-RTO interval
+  and only progressed when the host's retransmit raised a device IRQ. Root
+  cause was **depth-1 transmit staging** in `lib/virtio_net` (candidate (b),
+  not a scheduler lost-wakeup): each `service()` handed the device only one
+  frame and stranded the ACK queued behind a data segment in the frame ring
+  until an interrupt-driven re-service, so the transfer drained at the
+  completion-interrupt/RTO cadence. Fixed by multi-in-flight TX pipelining (a
+  fixed `TxStaging` pool sized to the transmit ring: reap-all + stage-all per
+  `service`, head-keyed completion reclaim), with two host regression tests.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -553,49 +554,53 @@ return. The QEMU vertical itself is the end-to-end guard.
 desktop, or terminal stage), so this gate exists only in the aarch64
 vertical's shared pointer-script contract; no sibling change was needed.
 
-## D11 — `netstack-listener-qemu-aarch64` intermittent IPC lost-wakeup — OPEN
+## D11 — `netstack-listener-qemu-aarch64` RTO-cadence crawl — DONE
 
-**State:** open. The vertical passes the majority of runs (~15–20 s) but
-intermittently (~1 in 3) times out at 300 s.
+**State:** fixed. The wedge (single-CPU guest going fully idle for a whole
+TCP-RTO interval and only stepping forward on the host's retransmit) no
+longer occurs; the transfer proceeds at line rate.
 
-**Symptom.** The single-CPU (`cpu_count=1`) guest goes **fully idle** — the
-guest monotonic clock freezes for a whole TCP-RTO interval (tens of
-seconds) — then makes a small step forward exactly when the host
-retransmits (an RTO-cadence crawl of ~11 s → 16 s → 30 s gaps), and the
-`tcpserve` client eventually aborts. When it wedges, the last activity is a
-netstack↔driver `netchan` Service round trip; both the `netstack` and
-`virtio_net` tasks are then parked and nothing runs until an unrelated
-device IRQ (the host's retransmit) wakes the driver.
+**Root cause — depth-1 transmit staging, candidate (b), not a scheduler
+lost-wakeup.** `lib/virtio_net` held exactly **one** transmit staging pair,
+so each `service()` could hand at most one frame to the device: `drain_tx`
+sent the first queued frame, saw the single pair in flight, and left every
+further queued frame (the TCP ACK sitting right behind a data segment) in
+the shared frame ring as "back-pressure" with no re-service scheduled. The
+trailing frame therefore egressed only on the *next* `service`, which the
+stack issues from a device interrupt — so a run of frames drained at the
+device's completion-interrupt cadence and, when the frame ring backed up,
+the host stopped advancing until its RTO retransmit (an unrelated RX IRQ)
+drove the next service. The CFQ park/unpark handshake and the
+`serve_wake_task`/`waitset_wait` path were correct throughout (candidates
+(a)/(c) ruled out).
 
-**What it is NOT.** Not the virtio-net transmit-doorbell defect (that was a
-real, separate bug — `tx_one` parked a cross-process `Service` doorbell on
-`host.notify_wait()`, producing the `irq_bind err=5` storm; fixed by the
-async fire-and-forget TX rework in `lib/virtio_net`, which removed the storm
-but did **not** remove this hang). Not the CFQ scheduler park/unpark
-wake-pending token: that handshake (`unpark` sets the token SeqCst-fenced
-for a Ready/Running task; the `step` Park commit stores `Parked` then
-`take_wake_pending` and re-admits) was audited and is correct, and the token
-is cleared only at those two points (not on dispatch), so the register→scan→
-park window is covered. Not load: it reproduces solo on the pristine
-baseline.
+**Fix — multi-in-flight transmit pipelining (`lib/virtio_net`).** The single
+`tx_header`/`tx_data`/`tx_inflight` fields are replaced by a fixed,
+allocation-free `TxStaging` pool of header+frame staging pairs, sized to the
+transmit virtqueue (`TX_INFLIGHT_MAX = TX_QUEUE_SIZE / 2`). Each `service`
+reaps **every** completed transmission (returning its staging pair to the
+pool, keyed by the descriptor head the used ring reports) and then stages
+**every** queued frame until the frame ring is empty or the pool is
+exhausted. A data segment and the ACK behind it now egress together in one
+call; back-pressure applies only when the ring is genuinely full, and even
+then never waits (safe across the cross-process `Service` boundary) and
+never drops. `stage_and_post` returns `TxOutcome::Sent(head)` so a
+completion maps back to exactly its staging pair; a malformed/device-
+fabricated completion reclaims nothing (fail closed). No busy-poll, no ABI
+change, no timeout bump.
 
-**Where to look next.** The wedge is a lost wakeup in the netstack↔driver
-IPC path under this specific high-frequency cross-process call+notify
-pattern. Candidate lines of enquiry (none yet confirmed): (a) whether a
-Service `ipc_call` posted to the driver's call endpoint reliably wakes the
-driver parked in `waitset_wait` (`serve_wake_task(ep.server_task())` →
-`SERVE_WAITQ.wake_task`), including the `server_task()` scheduler-vs-security
-id and the deregister→re-register window across `on_interrupt`; (b) whether
-the depth-1 async TX can back up the shared TX ring and drop an ACK
-(`queue_frames` overflow) so the host never advances and only its RTO drives
-progress — if so, the fix is deeper TX pipelining or an RX/TX re-service
-that guarantees ACK egress; (c) the netstack `serve_notify` drain-then-pump
-ordering versus a driver notify posted during the pump. Reproduce with
-`cargo xtask test --qemu --only netstack-listener-qemu-aarch64` in a loop;
-a hung run leaves its serial log at
-`target/aarch64-unknown-none/debug/tairix-test-netstack-listener-qemu-aarch64.serial.log`
-(only written on failure). The structural fix must not busy-poll (§2.23) and
-must land a host regression test; do not bump the timeout.
+**Regression guards (host, `lib/virtio_net`).**
+`service_egresses_a_burst_in_one_call_without_a_completion` proves a
+multi-frame burst all egresses in one `service` with the device undriven
+(the depth-1 predecessor sent only the first);
+`transmit_back_pressure_only_when_the_ring_is_full` proves back-pressure
+fires only with the whole pool in flight and the held frames then egress in
+order. The QEMU vertical itself is the end-to-end guard.
+
+**Note.** riscv64/x86_64 share the same `lib/virtio_net` engine, so the fix
+is arch-neutral (`§2.2`); no per-arch change was needed. Receive staging
+stays single-buffered (re-posted each frame) — a separate concern the stack
+rides out via TCP retransmit, out of scope for this transmit-egress fix.
 
 ## Non-goals / do not do
 

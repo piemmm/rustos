@@ -269,34 +269,103 @@ fn transmit_doorbell_never_waits_on_the_device() {
     assert_eq!(report, ServiceReport::default());
 }
 
-/// Regression: with a single staging pair, a second queued frame is held
-/// (back-pressure) until the first transmission is reaped — never dropped,
-/// never waited on.
+/// Build an ARP-shaped frame tagged in its first byte so a test can tell
+/// several queued frames apart in the transmit log.
+fn tagged_frame(tag: u8) -> Frame {
+    let mut f = arp_frame();
+    f[0] = tag;
+    f
+}
+
+/// Regression (D11): a burst of frames queued before a single `service`
+/// all egress in that one call, without waiting for any device completion
+/// in between. The device is never driven here (no `drain_queue`) and the
+/// host would panic on any wait, yet every queued frame is handed to the
+/// device: the depth-1 predecessor sent only the first and stranded the
+/// rest in the frame ring until an unrelated interrupt drove the next
+/// service — the RTO-cadence crawl this driver must not reintroduce (a TCP
+/// data segment and the ACK queued right behind it must go out together).
 #[test]
-fn transmit_applies_back_pressure_until_the_prior_frame_is_reaped() {
+fn service_egresses_a_burst_in_one_call_without_a_completion() {
     let (t, tx_log, _) = build_device();
     let mut net = open_net_no_wait(t);
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
-    let first = arp_frame();
-    let mut second = arp_frame();
-    second[0] = 0xAA; // distinguish it from the first
-    rings.tx.push(&first).expect("queue first");
-    rings.tx.push(&second).expect("queue second");
-    // First doorbell: one frame handed over, the second held in the ring.
-    assert_eq!(net.service(&mut rings).expect("service").transmitted, 1);
-    // Second doorbell without draining: the staging is still in flight, so
-    // nothing new is sent (back-pressure) and the frame is not dropped.
-    assert_eq!(net.service(&mut rings).expect("service").transmitted, 0);
-    // Drive the device: the first completes; the next doorbell reaps it and
-    // sends the held second frame.
-    deliver_tx(&mut net);
-    assert_eq!(net.service(&mut rings).expect("service").transmitted, 1);
+    // Three frames — a data segment and the two frames queued behind it —
+    // all fit under the transmit pool depth, so one service drains them all.
+    let frames = [tagged_frame(0x01), tagged_frame(0x02), tagged_frame(0x03)];
+    for f in &frames {
+        rings.tx.push(f).expect("queue");
+    }
+    let report = net.service(&mut rings).expect("service never waits");
+    assert_eq!(
+        report.transmitted, 3,
+        "the whole burst must egress in one service, not one frame per call"
+    );
+    // Nothing waited on the device: the frames are in flight, not yet
+    // consumed by the (undriven) device.
+    assert!(tx_log.borrow().is_empty());
+    // Driving the device now completes all three, in order.
     deliver_tx(&mut net);
     let log = tx_log.borrow();
-    assert_eq!(log.len(), 2);
-    assert_eq!(log[0], first);
-    assert_eq!(log[1], second);
+    assert_eq!(log.len(), 3);
+    for (sent, expected) in log.iter().zip(frames.iter()) {
+        assert_eq!(sent, expected);
+    }
+}
+
+/// Back-pressure is applied only when the transmit ring is genuinely full
+/// (every staging pair in flight) — never as an artificial one-frame-at-a-
+/// time limit. Filling the pool, then queueing another full ring's worth
+/// without draining, holds the second batch (transmitted 0) rather than
+/// dropping it; draining the device then lets the held frames egress on
+/// the next service, in order.
+#[test]
+fn transmit_back_pressure_only_when_the_ring_is_full() {
+    let (t, tx_log, _) = build_device();
+    let mut net = open_net_no_wait(t);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+
+    // First batch: exactly the pool depth. One service puts them all in
+    // flight and empties the frame ring.
+    let first: Vec<Frame> = (0..TX_INFLIGHT_MAX)
+        .map(|i| tagged_frame(u8::try_from(i).unwrap()))
+        .collect();
+    for f in &first {
+        rings.tx.push(f).expect("queue first batch");
+    }
+    assert_eq!(
+        net.service(&mut rings).expect("service").transmitted,
+        u32::try_from(TX_INFLIGHT_MAX).unwrap()
+    );
+
+    // Second batch (frame ring now empty again): with every staging pair
+    // still in flight, this doorbell sends nothing (ring-full back-pressure)
+    // and drops nothing.
+    let second: Vec<Frame> = (0..TX_INFLIGHT_MAX)
+        .map(|i| tagged_frame(u8::try_from(0x80 + i).unwrap()))
+        .collect();
+    for f in &second {
+        rings.tx.push(f).expect("queue second batch");
+    }
+    assert_eq!(net.service(&mut rings).expect("service").transmitted, 0);
+
+    // Drive the device: the first batch completes; the next service reaps
+    // the pool and drains the held second batch.
+    deliver_tx(&mut net);
+    assert_eq!(
+        net.service(&mut rings).expect("service").transmitted,
+        u32::try_from(TX_INFLIGHT_MAX).unwrap()
+    );
+    deliver_tx(&mut net);
+
+    let log = tx_log.borrow();
+    let expected: Vec<Frame> = first.iter().chain(second.iter()).cloned().collect();
+    assert_eq!(log.len(), expected.len());
+    for (sent, want) in log.iter().zip(expected.iter()) {
+        assert_eq!(sent, want);
+    }
 }
 
 #[test]

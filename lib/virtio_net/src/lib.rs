@@ -68,24 +68,32 @@
 //! `Service` request), where parking would block the reply and the
 //! serve loop. Waiting for the next device event is the caller's job
 //! — the driver parks on the device interrupt and rings the stack's
-//! notify port. A transmit frame handed to the device is left in
-//! flight and its completion reaped, non-blockingly, on a later call
-//! (the shared device interrupt the completion raises drives it);
-//! while it is in flight the single staging pair is busy, so a
-//! further queued frame is held in the ring — back-pressure, never a
-//! wait or a drop. A harvested receive frame that finds the RX ring
-//! full is likewise kept staged (the receive chain is simply not
-//! re-posted) and delivered by the next call.
+//! notify port. Each `service` reaps every completed transmission and
+//! then drains **every** queued frame the device can still hold into the
+//! transmit ring — up to the ring's descriptor capacity, kept in flight
+//! at once — so a burst (a TCP data segment and the ACK queued right
+//! behind it) egresses together in one call rather than one frame per
+//! call. Back-pressure applies only when the transmit ring is genuinely
+//! full: the remaining queued frames are left in the frame ring for the
+//! next completion-driven call — never waited on, never dropped. A frame
+//! in flight has its completion reaped non-blockingly on a later call
+//! (the shared device interrupt the completion raises drives it). A
+//! harvested receive frame that finds the RX ring full is likewise kept
+//! staged (the receive chain is simply not re-posted) and delivered by
+//! the next call.
 //!
 //! # Staging buffers
 //!
 //! DMA staging is allocated **once**, at [`VirtioNet::open`]: one
-//! header + one MTU-sized frame buffer per direction, reused for
-//! every packet. The receive pair is posted as a device-write chain
-//! at open and re-posted after every delivered completion, so the
-//! device always owns a receive buffer and an idle `service` poll
-//! touches no allocator — no per-packet `dma_alloc`/`dma_free`
-//! round trip, no per-poll audit-log traffic on the hot path.
+//! header + one MTU-sized frame buffer on the receive side, and a
+//! fixed pool of header + frame-buffer pairs (one per concurrently
+//! in-flight transmission, sized to the transmit ring) on the send
+//! side — all reused for every packet. The receive pair is posted as a
+//! device-write chain at open and re-posted after every delivered
+//! completion, so the device always owns a receive buffer and an idle
+//! `service` poll touches no allocator — no per-packet
+//! `dma_alloc`/`dma_free` round trip, no per-poll audit-log traffic on
+//! the hot path.
 //!
 //! # Zero-on-free
 //!
@@ -193,6 +201,99 @@ mod wire {
     pub const CONFIG_MAC_OFFSET: usize = 0;
 }
 
+/// Transmit frames the driver keeps in flight at once.
+///
+/// Each frame occupies two transmit descriptors (the `virtio_net_hdr` and
+/// the frame body), so the transmit virtqueue's descriptor table
+/// ([`wire::TX_QUEUE_SIZE`]) bounds it. Draining every queued frame the
+/// device can still hold in a single `service` — rather than one frame
+/// per call — is what lets a burst (a TCP data segment and the ACK queued
+/// right behind it) egress together instead of stranding the trailing
+/// frame in the shared frame ring until an unrelated interrupt drives the
+/// next call.
+const TX_INFLIGHT_MAX: usize = (wire::TX_QUEUE_SIZE / 2) as usize;
+
+/// One transmit frame handed to the device, awaiting its completion.
+///
+/// Holds the staging in class-aware [`BounceBuffer`]s (scrubbed on drop
+/// when the ring class is sensitive) and the descriptor `head` the device
+/// returns at completion, so a used-ring completion maps back to exactly
+/// the staging pair that produced it — the driver may hold several frames
+/// in flight without confusing their buffers.
+struct TxInflight {
+    head: u16,
+    header: BounceBuffer,
+    data: BounceBuffer,
+}
+
+/// The transmit staging pool: a fixed set of `virtio_net_hdr` + frame
+/// slab pairs (carved once at [`VirtioNet::open`], reused for every
+/// frame) split between those idle and those the device currently owns.
+///
+/// Allocation-free and sized to the transmit ring, so the driver can keep
+/// the ring full and never waits on the device to free a slot.
+struct TxStaging {
+    /// Idle staging pairs available for a new frame.
+    free: [Option<(DmaSlab, DmaSlab)>; TX_INFLIGHT_MAX],
+    /// Frames the device owns, awaiting completion, keyed by descriptor
+    /// head.
+    inflight: [Option<TxInflight>; TX_INFLIGHT_MAX],
+}
+
+impl TxStaging {
+    /// Build the pool from the given idle staging pairs (nothing in
+    /// flight yet).
+    fn new(free: [Option<(DmaSlab, DmaSlab)>; TX_INFLIGHT_MAX]) -> Self {
+        Self {
+            free,
+            inflight: core::array::from_fn(|_| None),
+        }
+    }
+
+    /// Claim an idle staging pair for a new frame, or [`None`] when every
+    /// pair is in flight (the ring is full — legitimate back-pressure).
+    fn take_free(&mut self) -> Option<(DmaSlab, DmaSlab)> {
+        self.free.iter_mut().find_map(Option::take)
+    }
+
+    /// Return a staging pair to the idle set (a frame the device could not
+    /// move, or an empty pop). A free slot always exists because a pair
+    /// only ever leaves the pool while it is in flight and every caller
+    /// returns exactly what it took; the slabs free themselves on drop if
+    /// that invariant is somehow broken (fail closed, never a leak of
+    /// device-visible memory).
+    fn return_free(&mut self, header: DmaSlab, data: DmaSlab) {
+        if let Some(slot) = self.free.iter_mut().find(|s| s.is_none()) {
+            *slot = Some((header, data));
+        }
+    }
+
+    /// Record a frame just handed to the device, keyed by its descriptor
+    /// `head`, so its completion reclaims exactly this staging pair.
+    fn record_inflight(&mut self, head: u16, header: BounceBuffer, data: BounceBuffer) {
+        if let Some(slot) = self.inflight.iter_mut().find(|s| s.is_none()) {
+            *slot = Some(TxInflight { head, header, data });
+        }
+    }
+
+    /// Reclaim the staging pair whose frame completed with `head`,
+    /// returning it to the idle set. A `head` that matches no in-flight
+    /// frame (a duplicate or device-fabricated completion) reclaims
+    /// nothing — fail closed.
+    fn reclaim(&mut self, head: u16) {
+        let frame = self.inflight.iter_mut().find_map(|slot| {
+            if slot.as_ref().is_some_and(|f| f.head == head) {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some(f) = frame {
+            self.return_free(f.header.into_slab(), f.data.into_slab());
+        }
+    }
+}
+
 /// Network device backed by a cross-arch virtio transport.
 ///
 /// `'h` bounds the borrow of the [`VirtioHost`] the driver allocates
@@ -225,18 +326,15 @@ pub struct VirtioNet<'h, T: Transport> {
     /// holds the pair in class-aware [`BounceBuffer`] wrappers.
     rx_header: Option<DmaSlab>,
     rx_data: Option<DmaSlab>,
-    /// The free transmit staging (virtio-net header + frame buffer),
-    /// `Some` when idle and `None` while a transmission holds it in
-    /// [`Self::tx_inflight`]. Carved once at open and reused for every
-    /// frame.
-    tx_header: Option<DmaSlab>,
-    tx_data: Option<DmaSlab>,
-    /// The transmit staging currently owned by the device: `Some` from
-    /// the moment a frame is handed to the transmit queue until its
-    /// completion is reaped (non-blockingly) by [`Self::reap_tx`]. The
-    /// doorbell never waits on the device, so the buffer stays here —
-    /// never reused or scrubbed — until the device has consumed it.
-    tx_inflight: Option<(BounceBuffer, BounceBuffer)>,
+    /// The transmit staging pool: a fixed set of header + frame-buffer
+    /// pairs (carved once at open, reused for every frame), split between
+    /// those idle and those the device currently owns. Its depth is the
+    /// number of frames the driver keeps in flight at once, so a burst
+    /// drains into the ring in one `service` rather than one frame per
+    /// call. The doorbell never waits on the device: an in-flight pair
+    /// stays owned by the device — never reused or scrubbed — until its
+    /// completion is reaped (non-blockingly) by [`Self::reap_tx`].
+    tx: TxStaging,
     /// Length of a harvested frame still waiting for RX-ring space
     /// (the receive chain stays un-posted while this is `Some`).
     rx_staged_len: Option<usize>,
@@ -331,9 +429,6 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         let rx_data = host
             .alloc_dma_zeroed(wire::MAX_FRAME_LEN)
             .map_err(|_| VirtioError::DeviceFault)?;
-        let tx_header = host
-            .alloc_dma_zeroed(wire::HEADER_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
         // The transmit staging must hold a segmentation-offload super-frame
         // (the transmit ring's slot capacity) when TSO is negotiated, else
         // a single link frame.
@@ -342,9 +437,21 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         } else {
             wire::MAX_FRAME_LEN
         };
-        let tx_data = host
-            .alloc_dma_zeroed(max_tx_frame_len)
-            .map_err(|_| VirtioError::DeviceFault)?;
+        // Carve the transmit staging pool once: one header + one
+        // frame buffer per concurrently in-flight transmission, sized to
+        // the transmit ring so the driver can keep it full without ever
+        // waiting on the device.
+        let mut tx_free: [Option<(DmaSlab, DmaSlab)>; TX_INFLIGHT_MAX] =
+            core::array::from_fn(|_| None);
+        for slot in &mut tx_free {
+            let header = host
+                .alloc_dma_zeroed(wire::HEADER_LEN)
+                .map_err(|_| VirtioError::DeviceFault)?;
+            let data = host
+                .alloc_dma_zeroed(max_tx_frame_len)
+                .map_err(|_| VirtioError::DeviceFault)?;
+            *slot = Some((header, data));
+        }
         let mut net = Self {
             transport,
             rx_queue,
@@ -355,9 +462,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             max_tx_frame_len,
             rx_header: Some(rx_header),
             rx_data: Some(rx_data),
-            tx_header: Some(tx_header),
-            tx_data: Some(tx_data),
-            tx_inflight: None,
+            tx: TxStaging::new(tx_free),
             rx_staged_len: None,
             rx_staged_offload: FrameOffload::None,
             guest_csum,
@@ -476,109 +581,97 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         header
     }
 
-    /// Reap the in-flight transmission and drain queued frames into the
-    /// device, never waiting on the device.
+    /// Reap every completed transmission, then drain **every** queued
+    /// frame the device can still hold into the transmit ring — never
+    /// waiting on the device.
     ///
-    /// A completed transmission is reclaimed first (freeing the single
-    /// staging pair), then queued frames are handed to the device one at a
-    /// time. The driver holds exactly one transmit staging pair, so at most
-    /// one frame is in flight: while it is unconsumed the drain applies
-    /// back-pressure — the queued frame stays in the ring for the next
-    /// doorbell — rather than parking (this doorbell may be a cross-process
-    /// `Service` call, where parking would block the reply and the serve
-    /// loop) or dropping the frame. The device consumes the chain
-    /// asynchronously and raises its (shared) interrupt; the driver's
-    /// interrupt handler rings the stack, which issues the next `service`
-    /// that reaps the completion here.
+    /// Completions are reclaimed first (freeing their staging pairs back
+    /// to the pool), then queued frames are staged and handed to the
+    /// device until either the frame ring is empty or every staging pair
+    /// is in flight (the ring is full). Draining the whole burst in one
+    /// call — up to [`TX_INFLIGHT_MAX`] frames concurrently in flight — is
+    /// what lets a TCP segment and the ACK queued right behind it egress
+    /// together, instead of stranding the trailing frame until an
+    /// unrelated interrupt drives the next `service`. When the pool is
+    /// exhausted the drain applies back-pressure — the remaining queued
+    /// frames stay in the frame ring for the next completion-driven call —
+    /// rather than parking (this doorbell may be a cross-process `Service`
+    /// call, where parking would block the reply and the serve loop) or
+    /// dropping. The device consumes each chain asynchronously and raises
+    /// its (shared) interrupt; the driver's interrupt handler rings the
+    /// stack, which issues the next `service` that reaps the completions
+    /// here.
     fn drain_tx(
         &mut self,
         rings: &mut FrameRings<'_>,
         report: &mut ServiceReport,
     ) -> Result<(), DriverError> {
+        self.reap_tx();
         loop {
-            self.reap_tx();
-            if self.tx_inflight.is_some() {
-                // The single staging pair is still owned by the device:
-                // do not wait, do not drop — leave the queued frame for a
-                // later doorbell (back-pressure).
+            let Some((header_slab, data_slab)) = self.tx.take_free() else {
+                // Every staging pair is in flight: the ring is full. Leave
+                // the remaining queued frames for the next completion-
+                // driven call — never wait, never drop (back-pressure).
                 return Ok(());
-            }
-            match self.tx_one(rings)? {
-                TxOutcome::Sent => report.transmitted += 1,
-                TxOutcome::Dropped => {}
-                TxOutcome::Empty => return Ok(()),
+            };
+            let mut header_bb = BounceBuffer::new(header_slab, rings.class);
+            let mut data_bb = BounceBuffer::new(data_slab, rings.class);
+            match self.stage_and_post(rings, &mut header_bb, &mut data_bb)? {
+                TxOutcome::Sent(head) => {
+                    // The device now owns the chain: hold the staging,
+                    // keyed by its descriptor head, until the completion is
+                    // reaped (never reused or scrubbed meanwhile).
+                    self.tx.record_inflight(head, header_bb, data_bb);
+                    report.transmitted += 1;
+                }
+                TxOutcome::Dropped => {
+                    // Nothing was handed to the device: return the staging
+                    // to the pool (scrubbed when the class is sensitive).
+                    self.tx
+                        .return_free(header_bb.into_slab(), data_bb.into_slab());
+                }
+                TxOutcome::Empty => {
+                    self.tx
+                        .return_free(header_bb.into_slab(), data_bb.into_slab());
+                    return Ok(());
+                }
             }
         }
     }
 
-    /// Reclaim a completed transmission's staging, non-blockingly.
+    /// Reclaim every completed transmission's staging, non-blockingly.
     ///
-    /// Polls the transmit used ring once (never waits). When the device has
-    /// consumed the in-flight chain the staging pair is returned to the free
-    /// slots through [`BounceBuffer::into_slab`], which scrubs it when the
-    /// ring class declared the traffic sensitive — the frame's bytes are
-    /// zeroed here, after the device has read them, never before. A
-    /// still-in-flight chain (`NoCompletion`) is left owned by the device; a
-    /// malformed completion has already consumed its used-ring slot, so the
-    /// staging is reclaimed too rather than wedging transmit on a hostile
-    /// device.
+    /// Drains the transmit used ring (never waits): each completion's
+    /// descriptor head reclaims exactly the staging pair that produced it
+    /// (see [`TxStaging::reclaim`]), returning the buffers to the pool
+    /// through [`BounceBuffer::into_slab`], which scrubs them when the ring
+    /// class declared the traffic sensitive — the frame's bytes are zeroed
+    /// here, after the device has read them, never before. A malformed
+    /// completion has consumed its used-ring slot but names no chain the
+    /// driver can trust, so it reclaims no staging (fail closed) while the
+    /// reap keeps draining the genuine completions behind it.
     fn reap_tx(&mut self) {
-        if self.tx_inflight.is_none() {
-            return;
-        }
-        let reclaim = match self.tx_queue.poll_used() {
-            Ok(_token) => true,
-            Err(VirtioError::MalformedCompletion) => true,
-            Err(_) => false,
-        };
-        if reclaim {
-            if let Some((header_bb, data_bb)) = self.tx_inflight.take() {
-                self.tx_header = Some(header_bb.into_slab());
-                self.tx_data = Some(data_bb.into_slab());
-            }
-        }
-    }
-
-    /// Pop one frame from the TX ring, stage it, and hand it to the device,
-    /// leaving it in flight — never waiting for consumption.
-    ///
-    /// Returns [`TxOutcome::Sent`] once the chain is queued and kicked (the
-    /// staging pair is now held in [`Self::tx_inflight`] until [`Self::reap_tx`]
-    /// reclaims it), [`TxOutcome::Dropped`] for a frame the device cannot
-    /// move (runt, over-capacity, corrupt slot — the staging is untouched),
-    /// or [`TxOutcome::Empty`] when the ring holds no frame. The caller
-    /// guarantees the staging pair is free (`tx_inflight` is `None`).
-    fn tx_one(&mut self, rings: &mut FrameRings<'_>) -> Result<TxOutcome, DriverError> {
-        let (Some(header_slab), Some(data_slab)) = (self.tx_header.take(), self.tx_data.take())
-        else {
-            return Err(DriverError::DeviceFault);
-        };
-        let mut header_bb = BounceBuffer::new(header_slab, rings.class);
-        let mut data_bb = BounceBuffer::new(data_slab, rings.class);
-        let outcome = self.stage_and_post(rings, &mut header_bb, &mut data_bb);
-        match outcome {
-            Ok(TxOutcome::Sent) => {
-                // The device now owns the chain: hold the staging until its
-                // completion is reaped (never reused or scrubbed meanwhile).
-                self.tx_inflight = Some((header_bb, data_bb));
-                Ok(TxOutcome::Sent)
-            }
-            other => {
-                // Nothing was handed to the device: return the staging to
-                // the free slots (scrubbed when the class is sensitive).
-                self.tx_header = Some(header_bb.into_slab());
-                self.tx_data = Some(data_bb.into_slab());
-                other
+        loop {
+            match self.tx_queue.poll_used() {
+                Ok(token) => self.tx.reclaim(token.head),
+                // A device-fabricated / malformed completion: skip it (its
+                // used-ring slot is already consumed) and keep reaping the
+                // genuine completions behind it — reclaim no staging.
+                Err(VirtioError::MalformedCompletion) => {}
+                // No further completion (or a transient error): done.
+                Err(_) => return,
             }
         }
     }
 
     /// Copy one queued TX frame into `data_bb`, build its header into
     /// `header_bb`, and post the two-segment chain to the device (add +
-    /// kick). Pure staging: it never waits and never touches `tx_inflight` —
-    /// the caller owns the buffers' fate by the returned [`TxOutcome`]. A
-    /// frame the device cannot move (runt, over-MTU, corrupt slot) is
-    /// consumed and dropped so the queue behind it keeps flowing.
+    /// kick). Pure staging: it never waits and never records the frame as
+    /// in flight — the caller owns the buffers' fate by the returned
+    /// [`TxOutcome`], and [`TxOutcome::Sent`] carries the descriptor head
+    /// so the caller can key the staging for completion. A frame the
+    /// device cannot move (runt, over-MTU, corrupt slot) is consumed and
+    /// dropped so the queue behind it keeps flowing.
     fn stage_and_post(
         &mut self,
         rings: &mut FrameRings<'_>,
@@ -621,11 +714,12 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
                 direction: Direction::DeviceRead,
             },
         ];
-        self.tx_queue
+        let head = self
+            .tx_queue
             .add_chain(&segments)
             .map_err(VirtioError::as_driver_error)?;
         self.tx_queue.kick(&mut self.transport);
-        Ok(TxOutcome::Sent)
+        Ok(TxOutcome::Sent(head))
     }
 
     /// Move delivered frames from the device into the RX ring until
@@ -740,10 +834,11 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     }
 }
 
-/// Outcome of one TX-ring pop inside [`VirtioNet::tx_one`].
+/// Outcome of one TX-frame staging in [`VirtioNet::stage_and_post`].
 enum TxOutcome {
-    /// A frame was handed to the device.
-    Sent,
+    /// A frame was handed to the device, carrying the descriptor head the
+    /// device returns at completion so the caller keys the staging pair.
+    Sent(u16),
     /// A frame the device cannot move was consumed and dropped.
     Dropped,
     /// The TX ring is empty.
