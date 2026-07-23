@@ -163,9 +163,10 @@ The model decides *what is offered* and *where a crumb leads*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
 picker builds the same model). Only the commands whose engine action already
 exists are modelled, so none is speculative surface (`AGENTS.md` §2.4):
-**Delete** and **New Folder**, whose action does not exist in the engine
-yet, are absent from `CONTEXT_COMMANDS` and land with the stage that first
-wires them.
+**Delete**, whose action does not exist in the engine yet, is absent from
+`CONTEXT_COMMANDS` and lands with the stage that first wires it. **New
+Folder** is a *write* tool that lives on the manager-only toolbar (below),
+not on this menu shared with the read-only picker.
 
 The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in
@@ -185,6 +186,26 @@ Forward), **Alt+↑** (Up), and **F5** (Refresh), so a shortcut and a toolbar
 click can never diverge (`AGENTS.md` §2.2). The view toggle and sort are
 toolbar (pointer) commands; a conventional single-key accelerator for them
 awaits the later toolbar keyboard-focus pass.
+
+**New Folder is a manager-only write tool.** The read-only picker composes the
+exact same toolbar (`render`, `apply_command`), so a *write* action can never
+live in the shared `ToolbarCommand` / `apply_command` surface — that would hand
+the picker write authority. New Folder is therefore a distinct
+`chrome::ManagerTool` vocabulary (`MANAGER_TOOLS`, `ManagerTool::icon()`) that
+**only a write-capable consumer hands to `render`**: the file manager passes
+`MANAGER_TOOLS`, the picker passes an empty slice, so the picker cannot draw or
+resolve a write tool (the separation is by type, not a runtime flag). `render`
+draws the write tools in their own toolbar group after the read-only commands,
+and `render::manager_tool_at` is their mirror hit-test (a read-only command's
+position is unchanged whether or not write tools follow). The `files.app` `Run`
+binary routes a click on the tool — and the **Ctrl+Shift+N** keyboard
+equivalent — to a new folder: `mkdir::suggest_new_dir_name` names a
+non-clashing placeholder, `Browser::create_directory` creates it through the
+`fs_mkdir` seam under the user's own identity (**no new capability** — the
+per-inode owner/mode/ACL model gates it), and the inline rename opens on the
+new folder so the user names it at once. A refused create states its reason on
+`stderr` and leaves the listing put — an answer, not a crash (`AGENTS.md`
+§2.24, §5.4).
 
 ### Activating an entry
 
@@ -248,10 +269,12 @@ picker composes the same engine and never launches.
 
 ### Rendering
 
-`render(browser, theme, font, viewport)` paints a command toolbar strip, a
-path bar, and the current directory into a `tairix-raster` `Surface` sized to
+`render(browser, theme, font, viewport, tools)` paints a command toolbar strip,
+a path bar, and the current directory into a `tairix-raster` `Surface` sized to
 the viewport, in whichever of the two views the browser holds
-(`ViewMode::List` or `ViewMode::Grid`). The toolbar strip is drawn at the top
+(`ViewMode::List` or `ViewMode::Grid`). `tools` is the manager-only
+`ManagerTool` set drawn after the read-only commands — the file manager passes
+`MANAGER_TOOLS`, the read-only picker an empty slice. The toolbar strip is drawn at the top
 (see the frame model above); the item area sits below the combined chrome
 (`chrome_height` = the toolbar strip plus the path bar), the one header offset
 the item views, the scrollbar gutter, and every hit-test share so paint and
@@ -312,10 +335,12 @@ panicking (`AGENTS.md` §2.9).
 over `tairix_rt::read_dir_all`, creates and grants the zero-copy window
 frame region, parks on its window-event mailbox, and drives the browser
 with the keyboard (`Down`/`Up` select, `Enter` opens a directory,
-`Backspace` climbs, `F2` renames the selected item, and the toolbar
-accelerators `Alt+←/→/↑` and `F5`) and the pointer: a primary-button press
-first checks the command toolbar (`render::toolbar_command_at` → the shared
-`apply_command`, so a click on a disabled tool does nothing), then a path-bar
+`Backspace` climbs, `F2` renames the selected item, `Ctrl+Shift+N` makes a new
+folder, and the toolbar accelerators `Alt+←/→/↑` and `F5`) and the pointer: a
+primary-button press first checks the manager-only write tools
+(`render::manager_tool_at` → New Folder), then the read-only command toolbar
+(`render::toolbar_command_at` → the shared `apply_command`, so a click on a
+disabled tool does nothing), then a path-bar
 crumb climbs to that ancestor through the same transactional
 `Browser::navigate_to_depth` the keyboard uses, and a press on an item selects
 it (`Browser::select`) — the GUI is a spelling of the user's
@@ -431,6 +456,13 @@ is surfaced as `MkdirError::Refused` for an honest in-UI answer (`AGENTS.md`
 onto the new folder, ready for the app to open its inline rename editor over
 it. The model reads nothing and holds no authority, so the trusted picker
 composes the same `Browser` and never calls the write path.
+
+The drawn tool is wired (see the frame model above): New Folder is a
+manager-only `chrome::ManagerTool` the file manager hands to `render` (the
+picker does not), reachable by clicking the toolbar tool or pressing
+`Ctrl+Shift+N`. The `Run` binary names a non-clashing placeholder with
+`mkdir::suggest_new_dir_name`, creates it through `Browser::create_directory`,
+and opens the inline rename on the new folder so the user names it at once.
 
 ### The properties model
 

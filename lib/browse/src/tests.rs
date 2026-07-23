@@ -241,6 +241,7 @@ fn render_produces_a_surface_the_size_of_the_viewport() {
         &theme,
         tairix_font::BitmapFont::inconsolata(),
         Rect::new(0, 0, 200, 120),
+        &[],
     )
     .expect("surface");
     assert_eq!(surface.width(), 200);
@@ -260,6 +261,7 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
         &theme,
         font,
         Rect::new(0, 0, 200, header + row_height * 3),
+        &[],
     )
     .expect("surface");
 
@@ -305,6 +307,7 @@ fn render_into_a_tiny_viewport_does_not_panic() {
         &theme,
         tairix_font::BitmapFont::inconsolata(),
         Rect::new(0, 0, 4, 3),
+        &[],
     )
     .expect("surface");
     assert_eq!(surface.width(), 4);
@@ -1048,7 +1051,7 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     let header = crate::render::chrome_height(font, &theme);
     // A window wide and tall enough for several tiles.
     let vp = Rect::new(0, 0, 400, 400);
-    let surface = crate::render(&browser, &theme, font, vp).expect("grid surface");
+    let surface = crate::render(&browser, &theme, font, vp, &[]).expect("grid surface");
     assert_eq!(surface.width(), 400);
 
     // A click just inside the first tile (past the header) resolves to entry 0.
@@ -2805,6 +2808,96 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
             Point::new(4, i32::try_from(toolbar_height(&theme)).unwrap())
         ),
         None
+    );
+}
+
+#[test]
+fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_commands() {
+    use crate::chrome::{ManagerTool, MANAGER_TOOLS};
+    use crate::render::{manager_tool_at, toolbar_command_at, toolbar_height};
+    use tairix_geometry::Point;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 400, crate::render::chrome_height(font, &theme) + 40);
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let y = i32::try_from(toolbar_height(&theme) / 2).unwrap();
+
+    // Scan the toolbar's middle row: the manager write tool resolves somewhere,
+    // and no pixel resolves to *both* a read-only command and a write tool —
+    // the two hit-tests cover disjoint regions (§2.2).
+    let mut saw_new_folder = false;
+    for x in 0..vp.width {
+        let point = Point::new(i32::try_from(x).unwrap(), y);
+        let command = toolbar_command_at(&browser, &theme, vp, point);
+        let tool = manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS);
+        assert!(
+            !(command.is_some() && tool.is_some()),
+            "a pixel resolved to both a command and a write tool"
+        );
+        if tool == Some(ManagerTool::NewFolder) {
+            saw_new_folder = true;
+        }
+    }
+    assert!(
+        saw_new_folder,
+        "the New Folder tool is drawn and hit-testable"
+    );
+
+    // The read-only picker hands no write tools, so none is ever resolved —
+    // the type separation keeps a write action out of the picker entirely.
+    for x in 0..vp.width {
+        let point = Point::new(i32::try_from(x).unwrap(), y);
+        assert_eq!(manager_tool_at(&browser, &theme, vp, point, &[]), None);
+    }
+
+    // A click below the toolbar strip is never a write tool either.
+    assert_eq!(
+        manager_tool_at(
+            &browser,
+            &theme,
+            vp,
+            Point::new(4, i32::try_from(toolbar_height(&theme)).unwrap()),
+            MANAGER_TOOLS,
+        ),
+        None
+    );
+}
+
+#[test]
+fn suggest_new_dir_name_disambiguates_against_the_listing() {
+    use crate::mkdir::{suggest_new_dir_name, NEW_FOLDER_BASE};
+
+    // An empty (or unrelated) listing gets the plain base name.
+    assert_eq!(suggest_new_dir_name(&[]), NEW_FOLDER_BASE);
+    assert_eq!(
+        suggest_new_dir_name(&[Entry::directory("Documents"), Entry::file("notes.txt")]),
+        NEW_FOLDER_BASE
+    );
+
+    // The base taken pushes to the first free numeric suffix, and further
+    // clashes advance it, so the placeholder never collides with a sibling
+    // (which the create would refuse).
+    assert_eq!(
+        suggest_new_dir_name(&[Entry::directory(NEW_FOLDER_BASE)]),
+        "New Folder 2"
+    );
+    assert_eq!(
+        suggest_new_dir_name(&[
+            Entry::directory(NEW_FOLDER_BASE),
+            Entry::directory("New Folder 2"),
+            Entry::directory("New Folder 3"),
+        ]),
+        "New Folder 4"
+    );
+
+    // A gap is filled by the smallest free suffix, not the next after the max.
+    assert_eq!(
+        suggest_new_dir_name(&[
+            Entry::directory(NEW_FOLDER_BASE),
+            Entry::directory("New Folder 3"),
+        ]),
+        "New Folder 2"
     );
 }
 

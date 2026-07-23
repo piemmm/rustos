@@ -23,7 +23,7 @@ use crate::vector::VectorIcon;
 ///
 /// A fixed table so a loader iterates the closed [`IconKind`] vocabulary
 /// without inventing a second list of kinds.
-pub const ICON_KINDS: [IconKind; 19] = [
+pub const ICON_KINDS: [IconKind; 20] = [
     IconKind::Network,
     IconKind::Volume,
     IconKind::Battery,
@@ -42,6 +42,7 @@ pub const ICON_KINDS: [IconKind; 19] = [
     IconKind::Refresh,
     IconKind::ViewToggle,
     IconKind::Sort,
+    IconKind::NewFolder,
     IconKind::Generic,
 ];
 

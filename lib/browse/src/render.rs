@@ -36,7 +36,7 @@ use tairix_theme::{Palette, Theme};
 
 use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
-use crate::chrome::{self, ToolbarCommand, ToolbarModel};
+use crate::chrome::{self, ManagerTool, ToolbarCommand, ToolbarModel};
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
@@ -60,6 +60,13 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 /// Paint `browser`'s current directory into a [`Surface`] the size of
 /// `viewport`, using `theme`'s palette and the shared collection controls.
 ///
+/// `tools` are the manager-only write tools ([`chrome::MANAGER_TOOLS`]) to draw
+/// on the toolbar after the shared read-only commands: the file manager passes
+/// them, the trusted read-only picker passes an empty slice so it never draws a
+/// write tool. The read-only commands keep their positions regardless (the
+/// toolbar left-packs fixed-width buttons), so a click on a read-only command
+/// resolves identically for both consumers.
+///
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
 /// dimensions cannot be allocated (a surface that could never exist), so the
@@ -70,13 +77,14 @@ pub fn render<S: DirectorySource>(
     theme: &Theme,
     font: BitmapFont,
     viewport: Rect,
+    tools: &[ManagerTool],
 ) -> Option<Surface> {
     let row_height = row_height(font);
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
-    draw_toolbar(&mut surface, theme, font, browser, viewport);
+    draw_toolbar(&mut surface, theme, font, browser, viewport, tools);
     draw_path_bar(
         &mut surface,
         font,
@@ -415,11 +423,18 @@ const fn toolbar_group(command: ToolbarCommand) -> u16 {
     }
 }
 
+/// The toolbar group the manager-only write tools sit in — after the read-only
+/// navigation/refresh/view groups (0..=2), so a quiet divider sets them apart.
+const MANAGER_TOOL_GROUP: u16 = 3;
+
 /// Build the drawn command toolbar for `model`: one [`IconButton`] per
 /// [`chrome::TOOLBAR_COMMANDS`] entry, in order, each carrying the command's
 /// glyph and rendered disabled (not hidden) when the model reports the command
-/// is not currently actionable, so the toolbar's shape is stable.
-fn build_toolbar(model: ToolbarModel) -> Toolbar {
+/// is not currently actionable, so the toolbar's shape is stable. The
+/// manager-only write `tools` follow the read-only commands (a picker passes an
+/// empty slice), so their [`Toolbar`] indices are
+/// `chrome::TOOLBAR_COMMANDS.len() + i`.
+fn build_toolbar(model: ToolbarModel, tools: &[ManagerTool]) -> Toolbar {
     let mut toolbar = Toolbar::new();
     for &command in chrome::TOOLBAR_COMMANDS {
         let mut button = IconButton::new(command.icon(), ControlRole::Navigation);
@@ -428,30 +443,38 @@ fn build_toolbar(model: ToolbarModel) -> Toolbar {
         }
         toolbar = toolbar.with_icon(button, toolbar_group(command));
     }
+    for &tool in tools {
+        let button = IconButton::new(tool.icon(), ControlRole::Neutral);
+        toolbar = toolbar.with_icon(button, MANAGER_TOOL_GROUP);
+    }
     toolbar
 }
 
-/// Draw the command toolbar in the top strip: [`chrome::TOOLBAR_COMMANDS`] as
-/// themed [`IconButton`]s over the [`ToolbarModel`], spanning the full window
-/// width above the path bar. A disabled command reads muted rather than
-/// vanishing (the model decides which).
+/// Draw the command toolbar in the top strip: [`chrome::TOOLBAR_COMMANDS`] then
+/// the manager-only write `tools`, as themed [`IconButton`]s over the
+/// [`ToolbarModel`], spanning the full window width above the path bar. A
+/// disabled command reads muted rather than vanishing (the model decides
+/// which).
 fn draw_toolbar<S: DirectorySource>(
     surface: &mut Surface,
     theme: &Theme,
     font: BitmapFont,
     browser: &Browser<S>,
     viewport: Rect,
+    tools: &[ManagerTool],
 ) {
-    let toolbar = build_toolbar(ToolbarModel::for_browser(browser));
+    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools);
     let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
     toolbar.render(surface, bounds, Scale::ONE, theme, font);
 }
 
 /// The actionable toolbar command at window-local pixel `point`, or `None`
 /// when the click is not on one — outside the toolbar strip, on a group
-/// gutter, or on a command the [`ToolbarModel`] has disabled (fail closed: a
-/// disabled tool does not act, §5.4). It mirrors the drawn toolbar's own
-/// layout so a click resolves to exactly the tool [`render`] painted (§2.2).
+/// gutter, on a manager write tool, or on a command the [`ToolbarModel`] has
+/// disabled (fail closed: a disabled tool does not act, §5.4). It mirrors the
+/// drawn toolbar's own layout so a click resolves to exactly the tool
+/// [`render`] painted (§2.2). The read-only commands keep the same positions
+/// whether or not write tools follow them, so this needs no `tools` argument.
 #[must_use]
 pub fn toolbar_command_at<S: DirectorySource>(
     browser: &Browser<S>,
@@ -460,11 +483,34 @@ pub fn toolbar_command_at<S: DirectorySource>(
     point: Point,
 ) -> Option<ToolbarCommand> {
     let model = ToolbarModel::for_browser(browser);
-    let toolbar = build_toolbar(model);
+    let toolbar = build_toolbar(model, &[]);
     let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
     let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
     let command = *chrome::TOOLBAR_COMMANDS.get(index)?;
     model.is_enabled(command).then_some(command)
+}
+
+/// The manager-only write [`ManagerTool`] at window-local pixel `point`, or
+/// `None` when the click is not on one. `tools` is the same set handed to
+/// [`render`] (a read-only picker passes an empty slice and so never resolves a
+/// write tool). The full toolbar — read-only commands then the write tools — is
+/// rebuilt so the write tools sit at exactly the positions [`render`] painted
+/// them (§2.2); a hit resolves only in the write-tool index range, so a click
+/// on a read-only command returns `None` here (it is handled by
+/// [`toolbar_command_at`]).
+#[must_use]
+pub fn manager_tool_at<S: DirectorySource>(
+    browser: &Browser<S>,
+    theme: &Theme,
+    viewport: Rect,
+    point: Point,
+    tools: &[ManagerTool],
+) -> Option<ManagerTool> {
+    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools);
+    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
+    let tool_index = index.checked_sub(chrome::TOOLBAR_COMMANDS.len())?;
+    tools.get(tool_index).copied()
 }
 
 /// The [`ListView`] for `browser` at the given content viewport.

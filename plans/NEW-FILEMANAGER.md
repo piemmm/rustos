@@ -31,14 +31,14 @@ which the drift guard enforces.
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
+FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
+`Ctrl+Shift+N` (create + inline-rename, wired end-to-end),
 FM8a's properties view model, FM8b's drawn read-only properties panel +
-its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
-FM4b's pure context-menu chrome model, and FM7b's pure new-folder (`fs_mkdir`)
-model
-are done**; the rest of the FM4b drawn chrome (the drawn context menu, and the New
-Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
-spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's drawn
-permission control + ownership, and FM9 are
+its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model, and
+FM4b's pure context-menu chrome model
+are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
+FM6b app-side spawn/delegation, the FM7b app-side move/copy/delete verbs,
+FM8b's drawn permission control + ownership, and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -371,6 +371,31 @@ conventional single-key accelerator, and a uniform keyboard path for every tool
 awaits the later toolbar keyboard-focus pass (the `lib/controls::Toolbar`
 `on_key` focus model), not invented chords now.
 
+**The New Folder tool is done** (its `fs_mkdir` action already exists, §2.4),
+and it exposed — and settled — a real design point: the drawn read-only
+toolbar (`chrome::ToolbarCommand` / `apply_command` / `render`) is composed by
+**both** the file manager *and* the trusted read-only picker, so a *write*
+action cannot live on it without handing the picker write authority. New Folder
+is therefore a separate **manager-only write-tool vocabulary**,
+`chrome::ManagerTool` (with `MANAGER_TOOLS` + `ManagerTool::icon()`), that only
+a write-capable consumer hands to `render` — the file manager passes
+`MANAGER_TOOLS`, the picker passes `&[]`, so the picker cannot draw or resolve
+a write tool (the separation is by type, not a runtime flag). `render` draws
+the write tools in their own toolbar group after the read-only commands, and
+`render::manager_tool_at` is the mirror hit-test (a read-only command's
+position is unchanged whether or not tools follow, so `toolbar_command_at`
+needs no `tools` argument). The `files.app` `Run` binary routes a toolbar click
+(and the `Ctrl+Shift+N` keyboard equivalent) to `begin_new_folder`, which names
+a non-clashing placeholder (`mkdir::suggest_new_dir_name`), creates it through
+`Browser::create_directory` over the `fs_mkdir` seam under the user's own
+identity (**no new capability**), and opens the inline rename on the new folder;
+a refused create states its reason on `stderr` and leaves the listing put
+(§2.24, §5.4). Host-tested in `lib/browse` (`manager_tool_at` resolves New
+Folder and stays disjoint from the read-only commands, the empty-`tools` picker
+never resolves a write tool, and `suggest_new_dir_name` disambiguation) and
+`lib/icon` (the `NewFolder` glyph). Docs: `docs/src/desktop/apps.md`,
+`lib/browse`/`lib/icon` README + rustdoc.
+
 The remaining drawn chrome (still `planned`):
 
 - **Drawn context menu** (`lib/controls::Menu`): the app-side menu painted
@@ -378,7 +403,6 @@ The remaining drawn chrome (still `planned`):
   `is_enabled` and routed to the verb it invokes — Open/Open With… (FM6),
   Rename (FM5), Cut/Copy/Paste (FM7), Properties (FM8). Delete lands with its
   own FM7 engine action + entry, never ahead of it.
-- **New Folder** toolbar tool arrives with FM7 (`fs_mkdir`).
 
 ### FM5 — in-place rename `[x]`
 
@@ -581,15 +605,18 @@ The remaining app-side verbs (still `planned`):
   (§2.24, §5.4).
 - **Delete** asks once (a `lib/controls::Dialog`, honest warmth), then
   `fs_unlink`/recursive remove under the user's identity; a refusal is an
-  in-UI answer. **New Folder** = `fs_mkdir` + inline-rename the new item.
+  in-UI answer.
 - **Progress + cancel** for long operations: a bounded progress indicator
   (`lib/controls` `Progress`), a Cancel that stops at the next chunk
   boundary; the window stays parked/responsive throughout (§2.23).
 - Host tests: the engine-side selection ranges, clipboard state machine,
   move-vs-copy volume decision, and chunked-copy resume/cancel/overrun are
   **done** in `lib/browse` (FM7a + the `execute` model above); the app-side
-  work adds partial-failure recovery, delete confirm/refuse, and mkdir+rename
-  over the VFS seams.
+  work adds partial-failure recovery and delete confirm/refuse over the VFS
+  seams.
+
+(**New Folder is done** — its drawn manager-only tool + `Ctrl+Shift+N` +
+create-then-inline-rename wiring landed with FM4b's chrome; see that stage.)
 
 ### FM8a — the properties view model `[x]`
 

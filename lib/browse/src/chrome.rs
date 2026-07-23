@@ -203,6 +203,49 @@ impl ToolbarModel {
     }
 }
 
+/// A file-manager **write** tool — a manager-only toolbar action that mutates
+/// the filesystem, deliberately kept in a vocabulary separate from the
+/// read-only [`ToolbarCommand`] set.
+///
+/// The shared read-only toolbar ([`ToolbarCommand`] / [`apply_command`]) is
+/// composed by *both* the file manager and the trusted read-only file picker,
+/// so it must never carry an action that writes. Write tools live here instead:
+/// only a write-capable consumer (the file manager) renders them — by handing
+/// [`MANAGER_TOOLS`] to the renderer — and dispatches them in its own
+/// capability-checked tail, under the user's own identity (no new capability;
+/// the per-inode permission model gates the write). The picker hands the
+/// renderer no write tools and therefore cannot express one: the separation is
+/// enforced by the type system, not a runtime flag.
+///
+/// New write tools (Delete, the clipboard verbs) join this set only in the
+/// stage that first wires their action, never ahead of it — exactly as the
+/// [`ToolbarCommand`] set grows.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ManagerTool {
+    /// Create a new folder in the current directory
+    /// ([`create_directory`](Browser::create_directory)), which the file
+    /// manager then opens the inline rename on.
+    NewFolder,
+}
+
+/// The complete set of manager-only write tools, in their left-to-right toolbar
+/// order (drawn after the shared read-only [`TOOLBAR_COMMANDS`]).
+///
+/// The file manager hands this to the renderer; the read-only picker hands an
+/// empty slice, so it never draws or dispatches a write tool.
+pub const MANAGER_TOOLS: &[ManagerTool] = &[ManagerTool::NewFolder];
+
+impl ManagerTool {
+    /// The built-in glyph the drawn toolbar paints for this tool (one
+    /// definition, mirroring [`ToolbarCommand::icon`]).
+    #[must_use]
+    pub const fn icon(self) -> IconKind {
+        match self {
+            Self::NewFolder => IconKind::NewFolder,
+        }
+    }
+}
+
 /// A file-manager context-menu command whose behaviour already exists in the
 /// engine.
 ///

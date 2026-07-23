@@ -53,10 +53,11 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
-    use tairix_browse::render::{draw_properties, render};
+    use tairix_browse::render::{draw_properties, manager_tool_at, render};
     use tairix_browse::{
-        validate_new_name, Browser, DirectorySource, EntryKind, Properties, RenameError,
-        ToolbarCommand, VfsDirectorySource, WIN_HEIGHT, WIN_WIDTH,
+        suggest_new_dir_name, validate_new_name, Browser, DirectorySource, EntryKind, ManagerTool,
+        Properties, RenameError, ToolbarCommand, VfsDirectorySource, MANAGER_TOOLS, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_controls::text::{TextAction, TextField};
     use tairix_font::BitmapFont;
@@ -206,7 +207,8 @@ mod program {
         // window is not DPI-scaled today, so the logical size is the physical
         // size), rather than a size hard-coded here.
         let font = BitmapFont::with_pixel_height(u32::from(theme.fonts().ui.size_px));
-        let mut surface = render(browser, theme, font, viewport).ok_or(Errno::LengthOutOfRange)?;
+        let mut surface =
+            render(browser, theme, font, viewport, MANAGER_TOOLS).ok_or(Errno::LengthOutOfRange)?;
         // In rename mode, overlay the inline editor exactly over the selected
         // item's row through the shared selection geometry, so the field sits
         // on the item the user is renaming (§2.2).
@@ -293,56 +295,16 @@ mod program {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
-            } => match key {
-                // Toolbar-command accelerators: Alt+←/→/↑ drive the history and
-                // climb commands, F5 refreshes — the same shared dispatch a
-                // toolbar click uses, so the keyboard and the toolbar can never
-                // disagree about what a command does (§2.2).
-                KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => {
-                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Back)
-                }
-                KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => {
-                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Forward)
-                }
-                KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => {
-                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Up)
-                }
-                KeyValue::Named(NamedKeyCode::F5) => {
-                    apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Refresh)
-                }
-                KeyValue::Named(NamedKeyCode::Down) => {
-                    browser.select_next();
-                    tairix_browse::render::reveal_selection(browser, font, theme, viewport);
-                    (true, false)
-                }
-                KeyValue::Named(NamedKeyCode::Up) => {
-                    browser.select_previous();
-                    tairix_browse::render::reveal_selection(browser, font, theme, viewport);
-                    (true, false)
-                }
-                // Alt+Enter opens the Properties overlay for the selected
-                // item; with nothing selected (an empty directory) it is a
-                // no-op. Checked before the bare Enter arm so the modifier
-                // wins.
-                KeyValue::Named(NamedKeyCode::Enter) if modifiers.alt => {
+            } => {
+                // Alt+Enter opens the Properties overlay (it needs the overlay
+                // state); every other navigation-mode key is handled by the
+                // shared `apply_nav_key`.
+                if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     begin_properties(browser, properties)
+                } else {
+                    apply_nav_key(browser, rename, font, theme, viewport, *key, *modifiers)
                 }
-                KeyValue::Named(NamedKeyCode::Enter) => {
-                    // Opening a file (or an unreadable directory) is a
-                    // refused no-op today: the browser lists, it does
-                    // not launch. The listing stays as it was.
-                    (browser.open_selected().is_ok(), false)
-                }
-                KeyValue::Named(NamedKeyCode::Backspace) => {
-                    (browser.go_up().unwrap_or(false), false)
-                }
-                // F2 begins an in-place rename of the selected item; with
-                // nothing selected (an empty directory) it is a no-op.
-                KeyValue::Named(NamedKeyCode::F2) => {
-                    begin_rename(browser, rename, font, theme, viewport)
-                }
-                _ => (false, false),
-            },
+            }
             // A wheel gesture the desktop forwarded (this window owns its own
             // content scrolling): scroll the view one line per tick through
             // the shared scroll model, which clamps at both ends so a large or
@@ -362,6 +324,18 @@ mod program {
             // coordinates: a primary-button press navigates (a path-bar crumb)
             // or selects (an item); every other pointer action is a no-op.
             WindowEvent::Pointer { x, y, action, .. } => {
+                // A primary click on a manager write tool (New Folder) is
+                // dispatched here because the write path needs the rename
+                // state; all read-only pointer routing (toolbar commands,
+                // path-bar crumbs, item selection) stays in `apply_pointer`,
+                // the same read-only router the trusted picker uses.
+                if let Some(point) = press_point(*action, *x, *y) {
+                    if let Some(tool) =
+                        manager_tool_at(browser, theme, viewport, point, MANAGER_TOOLS)
+                    {
+                        return apply_manager_tool(browser, rename, font, theme, viewport, tool);
+                    }
+                }
                 apply_pointer(browser, font, theme, viewport, *x, *y, *action)
             }
             // Focus changes and key releases repaint nothing. The browser
@@ -387,6 +361,82 @@ mod program {
         }
     }
 
+    /// Handle one key press in navigation mode (not renaming, not showing the
+    /// Properties overlay), reporting whether the view changed (it never asks
+    /// the app to close). Mirrors [`apply_rename_key`]'s shape; Alt+Enter
+    /// (Properties) is handled by the caller, which owns the overlay state.
+    fn apply_nav_key<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        rename: &mut Option<TextField>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        key: KeyValue,
+        modifiers: AbiModifiers,
+    ) -> (bool, bool) {
+        match key {
+            // Toolbar-command accelerators: Alt+←/→/↑ drive the history and
+            // climb commands, F5 refreshes — the same shared dispatch a toolbar
+            // click uses, so the keyboard and the toolbar cannot disagree (§2.2).
+            KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => {
+                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Back)
+            }
+            KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => {
+                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Forward)
+            }
+            KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => {
+                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Up)
+            }
+            KeyValue::Named(NamedKeyCode::F5) => {
+                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Refresh)
+            }
+            // Ctrl+Shift+N: the keyboard equivalent of the New Folder tool.
+            // Shift may deliver 'n' upper- or lower-case, so match either.
+            KeyValue::Char(ch)
+                if modifiers.ctrl && modifiers.shift && ch.eq_ignore_ascii_case(&'n') =>
+            {
+                begin_new_folder(browser, rename, font, theme, viewport)
+            }
+            KeyValue::Named(NamedKeyCode::Down) => {
+                browser.select_next();
+                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                (true, false)
+            }
+            KeyValue::Named(NamedKeyCode::Up) => {
+                browser.select_previous();
+                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                (true, false)
+            }
+            KeyValue::Named(NamedKeyCode::Enter) => {
+                // Opening a file (or an unreadable directory) is a refused
+                // no-op today: the browser lists, it does not launch. The
+                // listing stays as it was.
+                (browser.open_selected().is_ok(), false)
+            }
+            KeyValue::Named(NamedKeyCode::Backspace) => (browser.go_up().unwrap_or(false), false),
+            // F2 begins an in-place rename of the selected item; with nothing
+            // selected (an empty directory) it is a no-op.
+            KeyValue::Named(NamedKeyCode::F2) => {
+                begin_rename(browser, rename, font, theme, viewport)
+            }
+            _ => (false, false),
+        }
+    }
+
+    /// The window-local [`Point`] of a primary-button press, or `None` for any
+    /// other pointer action. The one place the primary-press gate and the
+    /// wire-coordinate conversion live, shared by the write-tool dispatch and
+    /// the read-only [`apply_pointer`] routing so they cannot disagree (§2.2).
+    fn press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
+        if action != PointerAction::Pressed(PointerButtonCode::Primary) {
+            return None;
+        }
+        Some(Point::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+        ))
+    }
+
     /// Apply one routed pointer event in navigation mode, reporting whether the
     /// view changed (and must re-present).
     ///
@@ -407,13 +457,9 @@ mod program {
         y: u32,
         action: PointerAction,
     ) -> (bool, bool) {
-        if action != PointerAction::Pressed(PointerButtonCode::Primary) {
+        let Some(point) = press_point(action, x, y) else {
             return (false, false);
-        }
-        let point = Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        );
+        };
         // A click on a toolbar command runs it through the same shared dispatch
         // the keyboard accelerators use; a disabled command resolves to nothing
         // (`toolbar_command_at` fails closed) and repaints nothing.
@@ -457,6 +503,58 @@ mod program {
                 (true, false)
             }
             Ok(false) | Err(_) => (false, false),
+        }
+    }
+
+    /// Dispatch a manager write `tool` (a toolbar click or its keyboard
+    /// equivalent). New Folder is the only write tool today.
+    fn apply_manager_tool<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        rename: &mut Option<TextField>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        tool: ManagerTool,
+    ) -> (bool, bool) {
+        match tool {
+            ManagerTool::NewFolder => begin_new_folder(browser, rename, font, theme, viewport),
+        }
+    }
+
+    /// Create a new folder in the current directory and open the inline rename
+    /// on it, so the user names it immediately (the standard new-folder flow).
+    ///
+    /// The placeholder name is disambiguated against the current listing
+    /// ([`suggest_new_dir_name`]) and the create is an ordinary
+    /// permission-checked `fs_mkdir` under the user's own identity — no new
+    /// capability; the per-inode owner/mode/ACL model gates it. The engine
+    /// validates before the syscall and is transactional: a refused create
+    /// leaves the listing exactly as it was and states its reason on `stderr`
+    /// (an honest answer, never a crash or a fabricated folder). On success the
+    /// engine has selected the new folder, so the rename editor opens on it.
+    fn begin_new_folder<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        rename: &mut Option<TextField>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+    ) -> (bool, bool) {
+        let name = suggest_new_dir_name(browser.entries());
+        match browser.create_directory(&name, |path| {
+            let ret = tairix_rt::fs_mkdir(path.as_bytes());
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(errno_from(ret))
+            }
+        }) {
+            Ok(()) => begin_rename(browser, rename, font, theme, viewport),
+            Err(err) => {
+                let _ = tairix_rt::stderr(b"files: ");
+                let _ = tairix_rt::stderr(err.message().as_bytes());
+                let _ = tairix_rt::stderr(b"\n");
+                (false, false)
+            }
         }
     }
 

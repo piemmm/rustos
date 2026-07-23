@@ -5,7 +5,7 @@
 //! manager's file-type icons (folder, document, application bundle, and the
 //! broad content classes text/image/archive/executable), and the file
 //! manager's toolbar command icons (back/forward/up navigation, refresh, the
-//! view toggle, and sort). A theme asset id
+//! view toggle, sort, and new folder). A theme asset id
 //! resolves to a kind through [`IconKind::for_asset`]; an unrecognised id
 //! falls back to [`IconKind::Generic`] rather than failing, so an unknown
 //! asset still shows a placeholder instead of nothing. [`builtin_icon`] turns
@@ -66,6 +66,8 @@ pub enum IconKind {
     ViewToggle,
     /// Descending horizontal bars, for the file manager's sort command.
     Sort,
+    /// A folder with a plus badge, for the file manager's New Folder command.
+    NewFolder,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
 }
@@ -95,6 +97,7 @@ impl IconKind {
             "refresh" => Self::Refresh,
             "view-toggle" => Self::ViewToggle,
             "sort" => Self::Sort,
+            "new-folder" => Self::NewFolder,
             _ => Self::Generic,
         }
     }
@@ -127,7 +130,8 @@ impl IconKind {
             Self::Refresh => 15,
             Self::ViewToggle => 16,
             Self::Sort => 17,
-            Self::Generic => 18,
+            Self::NewFolder => 18,
+            Self::Generic => 19,
         }
     }
 
@@ -159,6 +163,7 @@ impl IconKind {
             Self::Refresh => "refresh",
             Self::ViewToggle => "view-toggle",
             Self::Sort => "sort",
+            Self::NewFolder => "new-folder",
             Self::Generic => "generic",
         }
     }
@@ -189,6 +194,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Refresh => refresh(color),
         IconKind::ViewToggle => view_toggle(color),
         IconKind::Sort => sort(color),
+        IconKind::NewFolder => new_folder(color),
         IconKind::Generic => generic(color),
     };
     VectorIcon::new(DESIGN, layers)
@@ -406,6 +412,19 @@ fn sort(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, BAR1),
         IconLayer::from_points(color, BAR2),
         IconLayer::from_points(color, BAR3),
+    ]
+}
+
+/// A closed folder with a plus badge in its top-trailing corner (clear of the
+/// folder body so the two read as separate marks in one tint), for New Folder.
+fn new_folder(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BODY: &[(i32, i32)] = &[(2, 9), (8, 9), (10, 11), (15, 11), (15, 21), (2, 21)];
+    const PLUS_V: &[(i32, i32)] = &[(18, 3), (21, 3), (21, 10), (18, 10)];
+    const PLUS_H: &[(i32, i32)] = &[(16, 5), (23, 5), (23, 8), (16, 8)];
+    vec![
+        IconLayer::from_points(color, BODY),
+        IconLayer::from_points(color, PLUS_V),
+        IconLayer::from_points(color, PLUS_H),
     ]
 }
 

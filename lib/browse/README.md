@@ -159,7 +159,10 @@ can never diverge in navigation semantics, listing policy, or look.
   app's inline rename); a VFS refusal leaves the listing exactly as it was and
   is surfaced as `MkdirError::Refused`. The create is the caller's own
   permission-checked `fs_mkdir` (no new capability), so the read-only picker
-  composes the same `Browser` and never calls it.
+  composes the same `Browser` and never calls it. `suggest_new_dir_name`
+  supplies the non-clashing placeholder name (`New Folder`, then `New Folder 2`,
+  …) the manager creates with before opening the inline rename — bounded by the
+  listing (pigeonhole), never an arbitrary cap.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the
@@ -233,7 +236,14 @@ can never diverge in navigation semantics, listing policy, or look.
   the command toolbar (`chrome::TOOLBAR_COMMANDS` as a `lib/controls`
   `Toolbar` of themed `IconButton`s, disabled tools muted from the
   `ToolbarModel`); `toolbar_command_at` is that strip's hit-test, returning
-  only an *enabled* command (fail closed). `chrome_height` (the toolbar strip
+  only an *enabled* command (fail closed). Because a *write* action must never
+  reach the read-only picker that shares this toolbar, the manager-only write
+  tools live in a separate `chrome::ManagerTool` vocabulary (`MANAGER_TOOLS`,
+  `ManagerTool::icon`): a write-capable consumer hands `render` its tools (the
+  file manager passes `MANAGER_TOOLS`, the picker `&[]`), which draw in their
+  own toolbar group after the read-only commands, and `manager_tool_at` is
+  their mirror hit-test — so the picker can neither draw nor resolve a write
+  tool. `chrome_height` (the toolbar strip
   plus the path bar) is the one header offset the item views, the scrollbar
   gutter, and every hit-test share. `selection_rect` is
   `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so
