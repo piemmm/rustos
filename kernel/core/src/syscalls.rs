@@ -1850,6 +1850,16 @@ where
     /// (fail closed, no plaintext, already audited) and the task is
     /// terminated by the resolver.
     ///
+    /// After a successful restore, and only while free memory is
+    /// comfortably above the warm-up watermark, two bounded
+    /// opportunistic restores run in the resuming task's own context —
+    /// fault clustering (the faulted page's near, contemporaneous
+    /// neighbours) and one warm step (entries near recent faults). They
+    /// never run under pressure and never touch the decompression
+    /// reserve, so they add latency only when there is spare memory and
+    /// charge it to the task that is resuming, not a daemon; any pages
+    /// they bring back are republished with the faulted page.
+    ///
     /// `task` is the kernel-trusted current task of the faulting CPU.
     #[must_use]
     pub fn resolve_ramzip_fault(&self, task: SecTaskId, fault_va: u64) -> RamzipFaultOutcome {
@@ -1879,7 +1889,33 @@ where
                     .is_some_and(|(page, mapping)| {
                         self.aspaces.write().note_faulted_page(task, page, mapping)
                     });
-                if !applied {
+                // Opportunistic warm restores while memory is comfortable:
+                // fault clustering brings back the faulted page's near,
+                // contemporaneous neighbours, and one bounded warm step
+                // brings back entries near recent faults. Both gate
+                // themselves on comfortable free memory (they never run
+                // under pressure and never draw down the decompression
+                // reserve), so the cost is charged to the resuming task
+                // rather than a background daemon and cannot spin. A sample
+                // is read only when a tier is installed and a page was just
+                // restored, so a task not resuming from the tier pays
+                // nothing here.
+                let warmed = match crate::memstats::MEM_STATS.current_pressure() {
+                    Some(pressure) => crate::kthread::with_current_live_space(cpu, |live| {
+                        let clustered =
+                            live.ramzip_cluster(tier, pressure, fault_va, self.log_sink);
+                        let warmed = live.ramzip_warm(tier, pressure, self.log_sink);
+                        clustered + warmed
+                    })
+                    .unwrap_or(0),
+                    None => 0,
+                };
+                // Republish the restored pages to the registry snapshot: a
+                // warm restore remapped several pages at once, so re-freeze
+                // the whole snapshot once; otherwise the faulted page's
+                // single-page delta already covered it (fall back to a full
+                // re-freeze only if that delta could not be applied).
+                if warmed > 0 || !applied {
                     self.refreeze_task_aspace(task);
                 }
                 RamzipFaultOutcome::Handled
@@ -19183,6 +19219,23 @@ mod tests {
             _sink: &dyn Sink,
         ) -> tairix_kernel_mem::RamzipReclaimSummary {
             tairix_kernel_mem::RamzipReclaimSummary::default()
+        }
+        fn ramzip_cluster(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _va: u64,
+            _sink: &dyn Sink,
+        ) -> usize {
+            0
+        }
+        fn ramzip_warm(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _sink: &dyn Sink,
+        ) -> usize {
+            0
         }
     }
 

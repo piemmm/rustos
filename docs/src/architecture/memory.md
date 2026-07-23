@@ -1475,17 +1475,20 @@ nor metadata format with it.
   restores up to 8 entries near recent demand faults, re-checks the
   gate before every page, stops instantly on any pressure transition,
   and reports `NothingToDo` when no fault-locality evidence exists —
-  cold pages stay compressed by design.
+  cold pages stay compressed by design. Both are driven from the live
+  fault path (§7r), foreground-only, so there is no warm-up daemon.
 - **Thrash detection** is event-clock based and deterministic: restores
   of recently sealed entries score the owning task; over the threshold
   the tier refuses that task's pages until the score decays (halving on
   a fixed event cadence). No wall clock, no retry loop.
-- **Enablement.** The tier is complete as the arch-neutral VM mechanism
-  (host-proven over `AddressSpace`/`PhysMap`/`FrameAllocator`, the same
-  surfaces production uses). Switching it on for arbitrary *running*
-  tasks additionally requires a restartable user page-fault path in the
-  architecture ports (trap → restore → resume), which no port provides
-  yet; that prerequisite is staged in `PLAN.md`.
+- **Enablement.** The tier is switched on for running tasks on every
+  MMU-bearing Tier-1 port. The restartable user page-fault path exists
+  (trap → restore → resume) and the referenced-bit facility (§7o) is
+  live — x86_64 reads the hardware Accessed bit, aarch64/riscv64 manage
+  it in software — so cold-page identification, compress-out (§7q), and
+  the move-only fault-in, fault clustering, and warm-up restores (§7r)
+  all run end to end. wasm32 keeps the fail-closed `Unsupported` default
+  (no per-page referenced bit), so the sweep stays inert there.
 
 Audit events (continuing the §7k catalogue, `kernel/mem` range
 `2000..3000`): `RAMZIP_AUTH_FAILURE` (2002, Error) when a sealed entry
@@ -1767,14 +1770,15 @@ charges the cost to whoever is driving pressure (per-task fairness,
   afterwards (several pages changed at once), the batched analogue of the
   per-page republish `resolve_ramzip_fault` does on restore, keeping the
   copy path from ever reading a freed frame.
-- **Still gated on the referenced bit (§7o).** Real ports declare
-  `AccessTracking` non-`Supported` today, so the cold-page scanner shows
-  nothing cold and direct reclaim compresses nothing on hardware until a
-  port lands its referenced bit (its own QEMU vertical). The trigger,
-  policy, template, residue gate, and snapshot republish are complete and
-  host-tested now, so enabling a port is the only remaining step for
-  end-to-end compress-out on that port. On `HostPageTable` (which *is*
-  `Supported`) the whole path is exercised today.
+- **Live on every MMU-bearing port (§7o).** x86_64, aarch64, and
+  riscv64 all declare `AccessTracking::Supported`, so the cold-page
+  scanner sees genuinely idle pages and direct reclaim compresses cold
+  anonymous pages out end to end on hardware; wasm32 keeps the
+  fail-closed `Unsupported` default, so the sweep stays inert there. The
+  trigger, policy, template, residue gate, and snapshot republish are
+  port-agnostic — a port needs no per-port change once its referenced
+  bit is live. `HostPageTable` (also `Supported`) exercises the whole
+  path in host tests.
 - **Tested.** `pressure::ramzip_reclaim_batch` band mapping (zero off the
   compression bands, severe reclaims harder than moderate, non-zero only
   where the handoff opens), `memstats::current_pressure` (none until the
@@ -1785,6 +1789,44 @@ charges the cost to whoever is driving pressure (per-task fairness,
   fail-closed no-op before the tier is installed. The end-to-end
   compress→fault behaviour the trigger drives is the §7p `LiveSpace`
   live-wiring suite.
+
+## 7r. Fault clustering and opportunistic warm-up (live)
+
+The §7n clustering and warm-up mechanisms are driven from the live
+fault path, so a task resuming from the tier gets its working set back
+without a fault per page — the read half's analogue of the §7q
+compress-out trigger, and, like it, foreground-only: there is no
+warm-up daemon to schedule, wake, or busy-poll. The cost is charged to
+the resuming task, at the one moment it is provably using formerly
+compressed memory.
+
+- **The trigger.** After `resolve_ramzip_fault` restores the faulting
+  page (§7p), and only then, it samples the shared pressure gauge once
+  and — through the object-safe `LiveUserSpace::ramzip_cluster` and
+  `ramzip_warm` seams — runs fault clustering around the faulted page
+  and one bounded warm step over entries near recent faults. A task not
+  resuming from the tier (`NoEntry`) never reaches this code, so it
+  pays nothing.
+- **Comfort-gated, reserve-safe.** Both restore only at normal pressure
+  with free memory above the warm-up start watermark (`warmup_start` /
+  `warmup_stop` hysteresis, §7h) and re-check the decompression floor
+  before every page, so they never run under pressure and can never be
+  the cause of renewed pressure — the §7n / `plans/SWAPSWAPSWAP.md` §11,
+  §12 invariant. Clustering is bounded to ±8 pages sealed within 32
+  events of the faulted entry; a warm step to 8 pages within ±64.
+- **Best-effort, never fatal.** A cluster/warm restore failure never
+  propagates: the original fault already succeeded. An authentication
+  or decode failure is audit-logged and yields no plaintext, exactly as
+  on the demand path.
+- **Snapshot republish.** A warm restore remaps several pages at once,
+  so the registry snapshot is re-frozen once when any page was brought
+  back; the demand page's single-page delta covers the common case.
+- **Tested.** The `LiveSpace` live-wiring suite over `HostPageTable`
+  (`Supported`): a demand fault plus clustering restores exactly the
+  contemporaneous neighbours when comfortable and nothing under
+  pressure; a warm step restores near recent faults only with locality
+  evidence and comfort, and stops immediately under pressure; both are
+  fail-closed no-ops on an empty tier.
 
 ## 8. Testing strategy
 

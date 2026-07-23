@@ -51,6 +51,7 @@ use crate::phys::PhysMap;
 use crate::pressure::MemoryPressure;
 use crate::ramzip::{
     FaultError, PageCandidate, Ramzip, RamzipFaultOutcome, RamzipReclaimSummary, VmContext,
+    WarmOutcome,
 };
 use crate::vmm::{AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, VirtAddr};
 
@@ -477,6 +478,51 @@ pub trait LiveUserSpace: Send {
         template: PageCandidate,
         sink: &dyn Sink,
     ) -> RamzipReclaimSummary;
+
+    /// Opportunistically restore compressed entries adjacent to the
+    /// page just faulted in at `va`, through the global [`Ramzip`]
+    /// tier, returning how many pages were brought back.
+    ///
+    /// The fault resolver calls this **after** a successful
+    /// [`Self::ramzip_fault_in`]: that demand fault recorded the
+    /// locality evidence this consumes. The tier restores only
+    /// same-space neighbours within its cluster radius that were
+    /// sealed close in time to the faulted entry, and only while free
+    /// memory is comfortably above the warm-up watermark with the
+    /// decompression floor protected — so clustering never runs under
+    /// pressure and never draws down a reserve. It is best-effort: a
+    /// restore failure never propagates (the original fault already
+    /// succeeded), and `sink` records any authentication/corruption
+    /// loss. The caller republishes the restored pages to the registry
+    /// snapshot.
+    fn ramzip_cluster(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        pressure: &MemoryPressure,
+        va: u64,
+        sink: &dyn Sink,
+    ) -> usize;
+
+    /// Run one bounded, opportunistic warm-up step over this space's
+    /// compressed entries, returning how many pages were restored.
+    ///
+    /// The move-only background-warm optimisation: it restores up to a
+    /// fixed batch of entries near recent demand faults, only while
+    /// free memory is comfortably above the warm-up watermark
+    /// (re-checked before every page, so it stops the instant pressure
+    /// returns) and never touching the decompression reserve. A tier
+    /// with no fault-locality evidence restores nothing — keeping cold
+    /// pages compressed is the design. There is no timer here: the
+    /// resolver drives one step when a compressed page is faulted back
+    /// and memory is comfortable, so the cost is charged to the
+    /// resuming task rather than a background daemon. The caller
+    /// republishes the restored pages.
+    fn ramzip_warm(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        pressure: &MemoryPressure,
+        sink: &dyn Sink,
+    ) -> usize;
 }
 
 /// The generic concrete live address space retained per task.
@@ -1005,6 +1051,53 @@ where
             }
         }
         summary
+    }
+
+    fn ramzip_cluster(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        pressure: &MemoryPressure,
+        va: u64,
+        sink: &dyn Sink,
+    ) -> usize {
+        // A misaligned or out-of-range address names no faulted page to
+        // cluster around: restore nothing (fail closed).
+        let Ok(page) = Page::from_addr(VirtAddr::new(va & !((PAGE_SIZE as u64) - 1))) else {
+            return 0;
+        };
+        let space_id = self.space_id;
+        let mut tier = tier.lock();
+        let mut ctx = VmContext {
+            space_id,
+            space: &mut self.space,
+            physmap: &self.physmap,
+            frames: self.frames,
+            sink,
+        };
+        tier.cluster_after_fault(pressure, &mut ctx, page)
+    }
+
+    fn ramzip_warm(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        pressure: &MemoryPressure,
+        sink: &dyn Sink,
+    ) -> usize {
+        let space_id = self.space_id;
+        let mut tier = tier.lock();
+        let mut ctx = VmContext {
+            space_id,
+            space: &mut self.space,
+            physmap: &self.physmap,
+            frames: self.frames,
+            sink,
+        };
+        match tier.warm_step(pressure, &mut ctx) {
+            WarmOutcome::Restored(restored) => restored,
+            // No candidate had locality evidence, or a gate closed
+            // mid-step: nothing became resident either way.
+            WarmOutcome::NothingToDo | WarmOutcome::Stopped => 0,
+        }
     }
 }
 
@@ -2155,6 +2248,184 @@ mod tests {
             // pre-pressure resident set (the compressed round trip is frame
             // neutral).
             assert_eq!(frames.free_frames(), held_free);
+            assert_eq!(entries(&tier), 0);
+        }
+
+        /// Hold frames until the sampled band reaches `band`, returning
+        /// them so a test can free them again to relax back to `Normal`.
+        /// The shared `press_to` leaks its frames; the clustering and
+        /// warm-up paths must compress under pressure and then observe
+        /// *comfortable* memory, so their tests need releasable pressure.
+        fn press_holding(
+            frames: &FrameAllocator,
+            pressure: &MemoryPressure,
+            band: PressureBand,
+        ) -> alloc::vec::Vec<crate::frame::Frame> {
+            let mut held = alloc::vec::Vec::new();
+            let mut guard = 0;
+            while pressure.sample() != band {
+                held.push(frames.alloc().expect("pressure frame"));
+                guard += 1;
+                assert!(guard <= FRAMES, "band {band:?} never reached");
+            }
+            held
+        }
+
+        /// Return every held pressure frame to the allocator, relaxing
+        /// back toward `Normal`.
+        fn release(frames: &FrameAllocator, held: alloc::vec::Vec<crate::frame::Frame>) {
+            for frame in held {
+                frames.free(frame).expect("return held frame");
+            }
+        }
+
+        #[test]
+        fn cluster_restores_contemporaneous_neighbours_after_a_comfortable_fault() {
+            let (mut live, frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            // Six contiguous placed anonymous pages, all cold: compressed
+            // together, so their seal times are contemporaneous.
+            let base = live.map_anonymous_placed(6).expect("place anon region");
+            let held = press_holding(frames, &pressure, PressureBand::Moderate);
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                6,
+                PageCandidate::cold_anonymous(),
+                &sink,
+            );
+            assert_eq!(summary.compressed, 6);
+            assert_eq!(entries(&tier), 6);
+
+            // Relax so memory is comfortably free again — the warm gate.
+            release(frames, held);
+            assert_eq!(pressure.sample(), PressureBand::Normal);
+
+            // Demand-fault the first page (records locality), then cluster
+            // its neighbours: the exact production sequence the resolver
+            // drives after a restore.
+            assert_eq!(
+                live.ramzip_fault_in(&tier, base, &sink),
+                RamzipFaultOutcome::Handled
+            );
+            let restored = live.ramzip_cluster(&tier, &pressure, base, &sink);
+            assert_eq!(restored, 5, "the five contemporaneous neighbours came back");
+            assert_eq!(entries(&tier), 0, "fault + cluster emptied the tier");
+            for i in 0..6u64 {
+                let page = crate::vmm::Page::from_addr(VirtAddr::new(base + i * PAGE_SIZE as u64))
+                    .unwrap();
+                assert!(live.space().translate(page).is_some(), "page {i} resident");
+            }
+        }
+
+        #[test]
+        fn cluster_does_nothing_while_under_pressure() {
+            let (mut live, frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            let base = live.map_anonymous_placed(4).expect("place anon region");
+            // Stay under pressure: the held frames are never released.
+            let _held = press_holding(frames, &pressure, PressureBand::Moderate);
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                4,
+                PageCandidate::cold_anonymous(),
+                &sink,
+            );
+            assert_eq!(summary.compressed, 4);
+            assert_eq!(
+                live.ramzip_fault_in(&tier, base, &sink),
+                RamzipFaultOutcome::Handled
+            );
+            // The warm gate is closed under pressure: clustering restores
+            // nothing, and the other three pages stay compressed.
+            assert_eq!(live.ramzip_cluster(&tier, &pressure, base, &sink), 0);
+            assert_eq!(entries(&tier), 3);
+        }
+
+        #[test]
+        fn warm_restores_near_recent_faults_only_with_evidence_and_comfort() {
+            let (mut live, frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            let base = live.map_anonymous_placed(6).expect("place anon region");
+            let held = press_holding(frames, &pressure, PressureBand::Moderate);
+            assert_eq!(
+                live.ramzip_reclaim(
+                    &tier,
+                    &pressure,
+                    0,
+                    6,
+                    PageCandidate::cold_anonymous(),
+                    &sink
+                )
+                .compressed,
+                6
+            );
+            release(frames, held);
+            assert_eq!(pressure.sample(), PressureBand::Normal);
+
+            // No demand fault yet: warm-up has no locality evidence, so it
+            // keeps every cold page compressed by design.
+            assert_eq!(live.ramzip_warm(&tier, &pressure, &sink), 0);
+            assert_eq!(entries(&tier), 6, "nothing warmed without evidence");
+
+            // A demand fault provides evidence; the warm step brings the
+            // neighbours back (batch budget covers all five).
+            assert_eq!(
+                live.ramzip_fault_in(&tier, base, &sink),
+                RamzipFaultOutcome::Handled
+            );
+            let restored = live.ramzip_warm(&tier, &pressure, &sink);
+            assert_eq!(restored, 5, "the five neighbours warmed back");
+            assert_eq!(entries(&tier), 0);
+        }
+
+        #[test]
+        fn warm_stops_immediately_under_pressure() {
+            let (mut live, frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            let base = live.map_anonymous_placed(4).expect("place anon region");
+            let _held = press_holding(frames, &pressure, PressureBand::Moderate);
+            assert_eq!(
+                live.ramzip_reclaim(
+                    &tier,
+                    &pressure,
+                    0,
+                    4,
+                    PageCandidate::cold_anonymous(),
+                    &sink
+                )
+                .compressed,
+                4
+            );
+            assert_eq!(
+                live.ramzip_fault_in(&tier, base, &sink),
+                RamzipFaultOutcome::Handled
+            );
+            // Still under pressure: the warm gate is closed, so the step
+            // stops immediately and the three others stay compressed.
+            assert_eq!(live.ramzip_warm(&tier, &pressure, &sink), 0);
+            assert_eq!(entries(&tier), 3);
+        }
+
+        #[test]
+        fn cluster_and_warm_are_no_ops_on_an_empty_tier() {
+            let (mut live, _frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            // No entries and no faults: both restore nothing (fail closed)
+            // and never panic — the resolver may call them after any fault.
+            assert_eq!(
+                live.ramzip_cluster(&tier, &pressure, ANON_WINDOW_BASE, &sink),
+                0
+            );
+            assert_eq!(live.ramzip_warm(&tier, &pressure, &sink), 0);
             assert_eq!(entries(&tier), 0);
         }
     }

@@ -5818,6 +5818,21 @@ VM mechanism, `kernel/mem::ramzip`;
     faults and the existing riscv64 verticals still pass.
   - **wasm32** keeps the fail-closed `Unsupported` default permanently (the
     sandbox exposes no referenced bit).
+- **Warm-restore enablement (b4): done — clustering + warm-up are live.**
+  The SWAP4 read-half optimisations are now driven from the fault path, not
+  only host-tested at the tier: after `resolve_ramzip_fault` restores a page
+  it samples pressure once and, only while memory is comfortably free, runs
+  fault clustering around the faulted page and one bounded warm step over
+  entries near recent faults through the object-safe
+  `LiveUserSpace::ramzip_cluster` / `ramzip_warm` seams, re-freezing the
+  snapshot once if any page was brought back. Foreground-only (charged to the
+  resuming task, no daemon, no spin), comfort-gated and reserve-safe (never
+  under pressure, decompression floor re-checked per page), best-effort (a
+  cluster/warm failure never fails the original fault). Host-tested over
+  `HostPageTable`: clustering restores exactly the contemporaneous neighbours
+  when comfortable and nothing under pressure; warm-up restores near recent
+  faults only with locality evidence and comfort and stops instantly under
+  pressure; both are fail-closed no-ops on an empty tier.
 - SWAP5 (optional encrypted lower-tier block swap policy) remains a
   separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
 - Benchmarks beyond the host suites (per-page latency on real boards,

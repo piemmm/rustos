@@ -727,6 +727,29 @@ mod tests {
             // against the real `LiveSpace`.
             tairix_kernel_mem::RamzipReclaimSummary::default()
         }
+
+        fn ramzip_cluster(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _va: u64,
+            _sink: &dyn tairix_log::Sink,
+        ) -> usize {
+            // The routing double holds no tier; clustering is exercised
+            // against the real `LiveSpace` in `kernel/mem`.
+            0
+        }
+
+        fn ramzip_warm(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _sink: &dyn tairix_log::Sink,
+        ) -> usize {
+            // As `ramzip_cluster`: warm-up is exercised against the real
+            // `LiveSpace`.
+            0
+        }
     }
 
     /// A `TestArch` reporting `cpu`, leaked to the `'static` shape the
