@@ -21,7 +21,8 @@ use crate::delete::{DeleteAction, DeleteError, DeletePlan, DeleteWalk, MAX_DELET
 use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::execute::{
-    paste_strategy, CopyCursor, CopyError, PasteStrategy, VolumeId, COPY_CHUNK_LEN,
+    paste_strategy, CopyAction, CopyCursor, CopyError, CopyWalk, CopyWalkError, PasteStrategy,
+    VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
 use crate::select::Selection;
 use crate::source::DirectorySource;
@@ -2880,6 +2881,299 @@ fn advancing_past_the_source_length_fails_closed() {
 #[test]
 fn copy_error_message_is_non_empty() {
     assert!(!CopyError::Overrun.to_string().is_empty());
+}
+
+// ---- FM7b: the recursive-copy execution model (`CopyWalk`) ----
+
+/// Drive a [`CopyWalk`] to completion against an in-memory *source* tree keyed
+/// by absolute-path spelling → children `(name, is_directory)`, returning the
+/// absolute *destination*-path spelling of every node in the order the copy
+/// performed it (a directory when created, a file when copied).
+///
+/// A source directory absent from `tree` lists as empty. Every driver call
+/// must succeed — a walk driven strictly in step never errors — so any protocol
+/// slip is a test failure, not a swallowed result.
+fn drive_copy(walk: &mut CopyWalk, tree: &BTreeMap<String, Vec<(String, bool)>>) -> Vec<String> {
+    let mut order = Vec::new();
+    // A generous ceiling so a modelling bug (a walk that never completes) fails
+    // the test rather than looping forever.
+    for _ in 0..10_000 {
+        match walk.next_action() {
+            None => return order,
+            Some(CopyAction::MakeDir { dest }) => {
+                order.push(key(dest));
+                walk.created().expect("created in step");
+            }
+            Some(CopyAction::List { source }) => {
+                let children = tree.get(&key(source)).cloned().unwrap_or_default();
+                walk.expand(&children).expect("expand in step");
+            }
+            Some(CopyAction::CopyFile { dest, .. }) => {
+                order.push(key(dest));
+                walk.copied_file().expect("copy file in step");
+            }
+        }
+    }
+    panic!("copy walk did not complete within the step ceiling");
+}
+
+#[test]
+fn copy_walk_copies_a_single_file() {
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "a.txt"]),
+        comps(&["Storage", "a.txt"]),
+        false,
+    )])
+    .expect("walk");
+
+    assert!(!walk.is_complete());
+    assert_eq!(walk.copied(), 0);
+    match walk.next_action() {
+        Some(CopyAction::CopyFile { source, dest }) => {
+            assert_eq!(source, comps(&["Users", "a.txt"]).as_slice());
+            assert_eq!(dest, comps(&["Storage", "a.txt"]).as_slice());
+        }
+        other => panic!("expected a CopyFile, got {other:?}"),
+    }
+    walk.copied_file().expect("copy the file");
+    assert!(walk.is_complete());
+    assert_eq!(walk.copied(), 1);
+    assert!(walk.next_action().is_none());
+}
+
+#[test]
+fn copy_walk_makes_the_destination_directory_before_listing_an_empty_one() {
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "empty"]),
+        comps(&["Storage", "empty"]),
+        true,
+    )])
+    .expect("walk");
+
+    // The destination directory is created first, before its contents are read.
+    match walk.next_action() {
+        Some(CopyAction::MakeDir { dest }) => {
+            assert_eq!(dest, comps(&["Storage", "empty"]).as_slice());
+        }
+        other => panic!("expected a MakeDir, got {other:?}"),
+    }
+    walk.created().expect("dest dir made");
+    assert_eq!(walk.copied(), 1);
+    // Then the source is listed; an empty listing finishes the directory.
+    match walk.next_action() {
+        Some(CopyAction::List { source }) => {
+            assert_eq!(source, comps(&["Users", "empty"]).as_slice());
+        }
+        other => panic!("expected a List, got {other:?}"),
+    }
+    walk.expand(&[]).expect("expand empty");
+    assert!(walk.is_complete());
+    assert_eq!(walk.copied(), 1);
+}
+
+#[test]
+fn copy_walk_creates_containers_before_contents_depth_first() {
+    // /Users/tree/{a.txt, sub/{b.txt}}, listed in that order → /Storage/tree.
+    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    tree.insert(
+        key(&comps(&["Users", "tree"])),
+        vec![("a.txt".to_string(), false), ("sub".to_string(), true)],
+    );
+    tree.insert(
+        key(&comps(&["Users", "tree", "sub"])),
+        vec![("b.txt".to_string(), false)],
+    );
+
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "tree"]),
+        comps(&["Storage", "tree"]),
+        true,
+    )])
+    .expect("walk");
+    let order = drive_copy(&mut walk, &tree);
+
+    // A container is created before its contents, siblings keep listing order,
+    // and a subtree is fully copied before we return to the parent.
+    assert_eq!(
+        order,
+        vec![
+            key(&comps(&["Storage", "tree"])),
+            key(&comps(&["Storage", "tree", "a.txt"])),
+            key(&comps(&["Storage", "tree", "sub"])),
+            key(&comps(&["Storage", "tree", "sub", "b.txt"])),
+        ]
+    );
+    // Every node counted once: tree, a.txt, sub, b.txt.
+    assert_eq!(walk.copied(), 4);
+}
+
+#[test]
+fn copy_walk_processes_multiple_items_in_order() {
+    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    tree.insert(
+        key(&comps(&["Users", "dir"])),
+        vec![("inner".to_string(), false)],
+    );
+
+    let mut walk = CopyWalk::from_items(vec![
+        (
+            comps(&["Users", "first.txt"]),
+            comps(&["Storage", "first.txt"]),
+            false,
+        ),
+        (comps(&["Users", "dir"]), comps(&["Storage", "dir"]), true),
+        (
+            comps(&["Users", "last.txt"]),
+            comps(&["Storage", "last.txt"]),
+            false,
+        ),
+    ])
+    .expect("walk");
+    let order = drive_copy(&mut walk, &tree);
+
+    assert_eq!(
+        order,
+        vec![
+            key(&comps(&["Storage", "first.txt"])),
+            key(&comps(&["Storage", "dir"])),
+            key(&comps(&["Storage", "dir", "inner"])),
+            key(&comps(&["Storage", "last.txt"])),
+        ]
+    );
+    assert_eq!(walk.copied(), 4);
+}
+
+#[test]
+fn copy_walk_expand_refuses_a_tree_deeper_than_the_bound() {
+    // A directory source that already sits at the maximum depth: expanding it
+    // would name a child one component deeper than the bound.
+    let deep: Vec<String> = (0..MAX_COPY_DEPTH).map(|i| format!("d{i}")).collect();
+    assert_eq!(deep.len(), MAX_COPY_DEPTH);
+    let mut walk =
+        CopyWalk::from_items(vec![(deep, comps(&["Storage", "dst"]), true)]).expect("walk");
+
+    // Make the destination, then the list step refuses to descend further.
+    assert!(matches!(
+        walk.next_action(),
+        Some(CopyAction::MakeDir { .. })
+    ));
+    walk.created().expect("dest dir made");
+    assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
+    assert_eq!(
+        walk.expand(&[("child".to_string(), false)]),
+        Err(CopyWalkError::TooDeep)
+    );
+    // Refused, and the walk is left exactly where it was (fail closed): still a
+    // List of the same directory.
+    assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
+}
+
+#[test]
+fn copy_walk_fails_closed_when_driven_out_of_step() {
+    // `created` / `expand` on a leaf-file step are out of step.
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "a.txt"]),
+        comps(&["Storage", "a.txt"]),
+        false,
+    )])
+    .expect("walk");
+    assert!(matches!(
+        walk.next_action(),
+        Some(CopyAction::CopyFile { .. })
+    ));
+    assert_eq!(walk.created(), Err(CopyWalkError::OutOfStep));
+    assert_eq!(walk.expand(&[]), Err(CopyWalkError::OutOfStep));
+    assert!(matches!(
+        walk.next_action(),
+        Some(CopyAction::CopyFile { .. })
+    ));
+
+    // `expand` on a not-yet-created directory, and `copied_file` on a directory,
+    // are out of step.
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "d"]),
+        comps(&["Storage", "d"]),
+        true,
+    )])
+    .expect("walk");
+    assert!(matches!(
+        walk.next_action(),
+        Some(CopyAction::MakeDir { .. })
+    ));
+    assert_eq!(walk.expand(&[]), Err(CopyWalkError::OutOfStep));
+    assert_eq!(walk.copied_file(), Err(CopyWalkError::OutOfStep));
+    assert!(matches!(
+        walk.next_action(),
+        Some(CopyAction::MakeDir { .. })
+    ));
+
+    // Any driver call on a finished walk is out of step.
+    walk.created().expect("dest dir made");
+    walk.expand(&[]).expect("empty the directory");
+    assert!(walk.is_complete());
+    assert_eq!(walk.created(), Err(CopyWalkError::OutOfStep));
+    assert_eq!(walk.expand(&[]), Err(CopyWalkError::OutOfStep));
+    assert_eq!(walk.copied_file(), Err(CopyWalkError::OutOfStep));
+}
+
+#[test]
+fn copy_walk_holds_its_position_across_an_interruption() {
+    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    tree.insert(
+        key(&comps(&["Users", "dir"])),
+        vec![("x".to_string(), false), ("y".to_string(), false)],
+    );
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "dir"]),
+        comps(&["Storage", "dir"]),
+        true,
+    )])
+    .expect("walk");
+
+    // Make the dest dir, list it, then copy exactly one child and "stop" (as a
+    // Cancel or a preemption would) holding the walk.
+    assert!(matches!(
+        walk.next_action(),
+        Some(CopyAction::MakeDir { .. })
+    ));
+    walk.created().expect("dest dir made");
+    assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
+    walk.expand(&[("x".to_string(), false), ("y".to_string(), false)])
+        .expect("expand");
+    if let Some(CopyAction::CopyFile { .. }) = walk.next_action() {
+        walk.copied_file().expect("copy x");
+    }
+    // The directory and the first child are done; the second child remains.
+    assert_eq!(walk.copied(), 2);
+    assert!(!walk.is_complete());
+
+    // Resuming from exactly here copies the remaining child — no repeat of the
+    // child already copied, no skip.
+    let order = drive_copy(&mut walk, &tree);
+    assert_eq!(order, vec![key(&comps(&["Storage", "dir", "y"]))]);
+    assert_eq!(walk.copied(), 3);
+}
+
+#[test]
+fn copy_walk_from_items_fails_closed() {
+    // Nothing to copy.
+    assert!(CopyWalk::from_items(vec![]).is_none());
+    // A source or destination that names the root (an empty component list).
+    assert!(CopyWalk::from_items(vec![(Vec::new(), comps(&["Storage", "a"]), false)]).is_none());
+    assert!(CopyWalk::from_items(vec![(comps(&["Users", "a"]), Vec::new(), false)]).is_none());
+    // A valid item builds a walk.
+    assert!(CopyWalk::from_items(vec![(
+        comps(&["Users", "a"]),
+        comps(&["Storage", "a"]),
+        false
+    )])
+    .is_some());
+}
+
+#[test]
+fn copy_walk_error_messages_are_non_empty() {
+    assert!(!CopyWalkError::TooDeep.to_string().is_empty());
+    assert!(!CopyWalkError::OutOfStep.to_string().is_empty());
 }
 
 // ---------------------------------------------------------------------------

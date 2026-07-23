@@ -434,6 +434,32 @@ succeeded, so a failed copy loses no data. The engine does no I/O; the app
 performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
 launching user's own identity, so the read-only picker never runs it.
 
+Where an `execute::CopyCursor` streams one *file*, an `execute::CopyWalk` copies
+a whole *tree* — the copy-side analogue of the delete-side `delete::DeleteWalk`.
+Where a delete removes a directory's contents *before* the directory, a copy
+*creates* the destination directory *before* streaming its contents into it, so
+a child always has a parent to land in. `CopyWalk::from_items` begins the walk
+from the resolved `(source, dest, is_directory)` items — the app supplies each
+item's kind, which the path-only clipboard does not carry — and is fail closed:
+an empty set, or a source or destination naming the root, yields no walk
+(`AGENTS.md` §5.4). `CopyWalk::next_action` yields the next `execute::CopyAction`
+— `MakeDir { dest }` (the app `fs_mkdir`s the destination directory and reports
+`CopyWalk::created`), `List { source }` (the app reads the source with
+`fs_readdir` and reports its children with `CopyWalk::expand`), or
+`CopyFile { source, dest }` (the app streams the bytes with a `CopyCursor` and
+reports `CopyWalk::copied_file`). It keeps its own explicit stack rather than
+recursing on the call stack, so a deeply nested tree cannot overflow it, and it
+is bounded by `execute::MAX_COPY_DEPTH` — the same `MAX_WALK_DEPTH` fail-closed
+recursion bound `DeleteWalk` obeys, held in one place so the two walks cannot
+disagree (`AGENTS.md` §2.2, §26.6). It holds its exact position between steps, so
+the app may cancel or be preempted and resume without repeating or skipping work
+(`AGENTS.md` §2.23); a deeper tree is `CopyWalkError::TooDeep` and driving it
+against the wrong step is `CopyWalkError::OutOfStep`, both leaving the walk
+unchanged. `CopyWalk::copied` is the honest rising count a progress indicator
+shows; the total is unknown until the reads reveal it, so nothing fabricates a
+percentage. The engine does no I/O; the app performs every syscall under the
+launching user's own identity, so the read-only picker never runs a walk.
+
 ### The delete model
 
 Deleting the selection (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in

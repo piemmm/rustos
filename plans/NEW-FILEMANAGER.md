@@ -32,7 +32,8 @@ drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
 FM7b's pure delete model, FM7b's pure recursive-delete execution model
-(`DeleteWalk`), FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
+(`DeleteWalk`), FM7b's pure recursive-copy execution model (`CopyWalk`),
+FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
 `Ctrl+Shift+N` (create + inline-rename, wired end-to-end),
 FM8a's properties view model, FM8b's drawn read-only properties panel +
 its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
@@ -673,18 +674,45 @@ full-window mirror + fail-closed) and `lib/controls` (`Dialog::action_rects`
 matching `on_pointer`'s geometry). Docs: `docs/src/desktop/apps.md`,
 `lib/browse`/`lib/controls` README + rustdoc.
 
+**The pure recursive-copy *walk* model is done** (§2.19 — host-proven ahead of
+the app move/copy verbs, the copy-side analogue of the delete-side
+`delete::DeleteWalk`): the `lib/browse::execute::CopyWalk` driven cursor. Where
+`execute::CopyCursor` streams a single *file*, `CopyWalk` copies a whole *tree*:
+`from_items` begins a copy of resolved `(source, dest, is_directory)` items (the
+app supplies each item's kind, which the path-only `Clipboard` does not carry)
+and is fail closed — an empty set, or a source/dest naming the root, yields no
+walk (§5.4). `next_action` yields the next `CopyAction` — `MakeDir { dest }` (the
+app `fs_mkdir`s the destination *before* its contents, so a child always has a
+parent, reported with `created`), `List { source }` (the app reads it and
+reports children with `expand`), or `CopyFile { source, dest }` (the app streams
+the bytes with a `CopyCursor`, reported with `copied_file`), depth-first. It
+does no I/O, keeps its own explicit stack (so a deep tree cannot overflow the
+call stack), is bounded by `MAX_COPY_DEPTH` — the one shared `MAX_WALK_DEPTH`
+recursion bound `DeleteWalk` also obeys, hoisted so the two walks cannot drift
+(§2.2, §26.6) — and holds its exact position between steps so the app can cancel
+or be preempted without losing or repeating work (§2.23); a deeper tree is
+`CopyWalkError::TooDeep` and driving it against the wrong step is
+`CopyWalkError::OutOfStep`, both leaving the walk unchanged. `copied` is the
+honest rising count a progress indicator shows (§2.24). The model holds no
+authority, so the read-only picker never runs one. Host-tested in `lib/browse`
+(single file, container-before-contents depth-first order, multiple items in
+order, empty-directory create-then-empty-list, the `TooDeep` bound, the
+out-of-step fail-closed refusals leaving the walk put, the interruption/resume
+holding its exact position, `from_items` empty/root fail-closed, and the error
+messages). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
 The remaining app-side verbs (still `planned`):
 
 - **Move** = `fs_rename` when source and target share a volume (the
   `PasteStrategy::Rename` case); otherwise
   **copy-then-delete** (the `PasteStrategy::CopyThenDelete` case). **Copy**
   streams `fs_read`→`fs_write` driving the landed `execute::CopyCursor` in
-  bounded, interruptible chunks (§2.23 — no unbounded buffer, no spin),
+  bounded, interruptible chunks, and a *directory* copy drives the landed
+  `execute::CopyWalk` (§2.23 — no unbounded buffer, no spin),
   preserving metadata where the target format allows and failing closed with
-  `TimestampOutOfRange`-style honesty on a narrowing target (§21). A
-  directory copy recurses depth-bounded; an error mid-copy stops, reports,
-  and leaves a partial-copy marker rather than a silent half-result
-  (§2.24, §5.4).
+  `TimestampOutOfRange`-style honesty on a narrowing target (§21). An error
+  mid-copy stops, reports, and leaves a partial-copy marker rather than a
+  silent half-result (§2.24, §5.4).
 - **Progress + cancel** for long operations (delete and copy alike): a bounded
   progress indicator (`lib/controls` `Progress`) driven by `DeleteWalk::removed`
   / the copy cursor, and a Cancel that stops at the next step/chunk boundary

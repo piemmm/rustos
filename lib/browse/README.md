@@ -147,6 +147,29 @@ can never diverge in navigation semantics, listing policy, or look.
   never a silent wrap. The engine does no I/O and the source is deleted only
   after a cross-volume copy fully succeeds — the app performs every syscall
   under the user's own identity, so the read-only picker never runs it.
+- **Recursive copy** (`execute::CopyWalk`, `plans/NEW-FILEMANAGER.md` FM7b):
+  the model of *how* a whole tree is copied — the copy-side analogue of
+  `delete::DeleteWalk`. Where a delete removes contents before their container,
+  a copy *creates* a destination directory *before* streaming its contents into
+  it, so a child always has a parent to land in. `CopyWalk::from_items` starts
+  the walk from resolved `(source, dest, is_directory)` items (the app supplies
+  each item's kind, which the path-only clipboard does not carry) and is **fail
+  closed** — an empty set or a source/dest naming the root yields no walk.
+  `next_action` yields the next `CopyAction` — `MakeDir { dest }` (the app
+  `fs_mkdir`s it and reports `created`), `List { source }` (the app reads it and
+  reports its children with `expand`), or `CopyFile { source, dest }` (the app
+  streams the bytes with a `CopyCursor` and reports `copied_file`). It does no
+  I/O, keeps its own explicit stack (so a deep tree cannot overflow the call
+  stack), stays within the shared `MAX_COPY_DEPTH` (a deeper tree is
+  `CopyWalkError::TooDeep`, never descended without limit — the same
+  `MAX_WALK_DEPTH` bound `DeleteWalk` obeys), and holds its exact position
+  between steps so the app can cancel or be preempted without losing or
+  repeating work. Driving it against the wrong step is
+  `CopyWalkError::OutOfStep`, leaving the walk unchanged. `copied` is the honest
+  rising count a progress indicator shows; the total is unknown until the reads
+  reveal it, so no fabricated percentage. The app performs every syscall under
+  the user's own identity, so composing it grants nothing and the read-only
+  picker never runs it.
 - **Delete** (`delete`, `Browser::plan_delete`, `plans/NEW-FILEMANAGER.md`
   FM7b): the model of *what* a Delete removes, host-proven ahead of the app
   verb. `Browser::plan_delete()` captures the selection into a `DeletePlan`

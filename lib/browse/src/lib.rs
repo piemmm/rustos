@@ -48,8 +48,10 @@
 //!   [`DeleteWalk`] driven cursor that carries the recursive removal out
 //!   depth-first, bounded and interruptible (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`execute`](mod@execute) — the pure paste-execution model: the
-//!   [`paste_strategy`] move-vs-copy volume decision and the bounded,
-//!   resumable [`CopyCursor`] streaming-copy model the management verbs run.
+//!   [`paste_strategy`] move-vs-copy volume decision, the bounded, resumable
+//!   [`CopyCursor`] streaming single-file copy, and the depth-first,
+//!   depth-bounded [`CopyWalk`] recursive directory-copy cursor the management
+//!   verbs run (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`icon`](mod@icon) — the one file-type [`IconKind`](tairix_icon::IconKind)
 //!   classifier the manager and picker share (a display hint, never authority).
 //! * [`open_with`](mod@open_with) — the type→bundle "Open With…" association
@@ -130,7 +132,8 @@ pub use delete::{
 pub use entry::{is_bundle_name, Entry, EntryKind};
 pub use error::BrowseError;
 pub use execute::{
-    paste_strategy, CopyChunk, CopyCursor, CopyError, PasteStrategy, VolumeId, COPY_CHUNK_LEN,
+    paste_strategy, CopyAction, CopyChunk, CopyCursor, CopyError, CopyWalk, CopyWalkError,
+    PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
 pub use format::{format_date, format_datetime, format_size};
 pub use icon::{icon_for, icon_for_name};
@@ -156,6 +159,20 @@ pub const WIN_WIDTH: u32 = 480;
 /// Window content height of a browser view, in pixels (see
 /// [`WIN_WIDTH`]).
 pub const WIN_HEIGHT: u32 = 320;
+
+/// The deepest directory nesting any of the file manager's recursive
+/// component-path filesystem walks will descend, counted in root-first path
+/// components.
+///
+/// A fixed fail-closed *bound*, not a hardware-scaled capacity (§24.4): it caps
+/// how far a recursive removal ([`DeleteWalk`]) or a
+/// recursive copy ([`CopyWalk`]) descends, so a pathological
+/// or adversarial tree can never make the traversal recurse without limit
+/// (§26.6). Both walks share this single definition rather than each carrying
+/// their own copy of the value (§2.2); a tree deeper than the bound is refused
+/// rather than followed. Chosen far beyond any legitimate directory depth while
+/// staying comfortably bounded.
+pub(crate) const MAX_WALK_DEPTH: usize = 256;
 
 #[cfg(test)]
 mod tests;

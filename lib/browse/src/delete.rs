@@ -150,9 +150,11 @@ impl DeletePlan {
 /// A fixed fail-closed *bound*, not a hardware-scaled capacity (§24.4): it caps
 /// how far a [`DeleteWalk`] recurses so a pathological or adversarial tree
 /// cannot make the traversal descend without limit (§26.6). A tree deeper than
-/// this is refused ([`DeleteError::TooDeep`]) rather than followed. Chosen far
-/// beyond any legitimate directory depth while staying comfortably bounded.
-pub const MAX_DELETE_DEPTH: usize = 256;
+/// this is refused ([`DeleteError::TooDeep`]) rather than followed. It is the
+/// shared `MAX_WALK_DEPTH` value both the recursive removal and the recursive
+/// copy ([`CopyWalk`](crate::execute::CopyWalk)) obey, held in one place so the
+/// two walks' bounds cannot drift (§2.2).
+pub const MAX_DELETE_DEPTH: usize = crate::MAX_WALK_DEPTH;
 
 /// Why a [`DeleteWalk`] cannot take the requested step — a fail-closed refusal
 /// (§5.4).
