@@ -32,8 +32,9 @@ drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
 FM8a's properties view model, FM8b's drawn read-only properties panel +
-its `Alt+Enter`/`Escape` app wiring, and FM8b's pure permission-edit model
-are done**; the rest of the FM4b drawn chrome (the context menu, and the New
+its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model, and
+FM4b's pure context-menu chrome model
+are done**; the rest of the FM4b drawn chrome (the drawn context menu, and the New
 Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
 spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's drawn
 permission control + ownership, and FM9 are
@@ -320,13 +321,29 @@ when it cannot apply; `TOOLBAR_COMMANDS` is the one command order the chrome
 iterates. `breadcrumbs` turns the root-first `Browser::components` into the
 ordered `Crumb`s of the path bar, each carrying the ancestor `depth` the drawn
 crumb binds to `navigate_to_depth` (`0` = root); the terminal crumb is the
-current directory (`is_current`), whose jump is the documented no-op. Only the
-surfaces whose actions already exist are modelled — the context menu is *not*,
-so it lands with the verbs it invokes rather than as speculative surface (§2.4).
+current directory (`is_current`), whose jump is the documented no-op.
 Host-tested in `lib/browse` (toolbar enable/disable at root / after descend /
 after go-back, the active-view/sort report, the `TOOLBAR_COMMANDS` order, the
 breadcrumb crumb list + depth + `is_current`, and a crumb depth climbing to its
 ancestor). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+
+**The pure context-menu chrome model is done** (§2.19 — host-proven ahead of
+the drawn menu, exactly as `ToolbarModel` landed ahead of the drawn toolbar):
+`chrome::ContextMenuModel::for_browser(browser, has_clipboard)` +
+`ContextCommand` + `CONTEXT_COMMANDS`. It reports which right-click command is
+actionable: Open/Rename/Cut/Copy/Properties over the selection (an empty
+directory offers none), Open With… over a regular file only (a directory
+descends and a bundle launches itself, so neither has an app to choose), and
+Paste over the app's held clipboard (threaded in, since the clipboard lives in
+the app — `Browser::clipboard` *captures* one from the selection rather than
+storing it). This is no longer speculative surface: every modelled command maps
+to an engine action that already exists (§2.4). Delete and New Folder, whose
+engine action does not exist yet, are deliberately absent from `CONTEXT_COMMANDS`
+and land with the stage that first wires them. Host-tested in `lib/browse`
+(no-selection disables the item commands, a directory enables all but Open
+With…, a bundle disables Open With…, a file enables it, Paste tracks the
+clipboard flag, and the `CONTEXT_COMMANDS` order/coverage). Docs:
+`docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
 **The drawn, clickable toolbar is done.** `render` paints `TOOLBAR_COMMANDS`
 as a `lib/controls::Toolbar` of themed `IconButton`s in the top strip (each
@@ -355,9 +372,11 @@ awaits the later toolbar keyboard-focus pass (the `lib/controls::Toolbar`
 
 The remaining drawn chrome (still `planned`):
 
-- **Context menu** (`lib/controls::Menu`): one menu definition whose entries
-  land as their stages do — Open/Open With… (FM6), Rename (FM5), Cut/Copy/
-  Paste/Delete (FM7), Properties (FM8) — each disabling when inapplicable.
+- **Drawn context menu** (`lib/controls::Menu`): the app-side menu painted
+  from the done `ContextMenuModel`, each `MenuItem` enabled/disabled from
+  `is_enabled` and routed to the verb it invokes — Open/Open With… (FM6),
+  Rename (FM5), Cut/Copy/Paste (FM7), Properties (FM8). Delete lands with its
+  own FM7 engine action + entry, never ahead of it.
 - **New Folder** toolbar tool arrives with FM7 (`fs_mkdir`).
 
 ### FM5 — in-place rename `[x]`

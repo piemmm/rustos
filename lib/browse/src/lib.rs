@@ -33,7 +33,8 @@
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
-//!   command enable/pressed state and the [`breadcrumbs`] path bar
+//!   command enable/pressed state, the [`ContextMenuModel`] right-click command
+//!   enable state, and the [`breadcrumbs`] path bar
 //!   (`plans/NEW-FILEMANAGER.md` `FM4b`).
 //! * [`breadcrumb`](mod@breadcrumb) — the drawn path bar's placement: the one
 //!   right-anchored crumb layout the painter and the pointer hit-test share.
@@ -105,7 +106,8 @@ pub mod vfs;
 pub use activate::Activation;
 pub use browser::Browser;
 pub use chrome::{
-    apply_command, breadcrumbs, Crumb, ToolbarCommand, ToolbarModel, TOOLBAR_COMMANDS,
+    apply_command, breadcrumbs, ContextCommand, ContextMenuModel, Crumb, ToolbarCommand,
+    ToolbarModel, CONTEXT_COMMANDS, TOOLBAR_COMMANDS,
 };
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use entry::{is_bundle_name, Entry, EntryKind};

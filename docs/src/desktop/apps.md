@@ -144,13 +144,28 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
   The terminal crumb — the directory being shown — is flagged
   `is_current()` and the bar renders it inactive, because a jump to it is
   the documented no-op.
+- `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
+  `ContextCommand` the right-click menu offers is actionable. **Open**,
+  **Rename**, **Cut**, **Copy**, and **Properties** act on the selected
+  entry, so they need a selection (an empty directory offers none). **Open
+  With…** applies only to a regular *file* — a directory descends and a
+  bundle launches itself, neither of which has an application to choose.
+  **Paste** targets the current directory and needs only a held clipboard,
+  not a selection; because the clipboard lives in the app rather than the
+  browser (`Browser::clipboard` *captures* a fresh one from the selection),
+  whether a paste is possible is the app's own state, threaded in as
+  `has_clipboard`. `is_enabled(command)` gives each drawn `MenuItem` its
+  enabled state (an inapplicable command renders *disabled*, never hidden),
+  and `CONTEXT_COMMANDS` is the one top-to-bottom order the drawn menu
+  iterates.
 
 The model decides *what is offered* and *where a crumb leads*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
-picker builds the same model). Only the surfaces whose actions already
-exist are modelled — the context menu is built with the verbs it invokes
-(rename, open, the clipboard verbs, new folder), never ahead of them
-(`AGENTS.md` §2.4).
+picker builds the same model). Only the commands whose engine action already
+exists are modelled, so none is speculative surface (`AGENTS.md` §2.4):
+**Delete** and **New Folder**, whose action does not exist in the engine
+yet, are absent from `CONTEXT_COMMANDS` and land with the stage that first
+wires them.
 
 The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in

@@ -2319,6 +2319,105 @@ fn toolbar_commands_list_covers_every_variant_once() {
 }
 
 #[test]
+fn the_context_menu_needs_a_selection_for_the_item_commands() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // An empty directory offers no selection, so every command that acts on a
+    // selected entry renders disabled; Paste still depends only on the held
+    // clipboard.
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    browser.open_index(0).expect("enter the empty Fonts");
+    assert_eq!(browser.selected_name(), None);
+
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    for command in [
+        ContextCommand::Open,
+        ContextCommand::OpenWith,
+        ContextCommand::Rename,
+        ContextCommand::Cut,
+        ContextCommand::Copy,
+        ContextCommand::Properties,
+    ] {
+        assert!(!menu.is_enabled(command), "{command:?} without a selection");
+    }
+    assert!(!menu.is_enabled(ContextCommand::Paste));
+}
+
+#[test]
+fn the_context_menu_enables_item_commands_on_a_directory_but_not_open_with() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // A directory descends on Open; it has no application to "open with".
+    let browser = Browser::open_root(activation_source()).expect("root");
+    assert_eq!(browser.selected_name(), Some("Docs"));
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(menu.is_enabled(ContextCommand::Rename));
+    assert!(menu.is_enabled(ContextCommand::Cut));
+    assert!(menu.is_enabled(ContextCommand::Copy));
+    assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(!menu.is_enabled(ContextCommand::OpenWith));
+}
+
+#[test]
+fn the_context_menu_disables_open_with_on_a_bundle() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // A bundle launches itself; there is no application to choose for it.
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(1).expect("select Editor.app");
+    assert!(browser.selected_entry().expect("bundle").is_bundle());
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(!menu.is_enabled(ContextCommand::OpenWith));
+}
+
+#[test]
+fn the_context_menu_enables_open_with_only_on_a_file() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    assert_eq!(browser.selected_name(), Some("notes.txt"));
+    let menu = ContextMenuModel::for_browser(&browser, false);
+    assert!(menu.is_enabled(ContextCommand::Open));
+    assert!(menu.is_enabled(ContextCommand::OpenWith));
+}
+
+#[test]
+fn the_context_menu_enables_paste_only_when_a_clipboard_is_held() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // Paste targets the current directory and needs a held clipboard, not a
+    // selection: the app threads its own clipboard state in.
+    let browser = Browser::open_root(activation_source()).expect("root");
+    assert!(!ContextMenuModel::for_browser(&browser, false).is_enabled(ContextCommand::Paste));
+    assert!(ContextMenuModel::for_browser(&browser, true).is_enabled(ContextCommand::Paste));
+}
+
+#[test]
+fn context_commands_list_covers_every_variant_once() {
+    use crate::chrome::{ContextCommand, CONTEXT_COMMANDS};
+
+    // The drawn menu iterates CONTEXT_COMMANDS, so it must hold each command
+    // exactly once, in a stable order. Delete and New Folder are absent — their
+    // engine action does not exist yet, so they are not modelled here.
+    assert_eq!(
+        CONTEXT_COMMANDS,
+        &[
+            ContextCommand::Open,
+            ContextCommand::OpenWith,
+            ContextCommand::Rename,
+            ContextCommand::Cut,
+            ContextCommand::Copy,
+            ContextCommand::Paste,
+            ContextCommand::Properties,
+        ]
+    );
+}
+
+#[test]
 fn the_breadcrumbs_at_the_root_are_a_single_current_root_crumb() {
     use crate::chrome::breadcrumbs;
 

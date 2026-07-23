@@ -62,9 +62,16 @@ can never diverge in navigation semantics, listing policy, or look.
   is the one shared, **read-only** dispatch (Back / Forward / Up / Refresh /
   view toggle / sort cycle over `ViewMode::toggled` and `SortMode::next`) both
   the toolbar click and its keyboard accelerator run through, so they cannot
-  diverge and the read-only picker can drive the same toolbar. Only the
-  surfaces whose actions already exist are modelled — the context menu lands
-  with the verbs it invokes, never as speculative surface.
+  diverge and the read-only picker can drive the same toolbar.
+  `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
+  `ContextCommand` the right-click menu offers is actionable: Open / Rename /
+  Cut / Copy / Properties act on the selection (an empty directory offers
+  none), Open With… applies only to a regular file (a directory descends and a
+  bundle launches itself), and Paste needs only the app's held clipboard —
+  threaded in, since the clipboard lives in the app, not the browser. Every
+  command maps to an engine action that already exists, so it is not
+  speculative; Delete and New Folder, whose action does not exist yet, are
+  absent from `CONTEXT_COMMANDS` and land with the stage that first wires them.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name
