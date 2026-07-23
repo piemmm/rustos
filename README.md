@@ -70,15 +70,20 @@ for filesystems, the feature section below.
 Networking is the virtio-net link-layer driver plus the user-space
 `netstack` service: a dual-stack (IPv4 + IPv6) network layer — ARP,
 Neighbour Discovery, ICMP/ICMPv6 echo + errors, fragment reassembly,
-routing, and UDP with multicast — over a capability-gated shared-memory
-frame-ring seam, plus the datagram socket ABI. A discovered NIC's driver
-runs as its own user process and its frame channel is autobound into the
-running stack by the device manager (`plans/NETWORK.md` N4d) — proven
-end-to-end in a two-process live boot on all three Tier-1 targets, where the
-production boot autoloads the virtio-net driver, the stack auto-configures
-the interface's IPv6 link-local, and it answers a host peer's echo (N4e-β on
-aarch64, N4e-riscv64, and N4e-x86_64 over virtio-PCI with kernel-routed
-MSI-X). TCP is the next stage, hence still `◐`.
+routing, UDP with multicast, and TCP (RFC 9293 with CUBIC/NewReno
+congestion control, SACK loss recovery, and SYN-cookie listeners) — over a
+capability-gated shared-memory frame-ring seam, plus the datagram and
+stream socket ABIs. A discovered NIC's driver runs as its own user process
+and its frame channel is autobound into the running stack by the device
+manager (`plans/NETWORK.md` N4d) — proven end-to-end in a two-process live
+boot on all three Tier-1 targets, where the production boot autoloads the
+virtio-net driver, the stack auto-configures the interface's IPv6
+link-local, and it answers a host peer's echo (N4e-β on aarch64,
+N4e-riscv64, and N4e-x86_64 over virtio-PCI with kernel-routed MSI-X). The
+driver negotiates receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM`) and
+the stack skips the redundant fold for a device-validated frame while the
+software path stays the conformance oracle (N7a). Transmit-side offload,
+observability tooling, and interface configuration remain, hence still `◐`.
 
 ## Filesystem feature support
 

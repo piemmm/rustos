@@ -24,6 +24,8 @@
 
 pub use crate::checksum::Pseudo;
 
+use crate::checksum::ChecksumCheck;
+
 /// Length of the fixed UDP header (source/dest port, length, checksum).
 pub const UDP_HEADER_LEN: usize = 8;
 
@@ -57,6 +59,23 @@ impl<'a> UdpDatagram<'a> {
     /// `length` are ignored.
     #[must_use]
     pub fn parse(pseudo: Pseudo, bytes: &'a [u8]) -> Option<Self> {
+        Self::parse_with(pseudo, bytes, ChecksumCheck::Verify)
+    }
+
+    /// Parse a UDP datagram under `pseudo`, verifying the checksum in
+    /// software unless `check` reports the device already validated it
+    /// ([`ChecksumCheck::DeviceValidated`], the negotiated receive
+    /// checksum offload — `plans/NETWORK.md` §2.3).
+    ///
+    /// The offload suppresses **only** the one's-complement fold; every
+    /// other validation still runs, including the IPv6 mandatory-checksum
+    /// rule (a zero checksum field is rejected regardless of offload,
+    /// since a device could not have validated an absent checksum).
+    ///
+    /// Returns `None` (fail closed) exactly as [`Self::parse`], minus the
+    /// arithmetic mismatch when the fold is skipped.
+    #[must_use]
+    pub fn parse_with(pseudo: Pseudo, bytes: &'a [u8], check: ChecksumCheck) -> Option<Self> {
         let header = bytes.get(..UDP_HEADER_LEN)?;
         let source_port = u16::from_be_bytes([header[0], header[1]]);
         let destination_port = u16::from_be_bytes([header[2], header[3]]);
@@ -68,12 +87,13 @@ impl<'a> UdpDatagram<'a> {
         }
         let datagram = &bytes[..length];
         // IPv4 permits an all-zero checksum meaning "not computed"; IPv6
-        // requires a checksum, so a zero field there is a malformed datagram.
+        // requires a checksum, so a zero field there is a malformed
+        // datagram — a semantic rule that holds even under offload.
         if checksum == 0 {
             if pseudo.is_v6() {
                 return None;
             }
-        } else {
+        } else if check.must_verify() {
             let mut sum = pseudo.seed(PROTOCOL_UDP, length_field);
             sum.push(datagram);
             if sum.finish() != 0 {

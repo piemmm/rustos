@@ -17,12 +17,21 @@
 //!
 //! # Wire protocol
 //!
-//! Virtio-net 1.1. Stage 4 supports the legacy "no extended
-//! features" subset: a `struct virtio_net_hdr` of all zeros prefixes
-//! every transmit and receive descriptor chain, the device negotiates
-//! `VIRTIO_NET_F_MAC` to publish a stable link-layer address, and
-//! no checksum / GSO offloads are advertised. Two queues are used:
-//! receive queue `0` and transmit queue `1` (virtio-net §5.1.2).
+//! Virtio-net 1.1. A `struct virtio_net_hdr` prefixes every transmit
+//! and receive descriptor chain; the device publishes its MAC through
+//! the device-configuration window. Two queues are used: receive queue
+//! `0` and transmit queue `1` (virtio-net §5.1.2).
+//!
+//! The one extended feature negotiated is receive-checksum offload
+//! (`VIRTIO_NET_F_GUEST_CSUM`, when the device offers it): the device
+//! may then mark a received frame checksum-validated
+//! (`VIRTIO_NET_HDR_F_DATA_VALID`) or deliver it with a partial
+//! checksum (`VIRTIO_NET_HDR_F_NEEDS_CSUM`). The driver reports which,
+//! per frame, through the ring's offload metadata
+//! ([`tairix_abi::driver::net_ring::FrameOffload`]); the stack skips or
+//! completes the fold accordingly (`plans/NETWORK.md` §2.3). No
+//! transmit-side or GSO offload is advertised: every transmit header is
+//! zero and the checksum is computed in software.
 //!
 //! Higher-layer protocols (ARP, IP, ICMP) live above this trait in
 //! user space and are out of scope for `abi-v1` (see
@@ -85,7 +94,7 @@ use core::convert::TryFrom;
 use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,
 };
-use tairix_abi::driver::net_ring::{FrameRings, ServiceReport};
+use tairix_abi::driver::net_ring::{FrameOffload, FrameRings, ServiceReport};
 use tairix_abi::DriverError;
 use tairix_abi::Errno;
 use tairix_virtio::{
@@ -113,10 +122,29 @@ const MAX_TX_WAITS: u32 = 64;
 
 /// Virtio-net wire protocol constants (virtio 1.1 §5.1).
 mod wire {
-    /// `struct virtio_net_hdr` (legacy, no mergeable buffers).
-    /// Five 1-byte/2-byte fields totalling 10 bytes; Stage 4 always
-    /// writes them as zeroes (no offloads negotiated).
+    /// `struct virtio_net_hdr` (legacy, no mergeable buffers): a
+    /// 10-byte header prefixing every transmit and receive descriptor
+    /// chain. Field layout (virtio 1.1 §5.1.6): `flags` (1), `gso_type`
+    /// (1), `hdr_len` (2), `gso_size` (2), `csum_start` (2),
+    /// `csum_offset` (2), all little-endian.
     pub const HEADER_LEN: usize = 10;
+    /// `flags` byte offset within `virtio_net_hdr`.
+    pub const HDR_FLAGS_OFFSET: usize = 0;
+    /// `csum_start` field offset within `virtio_net_hdr`.
+    pub const HDR_CSUM_START_OFFSET: usize = 6;
+    /// `csum_offset` field offset within `virtio_net_hdr`.
+    pub const HDR_CSUM_OFFSET_OFFSET: usize = 8;
+    /// `VIRTIO_NET_HDR_F_NEEDS_CSUM` (virtio 1.1 §5.1.6.2): the frame's
+    /// transport checksum is only partial and the driver must complete
+    /// it using `csum_start`/`csum_offset`.
+    pub const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+    /// `VIRTIO_NET_HDR_F_DATA_VALID` (virtio 1.1 §5.1.6.2): the device
+    /// has verified the frame's transport checksum.
+    pub const VIRTIO_NET_HDR_F_DATA_VALID: u8 = 2;
+    /// `VIRTIO_NET_F_GUEST_CSUM` (virtio 1.1 §5.1.4, feature bit 1): the
+    /// device may deliver receive frames it has checksum-validated
+    /// (`DATA_VALID`) or left with a partial checksum (`NEEDS_CSUM`).
+    pub const VIRTIO_NET_F_GUEST_CSUM: u64 = 1 << 1;
     /// Minimum Ethernet frame size (excluding FCS).
     pub const MIN_ETHERNET_FRAME: usize = 14;
     /// Link MTU: the largest link-layer payload (IP packet) carried.
@@ -162,16 +190,24 @@ pub struct VirtioNet<'h, T: Transport> {
     /// Length of a harvested frame still waiting for RX-ring space
     /// (the receive chain stays un-posted while this is `Some`).
     rx_staged_len: Option<usize>,
+    /// Offload metadata of the harvested frame in `rx_staged_len`,
+    /// derived from the device's `virtio_net_hdr` flags: what the
+    /// device reported it did to the frame's checksum.
+    rx_staged_offload: FrameOffload,
+    /// Whether `VIRTIO_NET_F_GUEST_CSUM` was negotiated at open: only
+    /// then does the driver honour the device's receive checksum flags.
+    guest_csum: bool,
 }
 
 impl<'h, T: Transport> VirtioNet<'h, T> {
     /// Bring the device online.
     ///
     /// Implements the virtio-1.1 §3.1 initialisation sequence:
-    /// reset, ACKNOWLEDGE, DRIVER, feature negotiation (Stage 4
-    /// accepts zero extended features), `FEATURES_OK`, set up the
-    /// receive and transmit queues, `DRIVER_OK`, then read the MAC
-    /// from the device-configuration window.
+    /// reset, ACKNOWLEDGE, DRIVER, feature negotiation (accepting
+    /// `VIRTIO_NET_F_GUEST_CSUM` when the device offers it),
+    /// `FEATURES_OK`, set up the receive and transmit queues,
+    /// `DRIVER_OK`, then read the MAC from the device-configuration
+    /// window.
     ///
     /// # Errors
     ///
@@ -185,8 +221,20 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         transport.set_status(status);
         status = status.with(Status::DRIVER);
         transport.set_status(status);
-        let _device_features = transport.device_features();
-        transport.set_driver_features(0);
+        // Negotiate only the features this driver implements. The sole
+        // extended feature is receive-checksum offload
+        // (`VIRTIO_NET_F_GUEST_CSUM`): with it the device may mark a
+        // received frame checksum-validated, or deliver it with a
+        // partial checksum the stack completes. A feature the device
+        // offers but this vocabulary does not name is left un-negotiated
+        // (no speculative surface).
+        let device_features = transport.device_features();
+        let guest_csum = device_features & wire::VIRTIO_NET_F_GUEST_CSUM != 0;
+        let mut driver_features = 0u64;
+        if guest_csum {
+            driver_features |= wire::VIRTIO_NET_F_GUEST_CSUM;
+        }
+        transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
         transport.set_status(status);
         if !transport.status().contains(Status::FEATURES_OK) {
@@ -227,6 +275,8 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             tx_header: Some(tx_header),
             tx_data: Some(tx_data),
             rx_staged_len: None,
+            rx_staged_offload: FrameOffload::None,
+            guest_csum,
         };
         // Arm the receive path: the device owns a posted buffer from
         // DRIVER_OK onward, so a frame arriving before the first
@@ -288,7 +338,8 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     }
 
     fn build_header() -> [u8; wire::HEADER_LEN] {
-        // Stage 4 negotiates no offloads, so every field is zero.
+        // No transmit offload is negotiated, so every header field is
+        // zero: no partial checksum, no segmentation.
         [0u8; wire::HEADER_LEN]
     }
 
@@ -405,9 +456,13 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
                 let Some(data_slab) = self.rx_data.as_mut() else {
                     return Err(DriverError::DeviceFault);
                 };
-                match rings.rx.push(&data_slab.as_bytes()[..len]) {
+                match rings
+                    .rx
+                    .push_with(self.rx_staged_offload, &data_slab.as_bytes()[..len])
+                {
                     Ok(()) => {
                         self.rx_staged_len = None;
+                        self.rx_staged_offload = FrameOffload::None;
                         report.received += 1;
                         // The frame left the staging: scrub it now
                         // when the ring class demands it, then hand
@@ -434,12 +489,54 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
                             self.post_receive_chain()?;
                             continue;
                         }
+                        self.rx_staged_offload = self.rx_offload_from_header();
                         self.rx_staged_len = Some(frame_len.min(self.max_frame_len));
                     }
                     Err(VirtioError::NoCompletion) => return Ok(()),
                     Err(e) => return Err(e.as_driver_error()),
                 }
             }
+        }
+    }
+
+    /// Derive the offload tag for a just-completed receive frame from
+    /// the device's `virtio_net_hdr` flags.
+    ///
+    /// Honoured only when `VIRTIO_NET_F_GUEST_CSUM` was negotiated: a
+    /// `NEEDS_CSUM` frame carries the device's `csum_start`/`csum_offset`
+    /// through to the stack (which completes the fold), a `DATA_VALID`
+    /// frame is reported checksum-validated, and anything else is the
+    /// plain software path. The offsets are validated against the frame
+    /// length by the consumer, not trusted here.
+    fn rx_offload_from_header(&self) -> FrameOffload {
+        if !self.guest_csum {
+            return FrameOffload::None;
+        }
+        let Some(header) = self.rx_header.as_ref() else {
+            return FrameOffload::None;
+        };
+        let hdr = header.as_bytes();
+        if hdr.len() < wire::HEADER_LEN {
+            return FrameOffload::None;
+        }
+        let flags = hdr[wire::HDR_FLAGS_OFFSET];
+        if flags & wire::VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+            let csum_start = u16::from_le_bytes([
+                hdr[wire::HDR_CSUM_START_OFFSET],
+                hdr[wire::HDR_CSUM_START_OFFSET + 1],
+            ]);
+            let csum_offset = u16::from_le_bytes([
+                hdr[wire::HDR_CSUM_OFFSET_OFFSET],
+                hdr[wire::HDR_CSUM_OFFSET_OFFSET + 1],
+            ]);
+            FrameOffload::NeedsChecksum {
+                csum_start,
+                csum_offset,
+            }
+        } else if flags & wire::VIRTIO_NET_HDR_F_DATA_VALID != 0 {
+            FrameOffload::Validated
+        } else {
+            FrameOffload::None
         }
     }
 
@@ -466,15 +563,21 @@ enum TxOutcome {
 
 impl<T: Transport> Net for VirtioNet<'_, T> {
     fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
-        // No extended features are negotiated: no VIRTIO_NET_F_STATUS
-        // (an operational device reports its link up), no offloads,
-        // one receive queue.
+        // No VIRTIO_NET_F_STATUS is negotiated (an operational device
+        // reports its link up) and one receive queue is used. The only
+        // offload advertised is receive-checksum validation, and only
+        // when the device offered `VIRTIO_NET_F_GUEST_CSUM`.
+        let offloads = if self.guest_csum {
+            NetOffloads::RX_CSUM_VALIDATED
+        } else {
+            NetOffloads::empty()
+        };
         Ok(DeviceFacts {
             mac: self.mac,
             mtu: u32::try_from(self.max_frame_len - wire::MIN_ETHERNET_FRAME)
                 .map_err(|_| DriverError::LengthOutOfRange)?,
             link: LinkState::Up,
-            offloads: NetOffloads::empty(),
+            offloads,
             rx_queues: 1,
         })
     }

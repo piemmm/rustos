@@ -418,10 +418,37 @@ floods a bounded listener with hostile SYN/ACK/RST traffic and asserts no
 panic, bounded half-open and accept queues, and that every emitted segment
 parses.
 
+## Hardware offload: the software path is the oracle
+
+A network device may verify a receive frame's transport checksum for the
+stack. The stack opts into that offload per interface and honours it per
+frame, but the software fold stays the canonical implementation and the
+conformance oracle — an offload is never load-bearing for security (trust
+is in the *device* that carried the frame, never in the peer that sent
+it).
+
+The engine takes the device's per-frame report through
+`Stack::on_frame_meta(frame, RxMeta, now)` (`on_frame` is the
+no-offload wrapper). When `RxMeta::validated()` is passed **and** the
+interface negotiated `NetOffloads::RX_CSUM_VALIDATED`, the UDP/TCP
+decoders skip only the one's-complement *fold* (`ChecksumCheck` threaded
+through `UdpDatagram::parse_with` / `TcpSegment::parse_with`); every other
+validation — header lengths, the IPv6 mandatory-checksum rule, the
+pseudo-header length bound, all protocol-state checks — runs exactly as on
+the software path. A reassembled datagram is always software-verified,
+because a per-frame device assurance cannot cover a transport checksum
+spanning fragments. A `Validated` claim on an interface that did *not*
+negotiate the offload is ignored (fold in software). The
+`rx_checksum_offload_matches_the_software_path_byte_for_byte` test asserts
+the offloaded output equals the software oracle byte-for-byte; the
+transport carrying the per-frame descriptor and the driver→stack wiring
+live in `tairix_abi::driver::net_ring::FrameOffload`, `drivers/network`,
+and `netstack` respectively (`plans/NETWORK.md` N7a).
+
 ## What lands next
 
-The remaining `plans/NETWORK.md` increments evolve this crate in place —
-the socket-surface wiring that exposes `tcp::listen` through `netstack`
-(`listen`/`accept` ABI, `CAP_NET_BIND_PRIVILEGED`; N6b-2-β), then the
-hardware offloads (N7). Each is added with its callers, tests, and fuzz
-harnesses per increment.
+The remaining `plans/NETWORK.md` increments evolve this crate in place:
+transmit-side checksum and TCP-segmentation offload (N7b) then mergeable
+receive buffers, multiqueue receive, and the measured performance budgets
+(N7c). Each is added with its callers, tests, and fuzz harnesses per
+increment.

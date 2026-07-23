@@ -183,6 +183,36 @@ impl Pseudo {
     }
 }
 
+/// Whether a transport-layer parse must fold and verify the checksum,
+/// or may trust that a network device already validated it.
+///
+/// The offloaded value ([`ChecksumCheck::DeviceValidated`]) is passed
+/// only when the driver reported the frame as receive-checksum-validated
+/// *and* the interface negotiated that offload (`plans/NETWORK.md`
+/// §2.3). It suppresses **only** the redundant one's-complement fold;
+/// every other validation the parser performs — header lengths, the
+/// mandatory-checksum rule for IPv6, the pseudo-header length bound —
+/// still runs. The offload is never load-bearing for security: trust is
+/// in the device that carried the frame, never in the peer that sent it,
+/// and a device that lies can at worst let a corrupt frame reach the
+/// same semantic checks a software-folded frame faces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum ChecksumCheck {
+    /// Fold and verify the checksum in software — the canonical path.
+    #[default]
+    Verify,
+    /// The device validated the transport checksum; skip the fold.
+    DeviceValidated,
+}
+
+impl ChecksumCheck {
+    /// Whether the software fold must run.
+    #[must_use]
+    pub const fn must_verify(self) -> bool {
+        matches!(self, ChecksumCheck::Verify)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

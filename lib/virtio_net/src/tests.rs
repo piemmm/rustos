@@ -9,7 +9,8 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use tairix_abi::driver::net_ring::RingGeometry;
+use tairix_abi::driver::net::NetOffloads;
+use tairix_abi::driver::net_ring::{FrameOffload, RingGeometry};
 use tairix_abi::driver::BufferClass;
 use tairix_virtio::{ChainView, DmaHost, MockHost, MockTransport};
 
@@ -374,11 +375,151 @@ fn corrupt_tx_slot_is_consumed_and_flow_continues() {
         rings.tx.push(&arp_frame()).expect("queue good");
     }
     // The TX ring is the second half of the region; its first slot's
-    // length prefix sits right after the 8-byte ring header.
+    // length prefix sits after the 8-byte ring header and the 5-byte
+    // per-frame offload-metadata prefix (tag + two u16 checksum
+    // offsets).
     let tx_ring_base = test_geometry().ring_len();
-    region[tx_ring_base + 8..tx_ring_base + 12].copy_from_slice(&8000u32.to_le_bytes());
+    let len_prefix = tx_ring_base + 8 + 5;
+    region[len_prefix..len_prefix + 4].copy_from_slice(&8000u32.to_le_bytes());
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
     assert_eq!(tx_log.borrow().len(), 1);
+}
+
+/// Build a virtio-net `MockTransport` that offers `VIRTIO_NET_F_GUEST_CSUM`
+/// and whose RX shim stamps `flags` (plus the checksum offsets) into the
+/// `virtio_net_hdr` of every delivered frame, so the driver's per-frame
+/// receive-offload tagging can be exercised.
+fn build_device_rx_flags(flags: u8, csum_start: u16, csum_offset: u16) -> (MockTransport, RxQueue) {
+    let mut t = MockTransport::new(2, 8, wire::VIRTIO_NET_F_GUEST_CSUM, 6);
+    t.set_config(0, &DEVICE_MAC);
+    let rx_queue: RxQueue = Rc::new(RefCell::new(VecDeque::new()));
+    let rx_for_shim = Rc::clone(&rx_queue);
+    t.install_shim(
+        wire::RX_QUEUE,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            if chain.device_write.len() < 2 {
+                return Err(VirtioError::DeviceFault);
+            }
+            let hdr = &mut chain.device_write[0];
+            for b in hdr.iter_mut() {
+                *b = 0;
+            }
+            if hdr.len() >= wire::HEADER_LEN {
+                hdr[wire::HDR_FLAGS_OFFSET] = flags;
+                hdr[wire::HDR_CSUM_START_OFFSET..wire::HDR_CSUM_START_OFFSET + 2]
+                    .copy_from_slice(&csum_start.to_le_bytes());
+                hdr[wire::HDR_CSUM_OFFSET_OFFSET..wire::HDR_CSUM_OFFSET_OFFSET + 2]
+                    .copy_from_slice(&csum_offset.to_le_bytes());
+            }
+            let header_len = hdr.len();
+            let Some(frame) = rx_for_shim.borrow_mut().pop_front() else {
+                return Ok(0);
+            };
+            let dst = &mut chain.device_write[1];
+            let copy_len = core::cmp::min(dst.len(), frame.len());
+            dst[..copy_len].copy_from_slice(&frame[..copy_len]);
+            Ok(u32::try_from(header_len + copy_len).unwrap_or(u32::MAX))
+        }),
+    );
+    (t, rx_queue)
+}
+
+/// Service the driver once and return the offload metadata tagged onto
+/// the single delivered frame, asserting the frame bytes round-trip.
+/// The caller has already queued `frame` on the device's RX queue.
+fn deliver_and_pop_offload(
+    net: &mut VirtioNet<'static, MockTransport>,
+    frame: &[u8],
+) -> FrameOffload {
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    deliver_rx(net);
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.received, 1);
+    let mut buf = vec![0u8; 2048];
+    let mut offload = FrameOffload::None;
+    let n = rings
+        .rx
+        .pop_with(&mut offload, &mut buf)
+        .expect("pop")
+        .expect("frame");
+    assert_eq!(&buf[..n], frame);
+    offload
+}
+
+#[test]
+fn guest_csum_negotiation_advertises_rx_validated() {
+    // The device offers VIRTIO_NET_F_GUEST_CSUM: the driver negotiates it
+    // and advertises the receive-checksum-validation offload.
+    let (t, _rx) = build_device_rx_flags(0, 0, 0);
+    let net = open_net(t);
+    let facts = net.device_facts().expect("facts");
+    assert!(facts.offloads.contains(NetOffloads::RX_CSUM_VALIDATED));
+}
+
+#[test]
+fn rx_data_valid_frame_is_tagged_validated() {
+    let (t, rx_queue) = build_device_rx_flags(wire::VIRTIO_NET_HDR_F_DATA_VALID, 0, 0);
+    let mut net = open_net(t);
+    let frame = arp_frame();
+    rx_queue.borrow_mut().push_back(frame.clone());
+    assert_eq!(
+        deliver_and_pop_offload(&mut net, &frame),
+        FrameOffload::Validated
+    );
+}
+
+#[test]
+fn rx_needs_csum_frame_carries_the_offsets() {
+    let (t, rx_queue) = build_device_rx_flags(wire::VIRTIO_NET_HDR_F_NEEDS_CSUM, 34, 16);
+    let mut net = open_net(t);
+    let frame = arp_frame();
+    rx_queue.borrow_mut().push_back(frame.clone());
+    assert_eq!(
+        deliver_and_pop_offload(&mut net, &frame),
+        FrameOffload::NeedsChecksum {
+            csum_start: 34,
+            csum_offset: 16,
+        }
+    );
+}
+
+#[test]
+fn rx_flags_ignored_when_guest_csum_not_negotiated() {
+    // The default device offers no features: even a DATA_VALID flag on the
+    // wire is ignored, because the driver did not negotiate GUEST_CSUM.
+    let mut t = MockTransport::new(2, 8, 0, 6);
+    t.set_config(0, &DEVICE_MAC);
+    let rx_queue: RxQueue = Rc::new(RefCell::new(VecDeque::new()));
+    let rx_for_shim = Rc::clone(&rx_queue);
+    t.install_shim(
+        wire::RX_QUEUE,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            if chain.device_write.len() < 2 {
+                return Err(VirtioError::DeviceFault);
+            }
+            let hdr = &mut chain.device_write[0];
+            for b in hdr.iter_mut() {
+                *b = 0;
+            }
+            hdr[wire::HDR_FLAGS_OFFSET] = wire::VIRTIO_NET_HDR_F_DATA_VALID;
+            let header_len = hdr.len();
+            let Some(frame) = rx_for_shim.borrow_mut().pop_front() else {
+                return Ok(0);
+            };
+            let dst = &mut chain.device_write[1];
+            let copy_len = core::cmp::min(dst.len(), frame.len());
+            dst[..copy_len].copy_from_slice(&frame[..copy_len]);
+            Ok(u32::try_from(header_len + copy_len).unwrap_or(u32::MAX))
+        }),
+    );
+    let mut net = open_net(t);
+    let frame = arp_frame();
+    rx_queue.borrow_mut().push_back(frame.clone());
+    assert_eq!(
+        deliver_and_pop_offload(&mut net, &frame),
+        FrameOffload::None
+    );
 }

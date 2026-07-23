@@ -693,6 +693,96 @@ fn corrupt_udp_checksum_is_dropped() {
     assert!(a.counters().rx_dropped >= 1);
 }
 
+// ---- Receive-checksum offload (RX_CSUM_VALIDATED) --------------------
+
+/// A stack whose device advertised (and it opted into) receive-checksum
+/// validation.
+fn stack_with_rx_csum(mac: MacAddress, iid: [u8; 8]) -> Stack {
+    let mut f = facts(mac);
+    f.offloads = tairix_abi::driver::net::NetOffloads::RX_CSUM_VALIDATED;
+    Stack::new(&StackConfig::new(f, iid, 0x1234), t(0)).expect("valid facts")
+}
+
+/// A UDP/IPv4 datagram from `V4_B` to `V4_A` (Ethernet destination
+/// `MAC_A`). When `corrupt`, the first payload byte is flipped *after*
+/// the checksum is computed, so the on-wire checksum no longer verifies.
+fn v4_udp_frame_to_a(payload: &[u8], corrupt: bool) -> Vec<u8> {
+    let mut udp_msg = vec![0u8; udp::UDP_HEADER_LEN + payload.len()];
+    udp::write(
+        udp::Pseudo::V4 {
+            source: V4_B,
+            destination: V4_A,
+        },
+        1111,
+        2222,
+        payload,
+        &mut udp_msg,
+    )
+    .expect("write");
+    if corrupt {
+        udp_msg[udp::UDP_HEADER_LEN] ^= 0xFF;
+    }
+    let header = Ipv4Header::new(V4_B, V4_A, PROTOCOL_UDP);
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + udp_msg.len()];
+    header.write(&mut packet, udp_msg.len()).expect("fits");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&udp_msg);
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(&mut frame, MAC_A, MAC_B, ETHERTYPE_IPV4).expect("fits");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+#[test]
+fn rx_checksum_offload_matches_the_software_path_byte_for_byte() {
+    // The offloaded path (device-validated, fold skipped) must produce
+    // output identical to the canonical software path — the oracle.
+    let mut soft = stack(MAC_A, IID_A);
+    let mut off = stack_with_rx_csum(MAC_A, IID_A);
+    soft.set_ipv4_config(V4_A, 24, None)
+        .expect("configure soft");
+    off.set_ipv4_config(V4_A, 24, None).expect("configure off");
+    let frame = v4_udp_frame_to_a(b"conformance", false);
+    let soft_out = soft.on_frame(&frame, t(0));
+    let off_out = off.on_frame_meta(&frame, RxMeta::validated(), t(0));
+    assert_eq!(soft_out, off_out);
+    assert!(matches!(
+        soft_out.events.first(),
+        Some(StackEvent::UdpDatagram { .. })
+    ));
+}
+
+#[test]
+fn rx_validated_offload_skips_the_fold_but_still_delivers() {
+    // A frame the device validated is accepted even if its on-wire
+    // checksum is (now) wrong: the software fold is skipped. Trust is in
+    // the device; the offload is what is being exercised.
+    let mut off = stack_with_rx_csum(MAC_A, IID_A);
+    off.set_ipv4_config(V4_A, 24, None).expect("configure");
+    let corrupt = v4_udp_frame_to_a(b"trust-the-nic", true);
+    let out = off.on_frame_meta(&corrupt, RxMeta::validated(), t(0));
+    assert!(matches!(
+        out.events.first(),
+        Some(StackEvent::UdpDatagram { .. })
+    ));
+    // The *same* corrupt frame without the device's assurance is folded
+    // in software and dropped — the offload is never assumed.
+    let out = off.on_frame_meta(&corrupt, RxMeta::none(), t(0));
+    assert!(out.events.is_empty());
+}
+
+#[test]
+fn rx_validated_claim_is_ignored_when_offload_not_negotiated() {
+    // A stack that did not negotiate the offload folds in software even
+    // when a frame claims the device validated it: a corrupt frame is
+    // dropped. A per-frame claim is honoured only under a negotiated
+    // offload.
+    let mut soft = stack(MAC_A, IID_A);
+    soft.set_ipv4_config(V4_A, 24, None).expect("configure");
+    let corrupt = v4_udp_frame_to_a(b"no-offload", true);
+    let out = soft.on_frame_meta(&corrupt, RxMeta::validated(), t(0));
+    assert!(out.events.is_empty());
+}
+
 #[test]
 fn frames_for_other_hosts_are_dropped() {
     let mut a = stack(MAC_A, IID_A);

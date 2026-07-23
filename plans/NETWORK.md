@@ -1113,18 +1113,52 @@ the whole is too large for one change and each leaves the tree working.
   `fuzz_net_tcp` listener driver; this vertical proves the ordinary
   accept-and-serve path live.
 
-### N7 — hardware offloads + performance hardening `[ ]`
-- The offload vocabulary negotiated end to end: `virtio_net` maps
-  `VIRTIO_NET_F_CSUM`/`GUEST_CSUM`/`HOST_TSO*`/`MRG_RXBUF`; stack uses
-  TX checksum offload, RX checksum-validated skip, and TCP segmentation
-  offload; multiqueue receive plumbed where the device offers it.
-- Same-bytes conformance: every offloaded path is asserted equal to the
-  software path (the oracle); offload never bypasses semantic
-  validation.
-- Measured budgets recorded in the docs (loopback + QEMU virtio
-  throughput/latency, allocation counts on the hot path = 0);
-  regressions are §2.16 defects.
-- `README.md` support matrix rows updated (per-arch offload state).
+### N7 — hardware offloads + performance hardening
+
+#### N7a — receive-checksum offload, negotiated end to end `[x]`
+- The frame-ring transport carries a per-slot offload descriptor
+  (`tairix_abi::driver::net_ring::FrameOffload` — `None` / `Validated` /
+  `NeedsChecksum{csum_start,csum_offset}`) in a 5-byte fail-closed meta
+  prefix, read/written by `push_with`/`pop_with` (`push`/`pop` stay the
+  meta-`None` path). An unknown tag decodes to `None`, so a corrupt meta
+  byte can only *lose* an offload, never fabricate one.
+- `virtio_net` negotiates `VIRTIO_NET_F_GUEST_CSUM` when the device
+  offers it and reports `NetOffloads::RX_CSUM_VALIDATED`; it tags each
+  received frame from the device's `virtio_net_hdr` flags
+  (`DATA_VALID`→`Validated`, `NEEDS_CSUM`→`NeedsChecksum` carrying the
+  device's `csum_start`/`csum_offset`). The driver does no checksum
+  arithmetic (it never links the stack), so the kernel — which links the
+  driver crate for the device id — stays free of `lib/net`.
+- `netstack` resolves the tag: it *completes* a `NeedsChecksum` frame in
+  place through the one `internet_checksum` and then software-re-verifies
+  it, and it passes a `Validated` frame's assurance to the engine as
+  `RxMeta`. `lib/net`'s `Stack::on_frame_meta` skips the transport
+  checksum *fold* (via `ChecksumCheck`/`UdpDatagram::parse_with`/
+  `TcpSegment::parse_with`) only when the device validated it **and** the
+  interface negotiated the offload; every semantic check still runs, a
+  reassembled datagram is always software-verified, and the offload is
+  never load-bearing for security.
+- Same-bytes conformance: `rx_checksum_offload_matches_the_software_path_byte_for_byte`
+  asserts the offloaded output equals the software oracle byte-for-byte;
+  further tests prove the skip delivers a device-validated frame, a
+  `Validated` claim is ignored without a negotiated offload, and a
+  `NeedsChecksum` completion reproduces the transport checksum. Ring
+  meta round-trip + unknown-tag-fail-closed, driver RX-tag, and the
+  netstack completion/fail-closed paths are all unit-tested.
+
+#### N7b — transmit-side offload (checksum + TSO) `[ ]`
+- `virtio_net` maps `VIRTIO_NET_F_CSUM`/`HOST_TSO*`; the stack emits a
+  partial (pseudo-header) checksum + a per-frame TX offload descriptor
+  and hands one over-size TCP payload + template header to the device
+  (`TX_CSUM_*`, `TX_SEGMENT_TCP`). Same-bytes conformance vs the software
+  path; a live QEMU vertical proves the guest-driven path end to end.
+
+#### N7c — mergeable RX buffers, multiqueue, measured budgets `[ ]`
+- `MRG_RXBUF` and multiqueue receive plumbed where the device offers
+  them. Measured budgets recorded in the docs (loopback + QEMU virtio
+  throughput/latency, hot-path allocations = 0); regressions are §2.16
+  defects. `README.md` support-matrix rows updated (per-arch offload
+  state).
 
 ### N8 — `ping`/`ss`-class command apps + observability `[ ]`
 - System command apps (`ping` — v4+v6, coreutils/iputils-familiar

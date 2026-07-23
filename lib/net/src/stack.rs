@@ -36,7 +36,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::time::Duration64;
 
 use crate::addr::{
@@ -44,7 +44,7 @@ use crate::addr::{
     ALL_ROUTERS,
 };
 use crate::arp::{ArpPacket, OP_REPLY, OP_REQUEST};
-use crate::checksum::Pseudo;
+use crate::checksum::{ChecksumCheck, Pseudo};
 use crate::eth::{
     ipv4_multicast_mac, ipv6_multicast_mac, is_group_mac, write_header, EthernetFrame, BROADCAST,
     ETHERNET_HEADER_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
@@ -224,6 +224,42 @@ pub enum StackEvent {
     },
 }
 
+/// Per-frame receive metadata the driver reports alongside a delivered
+/// frame: which offloads the device performed on it.
+///
+/// Fed to [`Stack::on_frame`] so the engine can skip a redundant
+/// software checksum fold when the device validated the transport
+/// checksum *and* the interface negotiated that offload
+/// (`plans/NETWORK.md` §2.3). The [`Default`] (absent metadata) is the
+/// canonical software path — a caller that reports nothing loses no
+/// safety, only the skip. The offload is never load-bearing for
+/// security: every semantic validation still runs (trust is in the
+/// device, never the peer).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct RxMeta {
+    /// The device verified the frame's transport-layer (TCP/UDP)
+    /// checksum, so the stack may skip the software fold.
+    pub checksum_validated: bool,
+}
+
+impl RxMeta {
+    /// Metadata for a frame with no device offloads (software path).
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            checksum_validated: false,
+        }
+    }
+
+    /// Metadata for a frame the device reported checksum-validated.
+    #[must_use]
+    pub const fn validated() -> Self {
+        Self {
+            checksum_validated: true,
+        }
+    }
+}
+
 /// Frames to transmit and events to report from one engine call.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StackOutput {
@@ -378,6 +414,10 @@ pub struct Stack {
     membership_v4: Membership<Igmp>,
     /// IPv6 (MLDv2) group membership.
     membership_v6: Membership<Mld>,
+    /// Whether the device advertised receive-checksum validation and
+    /// the stack opted in: only then may a frame the driver marks
+    /// checksum-validated skip the software fold.
+    rx_csum_offload: bool,
     counters: StackCounters,
 }
 
@@ -415,6 +455,10 @@ impl Stack {
             next_ident: config.ipv4_ident_seed,
             membership_v4: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
             membership_v6: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
+            rx_csum_offload: config
+                .facts
+                .offloads
+                .contains(NetOffloads::RX_CSUM_VALIDATED),
             counters: StackCounters::default(),
         })
     }
@@ -536,8 +580,25 @@ impl Stack {
 }
 
 impl Stack {
-    /// Process one received Ethernet frame.
+    /// Process one received Ethernet frame carrying no device offload
+    /// metadata (the canonical software path).
     pub fn on_frame(&mut self, frame_bytes: &[u8], now: Duration64) -> StackOutput {
+        self.on_frame_meta(frame_bytes, RxMeta::none(), now)
+    }
+
+    /// Process one received Ethernet frame together with the per-frame
+    /// offload metadata the driver reported ([`RxMeta`]).
+    ///
+    /// A transport checksum is verified in software unless the device
+    /// validated it *and* the interface negotiated the receive-checksum
+    /// offload; every other validation runs regardless
+    /// (`plans/NETWORK.md` §2.3).
+    pub fn on_frame_meta(
+        &mut self,
+        frame_bytes: &[u8],
+        rx: RxMeta,
+        now: Duration64,
+    ) -> StackOutput {
         let mut out = StackOutput::default();
         self.counters.rx_frames += 1;
         let Some(frame) = EthernetFrame::parse(frame_bytes) else {
@@ -548,10 +609,17 @@ impl Stack {
             self.counters.rx_dropped += 1;
             return out;
         }
+        // The device's checksum assurance is honoured only when the stack
+        // opted into the offload; a per-frame claim is otherwise ignored.
+        let check = if rx.checksum_validated && self.rx_csum_offload {
+            ChecksumCheck::DeviceValidated
+        } else {
+            ChecksumCheck::Verify
+        };
         match frame.ethertype {
             ETHERTYPE_ARP => self.on_arp(&mut out, frame.payload, now),
-            ETHERTYPE_IPV4 => self.on_ipv4(&mut out, frame.payload, now),
-            ETHERTYPE_IPV6 => self.on_ipv6(&mut out, frame.payload, now),
+            ETHERTYPE_IPV4 => self.on_ipv4(&mut out, frame.payload, check, now),
+            ETHERTYPE_IPV6 => self.on_ipv6(&mut out, frame.payload, check, now),
             _ => self.counters.rx_dropped += 1,
         }
         out
@@ -590,7 +658,13 @@ impl Stack {
 
     /// IPv4 receive: our unicast address only (hosts do not
     /// forward), fragments through the budgeted reassembler.
-    fn on_ipv4(&mut self, out: &mut StackOutput, packet: &[u8], now: Duration64) {
+    fn on_ipv4(
+        &mut self,
+        out: &mut StackOutput,
+        packet: &[u8],
+        check: ChecksumCheck,
+        now: Duration64,
+    ) {
         let (Some((header, _options, payload)), Some((our_v4, _))) =
             (Ipv4Header::parse(packet), self.iface.ipv4())
         else {
@@ -619,15 +693,18 @@ impl Stack {
                     // The reconstructed datagram exists only here; an
                     // ICMP error about it could not carry the original
                     // packet excerpt, so unknown protocols inside a
-                    // reassembly are dropped silently below.
-                    self.on_ipv4_payload(out, &header, &datagram, None, now);
+                    // reassembly are dropped silently below. A device's
+                    // per-frame checksum assurance cannot cover a transport
+                    // checksum that spans fragments, so a reassembled
+                    // datagram is always software-verified.
+                    self.on_ipv4_payload(out, &header, &datagram, None, ChecksumCheck::Verify, now);
                 }
                 PushOutcome::Pending => {}
                 PushOutcome::Rejected(_) => self.counters.rx_dropped += 1,
             }
             return;
         }
-        self.on_ipv4_payload(out, &header, payload, Some(packet), now);
+        self.on_ipv4_payload(out, &header, payload, Some(packet), check, now);
     }
 
     /// Dispatch a whole IPv4 payload. `original` carries the intact
@@ -639,6 +716,7 @@ impl Stack {
         header: &Ipv4Header,
         payload: &[u8],
         original: Option<&[u8]>,
+        check: ChecksumCheck,
         now: Duration64,
     ) {
         if header.protocol == PROTOCOL_ICMP {
@@ -654,7 +732,7 @@ impl Stack {
                 source: header.source,
                 destination: header.destination,
             };
-            let Some(datagram) = UdpDatagram::parse(pseudo, payload) else {
+            let Some(datagram) = UdpDatagram::parse_with(pseudo, payload, check) else {
                 self.counters.rx_dropped += 1;
                 return;
             };
@@ -674,8 +752,10 @@ impl Stack {
             };
             // Verify the mandatory checksum here so a flood of corrupt
             // segments never reaches the connection layer; surface the
-            // raw bytes for the service to re-parse against its TCB.
-            if tcp::TcpSegment::parse(pseudo, payload).is_none() {
+            // raw bytes for the service to re-parse against its TCB. When
+            // the device validated the checksum and the offload is
+            // negotiated, the fold is skipped but every other check runs.
+            if tcp::TcpSegment::parse_with(pseudo, payload, check).is_none() {
                 self.counters.rx_dropped += 1;
                 return;
             }
@@ -779,7 +859,13 @@ impl Stack {
     /// IPv6 receive: destination-filtered, extension chain walked
     /// under the RFC 8200 dispositions, fragments through the
     /// budgeted reassembler.
-    fn on_ipv6(&mut self, out: &mut StackOutput, packet: &[u8], now: Duration64) {
+    fn on_ipv6(
+        &mut self,
+        out: &mut StackOutput,
+        packet: &[u8],
+        check: ChecksumCheck,
+        now: Duration64,
+    ) {
         let Some((header, payload)) = Ipv6Header::parse(packet) else {
             self.counters.rx_dropped += 1;
             return;
@@ -840,6 +926,9 @@ impl Stack {
                                 payload,
                                 nh_offset: _,
                             }) => {
+                                // A reassembled datagram's transport
+                                // checksum spans fragments, beyond any
+                                // per-frame device assurance: verify it.
                                 self.on_ipv6_upper(
                                     out,
                                     &header,
@@ -847,6 +936,7 @@ impl Stack {
                                     payload,
                                     None,
                                     dest_is_multicast,
+                                    ChecksumCheck::Verify,
                                     now,
                                 );
                             }
@@ -869,6 +959,7 @@ impl Stack {
                     payload,
                     Some((packet, nh_offset)),
                     dest_is_multicast,
+                    check,
                     now,
                 );
             }
@@ -887,6 +978,7 @@ impl Stack {
         payload: &[u8],
         original: Option<(&[u8], u32)>,
         dest_is_multicast: bool,
+        check: ChecksumCheck,
         now: Duration64,
     ) {
         if protocol == NEXT_HEADER_ICMPV6 {
@@ -898,7 +990,7 @@ impl Stack {
                 source: header.source,
                 destination: header.destination,
             };
-            let Some(datagram) = UdpDatagram::parse(pseudo, payload) else {
+            let Some(datagram) = UdpDatagram::parse_with(pseudo, payload, check) else {
                 self.counters.rx_dropped += 1;
                 return;
             };
@@ -916,7 +1008,7 @@ impl Stack {
                 source: header.source,
                 destination: header.destination,
             };
-            if tcp::TcpSegment::parse(pseudo, payload).is_none() {
+            if tcp::TcpSegment::parse_with(pseudo, payload, check).is_none() {
                 self.counters.rx_dropped += 1;
                 return;
             }

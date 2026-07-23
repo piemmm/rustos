@@ -12,14 +12,15 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState};
-use tairix_abi::driver::net_ring::FrameRings;
+use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetCountersReply, NetIfAddr, NetIfKind,
     NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::stack::{SendError, Stack, StackConfig, StackEvent};
+use tairix_net::internet_checksum;
+use tairix_net::stack::{RxMeta, SendError, Stack, StackConfig, StackEvent};
 use tairix_net::tcp::TcpSegmentMeta;
 
 use crate::channel::FrameService;
@@ -538,9 +539,16 @@ impl Netstack {
         {
             let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
             loop {
-                match rings.rx.pop(scratch) {
+                let mut offload = FrameOffload::None;
+                match rings.rx.pop_with(&mut offload, scratch) {
                     Ok(Some(len)) => {
-                        let out = iface.stack.on_frame(&scratch[..len], now);
+                        // Resolve the device's per-frame checksum offload:
+                        // complete a partial checksum in place, or report a
+                        // device-validated one so the engine can skip the
+                        // redundant fold. A bogus offset fails closed to the
+                        // software path (the engine then drops the frame).
+                        let rx = resolve_rx_offload(offload, &mut scratch[..len]);
+                        let out = iface.stack.on_frame_meta(&scratch[..len], rx, now);
                         events.extend(out.events);
                         replied |= !out.frames.is_empty();
                         queue_frames(&mut rings, &out.frames);
@@ -567,6 +575,54 @@ impl Netstack {
             .filter_map(|i| i.stack.next_deadline())
             .min_by_key(|d| (d.secs(), d.subsec_nanos()))
     }
+}
+
+/// Resolve a received frame's per-frame offload metadata into the
+/// [`RxMeta`] the engine consumes, completing a device-partial checksum
+/// in place when required.
+///
+/// * [`FrameOffload::Validated`] — the device verified the transport
+///   checksum; the engine may skip the software fold.
+/// * [`FrameOffload::NeedsChecksum`] — the device delivered only the
+///   partial (pseudo-header) sum; [`complete_partial_checksum`] finishes
+///   it in place and the engine re-verifies it in software (belt and
+///   braces: a mis-completed frame is dropped, never wrongly accepted).
+/// * [`FrameOffload::None`] or a bogus partial — the software path.
+fn resolve_rx_offload(offload: FrameOffload, frame: &mut [u8]) -> RxMeta {
+    match offload {
+        FrameOffload::None => RxMeta::none(),
+        FrameOffload::Validated => RxMeta::validated(),
+        FrameOffload::NeedsChecksum {
+            csum_start,
+            csum_offset,
+        } => {
+            complete_partial_checksum(frame, usize::from(csum_start), usize::from(csum_offset));
+            // Re-verify our completion in software rather than trust it.
+            RxMeta::none()
+        }
+    }
+}
+
+/// Complete a device-partial transport checksum: fold the frame from
+/// `csum_start` to the end (the field there holds the pseudo-header
+/// partial sum) and store the result at `csum_start + csum_offset`.
+///
+/// Fails closed on out-of-range offsets — the frame is left with its
+/// partial checksum, which the engine's software fold then rejects.
+/// Returns whether the completion was applied.
+fn complete_partial_checksum(frame: &mut [u8], csum_start: usize, csum_offset: usize) -> bool {
+    let Some(field) = csum_start.checked_add(csum_offset) else {
+        return false;
+    };
+    let Some(field_end) = field.checked_add(2) else {
+        return false;
+    };
+    if csum_start >= frame.len() || field_end > frame.len() {
+        return false;
+    }
+    let sum = internet_checksum(&frame[csum_start..]);
+    frame[field..field_end].copy_from_slice(&sum.to_be_bytes());
+    true
 }
 
 /// Queue engine output frames, dropping (never wedging on) overflow:
@@ -610,4 +666,90 @@ fn v4_bytes(addr: Ipv4Addr) -> [u8; 16] {
     let mut out = [0u8; 16];
     out[..4].copy_from_slice(&addr.octets());
     out
+}
+
+#[cfg(test)]
+mod offload_tests {
+    use super::{complete_partial_checksum, resolve_rx_offload};
+    use alloc::vec;
+    use tairix_abi::driver::net_ring::FrameOffload;
+    use tairix_net::addr::Ipv4Addr;
+    use tairix_net::stack::RxMeta;
+    use tairix_net::udp::{self, Pseudo, UdpDatagram, PROTOCOL_UDP};
+
+    const SRC: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const DST: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 9);
+
+    /// A UDP datagram whose checksum field holds only the pseudo-header
+    /// partial sum — exactly what a `NEEDS_CSUM` device delivers — paired
+    /// with the correct checksum the completion must reproduce.
+    fn partial_udp_datagram() -> (vec::Vec<u8>, [u8; 2]) {
+        let pseudo = Pseudo::V4 {
+            source: SRC,
+            destination: DST,
+        };
+        let payload = b"partial-checksum";
+        let mut dg = vec![0u8; udp::UDP_HEADER_LEN + payload.len()];
+        udp::write(pseudo, 4000, 53, payload, &mut dg).expect("write");
+        let correct = [dg[6], dg[7]];
+        // A CHECKSUM_PARTIAL sender seeds the field with the raw
+        // ones-complement sum of the pseudo-header.
+        let udp_len = u16::try_from(dg.len()).expect("fits");
+        let partial = !pseudo.seed(PROTOCOL_UDP, udp_len).finish();
+        dg[6..8].copy_from_slice(&partial.to_be_bytes());
+        (dg, correct)
+    }
+
+    #[test]
+    fn complete_partial_checksum_reproduces_the_transport_checksum() {
+        let (mut dg, correct) = partial_udp_datagram();
+        assert!(complete_partial_checksum(&mut dg, 0, 6));
+        assert_eq!([dg[6], dg[7]], correct);
+        // The completed datagram now verifies against the pseudo-header.
+        assert!(UdpDatagram::parse(
+            Pseudo::V4 {
+                source: SRC,
+                destination: DST,
+            },
+            &dg,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn complete_partial_checksum_fails_closed_on_out_of_range_offsets() {
+        let mut frame = [0u8; 16];
+        let before = frame;
+        // csum_start at/after the end.
+        assert!(!complete_partial_checksum(&mut frame, 16, 0));
+        // The checksum field would run past the end.
+        assert!(!complete_partial_checksum(&mut frame, 15, 4));
+        // A bogus partial leaves the frame untouched (fail closed).
+        assert_eq!(frame, before);
+    }
+
+    #[test]
+    fn resolve_rx_offload_maps_each_tag() {
+        let mut frame = [0u8; 32];
+        assert_eq!(
+            resolve_rx_offload(FrameOffload::None, &mut frame),
+            RxMeta::none()
+        );
+        assert_eq!(
+            resolve_rx_offload(FrameOffload::Validated, &mut frame),
+            RxMeta::validated()
+        );
+        // A NeedsChecksum completes the fold in place, then reports the
+        // software path so the engine re-verifies our completion.
+        let (mut dg, correct) = partial_udp_datagram();
+        let rx = resolve_rx_offload(
+            FrameOffload::NeedsChecksum {
+                csum_start: 0,
+                csum_offset: 6,
+            },
+            &mut dg,
+        );
+        assert_eq!(rx, RxMeta::none());
+        assert_eq!([dg[6], dg[7]], correct);
+    }
 }

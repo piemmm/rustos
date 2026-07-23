@@ -34,8 +34,97 @@ use crate::Errno;
 /// producer and consumer counters (4 bytes each, little-endian).
 pub const RING_HEADER_LEN: usize = 8;
 
+/// Byte length of one slot's per-frame offload-metadata prefix (the
+/// transport-neutral analogue of a device's per-descriptor offload
+/// header, e.g. `virtio_net_hdr`): one tag byte followed by the two
+/// little-endian `u16` checksum offsets a partial-checksum descriptor
+/// carries. It precedes the length prefix in every slot so a frame
+/// carries the offload the stack requested (transmit) or the device
+/// performed (receive) alongside its bytes, without a second channel.
+const SLOT_META_LEN: usize = 1 + 2 + 2;
+
 /// Byte length of one slot's length prefix.
 const SLOT_LEN_PREFIX: usize = 4;
+
+/// Per-frame offload descriptor carried in a ring slot's metadata.
+///
+/// The transport-neutral analogue of a NIC's per-descriptor offload
+/// header. A frame carries the offload the stack requested (transmit)
+/// or the offload the device performed (receive). The vocabulary is
+/// closed and versioned like the rest of `abi-v1`; the decoder is
+/// fail-closed — an unrecognised tag decodes to [`FrameOffload::None`]
+/// (software path), so a corrupt or hostile meta byte can only *lose*
+/// an offload, never fabricate one.
+///
+/// No offload is ever load-bearing for security (`plans/NETWORK.md`
+/// §2.3): [`Validated`](FrameOffload::Validated) lets the stack skip
+/// the redundant checksum *fold* and [`NeedsChecksum`] only asks the
+/// stack to *finish* a fold it would run anyway; every semantic
+/// validation (lengths, addresses, protocol state) still runs, and the
+/// offsets a [`NeedsChecksum`] carries are re-validated by the consumer
+/// against the frame length before use. Trust is in the device, never
+/// in the peer.
+///
+/// [`NeedsChecksum`]: FrameOffload::NeedsChecksum
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum FrameOffload {
+    /// No offload: the frame's checksums are computed on transmit and
+    /// verified on receive in software — the canonical path.
+    #[default]
+    None,
+    /// Receive only: the device verified the frame's transport-layer
+    /// checksum, so the stack may skip the software fold.
+    Validated,
+    /// Receive only: the device delivered a frame whose transport
+    /// checksum field holds only the partial (pseudo-header) sum and
+    /// must be *completed* by folding the frame bytes from `csum_start`
+    /// to the end and storing the result at `csum_start + csum_offset`
+    /// (the `virtio_net` `VIRTIO_NET_HDR_F_NEEDS_CSUM` case). The
+    /// consumer validates both offsets against the frame length before
+    /// touching a byte, and fails closed if they do not fit.
+    NeedsChecksum {
+        /// Byte offset in the frame where the checksummed range starts.
+        csum_start: u16,
+        /// Byte offset, past `csum_start`, of the 16-bit checksum field.
+        csum_offset: u16,
+    },
+}
+
+impl FrameOffload {
+    /// Encode the offload's one-byte ring tag.
+    const fn to_tag(self) -> u8 {
+        match self {
+            FrameOffload::None => 0,
+            FrameOffload::Validated => 1,
+            FrameOffload::NeedsChecksum { .. } => 2,
+        }
+    }
+
+    /// The two checksum offsets carried in the slot (zero unless this is
+    /// a [`FrameOffload::NeedsChecksum`]).
+    const fn offsets(self) -> (u16, u16) {
+        match self {
+            FrameOffload::NeedsChecksum {
+                csum_start,
+                csum_offset,
+            } => (csum_start, csum_offset),
+            _ => (0, 0),
+        }
+    }
+
+    /// Decode a ring meta record, fail-closed: an unknown tag is
+    /// [`FrameOffload::None`], never a fabricated offload.
+    const fn decode(tag: u8, csum_start: u16, csum_offset: u16) -> Self {
+        match tag {
+            1 => FrameOffload::Validated,
+            2 => FrameOffload::NeedsChecksum {
+                csum_start,
+                csum_offset,
+            },
+            _ => FrameOffload::None,
+        }
+    }
+}
 
 /// Validated geometry of one frame ring: how many slots it holds and
 /// the largest frame one slot carries.
@@ -101,11 +190,11 @@ impl RingGeometry {
         self.slot_capacity
     }
 
-    /// Bytes one slot occupies: its length prefix plus its payload
-    /// capacity.
+    /// Bytes one slot occupies: its offload-metadata prefix, its
+    /// length prefix, and its payload capacity.
     #[must_use]
     pub const fn slot_stride(&self) -> usize {
-        SLOT_LEN_PREFIX + self.slot_capacity as usize
+        SLOT_META_LEN + SLOT_LEN_PREFIX + self.slot_capacity as usize
     }
 
     /// Bytes one whole ring occupies: header plus every slot.
@@ -208,7 +297,10 @@ impl<'a> FrameRing<'a> {
         RING_HEADER_LEN + index * self.geometry.slot_stride()
     }
 
-    /// Queue one frame.
+    /// Queue one frame with [`FrameOffload::None`] metadata.
+    ///
+    /// The offload-unaware producer path; the offloaded transmit path
+    /// uses [`Self::push_with`].
     ///
     /// # Errors
     ///
@@ -217,6 +309,15 @@ impl<'a> FrameRing<'a> {
     ///   the slot capacity.
     /// * [`Errno::OutOfRange`] — the persisted counters are corrupt.
     pub fn push(&mut self, frame: &[u8]) -> Result<(), Errno> {
+        self.push_with(FrameOffload::None, frame)
+    }
+
+    /// Queue one frame together with its per-frame offload metadata.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::push`].
+    pub fn push_with(&mut self, offload: FrameOffload, frame: &[u8]) -> Result<(), Errno> {
         if frame.is_empty() || frame.len() > self.geometry.slot_capacity as usize {
             return Err(Errno::LengthOutOfRange);
         }
@@ -226,15 +327,20 @@ impl<'a> FrameRing<'a> {
         let head = self.producer();
         let offset = self.slot_offset(head);
         let frame_len = u32::try_from(frame.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        put_u32(self.region, offset, frame_len);
-        let payload = offset + SLOT_LEN_PREFIX;
+        let (csum_start, csum_offset) = offload.offsets();
+        self.region[offset] = offload.to_tag();
+        self.region[offset + 1..offset + 3].copy_from_slice(&csum_start.to_le_bytes());
+        self.region[offset + 3..offset + 5].copy_from_slice(&csum_offset.to_le_bytes());
+        put_u32(self.region, offset + SLOT_META_LEN, frame_len);
+        let payload = offset + SLOT_META_LEN + SLOT_LEN_PREFIX;
         self.region[payload..payload + frame.len()].copy_from_slice(frame);
         self.set_producer(head.wrapping_add(1));
         Ok(())
     }
 
     /// Dequeue the oldest frame into `out`, returning its length, or
-    /// `None` when the ring is empty.
+    /// `None` when the ring is empty. The frame's offload metadata is
+    /// discarded; use [`Self::pop_with`] to read it.
     ///
     /// # Errors
     ///
@@ -244,12 +350,28 @@ impl<'a> FrameRing<'a> {
     ///   consumed so one corrupt frame cannot wedge the ring.
     /// * [`Errno::OutOfRange`] — the persisted counters are corrupt.
     pub fn pop(&mut self, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+        let mut offload = FrameOffload::None;
+        self.pop_with(&mut offload, out)
+    }
+
+    /// Dequeue the oldest frame into `out`, writing its offload
+    /// metadata into `offload` and returning its length, or `None`
+    /// when the ring is empty.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::pop`].
+    pub fn pop_with(
+        &mut self,
+        offload: &mut FrameOffload,
+        out: &mut [u8],
+    ) -> Result<Option<usize>, Errno> {
         if self.is_empty()? {
             return Ok(None);
         }
         let tail = self.consumer();
         let offset = self.slot_offset(tail);
-        let len = read_u32(self.region, offset) as usize;
+        let len = read_u32(self.region, offset + SLOT_META_LEN) as usize;
         if len == 0 || len > self.geometry.slot_capacity as usize {
             // Consume the corrupt slot before refusing, so the ring
             // recovers rather than replaying the same corruption.
@@ -259,7 +381,11 @@ impl<'a> FrameRing<'a> {
         if out.len() < len {
             return Err(Errno::BufferTooSmall);
         }
-        let payload = offset + SLOT_LEN_PREFIX;
+        let tag = self.region[offset];
+        let csum_start = u16::from_le_bytes([self.region[offset + 1], self.region[offset + 2]]);
+        let csum_offset = u16::from_le_bytes([self.region[offset + 3], self.region[offset + 4]]);
+        *offload = FrameOffload::decode(tag, csum_start, csum_offset);
+        let payload = offset + SLOT_META_LEN + SLOT_LEN_PREFIX;
         out[..len].copy_from_slice(&self.region[payload..payload + len]);
         self.set_consumer(tail.wrapping_add(1));
         Ok(Some(len))
@@ -280,7 +406,7 @@ impl<'a> FrameRing<'a> {
             return Ok(None);
         }
         let tail = self.consumer();
-        let len = read_u32(self.region, self.slot_offset(tail)) as usize;
+        let len = read_u32(self.region, self.slot_offset(tail) + SLOT_META_LEN) as usize;
         self.set_consumer(tail.wrapping_add(1));
         Ok(Some(len))
     }
@@ -475,8 +601,9 @@ mod tests {
         let mut region = [0u8; RING_LEN];
         let mut ring = FrameRing::bind(&mut region, g).expect("bind");
         ring.push(&[1u8; 20]).expect("push");
-        // Corrupt the queued slot's length prefix beyond capacity.
-        put_u32(ring.region, RING_HEADER_LEN, 4096);
+        // Corrupt the queued slot's length prefix (past the one-byte
+        // offload-metadata prefix) beyond capacity.
+        put_u32(ring.region, RING_HEADER_LEN + SLOT_META_LEN, 4096);
         let mut out = [0u8; 128];
         assert_eq!(ring.pop(&mut out), Err(Errno::LengthOutOfRange));
         // The corrupt slot was consumed: the ring is usable again.
@@ -509,5 +636,54 @@ mod tests {
         assert_eq!(ring.pop(&mut short), Err(Errno::BufferTooSmall));
         let mut out = [0u8; 128];
         assert_eq!(ring.pop(&mut out), Ok(Some(100)));
+    }
+
+    #[test]
+    fn offload_metadata_round_trips_per_frame() {
+        let g = geometry();
+        let mut region = [0u8; RING_LEN];
+        let mut ring = FrameRing::bind(&mut region, g).expect("bind");
+        ring.push_with(FrameOffload::Validated, &[1u8; 40])
+            .expect("push validated");
+        ring.push_with(
+            FrameOffload::NeedsChecksum {
+                csum_start: 34,
+                csum_offset: 16,
+            },
+            &[2u8; 40],
+        )
+        .expect("push needs-checksum");
+        // A plain push carries no offload.
+        ring.push(&[3u8; 40]).expect("push plain");
+        let mut out = [0u8; 128];
+        let mut offload = FrameOffload::None;
+        assert_eq!(ring.pop_with(&mut offload, &mut out), Ok(Some(40)));
+        assert_eq!(offload, FrameOffload::Validated);
+        assert_eq!(ring.pop_with(&mut offload, &mut out), Ok(Some(40)));
+        assert_eq!(
+            offload,
+            FrameOffload::NeedsChecksum {
+                csum_start: 34,
+                csum_offset: 16,
+            }
+        );
+        assert_eq!(ring.pop_with(&mut offload, &mut out), Ok(Some(40)));
+        assert_eq!(offload, FrameOffload::None);
+    }
+
+    #[test]
+    fn unknown_offload_tag_decodes_to_none_fail_closed() {
+        let g = geometry();
+        let mut region = [0u8; RING_LEN];
+        let mut ring = FrameRing::bind(&mut region, g).expect("bind");
+        ring.push_with(FrameOffload::Validated, &[9u8; 30])
+            .expect("push");
+        // Corrupt the offload tag byte (slot start) to an unknown value.
+        ring.region[RING_HEADER_LEN] = 0xFF;
+        let mut out = [0u8; 128];
+        let mut offload = FrameOffload::Validated;
+        assert_eq!(ring.pop_with(&mut offload, &mut out), Ok(Some(30)));
+        // Fail closed: an unknown tag loses the offload, never invents one.
+        assert_eq!(offload, FrameOffload::None);
     }
 }

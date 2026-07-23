@@ -36,6 +36,16 @@ state read back from the region is untrusted: corrupt counters or slot
 lengths are refused (`BadMagic`), and a corrupt slot is consumed so it
 cannot wedge the queue behind it.
 
+Each slot also carries a small per-frame **offload descriptor**
+(`FrameOffload`) — the transport-neutral analogue of a device's
+per-descriptor header — read and written by `push_with`/`pop_with`
+(`push`/`pop` are the no-offload path). A receive frame the device
+checksum-validated is tagged `Validated`; one delivered with a partial
+checksum is tagged `NeedsChecksum { csum_start, csum_offset }`. The tag
+decodes fail-closed (an unknown byte is `None`), so a corrupt descriptor
+can only *lose* an offload, never fabricate one, and the offload is never
+load-bearing for security (`plans/NETWORK.md` N7a).
+
 `service` semantics:
 
 - Every frame queued in `tx` is moved into the device; a frame the
@@ -95,7 +105,7 @@ region itself; that remains the stack's responsibility.
 
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
-| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; no offloads negotiated yet |
+| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`) |
 
 The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
 so a user-space **driver process** can link it without depending on a
@@ -105,6 +115,21 @@ emits the `netchan` hardware-tree node the device manager binds to the
 stack, and serves the `netchan-v1` contract over a wait-set loop on
 `{call endpoint, device IRQ}`. The device manager autobinds a
 discovered `netchan` node to `netstack` (`plans/NETWORK.md` N4d).
+
+### Receive-checksum offload
+
+When the device offers `VIRTIO_NET_F_GUEST_CSUM` the driver negotiates it
+and advertises `NetOffloads::RX_CSUM_VALIDATED`. It then reads each
+receive frame's `virtio_net_hdr` flags and tags the ring slot: a
+`VIRTIO_NET_HDR_F_DATA_VALID` frame is `Validated`, a
+`VIRTIO_NET_HDR_F_NEEDS_CSUM` frame is `NeedsChecksum` carrying the
+device's `csum_start`/`csum_offset`. The driver does **no** checksum
+arithmetic — it never links `lib/net`, so the kernel that links the
+driver crate (for the virtio-net device id) stays free of the stack. The
+`netstack` service completes a `NeedsChecksum` frame through the one
+`internet_checksum` and lets `lib/net` skip the redundant fold for a
+`Validated` one, with every semantic check still running and the software
+path as the byte-for-byte conformance oracle (`plans/NETWORK.md` N7a).
 
 The netstack QEMU verticals
 (`tests/integration/netstack_autoload_qemu_{aarch64,riscv64,x86_64}`)

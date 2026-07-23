@@ -16,7 +16,7 @@
 //! does not verify is rejected, and there is no all-zero "no checksum"
 //! sentinel (unlike UDP over IPv4).
 
-use crate::checksum::Pseudo;
+use crate::checksum::{ChecksumCheck, Pseudo};
 
 #[path = "tcp_conn.rs"]
 pub mod conn;
@@ -513,6 +513,22 @@ impl<'a> TcpSegment<'a> {
     /// zero-checksum form.
     #[must_use]
     pub fn parse(pseudo: Pseudo, bytes: &'a [u8]) -> Option<Self> {
+        Self::parse_with(pseudo, bytes, ChecksumCheck::Verify)
+    }
+
+    /// Parse a TCP segment under `pseudo`, verifying the mandatory
+    /// checksum in software unless `check` reports the device already
+    /// validated it ([`ChecksumCheck::DeviceValidated`], the negotiated
+    /// receive checksum offload — `plans/NETWORK.md` §2.3).
+    ///
+    /// The offload suppresses **only** the one's-complement fold; every
+    /// other validation still runs, including the data-offset range and
+    /// the pseudo-header length bound (a segment too long to express in
+    /// the 16-bit length is rejected regardless of offload). Trust is in
+    /// the device, never the peer; the offload is never load-bearing for
+    /// security.
+    #[must_use]
+    pub fn parse_with(pseudo: Pseudo, bytes: &'a [u8], check: ChecksumCheck) -> Option<Self> {
         let fixed = bytes.get(..TCP_HEADER_LEN)?;
         let source_port = u16::from_be_bytes([fixed[0], fixed[1]]);
         let destination_port = u16::from_be_bytes([fixed[2], fixed[3]]);
@@ -532,12 +548,15 @@ impl<'a> TcpSegment<'a> {
             return None;
         }
         // The pseudo-header carries the TCP length (header + data). A
-        // segment too long to express there cannot bear a valid checksum.
+        // segment too long to express there cannot bear a valid checksum;
+        // this length bound is a semantic check that holds under offload.
         let segment_len = u16::try_from(bytes.len()).ok()?;
-        let mut sum = pseudo.seed(PROTOCOL_TCP, segment_len);
-        sum.push(bytes);
-        if sum.finish() != 0 {
-            return None;
+        if check.must_verify() {
+            let mut sum = pseudo.seed(PROTOCOL_TCP, segment_len);
+            sum.push(bytes);
+            if sum.finish() != 0 {
+                return None;
+            }
         }
         let options = parse_options(&bytes[TCP_HEADER_LEN..header_len])?;
         Some(Self {
