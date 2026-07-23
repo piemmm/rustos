@@ -16,7 +16,7 @@
 //! does not verify is rejected, and there is no all-zero "no checksum"
 //! sentinel (unlike UDP over IPv4).
 
-use crate::checksum::{ChecksumCheck, Pseudo};
+use crate::checksum::{ChecksumCheck, ChecksumMode, Pseudo};
 
 #[path = "tcp_conn.rs"]
 pub mod conn;
@@ -32,6 +32,11 @@ pub const PROTOCOL_TCP: u8 = 6;
 
 /// Length of the fixed TCP header, before any options.
 pub const TCP_HEADER_LEN: usize = 20;
+
+/// Byte offset of the 16-bit checksum field within the TCP header. The
+/// one definition the segment serialiser stores the checksum at and the
+/// transmit-offload path reports as the device's `csum_offset`.
+pub const CHECKSUM_OFFSET: usize = 16;
 
 /// Smallest legal value of the 4-bit data-offset field, in 32-bit words
 /// (a header with no options).
@@ -677,6 +682,28 @@ pub fn write(
     payload: &[u8],
     out: &mut [u8],
 ) -> Result<usize, WriteError> {
+    write_with_checksum(pseudo, meta, payload, out, ChecksumMode::Full)
+}
+
+/// Write a TCP segment into `out`, filling the checksum field per `mode`.
+///
+/// [`ChecksumMode::Full`] computes the complete checksum in software (the
+/// public [`write()`] path). [`ChecksumMode::Partial`] stores only the
+/// folded pseudo-header sum, for a segment the egress device will
+/// checksum-offload (`plans/NETWORK.md` §2.3): the device folds the
+/// transport bytes and completes the field. Both produce the same on-wire
+/// checksum once completed.
+///
+/// # Errors
+///
+/// As for [`write()`].
+pub(crate) fn write_with_checksum(
+    pseudo: Pseudo,
+    meta: &TcpSegmentMeta,
+    payload: &[u8],
+    out: &mut [u8],
+    mode: ChecksumMode,
+) -> Result<usize, WriteError> {
     let mut option_bytes = [0u8; MAX_OPTIONS_LEN];
     let options_len =
         encode_options(&meta.options, &mut option_bytes).ok_or(WriteError::OptionsTooLarge)?;
@@ -697,16 +724,24 @@ pub fn write(
     out[12] = data_offset_words << 4;
     out[13] = meta.flags.bits();
     out[14..16].copy_from_slice(&meta.window.to_be_bytes());
-    out[16..18].copy_from_slice(&[0, 0]);
+    out[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 2].copy_from_slice(&[0, 0]);
     out[18..20].copy_from_slice(&meta.urgent.to_be_bytes());
     out[TCP_HEADER_LEN..header_len].copy_from_slice(&option_bytes[..options_len]);
     out[header_len..].copy_from_slice(payload);
     // `total <= u16::MAX` was checked above.
     let segment_len = u16::try_from(total).map_err(|_| WriteError::TooLarge)?;
-    let mut sum = pseudo.seed(PROTOCOL_TCP, segment_len);
-    sum.push(out);
-    let checksum = sum.finish();
-    out[16..18].copy_from_slice(&checksum.to_be_bytes());
+    let seed = pseudo.seed(PROTOCOL_TCP, segment_len);
+    let checksum = match mode {
+        ChecksumMode::Full => {
+            let mut sum = seed;
+            sum.push(out);
+            sum.finish()
+        }
+        // Leave the folded pseudo-header sum for the device to complete
+        // over the transport bytes (no payload fold on this path).
+        ChecksumMode::Partial => seed.partial(),
+    };
+    out[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 2].copy_from_slice(&checksum.to_be_bytes());
     Ok(total)
 }
 

@@ -30,7 +30,7 @@ use tairix_abi::Duration64;
 use tairix_net::addr::IpAddr;
 use tairix_net::checksum::Pseudo;
 use tairix_net::iface::eui64_interface_id;
-use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput};
+use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 use tairix_net::tcp::conn::{Tcb, TcpConfig};
 use tairix_net::tcp::TcpSegment;
 use tairix_test_netstack_wire as wire;
@@ -258,9 +258,11 @@ fn note_replies(out: &StackOutput, guest_v6: core::net::Ipv6Addr, v6: &mut bool)
 /// errors are tolerated: before QEMU binds its end there is no receiver
 /// (the engine's retransmission machinery recovers the loss), and after
 /// the guest exits the wire is torn down under us.
-fn send_frames(socket: &UnixDatagram, qemu_sock: &PathBuf, frames: &[Vec<u8>]) {
+fn send_frames(socket: &UnixDatagram, qemu_sock: &PathBuf, frames: &[TxFrame]) {
     for frame in frames {
-        let _ = socket.send_to(frame, qemu_sock);
+        // The host peer speaks the raw wire; a live device would consume
+        // the transmit-offload metadata, so it is ignored here.
+        let _ = socket.send_to(&frame.bytes, qemu_sock);
     }
 }
 

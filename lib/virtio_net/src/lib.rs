@@ -22,16 +22,21 @@
 //! the device-configuration window. Two queues are used: receive queue
 //! `0` and transmit queue `1` (virtio-net §5.1.2).
 //!
-//! The one extended feature negotiated is receive-checksum offload
-//! (`VIRTIO_NET_F_GUEST_CSUM`, when the device offers it): the device
-//! may then mark a received frame checksum-validated
-//! (`VIRTIO_NET_HDR_F_DATA_VALID`) or deliver it with a partial
-//! checksum (`VIRTIO_NET_HDR_F_NEEDS_CSUM`). The driver reports which,
-//! per frame, through the ring's offload metadata
-//! ([`tairix_abi::driver::net_ring::FrameOffload`]); the stack skips or
-//! completes the fold accordingly (`plans/NETWORK.md` §2.3). No
-//! transmit-side or GSO offload is advertised: every transmit header is
-//! zero and the checksum is computed in software.
+//! Two checksum-offload features are negotiated when the device offers
+//! them. Receive (`VIRTIO_NET_F_GUEST_CSUM`): the device may mark a
+//! received frame checksum-validated (`VIRTIO_NET_HDR_F_DATA_VALID`) or
+//! deliver it with a partial checksum (`VIRTIO_NET_HDR_F_NEEDS_CSUM`);
+//! the driver reports which, per frame, through the ring's offload
+//! metadata ([`tairix_abi::driver::net_ring::FrameOffload`]) and the
+//! stack skips or completes the fold. Transmit (`VIRTIO_NET_F_CSUM`):
+//! the stack may hand a TCP segment carrying only the partial
+//! (pseudo-header) checksum ([`FrameOffload::TxChecksum`]), and the
+//! driver sets `VIRTIO_NET_HDR_F_NEEDS_CSUM` + `csum_start`/`csum_offset`
+//! so the device completes it (`plans/NETWORK.md` §2.3). The driver does
+//! no checksum arithmetic itself — it never links the stack — so the
+//! kernel that links this crate for the device id stays free of
+//! `lib/net`. No GSO/segmentation offload is advertised yet: `gso_type`
+//! is always `GSO_NONE`.
 //!
 //! Higher-layer protocols (ARP, IP, ICMP) live above this trait in
 //! user space and are out of scope for `abi-v1` (see
@@ -145,6 +150,11 @@ mod wire {
     /// device may deliver receive frames it has checksum-validated
     /// (`DATA_VALID`) or left with a partial checksum (`NEEDS_CSUM`).
     pub const VIRTIO_NET_F_GUEST_CSUM: u64 = 1 << 1;
+    /// `VIRTIO_NET_F_CSUM` (virtio 1.1 §5.1.4, feature bit 0): the device
+    /// completes the transport checksum of a transmit frame the driver
+    /// marks `NEEDS_CSUM`, so the stack may hand the device a segment
+    /// carrying only the partial (pseudo-header) checksum.
+    pub const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
     /// Minimum Ethernet frame size (excluding FCS).
     pub const MIN_ETHERNET_FRAME: usize = 14;
     /// Link MTU: the largest link-layer payload (IP packet) carried.
@@ -197,6 +207,11 @@ pub struct VirtioNet<'h, T: Transport> {
     /// Whether `VIRTIO_NET_F_GUEST_CSUM` was negotiated at open: only
     /// then does the driver honour the device's receive checksum flags.
     guest_csum: bool,
+    /// Whether `VIRTIO_NET_F_CSUM` was negotiated at open: only then does
+    /// the driver ask the device to complete a transmit frame's partial
+    /// checksum (and only then does it advertise the transmit-checksum
+    /// offload the stack opts into).
+    host_csum: bool,
 }
 
 impl<'h, T: Transport> VirtioNet<'h, T> {
@@ -230,9 +245,13 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // (no speculative surface).
         let device_features = transport.device_features();
         let guest_csum = device_features & wire::VIRTIO_NET_F_GUEST_CSUM != 0;
+        let host_csum = device_features & wire::VIRTIO_NET_F_CSUM != 0;
         let mut driver_features = 0u64;
         if guest_csum {
             driver_features |= wire::VIRTIO_NET_F_GUEST_CSUM;
+        }
+        if host_csum {
+            driver_features |= wire::VIRTIO_NET_F_CSUM;
         }
         transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
@@ -277,6 +296,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             rx_staged_len: None,
             rx_staged_offload: FrameOffload::None,
             guest_csum,
+            host_csum,
         };
         // Arm the receive path: the device owns a posted buffer from
         // DRIVER_OK onward, so a frame arriving before the first
@@ -337,10 +357,31 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         &mut self.transport
     }
 
-    fn build_header() -> [u8; wire::HEADER_LEN] {
-        // No transmit offload is negotiated, so every header field is
-        // zero: no partial checksum, no segmentation.
-        [0u8; wire::HEADER_LEN]
+    /// Build the `virtio_net_hdr` for a transmit frame carrying `offload`.
+    ///
+    /// With no offload every field is zero (the device transmits the
+    /// frame's complete software checksum verbatim). A
+    /// [`FrameOffload::TxChecksum`] frame — emitted only when
+    /// `VIRTIO_NET_F_CSUM` was negotiated — sets `VIRTIO_NET_HDR_F_NEEDS_CSUM`
+    /// and the device's `csum_start`/`csum_offset`, so the device folds the
+    /// transport bytes and completes the field the stack left partial. No
+    /// segmentation (`gso_type` stays `GSO_NONE`).
+    fn build_header(&self, offload: FrameOffload) -> [u8; wire::HEADER_LEN] {
+        let mut header = [0u8; wire::HEADER_LEN];
+        if let FrameOffload::TxChecksum {
+            csum_start,
+            csum_offset,
+        } = offload
+        {
+            if self.host_csum {
+                header[wire::HDR_FLAGS_OFFSET] = wire::VIRTIO_NET_HDR_F_NEEDS_CSUM;
+                header[wire::HDR_CSUM_START_OFFSET..wire::HDR_CSUM_START_OFFSET + 2]
+                    .copy_from_slice(&csum_start.to_le_bytes());
+                header[wire::HDR_CSUM_OFFSET_OFFSET..wire::HDR_CSUM_OFFSET_OFFSET + 2]
+                    .copy_from_slice(&csum_offset.to_le_bytes());
+            }
+        }
+        header
     }
 
     /// Drain every frame queued in the TX ring into the device.
@@ -382,7 +423,8 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     ) -> Result<TxOutcome, DriverError> {
         let staging = data_bb.full_region_mut();
         let cap = self.max_frame_len.min(staging.len());
-        let len = match rings.tx.pop(&mut staging[..cap]) {
+        let mut offload = FrameOffload::None;
+        let len = match rings.tx.pop_with(&mut offload, &mut staging[..cap]) {
             Ok(Some(len)) => len,
             Ok(None) => return Ok(TxOutcome::Empty),
             // Longer than the device moves: consume it and go on.
@@ -398,7 +440,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             return Ok(TxOutcome::Dropped);
         }
         header_bb
-            .stage(&Self::build_header())
+            .stage(&self.build_header(offload))
             .map_err(|()| DriverError::BufferTooSmall)?;
         let frame_len_u32 = u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [
@@ -564,14 +606,23 @@ enum TxOutcome {
 impl<T: Transport> Net for VirtioNet<'_, T> {
     fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
         // No VIRTIO_NET_F_STATUS is negotiated (an operational device
-        // reports its link up) and one receive queue is used. The only
-        // offload advertised is receive-checksum validation, and only
-        // when the device offered `VIRTIO_NET_F_GUEST_CSUM`.
-        let offloads = if self.guest_csum {
-            NetOffloads::RX_CSUM_VALIDATED
-        } else {
-            NetOffloads::empty()
-        };
+        // reports its link up) and one receive queue is used. Two offloads
+        // are advertised, each only when its virtio feature was negotiated:
+        // receive-checksum validation (`VIRTIO_NET_F_GUEST_CSUM`) and TCP
+        // transmit-checksum offload (`VIRTIO_NET_F_CSUM`). UDP transmit
+        // offload is not advertised: the stack keeps UDP on the software
+        // path (its zero-checksum-as-0xFFFF rule is not expressed by the
+        // virtio partial-checksum contract).
+        let mut offloads = NetOffloads::empty();
+        if self.guest_csum {
+            offloads =
+                NetOffloads::from_bits(offloads.bits() | NetOffloads::RX_CSUM_VALIDATED.bits())
+                    .unwrap_or(NetOffloads::empty());
+        }
+        if self.host_csum {
+            offloads = NetOffloads::from_bits(offloads.bits() | NetOffloads::TX_CSUM_TCP.bits())
+                .unwrap_or(offloads);
+        }
         Ok(DeviceFacts {
             mac: self.mac,
             mtu: u32::try_from(self.max_frame_len - wire::MIN_ETHERNET_FRAME)

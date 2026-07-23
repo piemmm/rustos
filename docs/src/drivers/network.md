@@ -41,10 +41,12 @@ Each slot also carries a small per-frame **offload descriptor**
 per-descriptor header — read and written by `push_with`/`pop_with`
 (`push`/`pop` are the no-offload path). A receive frame the device
 checksum-validated is tagged `Validated`; one delivered with a partial
-checksum is tagged `NeedsChecksum { csum_start, csum_offset }`. The tag
-decodes fail-closed (an unknown byte is `None`), so a corrupt descriptor
-can only *lose* an offload, never fabricate one, and the offload is never
-load-bearing for security (`plans/NETWORK.md` N7a).
+checksum is tagged `NeedsChecksum { csum_start, csum_offset }`. A transmit
+frame the stack asked the device to checksum is tagged
+`TxChecksum { csum_start, csum_offset }`. The tag decodes fail-closed (an
+unknown byte is `None`), so a corrupt descriptor can only *lose* an
+offload, never fabricate one, and the offload is never load-bearing for
+security (`plans/NETWORK.md` N7a/N7b-1).
 
 `service` semantics:
 
@@ -105,7 +107,7 @@ region itself; that remains the stack's responsibility.
 
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
-| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`) |
+| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`) |
 
 The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
 so a user-space **driver process** can link it without depending on a
@@ -130,6 +132,21 @@ driver crate (for the virtio-net device id) stays free of the stack. The
 `internet_checksum` and lets `lib/net` skip the redundant fold for a
 `Validated` one, with every semantic check still running and the software
 path as the byte-for-byte conformance oracle (`plans/NETWORK.md` N7a).
+
+### Transmit-checksum offload (TCP)
+
+When the device offers `VIRTIO_NET_F_CSUM` the driver negotiates it and
+advertises `NetOffloads::TX_CSUM_TCP`. For a transmit frame the ring tags
+`TxChecksum { csum_start, csum_offset }`, the driver builds the frame's
+`virtio_net_hdr` with `VIRTIO_NET_HDR_F_NEEDS_CSUM` and those offsets, so
+the device completes the fold over the transport bytes the stack left
+partial; every other frame gets a zero header (its complete software
+checksum is transmitted verbatim). As on receive, the driver does no
+checksum arithmetic. UDP transmit offload is not advertised — the stack
+keeps UDP's zero-checksum-as-`0xFFFF` rule on the software path. Because
+the path is guest-driven, the existing TCP QEMU verticals exercise it once
+`VIRTIO_NET_F_CSUM` is offered; QEMU recomputes the checksum on loopback
+(`plans/NETWORK.md` N7b-1).
 
 The netstack QEMU verticals
 (`tests/integration/netstack_autoload_qemu_{aarch64,riscv64,x86_64}`)

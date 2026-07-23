@@ -39,6 +39,15 @@ fn link_local(iid: [u8; 8]) -> Ipv6Addr {
     Ipv6Addr::from(octets)
 }
 
+/// The emitted frames' bytes, dropping the transmit-offload metadata a
+/// live device would consume — most tests pump raw bytes back through
+/// `on_frame` and inspect them, so this keeps the harness on `Vec<u8>`.
+/// Takes the `frames` field (not the whole [`StackOutput`]) so a caller
+/// may still read `events` from the same output.
+fn tx_bytes(frames: Vec<TxFrame>) -> Vec<Vec<u8>> {
+    frames.into_iter().map(|f| f.bytes).collect()
+}
+
 /// Run both stacks' timers forward to `now` and exchange every frame
 /// until the link is quiet, collecting each side's events.
 fn pump(
@@ -48,8 +57,8 @@ fn pump(
     events_a: &mut Vec<StackEvent>,
     events_b: &mut Vec<StackEvent>,
 ) {
-    let mut to_b: VecDeque<Vec<u8>> = VecDeque::new();
-    let mut to_a: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut to_b: VecDeque<TxFrame> = VecDeque::new();
+    let mut to_a: VecDeque<TxFrame> = VecDeque::new();
     let out_a = a.advance(now);
     events_a.extend(out_a.events);
     to_b.extend(out_a.frames);
@@ -62,12 +71,12 @@ fn pump(
             break;
         }
         if let Some(frame) = to_b.pop_front() {
-            let out = b.on_frame(&frame, now);
+            let out = b.on_frame(&frame.bytes, now);
             events_b.extend(out.events);
             to_a.extend(out.frames);
         }
         if let Some(frame) = to_a.pop_front() {
-            let out = a.on_frame(&frame, now);
+            let out = a.on_frame(&frame.bytes, now);
             events_a.extend(out.events);
             to_b.extend(out.frames);
         }
@@ -118,17 +127,17 @@ fn ipv4_ping_resolves_arp_and_round_trips() {
         .send_echo_request(IpAddr::V4(V4_B), 0x77, 1, b"tairix-stack", t(2))
         .expect("send");
     assert!(out.events.is_empty());
-    let mut frames: VecDeque<Vec<u8>> = out.frames.into();
+    let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
     for _ in 0..16 {
         let Some(frame) = frames.pop_front() else {
             break;
         };
         let out_b = b.on_frame(&frame, t(2));
         events_b.extend(out_b.events);
-        for reply in out_b.frames {
+        for reply in tx_bytes(out_b.frames) {
             let out_a = a.on_frame(&reply, t(2));
             events_a.extend(out_a.events);
-            frames.extend(out_a.frames);
+            frames.extend(tx_bytes(out_a.frames));
         }
     }
     assert_eq!(
@@ -168,17 +177,17 @@ fn ipv6_link_local_ping_resolves_nd_and_round_trips() {
     let out = a
         .send_echo_request(IpAddr::V6(link_local(IID_B)), 0x42, 7, b"ping6", t(3))
         .expect("send");
-    let mut frames: VecDeque<Vec<u8>> = out.frames.into();
+    let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
     for _ in 0..16 {
         let Some(frame) = frames.pop_front() else {
             break;
         };
         let out_b = b.on_frame(&frame, t(3));
         events_b.extend(out_b.events);
-        for reply in out_b.frames {
+        for reply in tx_bytes(out_b.frames) {
             let out_a = a.on_frame(&reply, t(3));
             events_a.extend(out_a.events);
-            frames.extend(out_a.frames);
+            frames.extend(tx_bytes(out_a.frames));
         }
     }
     assert_eq!(
@@ -456,15 +465,15 @@ fn unknown_ipv6_upper_protocol_reports_parameter_problem_pointer() {
     write_header(&mut frame, MAC_A, MAC_B, ETHERTYPE_IPV6).expect("fits");
     frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
     let mut events_b = Vec::new();
-    let mut to_b: VecDeque<Vec<u8>> = a.on_frame(&frame, t(2)).frames.into();
+    let mut to_b: VecDeque<Vec<u8>> = tx_bytes(a.on_frame(&frame, t(2)).frames).into();
     for _ in 0..16 {
         let Some(frame) = to_b.pop_front() else {
             break;
         };
         let out_b = b.on_frame(&frame, t(2));
         events_b.extend(out_b.events);
-        for reply in out_b.frames {
-            to_b.extend(a.on_frame(&reply, t(2)).frames);
+        for reply in tx_bytes(out_b.frames) {
+            to_b.extend(tx_bytes(a.on_frame(&reply, t(2)).frames));
         }
     }
     assert_eq!(
@@ -566,16 +575,16 @@ fn ipv4_udp_datagram_round_trips() {
     let out = a
         .send_datagram(IpAddr::V4(V4_B), 5000, 7, b"udp-payload", t(2))
         .expect("send");
-    let mut frames: VecDeque<Vec<u8>> = out.frames.into();
+    let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
     for _ in 0..16 {
         let Some(frame) = frames.pop_front() else {
             break;
         };
         let out_b = b.on_frame(&frame, t(2));
         events_b.extend(out_b.events);
-        for reply in out_b.frames {
+        for reply in tx_bytes(out_b.frames) {
             let out_a = a.on_frame(&reply, t(2));
-            frames.extend(out_a.frames);
+            frames.extend(tx_bytes(out_a.frames));
         }
     }
     assert!(events_b.contains(&StackEvent::UdpDatagram {
@@ -597,16 +606,16 @@ fn ipv6_udp_datagram_round_trips() {
     let out = a
         .send_datagram(IpAddr::V6(link_local(IID_B)), 6000, 9, b"udp6", t(3))
         .expect("send");
-    let mut frames: VecDeque<Vec<u8>> = out.frames.into();
+    let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
     for _ in 0..16 {
         let Some(frame) = frames.pop_front() else {
             break;
         };
         let out_b = b.on_frame(&frame, t(3));
         events_b.extend(out_b.events);
-        for reply in out_b.frames {
+        for reply in tx_bytes(out_b.frames) {
             let out_a = a.on_frame(&reply, t(3));
-            frames.extend(out_a.frames);
+            frames.extend(tx_bytes(out_a.frames));
         }
     }
     assert!(events_b.contains(&StackEvent::UdpDatagram {
@@ -865,9 +874,9 @@ fn igmp_general_query_frame(max_resp_deciseconds: u8) -> Vec<u8> {
 
 /// The first IGMP message in `frames`, with its Ethernet destination,
 /// TTL, and IPv4 options length.
-fn first_igmp(frames: &[Vec<u8>]) -> Option<(MacAddress, u8, usize, IgmpMessage)> {
+fn first_igmp(frames: &[TxFrame]) -> Option<(MacAddress, u8, usize, IgmpMessage)> {
     for f in frames {
-        let Some(eth) = EthernetFrame::parse(f) else {
+        let Some(eth) = EthernetFrame::parse(&f.bytes) else {
             continue;
         };
         if eth.ethertype != ETHERTYPE_IPV4 {
@@ -975,14 +984,14 @@ fn ipv6_address_reports_its_solicited_node_group_via_mld() {
         .frames
         .iter()
         .find(|f| {
-            EthernetFrame::parse(f).is_some_and(|eth| {
+            EthernetFrame::parse(&f.bytes).is_some_and(|eth| {
                 eth.ethertype == ETHERTYPE_IPV6
                     && Ipv6Header::parse(eth.payload)
                         .is_some_and(|(h, _)| h.next_header == NEXT_HEADER_HOP_BY_HOP)
             })
         })
         .expect("mld report frame");
-    let eth = EthernetFrame::parse(frame).expect("eth");
+    let eth = EthernetFrame::parse(&frame.bytes).expect("eth");
     assert_eq!(eth.destination, ipv6_multicast_mac(&ALL_MLDV2_ROUTERS));
     let (header, payload) = Ipv6Header::parse(eth.payload).expect("ipv6");
     assert_eq!(header.destination, ALL_MLDV2_ROUTERS);
@@ -1007,7 +1016,7 @@ fn ipv4_multicast_datagram_transmit_reaches_a_member() {
         .send_datagram(IpAddr::V4(GROUP_V4), 5000, 7000, b"mcast4", t(0))
         .expect("send");
     assert_eq!(out.frames.len(), 1, "one unfragmented multicast frame");
-    let eth = EthernetFrame::parse(&out.frames[0]).expect("eth");
+    let eth = EthernetFrame::parse(&out.frames[0].bytes).expect("eth");
     assert_eq!(eth.destination, ipv4_multicast_mac(&GROUP_V4));
     let (header, _opts, _payload) = Ipv4Header::parse(eth.payload).expect("ipv4");
     assert_eq!(header.destination, GROUP_V4);
@@ -1015,7 +1024,7 @@ fn ipv4_multicast_datagram_transmit_reaches_a_member() {
     // The member delivers it as a verbatim datagram event.
     let mut events = Vec::new();
     for frame in &out.frames {
-        events.extend(b.on_frame(frame, t(0)).events);
+        events.extend(b.on_frame(&frame.bytes, t(0)).events);
     }
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1039,7 +1048,7 @@ fn ipv6_multicast_datagram_transmit_reaches_a_member() {
         .send_datagram(IpAddr::V6(GROUP_V6), 6000, 9000, b"mcast6", t(3))
         .expect("send");
     assert_eq!(out.frames.len(), 1, "one multicast frame, no resolution");
-    let eth = EthernetFrame::parse(&out.frames[0]).expect("eth");
+    let eth = EthernetFrame::parse(&out.frames[0].bytes).expect("eth");
     assert_eq!(eth.destination, ipv6_multicast_mac(&GROUP_V6));
     let (header, _payload) = Ipv6Header::parse(eth.payload).expect("ipv6");
     assert_eq!(header.destination, GROUP_V6);
@@ -1049,7 +1058,7 @@ fn ipv6_multicast_datagram_transmit_reaches_a_member() {
     );
     let mut events = Vec::new();
     for frame in &out.frames {
-        events.extend(b.on_frame(frame, t(3)).events);
+        events.extend(b.on_frame(&frame.bytes, t(3)).events);
     }
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1096,7 +1105,7 @@ impl TcpSide {
             // A momentary resolution/route miss parks the segment in the
             // engine, which emits it on resolution; treat it as sent.
             if let Ok(out) = stack.send_tcp(peer, &seg.meta, seg.payload, now) {
-                frames.extend(out.frames);
+                frames.extend(tx_bytes(out.frames));
             }
             true
         });
@@ -1130,7 +1139,7 @@ impl TcpSide {
                 }
             }
         }
-        out.frames
+        tx_bytes(out.frames)
     }
 }
 
@@ -1144,8 +1153,8 @@ fn drive_tcp(a: &mut TcpSide, b: &mut TcpSide, now: Duration64) {
     let mut to_a: VecDeque<Vec<u8>> = VecDeque::new();
     a.tcb.advance(now);
     b.tcb.advance(now);
-    to_b.extend(a.stack.advance(now).frames);
-    to_a.extend(b.stack.advance(now).frames);
+    to_b.extend(tx_bytes(a.stack.advance(now).frames));
+    to_a.extend(tx_bytes(b.stack.advance(now).frames));
     to_b.extend(a.transmit(now));
     to_a.extend(b.transmit(now));
     for _ in 0..256 {
@@ -1385,4 +1394,80 @@ fn tcp_bulk_transfer_over_ipv6_respects_the_link_mtu() {
         received, payload,
         "the whole IPv6 bulk stream arrived intact and in order"
     );
+}
+
+/// Engine-level transmit-checksum-offload conformance: a stack that
+/// negotiated `TX_CSUM_TCP` emits a TCP frame carrying only the partial
+/// (pseudo-header) checksum and a [`TxOffload::PartialChecksum`] descriptor
+/// whose offsets address the transport checksum within the Ethernet frame;
+/// completing that fold reproduces, byte-for-byte, the frame a stack
+/// without the offload emits with a full software checksum.
+#[test]
+fn tcp_v4_tx_checksum_offload_matches_the_software_path() {
+    use crate::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegmentMeta};
+
+    // Resolve B's MAC in `a`'s neighbour cache by exchanging one echo
+    // round with a fresh peer B (the echo path drives ARP), so a later
+    // `send_tcp` emits synchronously rather than parking.
+    fn resolve_b(a: &mut Stack) {
+        let mut b = stack(MAC_B, IID_B);
+        b.set_ipv4_config(V4_B, 24, None).expect("cfg b");
+        let out = a
+            .send_echo_request(IpAddr::V4(V4_B), 1, 1, b"x", t(2))
+            .expect("echo");
+        let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
+        for _ in 0..8 {
+            let Some(f) = frames.pop_front() else { break };
+            let ob = b.on_frame(&f, t(2));
+            for r in tx_bytes(ob.frames) {
+                frames.extend(tx_bytes(a.on_frame(&r, t(2)).frames));
+            }
+        }
+    }
+
+    let mut off_facts = facts(MAC_A);
+    off_facts.offloads = tairix_abi::driver::net::NetOffloads::TX_CSUM_TCP;
+    let mut off = Stack::new(&StackConfig::new(off_facts, IID_A, 0x1234), t(0)).expect("valid");
+    let mut soft = stack(MAC_A, IID_A);
+    off.set_ipv4_config(V4_A, 24, None).expect("cfg off");
+    soft.set_ipv4_config(V4_A, 24, None).expect("cfg soft");
+    resolve_b(&mut off);
+    resolve_b(&mut soft);
+
+    let meta = TcpSegmentMeta {
+        source_port: A_PORT,
+        destination_port: B_PORT,
+        seq: SeqNumber::new(1),
+        ack: SeqNumber::new(0),
+        flags: TcpFlags::SYN,
+        window: 1000,
+        urgent: 0,
+        options: TcpOptions::new(),
+    };
+    let off_out = off
+        .send_tcp(IpAddr::V4(V4_B), &meta, b"tcp-tx-offload", t(3))
+        .expect("send off");
+    let soft_out = soft
+        .send_tcp(IpAddr::V4(V4_B), &meta, b"tcp-tx-offload", t(3))
+        .expect("send soft");
+    assert_eq!(off_out.frames.len(), 1);
+    assert_eq!(soft_out.frames.len(), 1);
+
+    // The offloaded stack attaches the eth(14)+ipv4(20) checksum offsets;
+    // the software stack attaches none.
+    assert_eq!(
+        off_out.frames[0].offload,
+        TxOffload::PartialChecksum {
+            csum_start: 34,
+            csum_offset: 16,
+        }
+    );
+    assert_eq!(soft_out.frames[0].offload, TxOffload::None);
+
+    // Complete the device's fold over the offloaded frame and compare.
+    let mut completed = off_out.frames[0].bytes.clone();
+    let start = 34usize;
+    let sum = crate::internet_checksum(&completed[start..]);
+    completed[start + 16..start + 18].copy_from_slice(&sum.to_be_bytes());
+    assert_eq!(completed, soft_out.frames[0].bytes);
 }

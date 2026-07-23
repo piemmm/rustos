@@ -25,7 +25,10 @@ connection state machine, and the listener + SYN-cookie driver),
   fold plus an incremental accumulator with byte-stream semantics and the
   IPv4 / IPv6 (RFC 8200 §8.1) pseudo-header seeds. Every checksummed
   protocol folds through this module; a second fold is forbidden
-  duplication.
+  duplication. `Checksum::partial` (the folded, *uncomplemented* sum) plus
+  `ChecksumMode::Partial` let a transmit path leave only the pseudo-header
+  sum for a device to complete — the transmit-checksum-offload seam
+  (`TxOffload`, below).
 - `eth` — Ethernet II framing (14-byte header; VLAN/802.3 are
   unrecognised `EtherType`s, dropped by the dispatcher).
 - `arp` — ARP for IPv4 over Ethernet (RFC 826), the IPv4 provider of the
@@ -78,7 +81,12 @@ connection state machine, and the listener + SYN-cookie driver),
   UDP demux to typed events, and IGMPv2/MLDv2 multicast membership
   (auto-joining each address's solicited-node group and the all-systems
   group, filtering the receive path by membership, emitting reports
-  with a Router Alert; `join_multicast` / `leave_multicast`).
+  with a Router Alert; `join_multicast` / `leave_multicast`). Emitted
+  frames carry a per-frame `TxOffload`: `send_tcp` attaches
+  `TxOffload::PartialChecksum` (and writes only the partial checksum) when
+  the interface negotiated `NetOffloads::TX_CSUM_TCP` and the segment is a
+  single unfragmented frame, so a device can complete the fold; every other
+  frame keeps its full software checksum (`TxOffload::None`).
 - `udp` — the dual-stack UDP codec (RFC 768): one parse/emit core over
   the family-appropriate pseudo-header checksum, IPv4-optional /
   IPv6-mandatory checksum discipline.
@@ -142,9 +150,9 @@ connection state machine, and the listener + SYN-cookie driver),
   event-driven like the rest of the crate (`advance`/`next_deadline` drive
   half-open retransmit + expiry).
 
-Later increments evolve this crate in place: the socket-surface wiring
-(`listen`/`accept` ABI, `CAP_NET_BIND_PRIVILEGED`) that exposes
-`tcp::listen` through `netstack` (`plans/NETWORK.md` N6b-2-β).
+Later increments evolve this crate in place: TCP-segmentation offload
+(TSO) and UDP transmit-checksum offload (`plans/NETWORK.md` N7b-2), then
+mergeable receive buffers and multiqueue receive (N7c).
 
 ## Security
 

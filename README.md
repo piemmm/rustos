@@ -81,9 +81,12 @@ virtio-net driver, the stack auto-configures the interface's IPv6
 link-local, and it answers a host peer's echo (N4e-β on aarch64,
 N4e-riscv64, and N4e-x86_64 over virtio-PCI with kernel-routed MSI-X). The
 driver negotiates receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM`) and
-the stack skips the redundant fold for a device-validated frame while the
-software path stays the conformance oracle (N7a). Transmit-side offload,
-observability tooling, and interface configuration remain, hence still `◐`.
+the stack skips the redundant fold for a device-validated frame; it also
+negotiates TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM`), handing the
+device a segment with only the partial pseudo-header checksum to complete —
+the software path stays the byte-for-byte conformance oracle for both
+(N7a, N7b-1). TCP-segmentation (TSO) and UDP transmit offload, observability
+tooling, and interface configuration remain, hence still `◐`.
 
 ## Filesystem feature support
 

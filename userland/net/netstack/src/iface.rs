@@ -20,7 +20,7 @@ use tairix_abi::net_ipc::{
 use tairix_abi::{Duration64, Errno};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::internet_checksum;
-use tairix_net::stack::{RxMeta, SendError, Stack, StackConfig, StackEvent};
+use tairix_net::stack::{RxMeta, SendError, Stack, StackConfig, StackEvent, TxFrame, TxOffload};
 use tairix_net::tcp::TcpSegmentMeta;
 
 use crate::channel::FrameService;
@@ -29,7 +29,7 @@ use crate::channel::FrameService;
 /// interface alias that emitted it, for the caller to queue onto that
 /// interface's TX ring. The one definition every egress helper
 /// ([`Netstack::originate`], the multicast join/leave paths) returns.
-pub type FrameBatch = Vec<([u8; IF_NAME_LEN], Vec<Vec<u8>>)>;
+pub type FrameBatch = Vec<([u8; IF_NAME_LEN], Vec<TxFrame>)>;
 
 /// One managed interface: its admin-chosen alias, link kind, and the
 /// per-interface dual-stack protocol engine.
@@ -304,7 +304,7 @@ impl Netstack {
         meta: &TcpSegmentMeta,
         payload: &[u8],
         now: Duration64,
-    ) -> Result<Vec<Vec<u8>>, Errno> {
+    ) -> Result<Vec<TxFrame>, Errno> {
         let index = self.find(name).ok_or(Errno::NotFound)?;
         match self.interfaces[index]
             .stack
@@ -587,10 +587,11 @@ impl Netstack {
 ///   partial (pseudo-header) sum; [`complete_partial_checksum`] finishes
 ///   it in place and the engine re-verifies it in software (belt and
 ///   braces: a mis-completed frame is dropped, never wrongly accepted).
-/// * [`FrameOffload::None`] or a bogus partial — the software path.
+/// * [`FrameOffload::None`], [`FrameOffload::TxChecksum`] (a transmit-only
+///   descriptor a device must never deliver on receive), or a bogus
+///   partial — the software path.
 fn resolve_rx_offload(offload: FrameOffload, frame: &mut [u8]) -> RxMeta {
     match offload {
-        FrameOffload::None => RxMeta::none(),
         FrameOffload::Validated => RxMeta::validated(),
         FrameOffload::NeedsChecksum {
             csum_start,
@@ -600,6 +601,9 @@ fn resolve_rx_offload(offload: FrameOffload, frame: &mut [u8]) -> RxMeta {
             // Re-verify our completion in software rather than trust it.
             RxMeta::none()
         }
+        // A transmit-checksum request has no meaning on a received frame;
+        // fall back to the software path (fail closed).
+        FrameOffload::None | FrameOffload::TxChecksum { .. } => RxMeta::none(),
     }
 }
 
@@ -625,12 +629,36 @@ fn complete_partial_checksum(frame: &mut [u8], csum_start: usize, csum_offset: u
     true
 }
 
+/// Map the engine's per-frame [`TxOffload`] onto the ring's
+/// transport-neutral [`FrameOffload`], so a frame the engine asked the
+/// device to checksum carries that request across the ring to the driver
+/// (`plans/NETWORK.md` §2.3). A device that did not negotiate the offload
+/// never receives one: the engine only attaches [`TxOffload::PartialChecksum`]
+/// when the interface's `NetOffloads` advertised it.
+pub(crate) fn frame_offload(offload: TxOffload) -> FrameOffload {
+    match offload {
+        TxOffload::None => FrameOffload::None,
+        TxOffload::PartialChecksum {
+            csum_start,
+            csum_offset,
+        } => FrameOffload::TxChecksum {
+            csum_start,
+            csum_offset,
+        },
+    }
+}
+
 /// Queue engine output frames, dropping (never wedging on) overflow:
 /// the engine's own retransmission machinery recovers a lost frame,
-/// and its counters account the drop when the peer never answers.
-fn queue_frames(rings: &mut FrameRings<'_>, frames: &[Vec<u8>]) {
+/// and its counters account the drop when the peer never answers. Each
+/// frame carries its transmit offload across the ring to the driver.
+fn queue_frames(rings: &mut FrameRings<'_>, frames: &[TxFrame]) {
     for frame in frames {
-        if rings.tx.push(frame).is_err() {
+        if rings
+            .tx
+            .push_with(frame_offload(frame.offload), &frame.bytes)
+            .is_err()
+        {
             break;
         }
     }
@@ -650,7 +678,7 @@ fn queue_frames(rings: &mut FrameRings<'_>, frames: &[Vec<u8>]) {
 ///
 /// [`Errno::BadMagic`] if the service's region does not hold a valid ring
 /// header for its declared geometry.
-pub fn queue_tx<F: FrameService>(fs: &mut F, frames: &[Vec<u8>]) -> Result<(), Errno> {
+pub fn queue_tx<F: FrameService>(fs: &mut F, frames: &[TxFrame]) -> Result<(), Errno> {
     let geometry = fs.geometry();
     let class = fs.class();
     let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;

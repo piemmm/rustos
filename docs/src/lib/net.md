@@ -445,10 +445,36 @@ transport carrying the per-frame descriptor and the driver→stack wiring
 live in `tairix_abi::driver::net_ring::FrameOffload`, `drivers/network`,
 and `netstack` respectively (`plans/NETWORK.md` N7a).
 
+### Transmit checksum offload (TCP)
+
+The symmetric transmit path lets a device that negotiated
+`NetOffloads::TX_CSUM_TCP` finish a TCP segment's checksum. When the egress
+interface advertised the offload and the segment is a single unfragmented
+frame, `send_tcp` writes it through `ChecksumMode::Partial`: the checksum
+field holds only the folded pseudo-header sum (`Checksum::partial`, the
+uncomplemented fold Linux's `CHECKSUM_PARTIAL` leaves), and the frame
+carries a `TxOffload::PartialChecksum { csum_start, csum_offset }`
+descriptor whose offsets address the transport checksum within the
+Ethernet frame (14 + IPv4 20 or IPv6 40, then the TCP header's 16-byte
+checksum-field offset). The device folds the transport bytes and completes
+the field — the fold the stack would otherwise have run. It is never
+load-bearing: a fragmented datagram (only the first fragment carries the
+transport header), an interface that did not negotiate the offload, or a
+device that ignores the request all keep the complete software checksum
+(`ChecksumMode::Full`, `TxOffload::None`). UDP transmit offload is *not*
+done: UDP's zero-checksum-transmitted-as-`0xFFFF` rule is not expressed by
+the virtio partial-checksum contract, so UDP stays on the software path.
+`tx_partial_checksum_completed_matches_the_software_full_checksum` (codec
+level) and `tcp_v4_tx_checksum_offload_matches_the_software_path` (engine
+level) assert the partial-plus-completion result equals the software
+full-checksum frame byte-for-byte; the ring descriptor
+(`FrameOffload::TxChecksum`) and the `virtio_net` header mapping carry it
+to the device (`plans/NETWORK.md` N7b-1).
+
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place:
-transmit-side checksum and TCP-segmentation offload (N7b) then mergeable
-receive buffers, multiqueue receive, and the measured performance budgets
-(N7c). Each is added with its callers, tests, and fuzz harnesses per
-increment.
+UDP transmit-checksum offload and TCP-segmentation offload (TSO) (N7b-2)
+then mergeable receive buffers, multiqueue receive, and the measured
+performance budgets (N7c). Each is added with its callers, tests, and fuzz
+harnesses per increment.

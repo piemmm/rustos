@@ -1146,12 +1146,45 @@ the whole is too large for one change and each leaves the tree working.
   meta round-trip + unknown-tag-fail-closed, driver RX-tag, and the
   netstack completion/fail-closed paths are all unit-tested.
 
-#### N7b — transmit-side offload (checksum + TSO) `[ ]`
-- `virtio_net` maps `VIRTIO_NET_F_CSUM`/`HOST_TSO*`; the stack emits a
-  partial (pseudo-header) checksum + a per-frame TX offload descriptor
-  and hands one over-size TCP payload + template header to the device
-  (`TX_CSUM_*`, `TX_SEGMENT_TCP`). Same-bytes conformance vs the software
-  path; a live QEMU vertical proves the guest-driven path end to end.
+#### N7b-1 — transmit-side TCP checksum offload `[x]`
+- The stack emits a TCP segment carrying only the partial (pseudo-header)
+  checksum plus a per-frame TX offload descriptor when the egress
+  interface negotiated `NetOffloads::TX_CSUM_TCP` and the segment is a
+  single unfragmented frame. `checksum::Checksum::partial` is the folded
+  uncomplemented pseudo sum (Linux `CHECKSUM_PARTIAL`); `ChecksumMode`
+  threads Full/Partial through `tcp::write_with_checksum`; `TxOffload`
+  (`None`/`PartialChecksum{csum_start,csum_offset}`) rides on
+  `StackOutput.frames` (now `Vec<TxFrame>`), threaded through
+  `push_frame`/`resolve_and_send`/`emit_ipv4_frame`/`send_ip*_packet*` and
+  the `PendingPacket` ARP/ND-park queue. Offsets address the transport
+  checksum within the Ethernet frame (14 + IPv4 20 / IPv6 40, TCP field
+  +16).
+- Ring: `tairix_abi::driver::net_ring::FrameOffload::TxChecksum` (tag 3,
+  reusing the 5-byte meta prefix). netstack `queue_frames` maps
+  `TxOffload`→`FrameOffload` and `push_with`s it; the RX resolver treats a
+  `TxChecksum` tag as the software path (fail closed).
+- `virtio_net` negotiates `VIRTIO_NET_F_CSUM` (feature bit 0) and reports
+  `TX_CSUM_TCP`; `tx_one` reads the offload (`pop_with`) and builds the
+  `virtio_net_hdr` with `VIRTIO_NET_HDR_F_NEEDS_CSUM` + the offsets so the
+  device completes the fold. No checksum arithmetic in the driver.
+- Same-bytes conformance: `tcp::tests::tx_partial_checksum_completed_matches_the_software_full_checksum`
+  (codec) and `stack::tests::tcp_v4_tx_checksum_offload_matches_the_software_path`
+  (engine) assert partial + device-completion == the full software
+  checksum byte-for-byte; driver TX-header tests + the ABI round-trip
+  cover the wiring. The path is guest-driven, so the existing TCP QEMU
+  verticals exercise it once `virtio_net` advertises `VIRTIO_NET_F_CSUM`
+  (QEMU recomputes the checksum on loopback).
+
+#### N7b-2 — TCP segmentation offload (TSO) + UDP transmit checksum `[ ]`
+- `virtio_net` maps `HOST_TSO*`; the stack hands one over-size TCP payload
+  + template header to the device with a TX segmentation descriptor
+  (`TX_SEGMENT_TCP`) — needs a `Tcb` super-segment path, ring/staging
+  sized past the MTU, and the driver GSO header. UDP transmit-checksum
+  offload (`TX_CSUM_UDP`) is deferred with it: UDP's
+  zero-checksum-as-`0xFFFF` rule is not expressed by the virtio
+  partial-checksum contract, so it needs its own handling. Same-bytes
+  conformance vs the software path; a live QEMU vertical proves the
+  guest-driven path end to end.
 
 #### N7c — mergeable RX buffers, multiqueue, measured budgets `[ ]`
 - `MRG_RXBUF` and multiqueue receive plumbed where the device offers

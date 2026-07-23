@@ -523,3 +523,136 @@ fn rx_flags_ignored_when_guest_csum_not_negotiated() {
         FrameOffload::None
     );
 }
+
+/// Captured `virtio_net_hdr` bytes of each transmitted frame.
+type HdrLog = Rc<RefCell<Vec<[u8; wire::HEADER_LEN]>>>;
+
+/// Build a virtio-net `MockTransport` that offers `VIRTIO_NET_F_CSUM`
+/// (transmit-checksum offload) and whose TX shim records both the
+/// `virtio_net_hdr` and the frame of every transmitted chain, so the
+/// driver's per-frame transmit-offload header can be exercised.
+fn build_device_tx_csum() -> (MockTransport, HdrLog, TxLog) {
+    let mut t = MockTransport::new(2, 8, wire::VIRTIO_NET_F_CSUM, 6);
+    t.set_config(0, &DEVICE_MAC);
+    let hdr_log: HdrLog = Rc::new(RefCell::new(Vec::new()));
+    let tx_log: TxLog = Rc::new(RefCell::new(Vec::new()));
+    let hdr_for_shim = Rc::clone(&hdr_log);
+    let tx_for_shim = Rc::clone(&tx_log);
+    t.install_shim(
+        wire::TX_QUEUE,
+        Box::new(move |chain: &mut ChainView<'_>| {
+            // device_read = [virtio_net_hdr, frame].
+            if chain.device_read.len() < 2 {
+                return Err(VirtioError::DeviceFault);
+            }
+            let mut hdr = [0u8; wire::HEADER_LEN];
+            let src = &chain.device_read[0];
+            let copy = core::cmp::min(hdr.len(), src.len());
+            hdr[..copy].copy_from_slice(&src[..copy]);
+            hdr_for_shim.borrow_mut().push(hdr);
+            tx_for_shim.borrow_mut().push(chain.device_read[1].to_vec());
+            Ok(0)
+        }),
+    );
+    (t, hdr_log, tx_log)
+}
+
+#[test]
+fn host_csum_negotiation_advertises_tx_csum_tcp() {
+    // The device offers VIRTIO_NET_F_CSUM: the driver negotiates it and
+    // advertises the TCP transmit-checksum offload (but not UDP).
+    let (t, _hdr, _tx) = build_device_tx_csum();
+    let net = open_net(t);
+    let facts = net.device_facts().expect("facts");
+    assert!(facts.offloads.contains(NetOffloads::TX_CSUM_TCP));
+    assert!(!facts.offloads.contains(NetOffloads::TX_CSUM_UDP));
+}
+
+#[test]
+fn tx_checksum_frame_sets_needs_csum_header() {
+    let (t, hdr_log, tx_log) = build_device_tx_csum();
+    let mut net = open_net(t);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    let frame = arp_frame();
+    rings
+        .tx
+        .push_with(
+            FrameOffload::TxChecksum {
+                csum_start: 34,
+                csum_offset: 16,
+            },
+            &frame,
+        )
+        .expect("queue");
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
+    // The frame bytes are handed over verbatim; the header carries the
+    // device's completion request.
+    assert_eq!(tx_log.borrow()[0], frame);
+    let hdr = hdr_log.borrow()[0];
+    assert_eq!(
+        hdr[wire::HDR_FLAGS_OFFSET],
+        wire::VIRTIO_NET_HDR_F_NEEDS_CSUM
+    );
+    assert_eq!(
+        u16::from_le_bytes([
+            hdr[wire::HDR_CSUM_START_OFFSET],
+            hdr[wire::HDR_CSUM_START_OFFSET + 1]
+        ]),
+        34
+    );
+    assert_eq!(
+        u16::from_le_bytes([
+            hdr[wire::HDR_CSUM_OFFSET_OFFSET],
+            hdr[wire::HDR_CSUM_OFFSET_OFFSET + 1]
+        ]),
+        16
+    );
+}
+
+#[test]
+fn plain_tx_frame_emits_a_zero_header() {
+    // A frame with no transmit offload carries its complete software
+    // checksum: the device header is all zero (no completion requested).
+    let (t, hdr_log, _tx) = build_device_tx_csum();
+    let mut net = open_net(t);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    rings.tx.push(&arp_frame()).expect("queue");
+    net.service(&mut rings).expect("service");
+    assert_eq!(hdr_log.borrow()[0], [0u8; wire::HEADER_LEN]);
+}
+
+#[test]
+fn tx_checksum_header_suppressed_when_host_csum_not_negotiated() {
+    // The default device offers no features: a TxChecksum request on the
+    // ring is ignored (the frame already carried a full software checksum
+    // and the device was never asked to complete one).
+    let (t, tx_log, _rx) = build_device();
+    let mut net = open_net(t);
+    // Confirm the driver did not advertise the offload.
+    assert!(!net
+        .device_facts()
+        .expect("facts")
+        .offloads
+        .contains(NetOffloads::TX_CSUM_TCP));
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    let frame = arp_frame();
+    rings
+        .tx
+        .push_with(
+            FrameOffload::TxChecksum {
+                csum_start: 34,
+                csum_offset: 16,
+            },
+            &frame,
+        )
+        .expect("queue");
+    // The frame is still transmitted verbatim (the default TX shim only
+    // logs the frame, so the zero-header path is exercised without fault).
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
+    assert_eq!(tx_log.borrow()[0], frame);
+}

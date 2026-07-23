@@ -22,7 +22,7 @@ use tairix_abi::{
 };
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_net::addr::{IpAddr, Ipv4Addr};
-use tairix_net::stack::{Stack, StackConfig, StackEvent};
+use tairix_net::stack::{Stack, StackConfig, StackEvent, TxFrame};
 
 use crate::channel::{FrameService, LocalFrameService};
 use crate::socket::{Delivery, SocketService, MAX_SOCKETS_PER_PRINCIPAL};
@@ -73,11 +73,14 @@ fn local_service(net: PeerNet, region: &mut [u8]) -> LocalFrameService<'_, PeerN
 
 /// Queue engine output onto the service's TX ring before pumping, exactly
 /// as the service layer would.
-fn push_tx<N: Net>(fs: &mut LocalFrameService<'_, N>, frames: &[Vec<u8>]) {
+fn push_tx<N: Net>(fs: &mut LocalFrameService<'_, N>, frames: &[TxFrame]) {
     let mut rings =
         FrameRings::bind(fs.region_mut(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
     for frame in frames {
-        rings.tx.push(frame).expect("queue");
+        rings
+            .tx
+            .push_with(crate::iface::frame_offload(frame.offload), &frame.bytes)
+            .expect("queue");
     }
 }
 
@@ -113,7 +116,7 @@ impl Net for PeerNet {
         // The peer's own timers first (its DAD probes, solicitations).
         let out = self.stack.advance(self.now);
         for frame in &out.frames {
-            if rings.rx.push(frame).is_ok() {
+            if rings.rx.push(&frame.bytes).is_ok() {
                 report.received += 1;
             }
         }
@@ -124,7 +127,7 @@ impl Net for PeerNet {
                     report.transmitted += 1;
                     let out = self.stack.on_frame(&self.scratch[..len], self.now);
                     for frame in &out.frames {
-                        if rings.rx.push(frame).is_ok() {
+                        if rings.rx.push(&frame.bytes).is_ok() {
                             report.received += 1;
                         }
                     }
@@ -1578,7 +1581,7 @@ impl PeerTcpNet {
         tcb.poll_transmit(*now, |seg| {
             if let Ok(out) = stack.send_tcp(dest, &seg.meta, seg.payload, *now) {
                 for frame in &out.frames {
-                    if rings.rx.push(frame).is_ok() {
+                    if rings.rx.push(&frame.bytes).is_ok() {
                         report.received += 1;
                     }
                 }
@@ -1597,7 +1600,7 @@ impl Net for PeerTcpNet {
         let mut report = ServiceReport::default();
         let out = self.stack.advance(self.now);
         for frame in &out.frames {
-            if rings.rx.push(frame).is_ok() {
+            if rings.rx.push(&frame.bytes).is_ok() {
                 report.received += 1;
             }
         }
@@ -1608,7 +1611,7 @@ impl Net for PeerTcpNet {
                     report.transmitted += 1;
                     let out = self.stack.on_frame(&self.scratch[..len], self.now);
                     for frame in &out.frames {
-                        if rings.rx.push(frame).is_ok() {
+                        if rings.rx.push(&frame.bytes).is_ok() {
                             report.received += 1;
                         }
                     }

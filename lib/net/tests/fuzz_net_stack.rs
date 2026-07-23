@@ -118,8 +118,8 @@ fn random_frames_never_panic_and_state_stays_bounded() {
             let now = Duration64::from_secs(secs);
             let out = stack.on_frame(&buf[..size], now);
             for frame in &out.frames {
-                assert!(frame.len() <= ETHERNET_HEADER_LEN + 1500);
-                assert!(EthernetFrame::parse(frame).is_some());
+                assert!(frame.bytes.len() <= ETHERNET_HEADER_LEN + 1500);
+                assert!(EthernetFrame::parse(&frame.bytes).is_some());
             }
             // Occasionally step time and run the timers; sometimes
             // originate an echo so the pending queue is exercised.

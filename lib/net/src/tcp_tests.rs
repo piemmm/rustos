@@ -355,3 +355,63 @@ fn fix_checksum(pseudo: Pseudo, seg: &mut [u8]) {
     let checksum = sum.finish();
     seg[16..18].copy_from_slice(&checksum.to_be_bytes());
 }
+
+/// Transmit-checksum offload conformance: a segment written with only the
+/// partial (pseudo-header) checksum, then completed as the device would
+/// (fold the transport bytes from `csum_start` to the end and store the
+/// result at the checksum field), is byte-for-byte identical to the
+/// segment the full software checksum produces. This is the invariant the
+/// TX-checksum offload rests on — the device saves the fold, never changes
+/// the wire result.
+#[test]
+fn tx_partial_checksum_completed_matches_the_software_full_checksum() {
+    let opts = {
+        let mut o = TcpOptions::new();
+        o.mss = Some(1460);
+        o.timestamps = Some(Timestamps {
+            value: 0x0102_0304,
+            echo: 0x0506_0708,
+        });
+        o
+    };
+    for pseudo in [v4_pseudo(), v6_pseudo()] {
+        for payload in [&b""[..], &b"transmit-offload conformance payload"[..]] {
+            let mut full = vec![0u8; MAX_HEADER_LEN + payload.len()];
+            let n_full = super::write_with_checksum(
+                pseudo,
+                &meta(TcpFlags::ACK, opts),
+                payload,
+                &mut full,
+                crate::checksum::ChecksumMode::Full,
+            )
+            .expect("full write");
+
+            let mut partial = vec![0u8; MAX_HEADER_LEN + payload.len()];
+            let n_partial = super::write_with_checksum(
+                pseudo,
+                &meta(TcpFlags::ACK, opts),
+                payload,
+                &mut partial,
+                crate::checksum::ChecksumMode::Partial,
+            )
+            .expect("partial write");
+            assert_eq!(n_full, n_partial);
+
+            // The device completes the fold: over the whole segment
+            // (csum_start = 0 here, the segment being the transport
+            // region) it computes `internet_checksum` and stores it at the
+            // checksum field (offset 16), exactly as the netstack RX
+            // completion does.
+            let completed = crate::internet_checksum(&partial[..n_partial]);
+            partial[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 2].copy_from_slice(&completed.to_be_bytes());
+
+            assert_eq!(
+                &full[..n_full],
+                &partial[..n_partial],
+                "partial+completed must equal the full-checksum segment"
+            );
+            // And the completed segment verifies against the pseudo-header.
+            assert!(TcpSegment::parse(pseudo, &partial[..n_partial]).is_some());
+        }
+    }
+}

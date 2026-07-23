@@ -88,6 +88,23 @@ pub enum FrameOffload {
         /// Byte offset, past `csum_start`, of the 16-bit checksum field.
         csum_offset: u16,
     },
+    /// Transmit only: the stack has placed only the partial
+    /// (pseudo-header) checksum in the frame's transport checksum field
+    /// and asks the device to complete it — fold the frame bytes from
+    /// `csum_start` to the end and store the result at
+    /// `csum_start + csum_offset` (virtio `VIRTIO_NET_HDR_F_NEEDS_CSUM`
+    /// on the transmit path). The device performs the fold the stack
+    /// would otherwise have run in software; the offsets are re-validated
+    /// against the frame length by the driver before use, and a device
+    /// that ignores the request never sees it (the offload is negotiated
+    /// per `NetOffloads`), so the frame still carries a valid — merely
+    /// partial — checksum field.
+    TxChecksum {
+        /// Byte offset in the frame where the checksummed range starts.
+        csum_start: u16,
+        /// Byte offset, past `csum_start`, of the 16-bit checksum field.
+        csum_offset: u16,
+    },
 }
 
 impl FrameOffload {
@@ -97,14 +114,20 @@ impl FrameOffload {
             FrameOffload::None => 0,
             FrameOffload::Validated => 1,
             FrameOffload::NeedsChecksum { .. } => 2,
+            FrameOffload::TxChecksum { .. } => 3,
         }
     }
 
     /// The two checksum offsets carried in the slot (zero unless this is
-    /// a [`FrameOffload::NeedsChecksum`]).
+    /// a partial-checksum offload — [`FrameOffload::NeedsChecksum`] on
+    /// receive or [`FrameOffload::TxChecksum`] on transmit).
     const fn offsets(self) -> (u16, u16) {
         match self {
             FrameOffload::NeedsChecksum {
+                csum_start,
+                csum_offset,
+            }
+            | FrameOffload::TxChecksum {
                 csum_start,
                 csum_offset,
             } => (csum_start, csum_offset),
@@ -118,6 +141,10 @@ impl FrameOffload {
         match tag {
             1 => FrameOffload::Validated,
             2 => FrameOffload::NeedsChecksum {
+                csum_start,
+                csum_offset,
+            },
+            3 => FrameOffload::TxChecksum {
                 csum_start,
                 csum_offset,
             },
@@ -669,6 +696,31 @@ mod tests {
         );
         assert_eq!(ring.pop_with(&mut offload, &mut out), Ok(Some(40)));
         assert_eq!(offload, FrameOffload::None);
+    }
+
+    #[test]
+    fn tx_checksum_offload_round_trips_per_frame() {
+        let g = geometry();
+        let mut region = [0u8; RING_LEN];
+        let mut ring = FrameRing::bind(&mut region, g).expect("bind");
+        ring.push_with(
+            FrameOffload::TxChecksum {
+                csum_start: 34,
+                csum_offset: 16,
+            },
+            &[7u8; 40],
+        )
+        .expect("push tx-checksum");
+        let mut out = [0u8; 128];
+        let mut offload = FrameOffload::None;
+        assert_eq!(ring.pop_with(&mut offload, &mut out), Ok(Some(40)));
+        assert_eq!(
+            offload,
+            FrameOffload::TxChecksum {
+                csum_start: 34,
+                csum_offset: 16,
+            }
+        );
     }
 
     #[test]

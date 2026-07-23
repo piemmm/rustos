@@ -44,7 +44,7 @@ use crate::addr::{
     ALL_ROUTERS,
 };
 use crate::arp::{ArpPacket, OP_REPLY, OP_REQUEST};
-use crate::checksum::{ChecksumCheck, Pseudo};
+use crate::checksum::{ChecksumCheck, ChecksumMode, Pseudo};
 use crate::eth::{
     ipv4_multicast_mac, ipv6_multicast_mac, is_group_mac, write_header, EthernetFrame, BROADCAST,
     ETHERNET_HEADER_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
@@ -260,11 +260,63 @@ impl RxMeta {
     }
 }
 
+/// Per-frame transmit offload the engine asks the egress device to
+/// perform (`plans/NETWORK.md` §2.3) — the transmit counterpart of
+/// [`RxMeta`].
+///
+/// The engine attaches this to a frame it emitted only when the egress
+/// interface negotiated the matching [`NetOffloads`] capability; the
+/// service layer maps it onto the ring's transport-neutral
+/// [`FrameOffload`](tairix_abi::driver::net_ring::FrameOffload) and a
+/// device that did not negotiate the offload never sees it. The offload
+/// is never load-bearing for correctness: the same frame with
+/// [`TxOffload::None`] carries a complete software checksum instead, so a
+/// device that ignores the request still transmits a valid frame.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum TxOffload {
+    /// No offload: the frame carries a complete software checksum.
+    #[default]
+    None,
+    /// The transport checksum field holds only the folded pseudo-header
+    /// sum; the device must fold the frame bytes from `csum_start` to the
+    /// end and store the completed checksum at `csum_start + csum_offset`
+    /// (virtio `VIRTIO_NET_HDR_F_NEEDS_CSUM`). Both offsets are relative
+    /// to the start of the Ethernet frame.
+    PartialChecksum {
+        /// Byte offset in the frame where the checksummed range starts
+        /// (the transport header — Ethernet + IP headers).
+        csum_start: u16,
+        /// Byte offset, past `csum_start`, of the 16-bit checksum field.
+        csum_offset: u16,
+    },
+}
+
+/// One Ethernet frame the engine emits, with the transmit offload it
+/// requests of the egress device.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TxFrame {
+    /// The offload the device should perform on the frame.
+    pub offload: TxOffload,
+    /// The Ethernet frame bytes (header, IP packet, transport payload).
+    pub bytes: Vec<u8>,
+}
+
+impl TxFrame {
+    /// A frame with no transmit offload (a complete software checksum).
+    #[must_use]
+    pub fn plain(bytes: Vec<u8>) -> Self {
+        Self {
+            offload: TxOffload::None,
+            bytes,
+        }
+    }
+}
+
 /// Frames to transmit and events to report from one engine call.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StackOutput {
     /// Ethernet frames to hand to the driver, in order.
-    pub frames: Vec<Vec<u8>>,
+    pub frames: Vec<TxFrame>,
     /// Typed facts for the caller.
     pub events: Vec<StackEvent>,
 }
@@ -384,6 +436,10 @@ struct PendingPacket {
     next_hop: IpAddr,
     ethertype: u16,
     packet: Vec<u8>,
+    /// The transmit offload to attach once the frame is emitted (the
+    /// checksum-offset fields are relative to the Ethernet frame, so
+    /// they are unaffected by prepending the header here).
+    offload: TxOffload,
 }
 
 /// The dual-stack host engine. See the module docs.
@@ -418,6 +474,10 @@ pub struct Stack {
     /// the stack opted in: only then may a frame the driver marks
     /// checksum-validated skip the software fold.
     rx_csum_offload: bool,
+    /// Whether the device advertised transmit TCP-checksum offload and
+    /// the stack opted in: only then does the engine emit a TCP segment
+    /// with a partial checksum for the device to complete.
+    tx_csum_tcp: bool,
     counters: StackCounters,
 }
 
@@ -459,6 +519,7 @@ impl Stack {
                 .facts
                 .offloads
                 .contains(NetOffloads::RX_CSUM_VALIDATED),
+            tx_csum_tcp: config.facts.offloads.contains(NetOffloads::TX_CSUM_TCP),
             counters: StackCounters::default(),
         })
     }
@@ -1317,7 +1378,8 @@ impl Stack {
         u32::try_from(self.mtu_v6).unwrap_or(u32::MAX)
     }
 
-    /// Emit one Ethernet frame.
+    /// Emit one Ethernet frame with no transmit offload (the
+    /// control-plane path: ARP, ND, IGMP/MLD, ICMP).
     fn push_frame(
         &mut self,
         out: &mut StackOutput,
@@ -1325,27 +1387,46 @@ impl Stack {
         ethertype: u16,
         packet: &[u8],
     ) {
+        self.push_frame_offloaded(out, dst, ethertype, packet, TxOffload::None);
+    }
+
+    /// Emit one Ethernet frame carrying `offload`.
+    fn push_frame_offloaded(
+        &mut self,
+        out: &mut StackOutput,
+        dst: MacAddress,
+        ethertype: u16,
+        packet: &[u8],
+        offload: TxOffload,
+    ) {
         let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
         if write_header(&mut frame, dst, self.mac, ethertype).is_none() {
             return;
         }
         frame[ETHERNET_HEADER_LEN..].copy_from_slice(packet);
         self.counters.tx_frames += 1;
-        out.frames.push(frame);
+        out.frames.push(TxFrame {
+            offload,
+            bytes: frame,
+        });
     }
 
-    /// Transmit `packet` to `next_hop`, parking it (bounded) while
-    /// the neighbour resolves.
-    fn resolve_and_send(
+    /// Transmit `packet` to `next_hop`, parking it (bounded) while the
+    /// neighbour resolves, attaching `offload` to the emitted (or parked)
+    /// frame.
+    fn resolve_and_send_offloaded(
         &mut self,
         out: &mut StackOutput,
         next_hop: IpAddr,
         ethertype: u16,
         packet: Vec<u8>,
+        offload: TxOffload,
         now: Duration64,
     ) {
         match self.neighbors.lookup(next_hop, now) {
-            LookupResult::Send(mac) => self.push_frame(out, mac, ethertype, &packet),
+            LookupResult::Send(mac) => {
+                self.push_frame_offloaded(out, mac, ethertype, &packet, offload);
+            }
             LookupResult::Pending => {
                 if self.pending.len() >= MAX_PENDING_PACKETS {
                     self.counters.pending_dropped += 1;
@@ -1354,6 +1435,7 @@ impl Stack {
                         next_hop,
                         ethertype,
                         packet,
+                        offload,
                     });
                 }
                 // The new entry's first solicitation is due now.
@@ -1376,7 +1458,13 @@ impl Stack {
         while index < self.pending.len() {
             if self.pending[index].next_hop == ip {
                 let parked = self.pending.remove(index);
-                self.push_frame(out, mac, parked.ethertype, &parked.packet);
+                self.push_frame_offloaded(
+                    out,
+                    mac,
+                    parked.ethertype,
+                    &parked.packet,
+                    parked.offload,
+                );
             } else {
                 index += 1;
             }
@@ -1595,7 +1683,16 @@ impl Stack {
         upper_message: &[u8],
         now: Duration64,
     ) {
-        self.send_ipv4_packet_ttl(out, source, dest, protocol, upper_message, None, now);
+        self.send_ipv4_packet_ttl(
+            out,
+            source,
+            dest,
+            protocol,
+            upper_message,
+            None,
+            TxOffload::None,
+            now,
+        );
     }
 
     /// [`Self::send_ipv4_packet`], with an optional TTL override.
@@ -1614,6 +1711,7 @@ impl Stack {
         protocol: u8,
         upper_message: &[u8],
         ttl: Option<u8>,
+        offload: TxOffload,
         now: Duration64,
     ) {
         if !self.link_up {
@@ -1641,9 +1739,12 @@ impl Stack {
                 return;
             }
             packet[IPV4_HEADER_LEN..].copy_from_slice(upper_message);
-            self.emit_ipv4_frame(out, dest, next_hop, packet, now);
+            self.emit_ipv4_frame(out, dest, next_hop, packet, offload, now);
             return;
         }
+        // A fragmented datagram cannot carry a single-packet transport
+        // checksum offload (only the first fragment holds the transport
+        // header): each fragment is emitted with its software checksum.
         let Some(parts) = crate::ipv4::fragment(header, upper_message.len(), self.link_mtu) else {
             return;
         };
@@ -1654,26 +1755,40 @@ impl Stack {
                 continue;
             }
             packet[IPV4_HEADER_LEN..].copy_from_slice(payload);
-            self.emit_ipv4_frame(out, dest, next_hop, packet, now);
+            self.emit_ipv4_frame(out, dest, next_hop, packet, TxOffload::None, now);
         }
     }
 
-    /// Emit one built IPv4 packet: a multicast destination (`next_hop`
-    /// [`None`]) goes straight to its group MAC; a unicast one resolves
-    /// `next_hop` through the neighbour cache.
+    /// Emit one built IPv4 packet carrying `offload`: a multicast
+    /// destination (`next_hop` [`None`]) goes straight to its group MAC;
+    /// a unicast one resolves `next_hop` through the neighbour cache.
     fn emit_ipv4_frame(
         &mut self,
         out: &mut StackOutput,
         dest: Ipv4Addr,
         next_hop: Option<Ipv4Addr>,
         packet: Vec<u8>,
+        offload: TxOffload,
         now: Duration64,
     ) {
         match next_hop {
             Some(next_hop) => {
-                self.resolve_and_send(out, IpAddr::V4(next_hop), ETHERTYPE_IPV4, packet, now);
+                self.resolve_and_send_offloaded(
+                    out,
+                    IpAddr::V4(next_hop),
+                    ETHERTYPE_IPV4,
+                    packet,
+                    offload,
+                    now,
+                );
             }
-            None => self.push_frame(out, ipv4_multicast_mac(&dest), ETHERTYPE_IPV4, &packet),
+            None => self.push_frame_offloaded(
+                out,
+                ipv4_multicast_mac(&dest),
+                ETHERTYPE_IPV4,
+                &packet,
+                offload,
+            ),
         }
     }
 
@@ -1699,13 +1814,16 @@ impl Stack {
             upper_message,
             hop_limit,
             false,
+            TxOffload::None,
             now,
         );
     }
 
     /// [`Self::send_ipv6_packet`], optionally prepending a Hop-by-Hop
-    /// Router Alert header (RFC 2711). MLD membership reports set
-    /// `router_alert`; every other emit path leaves it clear.
+    /// Router Alert header (RFC 2711) and carrying `offload`. MLD
+    /// membership reports set `router_alert`; every other emit path
+    /// leaves it clear. A Router Alert (a control datagram) never carries
+    /// an offload.
     #[allow(clippy::too_many_arguments)]
     fn send_ipv6_packet_opt(
         &mut self,
@@ -1716,6 +1834,7 @@ impl Stack {
         upper_message: &[u8],
         hop_limit: u8,
         router_alert: bool,
+        offload: TxOffload,
         now: Duration64,
     ) {
         if !self.link_up {
@@ -1741,13 +1860,26 @@ impl Stack {
             return;
         };
         if dest.is_multicast() {
-            self.push_frame(out, ipv6_multicast_mac(&dest), ETHERTYPE_IPV6, &packet);
+            self.push_frame_offloaded(
+                out,
+                ipv6_multicast_mac(&dest),
+                ETHERTYPE_IPV6,
+                &packet,
+                offload,
+            );
             return;
         }
         let Some(next_hop) = self.next_hop_v6(dest, now) else {
             return;
         };
-        self.resolve_and_send(out, IpAddr::V6(next_hop), ETHERTYPE_IPV6, packet, now);
+        self.resolve_and_send_offloaded(
+            out,
+            IpAddr::V6(next_hop),
+            ETHERTYPE_IPV6,
+            packet,
+            offload,
+            now,
+        );
     }
 
     /// Gate, rate-limit, and emit an ICMP error about a v4 packet.
@@ -1963,7 +2095,16 @@ impl Stack {
                 )
                 .map_err(|_| SendError::TooLarge)?;
                 let ttl = dest.is_multicast().then_some(MULTICAST_DATA_HOP_LIMIT);
-                self.send_ipv4_packet_ttl(&mut out, source, dest, PROTOCOL_UDP, &message, ttl, now);
+                self.send_ipv4_packet_ttl(
+                    &mut out,
+                    source,
+                    dest,
+                    PROTOCOL_UDP,
+                    &message,
+                    ttl,
+                    TxOffload::None,
+                    now,
+                );
             }
             IpAddr::V6(dest) => {
                 if dest.is_unspecified() {
@@ -2063,6 +2204,29 @@ impl Stack {
         Some(u16::try_from(payload.clamp(1, usize::from(u16::MAX))).unwrap_or(u16::MAX))
     }
 
+    /// The transmit checksum offload for a TCP segment over an IP header
+    /// of `ip_header_len` bytes: [`TxOffload::PartialChecksum`] when the
+    /// device negotiated TCP transmit-checksum offload and the segment is
+    /// a `single_frame` (unfragmented) datagram, else [`TxOffload::None`].
+    ///
+    /// The checksum offsets are relative to the Ethernet frame the engine
+    /// emits: the checksummed range starts at the transport header
+    /// (Ethernet + IP headers) and the checksum field sits at
+    /// [`tcp::CHECKSUM_OFFSET`] within it.
+    fn tcp_tx_offload(&self, ip_header_len: usize, single_frame: bool) -> TxOffload {
+        if !(self.tx_csum_tcp && single_frame) {
+            return TxOffload::None;
+        }
+        // Ethernet (14) + IP header (20/40) + the TCP checksum field
+        // offset all fit a `u16` far below the 1500-byte MTU.
+        let csum_start = u16::try_from(ETHERNET_HEADER_LEN + ip_header_len).unwrap_or(u16::MAX);
+        let csum_offset = u16::try_from(tcp::CHECKSUM_OFFSET).unwrap_or(u16::MAX);
+        TxOffload::PartialChecksum {
+            csum_start,
+            csum_offset,
+        }
+    }
+
     /// Originate one TCP segment to `dest`, folding the mandatory
     /// pseudo-header checksum over the source address this interface
     /// selects for `dest`.
@@ -2107,8 +2271,15 @@ impl Stack {
                 if self.next_hop_v4(dest).is_none() {
                     return Err(SendError::NoRoute);
                 }
+                // Offload the checksum only when the device negotiated it
+                // *and* the segment fits one frame: a fragmented datagram
+                // (only the first fragment carries the transport header)
+                // must keep its software checksum.
+                let seg_len = tcp::TCP_HEADER_LEN + meta.options.wire_len() + payload.len();
+                let single_frame = IPV4_HEADER_LEN + seg_len <= self.link_mtu;
+                let offload = self.tcp_tx_offload(IPV4_HEADER_LEN, single_frame);
                 let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
-                let n = tcp::write(
+                let n = tcp::write_with_checksum(
                     Pseudo::V4 {
                         source,
                         destination: dest,
@@ -2116,9 +2287,19 @@ impl Stack {
                     meta,
                     payload,
                     &mut segment,
+                    checksum_mode(offload),
                 )
                 .map_err(|_| SendError::TooLarge)?;
-                self.send_ipv4_packet(&mut out, source, dest, PROTOCOL_TCP, &segment[..n], now);
+                self.send_ipv4_packet_ttl(
+                    &mut out,
+                    source,
+                    dest,
+                    PROTOCOL_TCP,
+                    &segment[..n],
+                    None,
+                    offload,
+                    now,
+                );
             }
             IpAddr::V6(dest) => {
                 if dest.is_unspecified() || dest.is_multicast() {
@@ -2128,8 +2309,11 @@ impl Stack {
                 if self.next_hop_v6(dest, now).is_none() {
                     return Err(SendError::NoRoute);
                 }
+                // IPv6 never fragments on emit (an over-MTU segment is
+                // refused below), so a negotiated offload always applies.
+                let offload = self.tcp_tx_offload(IPV6_HEADER_LEN, true);
                 let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
-                let n = tcp::write(
+                let n = tcp::write_with_checksum(
                     Pseudo::V6 {
                         source,
                         destination: dest,
@@ -2137,18 +2321,21 @@ impl Stack {
                     meta,
                     payload,
                     &mut segment,
+                    checksum_mode(offload),
                 )
                 .map_err(|_| SendError::TooLarge)?;
                 if IPV6_HEADER_LEN + n > self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize {
                     return Err(SendError::TooLarge);
                 }
-                self.send_ipv6_packet(
+                self.send_ipv6_packet_opt(
                     &mut out,
                     source,
                     dest,
                     PROTOCOL_TCP,
                     &segment[..n],
                     self.hop_limit,
+                    false,
+                    offload,
                     now,
                 );
             }
@@ -2413,8 +2600,20 @@ impl Stack {
             &message,
             MEMBERSHIP_HOP_LIMIT,
             true,
+            TxOffload::None,
             now,
         );
+    }
+}
+
+/// The transport [`ChecksumMode`] a transmit `offload` implies: a
+/// [`TxOffload::PartialChecksum`] frame is serialised with only the
+/// pseudo-header partial sum for the device to complete; every other
+/// frame carries a complete software checksum.
+fn checksum_mode(offload: TxOffload) -> ChecksumMode {
+    match offload {
+        TxOffload::None => ChecksumMode::Full,
+        TxOffload::PartialChecksum { .. } => ChecksumMode::Partial,
     }
 }
 

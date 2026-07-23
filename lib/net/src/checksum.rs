@@ -101,7 +101,27 @@ impl Checksum {
     /// Verifying a received message is folding the message *including*
     /// its checksum field and requiring the result to be zero.
     #[must_use]
-    pub fn finish(mut self) -> u16 {
+    pub fn finish(self) -> u16 {
+        !self.partial()
+    }
+
+    /// Fold the running sum to 16 bits **without** the final one's
+    /// complement — the *partial* checksum a transmit-checksum-offload
+    /// sender leaves in the checksum field for the device to complete
+    /// (virtio's `VIRTIO_NET_HDR_F_NEEDS_CSUM`, Linux `CHECKSUM_PARTIAL`).
+    ///
+    /// Seeded with a pseudo-header ([`Pseudo::seed`]) and taken *without*
+    /// pushing the transport bytes, this is the folded one's-complement
+    /// sum of the pseudo-header alone. A device (or the software
+    /// completion) then folds the transport bytes from `csum_start` to the
+    /// end — which include this value in the checksum field — and
+    /// complements the result, reproducing exactly the checksum
+    /// [`finish`](Self::finish) would have computed over the whole
+    /// datagram (`plans/NETWORK.md` §2.3).
+    ///
+    /// A trailing odd byte is padded with a zero low byte, per RFC 1071.
+    #[must_use]
+    pub fn partial(mut self) -> u16 {
         if let Some(high) = self.pending.take() {
             self.sum += u32::from(u16::from_be_bytes([high, 0]));
         }
@@ -109,7 +129,7 @@ impl Checksum {
         while sum > 0xFFFF {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
-        !((sum & 0xFFFF) as u16)
+        (sum & 0xFFFF) as u16
     }
 }
 
@@ -211,6 +231,28 @@ impl ChecksumCheck {
     pub const fn must_verify(self) -> bool {
         matches!(self, ChecksumCheck::Verify)
     }
+}
+
+/// How a transport serialiser fills its checksum field on transmit.
+///
+/// [`Full`](ChecksumMode::Full) is the canonical software path: the
+/// serialiser folds the pseudo-header, transport header, and payload and
+/// stores the complete one's-complement checksum. [`Partial`](Self::Partial) is used
+/// only when the egress interface negotiated transmit-checksum offload
+/// (`plans/NETWORK.md` §2.3): the serialiser stores the folded
+/// pseudo-header sum alone ([`Checksum::partial`]) and the device
+/// completes the fold over the transport bytes. The two produce an
+/// identical on-wire checksum once the device (or the software
+/// completion) finishes the fold — the offload is never load-bearing for
+/// correctness, only a work saving.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum ChecksumMode {
+    /// Compute and store the complete transport checksum in software.
+    #[default]
+    Full,
+    /// Store only the pseudo-header partial sum for the device to
+    /// complete.
+    Partial,
 }
 
 #[cfg(test)]
