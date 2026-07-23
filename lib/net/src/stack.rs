@@ -289,6 +289,29 @@ pub enum TxOffload {
         /// Byte offset, past `csum_start`, of the 16-bit checksum field.
         csum_offset: u16,
     },
+    /// The frame is one over-size TCP segment the device must split into
+    /// MTU-sized packets on the wire (TCP segmentation offload). The TCP
+    /// checksum field holds the pseudo-header partial sum computed with a
+    /// zero length ([`ChecksumMode::PartialGso`]); the device replicates
+    /// the `hdr_len`-byte header for each `gso_size`-byte payload slice,
+    /// advancing the sequence number and completing each segment's
+    /// checksum. `csum_start`/`csum_offset` locate the TCP checksum field
+    /// as for [`TxOffload::PartialChecksum`]; `ipv6` selects the GSO type.
+    TcpSegment {
+        /// Byte offset in the frame where the checksummed range starts
+        /// (the transport header — Ethernet + IP headers).
+        csum_start: u16,
+        /// Byte offset, past `csum_start`, of the 16-bit checksum field.
+        csum_offset: u16,
+        /// Maximum TCP payload bytes per emitted segment.
+        gso_size: u16,
+        /// Header bytes the device replicates per segment (Ethernet + IP +
+        /// TCP header, including options).
+        hdr_len: u16,
+        /// Whether the segment is IPv6 (`TCPV6`) rather than IPv4
+        /// (`TCPV4`).
+        ipv6: bool,
+    },
 }
 
 /// One Ethernet frame the engine emits, with the transmit offload it
@@ -443,6 +466,11 @@ struct PendingPacket {
 }
 
 /// The dual-stack host engine. See the module docs.
+///
+/// The engine legitimately carries several independent boolean condition
+/// flags (link up, and one per negotiated offload); grouping them into a
+/// sub-struct purely to satisfy the heuristic would obscure, not clarify.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Stack {
     mac: MacAddress,
     /// Link MTU (largest IP packet) from the device facts.
@@ -478,8 +506,25 @@ pub struct Stack {
     /// the stack opted in: only then does the engine emit a TCP segment
     /// with a partial checksum for the device to complete.
     tx_csum_tcp: bool,
+    /// Whether the device advertised TCP segmentation offload and the
+    /// stack opted in: only then may a connection hand the engine an
+    /// over-size super-segment for the device to split.
+    tx_segment_tcp: bool,
     counters: StackCounters,
 }
+
+/// Largest TCP super-segment payload the engine will hand the device for
+/// segmentation offload: the transmit ring slot capacity
+/// ([`RingGeometry::MAX_SLOT_CAPACITY`](tairix_abi::driver::net_ring::RingGeometry::MAX_SLOT_CAPACITY))
+/// minus the Ethernet header, the largest IP header (IPv6, 40 bytes), and
+/// the largest TCP header (60 bytes). This bounds the single IP packet the
+/// super-segment forms to the 16-bit IP length field for **either** family
+/// (the TCB is family-agnostic), so a full-option v6 super-segment still
+/// fits one slot and one valid IP packet.
+const TSO_MAX_PAYLOAD: usize = {
+    let cap = tairix_abi::driver::net_ring::RingGeometry::MAX_SLOT_CAPACITY as usize;
+    cap - ETHERNET_HEADER_LEN - IPV6_HEADER_LEN - MAX_HEADER_LEN
+};
 
 impl Stack {
     /// Build the engine over a validated device report and begin
@@ -520,6 +565,7 @@ impl Stack {
                 .offloads
                 .contains(NetOffloads::RX_CSUM_VALIDATED),
             tx_csum_tcp: config.facts.offloads.contains(NetOffloads::TX_CSUM_TCP),
+            tx_segment_tcp: config.facts.offloads.contains(NetOffloads::TX_SEGMENT_TCP),
             counters: StackCounters::default(),
         })
     }
@@ -1733,7 +1779,13 @@ impl Stack {
         }
         header.identification = self.next_ident;
         self.next_ident = self.next_ident.wrapping_add(1);
-        if IPV4_HEADER_LEN + upper_message.len() <= self.link_mtu {
+        // A segmentation-offload super-segment is emitted as one packet
+        // even though it exceeds the link MTU: the device splits it into
+        // MTU-sized packets on the wire, so the IP layer must not fragment
+        // it (that would defeat the offload and split the transport
+        // header off the payload).
+        let is_segmentation = matches!(offload, TxOffload::TcpSegment { .. });
+        if is_segmentation || IPV4_HEADER_LEN + upper_message.len() <= self.link_mtu {
             let mut packet = vec![0u8; IPV4_HEADER_LEN + upper_message.len()];
             if header.write(&mut packet, upper_message.len()).is_none() {
                 return;
@@ -2204,6 +2256,23 @@ impl Stack {
         Some(u16::try_from(payload.clamp(1, usize::from(u16::MAX))).unwrap_or(u16::MAX))
     }
 
+    /// The largest TCP payload a connection out this interface may batch
+    /// into one segmentation-offload super-segment, or `0` when the device
+    /// did not negotiate segmentation offload (so the connection stays
+    /// per-MSS). The service seeds a new connection's
+    /// [`TcpConfig::tso_max_payload`](crate::tcp::conn::TcpConfig::tso_max_payload)
+    /// from this.
+    #[must_use]
+    pub fn tso_max_payload(&self) -> u16 {
+        if self.tx_segment_tcp {
+            // `TSO_MAX_PAYLOAD` is a compile-time-bounded value well within
+            // `u16` (≈ 65 435); the clamp is defensive only.
+            u16::try_from(TSO_MAX_PAYLOAD).unwrap_or(u16::MAX)
+        } else {
+            0
+        }
+    }
+
     /// The transmit checksum offload for a TCP segment over an IP header
     /// of `ip_header_len` bytes: [`TxOffload::PartialChecksum`] when the
     /// device negotiated TCP transmit-checksum offload and the segment is
@@ -2224,6 +2293,35 @@ impl Stack {
         TxOffload::PartialChecksum {
             csum_start,
             csum_offset,
+        }
+    }
+
+    /// The transmit segmentation offload for an over-size TCP segment
+    /// over an IP header of `ip_header_len` bytes carrying a TCP header of
+    /// `tcp_header_len` bytes (including options): a
+    /// [`TxOffload::TcpSegment`] the device splits into `gso_size`-byte
+    /// segments. The checksum offsets and `hdr_len` are relative to the
+    /// Ethernet frame the engine emits (`csum_start` at the transport
+    /// header, `hdr_len` covering Ethernet + IP + TCP headers). Only ever
+    /// called with the device's negotiated segmentation offload.
+    fn tcp_segment_offload(
+        ip_header_len: usize,
+        tcp_header_len: usize,
+        gso_size: u16,
+        ipv6: bool,
+    ) -> TxOffload {
+        // Ethernet (14) + IP header (20/40) + TCP header (20..=60) all fit
+        // a `u16` far below the 65 535-byte segmentation ceiling.
+        let csum_start = u16::try_from(ETHERNET_HEADER_LEN + ip_header_len).unwrap_or(u16::MAX);
+        let csum_offset = u16::try_from(tcp::CHECKSUM_OFFSET).unwrap_or(u16::MAX);
+        let hdr_len =
+            u16::try_from(ETHERNET_HEADER_LEN + ip_header_len + tcp_header_len).unwrap_or(u16::MAX);
+        TxOffload::TcpSegment {
+            csum_start,
+            csum_offset,
+            gso_size,
+            hdr_len,
+            ipv6,
         }
     }
 
@@ -2249,16 +2347,29 @@ impl Stack {
     /// destination, no usable source address / v4 configuration, no
     /// route, or a segment that cannot fit the path MTU (v6) or the
     /// segment-length field.
+    ///
+    /// When `gso_size` is `Some(mss)` the `payload` is an over-size TCP
+    /// *super-segment* the egress device will split into `mss`-byte
+    /// segments (TCP segmentation offload): the engine emits it as one
+    /// IP packet with a [`TxOffload::TcpSegment`] descriptor — it never
+    /// fragments the packet and does not refuse it for exceeding the path
+    /// MTU, because the device produces MTU-sized packets on the wire.
+    /// The caller only ever passes `Some` when the interface negotiated
+    /// segmentation offload and bounded `payload` so the single IP packet
+    /// stays within the 16-bit length field. `None` is the ordinary
+    /// per-segment path.
     pub fn send_tcp(
         &mut self,
         dest: IpAddr,
         meta: &TcpSegmentMeta,
         payload: &[u8],
+        gso_size: Option<u16>,
         now: Duration64,
     ) -> Result<StackOutput, SendError> {
         if !self.link_up {
             return Err(SendError::LinkDown);
         }
+        let tcp_header_len = tcp::TCP_HEADER_LEN + meta.options.wire_len();
         let mut out = StackOutput::default();
         match dest {
             IpAddr::V4(dest) => {
@@ -2271,13 +2382,19 @@ impl Stack {
                 if self.next_hop_v4(dest).is_none() {
                     return Err(SendError::NoRoute);
                 }
-                // Offload the checksum only when the device negotiated it
-                // *and* the segment fits one frame: a fragmented datagram
-                // (only the first fragment carries the transport header)
-                // must keep its software checksum.
-                let seg_len = tcp::TCP_HEADER_LEN + meta.options.wire_len() + payload.len();
-                let single_frame = IPV4_HEADER_LEN + seg_len <= self.link_mtu;
-                let offload = self.tcp_tx_offload(IPV4_HEADER_LEN, single_frame);
+                let offload = if let Some(mss) = gso_size {
+                    // Segmentation offload: one over-MTU packet the device
+                    // splits (emitted unfragmented below).
+                    Self::tcp_segment_offload(IPV4_HEADER_LEN, tcp_header_len, mss, false)
+                } else {
+                    // Offload the checksum only when the device negotiated
+                    // it *and* the segment fits one frame: a fragmented
+                    // datagram (only the first fragment carries the
+                    // transport header) must keep its software checksum.
+                    let seg_len = tcp_header_len + payload.len();
+                    let single_frame = IPV4_HEADER_LEN + seg_len <= self.link_mtu;
+                    self.tcp_tx_offload(IPV4_HEADER_LEN, single_frame)
+                };
                 let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
                 let n = tcp::write_with_checksum(
                     Pseudo::V4 {
@@ -2309,9 +2426,13 @@ impl Stack {
                 if self.next_hop_v6(dest, now).is_none() {
                     return Err(SendError::NoRoute);
                 }
-                // IPv6 never fragments on emit (an over-MTU segment is
-                // refused below), so a negotiated offload always applies.
-                let offload = self.tcp_tx_offload(IPV6_HEADER_LEN, true);
+                let offload = if let Some(mss) = gso_size {
+                    Self::tcp_segment_offload(IPV6_HEADER_LEN, tcp_header_len, mss, true)
+                } else {
+                    // IPv6 never fragments on emit (an over-MTU segment is
+                    // refused below), so a negotiated offload always applies.
+                    self.tcp_tx_offload(IPV6_HEADER_LEN, true)
+                };
                 let mut segment = vec![0u8; MAX_HEADER_LEN + payload.len()];
                 let n = tcp::write_with_checksum(
                     Pseudo::V6 {
@@ -2324,7 +2445,12 @@ impl Stack {
                     checksum_mode(offload),
                 )
                 .map_err(|_| SendError::TooLarge)?;
-                if IPV6_HEADER_LEN + n > self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize {
+                // A super-segment is legitimately larger than the path MTU
+                // (the device segments it); only the ordinary per-segment
+                // path refuses an over-MTU segment.
+                if gso_size.is_none()
+                    && IPV6_HEADER_LEN + n > self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize
+                {
                     return Err(SendError::TooLarge);
                 }
                 self.send_ipv6_packet_opt(
@@ -2614,6 +2740,7 @@ fn checksum_mode(offload: TxOffload) -> ChecksumMode {
     match offload {
         TxOffload::None => ChecksumMode::Full,
         TxOffload::PartialChecksum { .. } => ChecksumMode::Partial,
+        TxOffload::TcpSegment { .. } => ChecksumMode::PartialGso,
     }
 }
 

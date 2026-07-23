@@ -303,17 +303,29 @@ impl Netstack {
         dest: IpAddr,
         meta: &TcpSegmentMeta,
         payload: &[u8],
+        gso_size: Option<u16>,
         now: Duration64,
     ) -> Result<Vec<TxFrame>, Errno> {
         let index = self.find(name).ok_or(Errno::NotFound)?;
         match self.interfaces[index]
             .stack
-            .send_tcp(dest, meta, payload, now)
+            .send_tcp(dest, meta, payload, gso_size, now)
         {
             Ok(out) => Ok(out.frames),
             Err(SendError::TooLarge) => Err(Errno::MessageTooLarge),
             Err(_) => Err(Errno::NetworkUnreachable),
         }
+    }
+
+    /// The largest TCP super-segment payload a connection out the interface
+    /// named `name` may batch for segmentation offload, or `0` when the
+    /// interface is unknown or its device did not negotiate the offload
+    /// (so the connection stays per-MSS). Seeds a new connection's
+    /// [`TcpConfig::tso_max_payload`](tairix_net::tcp::conn::TcpConfig::tso_max_payload).
+    #[must_use]
+    pub fn tso_max_payload_on(&self, name: [u8; IF_NAME_LEN]) -> u16 {
+        self.find(name)
+            .map_or(0, |index| self.interfaces[index].stack.tso_max_payload())
     }
 
     /// Choose the egress interface for a new TCP connection to `dest` and
@@ -506,8 +518,10 @@ impl Netstack {
         let index = self.find(name).ok_or(Errno::NotFound)?;
         let geometry = fs.geometry();
         let class = fs.class();
-        // Size the reusable scratch to this ring's slot capacity once.
-        let slot_capacity = geometry.slot_capacity() as usize;
+        // Size the reusable scratch to the receive slot capacity once (the
+        // scratch only ever holds a received frame; the larger transmit
+        // capacity is the driver's staging concern).
+        let slot_capacity = geometry.rx_slot_capacity() as usize;
         if self.scratch.len() < slot_capacity {
             self.scratch.resize(slot_capacity, 0);
         }
@@ -587,9 +601,9 @@ impl Netstack {
 ///   partial (pseudo-header) sum; [`complete_partial_checksum`] finishes
 ///   it in place and the engine re-verifies it in software (belt and
 ///   braces: a mis-completed frame is dropped, never wrongly accepted).
-/// * [`FrameOffload::None`], [`FrameOffload::TxChecksum`] (a transmit-only
-///   descriptor a device must never deliver on receive), or a bogus
-///   partial — the software path.
+/// * [`FrameOffload::None`], [`FrameOffload::TxChecksum`] /
+///   [`FrameOffload::TxSegment`] (transmit-only descriptors a device must
+///   never deliver on receive), or a bogus partial — the software path.
 fn resolve_rx_offload(offload: FrameOffload, frame: &mut [u8]) -> RxMeta {
     match offload {
         FrameOffload::Validated => RxMeta::validated(),
@@ -601,9 +615,11 @@ fn resolve_rx_offload(offload: FrameOffload, frame: &mut [u8]) -> RxMeta {
             // Re-verify our completion in software rather than trust it.
             RxMeta::none()
         }
-        // A transmit-checksum request has no meaning on a received frame;
-        // fall back to the software path (fail closed).
-        FrameOffload::None | FrameOffload::TxChecksum { .. } => RxMeta::none(),
+        // A transmit offload (checksum or segmentation) has no meaning on a
+        // received frame; fall back to the software path (fail closed).
+        FrameOffload::None | FrameOffload::TxChecksum { .. } | FrameOffload::TxSegment { .. } => {
+            RxMeta::none()
+        }
     }
 }
 
@@ -644,6 +660,19 @@ pub(crate) fn frame_offload(offload: TxOffload) -> FrameOffload {
         } => FrameOffload::TxChecksum {
             csum_start,
             csum_offset,
+        },
+        TxOffload::TcpSegment {
+            csum_start,
+            csum_offset,
+            gso_size,
+            hdr_len,
+            ipv6,
+        } => FrameOffload::TxSegment {
+            csum_start,
+            csum_offset,
+            gso_size,
+            hdr_len,
+            ipv6,
         },
     }
 }

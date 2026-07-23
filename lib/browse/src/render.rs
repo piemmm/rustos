@@ -803,7 +803,13 @@ fn draw_property_fields(
         if y >= bottom {
             break;
         }
-        font.draw_text(surface, layout.left, y, label, palette.on_surface_muted.into());
+        font.draw_text(
+            surface,
+            layout.left,
+            y,
+            label,
+            palette.on_surface_muted.into(),
+        );
         font.draw_text(surface, layout.value_x, y, value, palette.on_surface.into());
         y = y.saturating_add(to_i32(layout.line));
     }
@@ -895,7 +901,9 @@ fn permission_toggle_cells(viewport: Rect, font: BitmapFont, theme: &Theme) -> O
         // Character 0 is the type indicator; the nine `rwx` bits are characters
         // 1..=9, so bit `i` sits over character `i + 1`.
         let step = u32::try_from(i + 1).unwrap_or(0);
-        let x = layout.value_x.saturating_add(to_i32(advance.saturating_mul(step)));
+        let x = layout
+            .value_x
+            .saturating_add(to_i32(advance.saturating_mul(step)));
         Rect::new(x, row_top, advance, glyph)
     }))
 }

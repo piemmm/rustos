@@ -253,6 +253,14 @@ pub enum ChecksumMode {
     /// Store only the pseudo-header partial sum for the device to
     /// complete.
     Partial,
+    /// Store the pseudo-header partial sum computed with a **zero**
+    /// upper-layer length, for a TCP-segmentation-offload super-segment
+    /// (`plans/NETWORK.md` §2.3): the device splits the payload into
+    /// MTU-sized segments of differing lengths and adds each segment's
+    /// own length to the sum before folding, so the length must not be
+    /// pre-folded into the partial checksum (Linux `CHECKSUM_PARTIAL` for
+    /// GSO seeds the pseudo-header with length 0 identically).
+    PartialGso,
 }
 
 #[cfg(test)]

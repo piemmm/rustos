@@ -297,8 +297,8 @@ mod tests {
         assert_eq!(no_queue.validate(), Err(Errno::OutOfRange));
     }
 
-    /// Test geometry: 4 slots of 128 bytes per ring.
-    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 128) {
+    /// Test geometry: 4 slots of 128 bytes per ring (equal RX/TX).
+    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 128, 128) {
         Ok(g) => g,
         Err(_) => panic!("valid test geometry"),
     };
@@ -481,7 +481,7 @@ mod tests {
         let mut n = MockNet::new();
         let mut region = [0u8; REGION_LEN];
         // Corrupt the TX ring's producer counter (second ring header).
-        let tx_header = GEOMETRY.ring_len();
+        let tx_header = GEOMETRY.rx_ring_len();
         region[tx_header..tx_header + 4].copy_from_slice(&100u32.to_le_bytes());
         let mut rings =
             FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");

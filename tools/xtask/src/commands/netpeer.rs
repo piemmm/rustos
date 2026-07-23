@@ -665,7 +665,7 @@ fn drive_tcp_egress(
 ) {
     let dest = IpAddr::V6(guest_v6);
     tcb.poll_transmit(now, |seg| {
-        match stack.send_tcp(dest, &seg.meta, seg.payload, now) {
+        match stack.send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, now) {
             Ok(out) => {
                 send_frames(socket, qemu_sock, &out.frames);
                 true

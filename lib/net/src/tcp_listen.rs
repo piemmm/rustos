@@ -468,7 +468,14 @@ impl Listener {
             urgent: 0,
             options,
         };
-        emit(peer, OutSegment { meta, payload: &[] });
+        emit(
+            peer,
+            OutSegment {
+                meta,
+                payload: &[],
+                gso_size: None,
+            },
+        );
     }
 
     /// Emit a RST refusing a segment. `seq` is the RST's sequence number (the
@@ -489,7 +496,14 @@ impl Listener {
             urgent: 0,
             options: TcpOptions::new(),
         };
-        if emit(peer, OutSegment { meta, payload: &[] }) {
+        if emit(
+            peer,
+            OutSegment {
+                meta,
+                payload: &[],
+                gso_size: None,
+            },
+        ) {
             self.stats.resets_sent += 1;
         }
     }

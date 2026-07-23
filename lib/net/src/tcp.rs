@@ -730,16 +730,19 @@ pub(crate) fn write_with_checksum(
     out[header_len..].copy_from_slice(payload);
     // `total <= u16::MAX` was checked above.
     let segment_len = u16::try_from(total).map_err(|_| WriteError::TooLarge)?;
-    let seed = pseudo.seed(PROTOCOL_TCP, segment_len);
     let checksum = match mode {
         ChecksumMode::Full => {
-            let mut sum = seed;
+            let mut sum = pseudo.seed(PROTOCOL_TCP, segment_len);
             sum.push(out);
             sum.finish()
         }
         // Leave the folded pseudo-header sum for the device to complete
         // over the transport bytes (no payload fold on this path).
-        ChecksumMode::Partial => seed.partial(),
+        ChecksumMode::Partial => pseudo.seed(PROTOCOL_TCP, segment_len).partial(),
+        // Segmentation offload: the device produces segments of differing
+        // lengths, so seed the pseudo-header with length 0 and let the
+        // device add each segment's own length before folding.
+        ChecksumMode::PartialGso => pseudo.seed(PROTOCOL_TCP, 0).partial(),
     };
     out[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 2].copy_from_slice(&checksum.to_be_bytes());
     Ok(total)

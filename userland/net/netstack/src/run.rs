@@ -44,7 +44,6 @@
 // (and `tairix-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use tairix_abi::driver::net::ETHERNET_HEADER_LEN;
     use tairix_abi::driver::net_channel::{
         notify_endpoint_for, NET_CHANNEL_ENDPOINT_COUNT, NET_CHANNEL_NOTIFY_LEN,
     };
@@ -577,11 +576,11 @@ mod program {
         };
         let facts = NetChannelClient::query_facts(&mut transport)?;
         facts.validate()?;
-        let slot_capacity = facts
-            .mtu
-            .checked_add(ETHERNET_HEADER_LEN)
-            .ok_or(Errno::OutOfRange)?;
-        let geometry = RingGeometry::new(NET_RING_SLOTS, slot_capacity)?;
+        // The receive ring holds a link frame; the transmit ring is sized
+        // for a segmentation-offload super-frame when the device
+        // negotiated it (`for_device` is the one definition both sides
+        // derive, so the driver's attach validation agrees).
+        let geometry = RingGeometry::for_device(&facts, NET_RING_SLOTS)?;
         let region_len = geometry.region_len();
 
         // Create and map the shared frame region (owner mapping), then mint

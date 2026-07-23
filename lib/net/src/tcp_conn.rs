@@ -172,6 +172,19 @@ pub struct TcpConfig {
     /// The congestion-control algorithm this connection uses (RFC 9438
     /// CUBIC by default; see [`crate::tcp::cc`]).
     pub congestion: CongestionAlgorithm,
+    /// Largest TCP payload the connection may hand to the egress device
+    /// as one over-size *super-segment* for TCP segmentation offload
+    /// (`plans/NETWORK.md` §2.3), or `0` to disable TSO (the default).
+    ///
+    /// When non-zero and larger than the effective per-segment MSS, the
+    /// segmentizer batches up to this many fresh, never-retransmitted
+    /// payload bytes from the send frontier into a single segment the
+    /// device splits on the wire; retransmissions and SACK recovery stay
+    /// per-MSS. The stack sets it from the egress interface's negotiated
+    /// segmentation offload and transmit-ring capacity, bounded so the
+    /// one IP packet the super-segment forms stays within the 16-bit IP
+    /// length field.
+    pub tso_max_payload: u16,
 }
 
 impl Default for TcpConfig {
@@ -193,6 +206,7 @@ impl Default for TcpConfig {
             maximum_segment_lifetime: Duration64::from_secs(30),
             challenge_ack_interval: millis(500),
             congestion: CongestionAlgorithm::Cubic,
+            tso_max_payload: 0,
         }
     }
 }
@@ -574,6 +588,11 @@ pub struct OutSegment<'a> {
     pub meta: TcpSegmentMeta,
     /// The payload (may be empty for a pure control/ACK segment).
     pub payload: &'a [u8],
+    /// When `Some(mss)`, `payload` is an over-size super-segment the
+    /// egress device must split into `mss`-byte segments (TCP
+    /// segmentation offload); the caller frames it as one packet and
+    /// tags it accordingly. `None` is an ordinary single segment.
+    pub gso_size: Option<u16>,
 }
 
 /// The transmission control block: one TCP connection's state machine.
@@ -702,8 +721,15 @@ enum Plan {
     /// A SYN (with ACK in SYN-RECEIVED); carries the SYN options.
     Syn { with_ack: bool },
     /// A data and/or FIN segment: `len` payload bytes from `snd_nxt`, plus
-    /// FIN when `fin` is set.
-    Data { len: usize, fin: bool, probe: bool },
+    /// FIN when `fin` is set. `gso_size` is non-zero only for a
+    /// segmentation-offload super-segment (`len` exceeds one MSS), and
+    /// then names the per-segment MSS the device splits against.
+    Data {
+        len: usize,
+        fin: bool,
+        probe: bool,
+        gso_size: u16,
+    },
     /// An RFC 6675 selective retransmission: `len` payload bytes from the
     /// explicit `seq` (a hole in the SACK scoreboard), which — unlike
     /// [`Plan::Data`] — does not advance `snd_nxt`/`snd_max`.
@@ -810,6 +836,21 @@ impl Tcb {
         tcb.iss = SeqNumber::new(iss);
         tcb.state = State::Listen;
         tcb
+    }
+
+    /// Set (or clear, with `0`) the largest TCP payload this connection may
+    /// batch into one segmentation-offload super-segment
+    /// ([`TcpConfig::tso_max_payload`]).
+    ///
+    /// A connection opened with [`connect`](Self::connect) is configured up
+    /// front, but a connection produced passively by a listener is built
+    /// from a template that does not know the egress link, so the service
+    /// enables the offload here once the accepted child is bound to its
+    /// interface. Changing it never affects data already in flight — the
+    /// per-segment path and the super-segment path produce the same
+    /// on-wire bytes.
+    pub fn set_tso_max_payload(&mut self, max_payload: u16) {
+        self.config.tso_max_payload = max_payload;
     }
 
     /// The current connection state.
@@ -1613,10 +1654,12 @@ impl Tcb {
             }
         }
         if len > 0 || fin {
+            // Fresh data sent during SACK recovery stays per-MSS (no TSO).
             Some(Plan::Data {
                 len,
                 fin,
                 probe: false,
+                gso_size: 0,
             })
         } else {
             None
@@ -1722,7 +1765,11 @@ impl Tcb {
                 urgent: 0,
                 options: TcpOptions::new(),
             };
-            if emit(OutSegment { meta, payload: &[] }) {
+            if emit(OutSegment {
+                meta,
+                payload: &[],
+                gso_size: None,
+            }) {
                 count += 1;
             }
             return count;
@@ -1730,9 +1777,15 @@ impl Tcb {
 
         while let Some(plan) = self.plan_segment(now_ns) {
             let (meta, payload) = self.build_segment(&plan, now_ns);
+            // A super-segment carries its per-segment MSS to the framer.
+            let gso_size = match &plan {
+                Plan::Data { gso_size, .. } if *gso_size > 0 => Some(*gso_size),
+                _ => None,
+            };
             if !emit(OutSegment {
                 meta,
                 payload: &payload,
+                gso_size,
             }) {
                 break;
             }
@@ -1782,8 +1835,24 @@ impl Tcb {
         // timestamps/SACK bytes must come out of the payload or the whole
         // segment overflows the path MTU. `send_mss` is already clamped to
         // our egress link, so header + options + payload then fits.
-        let max_payload = (self.send_mss as usize).saturating_sub(self.data_option_len());
-        let mut len = avail.min(usable).min(max_payload.max(1));
+        let per_seg = (self.send_mss as usize)
+            .saturating_sub(self.data_option_len())
+            .max(1);
+        // TCP segmentation offload: when the device negotiated it and we
+        // are at the send frontier (fresh, never-retransmitted data), batch
+        // up to the configured cap into one super-segment the device splits
+        // on the wire. Retransmissions and SACK recovery (handled above)
+        // always stay per-MSS, so a lost super-segment recovers as ordinary
+        // segments. Off the frontier (`snd_nxt != snd_max`, i.e. a go-back-N
+        // retransmit is in progress) TSO is disabled and the cap is one MSS.
+        let tso_cap = usize::from(self.config.tso_max_payload);
+        let at_frontier = self.snd_nxt == self.snd_max;
+        let send_cap = if tso_cap > per_seg && at_frontier {
+            tso_cap
+        } else {
+            per_seg
+        };
+        let mut len = avail.min(usable).min(send_cap);
         let mut probe = false;
         if len == 0
             && avail > 0
@@ -1802,7 +1871,19 @@ impl Tcb {
             }
         }
         if len > 0 || fin {
-            return Some(Plan::Data { len, fin, probe });
+            // A segment spanning more than one MSS is a super-segment the
+            // device splits against `gso_size`; one MSS or less is ordinary.
+            let gso_size = if len > per_seg {
+                u16::try_from(per_seg).unwrap_or(u16::MAX)
+            } else {
+                0
+            };
+            return Some(Plan::Data {
+                len,
+                fin,
+                probe,
+                gso_size,
+            });
         }
 
         // A pure acknowledgement, if one is owed and due.
@@ -1962,7 +2043,9 @@ impl Tcb {
                 self.arm_rtx(now_ns);
                 self.clear_ack_owed();
             }
-            Plan::Data { len, fin, probe } => {
+            Plan::Data {
+                len, fin, probe, ..
+            } => {
                 let seqlen = as_u32(*len) + u32::from(*fin);
                 let new_nxt = self.snd_nxt.add(seqlen);
                 if *fin {

@@ -50,6 +50,13 @@ use crate::events;
 use crate::iface::{FrameBatch, Netstack};
 use crate::service::Caller;
 
+/// One outbound TCP segment drained from a connection: its header, its
+/// owned payload, and the segmentation-offload super-segment size
+/// ([`OutSegment::gso_size`](tairix_net::tcp::conn::OutSegment::gso_size)) —
+/// `Some(mss)` for an over-size super-segment the device splits, `None`
+/// for an ordinary segment.
+type OutSeg = (TcpSegmentMeta, Vec<u8>, Option<u16>);
+
 /// Largest number of sockets a single principal may hold at once.
 ///
 /// A per-principal fail-closed bound so one principal cannot exhaust the
@@ -743,13 +750,16 @@ impl SocketService {
         let iss = entropy();
         let config = TcpConfig {
             local_mss,
+            // Enable segmentation offload when the egress device negotiated
+            // it (0 keeps the connection per-MSS).
+            tso_max_payload: interfaces.tso_max_payload_on(iface),
             ..TcpConfig::default()
         };
         let mut tcb = Tcb::connect(config, local_port, peer.port, iss, now);
         let segs = drain_segments(&mut tcb, now);
         let mut frames = Vec::new();
-        for (meta, payload) in &segs {
-            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, now) {
+        for (meta, payload, gso_size) in &segs {
+            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, *gso_size, now) {
                 frames.extend(more);
             }
         }
@@ -820,8 +830,8 @@ impl SocketService {
             segs = drain_segments(&mut conn.tcb, now);
         }
         let mut frames = Vec::new();
-        for (meta, payload) in &segs {
-            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, now) {
+        for (meta, payload, gso_size) in &segs {
+            if let Ok(more) = interfaces.send_tcp_on(iface, dest, meta, payload, *gso_size, now) {
                 frames.extend(more);
             }
         }
@@ -902,10 +912,10 @@ impl SocketService {
             addr: source,
             port: seg.source_port,
         };
-        let mut emitted: Vec<(TcpSegmentMeta, Vec<u8>)> = Vec::new();
+        let mut emitted: Vec<OutSeg> = Vec::new();
         if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
             listener.on_segment(destination, peer, seg, now, secret, |_peer, out| {
-                emitted.push((out.meta, out.payload.to_vec()));
+                emitted.push((out.meta, out.payload.to_vec(), out.gso_size));
                 true
             });
         }
@@ -926,17 +936,19 @@ impl SocketService {
         lindex: usize,
         now: Duration64,
     ) -> FrameBatch {
-        let mut emitted: Vec<(IpAddr, TcpSegmentMeta, Vec<u8>)> = Vec::new();
+        let mut emitted: Vec<(IpAddr, TcpSegmentMeta, Vec<u8>, Option<u16>)> = Vec::new();
         if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
             listener.advance(now, |peer, out| {
-                emitted.push((peer.addr, out.meta, out.payload.to_vec()));
+                emitted.push((peer.addr, out.meta, out.payload.to_vec(), out.gso_size));
                 true
             });
         }
         let mut tx = FrameBatch::new();
-        for (peer_ip, meta, payload) in &emitted {
+        for (peer_ip, meta, payload, gso_size) in &emitted {
             if let Ok((iface, _mss)) = interfaces.egress_mss_for(*peer_ip, now) {
-                if let Ok(frames) = interfaces.send_tcp_on(iface, *peer_ip, meta, payload, now) {
+                if let Ok(frames) =
+                    interfaces.send_tcp_on(iface, *peer_ip, meta, payload, *gso_size, now)
+                {
                     if !frames.is_empty() {
                         tx.push((iface, frames));
                     }
@@ -1001,7 +1013,15 @@ impl SocketService {
                 local_addr: [0u8; 16],
                 local_port,
                 proto: Proto::Stream(Some(Box::new(StreamConn {
-                    tcb: conn.tcb,
+                    tcb: {
+                        // A listener template does not know the egress link,
+                        // so segmentation offload is enabled here, once the
+                        // accepted child is bound to the interface that
+                        // reaches its peer.
+                        let mut tcb = conn.tcb;
+                        tcb.set_tso_max_payload(interfaces.tso_max_payload_on(iface));
+                        tcb
+                    },
                     peer,
                     iface,
                     notified: Notified::Nothing,
@@ -1342,10 +1362,10 @@ impl SocketService {
 /// Drain every segment a connection's TCB wants transmitted into owned
 /// `(header, payload)` pairs, so the engine's `send_tcp` can be called
 /// without holding a borrow of the socket table across it.
-fn drain_segments(tcb: &mut Tcb, now: Duration64) -> Vec<(TcpSegmentMeta, Vec<u8>)> {
+fn drain_segments(tcb: &mut Tcb, now: Duration64) -> Vec<OutSeg> {
     let mut segs = Vec::new();
     tcb.poll_transmit(now, |out| {
-        segs.push((out.meta, out.payload.to_vec()));
+        segs.push((out.meta, out.payload.to_vec(), out.gso_size));
         true
     });
     segs
@@ -1359,7 +1379,7 @@ fn drain_segments(tcb: &mut Tcb, now: Duration64) -> Vec<(TcpSegmentMeta, Vec<u8
 fn route_segments_to(
     interfaces: &mut Netstack,
     peer_ip: IpAddr,
-    segs: &[(TcpSegmentMeta, Vec<u8>)],
+    segs: &[OutSeg],
     now: Duration64,
 ) -> FrameBatch {
     if segs.is_empty() {
@@ -1369,8 +1389,8 @@ fn route_segments_to(
         return FrameBatch::new();
     };
     let mut frames = Vec::new();
-    for (meta, payload) in segs {
-        if let Ok(more) = interfaces.send_tcp_on(iface, peer_ip, meta, payload, now) {
+    for (meta, payload, gso_size) in segs {
+        if let Ok(more) = interfaces.send_tcp_on(iface, peer_ip, meta, payload, *gso_size, now) {
             frames.extend(more);
         }
     }

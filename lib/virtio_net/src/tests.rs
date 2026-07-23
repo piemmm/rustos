@@ -179,7 +179,7 @@ fn arp_frame() -> Vec<u8> {
 /// a deliberately over-MTU frame *into* the ring so the driver-side
 /// drop policy is what the test exercises.
 fn test_geometry() -> RingGeometry {
-    RingGeometry::new(4, 2048).expect("test geometry")
+    RingGeometry::new(4, 2048, 2048).expect("test geometry")
 }
 
 fn rings_region() -> Vec<u8> {
@@ -375,11 +375,11 @@ fn corrupt_tx_slot_is_consumed_and_flow_continues() {
         rings.tx.push(&arp_frame()).expect("queue good");
     }
     // The TX ring is the second half of the region; its first slot's
-    // length prefix sits after the 8-byte ring header and the 5-byte
-    // per-frame offload-metadata prefix (tag + two u16 checksum
-    // offsets).
-    let tx_ring_base = test_geometry().ring_len();
-    let len_prefix = tx_ring_base + 8 + 5;
+    // length prefix sits after the 8-byte ring header and the 9-byte
+    // per-frame offload-metadata prefix (tag + two u16 checksum offsets
+    // + two u16 segmentation fields).
+    let tx_ring_base = test_geometry().rx_ring_len();
+    let len_prefix = tx_ring_base + 8 + 9;
     region[len_prefix..len_prefix + 4].copy_from_slice(&8000u32.to_le_bytes());
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let report = net.service(&mut rings).expect("service");
@@ -527,12 +527,19 @@ fn rx_flags_ignored_when_guest_csum_not_negotiated() {
 /// Captured `virtio_net_hdr` bytes of each transmitted frame.
 type HdrLog = Rc<RefCell<Vec<[u8; wire::HEADER_LEN]>>>;
 
-/// Build a virtio-net `MockTransport` that offers `VIRTIO_NET_F_CSUM`
-/// (transmit-checksum offload) and whose TX shim records both the
-/// `virtio_net_hdr` and the frame of every transmitted chain, so the
-/// driver's per-frame transmit-offload header can be exercised.
+/// Build a virtio-net `MockTransport` offering `VIRTIO_NET_F_CSUM`
+/// (transmit-checksum offload) plus the transmit `features`, whose TX shim
+/// records both the `virtio_net_hdr` and the frame of every transmitted
+/// chain so the driver's per-frame transmit-offload header can be
+/// exercised.
 fn build_device_tx_csum() -> (MockTransport, HdrLog, TxLog) {
-    let mut t = MockTransport::new(2, 8, wire::VIRTIO_NET_F_CSUM, 6);
+    build_device_tx_features(wire::VIRTIO_NET_F_CSUM)
+}
+
+/// [`build_device_tx_csum`] with an explicit device-feature set (so a TSO
+/// test can add `HOST_TSO4`/`HOST_TSO6`), shared to avoid a second shim.
+fn build_device_tx_features(features: u64) -> (MockTransport, HdrLog, TxLog) {
+    let mut t = MockTransport::new(2, 8, features, 6);
     t.set_config(0, &DEVICE_MAC);
     let hdr_log: HdrLog = Rc::new(RefCell::new(Vec::new()));
     let tx_log: TxLog = Rc::new(RefCell::new(Vec::new()));
@@ -622,6 +629,92 @@ fn plain_tx_frame_emits_a_zero_header() {
     rings.tx.push(&arp_frame()).expect("queue");
     net.service(&mut rings).expect("service");
     assert_eq!(hdr_log.borrow()[0], [0u8; wire::HEADER_LEN]);
+}
+
+#[test]
+fn host_tso_negotiation_advertises_tx_segment_tcp() {
+    // The device offers CSUM + both HOST_TSO bits: the driver negotiates
+    // segmentation offload and advertises it.
+    let (t, _hdr, _tx) = build_device_tx_features(
+        wire::VIRTIO_NET_F_CSUM | wire::VIRTIO_NET_F_HOST_TSO4 | wire::VIRTIO_NET_F_HOST_TSO6,
+    );
+    let net = open_net(t);
+    let facts = net.device_facts().expect("facts");
+    assert!(facts.offloads.contains(NetOffloads::TX_SEGMENT_TCP));
+    assert!(facts.offloads.contains(NetOffloads::TX_CSUM_TCP));
+}
+
+#[test]
+fn tso_without_both_host_tso_bits_is_not_advertised() {
+    // Only one of the two HOST_TSO bits: the driver keeps TSO off (the
+    // single advertised offload must serve both IP families).
+    let (t, _hdr, _tx) =
+        build_device_tx_features(wire::VIRTIO_NET_F_CSUM | wire::VIRTIO_NET_F_HOST_TSO4);
+    let net = open_net(t);
+    assert!(!net
+        .device_facts()
+        .expect("facts")
+        .offloads
+        .contains(NetOffloads::TX_SEGMENT_TCP));
+}
+
+#[test]
+fn tx_segment_frame_sets_the_gso_header() {
+    let (t, hdr_log, tx_log) = build_device_tx_features(
+        wire::VIRTIO_NET_F_CSUM | wire::VIRTIO_NET_F_HOST_TSO4 | wire::VIRTIO_NET_F_HOST_TSO6,
+    );
+    let mut net = open_net(t);
+    let mut region = rings_region();
+    let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
+    // A frame larger than one segment (the shim only logs it; the real
+    // device would split it against gso_size).
+    let frame = vec![0x5Au8; 400];
+    rings
+        .tx
+        .push_with(
+            FrameOffload::TxSegment {
+                csum_start: 54,
+                csum_offset: 16,
+                gso_size: 100,
+                hdr_len: 74,
+                ipv6: true,
+            },
+            &frame,
+        )
+        .expect("queue");
+    let report = net.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
+    assert_eq!(tx_log.borrow()[0], frame);
+    let hdr = hdr_log.borrow()[0];
+    assert_eq!(
+        hdr[wire::HDR_FLAGS_OFFSET],
+        wire::VIRTIO_NET_HDR_F_NEEDS_CSUM
+    );
+    assert_eq!(
+        hdr[wire::HDR_GSO_TYPE_OFFSET],
+        wire::VIRTIO_NET_HDR_GSO_TCPV6
+    );
+    assert_eq!(
+        u16::from_le_bytes([
+            hdr[wire::HDR_HDR_LEN_OFFSET],
+            hdr[wire::HDR_HDR_LEN_OFFSET + 1]
+        ]),
+        74
+    );
+    assert_eq!(
+        u16::from_le_bytes([
+            hdr[wire::HDR_GSO_SIZE_OFFSET],
+            hdr[wire::HDR_GSO_SIZE_OFFSET + 1]
+        ]),
+        100
+    );
+    assert_eq!(
+        u16::from_le_bytes([
+            hdr[wire::HDR_CSUM_START_OFFSET],
+            hdr[wire::HDR_CSUM_START_OFFSET + 1]
+        ]),
+        54
+    );
 }
 
 #[test]

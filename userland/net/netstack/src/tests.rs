@@ -56,7 +56,7 @@ fn name(text: &str) -> [u8; IF_NAME_LEN] {
 }
 
 /// Ring geometry ample for the control-plane exchanges the tests run.
-const GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514) {
+const GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514, 1514) {
     Ok(g) => g,
     Err(_) => panic!("valid test geometry"),
 };
@@ -1383,7 +1383,7 @@ impl Net for EchoNet {
 
     fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
         let mut report = ServiceReport::default();
-        let mut frame = vec![0u8; GEOMETRY.slot_capacity() as usize];
+        let mut frame = vec![0u8; GEOMETRY.tx_slot_capacity() as usize];
         loop {
             match rings.tx.pop(&mut frame) {
                 Ok(Some(len)) => {
@@ -1489,7 +1489,7 @@ fn net_channel_client_round_trips_a_frame_through_the_server() {
         let mut rig = rig.borrow_mut();
         let mut rings =
             FrameRings::bind(&mut rig.region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
-        let mut out = vec![0u8; GEOMETRY.slot_capacity() as usize];
+        let mut out = vec![0u8; GEOMETRY.rx_slot_capacity() as usize];
         assert_eq!(rings.rx.pop(&mut out), Ok(Some(128)));
         assert_eq!(&out[..128], &[0xEE; 128]);
     }
@@ -1579,7 +1579,7 @@ impl PeerTcpNet {
         } = self;
         let dest = IpAddr::V4(V4_A);
         tcb.poll_transmit(*now, |seg| {
-            if let Ok(out) = stack.send_tcp(dest, &seg.meta, seg.payload, *now) {
+            if let Ok(out) = stack.send_tcp(dest, &seg.meta, seg.payload, seg.gso_size, *now) {
                 for frame in &out.frames {
                     if rings.rx.push(&frame.bytes).is_ok() {
                         report.received += 1;

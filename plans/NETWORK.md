@@ -1175,16 +1175,58 @@ the whole is too large for one change and each leaves the tree working.
   verticals exercise it once `virtio_net` advertises `VIRTIO_NET_F_CSUM`
   (QEMU recomputes the checksum on loopback).
 
-#### N7b-2 — TCP segmentation offload (TSO) + UDP transmit checksum `[ ]`
-- `virtio_net` maps `HOST_TSO*`; the stack hands one over-size TCP payload
-  + template header to the device with a TX segmentation descriptor
-  (`TX_SEGMENT_TCP`) — needs a `Tcb` super-segment path, ring/staging
-  sized past the MTU, and the driver GSO header. UDP transmit-checksum
-  offload (`TX_CSUM_UDP`) is deferred with it: UDP's
-  zero-checksum-as-`0xFFFF` rule is not expressed by the virtio
-  partial-checksum contract, so it needs its own handling. Same-bytes
-  conformance vs the software path; a live QEMU vertical proves the
-  guest-driven path end to end.
+#### N7b-2 — TCP segmentation offload (TSO) `[x]`
+- The frame ring now carries **per-direction** capacities: `RingGeometry`
+  holds a receive and a transmit slot capacity, sized by the one shared
+  `RingGeometry::for_device(facts, slots)` (RX = MTU + Ethernet header; TX
+  = `MAX_SLOT_CAPACITY`, a 64 KiB-class super-frame, when the device
+  negotiated `TX_SEGMENT_TCP`, else the same as RX). The transmit ring
+  never enlarges the receive ring. `AttachParams` carries both capacities
+  and the driver validates the offered geometry against its own
+  `for_device` minima.
+- The ring meta prefix grew to 9 bytes to carry `gso_size` + `hdr_len`
+  beside the checksum offsets; `FrameOffload::TxSegment { csum_start,
+  csum_offset, gso_size, hdr_len, ipv6 }` (v4/v6 in the tag, 4/5) is the
+  segmentation descriptor, fail-closed-decoded like the rest.
+- `Tcb` emits one over-size **super-segment** only for fresh,
+  never-retransmitted data at the send frontier (`snd_nxt == snd_max`, not
+  in SACK recovery), bounded by `TcpConfig.tso_max_payload`; retransmits
+  and SACK recovery always stay per-MSS, so a lost super-segment recovers
+  as ordinary segments. `OutSegment.gso_size` carries the per-segment MSS.
+- `Stack::send_tcp(dest, meta, payload, gso_size, now)` emits the
+  super-segment as one IP packet — never IP-fragmented, never MTU-refused
+  — tagged `TxOffload::TcpSegment`. The TCP checksum is the **length-0**
+  pseudo-header partial (`ChecksumMode::PartialGso`; Linux
+  `CHECKSUM_PARTIAL` for GSO), so the device adds each split segment's own
+  length. `TSO_MAX_PAYLOAD` bounds the one IP packet to the 16-bit length
+  field for either family.
+- `virtio_net` negotiates `VIRTIO_NET_F_HOST_TSO4` **and** `TSO6` (both,
+  since the offload is family-neutral) on top of `VIRTIO_NET_F_CSUM`,
+  reports `TX_SEGMENT_TCP`, sizes its transmit staging to the GSO cap, and
+  builds the GSO `virtio_net_hdr` (`gso_type` `TCPV4`/`TCPV6`, `hdr_len`,
+  `gso_size`, `NEEDS_CSUM` + offsets). No checksum/segmentation arithmetic
+  in the driver.
+- netstack seeds `TcpConfig.tso_max_payload` from the egress interface's
+  `Stack::tso_max_payload()` on connect and (via `Tcb::set_tso_max_payload`)
+  on each accepted child once it is bound to its interface.
+- Same-bytes conformance:
+  `stack::tests::tcp_v4_tx_segmentation_offload_matches_the_software_path`
+  splits the super-segment as the device must and asserts it reproduces
+  the per-MSS software segments TCP-byte-for-byte (and that the field
+  holds the length-0 partial). Ring meta round-trip + per-direction
+  geometry, driver TSO-negotiation/GSO-header, and the netstack offload
+  map are unit-tested. The path is guest-driven, so the existing TCP QEMU
+  verticals exercise it when a backend offers `HOST_TSO*`; the `dgram`
+  test backend does not advertise it, so the software path runs and the
+  verticals pass unchanged (the N7a/N7b-1 precedent — host same-bytes
+  conformance is the authoritative proof).
+- **UDP transmit-checksum offload (`TX_CSUM_UDP`) stays on the software
+  path — a settled decision, not deferred work.** virtio's
+  protocol-agnostic partial-checksum contract cannot honour RFC 768's
+  `0x0000`→`0xFFFF` substitution, which would put an illegal zero checksum
+  on an IPv6 UDP datagram and silently disable protection on the rare IPv4
+  datagram that folds to zero. `virtio_net` therefore never advertises
+  `TX_CSUM_UDP`; the rationale is documented in `device_facts`.
 
 #### N7c — mergeable RX buffers, multiqueue, measured budgets `[ ]`
 - `MRG_RXBUF` and multiqueue receive plumbed where the device offers

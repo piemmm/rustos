@@ -85,8 +85,13 @@ connection state machine, and the listener + SYN-cookie driver),
   frames carry a per-frame `TxOffload`: `send_tcp` attaches
   `TxOffload::PartialChecksum` (and writes only the partial checksum) when
   the interface negotiated `NetOffloads::TX_CSUM_TCP` and the segment is a
-  single unfragmented frame, so a device can complete the fold; every other
-  frame keeps its full software checksum (`TxOffload::None`).
+  single unfragmented frame, so a device can complete the fold; and, when
+  the interface negotiated `NetOffloads::TX_SEGMENT_TCP`, `send_tcp`
+  attaches `TxOffload::TcpSegment` to one over-size TCP super-segment (a
+  length-0-pseudo partial checksum, `ChecksumMode::PartialGso`) the device
+  splits into MTU-sized packets (TSO); every other frame keeps its full
+  software checksum (`TxOffload::None`). `Stack::tso_max_payload` reports
+  the connection's super-segment bound.
 - `udp` — the dual-stack UDP codec (RFC 768): one parse/emit core over
   the family-appropriate pseudo-header checksum, IPv4-optional /
   IPv6-mandatory checksum discipline.
@@ -150,9 +155,11 @@ connection state machine, and the listener + SYN-cookie driver),
   event-driven like the rest of the crate (`advance`/`next_deadline` drive
   half-open retransmit + expiry).
 
-Later increments evolve this crate in place: TCP-segmentation offload
-(TSO) and UDP transmit-checksum offload (`plans/NETWORK.md` N7b-2), then
-mergeable receive buffers and multiqueue receive (N7c).
+Later increments evolve this crate in place: mergeable receive buffers
+and multiqueue receive (`plans/NETWORK.md` N7c). UDP transmit-checksum
+offload is deliberately not done — the virtio partial-checksum contract
+cannot honour UDP's `0x0000`→`0xFFFF` rule, so UDP stays on the software
+path (N7b-2).
 
 ## Security
 

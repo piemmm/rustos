@@ -131,9 +131,10 @@ mod op {
 const HEADER_LEN: usize = 8;
 
 /// Wire length of the [`NetChannelRequest::Attach`] body that follows the
-/// header: geometry `slots` (4) + `slot_capacity` (4) + grant handle (8) +
-/// class (1) + reserved (3) + notify endpoint id (8).
-const ATTACH_BODY_LEN: usize = 4 + 4 + 8 + 1 + 3 + 8;
+/// header: geometry `slots` (4) + `rx_slot_capacity` (4) +
+/// `tx_slot_capacity` (4) + grant handle (8) + class (1) + reserved (3) +
+/// notify endpoint id (8).
+const ATTACH_BODY_LEN: usize = 4 + 4 + 4 + 8 + 1 + 3 + 8;
 
 /// Largest device-channel request frame: the header plus the (largest)
 /// [`NetChannelRequest::Attach`] body. A fixed validation bound sizing the
@@ -217,11 +218,12 @@ impl NetChannelRequest {
         // out[7] reserved, left zero.
         if let Self::Attach(params) = self {
             put_u32(out, HEADER_LEN, params.geometry.slots());
-            put_u32(out, HEADER_LEN + 4, params.geometry.slot_capacity());
-            put_u64(out, HEADER_LEN + 8, params.region_grant);
-            out[HEADER_LEN + 16] = params.class.as_u8();
-            // out[HEADER_LEN + 17..HEADER_LEN + 20] reserved, left zero.
-            put_u64(out, HEADER_LEN + 20, params.notify_endpoint);
+            put_u32(out, HEADER_LEN + 4, params.geometry.rx_slot_capacity());
+            put_u32(out, HEADER_LEN + 8, params.geometry.tx_slot_capacity());
+            put_u64(out, HEADER_LEN + 12, params.region_grant);
+            out[HEADER_LEN + 20] = params.class.as_u8();
+            // out[HEADER_LEN + 21..HEADER_LEN + 24] reserved, left zero.
+            put_u64(out, HEADER_LEN + 24, params.notify_endpoint);
         }
         Ok(len)
     }
@@ -262,16 +264,17 @@ impl NetChannelRequest {
             return Err(Errno::BufferTooSmall);
         }
         let slots = read_u32(bytes, HEADER_LEN);
-        let slot_capacity = read_u32(bytes, HEADER_LEN + 4);
-        let geometry = RingGeometry::new(slots, slot_capacity)?;
-        let region_grant = read_u64(bytes, HEADER_LEN + 8);
-        let class = BufferClass::from_u8(bytes[HEADER_LEN + 16]).map_err(|_| Errno::OutOfRange)?;
-        for &pad in &bytes[HEADER_LEN + 17..HEADER_LEN + 20] {
+        let rx_slot_capacity = read_u32(bytes, HEADER_LEN + 4);
+        let tx_slot_capacity = read_u32(bytes, HEADER_LEN + 8);
+        let geometry = RingGeometry::new(slots, rx_slot_capacity, tx_slot_capacity)?;
+        let region_grant = read_u64(bytes, HEADER_LEN + 12);
+        let class = BufferClass::from_u8(bytes[HEADER_LEN + 20]).map_err(|_| Errno::OutOfRange)?;
+        for &pad in &bytes[HEADER_LEN + 21..HEADER_LEN + 24] {
             if pad != 0 {
                 return Err(Errno::BadMagic);
             }
         }
-        let notify_endpoint = read_u64(bytes, HEADER_LEN + 20);
+        let notify_endpoint = read_u64(bytes, HEADER_LEN + 24);
         Ok(Self::Attach(AttachParams {
             geometry,
             region_grant,
@@ -504,7 +507,9 @@ mod tests {
     use super::*;
 
     fn geometry() -> RingGeometry {
-        RingGeometry::new(256, 1514).expect("valid geometry")
+        // A GSO-class transmit capacity distinct from the receive MTU,
+        // so the round-trip proves both capacities survive the wire.
+        RingGeometry::new(256, 1514, 65_549).expect("valid geometry")
     }
 
     fn attach() -> NetChannelRequest {
@@ -598,14 +603,14 @@ mod tests {
         );
         // Unknown buffer class byte.
         let mut bad = buf;
-        bad[HEADER_LEN + 16] = 0x7F;
+        bad[HEADER_LEN + 20] = 0x7F;
         assert_eq!(
             NetChannelRequest::decode(&bad[..len]),
             Err(Errno::OutOfRange)
         );
         // Dirty reserved byte in the attach body.
         let mut bad = buf;
-        bad[HEADER_LEN + 17] = 1;
+        bad[HEADER_LEN + 21] = 1;
         assert_eq!(NetChannelRequest::decode(&bad[..len]), Err(Errno::BadMagic));
         // Truncated attach body.
         assert_eq!(

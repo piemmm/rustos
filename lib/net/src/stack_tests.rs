@@ -1104,7 +1104,7 @@ impl TcpSide {
         self.tcb.poll_transmit(now, |seg| {
             // A momentary resolution/route miss parks the segment in the
             // engine, which emits it on resolution; treat it as sent.
-            if let Ok(out) = stack.send_tcp(peer, &seg.meta, seg.payload, now) {
+            if let Ok(out) = stack.send_tcp(peer, &seg.meta, seg.payload, seg.gso_size, now) {
                 frames.extend(tx_bytes(out.frames));
             }
             true
@@ -1445,10 +1445,10 @@ fn tcp_v4_tx_checksum_offload_matches_the_software_path() {
         options: TcpOptions::new(),
     };
     let off_out = off
-        .send_tcp(IpAddr::V4(V4_B), &meta, b"tcp-tx-offload", t(3))
+        .send_tcp(IpAddr::V4(V4_B), &meta, b"tcp-tx-offload", None, t(3))
         .expect("send off");
     let soft_out = soft
-        .send_tcp(IpAddr::V4(V4_B), &meta, b"tcp-tx-offload", t(3))
+        .send_tcp(IpAddr::V4(V4_B), &meta, b"tcp-tx-offload", None, t(3))
         .expect("send soft");
     assert_eq!(off_out.frames.len(), 1);
     assert_eq!(soft_out.frames.len(), 1);
@@ -1470,4 +1470,164 @@ fn tcp_v4_tx_checksum_offload_matches_the_software_path() {
     let sum = crate::internet_checksum(&completed[start..]);
     completed[start + 16..start + 18].copy_from_slice(&sum.to_be_bytes());
     assert_eq!(completed, soft_out.frames[0].bytes);
+}
+
+/// Engine-level TCP-segmentation-offload conformance: a stack that
+/// negotiated segmentation emits one over-size super-segment plus a
+/// [`TxOffload::TcpSegment`] descriptor; splitting that super-segment as
+/// the device is contractually required to (per-`gso_size` payloads, the
+/// header replicated with the sequence advanced, PSH only on the last
+/// segment, each segment's checksum recomputed) reproduces, TCP-segment
+/// for TCP-segment, exactly the segments the stack emits per-MSS with no
+/// offload. Compared at the TCP layer so the check is independent of the
+/// per-segment IPv4 identification the device assigns.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn tcp_v4_tx_segmentation_offload_matches_the_software_path() {
+    use crate::checksum::Checksum;
+    use crate::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegmentMeta, PROTOCOL_TCP};
+
+    fn resolve_b(a: &mut Stack) {
+        let mut b = stack(MAC_B, IID_B);
+        b.set_ipv4_config(V4_B, 24, None).expect("cfg b");
+        let out = a
+            .send_echo_request(IpAddr::V4(V4_B), 1, 1, b"x", t(2))
+            .expect("echo");
+        let mut frames: VecDeque<Vec<u8>> = tx_bytes(out.frames).into();
+        for _ in 0..8 {
+            let Some(f) = frames.pop_front() else { break };
+            let ob = b.on_frame(&f, t(2));
+            for r in tx_bytes(ob.frames) {
+                frames.extend(tx_bytes(a.on_frame(&r, t(2)).frames));
+            }
+        }
+    }
+
+    // The TCP segment (strip the 14-byte Ethernet + 20-byte IPv4 header).
+    const IP_TCP: usize = 34;
+    const MSS: u16 = 100;
+
+    let mut facts_off = facts(MAC_A);
+    facts_off.offloads = tairix_abi::driver::net::NetOffloads::from_bits(
+        tairix_abi::driver::net::NetOffloads::TX_CSUM_TCP.bits()
+            | tairix_abi::driver::net::NetOffloads::TX_SEGMENT_TCP.bits(),
+    )
+    .expect("defined bits");
+    let mut off = Stack::new(&StackConfig::new(facts_off, IID_A, 0x4321), t(0)).expect("valid");
+    let mut soft = stack(MAC_A, IID_A);
+    off.set_ipv4_config(V4_A, 24, None).expect("cfg off");
+    soft.set_ipv4_config(V4_A, 24, None).expect("cfg soft");
+    resolve_b(&mut off);
+    resolve_b(&mut soft);
+
+    let base = SeqNumber::new(1);
+    let payload: Vec<u8> = (0..250u32).map(|i| (i % 253) as u8).collect();
+
+    // Reference: the per-MSS segments the software path would emit, each
+    // built with the seq/flags the device must reproduce (PSH on the last).
+    let mut reference: Vec<Vec<u8>> = Vec::new();
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let end = (offset + usize::from(MSS)).min(payload.len());
+        let last = end == payload.len();
+        let mut flags = TcpFlags::ACK;
+        if last {
+            flags = flags | TcpFlags::PSH;
+        }
+        let meta = TcpSegmentMeta {
+            source_port: A_PORT,
+            destination_port: B_PORT,
+            seq: base.add(u32::try_from(offset).expect("offset fits u32")),
+            ack: SeqNumber::new(0),
+            flags,
+            window: 2000,
+            urgent: 0,
+            options: TcpOptions::new(),
+        };
+        let out = soft
+            .send_tcp(IpAddr::V4(V4_B), &meta, &payload[offset..end], None, t(3))
+            .expect("send soft segment");
+        assert_eq!(out.frames.len(), 1);
+        reference.push(out.frames[0].bytes[IP_TCP..].to_vec());
+        offset = end;
+    }
+    assert_eq!(
+        reference.len(),
+        3,
+        "250 bytes over MSS 100 is three segments"
+    );
+
+    // Offloaded: one super-segment (PSH set — it ends the data run).
+    let meta = TcpSegmentMeta {
+        source_port: A_PORT,
+        destination_port: B_PORT,
+        seq: base,
+        ack: SeqNumber::new(0),
+        flags: TcpFlags::ACK | TcpFlags::PSH,
+        window: 2000,
+        urgent: 0,
+        options: TcpOptions::new(),
+    };
+    let off_out = off
+        .send_tcp(IpAddr::V4(V4_B), &meta, &payload, Some(MSS), t(3))
+        .expect("send super-segment");
+    assert_eq!(off_out.frames.len(), 1, "TSO emits one frame");
+    let TxOffload::TcpSegment {
+        csum_start,
+        csum_offset,
+        gso_size,
+        hdr_len,
+        ipv6,
+    } = off_out.frames[0].offload
+    else {
+        panic!("expected a TcpSegment offload");
+    };
+    assert_eq!(
+        (csum_start, csum_offset, gso_size, hdr_len, ipv6),
+        (34, 16, MSS, 54, false)
+    );
+
+    // Software-segment the super-frame exactly as the device must, then
+    // compare each produced TCP segment to the reference.
+    let super_tcp = &off_out.frames[0].bytes[IP_TCP..];
+    // The super-segment's checksum field holds the length-0 pseudo-header
+    // partial sum (Linux `CHECKSUM_PARTIAL` for GSO): the device adds each
+    // segment's own length when it splits.
+    let field = u16::from_be_bytes([super_tcp[16], super_tcp[17]]);
+    let expected_partial = Checksum::ipv4_pseudo(V4_A, V4_B, PROTOCOL_TCP, 0).partial();
+    assert_eq!(
+        field, expected_partial,
+        "GSO super-segment carries the length-0 partial checksum"
+    );
+    let tcp_header_len = usize::from(hdr_len) - IP_TCP;
+    let header = &super_tcp[..tcp_header_len];
+    let body = &super_tcp[tcp_header_len..];
+    let mut produced: Vec<Vec<u8>> = Vec::new();
+    let mut off = 0usize;
+    while off < body.len() {
+        let end = (off + usize::from(gso_size)).min(body.len());
+        let last = end == body.len();
+        let mut seg = header.to_vec();
+        // Advance the sequence number by the payload already segmented.
+        let seq = base.add(u32::try_from(off).expect("offset fits u32"));
+        seg[4..8].copy_from_slice(&seq.value().to_be_bytes());
+        // The device sets PSH/FIN only on the final segment.
+        if !last {
+            seg[13] &= !(0x08 | 0x01);
+        }
+        // Zero the checksum field, append the payload slice, recompute the
+        // complete checksum over the per-segment pseudo-header.
+        seg[16..18].copy_from_slice(&[0, 0]);
+        seg.extend_from_slice(&body[off..end]);
+        let tcp_len = u16::try_from(seg.len()).expect("segment fits");
+        let mut sum = Checksum::ipv4_pseudo(V4_A, V4_B, PROTOCOL_TCP, tcp_len);
+        sum.push(&seg);
+        seg[16..18].copy_from_slice(&sum.finish().to_be_bytes());
+        produced.push(seg);
+        off = end;
+    }
+    assert_eq!(
+        produced, reference,
+        "device segmentation reproduces the per-MSS software segments byte-for-byte"
+    );
 }

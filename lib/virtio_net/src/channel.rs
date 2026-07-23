@@ -35,7 +35,7 @@
 //! typed [`Errno`] carried in the reply's status word — never a panic, never
 //! a partially-applied action.
 
-use tairix_abi::driver::net::{Net, ETHERNET_HEADER_LEN};
+use tairix_abi::driver::net::Net;
 use tairix_abi::driver::net_channel::{
     encode_facts_reply, encode_service_reply, AttachParams, NET_CHANNEL_FACTS_REPLY_LEN,
     NET_CHANNEL_SERVICE_REPLY_LEN,
@@ -148,8 +148,16 @@ impl<N: Net> NetChannelServer<N> {
             .net
             .device_facts()
             .map_err(tairix_abi::DriverError::as_errno)?;
-        let required = facts.mtu.saturating_add(ETHERNET_HEADER_LEN);
-        if params.geometry.slot_capacity() < required {
+        // Both directions must carry at least one device frame; when the
+        // device segments (`TX_SEGMENT_TCP`) the transmit ring must
+        // additionally carry a super-frame. `for_device` is the one
+        // definition of those minima (the stack sized its offer from the
+        // same facts), so a ring smaller than the device needs is refused
+        // rather than silently dropping oversize frames later.
+        let need = RingGeometry::for_device(&facts, params.geometry.slots())?;
+        if params.geometry.rx_slot_capacity() < need.rx_slot_capacity()
+            || params.geometry.tx_slot_capacity() < need.tx_slot_capacity()
+        {
             return Err(Errno::OutOfRange);
         }
         self.attached = Some(Attached {

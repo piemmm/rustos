@@ -461,9 +461,7 @@ the field — the fold the stack would otherwise have run. It is never
 load-bearing: a fragmented datagram (only the first fragment carries the
 transport header), an interface that did not negotiate the offload, or a
 device that ignores the request all keep the complete software checksum
-(`ChecksumMode::Full`, `TxOffload::None`). UDP transmit offload is *not*
-done: UDP's zero-checksum-transmitted-as-`0xFFFF` rule is not expressed by
-the virtio partial-checksum contract, so UDP stays on the software path.
+(`ChecksumMode::Full`, `TxOffload::None`).
 `tx_partial_checksum_completed_matches_the_software_full_checksum` (codec
 level) and `tcp_v4_tx_checksum_offload_matches_the_software_path` (engine
 level) assert the partial-plus-completion result equals the software
@@ -471,10 +469,37 @@ full-checksum frame byte-for-byte; the ring descriptor
 (`FrameOffload::TxChecksum`) and the `virtio_net` header mapping carry it
 to the device (`plans/NETWORK.md` N7b-1).
 
+UDP transmit-checksum offload is deliberately **not** done: UDP's
+zero-checksum-transmitted-as-`0xFFFF` rule (RFC 768) is not expressed by
+the virtio protocol-agnostic partial-checksum contract, which would let a
+device emit an illegal zero checksum on an IPv6 datagram and silently
+disable protection on the rare IPv4 datagram that folds to zero, so UDP
+stays on the software path (`plans/NETWORK.md` N7b-2).
+
+### Transmit segmentation offload (TSO)
+
+A device that negotiated `NetOffloads::TX_SEGMENT_TCP` splits one over-size
+TCP *super-segment* into MTU-sized packets on the wire. A connection whose
+egress interface advertised it (`Stack::tso_max_payload` seeds
+`TcpConfig::tso_max_payload`) batches fresh, never-retransmitted data at
+the send frontier into a single segment up to that bound; retransmissions
+and SACK recovery always stay per-MSS, so a lost super-segment recovers as
+ordinary segments. `send_tcp` emits it as one IP packet — never
+IP-fragmented, never MTU-refused — carrying `TxOffload::TcpSegment {
+csum_start, csum_offset, gso_size, hdr_len, ipv6 }` and a **length-0**
+pseudo-header partial checksum (`ChecksumMode::PartialGso`, matching
+Linux's `CHECKSUM_PARTIAL` for GSO), so the device adds each split
+segment's own length before folding. `TSO_MAX_PAYLOAD` bounds the one IP
+packet to the 16-bit length field for either family.
+`tcp_v4_tx_segmentation_offload_matches_the_software_path` splits the
+super-segment as the device must and asserts it reproduces the per-MSS
+software segments TCP-byte-for-byte. The ring descriptor
+(`FrameOffload::TxSegment`) and the `virtio_net` GSO header carry it to the
+device (`plans/NETWORK.md` N7b-2).
+
 ## What lands next
 
 The remaining `plans/NETWORK.md` increments evolve this crate in place:
-UDP transmit-checksum offload and TCP-segmentation offload (TSO) (N7b-2)
-then mergeable receive buffers, multiqueue receive, and the measured
+mergeable receive buffers, multiqueue receive, and the measured
 performance budgets (N7c). Each is added with its callers, tests, and fuzz
 harnesses per increment.

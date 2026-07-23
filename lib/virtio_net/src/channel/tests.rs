@@ -75,7 +75,8 @@ impl Net for LoopbackNet {
 /// A geometry sized exactly to the device's largest frame, as the stack
 /// derives it from the facts reply.
 fn geometry() -> RingGeometry {
-    RingGeometry::new(8, MTU + ETHERNET_HEADER_LEN).expect("valid geometry")
+    let cap = MTU + ETHERNET_HEADER_LEN;
+    RingGeometry::new(8, cap, cap).expect("valid geometry")
 }
 
 fn attach_params(geometry: RingGeometry) -> AttachParams {
@@ -148,7 +149,7 @@ fn attach_stores_state_and_service_round_trips_a_frame() {
 fn attach_rejects_a_geometry_too_small_for_the_device() {
     let mut server = NetChannelServer::new(LoopbackNet::new());
     // A ring whose slots cannot carry the device's full frame (MTU+header).
-    let small = RingGeometry::new(8, MTU).expect("valid but too small");
+    let small = RingGeometry::new(8, MTU, MTU).expect("valid but too small");
     assert_eq!(
         decode_status_reply(&server.attach(attach_params(small))),
         Err(Errno::OutOfRange)

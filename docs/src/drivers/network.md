@@ -43,10 +43,12 @@ per-descriptor header — read and written by `push_with`/`pop_with`
 checksum-validated is tagged `Validated`; one delivered with a partial
 checksum is tagged `NeedsChecksum { csum_start, csum_offset }`. A transmit
 frame the stack asked the device to checksum is tagged
-`TxChecksum { csum_start, csum_offset }`. The tag decodes fail-closed (an
-unknown byte is `None`), so a corrupt descriptor can only *lose* an
-offload, never fabricate one, and the offload is never load-bearing for
-security (`plans/NETWORK.md` N7a/N7b-1).
+`TxChecksum { csum_start, csum_offset }`; one it asked the device to
+segment (TSO) is tagged `TxSegment { csum_start, csum_offset, gso_size,
+hdr_len, ipv6 }`. The tag decodes fail-closed (an unknown byte is `None`),
+so a corrupt descriptor can only *lose* an offload, never fabricate one,
+and the offload is never load-bearing for security (`plans/NETWORK.md`
+N7a/N7b-1/N7b-2).
 
 `service` semantics:
 
@@ -74,7 +76,12 @@ region. This is the display service's `shm_grant` handoff with the roles
 inverted and frames flowing both ways:
 
 1. The stack asks `Facts` for the device's `DeviceFacts` and sizes a
-   `RingGeometry` from the MTU.
+   `RingGeometry` from them with the shared `RingGeometry::for_device`:
+   the receive ring holds one link frame (MTU + Ethernet header), and the
+   transmit ring holds a segmentation-offload super-frame (up to
+   `MAX_SLOT_CAPACITY`) when the device negotiated `TX_SEGMENT_TCP`, else
+   the same as receive. `Attach` carries both capacities and the driver
+   re-derives the minima to validate the offer.
 2. It `shm_create`s the region, `shm_grant`s it to the driver's endpoint
    (the recipient is resolved kernel-side from the endpoint, never a
    recyclable PID), and sends `Attach { geometry, region_grant, class,
@@ -107,7 +114,7 @@ region itself; that remains the stack's responsibility.
 
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
-| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`) |
+| [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`) |
 
 The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
 so a user-space **driver process** can link it without depending on a
@@ -147,6 +154,22 @@ keeps UDP's zero-checksum-as-`0xFFFF` rule on the software path. Because
 the path is guest-driven, the existing TCP QEMU verticals exercise it once
 `VIRTIO_NET_F_CSUM` is offered; QEMU recomputes the checksum on loopback
 (`plans/NETWORK.md` N7b-1).
+
+### Transmit segmentation offload (TSO)
+
+When the device offers **both** `VIRTIO_NET_F_HOST_TSO4` and
+`VIRTIO_NET_F_HOST_TSO6` (on top of `VIRTIO_NET_F_CSUM`, which segmentation
+requires) the driver negotiates them and advertises
+`NetOffloads::TX_SEGMENT_TCP`; both are required because the stack's
+offload is IP-family-neutral. For a `TxSegment` frame the driver builds a
+GSO `virtio_net_hdr` — `gso_type` `TCPV4`/`TCPV6`, `hdr_len`, `gso_size`,
+and `VIRTIO_NET_HDR_F_NEEDS_CSUM` plus the checksum offsets — so the device
+splits the one over-size segment into MTU-sized packets, advancing the
+sequence number and completing each segment's checksum. The driver's
+transmit staging is sized to the transmit-ring slot capacity (the GSO cap)
+when TSO is negotiated. As elsewhere, the driver does no
+checksum/segmentation arithmetic; `lib/net`'s software segmentation is the
+byte-for-byte conformance oracle (`plans/NETWORK.md` N7b-2).
 
 The netstack QEMU verticals
 (`tests/integration/netstack_autoload_qemu_{aarch64,riscv64,x86_64}`)

@@ -99,7 +99,7 @@ use core::convert::TryFrom;
 use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,
 };
-use tairix_abi::driver::net_ring::{FrameOffload, FrameRings, ServiceReport};
+use tairix_abi::driver::net_ring::{FrameOffload, FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::DriverError;
 use tairix_abi::Errno;
 use tairix_virtio::{
@@ -135,10 +135,23 @@ mod wire {
     pub const HEADER_LEN: usize = 10;
     /// `flags` byte offset within `virtio_net_hdr`.
     pub const HDR_FLAGS_OFFSET: usize = 0;
+    /// `gso_type` byte offset within `virtio_net_hdr`.
+    pub const HDR_GSO_TYPE_OFFSET: usize = 1;
+    /// `hdr_len` field offset within `virtio_net_hdr`.
+    pub const HDR_HDR_LEN_OFFSET: usize = 2;
+    /// `gso_size` field offset within `virtio_net_hdr`.
+    pub const HDR_GSO_SIZE_OFFSET: usize = 4;
     /// `csum_start` field offset within `virtio_net_hdr`.
     pub const HDR_CSUM_START_OFFSET: usize = 6;
     /// `csum_offset` field offset within `virtio_net_hdr`.
     pub const HDR_CSUM_OFFSET_OFFSET: usize = 8;
+    // `VIRTIO_NET_HDR_GSO_NONE` is 0 (the header's zero-initialised
+    // default when no segmentation is requested), so no named constant is
+    // needed for it.
+    /// `VIRTIO_NET_HDR_GSO_TCPV4`: segment as IPv4 TCP.
+    pub const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+    /// `VIRTIO_NET_HDR_GSO_TCPV6`: segment as IPv6 TCP.
+    pub const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
     /// `VIRTIO_NET_HDR_F_NEEDS_CSUM` (virtio 1.1 §5.1.6.2): the frame's
     /// transport checksum is only partial and the driver must complete
     /// it using `csum_start`/`csum_offset`.
@@ -155,6 +168,13 @@ mod wire {
     /// marks `NEEDS_CSUM`, so the stack may hand the device a segment
     /// carrying only the partial (pseudo-header) checksum.
     pub const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
+    /// `VIRTIO_NET_F_HOST_TSO4` (virtio 1.1 §5.1.4, feature bit 11): the
+    /// device segments an over-size IPv4 TCP frame the driver marks
+    /// `GSO_TCPV4` into MTU-sized packets. Requires `VIRTIO_NET_F_CSUM`.
+    pub const VIRTIO_NET_F_HOST_TSO4: u64 = 1 << 11;
+    /// `VIRTIO_NET_F_HOST_TSO6` (virtio 1.1 §5.1.4, feature bit 12): the
+    /// IPv6 counterpart of [`VIRTIO_NET_F_HOST_TSO4`].
+    pub const VIRTIO_NET_F_HOST_TSO6: u64 = 1 << 12;
     /// Minimum Ethernet frame size (excluding FCS).
     pub const MIN_ETHERNET_FRAME: usize = 14;
     /// Link MTU: the largest link-layer payload (IP packet) carried.
@@ -187,7 +207,13 @@ pub struct VirtioNet<'h, T: Transport> {
     tx_queue: SplitQueue,
     host: &'h dyn VirtioHost,
     mac: MacAddress,
+    /// Largest receive frame the device may deliver (link MTU + Ethernet
+    /// header); sizes the receive staging and clamps a harvested frame.
     max_frame_len: usize,
+    /// Largest transmit frame the driver stages: the link frame, or a
+    /// segmentation-offload super-frame (up to the ring's transmit slot
+    /// capacity) when [`Self::host_tso`] is set.
+    max_tx_frame_len: usize,
     /// Persistent receive staging (virtio-net header + frame buffer)
     /// the pre-posted receive chain points at. Carved once at open and
     /// reused for every frame; `None` only while a `receive` call
@@ -212,6 +238,11 @@ pub struct VirtioNet<'h, T: Transport> {
     /// checksum (and only then does it advertise the transmit-checksum
     /// offload the stack opts into).
     host_csum: bool,
+    /// Whether `VIRTIO_NET_F_HOST_TSO4` **and** `VIRTIO_NET_F_HOST_TSO6`
+    /// were negotiated at open (both, so segmentation works for either IP
+    /// family under the single advertised offload): only then does the
+    /// driver build a GSO `virtio_net_hdr` and advertise segmentation.
+    host_tso: bool,
 }
 
 impl<'h, T: Transport> VirtioNet<'h, T> {
@@ -246,12 +277,22 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         let device_features = transport.device_features();
         let guest_csum = device_features & wire::VIRTIO_NET_F_GUEST_CSUM != 0;
         let host_csum = device_features & wire::VIRTIO_NET_F_CSUM != 0;
+        // TCP segmentation offload requires the device to complete the
+        // transport checksum (`VIRTIO_NET_F_CSUM`) and to segment both IP
+        // families, since the stack advertises one family-neutral
+        // `TX_SEGMENT_TCP`; negotiate it only when all three hold.
+        let host_tso = host_csum
+            && device_features & wire::VIRTIO_NET_F_HOST_TSO4 != 0
+            && device_features & wire::VIRTIO_NET_F_HOST_TSO6 != 0;
         let mut driver_features = 0u64;
         if guest_csum {
             driver_features |= wire::VIRTIO_NET_F_GUEST_CSUM;
         }
         if host_csum {
             driver_features |= wire::VIRTIO_NET_F_CSUM;
+        }
+        if host_tso {
+            driver_features |= wire::VIRTIO_NET_F_HOST_TSO4 | wire::VIRTIO_NET_F_HOST_TSO6;
         }
         transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
@@ -279,8 +320,16 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         let tx_header = host
             .alloc_dma_zeroed(wire::HEADER_LEN)
             .map_err(|_| VirtioError::DeviceFault)?;
+        // The transmit staging must hold a segmentation-offload super-frame
+        // (the transmit ring's slot capacity) when TSO is negotiated, else
+        // a single link frame.
+        let max_tx_frame_len = if host_tso {
+            RingGeometry::MAX_SLOT_CAPACITY as usize
+        } else {
+            wire::MAX_FRAME_LEN
+        };
         let tx_data = host
-            .alloc_dma_zeroed(wire::MAX_FRAME_LEN)
+            .alloc_dma_zeroed(max_tx_frame_len)
             .map_err(|_| VirtioError::DeviceFault)?;
         let mut net = Self {
             transport,
@@ -289,6 +338,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             host,
             mac: MacAddress::new(mac),
             max_frame_len: wire::MAX_FRAME_LEN,
+            max_tx_frame_len,
             rx_header: Some(rx_header),
             rx_data: Some(rx_data),
             tx_header: Some(tx_header),
@@ -297,6 +347,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             rx_staged_offload: FrameOffload::None,
             guest_csum,
             host_csum,
+            host_tso,
         };
         // Arm the receive path: the device owns a posted buffer from
         // DRIVER_OK onward, so a frame arriving before the first
@@ -366,20 +417,46 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     /// and the device's `csum_start`/`csum_offset`, so the device folds the
     /// transport bytes and completes the field the stack left partial. No
     /// segmentation (`gso_type` stays `GSO_NONE`).
+    ///
+    /// A [`FrameOffload::TxSegment`] frame — emitted only when TSO was
+    /// negotiated — additionally sets `gso_type`
+    /// (`GSO_TCPV4`/`GSO_TCPV6`), `hdr_len`, and `gso_size`, so the device
+    /// replicates the header for each `gso_size`-byte slice and completes
+    /// each segment's checksum from the partial the stack left.
     fn build_header(&self, offload: FrameOffload) -> [u8; wire::HEADER_LEN] {
         let mut header = [0u8; wire::HEADER_LEN];
-        if let FrameOffload::TxChecksum {
-            csum_start,
-            csum_offset,
-        } = offload
-        {
-            if self.host_csum {
+        let write_csum =
+            |header: &mut [u8; wire::HEADER_LEN], csum_start: u16, csum_offset: u16| {
                 header[wire::HDR_FLAGS_OFFSET] = wire::VIRTIO_NET_HDR_F_NEEDS_CSUM;
                 header[wire::HDR_CSUM_START_OFFSET..wire::HDR_CSUM_START_OFFSET + 2]
                     .copy_from_slice(&csum_start.to_le_bytes());
                 header[wire::HDR_CSUM_OFFSET_OFFSET..wire::HDR_CSUM_OFFSET_OFFSET + 2]
                     .copy_from_slice(&csum_offset.to_le_bytes());
+            };
+        match offload {
+            FrameOffload::TxChecksum {
+                csum_start,
+                csum_offset,
+            } if self.host_csum => write_csum(&mut header, csum_start, csum_offset),
+            FrameOffload::TxSegment {
+                csum_start,
+                csum_offset,
+                gso_size,
+                hdr_len,
+                ipv6,
+            } if self.host_tso => {
+                write_csum(&mut header, csum_start, csum_offset);
+                header[wire::HDR_GSO_TYPE_OFFSET] = if ipv6 {
+                    wire::VIRTIO_NET_HDR_GSO_TCPV6
+                } else {
+                    wire::VIRTIO_NET_HDR_GSO_TCPV4
+                };
+                header[wire::HDR_HDR_LEN_OFFSET..wire::HDR_HDR_LEN_OFFSET + 2]
+                    .copy_from_slice(&hdr_len.to_le_bytes());
+                header[wire::HDR_GSO_SIZE_OFFSET..wire::HDR_GSO_SIZE_OFFSET + 2]
+                    .copy_from_slice(&gso_size.to_le_bytes());
             }
+            _ => {}
         }
         header
     }
@@ -422,7 +499,9 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         data_bb: &mut BounceBuffer,
     ) -> Result<TxOutcome, DriverError> {
         let staging = data_bb.full_region_mut();
-        let cap = self.max_frame_len.min(staging.len());
+        // A transmit frame may be a segmentation-offload super-frame, so it
+        // is bounded by the (larger) transmit staging, not the link MTU.
+        let cap = self.max_tx_frame_len.min(staging.len());
         let mut offload = FrameOffload::None;
         let len = match rings.tx.pop_with(&mut offload, &mut staging[..cap]) {
             Ok(Some(len)) => len,
@@ -606,13 +685,14 @@ enum TxOutcome {
 impl<T: Transport> Net for VirtioNet<'_, T> {
     fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
         // No VIRTIO_NET_F_STATUS is negotiated (an operational device
-        // reports its link up) and one receive queue is used. Two offloads
-        // are advertised, each only when its virtio feature was negotiated:
-        // receive-checksum validation (`VIRTIO_NET_F_GUEST_CSUM`) and TCP
-        // transmit-checksum offload (`VIRTIO_NET_F_CSUM`). UDP transmit
-        // offload is not advertised: the stack keeps UDP on the software
-        // path (its zero-checksum-as-0xFFFF rule is not expressed by the
-        // virtio partial-checksum contract).
+        // reports its link up) and one receive queue is used. Offloads are
+        // advertised, each only when its virtio feature was negotiated:
+        // receive-checksum validation (`VIRTIO_NET_F_GUEST_CSUM`), TCP
+        // transmit-checksum offload (`VIRTIO_NET_F_CSUM`), and TCP
+        // segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6`). UDP
+        // transmit offload is not advertised: the stack keeps UDP on the
+        // software path (its zero-checksum-as-0xFFFF rule is not expressed
+        // by the virtio partial-checksum contract).
         let mut offloads = NetOffloads::empty();
         if self.guest_csum {
             offloads =
@@ -621,6 +701,10 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
         }
         if self.host_csum {
             offloads = NetOffloads::from_bits(offloads.bits() | NetOffloads::TX_CSUM_TCP.bits())
+                .unwrap_or(offloads);
+        }
+        if self.host_tso {
+            offloads = NetOffloads::from_bits(offloads.bits() | NetOffloads::TX_SEGMENT_TCP.bits())
                 .unwrap_or(offloads);
         }
         Ok(DeviceFacts {
