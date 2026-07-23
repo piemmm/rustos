@@ -31,12 +31,12 @@ which the drift guard enforces.
 drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
-FM8a's properties view model, and FM8b's drawn read-only properties panel +
-its `Alt+Enter`/`Escape` app wiring
+FM8a's properties view model, FM8b's drawn read-only properties panel +
+its `Alt+Enter`/`Escape` app wiring, and FM8b's pure permission-edit model
 are done**; the rest of the FM4b drawn chrome (the context menu, and the New
 Folder tool which lands with FM7's `fs_mkdir`), the FM6b app-side
-spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's permission
-editing, and FM9 are
+spawn/delegation, the FM7b app-side move/copy/delete verbs, FM8b's drawn
+permission control + ownership, and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -613,13 +613,33 @@ labelling, `properties_panel_rect` centering/clamp, `draw_properties` paints /
 degenerate no-panic, and `selected_target_path` spelling + empty-directory
 `None`). Docs: `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
 
+**The pure permission-edit model is done** (§2.19 — host-proven ahead of the
+drawn control, exactly as FM8a's properties model landed ahead of the drawn
+panel): the `lib/browse::mode_edit` module + `Browser::set_mode_selected`.
+`validate_mode` fails closed on any bit above `tairix_abi::fs::FS_MODE_MASK`
+(the settable `rwx`/setuid/setgid/sticky word) — refused, never masked into a
+different mode, so the mode committed is always exactly the one asked for.
+`set_mode_selected` names the selected node through the shared
+`Browser::selected_target_path` spelling, validates the mode *before* any
+syscall, and applies it through an injected `fs_set_mode` seam under the user's
+own identity (**no new capability**); a VFS refusal leaves the node's mode
+unchanged and surfaces as `ModeError::Refused` (§2.24, §5.4). The listing
+carries no mode, so a success re-reads nothing — the app re-stats to refresh
+the panel. The model holds no authority, so the read-only picker composes the
+same `Browser` and never calls it. Host-tested in `lib/browse` (commit applies
+the mode to the selected node's path, an out-of-mask mode refused before any
+syscall, a VFS refusal surfaced leaving the listing put, empty-directory
+`NoSelection`, `validate_mode` purity across the whole mask + above it, every
+`ModeError` message non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse`
+README + rustdoc.
+
 The remaining FM8b work (still `planned`):
 
-- **Editing mode/ownership** where the user is authorised: mode via a
-  clear permission control, committed through `fs_set_mode`; a refused
-  change is an honest in-UI answer (§2.24). Ownership change is shown but
-  only offered when the user holds the authority (no ambient escalation,
-  §4). Host tests: mode edit commit/refuse.
+- **The drawn permission control** the panel offers, committing through the
+  landed `set_mode_selected` seam; a refused change is an honest in-UI answer
+  (§2.24). **Ownership change** is shown but only offered when the user holds
+  the authority (no ambient escalation, §4). Host tests: the app-side control
+  and its commit/refuse wiring.
 
 ### FM9 — the autoload QEMU vertical + docs `[ ]`
 

@@ -1464,6 +1464,107 @@ mod rename_model {
     }
 }
 
+// --- FM8b: the permission-edit model (validate + commit a new mode) --------
+//
+// The `mode_edit` model runs end to end over the `MockFs` fixture, so every
+// validation, transactional, and fail-closed branch of `set_mode_selected`
+// runs in `cargo test` without a kernel.
+
+mod mode_edit_model {
+    use core::cell::RefCell;
+
+    use alloc::string::ToString;
+
+    use tairix_abi::fs::FS_MODE_MASK;
+    use tairix_abi::Errno;
+
+    use super::MockFs;
+    use crate::browser::Browser;
+    use crate::mode_edit::{validate_mode, ModeError};
+
+    #[test]
+    fn commit_applies_the_mode_to_the_selected_node() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        // Sorted root order is [Apps, Storage, System, Users]; select Apps.
+        browser.select(0).expect("select Apps");
+
+        let seen = RefCell::new(None);
+        let result = browser.set_mode_selected(0o750, |path, mode| {
+            *seen.borrow_mut() = Some((path.to_string(), mode));
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*seen.borrow(), Some(("/Apps".to_string(), 0o750)));
+        // The listing is unchanged: a mode change touches no `Entry` field.
+        assert_eq!(
+            super::names(&browser),
+            ["Apps", "Storage", "System", "Users"]
+        );
+    }
+
+    #[test]
+    fn a_mode_carrying_a_bit_above_the_mask_is_refused_before_any_syscall() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        // A file-type bit (above the 0o7777 permission word) is not settable.
+        let result = browser.set_mode_selected(FS_MODE_MASK + 1, |_, _| {
+            panic!("the VFS must not be touched for an invalid mode");
+        });
+        assert_eq!(result, Err(ModeError::Invalid));
+    }
+
+    #[test]
+    fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let result = browser.set_mode_selected(0o644, |_, _| Err(Errno::PermissionDenied));
+        assert_eq!(result, Err(ModeError::Refused(Errno::PermissionDenied)));
+        // The listing stands, exactly as before the refused change.
+        assert_eq!(
+            super::names(&browser),
+            ["Apps", "Storage", "System", "Users"]
+        );
+    }
+
+    #[test]
+    fn an_empty_directory_reports_no_selection() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        // Enter the empty /System/Fonts.
+        browser.open_index(2).expect("enter System");
+        browser
+            .open_index(0)
+            .expect("enter the empty Fonts directory");
+        assert_eq!(browser.selected_name(), None);
+        let result = browser.set_mode_selected(0o644, |_, _| panic!("nothing to change"));
+        assert_eq!(result, Err(ModeError::NoSelection));
+    }
+
+    #[test]
+    fn validate_mode_accepts_the_whole_mask_and_refuses_above_it() {
+        // Every bit of the settable permission word is accepted, including the
+        // setuid/setgid/sticky bits.
+        assert_eq!(validate_mode(0), Ok(()));
+        assert_eq!(validate_mode(FS_MODE_MASK), Ok(()));
+        assert_eq!(validate_mode(0o755), Ok(()));
+        // One bit above the mask fails closed, never masked into a lesser word.
+        assert_eq!(validate_mode(FS_MODE_MASK + 1), Err(ModeError::Invalid));
+        assert_eq!(validate_mode(0xFFFF_F000), Err(ModeError::Invalid));
+    }
+
+    #[test]
+    fn every_mode_error_has_a_nonempty_message() {
+        for err in [
+            ModeError::NoSelection,
+            ModeError::Invalid,
+            ModeError::Path(Errno::NotFound),
+            ModeError::Refused(Errno::PermissionDenied),
+        ] {
+            assert!(!err.message().is_empty());
+        }
+    }
+}
+
 // --- FM6a: activating an entry (descend / launch a bundle / open a file) --
 
 use crate::activate::Activation;

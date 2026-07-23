@@ -446,8 +446,32 @@ swallowed rather than navigating the view behind it. Showing properties is an
 incidental, refusable action: if the item can no longer be named or its
 metadata cannot be read (it vanished, or is unreadable), the refusal is stated
 on `stderr` and the overlay stays closed — an answer, not a crash, and never a
-fabricated summary (`AGENTS.md` §2.24, §5.4). Editing mode and ownership from
-the panel is a later increment (FM8b's permission editing).
+fabricated summary (`AGENTS.md` §2.24, §5.4).
+
+### Editing permissions
+
+The permission-edit *model* (`plans/NEW-FILEMANAGER.md` FM8b) is
+`lib/browse::mode_edit` plus `Browser::set_mode_selected`, host-proven ahead of
+the drawn permission control exactly as the properties view model landed ahead
+of the drawn panel. `validate_mode` fails closed on any bit above
+`tairix_abi::fs::FS_MODE_MASK` — the settable `rwx`/setuid/setgid/sticky word —
+refusing it rather than masking it into a lesser mode, so the mode committed is
+always exactly the one asked for and never silently a different one (`AGENTS.md`
+§2.24, §5.4). `Browser::set_mode_selected` names the selected node through the
+shared `Browser::selected_target_path` spelling, validates the mode *before*
+any syscall, and applies it through an injected `fs_set_mode` seam under the
+user's own identity — an ordinary permission-checked VFS call, no new
+capability (`AGENTS.md` §4, §5.3). A VFS refusal (the user does not own the
+node, a read-only mount, a lost race) leaves the node's mode exactly as it was
+and is surfaced as `ModeError::Refused` for an honest in-UI answer (`AGENTS.md`
+§2.24). The directory listing carries no mode, so a successful change re-reads
+nothing; the app re-stats the node to refresh the panel. The model reads
+nothing and holds no authority, so the trusted picker composes the same
+`Browser` and never calls the write path.
+
+The drawn permission control the panel offers, and showing/offering an
+ownership change only where the user holds the authority, are the remaining
+FM8b app-side increment.
 
 ## Terminal emulator (`tairix-terminal`)
 
