@@ -3353,10 +3353,15 @@ transfer, landed in increments:
   (`render::draw_properties` — a shared `lib/controls::Panel` painting the
   `properties_rows` fields, opened by `Alt+Enter` / dismissed by `Escape`,
   reading its metadata with one capability-checked `fs_stat` under the user's
-  own identity). FM2/FM4/FM6/FM7/FM8 were each split (§2.19); the remaining
-  work is the **drawn** FM4b context menu (landing with the verbs it invokes,
-  §2.4), the FM6b/FM7b app-side spawn/delegation/move-copy-delete verbs,
-  **FM8b's permission editing**, and FM9.
+  own identity) and its **drawn permission (mode) control** (nine clickable
+  owner/group/other `rwx` toggles overlaid inline on the panel's permissions
+  row via `render::draw_properties_editable`/`permission_cell_at`, committed
+  through `Browser::set_mode_selected` over `fs_set_mode` under the user's own
+  identity — the read-only picker never draws or resolves a toggle).
+  FM2/FM4/FM6/FM7/FM8 were each split (§2.19); the remaining work is the
+  **drawn** FM4b context menu (landing with the verbs it invokes, §2.4), the
+  FM6b/FM7b app-side spawn/delegation/move-copy-delete verbs, **FM8b's
+  ownership editing**, and FM9.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

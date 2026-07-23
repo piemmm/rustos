@@ -539,9 +539,36 @@ nothing; the app re-stats the node to refresh the panel. The model reads
 nothing and holds no authority, so the trusted picker composes the same
 `Browser` and never calls the write path.
 
-The drawn permission control the panel offers, and showing/offering an
-ownership change only where the user holds the authority, are the remaining
-FM8b app-side increment.
+### The drawn permission control
+
+The file manager's Properties overlay is *editable*: `render::draw_properties_editable`
+draws the same panel as the read-only `render::draw_properties` and overlays
+the permissions row's nine `rwx` characters with clickable `lib/controls`
+`Checkbox` toggles reflecting the current mode. `render::PERMISSION_BITS` and
+`permission_cells` are the one definition of which of the nine
+owner/group/other bits each toggle carries, and `render::permission_cell_at` is
+the mirror hit-test returning the bit a click flips (and nothing off a toggle,
+fail closed). Only the write-capable file manager draws the editable overlay;
+the trusted read-only picker draws `draw_properties` and never resolves a
+toggle, so the write surface is separated from the picker by call site, not a
+runtime flag — the same discipline as the manager-only write tools (`AGENTS.md`
+§2.2). Keeping the toggles *inline* on the existing permissions row means the
+overlay stays within the fixed browser window rather than growing a second
+panel (`AGENTS.md` §2.3).
+
+A primary-button press on a toggle flips only that `rwx` bit — preserving the
+current setuid/setgid/sticky bits (the settable word masked by `FS_MODE_MASK`,
+dropping the non-settable file-type bits `fs_stat` also reports) — and commits
+the new mode through `Browser::set_mode_selected` over `fs_set_mode` under the
+user's own identity. On success the overlay is re-stat'd so it shows the
+applied mode; a refusal is stated on `stderr` and leaves the node's mode
+exactly as it was (`AGENTS.md` §2.24, §5.4). The setuid/setgid/sticky bits stay
+visible in the panel's octal and symbolic spelling and are edited through the
+`chmod` command — a deliberate scope boundary for a bloat-free panel, not an
+omission.
+
+Showing and offering an ownership change only where the user holds the
+authority is the remaining FM8b app-side increment.
 
 ## Terminal emulator (`tairix-terminal`)
 

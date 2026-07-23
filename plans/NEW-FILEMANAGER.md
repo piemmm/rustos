@@ -34,11 +34,12 @@ model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
 FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
 `Ctrl+Shift+N` (create + inline-rename, wired end-to-end),
 FM8a's properties view model, FM8b's drawn read-only properties panel +
-its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model, and
-FM4b's pure context-menu chrome model
+its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
+FM8b's drawn permission (mode) control + its click-to-toggle/commit app wiring,
+and FM4b's pure context-menu chrome model
 are done**; the rest of the FM4b drawn chrome (the drawn context menu), the
 FM6b app-side spawn/delegation, the FM7b app-side move/copy/delete verbs,
-FM8b's drawn permission control + ownership, and FM9 are
+FM8b's ownership change, and FM9 are
 `planned`. The starting point is
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
@@ -655,9 +656,8 @@ epoch and renders blank, never a made-up `1970-01-01` wall time.
 
 ### FM8b — the drawn properties panel + permission editing `[~]`
 
-Split (§2.19) into the drawn read-only panel (done) and permission editing
-(still `planned`, since it needs the `fs_set_mode` write path the read-only
-view does not).
+Split (§2.19) into the drawn read-only panel (done), the drawn permission
+(mode) control (done), and an ownership change (still `planned`).
 
 **The drawn Properties panel is done.** `render::draw_properties` paints the
 done FM8a `Properties` model as a shared `lib/controls` `Panel` centered over
@@ -700,13 +700,38 @@ syscall, a VFS refusal surfaced leaving the listing put, empty-directory
 `ModeError` message non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse`
 README + rustdoc.
 
+**The drawn permission (mode) control is done.** The Properties overlay is
+editable in the file manager: `render::draw_properties_editable` draws the same
+panel as the read-only `render::draw_properties` and overlays the permissions
+row's nine `rwx` characters with clickable `lib/controls` `Checkbox` toggles
+reflecting the current mode — kept *inline* on the existing row so the overlay
+stays within the fixed window rather than growing a second panel (§2.3).
+`render::PERMISSION_BITS` / `permission_cells` are the one definition of which
+of the nine owner/group/other bits each toggle carries, and
+`render::permission_cell_at` is the mirror hit-test returning the bit a click
+flips (nothing off a toggle, fail closed). Only the write-capable file manager
+draws the editable overlay; the trusted read-only picker draws `draw_properties`
+and never resolves a toggle, so the write surface is separated by call site, not
+a runtime flag (the manager-only write-tool precedent, §2.2). The `files.app`
+`Run` binary routes an overlay primary-press through `permission_cell_at`, flips
+that `rwx` bit while preserving the current setuid/setgid/sticky bits (the
+settable word masked by `FS_MODE_MASK`), and commits through
+`Browser::set_mode_selected` over `fs_set_mode` under the user's own identity
+(**no new capability**); on success it re-stats to refresh the panel, and a VFS
+refusal is stated on `stderr` leaving the mode untouched (§2.24, §5.4). The
+setuid/setgid/sticky bits stay visible in the octal/symbolic display and are
+edited via `chmod` — a deliberate scope boundary, not an omission. Host-tested
+in `lib/browse` (`PERMISSION_BITS`/`permission_cells` mapping incl. high-bit
+independence, `draw_properties_editable` paints / degenerate no-panic, and the
+full-panel scan proving `permission_cell_at` mirrors exactly the nine distinct
+bits and fails closed off-grid). Docs: `docs/src/desktop/apps.md`, `lib/browse`
+README + rustdoc.
+
 The remaining FM8b work (still `planned`):
 
-- **The drawn permission control** the panel offers, committing through the
-  landed `set_mode_selected` seam; a refused change is an honest in-UI answer
-  (§2.24). **Ownership change** is shown but only offered when the user holds
-  the authority (no ambient escalation, §4). Host tests: the app-side control
-  and its commit/refuse wiring.
+- **Ownership change** is shown but only offered when the user holds the
+  authority (no ambient escalation, §4). Host tests: the app-side control and
+  its commit/refuse wiring.
 
 ### FM9 — the autoload QEMU vertical + docs `[ ]`
 

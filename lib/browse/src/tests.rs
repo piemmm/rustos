@@ -3091,3 +3091,106 @@ fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
     .expect("enter Fonts");
     assert_eq!(b2.selected_target_path(), None);
 }
+
+// --- FM8b: the drawn permission (mode) control ----------------------------
+
+use crate::render::{
+    draw_properties_editable, permission_cell_at, permission_cells, PERMISSION_BITS,
+};
+use tairix_geometry::Point;
+
+#[test]
+fn permission_bits_are_the_nine_settable_rwx_bits_row_major() {
+    // Owner, group, other triads, each read/write/execute — the familiar
+    // `rwx` set, and their union is exactly the low nine bits (0o777).
+    assert_eq!(
+        PERMISSION_BITS,
+        [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001]
+    );
+    let union = PERMISSION_BITS.iter().fold(0u32, |acc, &b| acc | b);
+    assert_eq!(union, 0o777);
+    // All nine bits are distinct.
+    let set: BTreeSet<u32> = PERMISSION_BITS.iter().copied().collect();
+    assert_eq!(set.len(), PERMISSION_BITS.len());
+}
+
+#[test]
+fn permission_cells_report_exactly_the_set_rwx_bits() {
+    // A clear mode shows no cell; a full 0o777 shows all nine.
+    assert_eq!(permission_cells(0o000), [false; 9]);
+    assert_eq!(permission_cells(0o777), [true; 9]);
+    // 0o644 = owner rw-, group r--, other r--.
+    assert_eq!(
+        permission_cells(0o644),
+        [true, true, false, true, false, false, true, false, false]
+    );
+    // 0o755 = owner rwx, group r-x, other r-x.
+    assert_eq!(
+        permission_cells(0o755),
+        [true, true, true, true, false, true, true, false, true]
+    );
+    // The setuid/setgid/sticky and file-type bits are not part of the control:
+    // 0o4755 reads the same nine cells as 0o755.
+    assert_eq!(permission_cells(0o4755), permission_cells(0o755));
+    assert_eq!(permission_cells(0o170_755), permission_cells(0o755));
+}
+
+#[test]
+fn draw_properties_editable_paints_the_toggles_without_panicking() {
+    use tairix_raster::Surface;
+
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+    let props = Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o644),
+    );
+    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    let before = surface.pixels().to_vec();
+    draw_properties_editable(&mut surface, &props, &theme, font, vp);
+    assert_ne!(surface.pixels().to_vec(), before);
+
+    // A degenerate viewport draws nothing and does not panic.
+    let mut tiny = Surface::new(2, 2).expect("tiny surface");
+    draw_properties_editable(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2));
+}
+
+#[test]
+fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 320);
+
+    // Scanning the whole window, every bit the hit-test resolves is one of the
+    // nine settable bits, and all nine are reachable — so the drawn grid and
+    // the hit-test cover exactly the same nine distinct checkboxes (§2.2).
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    let mut y = 0;
+    while y < i32::try_from(vp.height).unwrap() {
+        let mut x = 0;
+        while x < i32::try_from(vp.width).unwrap() {
+            if let Some(bit) = permission_cell_at(vp, font, &theme, Point::new(x, y)) {
+                assert!(PERMISSION_BITS.contains(&bit), "resolved a non-grid bit");
+                seen.insert(bit);
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    let expected: BTreeSet<u32> = PERMISSION_BITS.iter().copied().collect();
+    assert_eq!(seen, expected);
+
+    // A click well outside the panel resolves nothing (fail closed).
+    assert_eq!(
+        permission_cell_at(vp, font, &theme, Point::new(-5, -5)),
+        None
+    );
+    // On a window too small for the grid, no cell resolves (fail closed).
+    let tiny = Rect::new(0, 0, 20, 16);
+    assert_eq!(
+        permission_cell_at(tiny, font, &theme, Point::new(5, 5)),
+        None
+    );
+}

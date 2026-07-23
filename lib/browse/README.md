@@ -211,7 +211,17 @@ can never diverge in navigation semantics, listing policy, or look.
   `ModeError::Refused`. The listing carries no mode, so a success re-reads
   nothing (the app re-stats to refresh the Properties view). The change is the
   caller's own permission-checked `fs_set_mode` (no new capability), so the
-  read-only picker composes the same `Browser` and never calls it.
+  read-only picker composes the same `Browser` and never calls it. The drawn
+  control is inline on the Properties panel: `render::PERMISSION_BITS` /
+  `permission_cells` are the one definition of the nine owner/group/other
+  `rwx` bits, `render::draw_properties_editable` overlays each with a clickable
+  `lib/controls` `Checkbox` over the symbolic permission string, and
+  `render::permission_cell_at` is the mirror hit-test returning the bit a click
+  toggles (fail closed off a toggle). Only the write-capable file manager draws
+  the editable overlay; the picker draws the read-only `draw_properties` and
+  never resolves a toggle (separated by call site, not a runtime flag). The
+  setuid/setgid/sticky bits stay in the octal/symbolic display and are edited
+  via `chmod` — a deliberate scope boundary, and a toggle preserves them.
 - **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
   the pure geometry of the drawn, clickable path bar. `layout` places each
   `Crumb`'s label left to right from measured widths and **right-anchors** the
@@ -251,7 +261,10 @@ can never diverge in navigation semantics, listing policy, or look.
   `selection_rect`'s sibling `draw_properties` draws the FM8b Properties
   overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
   the selected node's `Properties`, clipped so a too-small window shows what
-  fits rather than panicking. `WIN_WIDTH`/`WIN_HEIGHT` are the one
+  fits rather than panicking. `draw_properties_editable` is the file manager's
+  variant: the same panel with the permissions row's nine `rwx` characters
+  overlaid by clickable permission toggles (`permission_cell_at` its hit-test).
+  `WIN_WIDTH`/`WIN_HEIGHT` are the one
   browser-view geometry the files app, the picker, and the QEMU vertical's
   host-side assertions share.
 - **Path spelling** (`vfs`): `absolute_path` (root-first components into

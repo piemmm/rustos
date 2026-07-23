@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::state::{ControlRole, ControlState, SelectionState};
-use tairix_controls::{Card, IconButton, Panel, ScrollBar, TableCell, TableRow, Toolbar};
+use tairix_controls::{Card, Checkbox, IconButton, Panel, ScrollBar, TableCell, TableRow, Toolbar};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
@@ -664,6 +664,24 @@ fn view_layout_for<S: DirectorySource>(
 /// count the Properties overlay is sized to show.
 pub const PROPERTY_ROW_COUNT: usize = 8;
 
+/// The Properties overlay field labels, in display order. One definition so
+/// [`properties_rows`] and the inline permission-toggle placement agree on the
+/// label column width and which row is the permissions row (§2.2).
+const PROPERTY_LABELS: [&str; PROPERTY_ROW_COUNT] = [
+    "Kind",
+    "Size",
+    "Permissions",
+    "Owner",
+    "Created",
+    "Modified",
+    "Accessed",
+    "Changed",
+];
+
+/// The index of the "Permissions" row within [`PROPERTY_LABELS`] — the row the
+/// file manager overlays with the inline permission toggles.
+const PERMISSIONS_ROW_INDEX: usize = 2;
+
 /// The labelled metadata fields the Properties overlay shows for `props`, in
 /// display order: kind, size (apparent + on-disk), permissions (symbolic +
 /// octal), owner, and the four timestamps.
@@ -687,16 +705,17 @@ pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
 
     let owner = alloc::format!("uid {} / gid {}", props.uid(), props.gid());
 
-    vec![
-        ("Kind", String::from(props.kind_label())),
-        ("Size", size),
-        ("Permissions", permissions),
-        ("Owner", owner),
-        ("Created", props.created_display()),
-        ("Modified", props.modified_display()),
-        ("Accessed", props.accessed_display()),
-        ("Changed", props.changed_display()),
-    ]
+    let values = [
+        String::from(props.kind_label()),
+        size,
+        permissions,
+        owner,
+        props.created_display(),
+        props.modified_display(),
+        props.accessed_display(),
+        props.changed_display(),
+    ];
+    PROPERTY_LABELS.into_iter().zip(values).collect()
 }
 
 /// The centered bounds of the Properties overlay [`Panel`] within `viewport`,
@@ -704,6 +723,12 @@ pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
 /// line per field with a top and bottom margin) and clamped to the window so a
 /// small window still yields a drawable — if clipped — panel rather than a
 /// panic.
+///
+/// Both the file manager and the trusted read-only picker draw this. The file
+/// manager's editable overlay ([`draw_properties_editable`]) reuses the same
+/// bounds: it edits permissions *inline* on the existing permissions row
+/// rather than growing the panel, so the overlay stays within the fixed
+/// window (§2.3 — no bloat).
 #[must_use]
 pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
     let line = row_height(font);
@@ -730,6 +755,60 @@ pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) ->
     Rect::new(x, y, width, height)
 }
 
+/// The shared column geometry of the Properties overlay content area: the
+/// label column x, the value column x, and the per-row pitch. One definition
+/// so the drawn fields and the inline permission toggles line up exactly
+/// (§2.2).
+struct FieldLayout {
+    /// Left x of the label column.
+    left: i32,
+    /// Left x of the value column (past the widest label plus a gap).
+    value_x: i32,
+    /// Vertical pitch between successive rows.
+    line: u32,
+}
+
+impl FieldLayout {
+    fn resolve(content: Rect, font: BitmapFont) -> Self {
+        let label_col = PROPERTY_LABELS
+            .iter()
+            .map(|label| font.text_width(label))
+            .max()
+            .unwrap_or(0);
+        let gap = font.text_width("  ").max(LABEL_PADDING);
+        let left = content.left().saturating_add(to_i32(LABEL_PADDING));
+        let value_x = left.saturating_add(to_i32(label_col.saturating_add(gap)));
+        Self {
+            left,
+            value_x,
+            line: row_height(font),
+        }
+    }
+}
+
+/// Draw the [`properties_rows`] metadata fields as muted-label / solid-value
+/// rows within `content`, clipping at the content's bottom edge. Shared by the
+/// read-only and editable overlays so the fields read identically (§2.2).
+fn draw_property_fields(
+    surface: &mut Surface,
+    props: &Properties,
+    content: Rect,
+    palette: &Palette,
+    font: BitmapFont,
+) {
+    let layout = FieldLayout::resolve(content, font);
+    let bottom = content.top().saturating_add(to_i32(content.height));
+    let mut y = content.top().saturating_add(to_i32(ROW_PADDING));
+    for (label, value) in &properties_rows(props) {
+        if y >= bottom {
+            break;
+        }
+        font.draw_text(surface, layout.left, y, label, palette.on_surface_muted.into());
+        font.draw_text(surface, layout.value_x, y, value, palette.on_surface.into());
+        y = y.saturating_add(to_i32(layout.line));
+    }
+}
+
 /// Draw the Properties overlay for `props` centered in `viewport`: a [`Panel`]
 /// titled with the node's name, its labelled metadata fields drawn as
 /// muted-label / solid-value rows in the panel's content area.
@@ -751,29 +830,137 @@ pub fn draw_properties(
     let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
         return;
     };
-    let palette = theme.palette();
-    let rows = properties_rows(props);
-    // Start the value column past the widest label plus a gap, so the values
-    // line up in one column whatever the labels' widths.
-    let label_col = rows
-        .iter()
-        .map(|(label, _)| font.text_width(label))
-        .max()
-        .unwrap_or(0);
-    let gap = font.text_width("  ").max(LABEL_PADDING);
-    let line = row_height(font);
-    let left = content.left().saturating_add(to_i32(LABEL_PADDING));
-    let value_x = left.saturating_add(to_i32(label_col.saturating_add(gap)));
-    let bottom = content.top().saturating_add(to_i32(content.height));
-    let mut y = content.top().saturating_add(to_i32(ROW_PADDING));
-    for (label, value) in &rows {
-        if y >= bottom {
-            break;
-        }
-        font.draw_text(surface, left, y, label, palette.on_surface_muted.into());
-        font.draw_text(surface, value_x, y, value, palette.on_surface.into());
-        y = y.saturating_add(to_i32(line));
+    draw_property_fields(surface, props, content, theme.palette(), font);
+}
+
+/// The nine settable owner/group/other × read/write/execute permission bits,
+/// in the left-to-right order the inline permission control lays them out (the
+/// owner triad, then group, then other) — the same order as the symbolic
+/// `rwxrwxrwx` spelling they sit over, so the drawn toggles and their hit-test
+/// share one definition of which cell carries which bit (§2.2).
+///
+/// Only these nine `rwx` bits are offered as toggles — the familiar, legible
+/// permission set. The setuid/setgid/sticky bits stay visible in the
+/// Properties panel's octal and symbolic spelling and are edited through the
+/// `chmod` command: a deliberate scope boundary for a best-in-class,
+/// bloat-free panel, not an omission. Toggling a cell flips only its own `rwx`
+/// bit and preserves whatever the higher bits currently are.
+pub const PERMISSION_BITS: [u32; 9] = [
+    0o400, 0o200, 0o100, // owner: read, write, execute
+    0o040, 0o020, 0o010, // group: read, write, execute
+    0o004, 0o002, 0o001, // other: read, write, execute
+];
+
+/// Which of the nine [`PERMISSION_BITS`] `mode` currently sets, in the same
+/// left-to-right order — the one definition the drawn toggles' states and
+/// their tests read, so a toggle can never disagree with the mode it depicts
+/// (§2.2).
+#[must_use]
+pub const fn permission_cells(mode: u32) -> [bool; 9] {
+    let mut cells = [false; 9];
+    let mut i = 0;
+    while i < PERMISSION_BITS.len() {
+        cells[i] = mode & PERMISSION_BITS[i] != 0;
+        i += 1;
     }
+    cells
+}
+
+/// The nine clickable permission-toggle rects, one over each `rwx` character
+/// of the symbolic permission string on the Properties overlay's permissions
+/// row, left-to-right to match [`PERMISSION_BITS`]. `None` when the
+/// permissions row does not fit the panel's content (a window too small),
+/// so the painter and the hit-test both fail closed there rather than placing
+/// toggles off the row (§2.2, §5.4).
+///
+/// The toggles sit over characters 1..=9 of the ten-character `drwxr-xr-x`
+/// spelling (the leading type indicator, character 0, is left as text), so a
+/// toggle lands exactly on the letter it flips.
+fn permission_toggle_cells(viewport: Rect, font: BitmapFont, theme: &Theme) -> Option<[Rect; 9]> {
+    let bounds = properties_panel_rect(viewport, font, theme);
+    let content = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme)?;
+    let layout = FieldLayout::resolve(content, font);
+    let advance = font.text_width("r").max(1);
+    let glyph = font.glyph_height().max(1);
+    let row_index = u32::try_from(PERMISSIONS_ROW_INDEX).unwrap_or(u32::MAX);
+    let row_top = content
+        .top()
+        .saturating_add(to_i32(ROW_PADDING))
+        .saturating_add(to_i32(layout.line.saturating_mul(row_index)));
+    let content_bottom = content.top().saturating_add(to_i32(content.height));
+    if row_top.saturating_add(to_i32(glyph)) > content_bottom {
+        return None;
+    }
+    Some(core::array::from_fn(|i| {
+        // Character 0 is the type indicator; the nine `rwx` bits are characters
+        // 1..=9, so bit `i` sits over character `i + 1`.
+        let step = u32::try_from(i + 1).unwrap_or(0);
+        let x = layout.value_x.saturating_add(to_i32(advance.saturating_mul(step)));
+        Rect::new(x, row_top, advance, glyph)
+    }))
+}
+
+/// Draw the editable Properties overlay for `props`: the same panel and fields
+/// as [`draw_properties`], with the permissions row's nine `rwx` characters
+/// overlaid by clickable [`Checkbox`] toggles reflecting the current mode.
+///
+/// Only the write-capable file manager calls this; the trusted read-only
+/// picker calls [`draw_properties`] and never draws or resolves a permission
+/// toggle (the editable surface is separated by call site, not a runtime flag
+/// — the manager-only write-tool precedent). Every blit clips, so a window too
+/// small simply shows what fits rather than panicking. It reads only the
+/// already-authorised [`Properties`] and draws — the commit happens in the
+/// caller's own capability-checked
+/// [`Browser::set_mode_selected`](crate::Browser::set_mode_selected) tail, so
+/// this holds no authority (§4, §5.4).
+pub fn draw_properties_editable(
+    surface: &mut Surface,
+    props: &Properties,
+    theme: &Theme,
+    font: BitmapFont,
+    viewport: Rect,
+) {
+    draw_properties(surface, props, theme, font, viewport);
+    let Some(cells) = permission_toggle_cells(viewport, font, theme) else {
+        return;
+    };
+    let states = permission_cells(props.mode());
+    for (rect, &on) in cells.iter().zip(states.iter()) {
+        let selection = if on {
+            SelectionState::Selected
+        } else {
+            SelectionState::Unselected
+        };
+        Checkbox::new(String::new(), selection).render(surface, *rect, Scale::ONE, theme, font);
+    }
+}
+
+/// The permission bit whose toggle the editable Properties overlay draws at
+/// window-local pixel `point`, or `None` when the click is not on a toggle.
+///
+/// This mirrors [`draw_properties_editable`]'s placement through the shared
+/// `permission_toggle_cells` geometry, so a click toggles exactly the bit
+/// the user pressed (§2.2). Only the file manager calls it — the caller flips
+/// the returned bit in the current mode and commits through its own
+/// capability-checked
+/// [`Browser::set_mode_selected`](crate::Browser::set_mode_selected). A click
+/// anywhere but a toggle returns `None`, changing nothing (fail closed, §5.4).
+#[must_use]
+pub fn permission_cell_at(
+    viewport: Rect,
+    font: BitmapFont,
+    theme: &Theme,
+    point: Point,
+) -> Option<u32> {
+    let cells = permission_toggle_cells(viewport, font, theme)?;
+    for (i, rect) in cells.iter().enumerate() {
+        let right = rect.left().saturating_add(to_i32(rect.width));
+        let bottom = rect.top().saturating_add(to_i32(rect.height));
+        if point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom {
+            return PERMISSION_BITS.get(i).copied();
+        }
+    }
+    None
 }
 
 /// Saturating `u32` → `i32`.

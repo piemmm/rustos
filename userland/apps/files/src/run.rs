@@ -47,13 +47,15 @@ mod program {
     use alloc::string::{String, ToString};
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::fs::{OpenFlags, FS_NAME_MAX};
+    use tairix_abi::fs::{OpenFlags, FS_MODE_MASK, FS_NAME_MAX};
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
-    use tairix_browse::render::{draw_properties, manager_tool_at, render};
+    use tairix_browse::render::{
+        draw_properties_editable, manager_tool_at, permission_cell_at, render,
+    };
     use tairix_browse::{
         suggest_new_dir_name, validate_new_name, Browser, DirectorySource, EntryKind, ManagerTool,
         Properties, RenameError, ToolbarCommand, VfsDirectorySource, MANAGER_TOOLS, WIN_HEIGHT,
@@ -223,7 +225,7 @@ mod program {
         // view (the shared drawn panel painting the already-authorised
         // metadata). Rename and Properties are never open together.
         if let Some(props) = properties {
-            draw_properties(&mut surface, props, theme, font, viewport);
+            draw_properties_editable(&mut surface, props, theme, font, viewport);
         }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
@@ -261,22 +263,30 @@ mod program {
         }
 
         // Properties mode: the overlay owns the window. `Escape` dismisses it;
-        // every other event is swallowed so a keystroke never navigates the
-        // view behind it. It is read-only, so nothing is committed either way.
+        // a primary-button press on one of the permission toggles commits a
+        // mode change; every other event is swallowed so a keystroke never
+        // navigates the view behind it.
         if properties.is_some() {
-            if let WindowEvent::Key {
-                key:
-                    KeyInput::Pressed {
-                        key: KeyValue::Named(NamedKeyCode::Escape),
-                        ..
-                    },
-                ..
-            } = event
-            {
-                *properties = None;
-                return (true, false);
-            }
-            return (false, false);
+            return match event {
+                WindowEvent::Key {
+                    key:
+                        KeyInput::Pressed {
+                            key: KeyValue::Named(NamedKeyCode::Escape),
+                            ..
+                        },
+                    ..
+                } => {
+                    *properties = None;
+                    (true, false)
+                }
+                WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
+                    Some(point) => {
+                        apply_permission_toggle(browser, properties, font, theme, viewport, point)
+                    }
+                    None => (false, false),
+                },
+                _ => (false, false),
+            };
         }
 
         // Rename mode: the inline editor owns the keyboard. Its keys never
@@ -596,31 +606,97 @@ mod program {
         browser: &Browser<S>,
         properties: &mut Option<Properties>,
     ) -> (bool, bool) {
-        let Some(entry) = browser.selected_entry() else {
+        // With nothing selected (an empty directory) it is a silent no-op.
+        if browser.selected_entry().is_none() {
             return (false, false);
-        };
+        }
+        if let Some(props) = stat_selected_properties(browser) {
+            *properties = Some(props);
+            (true, false)
+        } else {
+            let _ = tairix_rt::stderr(b"files: properties unavailable for that item\n");
+            (false, false)
+        }
+    }
+
+    /// Read the selected item's metadata into a display-ready [`Properties`]:
+    /// name its path through the shared spelling and `fs_stat` it with one
+    /// capability-checked handle under the user's own identity (no new
+    /// capability). Returns `None` when there is no selection, the item can no
+    /// longer be named, or its metadata cannot be read — the caller decides
+    /// whether that is a silent no-op or a stated refusal (§2.24, §5.4). A
+    /// directory or sealed bundle is opened with the directory flag, a regular
+    /// file read-only; `stat` needs only a live handle either way.
+    ///
+    /// One definition shared by opening the overlay ([`begin_properties`]) and
+    /// refreshing it after a permission change, so the two cannot drift (§2.2).
+    fn stat_selected_properties<S: DirectorySource>(browser: &Browser<S>) -> Option<Properties> {
+        let entry = browser.selected_entry()?;
         let kind = entry.kind();
         let name = entry.name().to_string();
         let Some(Ok(path)) = browser.selected_target_path() else {
-            let _ = tairix_rt::stderr(b"files: cannot name the selected item\n");
-            return (false, false);
+            return None;
         };
         let flags = if matches!(kind, EntryKind::File) {
             OpenFlags::READ
         } else {
             OpenFlags::DIRECTORY
         };
-        let stat = match tairix_rt::File::open(path.as_bytes(), flags) {
-            Ok(file) => file.stat(),
-            Err(err) => Err(err),
+        let stat = tairix_rt::File::open(path.as_bytes(), flags)
+            .and_then(|file| file.stat())
+            .ok()?;
+        Some(Properties::from_stat(name, kind, &stat))
+    }
+
+    /// Apply a primary-button press inside the open Properties overlay: if it
+    /// landed on one of the nine permission toggles, flip that `rwx` bit and
+    /// commit the new mode through the browser's own capability-checked
+    /// [`Browser::set_mode_selected`] over `fs_set_mode` under the user's own
+    /// identity (no new capability — the per-inode owner/mode/ACL model gates
+    /// it). A press elsewhere in the overlay changes nothing.
+    ///
+    /// The toggle flips only its own `rwx` bit and preserves the current
+    /// setuid/setgid/sticky bits (the settable word masked by [`FS_MODE_MASK`],
+    /// dropping the non-settable file-type bits `fs_stat` also reports). On
+    /// success the overlay is re-stat'd so it reflects the applied mode; a VFS
+    /// refusal leaves the node's mode exactly as it was and states its reason
+    /// on `stderr` — an honest answer, never a crash or a fabricated success
+    /// (§2.24, §5.4).
+    fn apply_permission_toggle<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        properties: &mut Option<Properties>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        point: Point,
+    ) -> (bool, bool) {
+        let Some(bit) = permission_cell_at(viewport, font, theme, point) else {
+            return (false, false);
         };
-        match stat {
-            Ok(stat) => {
-                *properties = Some(Properties::from_stat(name, kind, &stat));
+        let Some(props) = properties.as_ref() else {
+            return (false, false);
+        };
+        let new_mode = (props.mode() & FS_MODE_MASK) ^ bit;
+        match browser.set_mode_selected(new_mode, |path, mode| {
+            let ret = tairix_rt::fs_set_mode(path.as_bytes(), mode);
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(errno_from(ret))
+            }
+        }) {
+            Ok(()) => {
+                // Re-read the node so the overlay shows the applied mode; if the
+                // re-stat fails the commit still succeeded, so keep the panel.
+                if let Some(updated) = stat_selected_properties(browser) {
+                    *properties = Some(updated);
+                }
                 (true, false)
             }
-            Err(_) => {
-                let _ = tairix_rt::stderr(b"files: properties unavailable for that item\n");
+            Err(err) => {
+                let _ = tairix_rt::stderr(b"files: ");
+                let _ = tairix_rt::stderr(err.message().as_bytes());
+                let _ = tairix_rt::stderr(b"\n");
                 (false, false)
             }
         }
