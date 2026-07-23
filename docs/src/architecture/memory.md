@@ -1247,9 +1247,11 @@ text-scrape file. The export is the one arch-neutral memory-statistics
 registry (`kernel/core::memstats::MEM_STATS`): the boot path publishes
 the single system pressure gauge through it, every production cache
 registers its `Arc<CacheAccounting>` ledger at construction
-(observation-only, lock-free reads of saturating diagnostics), and a
-future live `ramzip` tier installs its stats feed there — until it does,
-the query truthfully reports an idle tier.
+(observation-only, lock-free reads of saturating diagnostics), and the
+process-global `ramzip` tier's stats feed is installed there by the boot
+path (`memstats::install_global_ramzip_stats`, reading
+`ramzip::global_stats`, §7p) — reporting a truthful idle all-zero tier
+until one is installed and populated.
 
 - **Counters.** Every cache instance's `CacheAccounting` (§7g) is the
   per-owner counter surface — each cache is charged to exactly one
@@ -1650,6 +1652,54 @@ and its architecture-neutral core lands here (staged in
   pages are cold up to budget, a referenced page gets a second chance and
   the cleared bit makes a still-idle page cold next pass, the clock hand
   rotates, and a backend without a referenced bit fails closed).
+
+## 7p. Live tier wiring (global pool, fault-in, boot install)
+
+The §7n mechanism is wired into the running system as a single
+**process-global** pool (`kernel/mem::ramzip::global`, an
+`OnceCell<SpinLock<Ramzip>>`): one instance, keyed by `(space_id, page)`
+with a per-task ledger and total-RAM-derived caps, matching how the tier
+was designed (per-task fairness across one shared pool, not a tier per
+process). The global free-memory decompression-floor check on every
+`compress_out` upholds the reserve invariant, so the per-space band caps
+are a fairness bound rather than the safety bound.
+
+- **Ownership.** `kernel/mem::LiveSpace<P, M>` (the retained per-task live
+  address space) carries a `space_id` (a monotonic id, PID-style) and its
+  own `ColdPageScanner`, and exposes two object-safe `LiveUserSpace`
+  operations that take the tier lock explicitly: `ramzip_fault_in`
+  (move-only restore; `Fatal` on authentication/decode/OOM — fail closed,
+  audited, no plaintext) and `ramzip_reclaim` (candidate set = resident
+  *placed-anonymous* pages the heap-window allocator proves anonymous;
+  `ColdPageScanner` decides cold, failing closed on a non-`Supported`
+  backend; the tier's own gates admit). `LiveSpace::drop` purges the
+  global tier of the dead space's entries (no leak of RAM or ledger
+  charge).
+- **Fault path.** `kernel/core::resolve_user_fault` offers
+  `resolve_ramzip_fault` **before** the anonymous handler — a compressed
+  page is reserved anonymous memory the anon handler would otherwise
+  re-zero — and republishes the restored page to the registry snapshot as
+  the anon path does. `Fatal` terminates only the faulting task; `NoEntry`
+  (or no installed tier) falls through.
+- **Boot install.** `init.rs::install_ramzip_tier` brings the tier online
+  in the CSPRNG-reserve-seed success branch: caps from discovered RAM, the
+  per-boot key drawn from the seeded reserve through a
+  `RandomReserve → seal::EntropySource` adapter, fail closed (a failed draw
+  leaves no tier, and the compressed path stays inert). The `RAMZIP_STATS`
+  feed is registered by `memstats::install_global_ramzip_stats`.
+- **Not yet doing work in production.** Nothing calls `ramzip_reclaim`
+  yet: the pressure-driven reclaim driver that would hand cold anonymous
+  pages to the tier at `moderate+` bands (the `EscalationStep::HandOffToRamzip`
+  consumer) is unbuilt, and real ports still declare `AccessTracking`
+  non-`Supported` (§7o). So the tier stays empty and fault-in returns
+  `NoEntry` on real hardware until the reclaim driver and the §7o per-port
+  referenced bit land. The fault-in half is inert-but-correct until then.
+- **Tested.** `kernel/mem::ramzip::global` stats projection tests and the
+  `LiveSpace` live-wiring tests over `HostPageTable` (which is
+  `Supported`): compress→fault round-trip restoring exact bytes,
+  placed-anonymous-only candidate selection, Normal-pressure refusal,
+  `NoEntry` fall-through, `want`-budget honouring, and a frame-neutral
+  reclaim+fault cycle.
 
 ## 8. Testing strategy
 

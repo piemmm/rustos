@@ -7,8 +7,10 @@
 //! boot path has created them: the system pressure gauge is built over
 //! the frame allocator, each reclaimable cache's ledger is born with the
 //! cache (per mounted volume, per installed launch cache), and the
-//! `ramzip` tier has no live instance until the restartable-user-fault
-//! prerequisite lands. This registry is the one arch-neutral rendezvous
+//! `ramzip` tier is the one process-global compressed-memory pool the
+//! boot path installs once the CSPRNG is seeded (its stats feed is
+//! registered by [`install_global_ramzip_stats`]). This registry is the
+//! one arch-neutral rendezvous
 //! between those producers and the read-only export in
 //! [`crate::introspect_source`] — the same late-install pattern as the
 //! unlock-published user database.
@@ -66,10 +68,11 @@ pub fn cache_backing_bytes() -> usize {
 
 /// A live `ramzip` tier's stats feed.
 ///
-/// No production tier registers yet (its restartable-user-fault
-/// prerequisite is staged in `PLAN.md`); when one comes up it installs
-/// itself here and the `RAMZIP_STATS` query starts reporting its real
-/// figures. Counters only — never page contents or key material.
+/// The production source ([`install_global_ramzip_stats`]) reads the one
+/// process-global tier, so `RAMZIP_STATS` reports its real figures the
+/// moment the boot path brings the tier online (and an idle all-zero
+/// snapshot before then). Counters only — never page contents or key
+/// material.
 pub trait RamzipStatsSource: Sync {
     /// Snapshot the tier's exported counters.
     fn stats(&self) -> RamzipStats;
@@ -190,6 +193,28 @@ impl Default for MemStats {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The production `ramzip` stats feed: the one process-global tier
+/// installed by the boot path. Its [`RamzipStatsSource::stats`] reads a
+/// lock-free counters snapshot of that tier (all zero before boot
+/// installs one), so the `RAMZIP_STATS` query reports the real figures
+/// the moment the tier goes live.
+struct GlobalRamzipStats;
+
+impl RamzipStatsSource for GlobalRamzipStats {
+    fn stats(&self) -> RamzipStats {
+        tairix_kernel_mem::ramzip::global_stats()
+    }
+}
+
+static GLOBAL_RAMZIP_STATS: GlobalRamzipStats = GlobalRamzipStats;
+
+/// Register the production `ramzip` stats feed on [`MEM_STATS`], so the
+/// System Information `RAMZIP_STATS` query reports the live global
+/// tier's counters. Called once from the boot path; first install wins.
+pub fn install_global_ramzip_stats() {
+    MEM_STATS.install_ramzip(&GLOBAL_RAMZIP_STATS);
 }
 
 #[cfg(test)]

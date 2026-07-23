@@ -35,15 +35,39 @@
 //! direct map, the frame allocator, and the device-window allocator.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use tairix_log::Sink;
+use tairix_sync::SpinLock;
 
 use crate::anon::{map_anonymous, unmap_anonymous, zero_frame, AnonError};
 use crate::anon_window::AnonWindowMap;
+use crate::coldscan::{ColdPageScanner, ColdScanError};
 use crate::dma::{DmaError, DmaWindowMap};
 use crate::filemap::{map_file_page, unmap_file_region};
-use crate::frame::{Frame, FrameAllocator};
+use crate::frame::{Frame, FrameAllocator, PAGE_SIZE};
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
+use crate::pressure::MemoryPressure;
+use crate::ramzip::{
+    FaultError, PageCandidate, Ramzip, RamzipFaultOutcome, RamzipReclaimSummary, VmContext,
+};
 use crate::vmm::{AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, VirtAddr};
+
+/// Monotonic allocator of the stable per-address-space id the global
+/// [`Ramzip`] tier keys a space's compressed entries on and the audit
+/// log records.
+///
+/// A live space is minted with the next id here, exactly as a process
+/// id is allocated: ids are never reused within a boot, so a space's
+/// entries can never be confused with a later space's. `u64` never
+/// wraps in any realistic boot (2^64 spawns).
+static NEXT_SPACE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Mint the next unique live-address-space id.
+fn next_space_id() -> u64 {
+    NEXT_SPACE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Why a [`LiveUserSpace`] operation failed.
 ///
@@ -408,6 +432,51 @@ pub trait LiveUserSpace: Send {
     /// re-freezing the whole space per fault (which is O(N²) over a large
     /// mapping). Object-safe so `kernel/core` needs no concrete backend `P`.
     fn translate_page(&self, page: Page) -> Option<(Frame, MapFlags)>;
+
+    /// Restore a compressed anonymous page on a demand fault at user
+    /// virtual address `va`, through the process-global [`Ramzip`]
+    /// tier.
+    ///
+    /// The fault resolver calls this **before** the plain anonymous
+    /// handler: a compressed page is *reserved* anonymous memory, so
+    /// the anonymous handler would otherwise re-zero it and destroy the
+    /// compressed contents. [`RamzipFaultOutcome::NoEntry`] means no
+    /// compressed entry existed (fall through to the anonymous
+    /// handler); [`RamzipFaultOutcome::Handled`] means the page is now
+    /// resident (retry the instruction);
+    /// [`RamzipFaultOutcome::Fatal`] means the entry was unrecoverable
+    /// (fail closed, no plaintext, escalate the fault). `sink` records
+    /// authentication/corruption failures.
+    fn ramzip_fault_in(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        va: u64,
+        sink: &dyn Sink,
+    ) -> RamzipFaultOutcome;
+
+    /// Compress up to `want` of this space's cold anonymous pages out
+    /// into the global [`Ramzip`] tier under memory pressure, and
+    /// report what the sweep did.
+    ///
+    /// The candidate set is this space's resident *placed anonymous*
+    /// pages (its heap window); the owned second-chance
+    /// [`ColdPageScanner`] decides which are cold (fails closed,
+    /// reclaiming nothing, on a backend with no referenced bit), and
+    /// the tier's own gates (pressure handoff, caps, per-task share,
+    /// decompression floor, eligibility) decide which cold pages are
+    /// admitted. `template` carries the task-level attributes the
+    /// caller knows (pinned / sensitive / latency-critical); a pinned
+    /// task yields nothing. `reclaimable_residue` is the cheaper-cache
+    /// residue the tier waits to drain first.
+    fn ramzip_reclaim(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        pressure: &MemoryPressure,
+        reclaimable_residue: usize,
+        want: usize,
+        template: PageCandidate,
+        sink: &dyn Sink,
+    ) -> RamzipReclaimSummary;
 }
 
 /// The generic concrete live address space retained per task.
@@ -441,6 +510,10 @@ pub trait LiveUserSpace: Send {
 ///   ([`crate::filemap`]). `None` on a degenerate configuration whose user
 ///   address space has no room above the heap window (file mapping then
 ///   fails closed as a deterministic OOM).
+/// * `space_id` — the stable, monotonically minted id the process-global
+///   [`Ramzip`] tier keys this space's compressed entries on;
+/// * `scanner` — this space's own second-chance [`ColdPageScanner`], so
+///   the reclaim clock hand rotates independently per space.
 pub struct LiveSpace<P: PageTable, M: PhysMap> {
     space: AddressSpace<P>,
     physmap: M,
@@ -450,6 +523,8 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     dma: DmaWindowMap,
     shared: MmioWindowMap,
     file: Option<AnonWindowMap>,
+    space_id: u64,
+    scanner: ColdPageScanner,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
@@ -531,7 +606,16 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             dma,
             shared,
             file,
+            space_id: next_space_id(),
+            scanner: ColdPageScanner::new(),
         })
+    }
+
+    /// This space's stable id in the global [`Ramzip`] tier
+    /// (diagnostic / test observer).
+    #[must_use]
+    pub fn space_id(&self) -> u64 {
+        self.space_id
     }
 
     /// Borrow the underlying live address space (e.g. to freeze a fresh
@@ -813,6 +897,102 @@ where
     fn translate_page(&self, page: Page) -> Option<(Frame, MapFlags)> {
         self.space.translate(page)
     }
+
+    fn ramzip_fault_in(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        va: u64,
+        sink: &dyn Sink,
+    ) -> RamzipFaultOutcome {
+        // Round down to the faulting page; a misaligned or out-of-range
+        // address has no compressed entry (fall through).
+        let Ok(page) = Page::from_addr(VirtAddr::new(va & !((PAGE_SIZE as u64) - 1))) else {
+            return RamzipFaultOutcome::NoEntry;
+        };
+        let space_id = self.space_id;
+        let mut tier = tier.lock();
+        let mut ctx = VmContext {
+            space_id,
+            space: &mut self.space,
+            physmap: &self.physmap,
+            frames: self.frames,
+            sink,
+        };
+        match tier.fault_in(&mut ctx, page) {
+            Ok(()) => RamzipFaultOutcome::Handled,
+            // No entry, or the page is already resident (a spurious or
+            // raced fault): the anonymous handler takes it from here.
+            Err(FaultError::NoEntry | FaultError::AlreadyMapped) => RamzipFaultOutcome::NoEntry,
+            Err(other) => RamzipFaultOutcome::Fatal(other),
+        }
+    }
+
+    fn ramzip_reclaim(
+        &mut self,
+        tier: &SpinLock<Ramzip>,
+        pressure: &MemoryPressure,
+        reclaimable_residue: usize,
+        want: usize,
+        template: PageCandidate,
+        sink: &dyn Sink,
+    ) -> RamzipReclaimSummary {
+        if want == 0 {
+            return RamzipReclaimSummary::default();
+        }
+        // Candidate set: this space's resident *placed anonymous* pages
+        // (its heap window), ascending and unique — the order the
+        // second-chance scanner requires. Image, stack, file, device,
+        // DMA, and shared pages are all excluded here: only pages the
+        // window allocator proved anonymous are ever offered.
+        let mut candidates: Vec<Page> = self
+            .space
+            .live_pages()
+            .filter(|page| self.anon.covers(page.start().as_u64()))
+            .collect();
+        candidates.sort_unstable_by_key(|page| page.number());
+        candidates.dedup_by_key(|page| page.number());
+
+        let mut tier = tier.lock();
+        let cold = match self.scanner.scan(&mut self.space, &candidates, want) {
+            Ok(cold) => cold,
+            // No referenced bit on this backend: reclaim nothing rather
+            // than guess a page is cold (fail closed).
+            Err(ColdScanError::Unsupported) => {
+                return RamzipReclaimSummary {
+                    access_tracking_unsupported: true,
+                    ..RamzipReclaimSummary::default()
+                };
+            }
+        };
+        let mut summary = RamzipReclaimSummary {
+            scanned: candidates.len(),
+            ..RamzipReclaimSummary::default()
+        };
+        let space_id = self.space_id;
+        for page in cold {
+            let mut ctx = VmContext {
+                space_id,
+                space: &mut self.space,
+                physmap: &self.physmap,
+                frames: self.frames,
+                sink,
+            };
+            // The owning task is the space itself (one task per space),
+            // so its tier task id is the space id.
+            match tier.compress_out(
+                pressure,
+                reclaimable_residue,
+                &mut ctx,
+                page,
+                space_id,
+                &template,
+            ) {
+                Ok(()) => summary.compressed += 1,
+                Err(_) => summary.refused += 1,
+            }
+        }
+        summary
+    }
 }
 
 impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
@@ -822,6 +1002,16 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
     /// but every user frame (image, stack, startup block, anonymous heap)
     /// and every page-table frame leaked.
     fn drop(&mut self) {
+        // 0. Purge this space's compressed entries from the global tier
+        //    (if one is installed): a global pool keyed by space id must
+        //    not keep a dead space's entries — nothing would ever fault
+        //    them back in, so their RAM (sealed blobs) and ledger charge
+        //    would leak. Freeing them here restores the frame/ledger
+        //    balance the exit-cycle leak tests assert.
+        if let Some(tier) = crate::ramzip::global() {
+            tier.lock().purge_space(self.space_id);
+        }
+
         // 1. Reclaim every live DMA buffer: each physically-contiguous
         //    backing block is zeroed (zero-on-free) and returned to the
         //    frame allocator, and its pages leave the space's bookkeeping.
@@ -1670,5 +1860,289 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<LiveSpace<HostPageTable, SimPhysMap>>();
         assert_send::<Box<dyn LiveUserSpace + Send>>();
+    }
+
+    mod ramzip {
+        use super::{SharedSim, ANON_WINDOW_BASE};
+        use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
+        use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
+        use crate::live::{LiveSpace, LiveUserSpace};
+        use crate::phys::SimPhysMap;
+        use crate::pressure::{MemoryPressure, PressureBand};
+        use crate::ramzip::{PageCandidate, Ramzip, RamzipCaps, RamzipFaultOutcome};
+        use crate::seal::{EntropySource, SealError};
+        use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
+        use alloc::boxed::Box;
+        use tairix_log::{Event, Sink};
+        use tairix_sync::SpinLock;
+
+        /// A larger machine than the shared 64-frame harness, so a test can
+        /// press to a band *and* leave the tier room above the reserve.
+        const FRAMES: usize = 512;
+
+        struct NullSink;
+        impl Sink for NullSink {
+            fn write_event(&self, _event: &Event<'_>) {}
+        }
+
+        /// Deterministic counting entropy for the tier key/salt.
+        struct CountingEntropy(u8);
+        impl EntropySource for CountingEntropy {
+            fn fill(&mut self, out: &mut [u8]) -> Result<(), SealError> {
+                for byte in out.iter_mut() {
+                    *byte = self.0;
+                    self.0 = self.0.wrapping_add(1);
+                }
+                Ok(())
+            }
+        }
+
+        /// A test tier keyed to a large machine (so caps never bind before
+        /// the deliberately-exercised gate does).
+        fn tier() -> SpinLock<Ramzip> {
+            let mut entropy = CountingEntropy(1);
+            SpinLock::new(
+                Ramzip::new(RamzipCaps::from_physical(8 << 30), &mut entropy).expect("tier"),
+            )
+        }
+
+        /// A live space over a fresh 512-frame allocator and a shared,
+        /// leaked physical map (so `copy_in` observes the same storage).
+        fn env() -> (
+            LiveSpace<HostPageTable, SharedSim>,
+            &'static FrameAllocator,
+            MemoryPressure,
+            &'static SimPhysMap,
+        ) {
+            let mut map = BootMemoryMap::new();
+            map.push(MemoryRegion {
+                kind: RegionKind::Usable,
+                start: PhysAddr::new(0),
+                length: (FRAMES * PAGE_SIZE) as u64,
+            });
+            let frames: &'static FrameAllocator =
+                Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+            let simmap: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(
+                PhysAddr::new(0),
+                FRAMES * PAGE_SIZE,
+            )));
+            let pressure = MemoryPressure::over(frames);
+            let live = LiveSpace::new(
+                AddressSpace::new(HostPageTable::new()),
+                SharedSim(simmap),
+                frames,
+                VirtAddr::new(0x8000_0000),
+                64,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                256,
+                VirtAddr::new(0x1_0000_0000),
+                64,
+                VirtAddr::new(0x2_0000_0000),
+                64,
+                VirtAddr::new(0x3_0000_0000),
+                64,
+            )
+            .expect("windows valid");
+            (live, frames, pressure, simmap)
+        }
+
+        /// Hold frames until the sampled band reaches `band`.
+        fn press_to(frames: &FrameAllocator, pressure: &MemoryPressure, band: PressureBand) {
+            let mut held = alloc::vec::Vec::new();
+            let mut guard = 0;
+            while pressure.sample() != band {
+                held.push(frames.alloc().expect("pressure frame"));
+                guard += 1;
+                assert!(guard <= FRAMES, "band {band:?} never reached");
+            }
+            // Leak the held frames for the test's lifetime so the band stays.
+            core::mem::forget(held);
+        }
+
+        /// The tier entry count, read through the shared stats projection.
+        fn entries(tier: &SpinLock<Ramzip>) -> u64 {
+            crate::ramzip::stats_of(&tier.lock()).entries
+        }
+
+        #[test]
+        fn reclaim_compresses_cold_placed_anonymous_pages_and_faults_them_back() {
+            let (mut live, frames, pressure, simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+
+            // Six placed anonymous pages (zeroed, so highly compressible),
+            // never accessed since mapping -> cold on the first scan.
+            let base = live.map_anonymous_placed(6).expect("place anon region");
+            assert_eq!(live.space().mapped_pages(), 6);
+
+            press_to(frames, &pressure, PressureBand::Moderate);
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                6,
+                PageCandidate::cold_anonymous(),
+                &sink,
+            );
+            assert_eq!(summary.scanned, 6);
+            assert_eq!(summary.compressed, 6, "every cold page compressed");
+            assert_eq!(summary.refused, 0);
+            assert!(!summary.access_tracking_unsupported);
+            assert_eq!(entries(&tier), 6, "six entries parked in the tier");
+            assert_eq!(live.space().mapped_pages(), 0, "pages left resident RAM");
+
+            // Fault every page back and confirm the restored bytes are the
+            // original zeros (move-only: the entry is gone afterwards).
+            for i in 0..6u64 {
+                let va = base + i * PAGE_SIZE as u64;
+                assert_eq!(
+                    live.ramzip_fault_in(&tier, va, &sink),
+                    RamzipFaultOutcome::Handled,
+                    "page {i} restored"
+                );
+                let mut buf = [0xAAu8; PAGE_SIZE];
+                crate::uaccess::copy_in(
+                    live.space(),
+                    &SharedSim(simmap),
+                    VirtAddr::new(va),
+                    &mut buf,
+                )
+                .expect("restored page is readable");
+                assert!(buf.iter().all(|&b| b == 0), "page {i} restored to zeros");
+            }
+            assert_eq!(entries(&tier), 0, "move-only: tier emptied by fault-ins");
+            assert_eq!(
+                live.space().mapped_pages(),
+                6,
+                "all six pages resident again"
+            );
+        }
+
+        #[test]
+        fn reclaim_under_normal_pressure_compresses_nothing() {
+            let (mut live, _frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            live.map_anonymous_placed(4).expect("place anon region");
+            // No pressure: the handoff gate is closed, so every cold page is
+            // refused by policy — nothing is compressed, but the sweep still
+            // examined them.
+            assert_eq!(pressure.sample(), PressureBand::Normal);
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                4,
+                PageCandidate::cold_anonymous(),
+                &sink,
+            );
+            assert_eq!(summary.scanned, 4);
+            assert_eq!(summary.compressed, 0);
+            assert_eq!(summary.refused, 4);
+            assert_eq!(entries(&tier), 0);
+            assert_eq!(live.space().mapped_pages(), 4, "pages untouched");
+        }
+
+        #[test]
+        fn only_placed_anonymous_pages_are_candidates() {
+            let (mut live, frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            // A FIXED anonymous mapping outside every window is *not* a
+            // reclaim candidate; only the placed-window region is.
+            live.map_anonymous(0x4000, 2).expect("fixed map");
+            live.map_anonymous_placed(3).expect("placed region");
+
+            press_to(frames, &pressure, PressureBand::Moderate);
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                16,
+                PageCandidate::cold_anonymous(),
+                &sink,
+            );
+            // Only the three placed pages were ever offered.
+            assert_eq!(summary.scanned, 3);
+            assert_eq!(summary.compressed, 3);
+            // The two FIXED pages are still resident and untouched.
+            assert!(live
+                .space()
+                .translate(crate::vmm::Page::from_addr(VirtAddr::new(0x4000)).unwrap())
+                .is_some());
+            assert!(live
+                .space()
+                .translate(crate::vmm::Page::from_addr(VirtAddr::new(0x5000)).unwrap())
+                .is_some());
+        }
+
+        #[test]
+        fn fault_in_with_no_entry_falls_through() {
+            let (mut live, _frames, _pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            // An address the tier has no entry for: the resolver falls
+            // through to the anonymous handler.
+            assert_eq!(
+                live.ramzip_fault_in(&tier, ANON_WINDOW_BASE, &sink),
+                RamzipFaultOutcome::NoEntry
+            );
+        }
+
+        #[test]
+        fn reclaim_respects_the_want_budget() {
+            let (mut live, frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            live.map_anonymous_placed(10).expect("place anon region");
+            press_to(frames, &pressure, PressureBand::Moderate);
+            // Ask for only 3 of the 10 cold pages.
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                3,
+                PageCandidate::cold_anonymous(),
+                &sink,
+            );
+            assert_eq!(summary.compressed, 3, "budget honoured");
+            assert_eq!(entries(&tier), 3);
+            assert_eq!(live.space().mapped_pages(), 7, "seven pages stay resident");
+        }
+
+        #[test]
+        fn a_reclaim_and_fault_cycle_leaks_no_frames() {
+            let (mut live, frames, pressure, _simmap) = env();
+            let tier = tier();
+            let sink = NullSink;
+            let base = live.map_anonymous_placed(5).expect("place anon region");
+
+            press_to(frames, &pressure, PressureBand::Moderate);
+            let held_free = frames.free_frames();
+            let summary = live.ramzip_reclaim(
+                &tier,
+                &pressure,
+                0,
+                5,
+                PageCandidate::cold_anonymous(),
+                &sink,
+            );
+            assert_eq!(summary.compressed, 5);
+            // Compression returned five frames to the allocator.
+            assert_eq!(frames.free_frames(), held_free + 5);
+
+            for i in 0..5u64 {
+                assert_eq!(
+                    live.ramzip_fault_in(&tier, base + i * PAGE_SIZE as u64, &sink),
+                    RamzipFaultOutcome::Handled
+                );
+            }
+            // Faulting all five back consumed exactly the five frames again:
+            // free returns to the held level, and re-mapping restored the
+            // pre-pressure resident set (the compressed round trip is frame
+            // neutral).
+            assert_eq!(frames.free_frames(), held_free);
+            assert_eq!(entries(&tier), 0);
+        }
     }
 }

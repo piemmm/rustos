@@ -94,7 +94,8 @@ pub use pressure::{
 pub use ramtest::{run as ram_selftest, RamFault, Word as RamTestWord, PROGRESS_STEP_BYTES};
 pub use ramzip::{
     eligibility, escalate_refusal, CompressRefusal, FaultError, Ineligible, PageCandidate,
-    PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipLedger, VmContext, WarmOutcome,
+    PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipFaultOutcome, RamzipLedger,
+    RamzipReclaimSummary, VmContext, WarmOutcome,
 };
 pub use reclaim::{
     AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,

@@ -701,6 +701,32 @@ mod tests {
             // exercised end-to-end against a real `LiveSpace` in `aspace`.
             AddressSpace::new(HostPageTable::new()).freeze()
         }
+
+        fn ramzip_fault_in(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _va: u64,
+            _sink: &dyn tairix_log::Sink,
+        ) -> tairix_kernel_mem::RamzipFaultOutcome {
+            // The routing double models no page table and holds no tier; the
+            // real compressed fault-in is exercised against `LiveSpace` in
+            // `kernel/mem`. Fall through (no entry).
+            tairix_kernel_mem::RamzipFaultOutcome::NoEntry
+        }
+
+        fn ramzip_reclaim(
+            &mut self,
+            _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
+            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _reclaimable_residue: usize,
+            _want: usize,
+            _template: tairix_kernel_mem::PageCandidate,
+            _sink: &dyn tairix_log::Sink,
+        ) -> tairix_kernel_mem::RamzipReclaimSummary {
+            // No candidates in the routing double; reclaim is exercised
+            // against the real `LiveSpace`.
+            tairix_kernel_mem::RamzipReclaimSummary::default()
+        }
     }
 
     /// A `TestArch` reporting `cpu`, leaked to the `'static` shape the

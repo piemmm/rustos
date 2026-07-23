@@ -5341,9 +5341,10 @@ and `ramzip` accounting, plus per-CPU load — as four audited
 `stats:mem/*` / `stats:cpu/*` resolver selectors and `sysinfo` CLI
 subcommands; the export rendezvous is the arch-neutral
 `kernel/core::memstats::MEM_STATS` registry (one system pressure gauge,
-per-cache `Arc<CacheAccounting>` ledgers, and the seam a future live
-`ramzip` tier installs into — until then the query truthfully reports an
-idle tier), and `SchedulerPolicy` gained the `cpu_switches`/`queue_depth`
+per-cache `Arc<CacheAccounting>` ledgers, and the process-global `ramzip`
+tier's stats feed installed by the boot path — reporting a truthful idle
+all-zero tier until one is populated), and `SchedulerPolicy` gained the
+`cpu_switches`/`queue_depth`
 observations both policies implement under conformance cover. The bound
 kernel IRQ table is exported the same way: `IRQ_LIST` (id 19,
 `CAP_SYSINFO_HW`, audited — line ownership is cross-principal surface
@@ -5759,27 +5760,35 @@ VM mechanism, `kernel/mem::ramzip`;
   compress→tamper/truncate→fault cycles.
 
 **Live-task enablement (staged in `.junie/swapswap-progress.md`):**
-- **Restartable user page faults — already present.** A running task
-  *can* trap → resolve → resume: `kernel/core::resolve_user_fault`
+- **Restartable user page faults — present.** `kernel/core::resolve_user_fault`
   makes a not-present user page resident (stack growth, demand-paged
-  anonymous `mem_map`, read-only file mappings — reads and writes) and
-  returns so the port retries the faulting instruction. The earlier
-  "every port's fault hook is terminal" note was stale; the missing
-  piece for `ramzip` is a `resolve_ramzip_fault` step that restores a
-  compressed entry through `Ramzip::fault_in`.
+  anonymous `mem_map`, read-only file mappings) and retries the faulting
+  instruction.
 - **Cold-page identification — arch-neutral core landed (b1).** The
-  page-replacement referenced-bit facility is now in the Arch HAL: the
-  `tairix_arch_api::mmu::AddressSpace::test_and_clear_accessed`
-  primitive with its honest `AccessTracking` declaration (fail closed
-  when a port exposes no referenced bit), the `HostPageTable` software
-  model, and the `kernel/mem::coldscan` second-chance (clock) cold-page
-  scanner (host-tested). Concrete per-port Access-Flag support (aarch64
-  first — `AccessTracking::Pending` today; HAFDBS or a software
-  Access-Flag-fault path is b1a) and the pressure-driven compress-out /
-  `resolve_ramzip_fault` wiring (b2) remain staged.
-- Until the per-port AF and wiring land, the tier stays a complete,
-  fully tested VM mechanism with no production switch-on; nothing in it
-  may be weakened to work around a still-`Pending` port.
+  page-replacement referenced-bit facility is in the Arch HAL:
+  `tairix_arch_api::mmu::AddressSpace::test_and_clear_accessed` with its
+  honest `AccessTracking` declaration (fail closed when a port exposes no
+  referenced bit), the `HostPageTable` software model, and the
+  `kernel/mem::coldscan` second-chance (clock) scanner (host-tested).
+- **Live wiring — landed (b2), fault-in + infra.** `ramzip` is now a
+  single **process-global** pool (`kernel/mem::ramzip::global`, one
+  `Ramzip` behind a `SpinLock`, installed once at boot from the seeded
+  CSPRNG + discovered RAM). `LiveSpace` owns a `space_id` + `ColdPageScanner`
+  and the object-safe `ramzip_fault_in` / `ramzip_reclaim`; a dead space's
+  entries are purged on `LiveSpace::drop`. `resolve_user_fault` restores a
+  compressed page **before** the anonymous handler (`Fatal` terminates only
+  the faulting task, fail closed); `RAMZIP_STATS` reports the live tier
+  (`memstats::install_global_ramzip_stats`). Host-tested end to end over
+  `HostPageTable`.
+- **Remaining (b2 sweep + b3):** nothing calls `ramzip_reclaim` in
+  production yet — the pressure-driven reclaim driver that hands cold
+  anonymous pages to the tier at `moderate+` bands
+  (`EscalationStep::HandOffToRamzip`'s consumer) is unbuilt, and real ports
+  still declare `AccessTracking` non-`Supported`. So the tier stays empty
+  and fault-in returns `NoEntry` on real hardware until the reclaim driver
+  and the per-port Access-Flag work (b1a/b3, with their QEMU verticals)
+  land. The fault-in half is inert-but-correct until then; nothing in the
+  tier may be weakened to work around a still-`Pending` port.
 - SWAP5 (optional encrypted lower-tier block swap policy) remains a
   separately approved future design per `plans/SWAPSWAPSWAP.md` §15.
 - Benchmarks beyond the host suites (per-page latency on real boards,

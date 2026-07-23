@@ -218,6 +218,34 @@ fn near_zero_idle_cost_and_no_eager_reservation() {
 }
 
 #[test]
+fn purge_space_drops_entries_and_rebalances_the_ledger() {
+    let mut env = Env::new();
+    let mut ramzip = tier(&env);
+    env.press_to(PressureBand::Moderate);
+    // Compress three anonymous pages of SPACE into the tier.
+    let pages: Vec<Page> = (10..13).map(|n| env.map_page(n, 0x40)).collect();
+    for &page in &pages {
+        compress(&mut env, &mut ramzip, page);
+    }
+    assert_eq!(ramzip.ledger().entries(), 3);
+    assert!(ramzip.ledger().footprint() > 0);
+
+    // Tearing the space down (a task exit) purges every entry and
+    // rebalances the ledger to zero — no orphaned RAM or ledger charge.
+    assert_eq!(ramzip.purge_space(SPACE), 3);
+    assert_eq!(ramzip.ledger().entries(), 0);
+    assert_eq!(ramzip.ledger().footprint(), 0);
+    assert_eq!(ramzip.ledger().task_usage(TASK).entries, 0);
+    // Idempotent: a second purge of the emptied space finds nothing.
+    assert_eq!(ramzip.purge_space(SPACE), 0);
+    // A purged page has no entry (it would fault as a wild access).
+    assert_eq!(
+        try_fault(&mut env, &mut ramzip, pages[0]),
+        Err(FaultError::NoEntry)
+    );
+}
+
+#[test]
 fn compress_and_fault_round_trip_restores_exact_bytes_and_flags() {
     let mut env = Env::new();
     let mut ramzip = tier(&env);

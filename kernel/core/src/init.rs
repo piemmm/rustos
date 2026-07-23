@@ -817,6 +817,11 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                     value: tairix_log::FieldValue::Str(sources),
                 }],
             );
+            // A seeded CSPRNG now exists, so bring the process-global
+            // compressed-memory tier (`ramzip`) online: this is the one
+            // point a tier is installed. A failed key draw leaves none
+            // installed and the compressed path stays inert (fail closed).
+            install_ramzip_tier(state);
         }
         Err(_) => {
             // The source is enumerated but could not produce bytes (every
@@ -831,6 +836,50 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
                 }],
             );
         }
+    }
+}
+
+/// Bring the process-global compressed-memory tier (`ramzip`) online
+/// once the kernel CSPRNG reserve is seeded.
+///
+/// The tier's per-boot key and nonce salt are drawn from the seeded
+/// reserve through a thin adapter onto the sealing layer's entropy
+/// seam, and its capacity policy is derived from the discovered
+/// physical RAM. This is the single install point; installation is
+/// fail-closed — a failed draw (or an already-installed tier) leaves
+/// the global tier absent, so the compressed fault-in and reclaim
+/// paths stay inert rather than running with a weak or absent key.
+fn install_ramzip_tier<A: KernelArch + 'static>(state: &'static KernelState<A>) {
+    use tairix_kernel_mem::ramzip::{install, Ramzip, RamzipCaps};
+    use tairix_kernel_mem::{EntropySource, SealError, PAGE_SIZE};
+
+    /// Adapt the kernel CSPRNG output reserve to the sealing layer's
+    /// entropy seam: a non-blocking draw (a seeded reserve never blocks
+    /// for entropy) that fails the key derivation closed rather than
+    /// yielding predictable bytes.
+    struct ReserveEntropy<'a>(&'a mut (dyn RandomReserve + Send + Sync));
+    impl EntropySource for ReserveEntropy<'_> {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), SealError> {
+            self.0.draw(out, true).map_err(|_| SealError::Entropy)
+        }
+    }
+
+    let ram = state
+        .frame_allocator
+        .usable_frames()
+        .saturating_mul(PAGE_SIZE);
+    let caps = RamzipCaps::from_physical(ram);
+    let mut guard = state.rng.write();
+    let built = {
+        let mut entropy = ReserveEntropy(&mut **guard);
+        Ramzip::new(caps, &mut entropy)
+    };
+    drop(guard);
+    if let Ok(tier) = built {
+        // First install wins; the boot path calls this exactly once, so a
+        // `false` return would itself be a boot-path defect — but even
+        // then the already-installed tier is authoritative, never two.
+        let _installed = install(tier);
     }
 }
 
@@ -1959,6 +2008,13 @@ fn run_phases<A: KernelArch>(
             .usable_frames()
             .saturating_mul(tairix_kernel_mem::PAGE_SIZE),
     );
+
+    // Register the production `ramzip` stats feed so the System
+    // Information `RAMZIP_STATS` query reports the live global tier's
+    // counters. Safe before (and whether or not) a tier installs: it
+    // reads the global tier, which reports an idle all-zero snapshot
+    // until `install_ramzip_tier` brings one online.
+    crate::memstats::install_global_ramzip_stats();
 
     // The production wall clock, named so it backs *both* the
     // `wall_time_get`/`wall_time_set` syscalls and the introspection
